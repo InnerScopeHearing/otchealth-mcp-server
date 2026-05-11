@@ -90,12 +90,37 @@ export async function callN8nWebhook(args: N8nWebhookCallArgs): Promise<N8nWebho
         nextStep: `Check n8n execution log at ${env.N8N_BASE_URL}/executions for tool ${args.toolName}.`,
       });
     }
-    if (!text) return { success: true };
+    // Empty 200 body from n8n almost always means the workflow halted on an
+    // unhandled node error before reaching its respondToWebhook. Surface as
+    // an explicit failure rather than a fake success.
+    if (!text) {
+      throw new N8nWebhookError({
+        code: 'n8n_empty_response',
+        status: res.statusCode,
+        message: `n8n workflow returned ${res.statusCode} with empty body for ${args.webhookPath}. This usually means the workflow halted on an unhandled node error.`,
+        nextStep: `Inspect the n8n execution log at ${env.N8N_BASE_URL}/executions for correlation_id ${args.correlationId} (filter by workflow name "${args.toolName}").`,
+      });
+    }
     try {
       const parsed = JSON.parse(text) as N8nWebhookResponse;
+      if (parsed.success === false) {
+        // Workflow explicitly reported failure (e.g., HMAC invalid or upstream CIO error).
+        throw new N8nWebhookError({
+          code: 'n8n_workflow_reported_failure',
+          status: res.statusCode,
+          message: `n8n workflow reported failure: ${parsed.error ?? 'unspecified'}`,
+          nextStep: `Check the audit_payload returned by ${args.toolName} and inspect ${env.N8N_BASE_URL}/executions for correlation_id ${args.correlationId}.`,
+        });
+      }
       return parsed;
-    } catch {
-      return { success: true, result: text };
+    } catch (parseErr) {
+      if (parseErr instanceof N8nWebhookError) throw parseErr;
+      throw new N8nWebhookError({
+        code: 'n8n_unparseable_response',
+        status: res.statusCode,
+        message: `n8n returned non-JSON 2xx body for ${args.webhookPath}: ${text.slice(0, 200)}`,
+        nextStep: `Verify the workflow's respondToWebhook node returns JSON (respondWith: 'json').`,
+      });
     }
   } catch (err) {
     if (err instanceof N8nWebhookError) throw err;
