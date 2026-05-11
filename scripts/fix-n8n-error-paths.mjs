@@ -52,16 +52,18 @@ const WORKFLOWS = [
     buildSuccessLogic: `
 const fetched = $('Fetch current newsletter (for diff)').first().json;
 const patched = $json;
-const fetchStatus = (fetched && fetched.statusCode) || 200;
-const patchStatus = (patched && patched.statusCode) || 200;
+const fetchErr = fetched && fetched.error;
+const patchErr = patched && patched.error;
 const fields = $('Verify HMAC-SHA256').first().json.body.fields;
-if (fetchStatus < 200 || fetchStatus >= 300) {
-  return [{ json: { _httpStatus: 502, success: false, error: 'cio_fetch_failed', upstream_status: fetchStatus, upstream: fetched, audit_payload: { before: null, after: null } } }];
+if (fetchErr) {
+  const status = (fetchErr.status) || 502;
+  return [{ json: { success: false, error: 'cio_fetch_failed', upstream_status: status, upstream: fetched, audit_payload: { before: null, after: null } } }];
 }
-if (patchStatus < 200 || patchStatus >= 300) {
-  return [{ json: { _httpStatus: 502, success: false, error: 'cio_patch_failed', upstream_status: patchStatus, upstream: patched, audit_payload: { before: fetched, after: null } } }];
+if (patchErr) {
+  const status = (patchErr.status) || 502;
+  return [{ json: { success: false, error: 'cio_patch_failed', upstream_status: status, upstream: patched, audit_payload: { before: fetched, after: null } } }];
 }
-return [{ json: { _httpStatus: 200, success: true, result: { upstream: patched }, audit_payload: { before: fetched, after: fields } } }];
+return [{ json: { success: true, result: { upstream: patched }, audit_payload: { before: fetched, after: fields } } }];
 `.trim(),
   },
   {
@@ -72,16 +74,17 @@ return [{ json: { _httpStatus: 200, success: true, result: { upstream: patched }
     respondUnsupportedNodeName: 'Respond unsupported_via_api',
     buildSuccessLogic: `
 const dup = $json;
-const status = (dup && dup.statusCode) || 200;
+const dupErr = dup && dup.error;
 const sourceSnapshot = $('Verify HMAC-SHA256').first().json.body.source_snapshot;
-if (status === 404 || status === 405) {
-  return [{ json: { _httpStatus: 200, success: false, result: { new_newsletter_id: null, status: 'unsupported_via_api' }, error: 'Customer.io did not accept POST /newsletters/{id}/duplicate. Manual duplication in the UI is required.', audit_payload: { before: sourceSnapshot, after: null } } }];
-}
-if (status < 200 || status >= 300) {
-  return [{ json: { _httpStatus: 502, success: false, error: 'cio_duplicate_failed', upstream_status: status, upstream: dup, audit_payload: { before: sourceSnapshot, after: null } } }];
+if (dupErr) {
+  const status = (dupErr.status) || 502;
+  if (status === 404 || status === 405) {
+    return [{ json: { success: false, result: { new_newsletter_id: null, status: 'unsupported_via_api' }, error: 'Customer.io did not accept POST /newsletters/{id}/duplicate. Manual duplication in the UI is required.', upstream_status: status, audit_payload: { before: sourceSnapshot, after: null } } }];
+  }
+  return [{ json: { success: false, error: 'cio_duplicate_failed', upstream_status: status, upstream: dup, audit_payload: { before: sourceSnapshot, after: null } } }];
 }
 const newId = (dup && (dup.id || (dup.newsletter && dup.newsletter.id))) || null;
-return [{ json: { _httpStatus: 200, success: true, result: { new_newsletter_id: newId, status: 'ok' }, audit_payload: { before: sourceSnapshot, after: dup } } }];
+return [{ json: { success: true, result: { new_newsletter_id: newId, status: 'ok' }, audit_payload: { before: sourceSnapshot, after: dup } } }];
 `.trim(),
   },
 ];
