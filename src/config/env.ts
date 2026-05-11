@@ -55,6 +55,14 @@ const EnvSchema = z.object({
 
   // CIO workspace (informational, used in error messages)
   CIO_WORKSPACE_ID: z.string().default('193366'),
+
+  // Phase 2: Shopify (hearingassist.myshopify.com / otchealthmart.com)
+  SHOPIFY_SHOP: z.string().optional().default(''),
+  SHOPIFY_API_VERSION: z.string().optional().default('2024-10'),
+  SHOPIFY_ACCESS_TOKEN: z.string().optional().default(''),
+
+  // Phase 2: Intercom
+  INTERCOM_ACCESS_TOKEN: z.string().optional().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
