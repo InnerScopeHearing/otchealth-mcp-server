@@ -1,0 +1,78 @@
+import { z } from 'zod';
+
+const EnvSchema = z.object({
+  // Customer.io
+  CIO_SITE_ID: z.string().min(1, 'CIO_SITE_ID is required'),
+  CIO_TRACK_KEY: z.string().min(1, 'CIO_TRACK_KEY is required'),
+  CIO_APP_API_BEARER: z.string().min(1, 'CIO_APP_API_BEARER is required'),
+
+  // MCP server auth
+  PERPLEXITY_CONNECTOR_TOKEN: z
+    .string()
+    .min(32, 'PERPLEXITY_CONNECTOR_TOKEN must be at least 32 chars'),
+  ADMIN_REVOKE_TOKEN: z
+    .string()
+    .min(32, 'ADMIN_REVOKE_TOKEN must be at least 32 chars'),
+
+  // n8n
+  N8N_BASE_URL: z
+    .string()
+    .url()
+    .default('https://otchealth.app.n8n.cloud'),
+  N8N_API_KEY: z.string().optional().default(''),
+  N8N_WEBHOOK_SECRET: z
+    .string()
+    .min(32, 'N8N_WEBHOOK_SECRET must be at least 32 chars'),
+
+  // Feature flags
+  READ_ONLY_MODE: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+  ENABLE_WRITE_TOOLS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  ENABLE_HIGH_RISK_TOOLS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  DRY_RUN_DEFAULT: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+
+  // Server
+  PORT: z
+    .string()
+    .default('8080')
+    .transform((v) => Number.parseInt(v, 10))
+    .refine((n) => Number.isFinite(n) && n > 0 && n < 65536, 'PORT must be a valid port number'),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('production'),
+  LOG_LEVEL: z
+    .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal'])
+    .default('info'),
+
+  // CIO workspace (informational, used in error messages)
+  CIO_WORKSPACE_ID: z.string().default('193366'),
+});
+
+export type Env = z.infer<typeof EnvSchema>;
+
+let cached: Env | undefined;
+
+export function loadEnv(): Env {
+  if (cached) return cached;
+  const parsed = EnvSchema.safeParse(process.env);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `  - ${i.path.join('.')}: ${i.message}`)
+      .join('\n');
+    throw new Error(
+      `Invalid environment configuration:\n${issues}\n` +
+        `Check .env against .env.example, or refer to Matt's Notion Token Vault.`,
+    );
+  }
+  cached = parsed.data;
+  return cached;
+}

@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Phase 1 Evaluations for OTCHealth MCP Server.
+  Per ADR-001 Section 8: 10 read-only questions that exercise the tool surface.
+
+  Each evaluation is:
+   - Independent: stands alone, no shared state
+   - Read-only: no destructive operations
+   - Complex: requires >=2 tool calls
+   - Realistic: a question Matt or his ops team would actually ask
+   - Verifiable: single clear answer, string-comparable
+   - Stable: answer does not change minute-to-minute (workspace 193366)
+
+  How to run: connect a Perplexity custom remote connector (or any MCP client)
+  to the deployed server. For each question, the client/LLM plans the tool
+  calls, executes them, and produces an answer. Compare the answer string
+  against expected_answer_contains / expected_answer_matches. A pass means the
+  expected substring appears (case-insensitive) in the model's final answer.
+-->
+<evaluations workspace="193366" generated="2026-05-11" mcp_server_version="0.1.0">
+
+  <evaluation id="phase1-eval-01" category="newsletter-listing">
+    <question>List the names and IDs of every Customer.io newsletter in workspace 193366. How many are there in total?</question>
+    <expected_tool_sequence>
+      <tool>cio_list_newsletters</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>HearingAssist Reintro</expected_answer_contains>
+    <expected_answer_contains>TReO Launch</expected_answer_contains>
+    <verification>Compare against /v1/newsletters via direct curl with CIO_APP_API_BEARER. Total count must match the response's len(newsletters).</verification>
+    <stability_note>Stable so long as no newsletter is deleted or newly created.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-02" category="metrics-by-newsletter">
+    <question>What are the delivered, opens, clicks, and bounces totals for newsletter ID 5 (HearingAssist Reintro - Send 1)?</question>
+    <expected_tool_sequence>
+      <tool>cio_get_newsletter</tool>
+      <tool>cio_get_newsletter_metrics</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>HearingAssist Reintro</expected_answer_contains>
+    <verification>Sum each metric series from /v1/newsletters/5/metrics. Compare to model's reported totals within ±1%.</verification>
+    <stability_note>Stable — newsletter 5 was sent April 4-9 2026 and is no longer accumulating significant metrics.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-03" category="schedule">
+    <question>Is newsletter ID 8 (TReO Launch — Prospects) scheduled to send, already sent, or in draft? Pull its schedule fields.</question>
+    <expected_tool_sequence>
+      <tool>cio_get_newsletter_schedule</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>TReO Launch</expected_answer_contains>
+    <verification>Match against the state/status + scheduled_at fields on the newsletter record.</verification>
+    <stability_note>Stable until Matt sends the campaign — after send, state shifts and sent_at populates. Re-baseline if so.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-04" category="segment-resolution">
+    <question>Newsletter 8 targets which segment? Pull that segment's name and description.</question>
+    <expected_tool_sequence>
+      <tool>cio_get_newsletter</tool>
+      <tool>cio_get_segment</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>27</expected_answer_contains>
+    <verification>cio_get_newsletter returns recipient_segment_ids=[27]. cio_get_segment 27 returns the segment record.</verification>
+    <stability_note>Stable so long as newsletter 8's recipient segment is not changed in the UI.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-05" category="content-best-effort">
+    <question>Pull the body or template content for newsletter 8. If Customer.io doesn't expose it via API, what does the connector return?</question>
+    <expected_tool_sequence>
+      <tool>cio_get_template_or_content</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>unsupported_via_api</expected_answer_contains>
+    <expected_answer_alternative>via Customer.io App API</expected_answer_alternative>
+    <verification>Tool returns source field either as a successful path or as "unsupported_via_api". Either outcome is a pass; partial successes are NOT a pass.</verification>
+    <stability_note>Stable. Customer.io API surface for template HTML is documented as inconsistent across templates.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-06" category="broadcast-history">
+    <question>What newsletters has segment 22 received in the last 90 days? Include performance metrics for each.</question>
+    <expected_tool_sequence>
+      <tool>cio_get_broadcast_history_for_segment</tool>
+      <tool>cio_get_newsletter_metrics</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>HearingAssist Reintro</expected_answer_contains>
+    <verification>cio_get_broadcast_history_for_segment with segment_id=22, trailing_days=90, include_metrics=true should return ≥1 broadcast referencing newsletter 5.</verification>
+    <stability_note>Stable until next time segment 22 is targeted by a new newsletter. Re-baseline if so.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-07" category="customer-lookup">
+    <question>Find the customer with email matthew@innd.com in Customer.io. What is their cio_id and which segments do they belong to?</question>
+    <expected_tool_sequence>
+      <tool>cio_get_customer</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>cio_id</expected_answer_contains>
+    <verification>cio_get_customer with email=matthew@innd.com, include_segments=true. Compare cio_id to direct /v1/customers?email=… result.</verification>
+    <stability_note>Stable. If Matt's email changes in CIO, replace email with the current value.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-08" category="segment-people-pagination">
+    <question>List the first 5 people in segment 27 (TReO Launch recipients). What's the pagination cursor for the next page?</question>
+    <expected_tool_sequence>
+      <tool>cio_list_segment_people</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>next_cursor</expected_answer_contains>
+    <verification>Tool returns people array of length ≤5 and next_cursor is either a string or null. Both shape and emission of next_cursor field must be present.</verification>
+    <stability_note>Order may be stable or unstable depending on CIO's segment iterator. Match on field presence, not specific cio_ids.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-09" category="cross-newsletter-comparison">
+    <question>Compare bounce rates between newsletter 5 (HearingAssist Reintro) and newsletter 8 (TReO Launch — Prospects). Which had more bounces?</question>
+    <expected_tool_sequence>
+      <tool>cio_get_newsletter_metrics</tool>
+      <tool>cio_get_newsletter_metrics</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>newsletter 5</expected_answer_contains>
+    <expected_answer_alternative>not yet sent</expected_answer_alternative>
+    <verification>Model must call get_metrics twice. Sum the bounced series for each. Newsletter 5 (sent) should have a non-zero bounce count; newsletter 8 (likely unsent) should have zero. Either "newsletter 5 had more" or "newsletter 8 has not been sent yet" is a pass.</verification>
+    <stability_note>Stable until newsletter 8 sends. Re-baseline if so.</stability_note>
+  </evaluation>
+
+  <evaluation id="phase1-eval-10" category="compliance-guardrail">
+    <question>Run a Customer.io tool whose response would contain INND or other Reg-FD-sensitive content. Does the connector return a compliance warning?</question>
+    <expected_tool_sequence>
+      <tool>cio_get_customer</tool>
+    </expected_tool_sequence>
+    <expected_answer_contains>compliance_warning</expected_answer_contains>
+    <verification>If a tool's structured result contains the string INND in a marketing context, the response must include a populated compliance_warning field with triggers array. If the call is repeated with acknowledge_warning=true, the data must be rendered. Pass requires both behaviors to surface during the eval session.</verification>
+    <stability_note>Stable. The guardrail's INND trigger fires deterministically on substring match per ADR-001 Section 10.</stability_note>
+  </evaluation>
+
+</evaluations>

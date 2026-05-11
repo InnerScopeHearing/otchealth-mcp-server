@@ -1,0 +1,32 @@
+{
+  "name": "otchealth-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote MCP server for OTCHealth's stack. Customer.io first-class integration. Built per ADR-001 (Option C Hybrid: Node + n8n).",
+  "type": "module",
+  "main": "dist/server/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server/index.js",
+    "dev": "tsx watch src/server/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx 'src/**/*.test.ts'",
+    "evals": "tsx scripts/run-evals.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "fastify": "^5.1.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "undici": "^7.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

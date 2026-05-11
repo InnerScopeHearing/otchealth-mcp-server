@@ -1,0 +1,188 @@
+{
+  "name": "OTCHealth MCP — cio_duplicate_newsletter",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "any",
+    "saveExecutionProgress": true
+  },
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook (HMAC-signed)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "cio-duplicate-newsletter",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cio-duplicate-newsletter",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "hmac-verify",
+      "name": "Verify HMAC-SHA256",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET env var missing on n8n side');\nconst headers = $json.headers || {};\nconst sig = headers['x-signature-sha256'] || headers['X-Signature-Sha256'];\nconst rawBody = $binary?.data?.data ? Buffer.from($binary.data.data, 'base64').toString('utf8') : JSON.stringify($json.body || {});\nconst expected = crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');\nif (!sig || sig !== expected) {\n  return [{ json: { authorized: false, reason: 'invalid_signature' }, pairedItem: 0 }];\n}\nreturn [{ json: { authorized: true, correlation_id: headers['x-correlation-id'], tool_name: headers['x-tool-name'], caller_hash: headers['x-caller-hash'], body: $json.body || JSON.parse(rawBody) }, pairedItem: 0 }];"
+      }
+    },
+    {
+      "id": "auth-gate",
+      "name": "Authorized?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.authorized }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "try-duplicate-endpoint",
+      "name": "POST /newsletters/{id}/duplicate (best-effort)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.customer.io/v1/newsletters/{{ $json.body.source_newsletter_id }}/duplicate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $json.body.new_name }) }}",
+        "options": {
+          "ignoreHttpStatusErrors": true
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "name": "Customer.io App API Bearer", "id": "CIO_APP_API_BEARER_CRED" }
+      }
+    },
+    {
+      "id": "check-supported",
+      "name": "Endpoint supported?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 200],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.statusCode || 200 }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "equal" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond OK (200)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1340, 100],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, result: { new_newsletter_id: $json.newsletter?.id || $json.id, status: 'ok' }, audit_payload: { before: $('Verify HMAC-SHA256').first().json.body.source_snapshot, after: $json } }) }}"
+      }
+    },
+    {
+      "id": "respond-unsupported",
+      "name": "Respond unsupported_via_api",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1340, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={{ JSON.stringify({ success: false, result: { new_newsletter_id: null, status: 'unsupported_via_api' }, error: 'Customer.io did not accept POST /newsletters/{id}/duplicate. Manual duplication in the UI is required.', audit_payload: { before: $('Verify HMAC-SHA256').first().json.body.source_snapshot, after: null } }) }}"
+      }
+    },
+    {
+      "id": "respond-unauth",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 420],
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 401,
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'invalid_signature' }) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook (HMAC-signed)": {
+      "main": [[{ "node": "Verify HMAC-SHA256", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC-SHA256": {
+      "main": [[{ "node": "Authorized?", "type": "main", "index": 0 }]]
+    },
+    "Authorized?": {
+      "main": [
+        [{ "node": "POST /newsletters/{id}/duplicate (best-effort)", "type": "main", "index": 0 }],
+        [{ "node": "Respond 401", "type": "main", "index": 0 }]
+      ]
+    },
+    "POST /newsletters/{id}/duplicate (best-effort)": {
+      "main": [[{ "node": "Endpoint supported?", "type": "main", "index": 0 }]]
+    },
+    "Endpoint supported?": {
+      "main": [
+        [{ "node": "Respond OK (200)", "type": "main", "index": 0 }],
+        [{ "node": "Respond unsupported_via_api", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "_otchealth_mcp_metadata": {
+    "owner": "OTCHealth MCP Server",
+    "adr_reference": "ADR-001 Section 4b, Section 5",
+    "tool_name": "cio_duplicate_newsletter",
+    "boundary_contract": {
+      "expected_payload_shape": {
+        "source_newsletter_id": "string|number",
+        "new_name": "string",
+        "source_snapshot": "object — newsletter taken on MCP side for audit before/after",
+        "correlation_id": "string"
+      },
+      "required_headers": [
+        "x-correlation-id",
+        "x-tool-name",
+        "x-caller-hash",
+        "x-signature-sha256"
+      ],
+      "response_contract": {
+        "success": "boolean",
+        "result": { "new_newsletter_id": "string|null", "status": "string" },
+        "error": "string (optional)",
+        "audit_payload": { "before": "any", "after": "any" }
+      }
+    },
+    "import_instructions": "Same as cio-update-newsletter-variant.json — import, link CIO_APP_API_BEARER credential, set N8N_WEBHOOK_SECRET. Note: Customer.io may not expose POST /newsletters/{id}/duplicate publicly; the workflow gracefully returns unsupported_via_api when the endpoint 404s.",
+    "known_unknowns": [
+      "Whether Customer.io supports POST /newsletters/{id}/duplicate at all (docs are inconsistent across CIO API versions).",
+      "If unsupported, fallback is manual UI duplication followed by cio_update_newsletter_variant for any post-copy edits."
+    ]
+  }
+}

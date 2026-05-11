@@ -1,0 +1,164 @@
+{
+  "name": "OTCHealth MCP — cio_update_newsletter_variant",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "any",
+    "saveExecutionProgress": true
+  },
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook (HMAC-signed)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "cio-update-newsletter-variant",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cio-update-newsletter-variant",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "hmac-verify",
+      "name": "Verify HMAC-SHA256",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Verify HMAC-SHA256 over the raw request body against $env.N8N_WEBHOOK_SECRET.\n// Required headers per ADR-001 Section 5: X-Correlation-Id, X-Tool-Name, X-Caller-Hash, X-Signature-Sha256.\nconst crypto = require('crypto');\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET env var missing on n8n side');\nconst headers = $json.headers || {};\nconst correlation = headers['x-correlation-id'] || headers['X-Correlation-Id'];\nconst tool = headers['x-tool-name'] || headers['X-Tool-Name'];\nconst callerHash = headers['x-caller-hash'] || headers['X-Caller-Hash'];\nconst sig = headers['x-signature-sha256'] || headers['X-Signature-Sha256'];\nconst rawBody = $binary?.data?.data ? Buffer.from($binary.data.data, 'base64').toString('utf8') : JSON.stringify($json.body || {});\nconst expected = crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');\nif (!sig || sig !== expected) {\n  return [{ json: { authorized: false, reason: 'invalid_signature' }, pairedItem: 0 }];\n}\nreturn [{ json: { authorized: true, correlation_id: correlation, tool_name: tool, caller_hash: callerHash, body: $json.body || JSON.parse(rawBody) }, pairedItem: 0 }];"
+      }
+    },
+    {
+      "id": "auth-gate",
+      "name": "Authorized?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.authorized }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "fetch-current",
+      "name": "Fetch current newsletter (for diff)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 200],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.customer.io/v1/newsletters/{{ $json.body.newsletter_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "name": "Customer.io App API Bearer", "id": "CIO_APP_API_BEARER_CRED" }
+      }
+    },
+    {
+      "id": "apply-update",
+      "name": "PATCH newsletter variant (allowlisted fields only)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 200],
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.customer.io/v1/newsletters/{{ $('Verify HMAC-SHA256').first().json.body.newsletter_id }}/contents/{{ $('Verify HMAC-SHA256').first().json.body.variant_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Verify HMAC-SHA256').first().json.body.fields) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": { "name": "Customer.io App API Bearer", "id": "CIO_APP_API_BEARER_CRED" }
+      }
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond OK (200)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1340, 200],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, result: { upstream: $json }, audit_payload: { before: $('Fetch current newsletter (for diff)').first().json, after: $('Verify HMAC-SHA256').first().json.body.fields } }) }}"
+      }
+    },
+    {
+      "id": "respond-unauth",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 420],
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 401,
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'invalid_signature' }) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook (HMAC-signed)": {
+      "main": [[{ "node": "Verify HMAC-SHA256", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC-SHA256": {
+      "main": [[{ "node": "Authorized?", "type": "main", "index": 0 }]]
+    },
+    "Authorized?": {
+      "main": [
+        [{ "node": "Fetch current newsletter (for diff)", "type": "main", "index": 0 }],
+        [{ "node": "Respond 401", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch current newsletter (for diff)": {
+      "main": [[{ "node": "PATCH newsletter variant (allowlisted fields only)", "type": "main", "index": 0 }]]
+    },
+    "PATCH newsletter variant (allowlisted fields only)": {
+      "main": [[{ "node": "Respond OK (200)", "type": "main", "index": 0 }]]
+    }
+  },
+  "_otchealth_mcp_metadata": {
+    "owner": "OTCHealth MCP Server",
+    "adr_reference": "ADR-001 Section 4b, Section 5",
+    "tool_name": "cio_update_newsletter_variant",
+    "boundary_contract": {
+      "expected_payload_shape": {
+        "newsletter_id": "string|number",
+        "variant_id": "string|number|null",
+        "fields": "object — must contain only allowlisted keys: subject, preheader, body_html, from_name, reply_to, send_at",
+        "before": "object — newsletter snapshot taken on MCP side",
+        "correlation_id": "string"
+      },
+      "required_headers": [
+        "x-correlation-id",
+        "x-tool-name",
+        "x-caller-hash",
+        "x-signature-sha256"
+      ],
+      "response_contract": {
+        "success": "boolean",
+        "result": "any",
+        "error": "string (optional)",
+        "audit_payload": { "before": "any", "after": "any" }
+      }
+    },
+    "import_instructions": "n8n → Workflows → Import from File → select this JSON. Then create a credential named 'Customer.io App API Bearer' of type httpHeaderAuth (name=Authorization, value=Bearer <CIO_APP_API_BEARER>) and re-link it on the two HTTP Request nodes. Add N8N_WEBHOOK_SECRET as an environment variable under n8n Settings → Variables (Pro plan) or via the .env on the self-hosted instance."
+  }
+}
