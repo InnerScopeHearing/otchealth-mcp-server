@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # ============================================================
 # Stage 1: build
 # ============================================================
@@ -8,8 +6,7 @@ FROM node:22-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --include=dev
+RUN npm ci --include=dev
 
 COPY tsconfig.json ./
 COPY src ./src
