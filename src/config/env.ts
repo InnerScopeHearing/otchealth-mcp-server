@@ -18,7 +18,7 @@ const EnvSchema = z.object({
   N8N_BASE_URL: z
     .string()
     .url()
-    .default('https://otchealth.app.n8n.cloud'),
+    .default('https://automation.otchealth.app'),
   N8N_API_KEY: z.string().optional().default(''),
   N8N_WEBHOOK_SECRET: z
     .string()
