@@ -103,7 +103,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     url.searchParams.set('code', code);
     if (state) url.searchParams.set('state', state);
 
-    return reply.redirect(302, url.toString());
+    return reply.status(302).redirect(url.toString());
   });
 
   // Token endpoint

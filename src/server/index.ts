@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   });
 
   // Parse URL-encoded bodies (needed for OAuth token endpoint)
-  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (req, body, done) => {
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
     done(null, body);
   });
 
