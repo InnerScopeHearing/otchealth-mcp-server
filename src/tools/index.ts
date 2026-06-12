@@ -36,6 +36,25 @@ import { registerIntercomGetArticle } from './intercom/get-article.js';
 import { registerN8nListWorkflows } from './n8n/list-workflows.js';
 import { registerN8nGetExecution } from './n8n/get-execution.js';
 
+// Phase 3 — Cloudflare (fleet email routing + DNS)
+import { registerCloudflareListEmailDestinations } from './cloudflare/list-email-destinations.js';
+import { registerCloudflareAddEmailDestination } from './cloudflare/add-email-destination.js';
+import { registerCloudflareListEmailRules } from './cloudflare/list-email-rules.js';
+import { registerCloudflareCreateEmailRule } from './cloudflare/create-email-rule.js';
+import { registerCloudflareListDnsRecords } from './cloudflare/list-dns-records.js';
+import { registerCloudflareCreateDnsRecord } from './cloudflare/create-dns-record.js';
+
+// Phase 3 — Microsoft Graph (COO email send-as + inbox)
+import { registerGraphSendEmail } from './graph/send-email.js';
+import { registerGraphListMessages } from './graph/list-messages.js';
+
+// Phase 3 — Stripe (read-only: CFO scoreboard + CRO visibility)
+import { registerStripeGetBalance } from './stripe/get-balance.js';
+import { registerStripeListCharges } from './stripe/list-charges.js';
+import { registerStripeListCustomers } from './stripe/list-customers.js';
+import { registerStripeListPaymentIntents } from './stripe/list-payment-intents.js';
+import { registerStripeListProducts as registerStripeListProductsCatalog } from './stripe/list-products.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -70,4 +89,23 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 2: n8n meta-tools =====
   registerN8nListWorkflows(server, callerHash);
   registerN8nGetExecution(server, callerHash);
+
+  // ===== Phase 3: Cloudflare (fleet email routing + DNS) =====
+  registerCloudflareListEmailDestinations(server, callerHash);
+  registerCloudflareAddEmailDestination(server, callerHash);
+  registerCloudflareListEmailRules(server, callerHash);
+  registerCloudflareCreateEmailRule(server, callerHash);
+  registerCloudflareListDnsRecords(server, callerHash);
+  registerCloudflareCreateDnsRecord(server, callerHash);
+
+  // ===== Phase 3: Microsoft Graph (COO send-as + inbox) =====
+  registerGraphSendEmail(server, callerHash);
+  registerGraphListMessages(server, callerHash);
+
+  // ===== Phase 3: Stripe (read-only scoreboard) =====
+  registerStripeGetBalance(server, callerHash);
+  registerStripeListCharges(server, callerHash);
+  registerStripeListCustomers(server, callerHash);
+  registerStripeListPaymentIntents(server, callerHash);
+  registerStripeListProductsCatalog(server, callerHash);
 }
