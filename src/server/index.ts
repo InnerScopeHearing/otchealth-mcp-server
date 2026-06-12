@@ -4,19 +4,23 @@ import { logger } from '../audit/logger.js';
 import { registerHealth } from './health.js';
 import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
+import { registerOAuthRoutes } from './oauth.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
 
   const app = Fastify({
-    logger: false, // we use Pino directly via audit/logger
-    bodyLimit: 4 * 1024 * 1024, // 4 MiB — generous, but well below memory limits
-    trustProxy: true, // Railway sits behind a proxy
+    logger: false,
+    bodyLimit: 4 * 1024 * 1024,
+    trustProxy: true,
     disableRequestLogging: true,
   });
 
-  // Lightweight CORS for MCP-over-HTTP clients. Restrictive default; clients
-  // pass a bearer token in the Authorization header so CORS does not gate auth.
+  // Parse URL-encoded bodies (needed for OAuth token endpoint)
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (req, body, done) => {
+    done(null, body);
+  });
+
   app.addHook('onRequest', async (request, reply) => {
     const origin = request.headers.origin;
     if (origin) {
@@ -51,13 +55,14 @@ async function main(): Promise<void> {
 
   registerHealth(app);
   registerAdmin(app);
+  registerOAuthRoutes(app);
   registerMcpRoutes(app);
 
   app.setNotFoundHandler(async (_req, reply) => {
     return reply.code(404).send({
       error: 'not_found',
       message:
-        'Route not found. Known routes: GET /health, POST /mcp, POST /admin/revoke, GET /admin/revoke, POST /admin/clear-revoke.',
+        'Route not found. Known routes: GET /health, POST /mcp, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
     });
   });
 
@@ -112,7 +117,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  // eslint-disable-next-line no-console
   console.error('[fatal]', err);
   process.exit(1);
 });
