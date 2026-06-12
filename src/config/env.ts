@@ -18,11 +18,24 @@ const EnvSchema = z.object({
   N8N_BASE_URL: z
     .string()
     .url()
-    .default('https://otchealth.app.n8n.cloud'),
+    .default('https://automation.otchealth.app'),
   N8N_API_KEY: z.string().optional().default(''),
   N8N_WEBHOOK_SECRET: z
     .string()
     .min(32, 'N8N_WEBHOOK_SECRET must be at least 32 chars'),
+
+  // Cloudflare
+  CLOUDFLARE_API_TOKEN: z.string().optional().default(''),
+  CLOUDFLARE_ZONE_ID: z.string().optional().default(''),
+
+  // Microsoft Graph (COO send-as coo@otchealthmart.com)
+  GRAPH_TENANT_ID: z.string().optional().default(''),
+  GRAPH_CLIENT_ID: z.string().optional().default(''),
+  GRAPH_CLIENT_SECRET: z.string().optional().default(''),
+  GRAPH_SENDER_EMAIL: z.string().optional().default('coo@otchealthmart.com'),
+
+  // Stripe (read-only)
+  STRIPE_SECRET_KEY: z.string().optional().default(''),
 
   // Feature flags
   READ_ONLY_MODE: z
