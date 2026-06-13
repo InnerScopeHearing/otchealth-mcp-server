@@ -36,6 +36,29 @@ import { registerIntercomGetArticle } from './intercom/get-article.js';
 import { registerN8nListWorkflows } from './n8n/list-workflows.js';
 import { registerN8nGetExecution } from './n8n/get-execution.js';
 
+// Phase 2: Depot (FULL API)
+import { registerDepotListProjects } from './depot/list-projects.js';
+import { registerDepotListBuilds } from './depot/list-builds.js';
+import { registerDepotGetBuild } from './depot/get-build.js';
+import { registerDepotGetUsage } from './depot/get-usage.js';
+import { registerDepotListCacheUsage } from './depot/list-cache-usage.js';
+import { registerDepotResetCache } from './depot/reset-cache.js';
+
+// Phase 2: PostHog (management API, metadata only; PHI carve-out)
+import { registerPosthogListProjects } from './posthog/list-projects.js';
+import { registerPosthogListInsights } from './posthog/list-insights.js';
+import { registerPosthogGetInsight } from './posthog/get-insight.js';
+import { registerPosthogListFeatureFlags } from './posthog/list-feature-flags.js';
+import { registerPosthogGetFeatureFlag } from './posthog/get-feature-flag.js';
+import { registerPosthogListExperiments } from './posthog/list-experiments.js';
+import { registerPosthogListAnnotations } from './posthog/list-annotations.js';
+import { registerPosthogListCohorts } from './posthog/list-cohorts.js';
+
+// Phase 2: Capability Catalog (meta-toolset)
+import { registerCatalogListTools } from './catalog/list-tools.js';
+import { registerCatalogServiceCapabilities } from './catalog/service-capabilities.js';
+import { registerCatalogAuditUnused } from './catalog/audit-unused.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -70,4 +93,29 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 2: n8n meta-tools =====
   registerN8nListWorkflows(server, callerHash);
   registerN8nGetExecution(server, callerHash);
+
+  // ===== Phase 2: Depot (FULL API) =====
+  // Read-first tools (always on).
+  registerDepotListProjects(server, callerHash);
+  registerDepotListBuilds(server, callerHash);
+  registerDepotGetBuild(server, callerHash);
+  registerDepotGetUsage(server, callerHash);
+  registerDepotListCacheUsage(server, callerHash);
+  // Guarded write (destructive; gated by ENABLE_WRITE_TOOLS).
+  registerDepotResetCache(server, callerHash);
+
+  // ===== Phase 2: PostHog (management API, metadata only; PHI carve-out) =====
+  registerPosthogListProjects(server, callerHash);
+  registerPosthogListInsights(server, callerHash);
+  registerPosthogGetInsight(server, callerHash);
+  registerPosthogListFeatureFlags(server, callerHash);
+  registerPosthogGetFeatureFlag(server, callerHash);
+  registerPosthogListExperiments(server, callerHash);
+  registerPosthogListAnnotations(server, callerHash);
+  registerPosthogListCohorts(server, callerHash);
+
+  // ===== Phase 2: Capability Catalog (meta-toolset) =====
+  registerCatalogListTools(server, callerHash);
+  registerCatalogServiceCapabilities(server, callerHash);
+  registerCatalogAuditUnused(server, callerHash);
 }

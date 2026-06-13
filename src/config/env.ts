@@ -63,6 +63,18 @@ const EnvSchema = z.object({
 
   // Phase 2: Intercom
   INTERCOM_ACCESS_TOKEN: z.string().optional().default(''),
+
+  // Phase 2: Depot (FULL API). Token is a Depot org/user API token (Bearer).
+  // DEPOT_PROJECT_ID is an optional default project for build/cache scoping.
+  DEPOT_TOKEN: z.string().optional().default(''),
+  DEPOT_PROJECT_ID: z.string().optional().default(''),
+  DEPOT_BASE_URL: z.string().url().optional().default('https://api.depot.dev'),
+
+  // Phase 2: PostHog management API (phx_ personal API key, Bearer).
+  // NOTE: metadata only. The PHI-hardened MedReview project (468398) is never
+  // exposed via replay/recording/person-data tools through this gateway.
+  POSTHOG_PERSONAL_API_KEY: z.string().optional().default(''),
+  POSTHOG_HOST: z.string().url().optional().default('https://us.posthog.com'),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

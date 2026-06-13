@@ -20,10 +20,40 @@ import {
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { CustomerIoApiError } from '../customerio/app-api-client.js';
 import { N8nWebhookError } from '../n8n/webhook-client.js';
+import { DepotApiError } from '../depot/api-client.js';
+import { PostHogApiError } from '../posthog/api-client.js';
 
 const env = loadEnv();
 
 export type ToolCategory = 'read' | 'write_simple' | 'write_orchestrated';
+
+/**
+ * Process-level descriptor of every tool the gateway registers. registerTool
+ * records each tool here (deduped by name) so the Capability Catalog meta-tools
+ * (catalog_list_tools) can enumerate the live tool surface without depending on
+ * the per-request McpServer. The server is stateless (a fresh McpServer per
+ * request), so this side-table is the durable inventory.
+ */
+export interface RegisteredToolDescriptor {
+  name: string;
+  category: ToolCategory;
+  title: string;
+  description: string;
+  destructive: boolean;
+  /** Input parameter names (excludes the common dry_run/acknowledge_warning fields). */
+  params: string[];
+}
+
+const TOOL_REGISTRY = new Map<string, RegisteredToolDescriptor>();
+
+export function getRegisteredTools(): RegisteredToolDescriptor[] {
+  return [...TOOL_REGISTRY.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Map a ToolCategory to a coarse read/write flag for catalog reporting. */
+export function categoryIsWrite(category: ToolCategory): boolean {
+  return category !== 'read';
+}
 
 export interface ToolAnnotations {
   title: string;
@@ -126,6 +156,16 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   def: ToolDefinition<Shape, Output>,
   callerHashProvider: () => string,
 ): void {
+  // Record the descriptor (deduped) for the Capability Catalog meta-tools.
+  TOOL_REGISTRY.set(def.name, {
+    name: def.name,
+    category: def.category,
+    title: def.annotations.title,
+    description: def.annotations.description,
+    destructive: def.annotations.destructiveHint,
+    params: Object.keys(def.inputShape),
+  });
+
   const inputShape: ZodRawShape = { ...def.inputShape, ...COMMON_INPUT };
   // outputSchema is wrapped: every tool reports compliance_warning + result.
   const outputShape: ZodRawShape = {
@@ -286,6 +326,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           nextStep = err.nextStep;
           upstreamStatus = err.status;
         } else if (err instanceof N8nWebhookError) {
+          errorCode = err.code;
+          nextStep = err.nextStep;
+          upstreamStatus = err.status;
+        } else if (err instanceof DepotApiError) {
+          errorCode = err.code;
+          nextStep = err.nextStep;
+          upstreamStatus = err.status;
+        } else if (err instanceof PostHogApiError) {
           errorCode = err.code;
           nextStep = err.nextStep;
           upstreamStatus = err.status;
