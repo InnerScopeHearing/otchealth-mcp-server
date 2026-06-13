@@ -1,64 +1,81 @@
 /**
  * OAuth 2.1 endpoints for MCP authorization (per the MCP 2025-06-18 spec).
  *
- * The MCP server is an OAuth 2.1 RESOURCE SERVER and also hosts its (minimal)
- * authorization server. Implemented to satisfy the spec MUSTs:
+ * The MCP server is an OAuth 2.1 RESOURCE SERVER and hosts its (minimal)
+ * authorization server. Implements the spec MUSTs:
  *   - RFC 9728 Protected Resource Metadata  (/.well-known/oauth-protected-resource)
- *   - WWW-Authenticate on 401               (added in auth/bearer.ts)
+ *   - WWW-Authenticate on 401               (auth/bearer.ts)
  *   - RFC 8414 Authorization Server Metadata (/.well-known/oauth-authorization-server)
- *   - OAuth 2.1 authorization_code + PKCE     (/oauth/authorize, /oauth/token)
- * and the SHOULDs:
+ *   - OAuth 2.1 authorization_code + PKCE(S256) (/oauth/authorize, /oauth/token)
+ * and the SHOULD:
  *   - RFC 7591 Dynamic Client Registration    (/register)
  *
- * SECURITY MODEL (this gateway is keys-to-the-kingdom on the public internet):
- *   - Dynamic Client Registration is OPEN (it only hands out a client_id; per the
- *     spec, registration does not grant access). The ACCESS gate is the
- *     resource-owner CONSENT step at /oauth/authorize: the human (Matt) must enter
- *     the consent secret in the browser before any authorization code is issued.
- *     Without that secret, no code is issued, so a stranger who registers a client
- *     still cannot obtain a token.
- *   - redirect_uri is validated: for DCR clients it MUST exact-match a registered
- *     value (anti open-redirect); all redirect_uris MUST be https or localhost.
- *   - The issued access_token is the connector bearer (robust across restarts; the
- *     /mcp bearer check in auth/bearer.ts is unchanged). The consent gate ensures
- *     only the operator can ever complete the flow.
- *   - Consent secret = OAUTH_CONSENT_SECRET if set, else ADMIN_REVOKE_TOKEN
- *     (separate from the issued bearer; the operator already holds it).
+ * SECURITY MODEL (public, keys-to-the-kingdom; hardened per the 2026-06-13 review):
+ *   - A client MUST register first (DCR) to obtain a client_id bound to its exact
+ *     redirect_uris. The browser flow is only for registered clients; bearer-direct
+ *     clients (Perplexity / Claude Code) never use it.
+ *   - OPEN registration only hands out a client_id (no access). The ACCESS gate is
+ *     the resource-owner CONSENT at POST /oauth/authorize (constant-time check of the
+ *     consent secret). No request-controlled value is reflected into the consent HTML,
+ *     and the post-consent redirect target is the REGISTERED redirect_uri read from
+ *     the server-side store (never raw request input), re-validated to https/localhost.
+ *   - Issuer / metadata / WWW-Authenticate are derived from the trusted
+ *     PUBLIC_BASE_URL, never the (spoofable) request Host header.
+ *   - PKCE S256 is MANDATORY; `plain` is not offered.
+ *   - The token endpoint mints a PER-CLIENT, server-side-expiring, revocable access
+ *     token (auth/oauth-token-store.ts); the static connector bearer is never handed out.
+ *   - Open endpoints are size-bounded and per-IP rate-limited.
  */
 
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { randomBytes, createHash, timingSafeEqual } from 'crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { mintAccessToken, sweepAccessTokens } from '../auth/oauth-token-store.js';
 
 const env = loadEnv();
 
-// In-memory authorization code store (short-lived, cleared on restart).
-const authCodes = new Map<
-  string,
-  {
-    clientId: string;
-    redirectUri: string;
-    codeChallenge?: string;
-    codeChallengeMethod?: string;
-    expiresAt: number;
-  }
->();
+const MAX_CLIENTS = 1000;
+const CLIENT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const MAX_AUTHZ_REQUESTS = 2000;
+const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const RL_WINDOW_MS = 60_000;
 
-// In-memory dynamically-registered clients (RFC 7591). Cleared on restart; the
-// client (e.g. claude.ai) transparently re-registers if its client_id stops
-// working, so this does not need to be durable.
 const clients = new Map<string, { redirectUris: string[]; createdAt: number }>();
 
-// Clean up expired auth codes every 60s.
+const authzRequests = new Map<
+  string,
+  { clientId: string; redirectUri: string; codeChallenge: string; state?: string; expiresAt: number }
+>();
+
+const authCodes = new Map<
+  string,
+  { clientId: string; redirectUri: string; codeChallenge: string; expiresAt: number }
+>();
+
+// Per-IP fixed-window rate limiter (no external dependency).
+const rl = new Map<string, { count: number; resetAt: number }>();
+function rateLimited(ip: string, max: number): boolean {
+  const now = Date.now();
+  const e = rl.get(ip);
+  if (!e || e.resetAt < now) {
+    rl.set(ip, { count: 1, resetAt: now + RL_WINDOW_MS });
+    return false;
+  }
+  e.count += 1;
+  return e.count > max;
+}
+
 setInterval(() => {
   const now = Date.now();
-  for (const [code, data] of authCodes) {
-    if (data.expiresAt < now) authCodes.delete(code);
-  }
+  for (const [k, v] of authzRequests) if (v.expiresAt < now) authzRequests.delete(k);
+  for (const [k, v] of authCodes) if (v.expiresAt < now) authCodes.delete(k);
+  for (const [k, v] of clients) if (v.createdAt + CLIENT_TTL_MS < now) clients.delete(k);
+  for (const [k, v] of rl) if (v.resetAt < now) rl.delete(k);
+  sweepAccessTokens();
 }, 60_000).unref?.();
 
-function generateToken(): string {
+function generateId(): string {
   return randomBytes(32).toString('hex');
 }
 
@@ -69,23 +86,18 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-function verifyCodeChallenge(verifier: string, challenge: string, method: string): boolean {
-  if (method === 'S256') {
-    const hash = createHash('sha256').update(verifier).digest('base64url');
-    return safeEqual(hash, challenge);
-  }
-  return safeEqual(verifier, challenge); // plain
+/** PKCE S256 only. */
+function verifyS256(verifier: string, challenge: string): boolean {
+  return safeEqual(createHash('sha256').update(verifier).digest('base64url'), challenge);
 }
 
-/** The secret the operator must enter at the consent screen. */
 function consentSecret(): string {
   return env.OAUTH_CONSENT_SECRET || env.ADMIN_REVOKE_TOKEN;
 }
 
-/** Stable public base URL (issuer / resource). Behind the Cloudflare proxy,
- *  trustProxy makes protocol=https and hostname=mcp.otchealth.app. */
-function baseUrl(req: FastifyRequest): string {
-  return `${req.protocol}://${req.hostname}`;
+/** Trusted, stable base URL (never request-derived). */
+function baseUrl(): string {
+  return env.PUBLIC_BASE_URL;
 }
 
 function isValidRedirectUri(uri: string): boolean {
@@ -93,64 +105,33 @@ function isValidRedirectUri(uri: string): boolean {
     const u = new URL(uri);
     if (u.hash) return false;
     if (u.protocol === 'https:') return true;
-    if (u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1')) {
-      return true;
-    }
-    return false;
+    return u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
   } catch {
     return false;
   }
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-/**
- * Resolve + validate the client_id and redirect_uri for an authorization
- * request. Returns null (and the caller renders an error) when invalid.
- * Accepts two client kinds:
- *   - a DCR-registered client (redirect_uri MUST exact-match its registered set)
- *   - the connector bearer used directly as a client_id (manual/non-DCR fallback)
- */
-function resolveClient(clientId: string | undefined, redirectUri: string | undefined):
-  | { ok: true }
-  | { ok: false; error: string; description: string } {
+/** Resolve a registered client + return its EXACT registered redirect_uri. */
+function resolveRegisteredRedirect(
+  clientId: string | undefined,
+  requestedRedirect: string | undefined,
+): { ok: true; redirectUri: string } | { ok: false; error: string; description: string } {
   if (!clientId) return { ok: false, error: 'invalid_client', description: 'client_id required' };
-  if (!redirectUri) {
-    return { ok: false, error: 'invalid_request', description: 'redirect_uri required' };
-  }
-  if (!isValidRedirectUri(redirectUri)) {
-    return { ok: false, error: 'invalid_request', description: 'redirect_uri must be https or localhost' };
-  }
+  if (!requestedRedirect) return { ok: false, error: 'invalid_request', description: 'redirect_uri required' };
   const registered = clients.get(clientId);
-  if (registered) {
-    if (!registered.redirectUris.includes(redirectUri)) {
-      return { ok: false, error: 'invalid_request', description: 'redirect_uri not registered for this client' };
-    }
-    return { ok: true };
+  if (!registered) {
+    return { ok: false, error: 'invalid_client', description: 'unknown client_id (register via /register first)' };
   }
-  // Non-DCR fallback: the connector token itself acts as a pre-shared client_id.
-  if (safeEqual(clientId, env.PERPLEXITY_CONNECTOR_TOKEN)) return { ok: true };
-  return { ok: false, error: 'invalid_client', description: 'unknown client_id (register via /register first)' };
+  const match = registered.redirectUris.find((u) => u === requestedRedirect);
+  if (!match || !isValidRedirectUri(match)) {
+    return { ok: false, error: 'invalid_request', description: 'redirect_uri not registered for this client' };
+  }
+  return { ok: true, redirectUri: match };
 }
 
-function renderConsentPage(params: Record<string, string>): string {
-  const hidden = ['client_id', 'redirect_uri', 'state', 'code_challenge', 'code_challenge_method', 'response_type', 'resource', 'scope']
-    .map((k) => `<input type="hidden" name="${k}" value="${escapeHtml(params[k] ?? '')}">`)
-    .join('\n      ');
-  const redirectHost = (() => {
-    try {
-      return new URL(params.redirect_uri ?? '').host;
-    } catch {
-      return params.redirect_uri ?? '';
-    }
-  })();
+/** Consent page. NO request-controlled value is interpolated into this HTML. */
+function renderConsentPage(requestId: string, withError = false): string {
+  const err = withError ? '<p style="color:#f87171;font-size:.9rem">Incorrect consent secret, try again.</p>' : '';
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>OTCHealth MCP - Authorize</title>
@@ -158,43 +139,23 @@ function renderConsentPage(params: Record<string, string>): string {
   body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
   .card{background:#1e293b;padding:2rem;border-radius:12px;max-width:420px;width:90%;box-shadow:0 10px 30px rgba(0,0,0,.4)}
   h1{font-size:1.25rem;margin:0 0 .5rem} p{color:#94a3b8;font-size:.9rem;line-height:1.4}
-  code{background:#0f172a;padding:.1rem .35rem;border-radius:4px;color:#7dd3fc}
   input[type=password]{width:100%;padding:.7rem;margin:.75rem 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;box-sizing:border-box}
   button{width:100%;padding:.7rem;border:0;border-radius:8px;background:#0d9488;color:#fff;font-weight:600;cursor:pointer}
 </style></head>
 <body><form class="card" method="POST" action="/oauth/authorize">
   <h1>Authorize MCP connector</h1>
-  <p>A client at <code>${escapeHtml(redirectHost)}</code> is requesting access to the OTCHealth fleet gateway. Enter the operator consent secret to approve.</p>
-  ${hidden}
+  ${err}
+  <p>A connector is requesting access to the OTCHealth fleet gateway. Enter the operator consent secret to approve. Only approve a connection you started.</p>
+  <input type="hidden" name="request_id" value="${requestId}">
   <input type="password" name="consent_secret" placeholder="Consent secret" autocomplete="off" autofocus required>
   <button type="submit">Approve</button>
-  <p style="margin-top:1rem;font-size:.78rem">This grants the connecting client access to the gateway tools. Only approve clients you initiated.</p>
 </form></body></html>`;
-}
-
-function issueCode(
-  reply: FastifyReply,
-  p: Record<string, string>,
-): void {
-  const code = generateToken();
-  authCodes.set(code, {
-    clientId: p.client_id,
-    redirectUri: p.redirect_uri,
-    codeChallenge: p.code_challenge,
-    codeChallengeMethod: p.code_challenge_method ?? 'plain',
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5 min TTL
-  });
-  const url = new URL(p.redirect_uri);
-  url.searchParams.set('code', code);
-  if (p.state) url.searchParams.set('state', p.state);
-  logger.info({ type: 'oauth_code_issued', client_id_present: true }, 'oauth authorization code issued');
-  void reply.status(302).redirect(url.toString());
 }
 
 export function registerOAuthRoutes(app: FastifyInstance): void {
   // ---- RFC 8414: Authorization Server Metadata ----
-  app.get('/.well-known/oauth-authorization-server', async (req, reply) => {
-    const b = baseUrl(req);
+  app.get('/.well-known/oauth-authorization-server', async (_req, reply) => {
+    const b = baseUrl();
     return reply.send({
       issuer: b,
       authorization_endpoint: `${b}/oauth/authorize`,
@@ -202,42 +163,45 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       registration_endpoint: `${b}/register`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
-      code_challenge_methods_supported: ['S256', 'plain'],
-      token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+      code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none'],
     });
   });
 
   // ---- RFC 9728: Protected Resource Metadata (MUST) ----
-  app.get('/.well-known/oauth-protected-resource', async (req, reply) => {
-    const b = baseUrl(req);
-    return reply.send({
-      resource: b,
-      authorization_servers: [b],
-      bearer_methods_supported: ['header'],
-      resource_documentation: `${b}/health`,
-    });
-  });
-  // Some clients append the resource path when probing PRM; serve it there too.
-  app.get('/.well-known/oauth-protected-resource/mcp', async (req, reply) => {
-    const b = baseUrl(req);
-    return reply.send({ resource: b, authorization_servers: [b], bearer_methods_supported: ['header'] });
-  });
+  const prm = (): Record<string, unknown> => {
+    const b = baseUrl();
+    return { resource: b, authorization_servers: [b], bearer_methods_supported: ['header'], resource_documentation: `${b}/health` };
+  };
+  app.get('/.well-known/oauth-protected-resource', async (_req, reply) => reply.send(prm()));
+  app.get('/.well-known/oauth-protected-resource/mcp', async (_req, reply) => reply.send(prm()));
 
   // ---- RFC 7591: Dynamic Client Registration (SHOULD) ----
   app.post('/register', async (req, reply) => {
-    const body = (typeof req.body === 'string' ? safeJson(req.body) : req.body) as
-      | Record<string, unknown>
-      | undefined;
+    if (rateLimited(req.ip, 20)) return reply.status(429).send({ error: 'rate_limited' });
+    const body = (typeof req.body === 'string' ? safeJson(req.body) : req.body) as Record<string, unknown> | undefined;
     const redirectUris = Array.isArray(body?.redirect_uris)
       ? (body!.redirect_uris as unknown[]).filter((u): u is string => typeof u === 'string')
       : [];
-    if (redirectUris.length === 0 || !redirectUris.every(isValidRedirectUri)) {
+    if (redirectUris.length === 0 || redirectUris.length > 10 || !redirectUris.every(isValidRedirectUri)) {
       return reply.status(400).send({
         error: 'invalid_redirect_uri',
-        error_description: 'redirect_uris must be a non-empty array of https (or localhost) URIs',
+        error_description: 'redirect_uris must be 1-10 https (or localhost) URIs',
       });
     }
-    const clientId = `mcp-${generateToken()}`;
+    // Bound the store: evict expired, then the oldest, before inserting.
+    if (clients.size >= MAX_CLIENTS) {
+      const now = Date.now();
+      for (const [k, v] of clients) if (v.createdAt + CLIENT_TTL_MS < now) clients.delete(k);
+      while (clients.size >= MAX_CLIENTS) {
+        let oldestKey: string | undefined;
+        let oldest = Infinity;
+        for (const [k, v] of clients) if (v.createdAt < oldest) { oldest = v.createdAt; oldestKey = k; }
+        if (oldestKey === undefined) break;
+        clients.delete(oldestKey);
+      }
+    }
+    const clientId = `mcp-${generateId()}`;
     clients.set(clientId, { redirectUris, createdAt: Date.now() });
     logger.info({ type: 'oauth_client_registered', redirect_uris: redirectUris.length }, 'dcr client registered');
     reply.header('Cache-Control', 'no-store');
@@ -247,50 +211,86 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       redirect_uris: redirectUris,
       grant_types: ['authorization_code'],
       response_types: ['code'],
-      token_endpoint_auth_method: 'none', // public client (PKCE)
+      token_endpoint_auth_method: 'none',
     });
   });
 
-  // ---- Authorization endpoint: GET shows the operator consent screen ----
+  // ---- Authorization endpoint: GET stashes the request + shows the consent screen ----
   app.get('/oauth/authorize', async (req, reply) => {
+    if (rateLimited(req.ip, 30)) return reply.status(429).type('text/plain').send('rate_limited');
     const q = req.query as Record<string, string>;
     if (q.response_type !== 'code') {
       return reply.status(400).type('text/plain').send('unsupported_response_type (expected code)');
     }
-    const check = resolveClient(q.client_id, q.redirect_uri);
-    if (!check.ok) {
-      return reply.status(400).type('text/plain').send(`${check.error}: ${check.description}`);
+    // PKCE S256 mandatory (OAuth 2.1).
+    if (!q.code_challenge || (q.code_challenge_method ?? 'S256') !== 'S256') {
+      return reply.status(400).type('text/plain').send('invalid_request: PKCE code_challenge with method S256 is required');
     }
-    return reply.status(200).type('text/html').send(renderConsentPage(q));
+    const resolved = resolveRegisteredRedirect(q.client_id, q.redirect_uri);
+    if (!resolved.ok) {
+      return reply.status(400).type('text/plain').send(`${resolved.error}: ${resolved.description}`);
+    }
+    if (authzRequests.size >= MAX_AUTHZ_REQUESTS) {
+      // Drop the soonest-to-expire pending request to stay bounded.
+      let oldestKey: string | undefined;
+      let oldest = Infinity;
+      for (const [k, v] of authzRequests) if (v.expiresAt < oldest) { oldest = v.expiresAt; oldestKey = k; }
+      if (oldestKey) authzRequests.delete(oldestKey);
+    }
+    const requestId = generateId();
+    authzRequests.set(requestId, {
+      clientId: q.client_id,
+      redirectUri: resolved.redirectUri,
+      codeChallenge: q.code_challenge,
+      state: q.state,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+    return reply.status(200).type('text/html').send(renderConsentPage(requestId));
   });
 
-  // ---- Authorization endpoint: POST processes consent + issues the code ----
+  // ---- Authorization endpoint: POST verifies consent + issues the code ----
   app.post('/oauth/authorize', async (req, reply) => {
-    const p = (typeof req.body === 'string'
-      ? Object.fromEntries(new URLSearchParams(req.body))
-      : (req.body as Record<string, string>)) ?? {};
-    if (p.response_type !== 'code') {
-      return reply.status(400).type('text/plain').send('unsupported_response_type');
+    if (rateLimited(req.ip, 10)) return reply.status(429).type('text/plain').send('rate_limited');
+    const body =
+      (typeof req.body === 'string'
+        ? Object.fromEntries(new URLSearchParams(req.body))
+        : (req.body as Record<string, string>)) ?? {};
+    const requestId = typeof body.request_id === 'string' ? body.request_id : '';
+    const consent = typeof body.consent_secret === 'string' ? body.consent_secret : '';
+
+    const pending = authzRequests.get(requestId);
+    if (!pending || pending.expiresAt < Date.now()) {
+      if (pending) authzRequests.delete(requestId);
+      return reply.status(400).type('text/plain').send('invalid_request: authorization request expired, restart the flow');
     }
-    const check = resolveClient(p.client_id, p.redirect_uri);
-    if (!check.ok) {
-      return reply.status(400).type('text/plain').send(`${check.error}: ${check.description}`);
-    }
-    // Resource-owner consent gate. Constant-time compare; never logged.
-    if (!p.consent_secret || !safeEqual(p.consent_secret, consentSecret())) {
+    if (!consent || !safeEqual(consent, consentSecret())) {
       logger.warn({ type: 'oauth_consent_rejected', ip: req.ip }, 'oauth consent secret rejected');
-      return reply.status(401).type('text/html').send(
-        renderConsentPage(p).replace(
-          '<h1>Authorize MCP connector</h1>',
-          '<h1>Authorize MCP connector</h1><p style="color:#f87171">Incorrect consent secret, try again.</p>',
-        ),
-      );
+      return reply.status(401).type('text/html').send(renderConsentPage(requestId, true));
     }
-    return issueCode(reply, p);
+
+    authzRequests.delete(requestId); // one-time consume
+
+    if (!isValidRedirectUri(pending.redirectUri)) {
+      return reply.status(400).type('text/plain').send('invalid_request: redirect_uri failed validation');
+    }
+    const code = generateId();
+    authCodes.set(code, {
+      clientId: pending.clientId,
+      redirectUri: pending.redirectUri,
+      codeChallenge: pending.codeChallenge,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    });
+    const target = new URL(pending.redirectUri);
+    target.searchParams.set('code', code);
+    if (pending.state) target.searchParams.set('state', pending.state);
+    logger.info({ type: 'oauth_code_issued' }, 'oauth authorization code issued');
+    reply.header('location', target.toString());
+    return reply.status(302).send();
   });
 
-  // ---- Token endpoint: exchange code for the access token (PKCE enforced) ----
+  // ---- Token endpoint: exchange code for a per-client access token (PKCE S256) ----
   app.post('/oauth/token', async (req, reply) => {
+    if (rateLimited(req.ip, 30)) return reply.status(429).send({ error: 'rate_limited' });
     const body =
       typeof req.body === 'string'
         ? Object.fromEntries(new URLSearchParams(req.body))
@@ -317,21 +317,13 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     if (client_id && client_id !== authCode.clientId) {
       return reply.status(400).send({ error: 'invalid_client' });
     }
-    // PKCE: if a challenge was registered at /authorize, a matching verifier is required.
-    if (authCode.codeChallenge) {
-      if (!code_verifier) {
-        return reply.status(400).send({ error: 'invalid_request', error_description: 'code_verifier required' });
-      }
-      if (!verifyCodeChallenge(code_verifier, authCode.codeChallenge, authCode.codeChallengeMethod ?? 'plain')) {
-        return reply.status(400).send({ error: 'invalid_grant', error_description: 'code_verifier invalid' });
-      }
+    // PKCE is mandatory (a challenge is always stored by /authorize).
+    if (!code_verifier || !verifyS256(code_verifier, authCode.codeChallenge)) {
+      return reply.status(400).send({ error: 'invalid_grant', error_description: 'PKCE code_verifier invalid' });
     }
+    const { token, expiresInSeconds } = mintAccessToken(authCode.clientId, ACCESS_TOKEN_TTL_MS);
     reply.header('Cache-Control', 'no-store');
-    return reply.send({
-      access_token: env.PERPLEXITY_CONNECTOR_TOKEN,
-      token_type: 'Bearer',
-      expires_in: 86400 * 365,
-    });
+    return reply.send({ access_token: token, token_type: 'Bearer', expires_in: expiresInSeconds });
   });
 }
 
@@ -341,4 +333,13 @@ function safeJson(s: string): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Test-only: clear in-memory state (clients / pending requests / codes / rate
+ *  limiter) so each test runs in isolation. Not wired to any route. */
+export function __resetOAuthStateForTests(): void {
+  clients.clear();
+  authzRequests.clear();
+  authCodes.clear();
+  rl.clear();
 }

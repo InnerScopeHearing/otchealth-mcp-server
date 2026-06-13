@@ -5,17 +5,19 @@
  * Shopify / Intercom keys UNSET so the "not configured" paths can be tested.
  */
 
-const REQUIRED_32 = 'x'.repeat(40);
-
+// Distinct values per secret so tests prove the credentials are independent
+// (a conflation bug, e.g. consent secret == connector token, would now fail).
 const DEFAULTS: Record<string, string> = {
   NODE_ENV: 'test',
   LOG_LEVEL: 'error',
   CIO_SITE_ID: 'test-site',
   CIO_TRACK_KEY: 'test-track',
   CIO_APP_API_BEARER: 'test-bearer',
-  PERPLEXITY_CONNECTOR_TOKEN: REQUIRED_32,
-  ADMIN_REVOKE_TOKEN: REQUIRED_32,
-  N8N_WEBHOOK_SECRET: REQUIRED_32,
+  PERPLEXITY_CONNECTOR_TOKEN: 'c'.repeat(40),
+  ADMIN_REVOKE_TOKEN: 'a'.repeat(40),
+  OAUTH_CONSENT_SECRET: 's'.repeat(40),
+  N8N_WEBHOOK_SECRET: 'n'.repeat(40),
+  PUBLIC_BASE_URL: 'https://mcp.test.example',
 };
 
 for (const [k, v] of Object.entries(DEFAULTS)) {

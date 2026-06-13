@@ -18,6 +18,15 @@ const EnvSchema = z.object({
   // consent gate falls back to ADMIN_REVOKE_TOKEN (kept separate from the issued
   // bearer so the consent secret is never the access token).
   OAUTH_CONSENT_SECRET: z.string().optional().default(''),
+  // Stable, trusted public base URL. The OAuth issuer / authorization-server /
+  // protected-resource metadata and the WWW-Authenticate challenge are derived
+  // from THIS, never from the request Host header (which trustProxy makes
+  // attacker-influencable). Must have no trailing slash.
+  PUBLIC_BASE_URL: z
+    .string()
+    .url()
+    .default('https://mcp.otchealth.app')
+    .transform((v) => v.replace(/\/+$/, '')),
 
   // n8n
   N8N_BASE_URL: z

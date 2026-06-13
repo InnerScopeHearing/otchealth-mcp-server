@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked } from './revocation-store.js';
+import { lookupAccessToken } from './oauth-token-store.js';
 
 const env = loadEnv();
 
@@ -39,8 +40,16 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
     );
     return null;
   }
-  if (!safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) return null;
-  return { caller_hash: hashToken(token), raw_token: token };
+  // 1) The static connector bearer (durable; used by bearer-direct clients).
+  if (safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) {
+    return { caller_hash: hashToken(token), raw_token: token };
+  }
+  // 2) A per-client OAuth access token minted by our token endpoint (revocable,
+  //    server-side-expiring, distinct caller hash for audit attribution).
+  if (lookupAccessToken(token)) {
+    return { caller_hash: hashToken(token), raw_token: token };
+  }
+  return null;
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {
@@ -66,10 +75,10 @@ export async function requireConnectorAuth(
     );
     // RFC 9728 Section 5.1 / MCP 2025-06-18: point unauthenticated clients at the
     // protected-resource metadata so they can discover the authorization server.
-    const base = `${request.protocol}://${request.hostname}`;
+    // Derived from the trusted PUBLIC_BASE_URL, never the request Host header.
     reply.header(
       'WWW-Authenticate',
-      `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", error="invalid_token"`,
+      `Bearer resource_metadata="${env.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource", error="invalid_token"`,
     );
     await reply.code(401).send({
       error: 'unauthorized',

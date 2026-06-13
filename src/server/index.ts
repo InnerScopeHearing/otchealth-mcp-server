@@ -21,12 +21,30 @@ async function main(): Promise<void> {
     done(null, body);
   });
 
+  // CORS: allowlist known MCP-client origins only, and never send
+  // allow-credentials (this server authenticates via bearer, not cookies).
+  // MCP clients (claude.ai / Perplexity) connect server-side and are unaffected;
+  // this only restricts browser cross-origin access to a credentialed surface.
+  const ALLOWED_ORIGINS = new Set([
+    'https://claude.ai',
+    'https://claude.com',
+    'https://perplexity.ai',
+    'https://www.perplexity.ai',
+  ]);
+  const originAllowed = (origin: string): boolean => {
+    if (ALLOWED_ORIGINS.has(origin)) return true;
+    try {
+      const u = new URL(origin);
+      return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    } catch {
+      return false;
+    }
+  };
   app.addHook('onRequest', async (request, reply) => {
     const origin = request.headers.origin;
-    if (origin) {
+    if (origin && originAllowed(origin)) {
       reply.header('access-control-allow-origin', origin);
       reply.header('vary', 'Origin');
-      reply.header('access-control-allow-credentials', 'true');
       reply.header(
         'access-control-allow-headers',
         'Authorization, Content-Type, X-Correlation-Id, MCP-Protocol-Version, Mcp-Session-Id',
