@@ -62,7 +62,7 @@ async function main(): Promise<void> {
     return reply.code(404).send({
       error: 'not_found',
       message:
-        'Route not found. Known routes: GET /health, POST /mcp, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
+        'Route not found. Known routes: GET /health, POST /mcp, POST /register, GET+POST /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, GET /.well-known/oauth-protected-resource, POST /admin/revoke.',
     });
   });
 

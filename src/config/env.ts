@@ -13,6 +13,11 @@ const EnvSchema = z.object({
   ADMIN_REVOKE_TOKEN: z
     .string()
     .min(32, 'ADMIN_REVOKE_TOKEN must be at least 32 chars'),
+  // Optional dedicated secret for the OAuth /authorize consent screen. The
+  // operator enters this in the browser to approve a connector. If unset, the
+  // consent gate falls back to ADMIN_REVOKE_TOKEN (kept separate from the issued
+  // bearer so the consent secret is never the access token).
+  OAUTH_CONSENT_SECRET: z.string().optional().default(''),
 
   // n8n
   N8N_BASE_URL: z

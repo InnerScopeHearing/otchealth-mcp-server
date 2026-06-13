@@ -64,10 +64,17 @@ export async function requireConnectorAuth(
       },
       'connector auth rejected',
     );
+    // RFC 9728 Section 5.1 / MCP 2025-06-18: point unauthenticated clients at the
+    // protected-resource metadata so they can discover the authorization server.
+    const base = `${request.protocol}://${request.hostname}`;
+    reply.header(
+      'WWW-Authenticate',
+      `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", error="invalid_token"`,
+    );
     await reply.code(401).send({
       error: 'unauthorized',
       message:
-        'Missing or invalid bearer token. Provide Authorization: Bearer <PERPLEXITY_CONNECTOR_TOKEN>.',
+        'Missing or invalid bearer token. Authorize via OAuth (see /.well-known/oauth-protected-resource) or provide Authorization: Bearer <connector token>.',
     });
     return undefined;
   }
