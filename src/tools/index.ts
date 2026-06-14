@@ -63,6 +63,11 @@ import { registerNetlifyListSiteDeploys } from './netlify/list-site-deploys.js';
 import { registerGumroadListProducts } from './gumroad/list-products.js';
 import { registerGumroadListSales } from './gumroad/list-sales.js';
 
+// Capability Catalog (self-describing gateway introspection)
+import { registerCatalogListTools } from './catalog/list-tools.js';
+import { registerCatalogServiceCapabilities } from './catalog/service-capabilities.js';
+import { registerCatalogAuditUnused } from './catalog/audit-unused.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -124,4 +129,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 3: Gumroad (digital-products cash scoreboard) =====
   registerGumroadListProducts(server, callerHash);
   registerGumroadListSales(server, callerHash);
+
+  // ===== Capability Catalog (self-describing introspection) =====
+  registerCatalogListTools(server, callerHash);
+  registerCatalogServiceCapabilities(server, callerHash);
+  registerCatalogAuditUnused(server, callerHash);
 }

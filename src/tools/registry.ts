@@ -20,6 +20,7 @@ import {
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { CustomerIoApiError } from '../customerio/app-api-client.js';
 import { N8nWebhookError } from '../n8n/webhook-client.js';
+import { recordTool, deriveService } from '../catalog/catalog.js';
 
 const env = loadEnv();
 
@@ -126,6 +127,15 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   def: ToolDefinition<Shape, Output>,
   callerHashProvider: () => string,
 ): void {
+  // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
+  recordTool({
+    name: def.name,
+    service: deriveService(def.name),
+    category: def.category,
+    title: def.annotations.title,
+    description: def.annotations.description,
+    readOnly: def.annotations.readOnlyHint,
+  });
   const inputShape: ZodRawShape = { ...def.inputShape, ...COMMON_INPUT };
   // outputSchema is wrapped: every tool reports compliance_warning + result.
   const outputShape: ZodRawShape = {

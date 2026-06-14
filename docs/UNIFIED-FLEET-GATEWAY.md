@@ -23,8 +23,12 @@ WIRED (on main, registered in `src/tools/index.ts`):
 - **Cloudflare** (COO-25): list/add email destinations + rules, list/create DNS records.
 - **Microsoft Graph** (COO-25): send email (COO send-as), list messages.
 - **Stripe** (COO-25, read-only): balance, charges, customers, payment intents, products.
-- **Netlify** (Phase 3, this change, read-only): list sites, list site deploys.
-- **Gumroad** (Phase 3, this change, read-only): list products, list sales.
+- **Netlify** (Phase 3, read-only): list sites, list site deploys.
+- **Gumroad** (Phase 3, read-only): list products, list sales.
+- **Capability Catalog** (self-describing introspection, no creds): `catalog_list_tools`,
+  `catalog_service_capabilities`, `catalog_audit_unused`. Tools auto-register into the
+  catalog via `registry.ts`, so the list is always truthful; `SERVICE_CATALOG` in
+  `src/catalog/catalog.ts` declares planned/available surface for the audit. (41 tools total.)
 
 AUTH: OAuth 2.0 endpoints (`src/server/oauth.ts`) + bearer (`src/auth/bearer.ts`) +
 a revocation store (`src/auth/revocation-store.ts`). NOTE: verify this against the full
@@ -35,9 +39,8 @@ NOT YET BUILT (claimed elsewhere, absent here - this is the real backlog):
 - **Depot** module (FULL API: builds, cache, usage/grant-burn). Highest-value next.
 - **PostHog management** module - MUST enforce the PHI carve-out (no MedReview PHI data;
   project 468398 read-only at most) with a build-failing test.
-- **Capability Catalog** (`catalog_list_tools`, `catalog_service_capabilities`,
-  `catalog_audit_unused`) - the "don't leave features on the table" introspection layer.
 - **RevenueCat** (v2 read), **Twilio + ElevenLabs** (voice fleet), **GitHub passthrough**.
+(Capability Catalog is now BUILT - see the wired list above.)
 
 ## Security model (keys-to-the-kingdom; keep it hard)
 - Every tool goes through `src/tools/registry.ts`: strict Zod input (rejects unknown
