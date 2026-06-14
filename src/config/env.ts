@@ -76,6 +76,12 @@ const EnvSchema = z.object({
 
   // Phase 2: Intercom
   INTERCOM_ACCESS_TOKEN: z.string().optional().default(''),
+
+  // Phase 3: Netlify (INND site + portfolio deploy visibility, read-only)
+  NETLIFY_AUTH_TOKEN: z.string().optional().default(''),
+
+  // Phase 3: Gumroad (digital-products cash lane scoreboard, read-only)
+  GUMROAD_ACCESS_TOKEN: z.string().optional().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
