@@ -57,6 +57,25 @@ function requireKey(): string {
   return env.POSTHOG_PERSONAL_API_KEY;
 }
 
+/**
+ * Validate + encode a value used as a URL PATH SEGMENT (project/insight/flag id).
+ * PostHog ids are numeric or short_id slugs, so we allow only [A-Za-z0-9_-] and
+ * encode the result. This prevents path traversal / request-forgery: a crafted id
+ * cannot inject `/`, `?`, `#`, `@`, or `..` into the request URL.
+ */
+function seg(value: string | number): string {
+  const s = String(value);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) {
+    throw new PostHogApiError({
+      code: 'posthog_invalid_id',
+      status: 0,
+      message: `Invalid PostHog resource id "${s}". Ids must be alphanumeric (with _ or -), 1-64 chars.`,
+      nextStep: 'Pass a numeric project/insight/flag id, or a valid short_id slug (use posthog_list_projects to find ids).',
+    });
+  }
+  return encodeURIComponent(s);
+}
+
 function buildQuery(q?: Record<string, string | number | boolean | undefined>): string {
   if (!q) return '';
   const params = new URLSearchParams();
@@ -185,32 +204,32 @@ export async function listProjects(opts: PostHogGetOptions = {}): Promise<PostHo
 
 /** List insights (funnels, trends, etc.) for a project. GET /api/projects/:id/insights/ */
 export async function listInsights(projectId: string | number, opts: PostHogGetOptions = {}): Promise<PostHogPaginated<unknown>> {
-  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${projectId}/insights/`, opts);
+  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${seg(projectId)}/insights/`, opts);
 }
 
 /** Get a single insight (definition + last refresh metadata). GET /api/projects/:id/insights/:insightId/ */
 export async function getInsight(projectId: string | number, insightId: string | number, opts: PostHogGetOptions = {}): Promise<unknown> {
-  return posthogGet<unknown>(`/api/projects/${projectId}/insights/${insightId}/`, opts);
+  return posthogGet<unknown>(`/api/projects/${seg(projectId)}/insights/${seg(insightId)}/`, opts);
 }
 
 /** List feature flags. GET /api/projects/:id/feature_flags/ */
 export async function listFeatureFlags(projectId: string | number, opts: PostHogGetOptions = {}): Promise<PostHogPaginated<unknown>> {
-  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${projectId}/feature_flags/`, opts);
+  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${seg(projectId)}/feature_flags/`, opts);
 }
 
 /** Get a single feature flag. GET /api/projects/:id/feature_flags/:flagId/ */
 export async function getFeatureFlag(projectId: string | number, flagId: string | number, opts: PostHogGetOptions = {}): Promise<unknown> {
-  return posthogGet<unknown>(`/api/projects/${projectId}/feature_flags/${flagId}/`, opts);
+  return posthogGet<unknown>(`/api/projects/${seg(projectId)}/feature_flags/${seg(flagId)}/`, opts);
 }
 
 /** List experiments. GET /api/projects/:id/experiments/ */
 export async function listExperiments(projectId: string | number, opts: PostHogGetOptions = {}): Promise<PostHogPaginated<unknown>> {
-  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${projectId}/experiments/`, opts);
+  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${seg(projectId)}/experiments/`, opts);
 }
 
 /** List annotations. GET /api/projects/:id/annotations/ */
 export async function listAnnotations(projectId: string | number, opts: PostHogGetOptions = {}): Promise<PostHogPaginated<unknown>> {
-  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${projectId}/annotations/`, opts);
+  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${seg(projectId)}/annotations/`, opts);
 }
 
 /**
@@ -219,5 +238,5 @@ export async function listAnnotations(projectId: string | number, opts: PostHogG
  * be person-level data. Definitions are metadata; members are not exposed here.
  */
 export async function listCohorts(projectId: string | number, opts: PostHogGetOptions = {}): Promise<PostHogPaginated<unknown>> {
-  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${projectId}/cohorts/`, opts);
+  return posthogGet<PostHogPaginated<unknown>>(`/api/projects/${seg(projectId)}/cohorts/`, opts);
 }

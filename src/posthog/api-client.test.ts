@@ -27,6 +27,25 @@ test('posthog project-scoped reads also reject cleanly when unconfigured', async
   await assert.rejects(() => listCohorts(468389), (err: unknown) => err instanceof PostHogApiError);
 });
 
+test('posthog rejects an injection-y path-segment id (request-forgery guard)', async () => {
+  // A crafted id must be rejected by seg() BEFORE any request is built.
+  await assert.rejects(
+    () => listInsights('1/../../session_recordings'),
+    (err: unknown) => err instanceof PostHogApiError && (err as PostHogApiError).code === 'posthog_invalid_id',
+  );
+  await assert.rejects(
+    () => listInsights('1?evil=1'),
+    (err: unknown) => err instanceof PostHogApiError && (err as PostHogApiError).code === 'posthog_invalid_id',
+  );
+});
+
+test('posthog accepts a clean numeric id (passes seg, then hits not-configured)', async () => {
+  await assert.rejects(
+    () => listInsights(468389),
+    (err: unknown) => err instanceof PostHogApiError && (err as PostHogApiError).code === 'posthog_not_configured',
+  );
+});
+
 test('posthog client module does not export any replay/recording/person reader (PHI carve-out)', async () => {
   const mod = (await import('./api-client.js')) as Record<string, unknown>;
   const exportNames = Object.keys(mod).map((n) => n.toLowerCase());
