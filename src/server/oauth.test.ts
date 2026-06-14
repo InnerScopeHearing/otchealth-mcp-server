@@ -126,6 +126,22 @@ test('GET /authorize rejects an unknown client_id', async () => {
   await app.close();
 });
 
+test('N3: consent page sets anti-clickjacking + no-store headers', async () => {
+  const app = await buildApp();
+  const clientId = await register(app, ['https://claude.ai/cb']);
+  const res = await app.inject({
+    method: 'GET',
+    url:
+      `/oauth/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}` +
+      `&redirect_uri=${encodeURIComponent('https://claude.ai/cb')}&code_challenge=${pkce('v'.repeat(64))}&code_challenge_method=S256`,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['x-frame-options'], 'DENY');
+  assert.match(res.headers['content-security-policy'] as string, /frame-ancestors 'none'/);
+  assert.equal(res.headers['cache-control'], 'no-store');
+  await app.close();
+});
+
 test('consent gate: POST without a valid request_id does not issue a code', async () => {
   const app = await buildApp();
   const res = await app.inject({

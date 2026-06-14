@@ -60,6 +60,14 @@ export function revokeAccessToken(token: string): boolean {
   return tokens.delete(token);
 }
 
+/** Kill-switch: revoke ALL outstanding per-client OAuth access tokens. Returns
+ *  the number cleared. (The static connector bearer is handled separately.) */
+export function flushAccessTokens(): number {
+  const n = tokens.size;
+  tokens.clear();
+  return n;
+}
+
 export function sweepAccessTokens(): void {
   const now = Date.now();
   for (const [k, v] of tokens) if (v.expiresAt < now) tokens.delete(k);

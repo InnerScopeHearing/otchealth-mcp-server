@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { loadEnv } from '../config/env.js';
 import { validateAdminToken } from '../auth/bearer.js';
 import { revokeToken, getRevocationState, clearRevocation } from '../auth/revocation-store.js';
+import { revokeAccessToken, flushAccessTokens } from '../auth/oauth-token-store.js';
 import { logger } from '../audit/logger.js';
 
 const env = loadEnv();
@@ -84,5 +85,28 @@ export function registerAdmin(app: FastifyInstance): void {
       'revocation cleared via /admin/clear-revoke',
     );
     return reply.code(200).send({ status: 'cleared' });
+  });
+
+  // Revoke per-client OAuth access tokens (the oat_ tokens minted at /oauth/token).
+  // Body { "token": "oat_..." } revokes one; an empty/absent token flushes ALL.
+  app.post('/admin/revoke-oauth', async (request, reply) => {
+    if (!validateAdminToken(request.headers['authorization'])) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const body = (request.body ?? {}) as { token?: unknown };
+    if (typeof body.token === 'string' && body.token.length > 0) {
+      const ok = revokeAccessToken(body.token);
+      logger.warn(
+        { type: 'admin_oauth_token_revoked', ip: request.ip, found: ok },
+        'oauth access token revoked via /admin/revoke-oauth',
+      );
+      return reply.code(200).send({ status: ok ? 'revoked' : 'not_found' });
+    }
+    const count = flushAccessTokens();
+    logger.warn(
+      { type: 'admin_oauth_tokens_flushed', ip: request.ip, count },
+      'all oauth access tokens flushed via /admin/revoke-oauth',
+    );
+    return reply.code(200).send({ status: 'flushed', count });
   });
 }

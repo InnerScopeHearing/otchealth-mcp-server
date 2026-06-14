@@ -27,7 +27,7 @@
  *   - Open endpoints are size-bounded and per-IP rate-limited.
  */
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { randomBytes, createHash, timingSafeEqual } from 'crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
@@ -52,6 +52,20 @@ const authCodes = new Map<
   string,
   { clientId: string; redirectUri: string; codeChallenge: string; expiresAt: number }
 >();
+
+/**
+ * Trusted client IP for rate limiting. Prefers Cloudflare's CF-Connecting-IP,
+ * which Cloudflare sets to the real client and OVERWRITES on every request, so a
+ * client cannot forge it THROUGH the proxy. INFRA REQUIREMENT (N1): the origin
+ * must be reachable ONLY via Cloudflare; if the raw origin is internet-reachable,
+ * an attacker can bypass this by spoofing the header directly. Falls back to
+ * req.ip (X-Forwarded-For under trustProxy) only when CF-Connecting-IP is absent.
+ */
+function clientIp(req: FastifyRequest): string {
+  const cf = req.headers['cf-connecting-ip'];
+  if (typeof cf === 'string' && cf.length > 0 && cf.length <= 64) return cf;
+  return req.ip;
+}
 
 // Per-IP fixed-window rate limiter (no external dependency).
 const rl = new Map<string, { count: number; resetAt: number }>();
@@ -152,6 +166,17 @@ function renderConsentPage(requestId: string, withError = false): string {
 </form></body></html>`;
 }
 
+/** Send the consent page with anti-clickjacking + no-store headers (N3). */
+function sendConsentPage(reply: FastifyReply, status: number, requestId: string, withError = false): FastifyReply {
+  return reply
+    .status(status)
+    .header('X-Frame-Options', 'DENY')
+    .header('Content-Security-Policy', "frame-ancestors 'none'; default-src 'none'; style-src 'unsafe-inline'")
+    .header('Cache-Control', 'no-store')
+    .type('text/html')
+    .send(renderConsentPage(requestId, withError));
+}
+
 export function registerOAuthRoutes(app: FastifyInstance): void {
   // ---- RFC 8414: Authorization Server Metadata ----
   app.get('/.well-known/oauth-authorization-server', async (_req, reply) => {
@@ -178,7 +203,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
 
   // ---- RFC 7591: Dynamic Client Registration (SHOULD) ----
   app.post('/register', async (req, reply) => {
-    if (rateLimited(req.ip, 20)) return reply.status(429).send({ error: 'rate_limited' });
+    if (rateLimited(clientIp(req), 20)) return reply.status(429).send({ error: 'rate_limited' });
     const body = (typeof req.body === 'string' ? safeJson(req.body) : req.body) as Record<string, unknown> | undefined;
     const redirectUris = Array.isArray(body?.redirect_uris)
       ? (body!.redirect_uris as unknown[]).filter((u): u is string => typeof u === 'string')
@@ -217,7 +242,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
 
   // ---- Authorization endpoint: GET stashes the request + shows the consent screen ----
   app.get('/oauth/authorize', async (req, reply) => {
-    if (rateLimited(req.ip, 30)) return reply.status(429).type('text/plain').send('rate_limited');
+    if (rateLimited(clientIp(req), 30)) return reply.status(429).type('text/plain').send('rate_limited');
     const q = req.query as Record<string, string>;
     if (q.response_type !== 'code') {
       return reply.status(400).type('text/plain').send('unsupported_response_type (expected code)');
@@ -245,12 +270,12 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       state: q.state,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
-    return reply.status(200).type('text/html').send(renderConsentPage(requestId));
+    return sendConsentPage(reply, 200, requestId);
   });
 
   // ---- Authorization endpoint: POST verifies consent + issues the code ----
   app.post('/oauth/authorize', async (req, reply) => {
-    if (rateLimited(req.ip, 10)) return reply.status(429).type('text/plain').send('rate_limited');
+    if (rateLimited(clientIp(req), 10)) return reply.status(429).type('text/plain').send('rate_limited');
     const body =
       (typeof req.body === 'string'
         ? Object.fromEntries(new URLSearchParams(req.body))
@@ -264,23 +289,31 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       return reply.status(400).type('text/plain').send('invalid_request: authorization request expired, restart the flow');
     }
     if (!consent || !safeEqual(consent, consentSecret())) {
-      logger.warn({ type: 'oauth_consent_rejected', ip: req.ip }, 'oauth consent secret rejected');
-      return reply.status(401).type('text/html').send(renderConsentPage(requestId, true));
+      logger.warn({ type: 'oauth_consent_rejected', ip: clientIp(req) }, 'oauth consent secret rejected');
+      return sendConsentPage(reply, 401, requestId, true);
     }
 
     authzRequests.delete(requestId); // one-time consume
 
-    if (!isValidRedirectUri(pending.redirectUri)) {
-      return reply.status(400).type('text/plain').send('invalid_request: redirect_uri failed validation');
+    // Defense-in-depth: the redirect target MUST be a member of the client's
+    // CURRENT registered redirect_uri allowlist, checked inline right before the
+    // redirect. This membership guard is what makes the redirect closed (not an
+    // open redirect): only a pre-registered, exact-matched, https/localhost URI
+    // can ever receive the code, and only after the consent gate above.
+    const registered = clients.get(pending.clientId);
+    const allowlist = registered ? registered.redirectUris : [];
+    if (!allowlist.includes(pending.redirectUri) || !isValidRedirectUri(pending.redirectUri)) {
+      return reply.status(400).type('text/plain').send('invalid_request: redirect_uri no longer authorized');
     }
+    const safeRedirect = pending.redirectUri;
     const code = generateId();
     authCodes.set(code, {
       clientId: pending.clientId,
-      redirectUri: pending.redirectUri,
+      redirectUri: safeRedirect,
       codeChallenge: pending.codeChallenge,
       expiresAt: Date.now() + 5 * 60 * 1000,
     });
-    const target = new URL(pending.redirectUri);
+    const target = new URL(safeRedirect);
     target.searchParams.set('code', code);
     if (pending.state) target.searchParams.set('state', pending.state);
     logger.info({ type: 'oauth_code_issued' }, 'oauth authorization code issued');
@@ -290,7 +323,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
 
   // ---- Token endpoint: exchange code for a per-client access token (PKCE S256) ----
   app.post('/oauth/token', async (req, reply) => {
-    if (rateLimited(req.ip, 30)) return reply.status(429).send({ error: 'rate_limited' });
+    if (rateLimited(clientIp(req), 30)) return reply.status(429).send({ error: 'rate_limited' });
     const body =
       typeof req.body === 'string'
         ? Object.fromEntries(new URLSearchParams(req.body))
