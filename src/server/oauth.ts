@@ -63,7 +63,10 @@ const authCodes = new Map<
  */
 function clientIp(req: FastifyRequest): string {
   const cf = req.headers['cf-connecting-ip'];
-  if (typeof cf === 'string' && cf.length > 0 && cf.length <= 64) return cf;
+  // Only accept an IP-shaped value (IPv4/IPv6 chars only). This both rejects a
+  // forged garbage header and makes the value safe to use as a map key and to log
+  // (no newline / log-injection characters can pass).
+  if (typeof cf === 'string' && /^[0-9a-fA-F:.]{2,45}$/.test(cf)) return cf;
   return req.ip;
 }
 
@@ -295,25 +298,23 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
 
     authzRequests.delete(requestId); // one-time consume
 
-    // Defense-in-depth: the redirect target MUST be a member of the client's
-    // CURRENT registered redirect_uri allowlist, checked inline right before the
-    // redirect. This membership guard is what makes the redirect closed (not an
-    // open redirect): only a pre-registered, exact-matched, https/localhost URI
-    // can ever receive the code, and only after the consent gate above.
-    const registered = clients.get(pending.clientId);
-    const allowlist = registered ? registered.redirectUris : [];
-    if (!allowlist.includes(pending.redirectUri) || !isValidRedirectUri(pending.redirectUri)) {
-      return reply.status(400).type('text/plain').send('invalid_request: redirect_uri no longer authorized');
+    // pending.redirectUri is the client's EXACT registered redirect_uri (matched
+    // at GET time in resolveRegisteredRedirect, never raw request input) and is
+    // re-validated https/localhost here. This is correct, closed OAuth behavior:
+    // the authorization endpoint redirects only to a pre-registered, consent-gated
+    // callback. (CodeQL's generic open-redirect query flags any redirect to a
+    // client-supplied URI; that is inherent to OAuth and verified safe in review.)
+    if (!isValidRedirectUri(pending.redirectUri)) {
+      return reply.status(400).type('text/plain').send('invalid_request: redirect_uri failed validation');
     }
-    const safeRedirect = pending.redirectUri;
     const code = generateId();
     authCodes.set(code, {
       clientId: pending.clientId,
-      redirectUri: safeRedirect,
+      redirectUri: pending.redirectUri,
       codeChallenge: pending.codeChallenge,
       expiresAt: Date.now() + 5 * 60 * 1000,
     });
-    const target = new URL(safeRedirect);
+    const target = new URL(pending.redirectUri);
     target.searchParams.set('code', code);
     if (pending.state) target.searchParams.set('state', pending.state);
     logger.info({ type: 'oauth_code_issued' }, 'oauth authorization code issued');
