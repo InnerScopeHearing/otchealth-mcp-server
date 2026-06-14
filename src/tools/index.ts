@@ -55,6 +55,19 @@ import { registerStripeListCustomers } from './stripe/list-customers.js';
 import { registerStripeListPaymentIntents } from './stripe/list-payment-intents.js';
 import { registerStripeListProducts as registerStripeListProductsCatalog } from './stripe/list-products.js';
 
+// Phase 3 — Netlify (deploy visibility, read-only)
+import { registerNetlifyListSites } from './netlify/list-sites.js';
+import { registerNetlifyListSiteDeploys } from './netlify/list-site-deploys.js';
+
+// Phase 3 — Gumroad (digital-products cash scoreboard, read-only)
+import { registerGumroadListProducts } from './gumroad/list-products.js';
+import { registerGumroadListSales } from './gumroad/list-sales.js';
+
+// Capability Catalog (self-describing gateway introspection)
+import { registerCatalogListTools } from './catalog/list-tools.js';
+import { registerCatalogServiceCapabilities } from './catalog/service-capabilities.js';
+import { registerCatalogAuditUnused } from './catalog/audit-unused.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -108,4 +121,17 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerStripeListCustomers(server, callerHash);
   registerStripeListPaymentIntents(server, callerHash);
   registerStripeListProductsCatalog(server, callerHash);
+
+  // ===== Phase 3: Netlify (deploy visibility) =====
+  registerNetlifyListSites(server, callerHash);
+  registerNetlifyListSiteDeploys(server, callerHash);
+
+  // ===== Phase 3: Gumroad (digital-products cash scoreboard) =====
+  registerGumroadListProducts(server, callerHash);
+  registerGumroadListSales(server, callerHash);
+
+  // ===== Capability Catalog (self-describing introspection) =====
+  registerCatalogListTools(server, callerHash);
+  registerCatalogServiceCapabilities(server, callerHash);
+  registerCatalogAuditUnused(server, callerHash);
 }
