@@ -29,6 +29,18 @@ COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/package.json ./package.json
 
+# ── Datadog observability (APM + logs + metrics) ──────────────────────────────
+# serverless-init wraps the app process and forwards dd-trace traces, logs, and metrics
+# to Datadog with no separate agent (works on Azure Container Apps + Cloud Run). It is
+# INERT unless DD_API_KEY is provided to the environment, so this image is safe to ship
+# everywhere; telemetry only flows where DD_API_KEY is set (the per-env gate). No
+# DD_API_KEY is baked in here, by design (the gateway is keys-to-the-kingdom).
+COPY --from=datadog/serverless-init:1 --chown=app:app /datadog-init /app/datadog-init
+ENV DD_SITE=us3.datadoghq.com
+ENV DD_SERVICE=gateway-mcp
+ENV DD_LOGS_INJECTION=true
+ENV DD_SERVERLESS_LOG_PATH=/dev/stdout
+
 USER app
 
 EXPOSE 8080
@@ -36,4 +48,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/health || exit 1
 
+ENTRYPOINT ["/app/datadog-init"]
 CMD ["node", "dist/server/index.js"]

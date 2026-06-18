@@ -1,3 +1,4 @@
+import '../instrument.js'; // Datadog APM, must be first; no-ops unless DD_API_KEY is set.
 import Fastify from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
