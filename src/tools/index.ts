@@ -63,6 +63,11 @@ import { registerNetlifyListSiteDeploys } from './netlify/list-site-deploys.js';
 import { registerGumroadListProducts } from './gumroad/list-products.js';
 import { registerGumroadListSales } from './gumroad/list-sales.js';
 
+// Phase 4 — kb-memory shared brain (commons feed; the cross-agent / cross-platform memory)
+import { registerMemoryRemember } from './memory/remember.js';
+import { registerMemoryRecall } from './memory/recall.js';
+import { registerMemoryTeam } from './memory/team.js';
+
 // Capability Catalog (self-describing gateway introspection)
 import { registerCatalogListTools } from './catalog/list-tools.js';
 import { registerCatalogServiceCapabilities } from './catalog/service-capabilities.js';
@@ -129,6 +134,11 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 3: Gumroad (digital-products cash scoreboard) =====
   registerGumroadListProducts(server, callerHash);
   registerGumroadListSales(server, callerHash);
+
+  // ===== Phase 4: kb-memory shared brain (cross-agent / cross-platform memory) =====
+  registerMemoryRecall(server, callerHash);
+  registerMemoryTeam(server, callerHash);
+  registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
 
   // ===== Capability Catalog (self-describing introspection) =====
   registerCatalogListTools(server, callerHash);
