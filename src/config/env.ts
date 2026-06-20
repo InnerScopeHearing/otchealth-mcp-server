@@ -82,6 +82,12 @@ const EnvSchema = z.object({
 
   // Phase 3: Gumroad (digital-products cash lane scoreboard, read-only)
   GUMROAD_ACCESS_TOKEN: z.string().optional().default(''),
+
+  // Phase 4: kb-memory shared brain (commons store ONLY; non-PHI, non-MNPI, non-privileged
+  // by construction). Inert without these. Mirrors skills/kb-memory commons (otchealthcommons /
+  // company-journal). NEVER wire the cfo/clo/clo-personal/PHI storage accounts here.
+  AZURE_COMMONS_STORAGE_ACCOUNT: z.string().optional().default(''),
+  AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
