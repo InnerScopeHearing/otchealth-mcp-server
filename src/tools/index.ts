@@ -76,6 +76,8 @@ import { registerAgentPersona } from './agent/persona.js';
 import { registerCatalogListTools } from './catalog/list-tools.js';
 import { registerCatalogServiceCapabilities } from './catalog/service-capabilities.js';
 import { registerCatalogAuditUnused } from './catalog/audit-unused.js';
+import { registerCatalogMaster } from './catalog/master.js';
+import { registerCatalogSkill } from './catalog/skill.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -152,4 +154,6 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerCatalogListTools(server, callerHash);
   registerCatalogServiceCapabilities(server, callerHash);
   registerCatalogAuditUnused(server, callerHash);
+  registerCatalogMaster(server, callerHash);
+  registerCatalogSkill(server, callerHash);
 }
