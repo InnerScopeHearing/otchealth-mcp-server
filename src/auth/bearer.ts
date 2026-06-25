@@ -3,13 +3,14 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked } from './revocation-store.js';
-import { isValidIssuedAccessToken } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent } from '../server/oauth.js';
 
 const env = loadEnv();
 
 export interface AuthContext {
   caller_hash: string;
   raw_token: string;
+  caller_agent: string;
 }
 
 function extractBearer(authHeader: string | undefined): string | null {
@@ -42,9 +43,11 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
   }
   // Accept EITHER a real issued OAuth 2.1 access token (HS256 JWT) OR the static connector token
   // (back-compat for CLI/curl during the cutover). The static token is rotate-before-launch.
-  const ok = isValidIssuedAccessToken(token) || safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN);
+  const issued = isValidIssuedAccessToken(token);
+  const ok = issued || safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN);
   if (!ok) return null;
-  return { caller_hash: hashToken(token), raw_token: token };
+  const caller_agent = issued ? (issuedAgent(token) || '') : (env.OAUTH_DEFAULT_AGENT || '');
+  return { caller_hash: hashToken(token), raw_token: token, caller_agent };
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {

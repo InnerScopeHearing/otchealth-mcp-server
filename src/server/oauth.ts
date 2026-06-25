@@ -36,7 +36,23 @@ const env = loadEnv();
 
 /** OAuth 2.1 is "armed" only when a client id + signing secret are configured. */
 function oauthConfigured(): boolean {
-  return Boolean(env.OAUTH_CLIENT_ID && env.OAUTH_TOKEN_SIGNING_SECRET);
+  return Boolean(env.OAUTH_TOKEN_SIGNING_SECRET && (env.OAUTH_CLIENT_ID || env.OAUTH_CLIENTS));
+}
+
+interface ResolvedClient { secret: string; agent: string; }
+/** Resolve a client_id to its secret + agent lane: per-agent OAUTH_CLIENTS first, then the single client. */
+function resolveClient(clientId: string): ResolvedClient | null {
+  if (env.OAUTH_CLIENTS) {
+    try {
+      const arr = JSON.parse(env.OAUTH_CLIENTS) as Array<{ client_id: string; secret: string; agent?: string }>;
+      const m = arr.find((c) => c && c.client_id === clientId);
+      if (m) return { secret: m.secret, agent: (m.agent || '').toLowerCase() };
+    } catch { /* ignore malformed OAUTH_CLIENTS */ }
+  }
+  if (env.OAUTH_CLIENT_ID && clientId === env.OAUTH_CLIENT_ID) {
+    return { secret: env.OAUTH_CLIENT_SECRET, agent: (env.OAUTH_DEFAULT_AGENT || '').toLowerCase() };
+  }
+  return null;
 }
 
 function baseUrlOf(req: { protocol: string; hostname: string }): string {
@@ -93,8 +109,11 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       return reply.status(400).send({ error: 'invalid_request', error_description: 'redirect_uri not allowed' });
     }
 
-    const expectedClient = oauthConfigured() ? env.OAUTH_CLIENT_ID : env.PERPLEXITY_CONNECTOR_TOKEN;
-    if (!client_id || client_id !== expectedClient) {
+    if (oauthConfigured()) {
+      if (!client_id || !resolveClient(client_id)) {
+        return reply.status(400).send({ error: 'invalid_client' });
+      }
+    } else if (!client_id || client_id !== env.PERPLEXITY_CONNECTOR_TOKEN) {
       return reply.status(400).send({ error: 'invalid_client' });
     }
 
@@ -135,17 +154,18 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     // ----- refresh_token grant -----
     if (grant_type === 'refresh_token') {
       if (!oauthConfigured()) return reply.status(400).send({ error: 'unsupported_grant_type' });
-      if (client_secret !== env.OAUTH_CLIENT_SECRET) return reply.status(401).send({ error: 'invalid_client' });
       const claims = refresh_token ? verifyToken(refresh_token, env.OAUTH_TOKEN_SIGNING_SECRET) : null;
       if (!claims || claims.typ !== 'refresh') {
         return reply.status(400).send({ error: 'invalid_grant', error_description: 'invalid refresh_token' });
       }
+      const rc = resolveClient(claims.sub);
+      if (!rc || client_secret !== rc.secret) return reply.status(401).send({ error: 'invalid_client' });
       reply.header('Cache-Control', 'no-store');
       return reply.send({
-        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl),
+        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
         token_type: 'Bearer',
         expires_in: 3600,
-        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl),
+        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
         scope: claims.scope,
       });
     }
@@ -170,8 +190,9 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     }
 
     if (oauthConfigured()) {
-      // Confidential client: require the secret.
-      if (client_secret !== env.OAUTH_CLIENT_SECRET) {
+      // Confidential client: require the matching secret (per-agent or single).
+      const rc = resolveClient(rec.clientId);
+      if (!rc || client_secret !== rc.secret) {
         return reply.status(401).send({ error: 'invalid_client', error_description: 'client_secret required' });
       }
       // Mandatory PKCE verification.
@@ -180,10 +201,10 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       }
       reply.header('Cache-Control', 'no-store');
       return reply.send({
-        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl),
+        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
         token_type: 'Bearer',
         expires_in: 3600,
-        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl),
+        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
         scope: rec.scope,
       });
     }
@@ -208,4 +229,12 @@ export function isValidIssuedAccessToken(token: string): boolean {
   if (!env.OAUTH_TOKEN_SIGNING_SECRET) return false;
   const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
   return Boolean(claims && claims.typ === 'access');
+}
+
+/** The agent identity embedded in a valid issued access token (per-agent OAuth client), or null. */
+export function issuedAgent(token: string): string | null {
+  if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
+  const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
+  if (!claims || claims.typ !== 'access') return null;
+  return claims.agent || '';
 }

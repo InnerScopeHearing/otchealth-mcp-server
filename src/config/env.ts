@@ -45,6 +45,11 @@ const EnvSchema = z.object({
   OAUTH_TOKEN_SIGNING_SECRET: z.string().optional().default(''),
   OAUTH_REDIRECT_URIS: z.string().optional().default(''),
   PUBLIC_BASE_URL: z.string().optional().default(''),
+  // Per-agent OAuth clients (P2b): JSON array [{"client_id":"..","secret":"..","agent":"developer"}].
+  // Each connecting client maps to an agent lane; the issued token carries that agent identity.
+  OAUTH_CLIENTS: z.string().optional().default(''),
+  // Agent identity for the single OAUTH_CLIENT_ID connection (the original Hyperagent CTO connector).
+  OAUTH_DEFAULT_AGENT: z.string().optional().default(''),
 
   // Semantic recall over the memory-exec Azure AI Search index (read-only QUERY key).
   // Inert when unset -> memory_recall falls back to keyword search over the blob feed.
