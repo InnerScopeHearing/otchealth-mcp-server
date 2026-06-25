@@ -85,6 +85,10 @@ import { registerSentryListIssues } from './sentry/list-issues.js';
 import { registerRevenueCatListProjects } from './revenuecat/list-projects.js';
 import { registerPostHogListProjects } from './posthog/list-projects.js';
 import { registerDepotListProjects } from './depot/list-projects.js';
+import { registerGitHubListPullRequests } from './github/list-pull-requests.js';
+import { registerGitHubListWorkflowRuns } from './github/list-workflow-runs.js';
+import { registerTwilioGetBalance } from './twilio/get-balance.js';
+import { registerTwilioListMessages } from './twilio/list-messages.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -170,4 +174,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerRevenueCatListProjects(server, callerHash);
   registerPostHogListProjects(server, callerHash);
   registerDepotListProjects(server, callerHash);
+  registerGitHubListPullRequests(server, callerHash);
+  registerGitHubListWorkflowRuns(server, callerHash);
+  registerTwilioGetBalance(server, callerHash);
+  registerTwilioListMessages(server, callerHash);
 }
