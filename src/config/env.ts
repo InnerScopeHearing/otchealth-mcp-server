@@ -37,6 +37,15 @@ const EnvSchema = z.object({
   // Stripe (read-only)
   STRIPE_SECRET_KEY: z.string().optional().default(''),
 
+  // OAuth 2.1 (confidential client). When OAUTH_CLIENT_ID + OAUTH_TOKEN_SIGNING_SECRET are set,
+  // the gateway issues real expiring JWT access/refresh tokens (PKCE S256 mandatory). When unset,
+  // the legacy static-connector-token behavior is preserved for back-compat.
+  OAUTH_CLIENT_ID: z.string().optional().default(''),
+  OAUTH_CLIENT_SECRET: z.string().optional().default(''),
+  OAUTH_TOKEN_SIGNING_SECRET: z.string().optional().default(''),
+  OAUTH_REDIRECT_URIS: z.string().optional().default(''),
+  PUBLIC_BASE_URL: z.string().optional().default(''),
+
   // Feature flags
   READ_ONLY_MODE: z
     .enum(['true', 'false'])

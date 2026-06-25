@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked } from './revocation-store.js';
+import { isValidIssuedAccessToken } from '../server/oauth.js';
 
 const env = loadEnv();
 
@@ -39,7 +40,10 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
     );
     return null;
   }
-  if (!safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) return null;
+  // Accept EITHER a real issued OAuth 2.1 access token (HS256 JWT) OR the static connector token
+  // (back-compat for CLI/curl during the cutover). The static token is rotate-before-launch.
+  const ok = isValidIssuedAccessToken(token) || safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN);
+  if (!ok) return null;
   return { caller_hash: hashToken(token), raw_token: token };
 }
 
