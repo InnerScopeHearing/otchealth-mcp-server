@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
+import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
 
 export function registerMemoryRecall(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -26,14 +27,33 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
       outputShape: {
         matches: z.array(z.unknown()),
         count: z.number(),
+        mode: z.string(),
       },
       handler: async (input) => {
-        if (!isConfigured()) {
-          return { data: { matches: [], count: 0 }, summary: 'Shared brain not configured; no results.' };
-        }
         const limit = input.limit ?? 25;
-        const terms = input.query.toLowerCase().split(/\s+/).filter(Boolean);
         const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
+
+        // Prefer SEMANTIC recall (Azure AI Search memory-exec): matches by meaning, not just
+        // keyword, and is the same index the fleet's per-prompt memory uses. Falls back to
+        // keyword over the blob feed when search isn't configured or errors.
+        if (semanticConfigured()) {
+          try {
+            const hits = await semanticSearch(input.query, agentFilter, limit);
+            if (hits) {
+              return {
+                data: { matches: hits, count: hits.length, mode: 'semantic' },
+                summary: `${hits.length} semantic match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+              };
+            }
+          } catch {
+            /* fall through to keyword */
+          }
+        }
+
+        if (!isConfigured()) {
+          return { data: { matches: [], count: 0, mode: 'none' }, summary: 'Shared brain not configured; no results.' };
+        }
+        const terms = input.query.toLowerCase().split(/\s+/).filter(Boolean);
         const all = await readSharedAll();
         const matches = all
           .filter((r) => !agentFilter || r.agent === agentFilter)
@@ -43,8 +63,8 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
           })
           .slice(0, limit);
         return {
-          data: { matches, count: matches.length },
-          summary: `${matches.length} match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+          data: { matches, count: matches.length, mode: 'keyword' },
+          summary: `${matches.length} keyword match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
         };
       },
     },

@@ -67,6 +67,7 @@ import { registerGumroadListSales } from './gumroad/list-sales.js';
 import { registerMemoryRemember } from './memory/remember.js';
 import { registerMemoryRecall } from './memory/recall.js';
 import { registerMemoryTeam } from './memory/team.js';
+import { registerMemoryPack } from './memory/pack.js';
 
 // Capability Catalog (self-describing gateway introspection)
 import { registerCatalogListTools } from './catalog/list-tools.js';
@@ -138,6 +139,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 4: kb-memory shared brain (cross-agent / cross-platform memory) =====
   registerMemoryRecall(server, callerHash);
   registerMemoryTeam(server, callerHash);
+  registerMemoryPack(server, callerHash);
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
 
   // ===== Capability Catalog (self-describing introspection) =====

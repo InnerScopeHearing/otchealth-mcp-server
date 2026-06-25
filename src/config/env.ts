@@ -46,6 +46,11 @@ const EnvSchema = z.object({
   OAUTH_REDIRECT_URIS: z.string().optional().default(''),
   PUBLIC_BASE_URL: z.string().optional().default(''),
 
+  // Semantic recall over the memory-exec Azure AI Search index (read-only QUERY key).
+  // Inert when unset -> memory_recall falls back to keyword search over the blob feed.
+  AZURE_SEARCH_ENDPOINT: z.string().optional().default(''),
+  AZURE_SEARCH_QUERY_KEY: z.string().optional().default(''),
+
   // Feature flags
   READ_ONLY_MODE: z
     .enum(['true', 'false'])
