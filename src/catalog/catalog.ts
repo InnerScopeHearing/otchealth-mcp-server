@@ -197,8 +197,8 @@ export function auditUnused() {
 // ---- EXTRA fleet connectors (known to the fleet; surfaced in the master catalog) ----
 // Merged with SERVICE_CATALOG by catalog_master. "planned" = not yet wired as gateway tools.
 export const EXTRA_SERVICES: Record<string, ServiceInfo> = {
-  depot: { description: 'Depot build/CI (iOS macOS + Linux) and grant-burn.', ring: 'non-phi', auth: 'DEPOT_TOKEN', status: 'planned', available: ['list projects/builds', 'trigger build', 'usage'], rule: 'CTO-ONLY to kick off a build/upload (all agents may SEE/read build status).' },
-  posthog: { description: 'PostHog product analytics + flags (MedReview PHI project carved OUT).', ring: 'phi-carved-out', auth: 'POSTHOG_PERSONAL_API_KEY', status: 'planned', available: ['insights', 'feature flags', 'error tracking'], rule: 'Never expose the MedReview PHI project (468398).' },
+  depot: { description: 'Depot build/CI (iOS macOS + Linux) and grant-burn.', ring: 'non-phi', auth: 'DEPOT_TOKEN', status: 'wired', available: ['list projects/builds', 'trigger build', 'usage'], rule: 'CTO-ONLY to kick off a build/upload (all agents may SEE/read build status).' },
+  posthog: { description: 'PostHog product analytics + flags (MedReview PHI project carved OUT).', ring: 'phi-carved-out', auth: 'POSTHOG_PERSONAL_API_KEY', status: 'wired', available: ['insights', 'feature flags', 'error tracking'], rule: 'Never expose the MedReview PHI project (468398).' },
   revenuecat: { description: 'RevenueCat subscriptions/entitlements (read).', ring: 'non-phi', auth: 'REVENUECAT_V2_API_KEY', status: 'wired', available: ['subscriber', 'entitlements', 'offerings'] },
   twilio: { description: 'Twilio SMS/voice + ElevenLabs voice.', ring: 'non-phi', auth: 'TWILIO SID+token / ELEVENLABS xi-api-key', status: 'planned', available: ['send SMS', 'calls', 'TTS'], rule: 'Outbound SMS/calls are TCPA-gated (CCO approval) - never autonomous.' },
   sentry: { description: 'Sentry crash/error monitoring (read).', ring: 'non-phi', auth: 'SENTRY_AUTH_TOKEN', status: 'wired', available: ['issues', 'release health'], rule: 'MedReview (medreview-*) projects are PHI - excluded.' },

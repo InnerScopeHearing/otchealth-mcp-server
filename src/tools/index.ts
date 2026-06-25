@@ -83,6 +83,8 @@ import { registerCatalogSkill } from './catalog/skill.js';
 import { registerSentryListProjects } from './sentry/list-projects.js';
 import { registerSentryListIssues } from './sentry/list-issues.js';
 import { registerRevenueCatListProjects } from './revenuecat/list-projects.js';
+import { registerPostHogListProjects } from './posthog/list-projects.js';
+import { registerDepotListProjects } from './depot/list-projects.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -166,4 +168,6 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerSentryListProjects(server, callerHash);
   registerSentryListIssues(server, callerHash);
   registerRevenueCatListProjects(server, callerHash);
+  registerPostHogListProjects(server, callerHash);
+  registerDepotListProjects(server, callerHash);
 }

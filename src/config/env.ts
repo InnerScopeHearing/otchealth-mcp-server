@@ -112,6 +112,11 @@ const EnvSchema = z.object({
   SENTRY_AUTH_TOKEN: z.string().optional().default(''),
   SENTRY_ORG: z.string().optional().default('otchealth-inc'),
   REVENUECAT_API_KEY: z.string().optional().default(''),
+
+  // Connectors wired in P3 wave 2 (read-only; PostHog MedReview project carved out; depot reads only)
+  POSTHOG_PERSONAL_API_KEY: z.string().optional().default(''),
+  POSTHOG_HOST: z.string().optional().default('https://us.posthog.com'),
+  DEPOT_TOKEN: z.string().optional().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
