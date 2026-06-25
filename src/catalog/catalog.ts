@@ -45,6 +45,8 @@ export interface ServiceInfo {
   status: 'wired' | 'planned';
   /** Capabilities the service offers that are NOT yet wired as gateway tools. */
   available: string[];
+  /** Governance rule for this service's actions (who may EXECUTE), surfaced in the master catalog. */
+  rule?: string;
 }
 
 /**
@@ -190,3 +192,26 @@ export function auditUnused() {
     summary: `${planned_services.length} planned service(s), ${partial_coverage.length} wired service(s) with un-wired capabilities, ${undocumented_services.length} undocumented wired service(s).`,
   };
 }
+
+
+// ---- EXTRA fleet connectors (known to the fleet; surfaced in the master catalog) ----
+// Merged with SERVICE_CATALOG by catalog_master. "planned" = not yet wired as gateway tools.
+export const EXTRA_SERVICES: Record<string, ServiceInfo> = {
+  depot: { description: 'Depot build/CI (iOS macOS + Linux) and grant-burn.', ring: 'non-phi', auth: 'DEPOT_TOKEN', status: 'planned', available: ['list projects/builds', 'trigger build', 'usage'], rule: 'CTO-ONLY to kick off a build/upload (all agents may SEE/read build status).' },
+  posthog: { description: 'PostHog product analytics + flags (MedReview PHI project carved OUT).', ring: 'phi-carved-out', auth: 'POSTHOG_PERSONAL_API_KEY', status: 'planned', available: ['insights', 'feature flags', 'error tracking'], rule: 'Never expose the MedReview PHI project (468398).' },
+  revenuecat: { description: 'RevenueCat subscriptions/entitlements (read).', ring: 'non-phi', auth: 'REVENUECAT_V2_API_KEY', status: 'planned', available: ['subscriber', 'entitlements', 'offerings'] },
+  twilio: { description: 'Twilio SMS/voice + ElevenLabs voice.', ring: 'non-phi', auth: 'TWILIO SID+token / ELEVENLABS xi-api-key', status: 'planned', available: ['send SMS', 'calls', 'TTS'], rule: 'Outbound SMS/calls are TCPA-gated (CCO approval) - never autonomous.' },
+  sentry: { description: 'Sentry crash/error monitoring (read).', ring: 'non-phi', auth: 'SENTRY_AUTH_TOKEN', status: 'planned', available: ['issues', 'release health'], rule: 'MedReview (medreview-*) projects are PHI - excluded.' },
+  github: { description: 'GitHub repos/PRs/Actions.', ring: 'non-phi', auth: 'github-app token', status: 'planned', available: ['repo read', 'PRs', 'Actions'], rule: 'iOS build/release dispatch is CTO-only.' },
+  mercury: { description: 'Mercury banking (read).', ring: 'non-phi', auth: 'mercury token', status: 'planned', available: ['balances', 'transactions'], rule: 'Finance data - CFO lane; not for external clients.' },
+  quickbooks: { description: 'QuickBooks / Xero accounting (read).', ring: 'non-phi', auth: 'OAuth refresh tokens', status: 'planned', available: ['P&L', 'balance sheet'], rule: 'Finance data - CFO lane; not for external clients.' },
+  plaid: { description: 'Plaid bank aggregation (read).', ring: 'non-phi', auth: 'plaid tokens', status: 'planned', available: ['accounts', 'transactions'], rule: 'Finance data - CFO lane; not for external clients.' },
+  heygen: { description: 'HeyGen avatar video generation.', ring: 'non-phi', auth: 'heygen key', status: 'planned', available: ['avatar video'] },
+};
+
+// ---- Fleet SKILLS (octools, public repo skills/<name>/SKILL.md) - snapshot; live source is the repo ----
+export const SKILLS: string[] = ["agent-evals","amazon-sp-api","analyzing-financial-statements","aso-growth","attack-tree-construction","auth-implementation-patterns","billing-automation","brainstorming","browser-agent","cfo-onedrive","cfo-sharepoint","cfo-store","company-brain","competitive-landscape","content-engine","contract-analyzer","contract-redliner","coo","creating-financial-models","cto-onedrive","daily-briefing","daily-digest","datadog","designer","devkit","digital-products","dispatching-parallel-agents","distributed-tracing","doc-indexer","edgartools","employment-contract-templates","error-handling-patterns","eval-runner","executing-plans","fleet-dispatch","fleet-medic","fleet-telemetry","focus-group-loop","gdpr-data-handling","github-app","gmail","grant-tracker","growth-pr","heygen-video","incident-runbook-templates","innd-stock","ir-support","kb-memory","kpi-dashboard-design","legal","lifecycle-crm","live-walkthrough","m365-mail","market-sizing-analysis","monetization","paid-ads","partnerships","pci-compliance","pdf","plaid-banking","postmortem-writing","quickbooks","raise-ops","receiving-code-review","release-conductor","requesting-code-review","sast-configuration","scaffolder","screen-reader-testing","shark-tank","skills-discovery","slo-implementation","sql-optimization-patterns","startup-financial-modeling","storefront-cro","stripe-integration","subagent-driven-development","sunset-protocol","supply-chain-guard","systematic-debugging","telemetry-wiring","test-author","test-driven-development","threat-mitigation-mapping","vault-sync","verification-before-completion","voice-ops","wcag-audit-patterns","writing-plans","xero"];
+
+export const PLUGINS: string[] = ["sunset-protocol"];
+
+export const SKILLS_REPO = 'https://github.com/InnerScopeHearing/otchealth-claude-tools/tree/main/skills';
