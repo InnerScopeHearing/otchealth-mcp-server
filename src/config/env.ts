@@ -117,6 +117,13 @@ const EnvSchema = z.object({
   POSTHOG_PERSONAL_API_KEY: z.string().optional().default(''),
   POSTHOG_HOST: z.string().optional().default('https://us.posthog.com'),
   DEPOT_TOKEN: z.string().optional().default(''),
+
+  // Connectors wired in P3 wave 3 (read-only): GitHub App (reads) + Twilio (reads; sends are TCPA-gated, not wired)
+  GITHUB_APP_ID: z.string().optional().default(''),
+  GITHUB_APP_INSTALLATION_ID: z.string().optional().default(''),
+  GITHUB_APP_PRIVATE_KEY: z.string().optional().default(''),
+  TWILIO_ACCOUNT_SID: z.string().optional().default(''),
+  TWILIO_AUTH_TOKEN: z.string().optional().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
