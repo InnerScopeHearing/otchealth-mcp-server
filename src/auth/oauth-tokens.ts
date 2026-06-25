@@ -27,6 +27,7 @@ export interface AccessClaims {
   sub: string; // client_id
   scope: string;
   typ: 'access' | 'refresh';
+  agent?: string;
   iat: number;
   exp: number;
   jti: string;
@@ -69,14 +70,14 @@ export function verifyToken(token: string, secret: string): AccessClaims | null 
   return claims;
 }
 
-export function issueAccessToken(clientId: string, scope: string, secret: string, baseUrl: string, ttlSeconds = 3600): string {
+export function issueAccessToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 3600): string {
   const now = Math.floor(Date.now() / 1000);
-  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, typ: 'access', exp: now + ttlSeconds }, secret);
+  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds }, secret);
 }
 
-export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, ttlSeconds = 60 * 60 * 24 * 30): string {
+export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 60 * 60 * 24 * 30): string {
   const now = Math.floor(Date.now() / 1000);
-  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, typ: 'refresh', exp: now + ttlSeconds }, secret);
+  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'refresh', exp: now + ttlSeconds }, secret);
 }
 
 // ── Authorization-code store (short-lived, in-memory) ────────────────────────

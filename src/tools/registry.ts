@@ -21,6 +21,8 @@ import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.
 import { CustomerIoApiError } from '../customerio/app-api-client.js';
 import { N8nWebhookError } from '../n8n/webhook-client.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
+import { requiredRoleFor } from '../catalog/governance.js';
+import { currentCallerAgent } from '../server/request-context.js';
 
 const env = loadEnv();
 
@@ -40,6 +42,7 @@ export interface ToolContext {
   callerHash: string;
   dryRun: boolean;
   acknowledgeWarning: boolean;
+  callerAgent: string;
 }
 
 export interface ToolResultPayload {
@@ -215,6 +218,34 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       const dryRun = args.dry_run ?? (def.category === 'read' ? false : env.DRY_RUN_DEFAULT);
       const acknowledged = args.acknowledge_warning === true;
 
+      // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
+      const callerAgent = currentCallerAgent();
+      const gov = requiredRoleFor(def.name);
+      if (gov && callerAgent !== gov.role) {
+        const gmsg = `Tool "${def.name}" is restricted to the ${gov.role} agent. ${gov.reason}` +
+          (callerAgent ? ` Your identity: ${callerAgent}.` : ' No agent identity on your token.');
+        logToolEnd({
+          correlation_id: correlationId,
+          tool: def.name,
+          caller_hash: callerHash,
+          outcome: 'rejected',
+          latency_ms: Date.now() - started,
+          error_code: 'forbidden_role',
+          error_message: gmsg,
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: gmsg }],
+          structuredContent: {
+            result: null,
+            compliance_warning: null,
+            correlation_id: correlationId,
+            dry_run: dryRun,
+            error: { code: 'forbidden_role', message: gmsg },
+          },
+        };
+      }
+
       // Write-tool gating.
       const gate = gatedReject(def.category, def.name);
       if (gate.rejected) {
@@ -240,7 +271,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         };
       }
 
-      const ctx: ToolContext = { correlationId, callerHash, dryRun, acknowledgeWarning: acknowledged };
+      const ctx: ToolContext = { correlationId, callerHash, dryRun, acknowledgeWarning: acknowledged, callerAgent };
 
       logToolStart({
         correlation_id: correlationId,

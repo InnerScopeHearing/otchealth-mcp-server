@@ -23,7 +23,8 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
       inputShape: {
         agent: z
           .string()
-          .describe('The agent lane to publish under (lowercase id, e.g. "cto", "cfo", "commerce", "haulai").'),
+          .optional()
+          .describe('The agent lane to publish under; defaults to your token identity (lowercase id, e.g. "cto", "commerce").'),
         type: z.enum(TYPES).describe('Entry kind: fact, decision, correction, pitfall, or status.'),
         text: z.string().min(1).describe('The fact/decision/correction/pitfall/status text. Keep it atomic and non-sensitive.'),
         tags: z.array(z.string()).optional().describe('Optional tags for recall, e.g. ["ebay","pricing"].'),
@@ -41,7 +42,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
             summary: 'Memory store not configured; nothing written.',
           };
         }
-        const agent = normalizeAgent(input.agent);
+        const agent = normalizeAgent(input.agent || ctx.callerAgent);
         if (ctx.dryRun) {
           const preview: Omit<MemoryEntry, 'id' | 'ts'> = {
             type: input.type,
