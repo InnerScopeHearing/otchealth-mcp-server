@@ -69,6 +69,9 @@ import { registerMemoryRecall } from './memory/recall.js';
 import { registerMemoryTeam } from './memory/team.js';
 import { registerMemoryPack } from './memory/pack.js';
 
+// Agent persona (cross-platform identity bootstrap)
+import { registerAgentPersona } from './agent/persona.js';
+
 // Capability Catalog (self-describing gateway introspection)
 import { registerCatalogListTools } from './catalog/list-tools.js';
 import { registerCatalogServiceCapabilities } from './catalog/service-capabilities.js';
@@ -141,6 +144,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerMemoryTeam(server, callerHash);
   registerMemoryPack(server, callerHash);
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
+
+  // ===== P2: Agent persona (cross-platform identity bootstrap) =====
+  registerAgentPersona(server, callerHash);
 
   // ===== Capability Catalog (self-describing introspection) =====
   registerCatalogListTools(server, callerHash);
