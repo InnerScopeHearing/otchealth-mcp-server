@@ -79,6 +79,11 @@ import { registerCatalogAuditUnused } from './catalog/audit-unused.js';
 import { registerCatalogMaster } from './catalog/master.js';
 import { registerCatalogSkill } from './catalog/skill.js';
 
+// P3 wave 1 connectors (read-only)
+import { registerSentryListProjects } from './sentry/list-projects.js';
+import { registerSentryListIssues } from './sentry/list-issues.js';
+import { registerRevenueCatListProjects } from './revenuecat/list-projects.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -156,4 +161,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerCatalogAuditUnused(server, callerHash);
   registerCatalogMaster(server, callerHash);
   registerCatalogSkill(server, callerHash);
+
+  // ===== P3 wave 1: Sentry + RevenueCat (read-only, ring-safe) =====
+  registerSentryListProjects(server, callerHash);
+  registerSentryListIssues(server, callerHash);
+  registerRevenueCatListProjects(server, callerHash);
 }

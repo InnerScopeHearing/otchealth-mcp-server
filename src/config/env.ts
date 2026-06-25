@@ -107,6 +107,11 @@ const EnvSchema = z.object({
   // company-journal). NEVER wire the cfo/clo/clo-personal/PHI storage accounts here.
   AZURE_COMMONS_STORAGE_ACCOUNT: z.string().optional().default(''),
   AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
+
+  // Connectors wired in P3 wave 1 (read-only)
+  SENTRY_AUTH_TOKEN: z.string().optional().default(''),
+  SENTRY_ORG: z.string().optional().default('otchealth-inc'),
+  REVENUECAT_API_KEY: z.string().optional().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
