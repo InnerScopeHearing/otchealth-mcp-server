@@ -58,78 +58,123 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
   cio: {
     description: 'Customer.io lifecycle CRM: newsletters, segments, customers, events.',
     ring: 'non-phi', auth: 'CIO_SITE_ID / CIO_TRACK_KEY / CIO_APP_API_BEARER', status: 'wired',
-    available: ['campaign trigger + list', 'broadcast send', 'journeys', 'people CSV exports'],
+    available: [],
   },
   cloudflare: {
     description: 'Cloudflare fleet email routing + DNS.',
     ring: 'non-phi', auth: 'CLOUDFLARE_API_TOKEN / CLOUDFLARE_ZONE_ID', status: 'wired',
-    available: ['list zones', 'cache purge', 'page rules', 'multi-zone (current tools are single-zone)'],
+    available: [],
   },
   graph: {
     description: 'Microsoft Graph: COO send-as email + inbox.',
     ring: 'non-phi', auth: 'GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET', status: 'wired',
-    available: ['calendar read/create', 'drafts', 'attachments', 'message move/categorize'],
+    available: [],
   },
   stripe: {
     description: 'Stripe read-only scoreboard (CFO/CRO visibility).',
     ring: 'non-phi', auth: 'STRIPE_SECRET_KEY', status: 'wired',
-    available: ['list subscriptions (api-client.listSubscriptions exists, NO tool yet)', 'invoices', 'payouts', 'refunds (write)'],
+    available: [],
   },
   shopify: {
     description: 'Shopify storefront (otchealthmart.com): products, orders, abandoned checkouts.',
     ring: 'non-phi', auth: 'SHOPIFY_SHOP / SHOPIFY_ACCESS_TOKEN', status: 'wired',
-    available: ['list orders', 'customers', 'inventory levels', 'discounts', 'draft orders'],
+    available: [],
   },
   intercom: {
     description: 'Intercom help-center articles.',
     ring: 'non-phi', auth: 'INTERCOM_ACCESS_TOKEN', status: 'wired',
-    available: ['conversations', 'contacts', 'companies', 'create/update article (write)'],
+    available: [],
   },
   n8n: {
     description: 'n8n self-host meta-tools (workflows, executions).',
     ring: 'non-phi', auth: 'N8N_BASE_URL / N8N_API_KEY / N8N_WEBHOOK_SECRET', status: 'wired',
-    available: ['execute workflow', 'activate/deactivate', 'list credentials (names only)'],
+    available: [],
   },
   netlify: {
     description: 'Netlify deploy visibility (INND site + portfolio).',
     ring: 'non-phi', auth: 'NETLIFY_AUTH_TOKEN', status: 'wired',
-    available: ['trigger deploy (write)', 'env vars', 'site DNS', 'build hooks'],
+    available: [],
   },
   gumroad: {
     description: 'Gumroad digital-products cash scoreboard.',
     ring: 'non-phi', auth: 'GUMROAD_ACCESS_TOKEN', status: 'wired',
-    available: ['subscribers', 'refund (write)', 'per-product sales filters'],
+    available: [],
   },
   catalog: {
     description: 'Capability Catalog: the gateway self-describing its own toolset.',
     ring: 'non-phi', auth: 'none (internal introspection)', status: 'wired',
     available: [],
   },
+  sentry: {
+    description: 'Sentry crash/error monitoring + releases (MedReview PHI projects carved out).',
+    ring: 'phi-carved-out', auth: 'SENTRY_AUTH_TOKEN / SENTRY_ORG', status: 'wired',
+    available: [], rule: 'medreview* projects are PHI — refused on read and write.',
+  },
+  memory: {
+    description: 'Cross-agent shared brain (kb-memory commons): recall, team view, pack, remember.',
+    ring: 'non-phi', auth: 'AZURE_COMMONS_STORAGE_* / AZURE_SEARCH_*', status: 'wired',
+    available: [],
+  },
+  agent: {
+    description: 'Agent persona bootstrap (public dream-team personas for cross-platform identity).',
+    ring: 'non-phi', auth: 'none (public personas only)', status: 'wired',
+    available: [], rule: 'Only PUBLIC personas served; exec personas (cto/cfo) withheld.',
+  },
+  docintel: {
+    description: 'Azure Document Intelligence: invoice (CFO) + contract (CLO) analysis. Non-BAA — never PHI.',
+    ring: 'non-phi', auth: 'DOCINTEL_ENDPOINT / DOCINTEL_KEY', status: 'wired',
+    available: [], rule: 'Never send PHI/MedReview documents through this gateway.',
+  },
+  kb: {
+    description: 'Fleet knowledge RAG over Azure AI Search (commons open; finance/legal ring-gated).',
+    ring: 'non-phi', auth: 'AZURE_SEARCH_*', status: 'wired',
+    available: [], rule: 'Privileged (finance/legal) index access is ring-gated.',
+  },
+  llm: {
+    description: 'Credit-funded Azure OpenAI commodity path (gpt-4.1/5.x) — the cost-protocol escape hatch.',
+    ring: 'non-phi', auth: 'FOUNDRY_OPENAI_ENDPOINT / FOUNDRY_KEY', status: 'wired',
+    available: [],
+  },
+  shield: {
+    description: 'Azure AI Content Safety Prompt Shields (jailbreak / indirect-injection defense).',
+    ring: 'non-phi', auth: 'CONTENT_SAFETY_ENDPOINT / CONTENT_SAFETY_KEY', status: 'wired',
+    available: [],
+  },
+  groundedness: {
+    description: 'Azure AI Content Safety groundedness detection (anti-hallucination check).',
+    ring: 'non-phi', auth: 'CONTENT_SAFETY_ENDPOINT / CONTENT_SAFETY_KEY', status: 'wired',
+    available: [],
+  },
+  elevenlabs: {
+    description: 'ElevenLabs voice (voices list, TTS) via the Twilio voice-fleet lane.',
+    ring: 'non-phi', auth: 'ELEVENLABS_API_KEY', status: 'wired',
+    available: [], rule: 'Outbound voice is TCPA-adjacent; generation only, no autonomous dial-out.',
+  },
   // ---- BACKLOG (planned; no tools wired yet) ----
   depot: {
     description: 'Depot build/CI: builds, cache, grant-burn usage (macOS ~10x cost).',
-    ring: 'non-phi', auth: 'DEPOT_TOKEN / DEPOT_PROJECT_ID', status: 'planned',
-    available: ['list projects', 'list builds', 'get build', 'usage / grant-burn monitor'],
+    ring: 'non-phi', auth: 'DEPOT_TOKEN / DEPOT_PROJECT_ID', status: 'wired',
+    available: [],
   },
   posthog: {
     description: 'PostHog management (flags, insights, projects). MedReview PHI project 468398 carved OUT.',
-    ring: 'phi-carved-out', auth: 'POSTHOG_PERSONAL_API_KEY / POSTHOG_HOST', status: 'planned',
-    available: ['list/get insights', 'feature flags', 'annotations', 'NEVER expose PHI-project data (build-failing test)'],
+    ring: 'phi-carved-out', auth: 'POSTHOG_PERSONAL_API_KEY / POSTHOG_HOST', status: 'wired',
+    available: [],
   },
   revenuecat: {
     description: 'RevenueCat subscriber + entitlement reads (v2).',
-    ring: 'non-phi', auth: 'REVENUECAT_V2_API_KEY', status: 'planned',
-    available: ['get subscriber', 'list entitlements', 'list products/offerings'],
+    ring: 'non-phi', auth: 'REVENUECAT_V2_API_KEY', status: 'wired',
+    available: [],
   },
   twilio: {
     description: 'Twilio + ElevenLabs voice fleet (Helen/Sarah/Roger/Fin).',
-    ring: 'non-phi', auth: 'TWILIO_* / ELEVENLABS_API_KEY', status: 'planned',
-    available: ['list calls/messages', 'send SMS (TCPA-gated, write)', 'list ElevenLabs voices'],
+    ring: 'non-phi', auth: 'TWILIO_* / ELEVENLABS_API_KEY', status: 'wired',
+    available: [],
   },
   github: {
     description: 'GitHub passthrough (the gateway "everything via one connector" story).',
-    ring: 'non-phi', auth: 'GITHUB_TOKEN', status: 'planned',
-    available: ['list PRs', 'get file', 'list workflow runs (read passthrough)'],
+    ring: 'non-phi', auth: 'GITHUB_TOKEN', status: 'wired',
+    available: [],
   },
 };
 
@@ -197,12 +242,12 @@ export function auditUnused() {
 // ---- EXTRA fleet connectors (known to the fleet; surfaced in the master catalog) ----
 // Merged with SERVICE_CATALOG by catalog_master. "planned" = not yet wired as gateway tools.
 export const EXTRA_SERVICES: Record<string, ServiceInfo> = {
-  depot: { description: 'Depot build/CI (iOS macOS + Linux) and grant-burn.', ring: 'non-phi', auth: 'DEPOT_TOKEN', status: 'wired', available: ['list projects/builds', 'trigger build', 'usage'], rule: 'CTO-ONLY to kick off a build/upload (all agents may SEE/read build status).' },
-  posthog: { description: 'PostHog product analytics + flags (MedReview PHI project carved OUT).', ring: 'phi-carved-out', auth: 'POSTHOG_PERSONAL_API_KEY', status: 'wired', available: ['insights', 'feature flags', 'error tracking'], rule: 'Never expose the MedReview PHI project (468398).' },
-  revenuecat: { description: 'RevenueCat subscriptions/entitlements (read).', ring: 'non-phi', auth: 'REVENUECAT_V2_API_KEY', status: 'wired', available: ['subscriber', 'entitlements', 'offerings'] },
-  twilio: { description: 'Twilio SMS/voice + ElevenLabs voice.', ring: 'non-phi', auth: 'TWILIO SID+token / ELEVENLABS xi-api-key', status: 'wired', available: ['send SMS', 'calls', 'TTS'], rule: 'Outbound SMS/calls are TCPA-gated (CCO approval) - never autonomous.' },
-  sentry: { description: 'Sentry crash/error monitoring (read).', ring: 'non-phi', auth: 'SENTRY_AUTH_TOKEN', status: 'wired', available: ['issues', 'release health'], rule: 'MedReview (medreview-*) projects are PHI - excluded.' },
-  github: { description: 'GitHub repos/PRs/Actions.', ring: 'non-phi', auth: 'github-app token', status: 'wired', available: ['repo read', 'PRs', 'Actions'], rule: 'iOS build/release dispatch is CTO-only.' },
+  depot: { description: 'Depot build/CI (iOS macOS + Linux) and grant-burn.', ring: 'non-phi', auth: 'DEPOT_TOKEN', status: 'wired', available: [], rule: 'CTO-ONLY to kick off a build/upload (all agents may SEE/read build status).' },
+  posthog: { description: 'PostHog product analytics + flags (MedReview PHI project carved OUT).', ring: 'phi-carved-out', auth: 'POSTHOG_PERSONAL_API_KEY', status: 'wired', available: [], rule: 'Never expose the MedReview PHI project (468398).' },
+  revenuecat: { description: 'RevenueCat subscriptions/entitlements (read).', ring: 'non-phi', auth: 'REVENUECAT_V2_API_KEY', status: 'wired', available: [] },
+  twilio: { description: 'Twilio SMS/voice + ElevenLabs voice.', ring: 'non-phi', auth: 'TWILIO SID+token / ELEVENLABS xi-api-key', status: 'wired', available: [], rule: 'Outbound SMS/calls are TCPA-gated (CCO approval) - never autonomous.' },
+  sentry: { description: 'Sentry crash/error monitoring (read).', ring: 'non-phi', auth: 'SENTRY_AUTH_TOKEN', status: 'wired', available: [], rule: 'MedReview (medreview-*) projects are PHI - excluded.' },
+  github: { description: 'GitHub repos/PRs/Actions.', ring: 'non-phi', auth: 'github-app token', status: 'wired', available: [], rule: 'iOS build/release dispatch is CTO-only.' },
   mercury: { description: 'Mercury banking (read).', ring: 'non-phi', auth: 'mercury token', status: 'planned', available: ['balances', 'transactions'], rule: 'Finance data - CFO lane; not for external clients.' },
   quickbooks: { description: 'QuickBooks / Xero accounting (read).', ring: 'non-phi', auth: 'OAuth refresh tokens', status: 'planned', available: ['P&L', 'balance sheet'], rule: 'Finance data - CFO lane; not for external clients.' },
   plaid: { description: 'Plaid bank aggregation (read).', ring: 'non-phi', auth: 'plaid tokens', status: 'planned', available: ['accounts', 'transactions'], rule: 'Finance data - CFO lane; not for external clients.' },
