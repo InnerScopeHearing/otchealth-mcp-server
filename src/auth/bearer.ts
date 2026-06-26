@@ -41,12 +41,23 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
     );
     return null;
   }
-  // Accept EITHER a real issued OAuth 2.1 access token (HS256 JWT) OR the static connector token
-  // (back-compat for CLI/curl during the cutover). The static token is rotate-before-launch.
+  // Accept: (1) a real issued OAuth 2.1 access token (HS256 JWT); (2) the static connector token
+  // (back-compat, identity=OAUTH_DEFAULT_AGENT); (3) the long-lived low-priv COPILOT_AGENT_TOKEN
+  // (identity='copilot-agent') for the GitHub Copilot coding agents' MCP header. All rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
-  const ok = issued || safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN);
-  if (!ok) return null;
-  const caller_agent = issued ? (issuedAgent(token) || '') : (env.OAUTH_DEFAULT_AGENT || '');
+  let staticAgent: string | null = null;
+  if (!issued) {
+    if (safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) {
+      staticAgent = env.OAUTH_DEFAULT_AGENT || '';
+    } else if (env.COPILOT_AGENT_TOKEN && env.COPILOT_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_AGENT_TOKEN)) {
+      // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
+      // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
+      staticAgent = 'copilot-agent';
+    } else {
+      return null;
+    }
+  }
+  const caller_agent = issued ? (issuedAgent(token) || '') : (staticAgent || '');
   return { caller_hash: hashToken(token), raw_token: token, caller_agent };
 }
 

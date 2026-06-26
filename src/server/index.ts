@@ -3,10 +3,10 @@ import Fastify from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { registerHealth } from './health.js';
-import { registerVersion } from './version.js';
 import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
 import { registerOAuthRoutes } from './oauth.js';
+import { registerWebhookRoutes } from './webhooks.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -21,6 +21,18 @@ async function main(): Promise<void> {
   // Parse URL-encoded bodies (needed for OAuth token endpoint)
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
     done(null, body);
+  });
+
+  // Parse JSON but ALSO retain the raw string on request.rawBody — needed to verify GitHub
+  // webhook HMAC signatures. MCP/other routes keep using the parsed request.body unchanged.
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    (req as typeof req & { rawBody?: string }).rawBody = body as string;
+    if (!body) return done(null, undefined);
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (e) {
+      done(e as Error, undefined);
+    }
   });
 
   app.addHook('onRequest', async (request, reply) => {
@@ -56,16 +68,16 @@ async function main(): Promise<void> {
   });
 
   registerHealth(app);
-  registerVersion(app);
   registerAdmin(app);
   registerOAuthRoutes(app);
   registerMcpRoutes(app);
+  registerWebhookRoutes(app);
 
   app.setNotFoundHandler(async (_req, reply) => {
     return reply.code(404).send({
       error: 'not_found',
       message:
-        'Route not found. Known routes: GET /health, GET /healthz, GET /version, POST /mcp, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
+        'Route not found. Known routes: GET /health, POST /mcp, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
     });
   });
 

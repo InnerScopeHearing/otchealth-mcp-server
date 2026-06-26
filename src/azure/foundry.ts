@@ -87,15 +87,31 @@ export interface ChatMessage {
   content: string;
 }
 
-/** Chat completion on a credit-funded Foundry deployment (default gpt-4.1). Throws when unconfigured. */
+/** Is the Azure Model Router configured? */
+export function routerConfigured(): boolean {
+  const e = loadEnv();
+  return Boolean(e.FOUNDRY_ROUTER_ENDPOINT && e.FOUNDRY_ROUTER_KEY);
+}
+
+/** Chat completion on a credit-funded Foundry deployment (default gpt-5.1), or the Model Router. */
 export async function chat(
   messages: ChatMessage[],
-  opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean; deployment?: string },
+  opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean; deployment?: string; tier?: 'standard' | 'high' | 'router' },
 ): Promise<{ text: string; usage?: unknown; model: string }> {
   const c = cfg();
   if (!c) throw new FoundryError(0, 'Foundry not configured (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY unset)');
-  const deployment = opts?.deployment || c.chat;
-  const url = `${c.ep}/openai/deployments/${deployment}/chat/completions?api-version=${API_VERSION}`;
+  // Resolve endpoint/key/deployment by tier. 'router' uses the Azure Model Router (auto-picks the
+  // cheapest-sufficient model); falls back to Foundry standard if the router isn't configured.
+  let ep = c.ep, key = c.key, deployment = opts?.deployment || (opts?.tier === 'high' ? c.high : c.chat);
+  if (opts?.tier === 'router') {
+    const e = loadEnv();
+    if (e.FOUNDRY_ROUTER_ENDPOINT && e.FOUNDRY_ROUTER_KEY) {
+      ep = e.FOUNDRY_ROUTER_ENDPOINT.replace(/\/+$/, '');
+      key = e.FOUNDRY_ROUTER_KEY;
+      deployment = e.FOUNDRY_ROUTER_DEPLOYMENT || 'model-router';
+    }
+  }
+  const url = `${ep}/openai/deployments/${deployment}/chat/completions?api-version=${API_VERSION}`;
   // gpt-5 / o-series reasoning models require max_completion_tokens (not max_tokens) and reject a
   // custom temperature (only the default is allowed). Use the new param and only pass temperature
   // when a caller explicitly sets it (kept for older gpt-4.x deployments).
@@ -105,6 +121,7 @@ export async function chat(
   };
   if (typeof opts?.temperature === 'number') body.temperature = opts.temperature;
   if (opts?.jsonMode) body.response_format = { type: 'json_object' };
-  const j = await post<{ choices?: Array<{ message?: { content?: string } }>; usage?: unknown }>(url, c.key, body);
-  return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: deployment };
+  const j = await post<{ choices?: Array<{ message?: { content?: string } }>; usage?: unknown; model?: string }>(url, key, body);
+  // The router echoes which underlying model it picked in `model`; surface that.
+  return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: j.model || deployment };
 }

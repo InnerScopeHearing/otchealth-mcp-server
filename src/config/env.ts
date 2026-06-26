@@ -14,6 +14,11 @@ const EnvSchema = z.object({
     .string()
     .min(32, 'ADMIN_REVOKE_TOKEN must be at least 32 chars'),
 
+  // Long-lived low-privilege token for the GitHub Copilot coding agents' MCP header.
+  // Maps to caller_agent='copilot-agent' (reads/commons/llm_azure/guardrails only; NO privileged RAG,
+  // NO GitHub writes, NO builds). Inert when unset. Rotate-before-launch.
+  COPILOT_AGENT_TOKEN: z.string().optional().default(''),
+
   // n8n
   N8N_BASE_URL: z
     .string()
@@ -23,6 +28,17 @@ const EnvSchema = z.object({
   N8N_WEBHOOK_SECRET: z
     .string()
     .min(32, 'N8N_WEBHOOK_SECRET must be at least 32 chars'),
+
+  // GitHub webhook ingestion (fleet-medic). Inert when unset; HMAC-SHA256 verified.
+  GITHUB_WEBHOOK_SECRET: z.string().optional().default(''),
+  // Fleet-medic v2: auto-merge AGENT-authored PRs when their checks go green (branch protection gates).
+  FLEET_MEDIC_AUTOMERGE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  // Where the webhook routes human+agent-visible fleet-medic alerts (issue comments).
+  FLEET_MEDIC_LOG_REPO: z.string().optional().default('InnerScopeHearing/otchealth-mcp-server'),
+  FLEET_MEDIC_LOG_ISSUE: z.string().optional().default('21'),
 
   // Cloudflare
   CLOUDFLARE_API_TOKEN: z.string().optional().default(''),
@@ -128,6 +144,10 @@ const EnvSchema = z.object({
   FOUNDRY_CHAT_DEPLOYMENT: z.string().optional().default('gpt-5.1'),
   FOUNDRY_HIGH_DEPLOYMENT: z.string().optional().default('gpt-5.4'),
   FOUNDRY_EMBED_DEPLOYMENT: z.string().optional().default('text-embedding-3-large'),
+  // Azure AI Model Router (otchealth-router, eastus2) — auto-routes to the cheapest-sufficient model.
+  FOUNDRY_ROUTER_ENDPOINT: z.string().optional().default(''),
+  FOUNDRY_ROUTER_KEY: z.string().optional().default(''),
+  FOUNDRY_ROUTER_DEPLOYMENT: z.string().optional().default('model-router'),
 
   // Connectors wired in P3 wave 1 (read-only)
   SENTRY_AUTH_TOKEN: z.string().optional().default(''),

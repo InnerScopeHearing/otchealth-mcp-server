@@ -145,6 +145,14 @@ export async function pushFiles(
   return { commit: commit.sha, branch, files: files.length };
 }
 
+export async function getPullRequest(owner: string, repo: string, number: number): Promise<any> {
+  return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${number}`);
+}
+
+export async function createIssueComment(owner: string, repo: string, number: number, body: string): Promise<void> {
+  await githubSend('POST', `/repos/${O(owner)}/${O(repo)}/issues/${number}/comments`, { body });
+}
+
 export async function createPullRequest(
   owner: string, repo: string, title: string, head: string, base: string, body?: string, draft?: boolean,
 ): Promise<{ number: number; url: string; state: string }> {
