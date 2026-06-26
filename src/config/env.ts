@@ -109,6 +109,10 @@ const EnvSchema = z.object({
   SHOPIFY_API_VERSION: z.string().optional().default('2024-10'),
   SHOPIFY_ACCESS_TOKEN: z.string().optional().default(''),
 
+  // Miro (visual collaboration / board generation). REST v2 with a personal/OAuth token.
+  // Inert when unset. Token in GCP Secret Manager (miro-token) + Notion vault.
+  MIRO_TOKEN: z.string().optional().default(''),
+
   // Phase 2: Intercom
   INTERCOM_ACCESS_TOKEN: z.string().optional().default(''),
 
