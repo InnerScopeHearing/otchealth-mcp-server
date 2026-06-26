@@ -97,6 +97,49 @@ export async function shopifyRestGet<T = unknown>(path: string, opts: ShopifyRes
   }
 }
 
+export async function shopifyRestWrite<T = unknown>(
+  method: 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+  opts: ShopifyRestOptions = {},
+): Promise<T> {
+  const { shop, version, token } = requireConfigured();
+  const url = `https://${shop}/admin/api/${version}${path}${buildQuery(opts.query)}`;
+  const started = Date.now();
+  try {
+    const res = await request(url, {
+      method,
+      headers: {
+        'x-shopify-access-token': token,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      bodyTimeout: opts.timeoutMs ?? 30_000,
+      headersTimeout: opts.timeoutMs ?? 30_000,
+    });
+    const text = await res.body.text();
+    const latency = Date.now() - started;
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      logger.info(
+        { type: 'shopify_rest_write_ok', method, path, status: res.statusCode, latency_ms: latency, correlation_id: opts.correlationId },
+        'shopify rest write ok',
+      );
+      return text ? (JSON.parse(text) as T) : ({} as T);
+    }
+    throw mapError(res.statusCode, path, text);
+  } catch (err) {
+    if (err instanceof ShopifyApiError) throw err;
+    throw new ShopifyApiError({
+      code: 'shopify_network_error',
+      status: 0,
+      message: `Network error calling Shopify Admin API (${method} ${path}): ${(err as Error).message}`,
+      nextStep: 'Check gateway logs and https://www.shopifystatus.com/. Retry if transient.',
+      upstream: err,
+    });
+  }
+}
+
 function mapError(status: number, path: string, body: string): ShopifyApiError {
   let upstream: unknown = body;
   try { upstream = JSON.parse(body); } catch { /* keep string */ }
