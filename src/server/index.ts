@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { registerHealth } from './health.js';
+import { registerVersion } from './version.js';
 import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
 import { registerOAuthRoutes } from './oauth.js';
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
   });
 
   registerHealth(app);
+  registerVersion(app);
   registerAdmin(app);
   registerOAuthRoutes(app);
   registerMcpRoutes(app);
@@ -63,7 +65,7 @@ async function main(): Promise<void> {
     return reply.code(404).send({
       error: 'not_found',
       message:
-        'Route not found. Known routes: GET /health, POST /mcp, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
+        'Route not found. Known routes: GET /health, GET /version, POST /mcp, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
     });
   });
 

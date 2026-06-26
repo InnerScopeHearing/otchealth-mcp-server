@@ -19,6 +19,7 @@ npm start                  # listens on $PORT (default 8080)
 
 Endpoints:
 - `GET /health` — public, returns operational flags
+- `GET /version` — public, returns service version/build metadata
 - `POST /mcp` — Streamable HTTP, JSON-RPC 2.0, bearer-auth required
 - `POST /admin/revoke` — kill-switch (separate admin token)
 - `GET /admin/revoke`, `POST /admin/clear-revoke` — inspect / clear revocation
@@ -336,6 +337,7 @@ Implementation pattern: add `src/tools/<provider>/<action>.ts` files, register i
         ├── mcp.ts                   # POST /mcp (Streamable HTTP, stateless)
         ├── admin.ts                 # POST /admin/revoke
         ├── health.ts                # GET /health
+        ├── version.ts               # GET /version
         └── request-context.ts       # AsyncLocalStorage for caller_hash
 ```
 
