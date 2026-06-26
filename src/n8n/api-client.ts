@@ -92,6 +92,30 @@ export async function n8nGet<T = unknown>(path: string, opts: N8nGetOptions = {}
   }
 }
 
+export async function n8nWrite<T = unknown>(method: 'POST' | 'PATCH' | 'PUT' | 'DELETE', path: string, body?: unknown, opts: N8nGetOptions = {}): Promise<T> {
+  const key = requireKey();
+  const base = env.N8N_BASE_URL.replace(/\/$/, '');
+  const url = `${base}/api/v1${path}${buildQuery(opts.query)}`;
+  try {
+    const res = await request(url, {
+      method,
+      headers: { 'x-n8n-api-key': key, accept: 'application/json', ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      bodyTimeout: opts.timeoutMs ?? 30_000,
+      headersTimeout: opts.timeoutMs ?? 30_000,
+    });
+    const text = await res.body.text();
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      logger.info({ type: 'n8n_api_write_ok', method, path, status: res.statusCode, correlation_id: opts.correlationId }, 'n8n write ok');
+      return text ? (JSON.parse(text) as T) : ({} as T);
+    }
+    throw mapError(res.statusCode, path, text);
+  } catch (err) {
+    if (err instanceof N8nApiError) throw err;
+    throw new N8nApiError({ code: 'n8n_network_error', status: 0, message: `Network error calling n8n API (${method} ${path}): ${(err as Error).message}`, nextStep: `Verify ${env.N8N_BASE_URL} is reachable.`, upstream: err });
+  }
+}
+
 function mapError(status: number, path: string, body: string): N8nApiError {
   let upstream: unknown = body;
   try { upstream = JSON.parse(body); } catch { /* keep */ }
