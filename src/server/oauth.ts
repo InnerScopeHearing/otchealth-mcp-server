@@ -79,7 +79,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       authorization_endpoint: `${baseUrl}/oauth/authorize`,
       token_endpoint: `${baseUrl}/oauth/token`,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
+      grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['client_secret_post', 'none'],
       scopes_supported: ['mcp'],
@@ -150,6 +150,24 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
 
     const { grant_type, code, redirect_uri, client_id, client_secret, code_verifier, refresh_token } = body;
     const baseUrl = baseUrlOf(req);
+
+    // ----- client_credentials grant (machine-to-machine; per-agent trusted lanes) -----
+    // Lets a trusted engine (e.g. the CFO/CLO agent on Claude Code) obtain a short-lived access
+    // token carrying its agent identity, with NO browser flow. Confidential: client_id+client_secret
+    // must match an OAUTH_CLIENTS entry. The issued token's agent lane drives governance + ring gates.
+    if (grant_type === 'client_credentials') {
+      if (!oauthConfigured()) return reply.status(400).send({ error: 'unsupported_grant_type' });
+      const rc = client_id ? resolveClient(client_id) : null;
+      if (!rc || client_secret !== rc.secret) return reply.status(401).send({ error: 'invalid_client' });
+      reply.header('Cache-Control', 'no-store');
+      logger.info({ type: 'oauth_client_credentials', agent: rc.agent }, 'issued client_credentials access token');
+      return reply.send({
+        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: 'mcp',
+      });
+    }
 
     // ----- refresh_token grant -----
     if (grant_type === 'refresh_token') {
