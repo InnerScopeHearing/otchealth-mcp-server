@@ -165,6 +165,8 @@ const EnvSchema = z.object({
   GITHUB_APP_PRIVATE_KEY: z.string().optional().default(''),
   TWILIO_ACCOUNT_SID: z.string().optional().default(''),
   TWILIO_AUTH_TOKEN: z.string().optional().default(''),
+  // Twilio default sender (E.164) for outbound SMS/MMS/voice write tools. Callers may override per-call.
+  TWILIO_FROM_NUMBER: z.string().optional().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

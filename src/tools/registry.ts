@@ -220,7 +220,12 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 
       // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
       const callerAgent = currentCallerAgent();
-      const gov = requiredRoleFor(def.name);
+      let gov = requiredRoleFor(def.name);
+      // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
+      // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
+      if (!gov && def.category === 'write_orchestrated') {
+        gov = { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
+      }
       if (gov && callerAgent !== gov.role) {
         const gmsg = `Tool "${def.name}" is restricted to the ${gov.role} agent. ${gov.reason}` +
           (callerAgent ? ` Your identity: ${callerAgent}.` : ' No agent identity on your token.');
