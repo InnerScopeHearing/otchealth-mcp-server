@@ -27,6 +27,12 @@ import { registerShopifyListProducts } from './shopify/list-products.js';
 import { registerShopifyGetProduct } from './shopify/get-product.js';
 import { registerShopifyGetOrder } from './shopify/get-order.js';
 import { registerShopifyListAbandonedCheckouts } from './shopify/list-abandoned-checkouts.js';
+import { registerShopifyUpdateProduct } from './shopify/update-product.js';
+import { registerShopifyCreateProduct } from './shopify/create-product.js';
+import { registerShopifyCreateDraftOrder } from './shopify/create-draft-order.js';
+import { registerMiroListBoards } from './miro/list-boards.js';
+import { registerMiroCreateBoard } from './miro/create-board.js';
+import { registerMiroCreateStickyNote } from './miro/create-sticky-note.js';
 
 // Phase 2 — Intercom
 import { registerIntercomListArticles } from './intercom/list-articles.js';
@@ -98,6 +104,7 @@ import { registerTwilioListMessages } from './twilio/list-messages.js';
 // Wave A — Azure AI Content Safety (Prompt Shields + groundedness): gateway-level guardrails
 import { registerShieldCheck } from './safety/shield-check.js';
 import { registerGroundednessCheck } from './safety/groundedness-check.js';
+import { registerClaimsCheck } from './safety/claims-check.js';
 
 // Wave A — Azure Document Intelligence (CFO invoices + CLO contracts, read/analyze only)
 import { registerDocintelAnalyzeInvoice } from './docintel/analyze-invoice.js';
@@ -136,6 +143,12 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerShopifyGetProduct(server, callerHash);
   registerShopifyGetOrder(server, callerHash);
   registerShopifyListAbandonedCheckouts(server, callerHash);
+  registerShopifyUpdateProduct(server, callerHash);
+  registerShopifyCreateProduct(server, callerHash);
+  registerShopifyCreateDraftOrder(server, callerHash);
+  registerMiroListBoards(server, callerHash);
+  registerMiroCreateBoard(server, callerHash);
+  registerMiroCreateStickyNote(server, callerHash);
 
   // ===== Phase 2: Intercom =====
   registerIntercomListArticles(server, callerHash);
@@ -206,6 +219,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Wave A: Azure AI Content Safety (prompt-injection defense + groundedness) =====
   registerShieldCheck(server, callerHash);
   registerGroundednessCheck(server, callerHash);
+  registerClaimsCheck(server, callerHash);
 
   // ===== Wave A: Azure Document Intelligence (CFO + CLO, read/analyze only, non-BAA) =====
   registerDocintelAnalyzeInvoice(server, callerHash);
