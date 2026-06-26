@@ -14,7 +14,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { chat, foundryConfigured, deploymentForTier, type ChatMessage } from '../../azure/foundry.js';
+import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
 
 const TASK_PROMPTS: Record<string, string> = {
   summarize: 'You are a precise summarizer. Produce a faithful, well-structured summary of the user content. Preserve key facts, numbers, names, and decisions. No preamble.',
@@ -42,7 +42,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
       inputShape: {
         task: z.enum(['summarize', 'classify', 'extract', 'synthesize', 'complete']).describe('The task type.'),
         input: z.string().min(1).describe('The content to operate on.'),
-        tier: z.enum(['standard', 'high']).optional().describe('standard=gpt-4.1 (default), high=strongest deployed model for quality-critical work.'),
+        tier: z.enum(['standard', 'high', 'router']).optional().describe('standard=gpt-5.1 (default), high=gpt-5.4 (quality-critical), router=Azure Model Router auto-picks the cheapest-sufficient model.'),
         instructions: z.string().optional().describe('Optional extra guidance (fields to extract, summary length, focus).'),
         labels: z.array(z.string()).optional().describe('For task=classify: the candidate labels.'),
         jsonMode: z.boolean().optional().describe('Force strict JSON output (recommended for extract/classify pipelines).'),
@@ -64,7 +64,6 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             summary: 'llm_azure unavailable: Foundry endpoint/key not configured on the gateway.',
           };
         }
-        const deployment = deploymentForTier(tier) ?? undefined;
         const sys = TASK_PROMPTS[input.task] ?? TASK_PROMPTS.complete;
         const parts: string[] = [];
         if (input.instructions) parts.push(`Instructions: ${input.instructions}`);
@@ -78,7 +77,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
           const res = await chat(messages, {
             maxTokens: input.maxTokens ?? 1500,
             jsonMode: input.jsonMode ?? input.task === 'extract',
-            deployment,
+            tier,
           });
           return {
             data: { task: input.task, tier, output: res.text, model: res.model, usage: res.usage },

@@ -54,7 +54,7 @@ async function curlJson(url, opts = {}) {
     '--write-out', '\n__HTTP_STATUS__%{http_code}',
     '-X', method,
     '-H', 'Content-Type: application/json',
-    '-H', 'Accept: application/json',
+    '-H', 'Accept: application/json, text/event-stream',
   ];
 
   for (const [k, v] of Object.entries(headers)) {
