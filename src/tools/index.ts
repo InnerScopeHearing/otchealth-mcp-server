@@ -100,6 +100,7 @@ import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js'
 
 // Wave A+ — fleet knowledge RAG (hybrid AI Search; commons open, finance/legal ring-gated)
 import { registerKbSearch } from './kb/search.js';
+import { registerKbSearchPrivileged } from './kb/search-privileged.js';
 
 // Wave A+ — llm_azure commodity path (credit-funded gpt-4.1, tiered): the cost-protocol escape hatch
 import { registerLlmAzure } from './llm/azure.js';
@@ -203,5 +204,6 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // ===== Wave A+: fleet knowledge RAG + commodity LLM (credit-funded) =====
   registerKbSearch(server, callerHash);
+  registerKbSearchPrivileged(server, callerHash);
   registerLlmAzure(server, callerHash);
 }

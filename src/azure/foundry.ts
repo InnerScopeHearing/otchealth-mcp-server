@@ -96,11 +96,14 @@ export async function chat(
   if (!c) throw new FoundryError(0, 'Foundry not configured (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY unset)');
   const deployment = opts?.deployment || c.chat;
   const url = `${c.ep}/openai/deployments/${deployment}/chat/completions?api-version=${API_VERSION}`;
+  // gpt-5 / o-series reasoning models require max_completion_tokens (not max_tokens) and reject a
+  // custom temperature (only the default is allowed). Use the new param and only pass temperature
+  // when a caller explicitly sets it (kept for older gpt-4.x deployments).
   const body: Record<string, unknown> = {
     messages,
-    temperature: opts?.temperature ?? 0.2,
-    max_tokens: opts?.maxTokens ?? 1024,
+    max_completion_tokens: opts?.maxTokens ?? 1024,
   };
+  if (typeof opts?.temperature === 'number') body.temperature = opts.temperature;
   if (opts?.jsonMode) body.response_format = { type: 'json_object' };
   const j = await post<{ choices?: Array<{ message?: { content?: string } }>; usage?: unknown }>(url, c.key, body);
   return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: deployment };
