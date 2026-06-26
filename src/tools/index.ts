@@ -87,6 +87,11 @@ import { registerPostHogListProjects } from './posthog/list-projects.js';
 import { registerDepotListProjects } from './depot/list-projects.js';
 import { registerGitHubListPullRequests } from './github/list-pull-requests.js';
 import { registerGitHubListWorkflowRuns } from './github/list-workflow-runs.js';
+// GitHub writes (CTO-gated) + file read — custom-gateway, governed, custom-first code ops
+import { registerGitHubPushFiles } from './github/push-files.js';
+import { registerGitHubCreatePullRequest } from './github/create-pull-request.js';
+import { registerGitHubMergePullRequest } from './github/merge-pull-request.js';
+import { registerGitHubGetFileContents } from './github/get-file-contents.js';
 import { registerTwilioGetBalance } from './twilio/get-balance.js';
 import { registerTwilioListMessages } from './twilio/list-messages.js';
 
@@ -191,6 +196,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerDepotListProjects(server, callerHash);
   registerGitHubListPullRequests(server, callerHash);
   registerGitHubListWorkflowRuns(server, callerHash);
+  registerGitHubGetFileContents(server, callerHash);
+  registerGitHubPushFiles(server, callerHash);
+  registerGitHubCreatePullRequest(server, callerHash);
+  registerGitHubMergePullRequest(server, callerHash);
   registerTwilioGetBalance(server, callerHash);
   registerTwilioListMessages(server, callerHash);
 

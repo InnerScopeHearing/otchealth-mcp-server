@@ -21,6 +21,11 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'release_*', requiredRole: 'cto', reason: 'Release cutovers are CTO-only.' },
   // DNS / infra writes are CTO-only (charter: DNS + infra changes are CTO-owned).
   { pattern: 'cloudflare_create_dns_record', requiredRole: 'cto', reason: 'DNS changes are CTO-owned infrastructure.' },
+  // GitHub writes are CTO-only (code pushes / PRs / merges are a single-initiator CTO action,
+  // mirroring the build/release rule). All agents may read GitHub (github_list_*, get_file_contents).
+  { pattern: 'github_push_files', requiredRole: 'cto', reason: 'Code pushes are CTO-only (single initiator).' },
+  { pattern: 'github_create_pull_request', requiredRole: 'cto', reason: 'Opening PRs is CTO-only.' },
+  { pattern: 'github_merge_pull_request', requiredRole: 'cto', reason: 'Merging PRs is CTO-only.' },
 ];
 
 /** Return the required role for a tool name, or null if unrestricted. */
