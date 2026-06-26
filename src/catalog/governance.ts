@@ -26,6 +26,27 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'github_push_files', requiredRole: 'cto', reason: 'Code pushes are CTO-only (single initiator).' },
   { pattern: 'github_create_pull_request', requiredRole: 'cto', reason: 'Opening PRs is CTO-only.' },
   { pattern: 'github_merge_pull_request', requiredRole: 'cto', reason: 'Merging PRs is CTO-only.' },
+  // ===== FULL READ+WRITE WAVE: write-tool role gates (CTO = the operator connector identity) =====
+  // GitHub writes (single-initiator, mirrors existing push/PR/merge rules).
+  { pattern: 'github_create_branch', requiredRole: 'cto', reason: 'Branch creation is CTO-only (single initiator).' },
+  { pattern: 'github_create_or_update_file', requiredRole: 'cto', reason: 'Direct file commits are CTO-only.' },
+  { pattern: 'github_create_issue', requiredRole: 'cto', reason: 'Gateway issue creation is CTO-only.' },
+  { pattern: 'github_comment_on_issue', requiredRole: 'cto', reason: 'Gateway issue/PR comments are CTO-only.' },
+  { pattern: 'github_add_labels', requiredRole: 'cto', reason: 'Label writes are CTO-only.' },
+  { pattern: 'github_create_release', requiredRole: 'cto', reason: 'Releases are CTO-only (single initiator).' },
+  { pattern: 'github_dispatch_workflow', requiredRole: 'cto', reason: 'Workflow dispatch triggers builds/deploys; CTO-only.' },
+  // Netlify deploy + env + hooks are CTO-owned infra.
+  { pattern: 'netlify_trigger_deploy', requiredRole: 'cto', reason: 'Production deploys are CTO-only.' },
+  { pattern: 'netlify_set_env_var', requiredRole: 'cto', reason: 'Env-var changes affect all deploys; CTO-only.' },
+  { pattern: 'netlify_create_deploy_hook', requiredRole: 'cto', reason: 'Deploy hooks grant unauthenticated build triggers; CTO-only.' },
+  // Cloudflare DNS update/delete match the existing create-dns CTO rule (DNS = infra).
+  { pattern: 'cloudflare_update_dns_record', requiredRole: 'cto', reason: 'DNS changes are CTO-owned infrastructure.' },
+  { pattern: 'cloudflare_delete_dns_record', requiredRole: 'cto', reason: 'DNS deletions are CTO-owned infrastructure; irreversible.' },
+  // Stripe irreversible money movement / charge instruments are CTO-gated (promote to cfo lane when provisioned).
+  { pattern: 'stripe_create_refund', requiredRole: 'cto', reason: 'Refunds are irreversible money movement.' },
+  { pattern: 'stripe_cancel_subscription', requiredRole: 'cto', reason: 'Cancelling a subscription terminates recurring revenue.' },
+  { pattern: 'stripe_create_payment_link', requiredRole: 'cto', reason: 'Payment links are public charge instruments.' },
+  { pattern: 'stripe_create_invoice', requiredRole: 'cto', reason: 'Invoices with auto_advance can trigger collection.' },
 ];
 
 /** Return the required role for a tool name, or null if unrestricted. */
