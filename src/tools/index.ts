@@ -90,6 +90,14 @@ import { registerGitHubListWorkflowRuns } from './github/list-workflow-runs.js';
 import { registerTwilioGetBalance } from './twilio/get-balance.js';
 import { registerTwilioListMessages } from './twilio/list-messages.js';
 
+// Wave A — Azure AI Content Safety (Prompt Shields + groundedness): gateway-level guardrails
+import { registerShieldCheck } from './safety/shield-check.js';
+import { registerGroundednessCheck } from './safety/groundedness-check.js';
+
+// Wave A — Azure Document Intelligence (CFO invoices + CLO contracts, read/analyze only)
+import { registerDocintelAnalyzeInvoice } from './docintel/analyze-invoice.js';
+import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -178,4 +186,12 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubListWorkflowRuns(server, callerHash);
   registerTwilioGetBalance(server, callerHash);
   registerTwilioListMessages(server, callerHash);
+
+  // ===== Wave A: Azure AI Content Safety (prompt-injection defense + groundedness) =====
+  registerShieldCheck(server, callerHash);
+  registerGroundednessCheck(server, callerHash);
+
+  // ===== Wave A: Azure Document Intelligence (CFO + CLO, read/analyze only, non-BAA) =====
+  registerDocintelAnalyzeInvoice(server, callerHash);
+  registerDocintelAnalyzeContract(server, callerHash);
 }

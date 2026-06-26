@@ -108,6 +108,16 @@ const EnvSchema = z.object({
   AZURE_COMMONS_STORAGE_ACCOUNT: z.string().optional().default(''),
   AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
 
+  // Wave A: Azure AI Content Safety (Prompt Shields + groundedness) — gateway-level guardrails.
+  // Inert when unset (tools return a flagged "skipped" result rather than throwing).
+  CONTENT_SAFETY_ENDPOINT: z.string().optional().default(''),
+  CONTENT_SAFETY_KEY: z.string().optional().default(''),
+
+  // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
+  // NEVER send PHI/MedReview documents through this gateway.
+  DOCINTEL_ENDPOINT: z.string().optional().default(''),
+  DOCINTEL_KEY: z.string().optional().default(''),
+
   // Connectors wired in P3 wave 1 (read-only)
   SENTRY_AUTH_TOKEN: z.string().optional().default(''),
   SENTRY_ORG: z.string().optional().default('otchealth-inc'),
