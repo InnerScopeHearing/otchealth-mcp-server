@@ -108,6 +108,27 @@ const EnvSchema = z.object({
   AZURE_COMMONS_STORAGE_ACCOUNT: z.string().optional().default(''),
   AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
 
+  // Wave A: Azure AI Content Safety (Prompt Shields + groundedness) — gateway-level guardrails.
+  // Inert when unset (tools return a flagged "skipped" result rather than throwing).
+  CONTENT_SAFETY_ENDPOINT: z.string().optional().default(''),
+  CONTENT_SAFETY_KEY: z.string().optional().default(''),
+
+  // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
+  // NEVER send PHI/MedReview documents through this gateway.
+  DOCINTEL_ENDPOINT: z.string().optional().default(''),
+  DOCINTEL_KEY: z.string().optional().default(''),
+
+  // Wave A: Azure AI Foundry (otchealth-foundry, AIServices) — credit-funded OpenAI-family endpoint.
+  // Powers hybrid-search query embeddings (text-embedding-3-large) and the llm_cheap commodity path
+  // (gpt-4.1-mini). The FLEET COST PROTOCOL escape hatch: move commodity LLM work off metered Claude.
+  FOUNDRY_OPENAI_ENDPOINT: z.string().optional().default(''),
+  FOUNDRY_KEY: z.string().optional().default(''),
+  // Quality tiers (gpt-4.1-mini is BANNED for quality work — it failed the doc-repo summarization).
+  // standard = gpt-5.1 (good, well-rounded); high = gpt-5.4 (strongest deployed). gpt-5.5 pending quota.
+  FOUNDRY_CHAT_DEPLOYMENT: z.string().optional().default('gpt-5.1'),
+  FOUNDRY_HIGH_DEPLOYMENT: z.string().optional().default('gpt-5.4'),
+  FOUNDRY_EMBED_DEPLOYMENT: z.string().optional().default('text-embedding-3-large'),
+
   // Connectors wired in P3 wave 1 (read-only)
   SENTRY_AUTH_TOKEN: z.string().optional().default(''),
   SENTRY_ORG: z.string().optional().default('otchealth-inc'),

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
 import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
+import { agenticRecall } from '../../memory/agentic.js';
 
 export function registerMemoryRecall(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -33,9 +34,24 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
         const limit = input.limit ?? 25;
         const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
 
-        // Prefer SEMANTIC recall (Azure AI Search memory-exec): matches by meaning, not just
-        // keyword, and is the same index the fleet's per-prompt memory uses. Falls back to
-        // keyword over the blob feed when search isn't configured or errors.
+        // Prefer AGENTIC HYBRID recall (Azure AI Search memory-exec): decomposes the query into
+        // focused sub-queries, fans out hybrid (BM25 + semantic-ranker) searches concurrently, and
+        // fuses with Reciprocal Rank Fusion. Highest-quality recall for the whole fleet. Falls
+        // through to flat semantic, then keyword, when search isn't configured or errors.
+        try {
+          const ar = await agenticRecall(input.query, { agent: agentFilter ?? undefined, top: 5 });
+          if (ar.mode === 'agentic-hybrid' && ar.results.length > 0) {
+            return {
+              data: { matches: ar.results, count: ar.results.length, mode: ar.mode },
+              summary: `${ar.results.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length}).`,
+            };
+          }
+        } catch {
+          /* fall through to flat semantic / keyword */
+        }
+
+        // Flat SEMANTIC recall fallback: matches by meaning over the same memory-exec index.
+        // Falls back to keyword over the blob feed when search isn't configured or errors.
         if (semanticConfigured()) {
           try {
             const hits = await semanticSearch(input.query, agentFilter, limit);

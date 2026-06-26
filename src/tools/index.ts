@@ -90,6 +90,21 @@ import { registerGitHubListWorkflowRuns } from './github/list-workflow-runs.js';
 import { registerTwilioGetBalance } from './twilio/get-balance.js';
 import { registerTwilioListMessages } from './twilio/list-messages.js';
 
+// Wave A — Azure AI Content Safety (Prompt Shields + groundedness): gateway-level guardrails
+import { registerShieldCheck } from './safety/shield-check.js';
+import { registerGroundednessCheck } from './safety/groundedness-check.js';
+
+// Wave A — Azure Document Intelligence (CFO invoices + CLO contracts, read/analyze only)
+import { registerDocintelAnalyzeInvoice } from './docintel/analyze-invoice.js';
+import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js';
+
+// Wave A+ — fleet knowledge RAG (hybrid AI Search; commons open, finance/legal ring-gated)
+import { registerKbSearch } from './kb/search.js';
+import { registerKbSearchPrivileged } from './kb/search-privileged.js';
+
+// Wave A+ — llm_azure commodity path (credit-funded gpt-4.1, tiered): the cost-protocol escape hatch
+import { registerLlmAzure } from './llm/azure.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -178,4 +193,17 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubListWorkflowRuns(server, callerHash);
   registerTwilioGetBalance(server, callerHash);
   registerTwilioListMessages(server, callerHash);
+
+  // ===== Wave A: Azure AI Content Safety (prompt-injection defense + groundedness) =====
+  registerShieldCheck(server, callerHash);
+  registerGroundednessCheck(server, callerHash);
+
+  // ===== Wave A: Azure Document Intelligence (CFO + CLO, read/analyze only, non-BAA) =====
+  registerDocintelAnalyzeInvoice(server, callerHash);
+  registerDocintelAnalyzeContract(server, callerHash);
+
+  // ===== Wave A+: fleet knowledge RAG + commodity LLM (credit-funded) =====
+  registerKbSearch(server, callerHash);
+  registerKbSearchPrivileged(server, callerHash);
+  registerLlmAzure(server, callerHash);
 }
