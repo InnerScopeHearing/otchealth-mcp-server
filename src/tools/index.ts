@@ -41,6 +41,8 @@ import { registerIntercomGetArticle } from './intercom/get-article.js';
 // Phase 2 — n8n meta-tools
 import { registerN8nListWorkflows } from './n8n/list-workflows.js';
 import { registerN8nGetExecution } from './n8n/get-execution.js';
+import { registerN8nSetWorkflowActive } from './n8n/set-workflow-active.js';
+import { registerN8nTriggerWebhook } from './n8n/trigger-webhook.js';
 
 // Phase 3 — Cloudflare (fleet email routing + DNS)
 import { registerCloudflareListEmailDestinations } from './cloudflare/list-email-destinations.js';
@@ -157,6 +159,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 2: n8n meta-tools =====
   registerN8nListWorkflows(server, callerHash);
   registerN8nGetExecution(server, callerHash);
+  registerN8nSetWorkflowActive(server, callerHash);
+  registerN8nTriggerWebhook(server, callerHash);
 
   // ===== Phase 3: Cloudflare (fleet email routing + DNS) =====
   registerCloudflareListEmailDestinations(server, callerHash);
