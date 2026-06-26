@@ -15,9 +15,15 @@
  * is later added, update SEMANTIC_CONFIG below.
  */
 
+import { embed } from '../azure/foundry.js';
+
 const INDEX = 'memory-exec';
 const API_VERSION = '2023-11-01';
-const SEMANTIC_CONFIG = 'default';
+// VERIFIED against the live index (otchealth-dataroom-search, 2026-06-26): semantic config is
+// named 'sem' and the vector field is 'contentVector' (text-embedding-3-large). Earlier 'default'
+// was wrong and silently degraded every query to keyword.
+const SEMANTIC_CONFIG = 'sem';
+const VECTOR_FIELD = 'contentVector';
 const RRF_K = 60;
 const DEFAULT_TOP = 5;
 const FUSION_TOP = 8;
@@ -103,6 +109,16 @@ async function hybridSearch(
   top: number,
   c: { ep: string; key: string },
 ): Promise<RawHit[]> {
+  // TRUE HYBRID: BM25 keyword (search) + vector (contentVector) + 'sem' semantic ranker.
+  // Embed the sub-query via Foundry text-embedding-3-large; if embedding is unavailable
+  // (Foundry unconfigured/erroring) we still run keyword + semantic ranking.
+  let vector: number[] | null = null;
+  try {
+    vector = await embed(subQuery);
+  } catch {
+    vector = null;
+  }
+
   const body: Record<string, unknown> = {
     search: subQuery,
     top,
@@ -110,6 +126,11 @@ async function hybridSearch(
     semanticConfiguration: SEMANTIC_CONFIG,
     searchMode: 'any',
   };
+  if (vector) {
+    body.vectorQueries = [
+      { kind: 'vector', vector, fields: VECTOR_FIELD, k: top },
+    ];
+  }
 
   const r = await fetch(
     `${c.ep}/indexes/${INDEX}/docs/search?api-version=${API_VERSION}`,

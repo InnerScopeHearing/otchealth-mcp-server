@@ -98,6 +98,12 @@ import { registerGroundednessCheck } from './safety/groundedness-check.js';
 import { registerDocintelAnalyzeInvoice } from './docintel/analyze-invoice.js';
 import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js';
 
+// Wave A+ — fleet knowledge RAG (hybrid AI Search; commons open, finance/legal ring-gated)
+import { registerKbSearch } from './kb/search.js';
+
+// Wave A+ — llm_azure commodity path (credit-funded gpt-4.1, tiered): the cost-protocol escape hatch
+import { registerLlmAzure } from './llm/azure.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -194,4 +200,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Wave A: Azure Document Intelligence (CFO + CLO, read/analyze only, non-BAA) =====
   registerDocintelAnalyzeInvoice(server, callerHash);
   registerDocintelAnalyzeContract(server, callerHash);
+
+  // ===== Wave A+: fleet knowledge RAG + commodity LLM (credit-funded) =====
+  registerKbSearch(server, callerHash);
+  registerLlmAzure(server, callerHash);
 }
