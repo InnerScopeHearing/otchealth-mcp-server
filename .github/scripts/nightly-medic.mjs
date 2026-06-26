@@ -21,10 +21,31 @@ async function logLine(issueNumber, body) {
   await fetch(`${API}/repos/${REPO}/issues/${issueNumber}/comments`, { method: 'POST', headers: H, body: JSON.stringify({ body }) });
 }
 
+// Best-effort: today's Copilot/AI spend from the org metered-billing usage API.
+// Non-fatal — returns a human string; if the API isn't available, says so.
+async function dailySpend() {
+  try {
+    const d = new Date();
+    const url = `${API}/organizations/${owner}/settings/billing/usage?year=${d.getUTCFullYear()}&month=${d.getUTCMonth() + 1}&day=${d.getUTCDate()}`;
+    const u = await j(await fetch(url, { headers: H }));
+    const items = u.usageItems || u.usage || [];
+    if (!Array.isArray(items) || !items.length) return 'spend today: n/a';
+    let net = 0;
+    for (const it of items) {
+      const prod = String(it.product || it.sku || '').toLowerCase();
+      if (prod.includes('copilot')) net += Number(it.netAmount ?? it.net_amount ?? 0) || 0;
+    }
+    return `Copilot spend today: $${net.toFixed(2)}`;
+  } catch {
+    return 'spend today: n/a';
+  }
+}
+
 (async () => {
   if (!PAT) { console.error('GH_PAT required'); process.exit(1); }
   const log = await findLogIssue();
   const logNo = log?.number;
+  const spend = await dailySpend();
 
   // 1) Did the latest completed CI on main fail?
   const runs = await j(await fetch(`${API}/repos/${REPO}/actions/runs?branch=main&status=completed&per_page=5`, { headers: H }));
@@ -37,11 +58,11 @@ async function logLine(issueNumber, body) {
   const actedToday = (Array.isArray(openFix) ? openFix : []).some(i => (i.created_at || '').slice(0, 10) === today);
 
   if (!failing) {
-    const msg = `🟢 ${today} — main CI is ${conclusion || 'unknown'} (run: ${latest?.html_url || 'n/a'}). No action, $0 spend.`;
+    const msg = `🟢 ${today} — main CI is ${conclusion || 'unknown'} (run: ${latest?.html_url || 'n/a'}). No action, $0 spend. (${spend})`;
     console.log(msg); if (logNo) await logLine(logNo, msg); return;
   }
   if (actedToday) {
-    const msg = `🟡 ${today} — main CI failing but a nightly-fix task was already opened today (daily cap = 1). Skipping to bound spend.`;
+    const msg = `🟡 ${today} — main CI failing but a nightly-fix task was already opened today (daily cap = 1). Skipping to bound spend. (${spend})`;
     console.log(msg); if (logNo) await logLine(logNo, msg); return;
   }
 
@@ -59,6 +80,6 @@ async function logLine(issueNumber, body) {
     const m = await gql(`mutation($a:ID!,$b:ID!){replaceActorsForAssignable(input:{assignableId:$a,actorIds:[$b]}){assignable{... on Issue{number}}}}`, { a: issue.node_id, b: actor.id });
     assigned = m.errors ? ('ERR ' + JSON.stringify(m.errors).slice(0, 100)) : `assigned ${AGENT}`;
   }
-  const msg = `🔴 ${today} — main CI ${conclusion}. Opened fix issue #${issue.number} and ${assigned}. (1/1 daily cap used.)`;
+  const msg = `🔴 ${today} — main CI ${conclusion}. Opened fix issue #${issue.number} and ${assigned}. (1/1 daily cap used.) (${spend})`;
   console.log(msg); if (logNo) await logLine(logNo, msg);
 })().catch(e => { console.error('nightly-medic error: ' + e.message); process.exit(1); });
