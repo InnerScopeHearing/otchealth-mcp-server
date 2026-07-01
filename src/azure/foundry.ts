@@ -12,8 +12,8 @@
  *   FOUNDRY_CHAT_DEPLOYMENT  default 'gpt-4.1-mini'
  *   FOUNDRY_EMBED_DEPLOYMENT default 'text-embedding-3-large'
  */
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const API_VERSION = '2024-08-01-preview';
 
@@ -53,22 +53,27 @@ export class FoundryError extends Error {
   }
 }
 
+// Bounded + one retry: Foundry chat/embeddings calls are read-only inference requests (no
+// server-side state mutated by re-sending the same prompt/input), safe to repeat once on a
+// network blip / 429 / 5xx (see src/util/fetch-budget.ts). The retry is fully contained inside
+// fetchWithBudget; post() below still sees exactly one final Response and preserves its existing
+// error shape (FoundryError with the LAST observed status) whether or not a retry happened.
 async function post<T>(url: string, key: string, body: unknown): Promise<T> {
-  const { statusCode, body: rb } = await request(url, {
+  const res = await fetchWithBudget(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'api-key': key },
     body: JSON.stringify(body),
   });
-  const text = await rb.text();
+  const text = await res.text();
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
     data = { raw: text };
   }
-  if (statusCode >= 400) {
-    const msg = (data as any)?.error?.message ?? `HTTP ${statusCode}`;
-    throw new FoundryError(statusCode, msg);
+  if (res.status >= 400) {
+    const msg = (data as any)?.error?.message ?? `HTTP ${res.status}`;
+    throw new FoundryError(res.status, msg);
   }
   return data as T;
 }
@@ -80,6 +85,31 @@ export async function embed(text: string): Promise<number[] | null> {
   const url = `${c.ep}/openai/deployments/${c.embed}/embeddings?api-version=${API_VERSION}`;
   const j = await post<{ data?: Array<{ embedding: number[] }> }>(url, c.key, { input: text });
   return j.data?.[0]?.embedding ?? null;
+}
+
+/**
+ * Embed a batch of strings in ONE call (Azure OpenAI's /embeddings endpoint accepts an array
+ * `input`). Returns vectors in the SAME ORDER as `texts`. Azure guarantees `data[i].index === i`
+ * matching the input order, but this sorts by `.index` defensively rather than trusting bare
+ * array order, so a caller can always do `vector[i]` <-> `texts[i]` safely.
+ *
+ * Returns null when unconfigured (mirrors `embed`) or when the input list is empty. On any
+ * failure this throws (same as `embed`/`post`); callers that want a same-shape-as-embed
+ * best-effort fallback should catch and fall back to per-item `embed()` calls, exactly as the
+ * existing per-call `embed()` sites already do.
+ */
+export async function embedBatch(texts: string[]): Promise<number[][] | null> {
+  const c = cfg();
+  if (!c) return null;
+  if (texts.length === 0) return [];
+  const url = `${c.ep}/openai/deployments/${c.embed}/embeddings?api-version=${API_VERSION}`;
+  const j = await post<{ data?: Array<{ embedding: number[]; index?: number }> }>(url, c.key, {
+    input: texts,
+  });
+  const data = j.data ?? [];
+  return [...data]
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+    .map((d) => d.embedding);
 }
 
 export interface ChatMessage {

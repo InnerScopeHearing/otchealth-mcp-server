@@ -20,6 +20,7 @@
 
 import crypto from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 /** Cosmos data-plane REST api-version. Supports docs CRUD + cross-partition query. */
 const COSMOS_API_VERSION = '2018-12-31';
@@ -107,7 +108,11 @@ async function request(
     headers['Content-Type'] = 'application/json';
   }
 
-  const r = await fetch(`${c.endpoint}/${urlPath}`, {
+  // Bounded + one retry: every Cosmos call here is a single-document read/write or a
+  // query-by-POST (isQuery), all safe to repeat once on a network blip / 429 / 5xx (see
+  // src/util/fetch-budget.ts). Prevents one half-open socket from hanging a request slot
+  // forever on a container with no Log Analytics to diagnose it after the fact.
+  const r = await fetchWithBudget(`${c.endpoint}/${urlPath}`, {
     method: verb,
     headers,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
@@ -248,17 +253,35 @@ export async function queryDocs(
   const max = opts.max ?? 100;
   const link = `dbs/${db()}/colls/${coll}`;
 
+  // A single-page 429 (Cosmos RU throttling) mid-pagination must not throw away every page
+  // already collected. `request()` already retries once at the transport level for a genuine
+  // network blip; this is a SEPARATE, page-level backoff for Cosmos's own rate-limit response,
+  // bounded so a persistently-throttled container fails after a few short waits rather than
+  // hanging the recall forever.
+  const MAX_PAGE_RETRIES = 3;
+  const PAGE_RETRY_BASE_MS = 250;
+
   const runOne = async (extra: { pk?: string; pkRangeId?: string }): Promise<Record<string, unknown>[]> => {
     const out: Record<string, unknown>[] = [];
     let continuation: string | undefined;
     do {
-      const res = (await request('POST', 'docs', link, `${link}/docs`, {
-        isQuery: true,
-        body: { query, parameters },
-        continuation,
-        maxItemCount: 100,
-        ...extra,
-      })) as CosmosResponse & { continuation: string | null };
+      let res: CosmosResponse & { continuation: string | null };
+      let pageAttempt = 0;
+      for (;;) {
+        res = (await request('POST', 'docs', link, `${link}/docs`, {
+          isQuery: true,
+          body: { query, parameters },
+          continuation,
+          maxItemCount: 100,
+          ...extra,
+        })) as CosmosResponse & { continuation: string | null };
+        if (res.status === 429 && pageAttempt < MAX_PAGE_RETRIES) {
+          pageAttempt++;
+          await new Promise((resolve) => setTimeout(resolve, PAGE_RETRY_BASE_MS * pageAttempt));
+          continue;
+        }
+        break;
+      }
       if (!res.ok) {
         throw new Error(`Cosmos query ${coll} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
       }
