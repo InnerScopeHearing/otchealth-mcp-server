@@ -98,7 +98,9 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
   });
 
   // ── Authorization endpoint ─────────────────────────────────────────────────
-  app.get('/oauth/authorize', async (req, reply) => {
+  // Strict per-route rate limit (overrides the generous global default in server/index.ts): this
+  // is an unauthenticated brute-force surface, so cap it hard per client IP.
+  app.get('/oauth/authorize', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const q = req.query as Record<string, string>;
     const { client_id, redirect_uri, response_type, state, code_challenge, code_challenge_method } = q;
 
@@ -142,7 +144,9 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
   });
 
   // ── Token endpoint ─────────────────────────────────────────────────────────
-  app.post('/oauth/token', async (req, reply) => {
+  // Strict per-route rate limit: the token endpoint mints access tokens (auth-code exchange and
+  // client_credentials), so it is the highest-value brute-force target on the gateway.
+  app.post('/oauth/token', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const body =
       typeof req.body === 'string'
         ? (Object.fromEntries(new URLSearchParams(req.body)) as Record<string, string>)
