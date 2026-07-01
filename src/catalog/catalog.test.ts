@@ -26,11 +26,15 @@ test('serviceCapabilities reports wired tools + known available-not-wired surfac
   const caps = serviceCapabilities('stripe');
   assert.equal(caps.known, true);
   assert.ok(caps.wired_tools.includes('stripe_get_balance'));
-  assert.ok(caps.available_not_wired.length > 0); // stripe has declared backlog (subscriptions, invoices, ...)
+  // Wired services now carry an empty backlog; a PLANNED service still declares its available
+  // surface (mercury is planned + never wired, so this is independent of registration state).
+  assert.ok(serviceCapabilities('mercury').available_not_wired.length > 0);
 });
 
 test('auditUnused surfaces planned services (e.g. depot) and partial coverage', () => {
   const audit = auditUnused();
-  assert.ok(audit.planned_services.some((s) => s.service === 'depot'));
+  // mercury is a status:'planned' service and is never wired, so it is always in planned_services
+  // (unlike depot, which main has since wired).
+  assert.ok(audit.planned_services.some((s) => s.service === 'mercury'));
   assert.ok(typeof audit.summary === 'string' && audit.summary.length > 0);
 });
