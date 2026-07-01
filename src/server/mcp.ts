@@ -25,6 +25,21 @@ const SERVER_OPTIONS = {
  * to whichever transport was last connected and the others see empty results.
  */
 export function registerMcpRoutes(app: FastifyInstance): void {
+  // Warm the capability catalog at startup. Tools otherwise register lazily, per request (below),
+  // so before the first MCP session the module-level catalog is empty and toolCount() (exposed on
+  // /health) reads 0 — which trips the deploy pipeline's tool_count regression guard on a perfectly
+  // good image. registerAllTools records every tool into the catalog (recordTool is idempotent by
+  // name), so the per-request registration below is unaffected; the throwaway server is discarded.
+  // currentCallerHash is only invoked at tool-execution time, never during registration.
+  try {
+    registerAllTools(new McpServer(SERVER_INFO, SERVER_OPTIONS), currentCallerHash);
+  } catch (err) {
+    logger.error(
+      { type: 'catalog_warm_error', err: (err as Error).message },
+      'failed to warm tool catalog at startup',
+    );
+  }
+
   app.post('/mcp', async (request: FastifyRequest, reply: FastifyReply) => {
     const ctx = await requireConnectorAuth(request, reply);
     if (!ctx) return;
