@@ -1,0 +1,47 @@
+name: revision-gc
+
+# Release-hygiene backstop. Deactivates idle (0%-traffic) container-app revisions so they stop
+# burning warm replicas against the shared Container Apps free grant. deploy.yml already prunes on
+# every deploy; this weekly job catches anything that accumulates between deploys. Always keeps the
+# active revision + the single most-recent inactive one (the instant-rollback target).
+#
+# Auth is OIDC via the id-gateway-deployer managed identity, so this job declares environment:
+# production (that is the federated-credential subject). No stored secret.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: revision-gc
+  cancel-in-progress: false
+
+env:
+  APP: otchealth-mcp-gateway
+  APP_RG: rg-otchealth-apps-prod
+
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: 0918788a-f290-4a25-b4cd-2cf3a6faaf57
+          tenant-id: 4ab58580-cc9c-49f7-b5c7-a77f84fdc270
+          subscription-id: 55c84f6b-ef90-4259-a58b-50835cc4cab4
+
+      - name: Deactivate idle revisions (keep active + one warm rollback)
+        run: |
+          set -euo pipefail
+          KEPT=$(az containerapp revision list -n "$APP" -g "$APP_RG" -o json \
+            | jq -r '[.[] | select(.properties.active and .properties.trafficWeight==0)] | sort_by(.properties.createdTime) | .[:-1] | .[].name')
+          if [ -z "$KEPT" ]; then echo "Nothing to prune (<=1 idle revision)."; exit 0; fi
+          echo "$KEPT" | while read -r rev; do
+            [ -n "$rev" ] && echo "deactivating $rev" && (az containerapp revision deactivate -n "$APP" -g "$APP_RG" --revision "$rev" || true)
+          done

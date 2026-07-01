@@ -1,0 +1,35 @@
+name: iac-validate
+
+# Compiles the Bicep IaC (bicep build = parse + type-check + linter) on every change under infra/.
+# Runs only on infra/ changes so it never blocks unrelated PRs. Uses the Azure CLI's bundled bicep
+# (no external download to pin). Pairs with deploy.yml's paths-ignore of infra/** (an infra-only
+# change is validated here but does NOT trigger an image rebuild + revision cutover).
+
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+
+permissions:
+  contents: read
+
+jobs:
+  bicep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Compile + lint Bicep
+        run: |
+          set -euo pipefail
+          az bicep install
+          az bicep version
+          for f in infra/*.bicep; do
+            echo "::group::bicep build $f"
+            az bicep build --file "$f" --outdir /tmp/bicepout
+            echo "::endgroup::"
+          done
+          echo "All Bicep templates compiled clean."
