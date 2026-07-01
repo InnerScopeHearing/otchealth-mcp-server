@@ -82,7 +82,8 @@ jobs:
           set -euo pipefail
           SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)"
           az containerapp update -n "$APP" -g "$APP_RG" \
-            --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" >/dev/null
+            --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" \
+            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" >/dev/null
           echo "revision=${APP}--${SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Assert GREEN health + full tool catalog (regression guard)
