@@ -19,7 +19,7 @@
 //          -> route (gw-route) -> originGroup (apim-og) -> origin (apim, the APIM gateway host)
 //          -> customDomain (mcp-otchealth-app, hostName mcp.otchealth.app, ManagedCertificate)
 //     -> securityPolicy (gw-security-policy) associates the WAF policy with the endpoint + domain
-//   frontdoorWebApplicationFirewallPolicy (waf-otchealth-gw), Detection mode, Microsoft_DefaultRuleSet
+//   frontdoorWebApplicationFirewallPolicy (wafotchealthgw), Detection mode, Microsoft_DefaultRuleSet 1.1
 // ============================================================================
 
 @description('Front Door profile name.')
@@ -47,8 +47,8 @@ param customDomainResourceName string = 'mcp-otchealth-app'
 @description('The public hostname served through this custom domain.')
 param customDomainHostName string = 'mcp.otchealth.app'
 
-@description('WAF policy resource name.')
-param wafPolicyName string = 'waf-otchealth-gw'
+@description('WAF policy resource name. MUST be alphanumeric only: Front Door WAF policy names reject hyphens ("Policy ArmResourceId has incorrect formatting"), so this matches the live-attached policy name exactly.')
+param wafPolicyName string = 'wafotchealthgw'
 
 @description('WAF mode. Detection = log-only, never blocks traffic. Do not flip to Prevention from this template without a deliberate, reviewed change (a bad WAF rule in Prevention mode can 403 legitimate MCP traffic).')
 @allowed([
@@ -57,8 +57,8 @@ param wafPolicyName string = 'waf-otchealth-gw'
 ])
 param wafMode string = 'Detection'
 
-@description('Managed rule set version for Microsoft_DefaultRuleSet.')
-param defaultRuleSetVersion string = '2.1'
+@description('Managed rule set version for Microsoft_DefaultRuleSet. 1.1 is what the live policy uses: version 2.1 returns "rule set action value is not supported" (400) at api 2024-02-01, so this matches the deployed WAF.')
+param defaultRuleSetVersion string = '1.1'
 
 resource profile 'Microsoft.Cdn/profiles@2024-02-01' = {
   name: profileName
