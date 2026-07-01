@@ -44,9 +44,14 @@ jobs:
 
       - uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # These are non-secret Azure identifiers, NOT credentials. Security is the OIDC federated
+          # credential on the `id-gateway-deployer` user-assigned managed identity, which trusts only
+          # subject `repo:InnerScopeHearing/otchealth-mcp-server:environment:production`. That identity
+          # is least-privilege (Contributor on rg-otchealth-apps-prod + the acrotc55c84f6bef registry
+          # only). Hardcoded so the pipeline is self-contained, no repo-variable/secret setup required.
+          client-id: 0918788a-f290-4a25-b4cd-2cf3a6faaf57 # id-gateway-deployer (UAMI) clientId
+          tenant-id: 4ab58580-cc9c-49f7-b5c7-a77f84fdc270
+          subscription-id: 55c84f6b-ef90-4259-a58b-50835cc4cab4
 
       - name: Build once (immutable, tagged by git sha)
         run: az acr build -r "$ACR" -t "${IMAGE_REPO}:${GITHUB_SHA}" -f Dockerfile .
