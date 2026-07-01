@@ -74,6 +74,7 @@ interface RequestOptions {
   upsert?: boolean;
   continuation?: string;
   maxItemCount?: number;
+  pkRangeId?: string;
 }
 
 async function request(
@@ -93,6 +94,7 @@ async function request(
     Accept: 'application/json',
   };
   if (opts.pk !== undefined) headers['x-ms-documentdb-partitionkey'] = JSON.stringify([opts.pk]);
+  if (opts.pkRangeId !== undefined) headers['x-ms-documentdb-partitionkeyrangeid'] = opts.pkRangeId;
   if (opts.ifMatch) headers['If-Match'] = opts.ifMatch;
   if (opts.upsert) headers['x-ms-documentdb-is-upsert'] = 'true';
   if (opts.continuation) headers['x-ms-continuation'] = opts.continuation;
@@ -208,7 +210,21 @@ export async function upsertDoc(
   return res;
 }
 
-/** Run a SQL query (cross-partition by default). Follows continuations up to `max` docs. */
+/** List the physical partition-key-range ids of a container. */
+async function pkRanges(coll: string): Promise<string[]> {
+  const link = `dbs/${db()}/colls/${coll}`;
+  const res = await request('GET', 'pkranges', link, `${link}/pkranges`, {});
+  if (!res.ok) throw new Error(`Cosmos pkranges ${coll} -> ${res.status}`);
+  const ranges = ((res.body as { PartitionKeyRanges?: { id: string }[] })?.PartitionKeyRanges) ?? [];
+  return ranges.map((r) => r.id);
+}
+
+/**
+ * Run a SQL query. A single-partition query (pk given) is served directly. A CROSS-partition query
+ * is executed per partition-key-range and merged: the REST gateway cannot itself fan out queries
+ * that use CONTAINS / aggregates ("cannot be directly served by the gateway"), which the SDKs hide
+ * behind a query-plan negotiation. Follows continuations up to `max` docs.
+ */
 export async function queryDocs(
   coll: string,
   query: string,
@@ -216,27 +232,42 @@ export async function queryDocs(
   opts: { pk?: string; max?: number } = {},
 ): Promise<Record<string, unknown>[]> {
   assertColl(coll);
-  if (opts.pk !== undefined) assertId(opts.pk, 'partition key');
-  const link = `dbs/${db()}/colls/${coll}`;
   const max = opts.max ?? 100;
-  const out: Record<string, unknown>[] = [];
-  let continuation: string | undefined;
-  do {
-    const res = (await request('POST', 'docs', link, `${link}/docs`, {
-      isQuery: true,
-      body: { query, parameters },
-      pk: opts.pk,
-      continuation,
-      maxItemCount: Math.min(100, max),
-    })) as CosmosResponse & { continuation: string | null };
-    if (!res.ok) {
-      throw new Error(`Cosmos query ${coll} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
-    }
-    const docs = ((res.body as { Documents?: Record<string, unknown>[] })?.Documents) ?? [];
-    out.push(...docs);
-    continuation = res.continuation ?? undefined;
-  } while (continuation && out.length < max);
-  return out.slice(0, max);
+  const link = `dbs/${db()}/colls/${coll}`;
+
+  const runOne = async (extra: { pk?: string; pkRangeId?: string }): Promise<Record<string, unknown>[]> => {
+    const out: Record<string, unknown>[] = [];
+    let continuation: string | undefined;
+    do {
+      const res = (await request('POST', 'docs', link, `${link}/docs`, {
+        isQuery: true,
+        body: { query, parameters },
+        continuation,
+        maxItemCount: 100,
+        ...extra,
+      })) as CosmosResponse & { continuation: string | null };
+      if (!res.ok) {
+        throw new Error(`Cosmos query ${coll} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
+      }
+      const docs = ((res.body as { Documents?: Record<string, unknown>[] })?.Documents) ?? [];
+      out.push(...docs);
+      continuation = res.continuation ?? undefined;
+    } while (continuation && out.length < max);
+    return out;
+  };
+
+  if (opts.pk !== undefined) {
+    assertId(opts.pk, 'partition key');
+    return (await runOne({ pk: opts.pk })).slice(0, max);
+  }
+
+  const ranges = await pkRanges(coll);
+  const merged: Record<string, unknown>[] = [];
+  for (const rid of ranges) {
+    merged.push(...(await runOne({ pkRangeId: rid })));
+    if (merged.length >= max) break;
+  }
+  return merged.slice(0, max);
 }
 
 /** A short unique id (used for task/memory/event ids). */
