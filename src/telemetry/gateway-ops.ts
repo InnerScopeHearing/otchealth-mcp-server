@@ -10,7 +10,7 @@
  * Events land in the dedicated PostHog "Gateway Ops" project (id 493944), kept separate
  * from product analytics. The MedReview PHI project (468398) is never touched here.
  */
-import { env } from '../config/env.js';
+import { loadEnv } from '../config/env.js';
 
 export interface CapturePayload {
   api_key: string;
@@ -29,7 +29,7 @@ export function buildCapturePayload(
   event: string,
   properties: Record<string, unknown>,
   distinctId?: string,
-  key: string = env.POSTHOG_GATEWAYOPS_KEY,
+  key: string = loadEnv().POSTHOG_GATEWAYOPS_KEY,
 ): CapturePayload | null {
   if (!key) return null;
   return {
@@ -52,7 +52,7 @@ export function captureGatewayEvent(
 ): void {
   const payload = buildCapturePayload(event, properties, distinctId);
   if (!payload) return;
-  const host = env.POSTHOG_HOST || 'https://us.posthog.com';
+  const host = loadEnv().POSTHOG_HOST || 'https://us.posthog.com';
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 1500);
   void fetch(`${host}/i/v0/e/`, {
