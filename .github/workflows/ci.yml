@@ -1,0 +1,37 @@
+name: ci
+
+# The green-main gate. Runs on every PR to main and on push to main. Making this a REQUIRED
+# status check (+ "require branches up to date") is what makes deploy-from-stale-branch,
+# merging-into-red-main, and dropped-file merges structurally impossible. Build once here is
+# a typecheck/build/test proof; the immutable release artifact is built by deploy.yml on merge.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install (frozen lockfile)
+        run: npm ci --include=dev
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: Test
+        run: npm test
