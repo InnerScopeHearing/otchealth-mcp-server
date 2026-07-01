@@ -140,7 +140,7 @@ function db(): string {
  * the Cosmos-safe id charset BEFORE they touch a request. A caller-supplied task_id like
  * "../colls/other/docs/x" must never escape its container.
  */
-const CONTAINERS = new Set(['tasks', 'memory', 'events', 'oauthcodes']);
+const CONTAINERS = new Set(['tasks', 'memory', 'events', 'oauthcodes', 'cache']);
 const ID_RE = /^[A-Za-z0-9_.\-]{1,255}$/;
 function assertColl(coll: string): void {
   if (!CONTAINERS.has(coll)) throw new Error(`unknown container "${coll}" (allowed: ${[...CONTAINERS].join(', ')})`);
@@ -286,4 +286,44 @@ export async function queryDocs(
 /** A short unique id (used for task/memory/event ids). */
 export function newId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`;
+}
+
+export interface VectorMatch {
+  doc: Record<string, unknown>;
+  similarity: number;
+}
+
+/**
+ * Cosine-similarity vector search within a single partition, via Cosmos DB for NoSQL's
+ * VectorDistance() query function. Scoped to one partition key on purpose (the caller is
+ * expected to pass a scope-bounded pk, e.g. a cache scope, so the search never fans out
+ * cross-partition). Returns the top `top` matches ordered by similarity, best first, each
+ * annotated with its cosine similarity (Cosmos VectorDistance with the cosine distance
+ * function returns 1 - cosine_similarity is NOT the case here: for distanceFunction 'cosine'
+ * VectorDistance returns the cosine SIMILARITY directly, range [-1, 1], higher = closer).
+ */
+export async function vectorSearchDocs(
+  coll: string,
+  pkValue: string,
+  vectorField: string,
+  vector: number[],
+  top = 1,
+): Promise<VectorMatch[]> {
+  assertColl(coll);
+  assertId(pkValue, 'partition key');
+  const query =
+    `SELECT TOP ${Math.max(1, Math.min(top, 50))} c, VectorDistance(c.${vectorField}, @vec) AS similarity ` +
+    `FROM c WHERE c.cacheScope = @scope ORDER BY VectorDistance(c.${vectorField}, @vec)`;
+  const rows = await queryDocs(
+    coll,
+    query,
+    [
+      { name: '@vec', value: vector },
+      { name: '@scope', value: pkValue },
+    ],
+    { pk: pkValue, max: top },
+  );
+  return rows
+    .map((r) => ({ doc: (r as Record<string, unknown>)['c'] as Record<string, unknown>, similarity: Number((r as Record<string, unknown>)['similarity'] ?? 0) }))
+    .filter((m) => m.doc !== undefined && m.doc !== null);
 }
