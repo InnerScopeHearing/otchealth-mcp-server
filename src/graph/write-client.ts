@@ -5,8 +5,8 @@
  * the read client is never modified (hard rule).
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -62,12 +62,15 @@ async function getAccessToken(): Promise<string> {
     scope: 'https://graph.microsoft.com/.default',
   });
 
-  const { statusCode, body: respBody } = await request(tokenUrl, {
+  // Token mint is a read-only OAuth exchange: safe to retry once on a network
+  // blip / 429 / 5xx.
+  const res = await fetchWithBudget(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
-  });
-  const text = await respBody.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = {}; }
 
@@ -97,15 +100,19 @@ async function graphRequest<T = unknown>(
 ): Promise<T> {
   const token = await getAccessToken();
   const url = `https://graph.microsoft.com/v1.0${path}`;
-  const { statusCode, body: respBody } = await request(url, {
+  // Every caller of this write-client helper is a non-idempotent mutation (create
+  // draft/event, reply, move, mark-read): retries:0 so a timeout never sends a
+  // duplicate email, calendar invite, or mailbox mutation.
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const text = await respBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
 
   // 202 Accepted or 204 No Content return empty body
   if (statusCode === 202 || statusCode === 204) {

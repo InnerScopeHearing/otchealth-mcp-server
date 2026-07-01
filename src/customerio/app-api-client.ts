@@ -1,6 +1,6 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -66,25 +66,24 @@ export async function appApiGet<T = unknown>(
   const url = `${BASE}${path}${buildQuery(opts.query)}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+    const res = await fetchWithBudget(url, {
       method: 'GET',
       headers: {
         authorization: `Bearer ${env.CIO_APP_API_BEARER}`,
         accept: 'application/json',
       },
-      bodyTimeout: opts.timeoutMs ?? 30_000,
-      headersTimeout: opts.timeoutMs ?? 30_000,
-    });
-    const body = await res.body.text();
+    }, { timeoutMs: opts.timeoutMs ?? 30_000, retries: 1 });
+    const body = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
-        { type: 'cio_app_api_ok', path, status: res.statusCode, latency_ms: latency, correlation_id: opts.correlationId },
+        { type: 'cio_app_api_ok', path, status: res.status, latency_ms: latency, correlation_id: opts.correlationId },
         'cio app-api ok',
       );
       return body ? (JSON.parse(body) as T) : ({} as T);
     }
-    throw mapAppApiError(res.statusCode, path, body);
+    throw mapAppApiError(res.status, path, body);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
     const latency = Date.now() - started;

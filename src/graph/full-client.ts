@@ -6,8 +6,8 @@
  * NO Teams, SharePoint, OneDrive, Intune, Directory-admin, or PHI.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -67,12 +67,15 @@ async function getAccessToken(): Promise<string> {
     scope: 'https://graph.microsoft.com/.default',
   });
 
-  const { statusCode, body: respBody } = await request(tokenUrl, {
+  // Token mint is a read-only OAuth exchange: safe to retry once on a network
+  // blip / 429 / 5xx.
+  const res = await fetchWithBudget(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
-  });
-  const text = await respBody.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = {}; }
 
@@ -108,15 +111,20 @@ async function graphRequest<T = unknown>(
     const qs = new URLSearchParams(opts.queryParams).toString();
     if (qs) url += `?${qs}`;
   }
-  const { statusCode, body: respBody } = await request(url, {
+  // GET is read-only (retries:1); every other verb here mutates mail/calendar/contacts
+  // (send, forward, accept/decline, create/update/delete), so retries:0 to avoid a
+  // duplicate send or mutation on a timeout.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const text = await respBody.text();
+  }, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
 
   if (statusCode === 202 || statusCode === 204) {
     return {} as T;

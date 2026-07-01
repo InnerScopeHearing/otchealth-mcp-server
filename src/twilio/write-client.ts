@@ -17,9 +17,9 @@
  * Base URL: https://api.twilio.com/2010-04-01
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { TwilioApiError } from './api-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -65,7 +65,9 @@ async function twilioPost<T = unknown>(
   let statusCode: number;
   let text: string;
   try {
-    const res = await request(url, {
+    // Non-idempotent write (outbound SMS/MMS/call): retries:0 so a timeout never sends
+    // a duplicate message or call. TCPA-sensitive.
+    const res = await fetchWithBudget(url, {
       method: 'POST',
       headers: {
         Authorization: basicAuth(creds),
@@ -73,11 +75,9 @@ async function twilioPost<T = unknown>(
         Accept: 'application/json',
       },
       body,
-      bodyTimeout: 30_000,
-      headersTimeout: 30_000,
-    });
-    statusCode = res.statusCode;
-    text = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    statusCode = res.status;
+    text = await res.text();
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'twilio_network_error',
@@ -268,7 +268,9 @@ export async function sendMms(args: {
   let statusCode: number;
   let text: string;
   try {
-    const res = await request(url, {
+    // Non-idempotent write (outbound MMS): retries:0 so a timeout never sends a
+    // duplicate message. TCPA-sensitive.
+    const res = await fetchWithBudget(url, {
       method: 'POST',
       headers: {
         Authorization: basicAuth(creds),
@@ -276,11 +278,9 @@ export async function sendMms(args: {
         Accept: 'application/json',
       },
       body,
-      bodyTimeout: 30_000,
-      headersTimeout: 30_000,
-    });
-    statusCode = res.statusCode;
-    text = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    statusCode = res.status;
+    text = await res.text();
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'twilio_network_error',

@@ -12,8 +12,8 @@
  * All methods are self-contained POST calls to https://api.depot.dev.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 const DEPOT_BASE = 'https://api.depot.dev';
@@ -48,9 +48,15 @@ function requireToken(): string {
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 
-async function post<T = any>(rpcPath: string, body: unknown): Promise<T> {
+/**
+ * Connect RPC is POST-only by convention, so HTTP method cannot signal idempotency here;
+ * the RPC verb does. Pass `idempotent: true` only for Get/List (read-only) calls; every
+ * Create/Update/Delete/Reset/Add/Remove/Cancel/Retry/Rerun call defaults to retries:0 so a
+ * timeout never duplicates a mutation, a CI cancel/retry, or a registry image deletion.
+ */
+async function post<T = any>(rpcPath: string, body: unknown, idempotent = false): Promise<T> {
   const token = requireToken();
-  const { statusCode, body: rb } = await request(`${DEPOT_BASE}${rpcPath}`, {
+  const res = await fetchWithBudget(`${DEPOT_BASE}${rpcPath}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -58,8 +64,9 @@ async function post<T = any>(rpcPath: string, body: unknown): Promise<T> {
       'Connect-Protocol-Version': '1',
     },
     body: JSON.stringify(body),
-  });
-  const text = await rb.text();
+  }, { retries: idempotent ? 1 : 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400)
@@ -77,7 +84,7 @@ async function post<T = any>(rpcPath: string, body: unknown): Promise<T> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function getProject(opts: { projectId: string }): Promise<any> {
-  return post('/depot.core.v1.ProjectService/GetProject', { projectId: opts.projectId });
+  return post('/depot.core.v1.ProjectService/GetProject', { projectId: opts.projectId }, true);
 }
 
 export async function createProject(opts: {
@@ -114,7 +121,7 @@ export async function resetProject(opts: { projectId: string }): Promise<any> {
 // ── Trust Policies ────────────────────────────────────────────────────────────
 
 export async function listTrustPolicies(opts: { projectId: string }): Promise<any> {
-  return post('/depot.core.v1.ProjectService/ListTrustPolicies', { projectId: opts.projectId });
+  return post('/depot.core.v1.ProjectService/ListTrustPolicies', { projectId: opts.projectId }, true);
 }
 
 export async function addTrustPolicy(opts: {
@@ -142,7 +149,7 @@ export async function removeTrustPolicy(opts: {
 // ── Project Tokens ────────────────────────────────────────────────────────────
 
 export async function listProjectTokens(opts: { projectId: string }): Promise<any> {
-  return post('/depot.core.v1.ProjectService/ListTokens', { projectId: opts.projectId });
+  return post('/depot.core.v1.ProjectService/ListTokens', { projectId: opts.projectId }, true);
 }
 
 export async function createProjectToken(opts: {
@@ -189,7 +196,7 @@ export async function listProjectUsage(opts: {
   const body: Record<string, unknown> = {};
   if (opts.startTime) body.startTime = opts.startTime;
   if (opts.endTime) body.endTime = opts.endTime;
-  return post('/depot.core.v1.UsageService/ListProjectUsage', body);
+  return post('/depot.core.v1.UsageService/ListProjectUsage', body, true);
 }
 
 export async function getProjectUsage(opts: {
@@ -200,7 +207,7 @@ export async function getProjectUsage(opts: {
   const body: Record<string, unknown> = { projectId: opts.projectId };
   if (opts.startTime) body.startTime = opts.startTime;
   if (opts.endTime) body.endTime = opts.endTime;
-  return post('/depot.core.v1.UsageService/GetProjectUsage', body);
+  return post('/depot.core.v1.UsageService/GetProjectUsage', body, true);
 }
 
 export async function getUsage(opts: {
@@ -210,7 +217,7 @@ export async function getUsage(opts: {
   const body: Record<string, unknown> = {};
   if (opts.startTime) body.startTime = opts.startTime;
   if (opts.endTime) body.endTime = opts.endTime;
-  return post('/depot.core.v1.UsageService/GetUsage', body);
+  return post('/depot.core.v1.UsageService/GetUsage', body, true);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -218,7 +225,7 @@ export async function getUsage(opts: {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function getBuildSteps(opts: { buildId: string }): Promise<any> {
-  return post('/depot.build.v1.BuildService/GetBuildSteps', { buildId: opts.buildId });
+  return post('/depot.build.v1.BuildService/GetBuildSteps', { buildId: opts.buildId }, true);
 }
 
 export async function getBuildStepLogs(opts: {
@@ -228,7 +235,7 @@ export async function getBuildStepLogs(opts: {
   return post('/depot.build.v1.BuildService/GetBuildStepLogs', {
     buildId: opts.buildId,
     stepId: opts.stepId,
-  });
+  }, true);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -236,7 +243,7 @@ export async function getBuildStepLogs(opts: {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function listRegistryImages(opts: { projectId: string }): Promise<any> {
-  return post('/depot.build.v1.RegistryService/ListImages', { projectId: opts.projectId });
+  return post('/depot.build.v1.RegistryService/ListImages', { projectId: opts.projectId }, true);
 }
 
 export async function deleteRegistryImages(opts: {
@@ -270,19 +277,19 @@ export async function listRuns(opts: {
   if (opts.sha) body.sha = opts.sha;
   if (opts.trigger) body.trigger = opts.trigger;
   if (opts.pr) body.pr = opts.pr;
-  return post('/depot.ci.v1.CIService/ListRuns', body);
+  return post('/depot.ci.v1.CIService/ListRuns', body, true);
 }
 
 export async function getRun(opts: { runId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetRun', { runId: opts.runId });
+  return post('/depot.ci.v1.CIService/GetRun', { runId: opts.runId }, true);
 }
 
 export async function getRunStatus(opts: { runId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetRunStatus', { runId: opts.runId });
+  return post('/depot.ci.v1.CIService/GetRunStatus', { runId: opts.runId }, true);
 }
 
 export async function getRunMetrics(opts: { runId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetRunMetrics', { runId: opts.runId });
+  return post('/depot.ci.v1.CIService/GetRunMetrics', { runId: opts.runId }, true);
 }
 
 export async function cancelRun(opts: { runId: string }): Promise<any> {
@@ -310,11 +317,11 @@ export async function listWorkflows(opts: {
   if (opts.trigger) body.trigger = opts.trigger;
   if (opts.sha) body.sha = opts.sha;
   if (opts.pr) body.pr = opts.pr;
-  return post('/depot.ci.v1.CIService/ListWorkflows', body);
+  return post('/depot.ci.v1.CIService/ListWorkflows', body, true);
 }
 
 export async function getWorkflow(opts: { workflowId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetWorkflow', { workflowId: opts.workflowId });
+  return post('/depot.ci.v1.CIService/GetWorkflow', { workflowId: opts.workflowId }, true);
 }
 
 export async function rerunWorkflow(opts: { workflowId: string }): Promise<any> {
@@ -330,7 +337,7 @@ export async function cancelWorkflow(opts: { workflowId: string }): Promise<any>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function getJob(opts: { jobId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetJob', { jobId: opts.jobId });
+  return post('/depot.ci.v1.CIService/GetJob', { jobId: opts.jobId }, true);
 }
 
 export async function getJobSummary(opts: {
@@ -340,11 +347,11 @@ export async function getJobSummary(opts: {
   const body: Record<string, unknown> = {};
   if (opts.jobId) body.jobId = opts.jobId;
   if (opts.attemptId) body.attemptId = opts.attemptId;
-  return post('/depot.ci.v1.CIService/GetJobSummary', body);
+  return post('/depot.ci.v1.CIService/GetJobSummary', body, true);
 }
 
 export async function getJobMetrics(opts: { jobId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetJobMetrics', { jobId: opts.jobId });
+  return post('/depot.ci.v1.CIService/GetJobMetrics', { jobId: opts.jobId }, true);
 }
 
 export async function retryJob(opts: { workflowId: string; jobId: string }): Promise<any> {
@@ -370,11 +377,11 @@ export async function cancelJob(opts: { workflowId: string; jobId: string }): Pr
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function getAttempt(opts: { attemptId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetAttempt', { attemptId: opts.attemptId });
+  return post('/depot.ci.v1.CIService/GetAttempt', { attemptId: opts.attemptId }, true);
 }
 
 export async function getJobAttemptMetrics(opts: { attemptId: string }): Promise<any> {
-  return post('/depot.ci.v1.CIService/GetJobAttemptMetrics', { attemptId: opts.attemptId });
+  return post('/depot.ci.v1.CIService/GetJobAttemptMetrics', { attemptId: opts.attemptId }, true);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -390,7 +397,7 @@ export async function getJobAttemptLogs(opts: {
   if (opts.attemptId) body.attemptId = opts.attemptId;
   if (opts.jobId) body.jobId = opts.jobId;
   if (opts.pageToken) body.pageToken = opts.pageToken;
-  return post('/depot.ci.v1.CIService/GetJobAttemptLogs', body);
+  return post('/depot.ci.v1.CIService/GetJobAttemptLogs', body, true);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -407,13 +414,13 @@ export async function listArtifacts(opts: {
   if (opts.workflowId) body.workflowId = opts.workflowId;
   if (opts.jobId) body.jobId = opts.jobId;
   if (opts.attemptId) body.attemptId = opts.attemptId;
-  return post('/depot.ci.v1.CIService/ListArtifacts', body);
+  return post('/depot.ci.v1.CIService/ListArtifacts', body, true);
 }
 
 export async function getArtifactDownloadUrl(opts: { artifactId: string }): Promise<any> {
   return post('/depot.ci.v1.CIService/GetArtifactDownloadURL', {
     artifactId: opts.artifactId,
-  });
+  }, true);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -431,5 +438,5 @@ export async function getFailureDiagnosis(opts: {
   if (opts.workflowId) body.workflowId = opts.workflowId;
   if (opts.jobId) body.jobId = opts.jobId;
   if (opts.attemptId) body.attemptId = opts.attemptId;
-  return post('/depot.ci.v1.CIService/GetFailureDiagnosis', body);
+  return post('/depot.ci.v1.CIService/GetFailureDiagnosis', body, true);
 }

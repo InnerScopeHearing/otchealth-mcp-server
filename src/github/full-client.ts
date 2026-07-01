@@ -12,9 +12,9 @@
  * Scope boundary: repo-level only. NO org admin, billing, or secrets endpoints.
  */
 
-import { request } from 'undici';
 import { createSign } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -87,11 +87,13 @@ async function getInstallationToken(): Promise<string> {
 
   const jwt = mintJwt();
   const url = `https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
-  const { statusCode, body } = await request(url, {
+  // Token mint: retries:0 (a duplicate mint is wasted, not harmful, but be conservative).
+  const res = await fetchWithBudget(url, {
     method: 'POST',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${jwt}` },
-  });
-  const text = await body.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400)
@@ -109,11 +111,13 @@ const O = encodeURIComponent;
 
 async function ghGet<T = any>(path: string): Promise<T> {
   const token = await getInstallationToken();
-  const { statusCode, body } = await request(`https://api.github.com${path}`, {
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(`https://api.github.com${path}`, {
     method: 'GET',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  });
-  const text = await body.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400)
@@ -127,7 +131,9 @@ async function ghSend<T = any>(
   body?: unknown,
 ): Promise<{ statusCode: number; data: T }> {
   const token = await getInstallationToken();
-  const { statusCode, body: rb } = await request(`https://api.github.com${path}`, {
+  // Non-idempotent write (create/update/delete refs, tags, releases, labels, etc.):
+  // retries:0 so a timeout never causes a duplicate GitHub mutation.
+  const res = await fetchWithBudget(`https://api.github.com${path}`, {
     method,
     headers: {
       ...GITHUB_HEADERS,
@@ -135,8 +141,9 @@ async function ghSend<T = any>(
       'Content-Type': 'application/json',
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await rb.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
   if (statusCode >= 400)

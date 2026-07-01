@@ -19,9 +19,9 @@
  * ElevenLabs base:  https://api.elevenlabs.io/v1
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { TwilioApiError } from './api-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -132,14 +132,13 @@ async function twilioGet<T = unknown>(path: string): Promise<T> {
   let statusCode: number;
   let text: string;
   try {
-    const res = await request(url, {
+    // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+    const res = await fetchWithBudget(url, {
       method: 'GET',
       headers: { Authorization: basicAuth(creds), Accept: 'application/json' },
-      headersTimeout: 30_000,
-      bodyTimeout: 30_000,
-    });
-    statusCode = res.statusCode;
-    text = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 1 });
+    statusCode = res.status;
+    text = await res.text();
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'twilio_network_error',
@@ -162,7 +161,9 @@ async function twilioPost<T = unknown>(path: string, params: Record<string, stri
   let statusCode: number;
   let text: string;
   try {
-    const res = await request(url, {
+    // Non-idempotent write (SMS/MMS/call/conference/feedback create or update):
+    // retries:0 so a timeout never causes a duplicate send or mutation. TCPA-sensitive.
+    const res = await fetchWithBudget(url, {
       method: 'POST',
       headers: {
         Authorization: basicAuth(creds),
@@ -170,11 +171,9 @@ async function twilioPost<T = unknown>(path: string, params: Record<string, stri
         Accept: 'application/json',
       },
       body,
-      headersTimeout: 30_000,
-      bodyTimeout: 30_000,
-    });
-    statusCode = res.statusCode;
-    text = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    statusCode = res.status;
+    text = await res.text();
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'twilio_network_error',
@@ -196,14 +195,14 @@ async function twilioDelete(path: string): Promise<void> {
   let statusCode: number;
   let text: string;
   try {
-    const res = await request(url, {
+    // Non-idempotent delete (release a number, kick a participant, delete a
+    // recording/transcription): retries:0 so a timeout never double-deletes.
+    const res = await fetchWithBudget(url, {
       method: 'DELETE',
       headers: { Authorization: basicAuth(creds), Accept: 'application/json' },
-      headersTimeout: 30_000,
-      bodyTimeout: 30_000,
-    });
-    statusCode = res.statusCode;
-    text = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    statusCode = res.status;
+    text = await res.text();
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'twilio_network_error',
@@ -227,14 +226,13 @@ async function elevenGet<T = unknown>(path: string): Promise<T> {
   let statusCode: number;
   let text: string;
   try {
-    const res = await request(url, {
+    // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+    const res = await fetchWithBudget(url, {
       method: 'GET',
       headers: { 'xi-api-key': key, Accept: 'application/json' },
-      headersTimeout: 30_000,
-      bodyTimeout: 30_000,
-    });
-    statusCode = res.statusCode;
-    text = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 1 });
+    statusCode = res.status;
+    text = await res.text();
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'elevenlabs_network_error',
@@ -262,19 +260,15 @@ async function elevenPostBinary(path: string, jsonBody: unknown): Promise<Buffer
   let statusCode: number;
   let buffer: Buffer;
   try {
-    const res = await request(url, {
+    // TTS generation consumes ElevenLabs quota per call: retries:0 so a timeout never
+    // generates (and bills) duplicate audio.
+    const res = await fetchWithBudget(url, {
       method: 'POST',
       headers: { 'xi-api-key': key, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
       body: JSON.stringify(jsonBody),
-      headersTimeout: 60_000,
-      bodyTimeout: 120_000,
-    });
-    statusCode = res.statusCode;
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of res.body) {
-      chunks.push(chunk as Uint8Array);
-    }
-    buffer = Buffer.concat(chunks);
+    }, { timeoutMs: 60_000, retries: 0 });
+    statusCode = res.status;
+    buffer = Buffer.from(await res.arrayBuffer());
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'elevenlabs_network_error',
@@ -541,7 +535,9 @@ async function _twilioPostRaw<T = unknown>(path: string, body: string): Promise<
   let statusCode: number;
   let text: string;
   try {
-    const res = await request(url, {
+    // Non-idempotent write (call feedback create): retries:0 so a timeout never
+    // duplicates the feedback record.
+    const res = await fetchWithBudget(url, {
       method: 'POST',
       headers: {
         Authorization: basicAuth(creds),
@@ -549,11 +545,9 @@ async function _twilioPostRaw<T = unknown>(path: string, body: string): Promise<
         Accept: 'application/json',
       },
       body,
-      headersTimeout: 30_000,
-      bodyTimeout: 30_000,
-    });
-    statusCode = res.statusCode;
-    text = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    statusCode = res.status;
+    text = await res.text();
   } catch (netErr) {
     throw new TwilioApiError({
       code: 'twilio_network_error',

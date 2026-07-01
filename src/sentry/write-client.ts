@@ -1,6 +1,6 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { isPhiProject } from './api-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -32,12 +32,15 @@ function assertNotPhi(projectSlug: string): void {
 
 async function sentryPut<T = any>(path: string, body: unknown): Promise<T> {
   const key = requireKey();
-  const { statusCode, body: resBody } = await request(`${base()}${path}`, {
+  // Non-idempotent write (issue status/assignee update, release update): retries:0 so a
+  // timeout never causes a duplicate mutation.
+  const res = await fetchWithBudget(`${base()}${path}`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
-  const text = await resBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new SentryWriteError({ code: `sentry_${statusCode}`, status: statusCode, message: data?.detail || `HTTP ${statusCode}`, nextStep: 'Verify SENTRY_AUTH_TOKEN scope + org/project slug.' });
   return data as T;
@@ -45,12 +48,15 @@ async function sentryPut<T = any>(path: string, body: unknown): Promise<T> {
 
 async function sentryPost<T = any>(path: string, body: unknown): Promise<T> {
   const key = requireKey();
-  const { statusCode, body: resBody } = await request(`${base()}${path}`, {
+  // Non-idempotent write (creates a release): retries:0 so a timeout never creates a
+  // duplicate release.
+  const res = await fetchWithBudget(`${base()}${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
-  const text = await resBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new SentryWriteError({ code: `sentry_${statusCode}`, status: statusCode, message: data?.detail || `HTTP ${statusCode}`, nextStep: 'Verify SENTRY_AUTH_TOKEN scope + org slug.' });
   return data as T;

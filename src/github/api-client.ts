@@ -1,6 +1,6 @@
-import { request } from 'undici';
 import { createSign } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -48,11 +48,14 @@ async function getInstallationToken(): Promise<string> {
 
   const jwt = mintJwt();
   const url = `https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
-  const { statusCode, body } = await request(url, {
+  // Token mint is a POST but has no side effect on GitHub state; still, be conservative
+  // and do not retry (a second identical mint is wasted, not harmful, but avoids doubt).
+  const res = await fetchWithBudget(url, {
     method: 'POST',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${jwt}` },
-  });
-  const text = await body.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new GitHubApiError({ code: `github_${statusCode}`, status: statusCode, message: data?.message || `HTTP ${statusCode}`, nextStep: 'Verify GitHub App credentials and installation ID.' });
@@ -66,11 +69,13 @@ async function getInstallationToken(): Promise<string> {
 
 async function githubGet<T = any>(path: string): Promise<T> {
   const token = await getInstallationToken();
-  const { statusCode, body } = await request(`https://api.github.com${path}`, {
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(`https://api.github.com${path}`, {
     method: 'GET',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  });
-  const text = await body.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new GitHubApiError({ code: `github_${statusCode}`, status: statusCode, message: data?.message || `HTTP ${statusCode}`, nextStep: 'Verify GitHub App installation has access to this repository.' });
@@ -90,12 +95,15 @@ export async function listWorkflowRuns(owner: string, repo: string): Promise<any
 // ── Writes (App installation token; CTO-gated at the tool layer) ───────────────
 async function githubSend<T = any>(method: 'POST' | 'PATCH' | 'PUT', path: string, body: unknown): Promise<T> {
   const token = await getInstallationToken();
-  const { statusCode, body: rb } = await request(`https://api.github.com${path}`, {
+  // Non-idempotent write (creates/updates a branch, file, PR, comment, merge, etc.):
+  // retries:0 so a timeout never causes a duplicate GitHub mutation.
+  const res = await fetchWithBudget(`https://api.github.com${path}`, {
     method,
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
-  const text = await rb.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new GitHubApiError({ code: `github_${statusCode}`, status: statusCode, message: data?.message || `HTTP ${statusCode}`, nextStep: 'Verify the App installation has write access (contents/pull_requests) to this repo and the branch/PR exists.' });

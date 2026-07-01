@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 const env = loadEnv();
 export class DepotApiError extends Error {
   readonly code: string; readonly status: number; readonly nextStep: string;
@@ -14,12 +14,15 @@ function requireToken(): string {
 }
 export async function listProjects(): Promise<{ projectId: string; name: string }[]> {
   const token = requireToken();
-  const { statusCode, body } = await request(`${base()}/depot.core.v1.ProjectService/ListProjects`, {
+  // Connect RPC is POST-only by convention, but ListProjects is a read: safe to retry
+  // once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(`${base()}/depot.core.v1.ProjectService/ListProjects`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: '{}',
-  });
-  const text = await body.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new DepotApiError({ code: `depot_${statusCode}`, status: statusCode, message: data?.message || data?.detail || `HTTP ${statusCode}`, nextStep: 'Verify DEPOT_TOKEN is valid and has project read access.' });

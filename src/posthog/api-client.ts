@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 const env = loadEnv();
 export class PostHogApiError extends Error {
   readonly code: string; readonly status: number; readonly nextStep: string;
@@ -16,8 +16,10 @@ function requireKey(): string {
 export function isPhiProject(id: string | number): boolean { return String(id) === '468398'; }
 export async function listProjects(): Promise<any[]> {
   const key = requireKey();
-  const { statusCode, body } = await request(`${host()}/api/organizations/@current/projects/`, { method: 'GET', headers: { Authorization: `Bearer ${key}` } });
-  const text = await body.text(); let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(`${host()}/api/organizations/@current/projects/`, { method: 'GET', headers: { Authorization: `Bearer ${key}` } }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text(); let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new PostHogApiError({ code: `posthog_${statusCode}`, status: statusCode, message: data?.detail || data?.message || `HTTP ${statusCode}`, nextStep: 'Verify POSTHOG_PERSONAL_API_KEY scope.' });
   const results: any[] = Array.isArray(data) ? data : (Array.isArray(data?.results) ? data.results : []);
   return results.filter((p) => !isPhiProject(p.id)); // carve out PHI project 468398

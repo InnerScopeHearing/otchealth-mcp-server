@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -48,8 +48,10 @@ async function gumroadRequest<T = any>(
   }
   const url = `${BASE}${path}?${params.toString()}`;
 
-  const { statusCode, body: respBody } = await request(url, { method: 'GET' });
-  const text = await respBody.text();
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(url, { method: 'GET' }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 

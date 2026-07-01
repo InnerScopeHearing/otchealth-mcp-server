@@ -1,7 +1,7 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { CustomerIoApiError } from './app-api-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -26,7 +26,11 @@ async function trackRequest(
   const url = `${BASE}${path}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // GET is read-only (retries:1); trackEvent (POST) and identifyCustomer (PUT) are
+    // non-idempotent writes, so every other method gets retries:0 to avoid a duplicate
+    // tracked event or profile write on a timeout.
+    const retries = method === 'GET' ? 1 : 0;
+    const res = await fetchWithBudget(url, {
       method,
       headers: {
         authorization: basicAuthHeader(),
@@ -34,19 +38,17 @@ async function trackRequest(
         accept: 'application/json',
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      bodyTimeout: opts.timeoutMs ?? 30_000,
-      headersTimeout: opts.timeoutMs ?? 30_000,
-    });
-    const raw = await res.body.text();
+    }, { timeoutMs: opts.timeoutMs ?? 30_000, retries });
+    const raw = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
-        { type: 'cio_track_api_ok', method, path, status: res.statusCode, latency_ms: latency, correlation_id: opts.correlationId },
+        { type: 'cio_track_api_ok', method, path, status: res.status, latency_ms: latency, correlation_id: opts.correlationId },
         'cio track-api ok',
       );
       return raw ? safeJsonParse(raw) : { ok: true };
     }
-    throw mapTrackError(res.statusCode, method, path, raw);
+    throw mapTrackError(res.status, method, path, raw);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
     const latency = Date.now() - started;

@@ -4,8 +4,8 @@
  * packages, products, apps, invoices, and v1 subscriber/receipt endpoints.
  * Auth: Bearer <REVENUECAT_API_KEY> (sk_...)
  */
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -52,8 +52,13 @@ async function rcRequest<T = any>(
     headers['Content-Type'] = 'application/json';
     reqBody = JSON.stringify(body);
   }
-  const { statusCode, body: resBody } = await request(url, { method, headers, body: reqBody });
-  const text = await resBody.text();
+  // GET is read-only (retries:1); POST/DELETE mutate customers/entitlements/offerings/
+  // packages/products/invoices/purchases, so retries:0 to avoid a duplicate mutation on
+  // a timeout.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, { method, headers, body: reqBody }, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) handleError(statusCode, data, path);

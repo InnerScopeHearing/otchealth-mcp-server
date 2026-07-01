@@ -6,8 +6,8 @@
  * Auth: Bearer token + Intercom-Version header.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -108,19 +108,20 @@ function buildQuery(q?: Record<string, string | number | boolean | undefined>): 
 async function iGet<T = unknown>(path: string, query?: Record<string, string | number | boolean | undefined>): Promise<T> {
   const token = requireToken();
   const url = `${BASE}${path}${buildQuery(query)}`;
-  const res = await request(url, {
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(url, {
     method: 'GET',
     headers: {
       authorization: `Bearer ${token}`,
       accept: 'application/json',
       'intercom-version': INTERCOM_VERSION,
     },
-  });
-  const text = await res.body.text();
-  if (res.statusCode >= 200 && res.statusCode < 300) {
+  }, { retries: 1 });
+  const text = await res.text();
+  if (res.status >= 200 && res.status < 300) {
     return text ? (JSON.parse(text) as T) : ({} as T);
   }
-  throw mapError(res.statusCode, path, text);
+  throw mapError(res.status, path, text);
 }
 
 async function iWrite<T = unknown>(
@@ -130,7 +131,11 @@ async function iWrite<T = unknown>(
 ): Promise<T> {
   const token = requireToken();
   const url = `${BASE}${path}`;
-  const res = await request(url, {
+  // Non-idempotent by default (creates/updates/deletes contacts, conversations, tickets,
+  // articles, tags, etc.): retries:0 so a timeout never causes a duplicate mutation. Note
+  // some POST calls here (search endpoints) are read-only queries, but this helper is
+  // conservatively retries:0 across the board per the no-duplicate-write-on-timeout rule.
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       authorization: `Bearer ${token}`,
@@ -139,12 +144,12 @@ async function iWrite<T = unknown>(
       'intercom-version': INTERCOM_VERSION,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.body.text();
-  if (res.statusCode >= 200 && res.statusCode < 300) {
+  }, { retries: 0 });
+  const text = await res.text();
+  if (res.status >= 200 && res.status < 300) {
     return text ? (JSON.parse(text) as T) : ({} as T);
   }
-  throw mapError(res.statusCode, path, text);
+  throw mapError(res.status, path, text);
 }
 
 // ===========================================================================

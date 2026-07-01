@@ -10,8 +10,8 @@
  *   - createDeployHook   — POST /sites/{id}/build_hooks     (create a webhook URL that triggers a build)
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -62,15 +62,19 @@ async function netlifyWrite<T = unknown>(
   body?: unknown,
 ): Promise<{ statusCode: number; data: T }> {
   const key = requireKey();
-  const { statusCode, body: rb } = await request(`${BASE}${path}`, {
+  // Every call through netlifyWrite() is a non-idempotent mutation (trigger a build,
+  // set an env var, create a deploy hook): retries:0 so a timeout never causes a
+  // duplicate deploy trigger or env-var write.
+  const res = await fetchWithBudget(`${BASE}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await rb.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = text ? { raw: text } : null; }
   if (statusCode >= 400)

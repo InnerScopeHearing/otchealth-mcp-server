@@ -12,7 +12,7 @@
  *   and CLO commercial contracts only. PHI goes to the BAA-covered engine.
  */
 
-import { request } from 'undici';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const API_VERSION = '2024-11-30';
 const POLL_INTERVAL_MS = 2_000;
@@ -91,15 +91,18 @@ export async function analyzeDocument(
   if (source.base64Source) body['base64Source'] = source.base64Source;
 
   // --- Submit analysis job ---
-  const { statusCode: submitStatus, headers, body: submitBody } = await request(analyzeUrl, {
+  // Non-idempotent: starts a billed Document Intelligence analysis job. retries:0 so a
+  // timeout never submits a duplicate (and doubly-billed) analysis.
+  const submitRes = await fetchWithBudget(analyzeUrl, {
     method: 'POST',
     headers: {
       'Ocp-Apim-Subscription-Key': key,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-  });
-  await submitBody.dump(); // drain the body to release socket
+  }, { retries: 0 });
+  const submitStatus = submitRes.status;
+  await submitRes.arrayBuffer(); // drain the body to release the connection
 
   if (submitStatus !== 202) {
     // Non-202 means immediate error — drain and surface it
@@ -111,8 +114,8 @@ export async function analyzeDocument(
     });
   }
 
-  const operationLocation = headers['operation-location'];
-  if (!operationLocation || typeof operationLocation !== 'string') {
+  const operationLocation = submitRes.headers.get('operation-location');
+  if (!operationLocation) {
     throw new DocIntelApiError({
       code: 'docintel_missing_operation_location',
       status: 202,
@@ -127,11 +130,13 @@ export async function analyzeDocument(
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL_MS);
 
-    const { statusCode: pollStatus, body: pollBody } = await request(operationLocation, {
+    // Read-only poll: safe to retry once on a network blip / 429 / 5xx.
+    const pollRes = await fetchWithBudget(operationLocation, {
       method: 'GET',
       headers: { 'Ocp-Apim-Subscription-Key': key },
-    });
-    const pollText = await pollBody.text();
+    }, { retries: 1 });
+    const pollStatus = pollRes.status;
+    const pollText = await pollRes.text();
     let pollData: any;
     try { pollData = JSON.parse(pollText); } catch { pollData = { raw: pollText }; }
 

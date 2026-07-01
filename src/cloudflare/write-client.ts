@@ -9,8 +9,8 @@
  *  Email: updateEmailRoutingRule (PUT), deleteEmailRoutingRule (DELETE)
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -69,15 +69,18 @@ async function cfWrite<T = unknown>(
 ): Promise<T> {
   const token = requireToken();
   const url = `${BASE}${path}`;
-  const { statusCode, body: respBody } = await request(url, {
+  // Every call through cfWrite() is a mutation (PATCH/PUT/DELETE): retries:0 so a
+  // timeout never doubles a write against the zone (see the fetch-budget policy note).
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
-  const text = await respBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 

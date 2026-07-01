@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -49,14 +49,16 @@ async function stripeRequest<T = unknown>(
   }
 
   const auth = Buffer.from(`${key}:`).toString('base64');
-  const { statusCode, body: respBody } = await request(url, {
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(url, {
     method: 'GET',
     headers: {
       Authorization: `Basic ${auth}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-  });
-  const text = await respBody.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 

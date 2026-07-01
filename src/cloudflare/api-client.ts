@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -60,15 +60,19 @@ async function cfRequest<T = unknown>(
     const qs = params.toString();
     if (qs) url += `?${qs}`;
   }
-  const { statusCode, body: respBody } = await request(url, {
+  // GET/DELETE-by-id here are idempotent (retries:1); POST/PATCH mutate zone
+  // config, so those get retries:0 to avoid a duplicate write on a timeout.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const text = await respBody.text();
+  }, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 

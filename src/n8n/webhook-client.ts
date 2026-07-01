@@ -8,9 +8,9 @@
  */
 
 import { createHmac } from 'node:crypto';
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -56,7 +56,9 @@ export async function callN8nWebhook(args: N8nWebhookCallArgs): Promise<N8nWebho
   const started = Date.now();
 
   try {
-    const res = await request(url, {
+    // Triggers an arbitrary n8n workflow (may send email/SMS, write to Shopify, etc.):
+    // non-idempotent, retries:0 so a timeout never causes a duplicate workflow run.
+    const res = await fetchWithBudget(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -67,26 +69,24 @@ export async function callN8nWebhook(args: N8nWebhookCallArgs): Promise<N8nWebho
         'x-signature-sha256': signature,
       },
       body: bodyString,
-      bodyTimeout: timeout,
-      headersTimeout: timeout,
-    });
-    const text = await res.body.text();
+    }, { timeoutMs: timeout, retries: 0 });
+    const text = await res.text();
     const latency = Date.now() - started;
     logger.info(
       {
         type: 'n8n_webhook_response',
         tool: args.toolName,
         correlation_id: args.correlationId,
-        status: res.statusCode,
+        status: res.status,
         latency_ms: latency,
       },
       'n8n webhook response',
     );
-    if (res.statusCode < 200 || res.statusCode >= 300) {
+    if (res.status < 200 || res.status >= 300) {
       throw new N8nWebhookError({
         code: 'n8n_upstream_error',
-        status: res.statusCode,
-        message: `n8n webhook returned ${res.statusCode} for ${args.webhookPath}.`,
+        status: res.status,
+        message: `n8n webhook returned ${res.status} for ${args.webhookPath}.`,
         nextStep: `Check n8n execution log at ${env.N8N_BASE_URL}/executions for tool ${args.toolName}.`,
       });
     }
@@ -96,8 +96,8 @@ export async function callN8nWebhook(args: N8nWebhookCallArgs): Promise<N8nWebho
     if (!text) {
       throw new N8nWebhookError({
         code: 'n8n_empty_response',
-        status: res.statusCode,
-        message: `n8n workflow returned ${res.statusCode} with empty body for ${args.webhookPath}. This usually means the workflow halted on an unhandled node error.`,
+        status: res.status,
+        message: `n8n workflow returned ${res.status} with empty body for ${args.webhookPath}. This usually means the workflow halted on an unhandled node error.`,
         nextStep: `Inspect the n8n execution log at ${env.N8N_BASE_URL}/executions for correlation_id ${args.correlationId} (filter by workflow name "${args.toolName}").`,
       });
     }
@@ -107,7 +107,7 @@ export async function callN8nWebhook(args: N8nWebhookCallArgs): Promise<N8nWebho
         // Workflow explicitly reported failure (e.g., HMAC invalid or upstream CIO error).
         throw new N8nWebhookError({
           code: 'n8n_workflow_reported_failure',
-          status: res.statusCode,
+          status: res.status,
           message: `n8n workflow reported failure: ${parsed.error ?? 'unspecified'}`,
           nextStep: `Check the audit_payload returned by ${args.toolName} and inspect ${env.N8N_BASE_URL}/executions for correlation_id ${args.correlationId}.`,
         });
@@ -117,7 +117,7 @@ export async function callN8nWebhook(args: N8nWebhookCallArgs): Promise<N8nWebho
       if (parseErr instanceof N8nWebhookError) throw parseErr;
       throw new N8nWebhookError({
         code: 'n8n_unparseable_response',
-        status: res.statusCode,
+        status: res.status,
         message: `n8n returned non-JSON 2xx body for ${args.webhookPath}: ${text.slice(0, 200)}`,
         nextStep: `Verify the workflow's respondToWebhook node returns JSON (respondWith: 'json').`,
       });

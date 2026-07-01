@@ -10,7 +10,7 @@
  * connectors in this repo.
  */
 
-import { request } from 'undici';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 // ---------------------------------------------------------------------------
 // Config helpers — read directly from process.env (loadEnv schema doesn't
@@ -52,16 +52,19 @@ async function csPost<T = unknown>(path: string, body: unknown): Promise<T> {
   const key = apiKey()!;
   const url = `${base}${path}`;
 
-  const { statusCode, body: resBody } = await request(url, {
+  // Both callers (shieldPrompt, detectGroundedness) are stateless classification
+  // queries with no side effect: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Ocp-Apim-Subscription-Key': key,
     },
     body: JSON.stringify(body),
-  });
+  }, { retries: 1 });
 
-  const text = await resBody.text();
+  const statusCode = res.status;
+  const text = await res.text();
   let data: unknown;
   try {
     data = JSON.parse(text);

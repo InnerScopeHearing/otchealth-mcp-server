@@ -13,8 +13,8 @@
  *   - Bulk operations of any kind
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 const BASE = 'https://api.gumroad.com/v2';
@@ -63,8 +63,10 @@ async function gGet<T = any>(
     }
   }
   const url = `${BASE}${path}?${params.toString()}`;
-  const { statusCode, body: respBody } = await request(url, { method: 'GET' });
-  const text = await respBody.text();
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(url, { method: 'GET' }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400 || data?.success === false) {
@@ -94,12 +96,17 @@ async function gMutate<T = any>(
     }
   }
   const url = `${BASE}${path}`;
-  const { statusCode, body: respBody } = await request(url, {
+  // Non-idempotent by default (create/update/delete variants, offer codes, custom
+  // fields, sales actions, license operations): retries:0 so a timeout never causes a
+  // duplicate mutation. verifyLicense is a read-shaped check but uses POST here, so it
+  // conservatively stays retries:0 too, per the no-duplicate-write-on-timeout rule.
+  const res = await fetchWithBudget(url, {
     method,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
-  });
-  const text = await respBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400 || data?.success === false) {

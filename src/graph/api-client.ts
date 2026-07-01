@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -52,12 +52,15 @@ export async function getAccessToken(): Promise<string> {
     scope: 'https://graph.microsoft.com/.default',
   });
 
-  const { statusCode, body: respBody } = await request(tokenUrl, {
+  // Token mint is a read-only OAuth exchange (no state mutation on Microsoft's side
+  // beyond issuing a token): safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
-  });
-  const text = await respBody.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = {}; }
 
@@ -87,15 +90,20 @@ async function graphRequest<T = unknown>(
 ): Promise<T> {
   const token = await getAccessToken();
   const url = `https://graph.microsoft.com/v1.0${path}`;
-  const { statusCode, body: respBody } = await request(url, {
+  // GET is read-only (retries:1); this helper is also used for sendMail (POST), a
+  // non-idempotent write, so every other method gets retries:0 to avoid a duplicate
+  // send/mutation on a timeout.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const text = await respBody.text();
+  }, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
 
   // 202 Accepted (sendMail) or 204 No Content returns empty body
   if (statusCode === 202 || statusCode === 204) {

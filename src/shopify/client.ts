@@ -1,6 +1,6 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -55,25 +55,24 @@ export async function shopifyRestGet<T = unknown>(path: string, opts: ShopifyRes
   const url = `https://${shop}/admin/api/${version}${path}${buildQuery(opts.query)}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+    const res = await fetchWithBudget(url, {
       method: 'GET',
       headers: {
         'x-shopify-access-token': token,
         accept: 'application/json',
       },
-      bodyTimeout: opts.timeoutMs ?? 30_000,
-      headersTimeout: opts.timeoutMs ?? 30_000,
-    });
-    const body = await res.body.text();
+    }, { timeoutMs: opts.timeoutMs ?? 30_000, retries: 1 });
+    const body = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
-        { type: 'shopify_rest_ok', path, status: res.statusCode, latency_ms: latency, correlation_id: opts.correlationId },
+        { type: 'shopify_rest_ok', path, status: res.status, latency_ms: latency, correlation_id: opts.correlationId },
         'shopify rest ok',
       );
       return body ? (JSON.parse(body) as T) : ({} as T);
     }
-    throw mapError(res.statusCode, path, body);
+    throw mapError(res.status, path, body);
   } catch (err) {
     if (err instanceof ShopifyApiError) throw err;
     const latency = Date.now() - started;

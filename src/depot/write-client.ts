@@ -15,8 +15,8 @@
  * has been GA since June 2026.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -55,7 +55,9 @@ const DEPOT_BASE = 'https://api.depot.dev';
 
 async function depotPost<T = any>(rpcPath: string, body: unknown): Promise<T> {
   const token = requireToken();
-  const { statusCode, body: rb } = await request(`${DEPOT_BASE}${rpcPath}`, {
+  // Both callers (triggerRun, dispatchWorkflow) kick off a real CI run: retries:0 so a
+  // timeout never triggers a duplicate build.
+  const res = await fetchWithBudget(`${DEPOT_BASE}${rpcPath}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -64,8 +66,9 @@ async function depotPost<T = any>(rpcPath: string, body: unknown): Promise<T> {
       'Connect-Protocol-Version': '1',
     },
     body: JSON.stringify(body),
-  });
-  const text = await rb.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400)
