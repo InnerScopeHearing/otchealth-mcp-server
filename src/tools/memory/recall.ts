@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
 import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
-import { agenticRecall } from '../../memory/agentic.js';
+import { cachedAgenticRecall } from '../../memory/hot-cache.js';
 
 export function registerMemoryRecall(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -30,7 +30,7 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
         count: z.number(),
         mode: z.string(),
       },
-      handler: async (input) => {
+      handler: async (input, ctx) => {
         const limit = input.limit ?? 25;
         const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
 
@@ -38,12 +38,24 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
         // focused sub-queries, fans out hybrid (BM25 + semantic-ranker) searches concurrently, and
         // fuses with Reciprocal Rank Fusion. Highest-quality recall for the whole fleet. Falls
         // through to flat semantic, then keyword, when search isn't configured or errors.
+        //
+        // A HOT read-through cache sits in front of this (Cosmos vector cache, cachedAgenticRecall):
+        // near-duplicate repeat queries from the SAME caller lane skip the query-plan/hybrid/RRF
+        // pipeline entirely. `scope` (the cache partition) is the caller's own OAuth-derived lane
+        // (ctx.callerAgent) so results never cross agent lanes; `agent` is the unrelated content
+        // filter above, forwarded through unchanged. The privilege-walled clo-personal lane is
+        // never cached (defense in depth; it should never reach the gateway as a caller identity).
         try {
-          const ar = await agenticRecall(input.query, { agent: agentFilter ?? undefined, top: 5 });
-          if (ar.mode === 'agentic-hybrid' && ar.results.length > 0) {
+          const ar = await cachedAgenticRecall(input.query, {
+            scope: ctx.callerAgent,
+            agent: agentFilter ?? undefined,
+            top: 5,
+          });
+          if ((ar.mode === 'agentic-hybrid' || ar.mode === 'cache-hit') && ar.results.length > 0) {
+            const cacheNote = ar.cacheHit ? ' [cache hit]' : '';
             return {
               data: { matches: ar.results, count: ar.results.length, mode: ar.mode },
-              summary: `${ar.results.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length}).`,
+              summary: `${ar.results.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
             };
           }
         } catch {
