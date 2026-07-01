@@ -90,6 +90,7 @@ jobs:
           set -euo pipefail
           FQDN=$(az containerapp revision show -n "$APP" -g "$APP_RG" \
             --revision "${{ steps.green.outputs.revision }}" --query properties.fqdn -o tsv)
+          echo "fqdn=${FQDN}" >> "$GITHUB_OUTPUT"
           for i in $(seq 1 25); do
             code=$(curl -fsS -o /tmp/h.json -w '%{http_code}' "https://${FQDN}/health" 2>/dev/null || echo 000)
             [ "$code" = "200" ] && break
@@ -103,6 +104,44 @@ jobs:
             if (n < min) { console.error(`REGRESSION: tool_count ${n} < ${min}`); process.exit(1); }
             console.log(`GREEN healthy: ${n} tools advertised (>= ${min}).`);
           '
+        id: health
+
+      # Deep dependency gate: /health status + tool_count alone say nothing about whether the
+      # GREEN revision can actually REACH Cosmos / Azure AI Search / Foundry, a build with a dead
+      # downstream endpoint still returns /health status "ok". /health/deep runs one bounded
+      # (2s-timeout) reachability probe per CONFIGURED dependency; an unconfigured optional
+      # dependency reports 'unconfigured' and never fails this gate, only a real 'down' does.
+      # Requires the ADMIN_REVOKE_TOKEN repo secret (the same bearer already documented in
+      # README.md's env-var table and used against POST /admin/revoke); it is never printed.
+      - name: Assert GREEN deep-health (Cosmos / Search / Foundry reachability)
+        env:
+          ADMIN_REVOKE_TOKEN: ${{ secrets.ADMIN_REVOKE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ADMIN_REVOKE_TOKEN:-}" ]; then
+            echo "::warning::ADMIN_REVOKE_TOKEN repo secret is not set; skipping the deep-health gate. Add it (Settings > Secrets and variables > Actions) to enable dependency-reachability gating on every deploy."
+            exit 0
+          fi
+          FQDN="${{ steps.health.outputs.fqdn }}"
+          code=$(curl -fsS -o /tmp/hd.json -w '%{http_code}' \
+            -H "authorization: Bearer ${ADMIN_REVOKE_TOKEN}" \
+            "https://${FQDN}/health/deep" 2>/dev/null || echo 000)
+          cat /tmp/hd.json
+          node -e '
+            const h = require("/tmp/hd.json");
+            const deps = { cosmos: h.cosmos, search: h.search, foundry: h.foundry };
+            const down = Object.entries(deps).filter(([, v]) => v === "down");
+            if (down.length > 0) {
+              console.error(`REGRESSION: dependency DOWN on GREEN: ${down.map(([k]) => k).join(", ")}`);
+              console.error(JSON.stringify(deps));
+              process.exit(1);
+            }
+            console.log(`GREEN deep-health ok: ${JSON.stringify(deps)} (governance_mode=${h.governance_mode})`);
+          '
+          if [ "$code" != "200" ] && [ "$code" != "503" ]; then
+            echo "::error::/health/deep returned unexpected HTTP ${code} (expected 200 all-ok or 503 with a dependency down, both parsed above)."
+            exit 1
+          fi
 
       - name: Shift 100% traffic to GREEN (blue-green cutover)
         run: |
