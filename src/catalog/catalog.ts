@@ -198,7 +198,7 @@ export function listTools(serviceFilter?: string): ServiceListing[] {
 }
 
 export function serviceCapabilities(service: string) {
-  const info = SERVICE_CATALOG[service];
+  const info = SERVICE_CATALOG[service] ?? EXTRA_SERVICES[service];
   const wired = registeredTools.filter((t) => t.service === service).map((t) => t.name).sort();
   return {
     service,
@@ -213,22 +213,24 @@ export function serviceCapabilities(service: string) {
 }
 
 export function auditUnused() {
+  // The master catalog is SERVICE_CATALOG + the EXTRA_SERVICES fleet connectors (planned/known).
+  const catalog: Record<string, ServiceInfo> = { ...SERVICE_CATALOG, ...EXTRA_SERVICES };
   const wiredServices = new Set(registeredTools.map((t) => t.service));
-  const declared = Object.keys(SERVICE_CATALOG);
+  const declared = Object.keys(catalog);
 
   const planned_services = declared
-    .filter((s) => SERVICE_CATALOG[s].status === 'planned' || !wiredServices.has(s))
-    .map((s) => ({ service: s, description: SERVICE_CATALOG[s].description, planned_tools: SERVICE_CATALOG[s].available }));
+    .filter((s) => catalog[s].status === 'planned' || !wiredServices.has(s))
+    .map((s) => ({ service: s, description: catalog[s].description, planned_tools: catalog[s].available }));
 
   const partial_coverage = declared
-    .filter((s) => wiredServices.has(s) && (SERVICE_CATALOG[s].available?.length ?? 0) > 0)
+    .filter((s) => wiredServices.has(s) && (catalog[s].available?.length ?? 0) > 0)
     .map((s) => ({
       service: s,
       wired_count: registeredTools.filter((t) => t.service === s).length,
-      available_not_wired: SERVICE_CATALOG[s].available,
+      available_not_wired: catalog[s].available,
     }));
 
-  const undocumented_services = [...wiredServices].filter((s) => !SERVICE_CATALOG[s]).sort();
+  const undocumented_services = [...wiredServices].filter((s) => !catalog[s]).sort();
 
   return {
     planned_services,
