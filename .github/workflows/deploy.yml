@@ -6,9 +6,11 @@ name: deploy
 # 838->subset regression), then shifts traffic. The `production` GitHub Environment gates the
 # deploy behind a required reviewer (separation of duties). Auth is OIDC (no stored SP secret).
 #
-# NOTE: workflow_dispatch-only for now. Flip on `push: main` AFTER the OAuth auth-code + token
-# store moves from the in-memory Map to Cosmos, so a revision cutover stops dropping live
-# claude.ai/Hyperagent sessions (verifier-mandated ordering).
+# AUTO-DEPLOY: runs on every push to main (i.e. every merge) AND on manual dispatch. Safe because
+# (1) branch protection means only build-green code reaches main, (2) the OAuth auth-code store now
+# lives in Cosmos so a blue-green revision cutover no longer drops live sessions, and (3) the health
+# + tool_count gate below refuses to shift traffic to a bad revision. Rollback = the previous
+# immutable digest is still a healthy 0%-traffic revision.
 
 on:
   workflow_dispatch:
@@ -17,8 +19,8 @@ on:
         description: 'Why this deploy (audit note)'
         required: false
         default: 'manual release from green main'
-  # push:
-  #   branches: [main]
+  push:
+    branches: [main]
 
 permissions:
   id-token: write
