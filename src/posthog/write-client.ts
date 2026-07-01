@@ -1,6 +1,6 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { isPhiProject } from './api-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -31,12 +31,15 @@ function assertNotPhi(projectId: string | number): void {
 
 async function phPost<T = any>(path: string, body: unknown): Promise<T> {
   const key = requireKey();
-  const { statusCode, body: resBody } = await request(`${host()}${path}`, {
+  // Non-idempotent write (create an annotation or feature flag): retries:0 so a
+  // timeout never causes a duplicate create.
+  const res = await fetchWithBudget(`${host()}${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
-  const text = await resBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new PostHogWriteError({ code: `posthog_${statusCode}`, status: statusCode, message: data?.detail || data?.message || `HTTP ${statusCode}`, nextStep: 'Verify POSTHOG_PERSONAL_API_KEY scope + project id.' });
   return data as T;
@@ -44,12 +47,15 @@ async function phPost<T = any>(path: string, body: unknown): Promise<T> {
 
 async function phPatch<T = any>(path: string, body: unknown): Promise<T> {
   const key = requireKey();
-  const { statusCode, body: resBody } = await request(`${host()}${path}`, {
+  // Non-idempotent write (update a feature flag): retries:0 so a timeout never
+  // causes a racing/duplicate update.
+  const res = await fetchWithBudget(`${host()}${path}`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
-  const text = await resBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new PostHogWriteError({ code: `posthog_${statusCode}`, status: statusCode, message: data?.detail || data?.message || `HTTP ${statusCode}`, nextStep: 'Verify POSTHOG_PERSONAL_API_KEY scope + project id + flag id.' });
   return data as T;

@@ -9,8 +9,8 @@
  *   Filters, Email Routing (settings/catch-all/DNS), Workers Routes, DNSSEC.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -78,15 +78,19 @@ async function cf<T = unknown>(
     const qs = params.toString();
     if (qs) url += `?${qs}`;
   }
-  const { statusCode, body: respBody } = await request(url, {
+  // GET here is idempotent (retries:1); every mutating method (POST/PUT/PATCH/
+  // DELETE) gets retries:0 so a timeout never doubles a write against the zone.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
-  const text = await respBody.text();
+  }, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
@@ -110,7 +114,8 @@ async function cf<T = unknown>(
 async function cfText(method: string, path: string, opts?: { body?: unknown; contentType?: string }): Promise<string> {
   const token = requireToken();
   const url = `${BASE}${path}`;
-  const { statusCode, body: respBody } = await request(url, {
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -119,8 +124,9 @@ async function cfText(method: string, path: string, opts?: { body?: unknown; con
     body: opts?.body !== undefined
       ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body))
       : undefined,
-  });
-  const text = await respBody.text();
+  }, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
   if (statusCode >= 400) {
     throw new CloudflareFullError({
       code: `cloudflare_http_${statusCode}`,
@@ -212,15 +218,17 @@ export async function importDnsRecords(
   ].join('\r\n');
   const token = requireToken();
   const url = `${BASE}/zones/${id}/dns_records/import`;
-  const { statusCode, body: respBody } = await request(url, {
+  // Import is a non-idempotent write (creates/replaces DNS records): retries:0.
+  const res = await fetchWithBudget(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
     },
     body,
-  });
-  const text = await respBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400 || data.success === false) {

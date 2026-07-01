@@ -17,9 +17,9 @@
  *  Audit      : generateAudit
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -128,7 +128,11 @@ async function n8nRequest<T = unknown>(
   const url = `${baseUrl()}/api/v1${path}${buildQuery(opts?.query)}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // GET is read-only (retries:1); POST/PUT/DELETE mutate workflows, executions,
+    // credentials, tags, variables, projects, source control, so retries:0 to avoid a
+    // duplicate mutation on a timeout.
+    const retries = method === 'GET' ? 1 : 0;
+    const res = await fetchWithBudget(url, {
       method,
       headers: {
         'x-n8n-api-key': key,
@@ -136,19 +140,17 @@ async function n8nRequest<T = unknown>(
         accept: 'application/json',
       },
       body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      bodyTimeout: opts?.timeoutMs ?? 30_000,
-      headersTimeout: opts?.timeoutMs ?? 30_000,
-    });
-    const body = await res.body.text();
+    }, { timeoutMs: opts?.timeoutMs ?? 30_000, retries });
+    const body = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
-        { type: 'n8n_full_client_ok', path, method, status: res.statusCode, latency_ms: latency, correlation_id: opts?.correlationId },
+        { type: 'n8n_full_client_ok', path, method, status: res.status, latency_ms: latency, correlation_id: opts?.correlationId },
         'n8n full client ok',
       );
       return body ? (JSON.parse(body) as T) : ({} as T);
     }
-    throw mapError(res.statusCode, path, body);
+    throw mapError(res.status, path, body);
   } catch (err) {
     if (err instanceof N8nFullError) throw err;
     throw new N8nFullError({

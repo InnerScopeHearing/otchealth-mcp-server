@@ -9,8 +9,8 @@
  * standalone so the full surface can be audited and gated independently.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -104,14 +104,16 @@ async function stripeGet<T = unknown>(
     if (qs) url += `?${qs}`;
   }
   const auth = Buffer.from(`${key}:`).toString('base64');
-  const { statusCode, body: respBody } = await request(url, {
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(url, {
     method: 'GET',
     headers: {
       Authorization: `Basic ${auth}`,
       'Stripe-Version': '2024-06-20',
     },
-  });
-  const text = await respBody.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) {
@@ -135,7 +137,9 @@ async function stripePost<T = unknown>(
   const auth = Buffer.from(`${key}:`).toString('base64');
   const params = body ? flattenParams(body) : new URLSearchParams();
   const bodyStr = params.toString();
-  const { statusCode, body: respBody } = await request(url, {
+  // Non-idempotent financial mutation (subscriptions, invoices, payment intents, payouts,
+  // etc.), no idempotency key wired: retries:0 so a timeout never doubles a Stripe write.
+  const res = await fetchWithBudget(url, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${auth}`,
@@ -143,8 +147,9 @@ async function stripePost<T = unknown>(
       'Stripe-Version': '2024-06-20',
     },
     body: bodyStr || undefined,
-  });
-  const text = await respBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) {
@@ -168,7 +173,9 @@ async function stripeDelete<T = unknown>(
   const auth = Buffer.from(`${key}:`).toString('base64');
   const params = body ? flattenParams(body) : new URLSearchParams();
   const bodyStr = params.toString();
-  const { statusCode, body: respBody } = await request(url, {
+  // Non-idempotent delete (product/customer/coupon/invoice-draft deletion): retries:0
+  // so a timeout never causes a duplicate delete attempt against a since-deleted resource.
+  const res = await fetchWithBudget(url, {
     method: 'DELETE',
     headers: {
       Authorization: `Basic ${auth}`,
@@ -176,8 +183,9 @@ async function stripeDelete<T = unknown>(
       'Stripe-Version': '2024-06-20',
     },
     body: bodyStr || undefined,
-  });
-  const text = await respBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) {

@@ -13,10 +13,10 @@
  * mirroring the read-client carve for PHI projects.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { CustomerIoApiError } from './app-api-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -60,7 +60,9 @@ async function trackWrite(
   const url = `${TRACK_BASE}${path}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Non-idempotent write (create/update/delete/suppress/unsuppress a customer
+    // profile): retries:0 so a timeout never causes a duplicate mutation.
+    const res = await fetchWithBudget(url, {
       method,
       headers: {
         authorization: trackBasicAuth(),
@@ -68,19 +70,17 @@ async function trackWrite(
         accept: 'application/json',
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      bodyTimeout: 30_000,
-      headersTimeout: 30_000,
-    });
-    const raw = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    const raw = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
-        { type: 'cio_track_write_ok', method, path, status: res.statusCode, latency_ms: latency, correlation_id: correlationId },
+        { type: 'cio_track_write_ok', method, path, status: res.status, latency_ms: latency, correlation_id: correlationId },
         'cio track write ok',
       );
       return raw ? safeJsonParse(raw) : { ok: true };
     }
-    throw mapTrackError(res.statusCode, method, path, raw);
+    throw mapTrackError(res.status, method, path, raw);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
     const latency = Date.now() - started;
@@ -108,7 +108,9 @@ async function appWrite<T = unknown>(
   const url = `${APP_BASE}${path}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Non-idempotent write (send a transactional email, trigger a broadcast send to
+    // a whole campaign audience): retries:0 so a timeout never causes a duplicate send.
+    const res = await fetchWithBudget(url, {
       method,
       headers: {
         authorization: appBearerAuth(),
@@ -116,19 +118,17 @@ async function appWrite<T = unknown>(
         accept: 'application/json',
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      bodyTimeout: 30_000,
-      headersTimeout: 30_000,
-    });
-    const raw = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    const raw = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
-        { type: 'cio_app_write_ok', method, path, status: res.statusCode, latency_ms: latency, correlation_id: correlationId },
+        { type: 'cio_app_write_ok', method, path, status: res.status, latency_ms: latency, correlation_id: correlationId },
         'cio app write ok',
       );
       return raw ? (JSON.parse(raw) as T) : ({} as T);
     }
-    throw mapAppError(res.statusCode, path, raw);
+    throw mapAppError(res.status, path, raw);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
     const latency = Date.now() - started;

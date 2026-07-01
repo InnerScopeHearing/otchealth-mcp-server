@@ -4,8 +4,8 @@
  * by new tool files without touching the existing clients.
  * PHI ring guard: assertNotPhi() / filterPhi() must be called on every project-scoped op.
  */
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -55,8 +55,12 @@ async function req<T = any>(method: string, path: string, body?: unknown): Promi
   const key = requireKey();
   const opts: Record<string, any> = { method, headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' } };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const { statusCode, body: resBody } = await request(`${base()}${path}`, opts);
-  const text = await resBody.text();
+  // GET is read-only (retries:1); POST/PUT/DELETE mutate issues/projects/teams/releases/
+  // alert rules, so retries:0 to avoid a duplicate mutation on a timeout.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(`${base()}${path}`, opts, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new SentryFullError({ code: `sentry_${statusCode}`, status: statusCode, message: data?.detail ?? `HTTP ${statusCode}`, nextStep: 'Verify SENTRY_AUTH_TOKEN scopes and org/project slug.' });
   return data as T;

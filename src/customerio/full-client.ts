@@ -12,10 +12,10 @@
  * this file is fully self-contained.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { CustomerIoApiError } from './app-api-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -101,18 +101,18 @@ async function appGet<T = unknown>(path: string, query?: Record<string, string |
   const url = `${APP_BASE}${path}${buildQuery(query)}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+    const res = await fetchWithBudget(url, {
       method: 'GET',
       headers: { authorization: appBearer(), accept: 'application/json' },
-      bodyTimeout: 30_000, headersTimeout: 30_000,
-    });
-    const body = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 1 });
+    const body = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      logger.debug({ type: 'cio_full_app_get_ok', path, status: res.statusCode, latency_ms: latency, correlation_id: correlationId }, 'cio full-client app GET ok');
+    if (res.status >= 200 && res.status < 300) {
+      logger.debug({ type: 'cio_full_app_get_ok', path, status: res.status, latency_ms: latency, correlation_id: correlationId }, 'cio full-client app GET ok');
       return body ? (JSON.parse(body) as T) : ({} as T);
     }
-    throw mapAppError(res.statusCode, path, body);
+    throw mapAppError(res.status, path, body);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
     throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error GET ${path}: ${(err as Error).message}`, nextStep: 'Check Railway logs and Customer.io status page.', upstream: err });
@@ -123,19 +123,21 @@ async function appWrite<T = unknown>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   const url = `${APP_BASE}${path}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Non-idempotent by default (create/update/delete newsletters, segments,
+    // collections, snippets, exports; also used for searchCustomers, a read-shaped
+    // POST): retries:0 so a timeout never causes a duplicate mutation.
+    const res = await fetchWithBudget(url, {
       method,
       headers: { authorization: appBearer(), 'content-type': 'application/json', accept: 'application/json' },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      bodyTimeout: 30_000, headersTimeout: 30_000,
-    });
-    const raw = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    const raw = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      logger.debug({ type: 'cio_full_app_write_ok', method, path, status: res.statusCode, latency_ms: latency, correlation_id: correlationId }, 'cio full-client app write ok');
+    if (res.status >= 200 && res.status < 300) {
+      logger.debug({ type: 'cio_full_app_write_ok', method, path, status: res.status, latency_ms: latency, correlation_id: correlationId }, 'cio full-client app write ok');
       return raw ? (JSON.parse(raw) as T) : ({} as T);
     }
-    throw mapAppError(res.statusCode, path, raw);
+    throw mapAppError(res.status, path, raw);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
     throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error ${method} ${path}: ${(err as Error).message}`, nextStep: 'Check Railway logs and Customer.io status page.', upstream: err });
@@ -146,19 +148,20 @@ async function trackWrite(method: 'PUT' | 'POST' | 'DELETE' | 'PATCH', path: str
   const url = `${TRACK_BASE}${path}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Non-idempotent write (create/update/delete objects, relationships, devices,
+    // merge customers): retries:0 so a timeout never causes a duplicate mutation.
+    const res = await fetchWithBudget(url, {
       method,
       headers: { authorization: trackBasic(), 'content-type': 'application/json', accept: 'application/json' },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      bodyTimeout: 30_000, headersTimeout: 30_000,
-    });
-    const raw = await res.body.text();
+    }, { timeoutMs: 30_000, retries: 0 });
+    const raw = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      logger.debug({ type: 'cio_full_track_write_ok', method, path, status: res.statusCode, latency_ms: latency, correlation_id: correlationId }, 'cio full-client track write ok');
+    if (res.status >= 200 && res.status < 300) {
+      logger.debug({ type: 'cio_full_track_write_ok', method, path, status: res.status, latency_ms: latency, correlation_id: correlationId }, 'cio full-client track write ok');
       return raw ? safeJson(raw) : { ok: true };
     }
-    throw mapTrackError(res.statusCode, method, path, raw);
+    throw mapTrackError(res.status, method, path, raw);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
     throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error ${method} ${path}: ${(err as Error).message}`, nextStep: 'Check Railway logs and Customer.io status page.', upstream: err });

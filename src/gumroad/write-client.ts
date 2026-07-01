@@ -18,8 +18,8 @@
  *   See: https://app.gumroad.com/api#products
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 const BASE = 'https://api.gumroad.com/v2';
@@ -73,12 +73,15 @@ async function gumroadMutate<T = any>(
     }
   }
   const url = `${BASE}${path}`;
-  const { statusCode, body: respBody } = await request(url, {
+  // Non-idempotent write (enable/disable/update a product, a real storefront change):
+  // retries:0 so a timeout never causes a duplicate/racing mutation.
+  const res = await fetchWithBudget(url, {
     method,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
-  });
-  const text = await respBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 

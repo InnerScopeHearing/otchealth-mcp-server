@@ -5,8 +5,8 @@
  * This file is self-contained so the read client is never modified (hard rule).
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -89,7 +89,9 @@ async function intercomWrite<T = unknown>(
 ): Promise<T> {
   const token = requireToken();
   const url = `${BASE}${path}`;
-  const res = await request(url, {
+  // Non-idempotent write (create contact/conversation/reply/note/article): retries:0
+  // so a timeout never causes a duplicate conversation, reply, or article.
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -98,12 +100,12 @@ async function intercomWrite<T = unknown>(
       'Intercom-Version': INTERCOM_VERSION,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.body.text();
-  if (res.statusCode >= 200 && res.statusCode < 300) {
+  }, { retries: 0 });
+  const text = await res.text();
+  if (res.status >= 200 && res.status < 300) {
     return text ? (JSON.parse(text) as T) : ({} as T);
   }
-  throw mapError(res.statusCode, path, text);
+  throw mapError(res.status, path, text);
 }
 
 // ===========================================================================

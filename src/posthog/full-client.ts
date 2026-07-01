@@ -5,8 +5,8 @@
  * AND read operation — no data at all flows for that project.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -75,12 +75,18 @@ async function ph<T = any>(
   const url = `${host()}${path}`;
   const headers: Record<string, string> = { Authorization: `Bearer ${key}` };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const { statusCode, body: resBody } = await request(url, {
+  // GET is read-only (retries:1); POST/PATCH/PUT/DELETE mutate feature flags, insights,
+  // dashboards, annotations, cohorts, persons, experiments, surveys, actions, and the
+  // project itself (also used for queryHogQL, a read-shaped POST): retries:0 to avoid a
+  // duplicate mutation on a timeout.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await resBody.text();
+  }, { retries });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try {
     data = JSON.parse(text);

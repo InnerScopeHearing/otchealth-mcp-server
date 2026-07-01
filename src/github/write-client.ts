@@ -10,9 +10,9 @@
  * applied to Sentry/PostHog in the read clients.
  */
 
-import { request } from 'undici';
 import { createSign } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -100,11 +100,13 @@ async function getInstallationToken(): Promise<string> {
 
   const jwt = mintJwt();
   const url = `https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
-  const { statusCode, body } = await request(url, {
+  // Token mint: retries:0 (a duplicate mint is wasted, not harmful, but be conservative).
+  const res = await fetchWithBudget(url, {
     method: 'POST',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${jwt}` },
-  });
-  const text = await body.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400)
@@ -129,7 +131,9 @@ async function ghSend<T = any>(
   body?: unknown,
 ): Promise<T> {
   const token = await getInstallationToken();
-  const { statusCode, body: rb } = await request(`https://api.github.com${path}`, {
+  // Non-idempotent write (create branch/file/issue/release, dispatch a workflow, etc.):
+  // retries:0 so a timeout never causes a duplicate GitHub mutation.
+  const res = await fetchWithBudget(`https://api.github.com${path}`, {
     method,
     headers: {
       ...GITHUB_HEADERS,
@@ -137,8 +141,9 @@ async function ghSend<T = any>(
       'Content-Type': 'application/json',
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await rb.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400)
@@ -153,11 +158,14 @@ async function ghSend<T = any>(
 
 async function ghGet<T = any>(path: string): Promise<T> {
   const token = await getInstallationToken();
-  const { statusCode, body } = await request(`https://api.github.com${path}`, {
+  // Read-only GET (used here to resolve a branch head / repo default branch before a
+  // write): safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(`https://api.github.com${path}`, {
     method: 'GET',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  });
-  const text = await body.text();
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400)

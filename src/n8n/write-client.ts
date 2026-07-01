@@ -9,10 +9,10 @@
  *  Trigger   : runWorkflow (webhook-based, mirrors webhook-client.ts pattern)
  */
 
-import { request } from 'undici';
 import { createHmac } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -104,7 +104,9 @@ async function n8nWrite<T = unknown>(
   const url = `${baseUrl()}/api/v1${path}`;
   const started = Date.now();
   try {
-    const res = await request(url, {
+    // Non-idempotent write (activate/deactivate/create/update a workflow): retries:0
+    // so a timeout never causes a duplicate workflow or a racing lifecycle change.
+    const res = await fetchWithBudget(url, {
       method,
       headers: {
         'x-n8n-api-key': key,
@@ -112,19 +114,17 @@ async function n8nWrite<T = unknown>(
         accept: 'application/json',
       },
       body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      bodyTimeout: opts?.timeoutMs ?? 30_000,
-      headersTimeout: opts?.timeoutMs ?? 30_000,
-    });
-    const body = await res.body.text();
+    }, { timeoutMs: opts?.timeoutMs ?? 30_000, retries: 0 });
+    const body = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
-        { type: 'n8n_write_ok', path, method, status: res.statusCode, latency_ms: latency, correlation_id: opts?.correlationId },
+        { type: 'n8n_write_ok', path, method, status: res.status, latency_ms: latency, correlation_id: opts?.correlationId },
         'n8n write ok',
       );
       return body ? (JSON.parse(body) as T) : ({} as T);
     }
-    throw mapError(res.statusCode, path, body);
+    throw mapError(res.status, path, body);
   } catch (err) {
     if (err instanceof N8nWriteError) throw err;
     throw new N8nWriteError({
@@ -238,7 +238,9 @@ export async function runWorkflow(args: RunWorkflowArgs): Promise<RunWorkflowRes
   const started = Date.now();
 
   try {
-    const res = await request(url, {
+    // Triggers an arbitrary n8n workflow (may send email/SMS, write to Shopify, etc.):
+    // non-idempotent, retries:0 so a timeout never causes a duplicate workflow run.
+    const res = await fetchWithBudget(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -249,28 +251,26 @@ export async function runWorkflow(args: RunWorkflowArgs): Promise<RunWorkflowRes
         'x-signature-sha256': signature,
       },
       body: bodyString,
-      bodyTimeout: timeout,
-      headersTimeout: timeout,
-    });
-    const text = await res.body.text();
+    }, { timeoutMs: timeout, retries: 0 });
+    const text = await res.text();
     const latency = Date.now() - started;
     logger.info(
-      { type: 'n8n_run_webhook_response', tool: args.toolName, correlation_id: args.correlationId, status: res.statusCode, latency_ms: latency },
+      { type: 'n8n_run_webhook_response', tool: args.toolName, correlation_id: args.correlationId, status: res.status, latency_ms: latency },
       'n8n run webhook response',
     );
-    if (res.statusCode < 200 || res.statusCode >= 300) {
+    if (res.status < 200 || res.status >= 300) {
       throw new N8nWriteError({
         code: 'n8n_upstream_error',
-        status: res.statusCode,
-        message: `n8n webhook returned ${res.statusCode} for ${args.webhookPath}.`,
+        status: res.status,
+        message: `n8n webhook returned ${res.status} for ${args.webhookPath}.`,
         nextStep: `Check n8n execution log at ${env.N8N_BASE_URL}/executions for tool ${args.toolName}.`,
       });
     }
     if (!text) {
       throw new N8nWriteError({
         code: 'n8n_empty_response',
-        status: res.statusCode,
-        message: `n8n workflow returned ${res.statusCode} with empty body for ${args.webhookPath}. Workflow likely halted on an unhandled node error.`,
+        status: res.status,
+        message: `n8n workflow returned ${res.status} with empty body for ${args.webhookPath}. Workflow likely halted on an unhandled node error.`,
         nextStep: `Inspect the n8n execution log at ${env.N8N_BASE_URL}/executions for correlation_id ${args.correlationId}.`,
       });
     }
@@ -279,7 +279,7 @@ export async function runWorkflow(args: RunWorkflowArgs): Promise<RunWorkflowRes
       if (parsed.success === false) {
         throw new N8nWriteError({
           code: 'n8n_workflow_reported_failure',
-          status: res.statusCode,
+          status: res.status,
           message: `n8n workflow reported failure: ${parsed.error ?? 'unspecified'}`,
           nextStep: `Check the audit_payload returned by ${args.toolName} and inspect ${env.N8N_BASE_URL}/executions for correlation_id ${args.correlationId}.`,
         });
@@ -289,7 +289,7 @@ export async function runWorkflow(args: RunWorkflowArgs): Promise<RunWorkflowRes
       if (parseErr instanceof N8nWriteError) throw parseErr;
       throw new N8nWriteError({
         code: 'n8n_unparseable_response',
-        status: res.statusCode,
+        status: res.status,
         message: `n8n returned non-JSON 2xx body for ${args.webhookPath}: ${text.slice(0, 200)}`,
         nextStep: `Verify the workflow's respondToWebhook node returns JSON (respondWith: 'json').`,
       });

@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -22,12 +22,15 @@ function requireKey(): string {
 
 async function rcPostV1<T = any>(path: string, body: unknown): Promise<T> {
   const key = requireKey();
-  const { statusCode, body: resBody } = await request(`https://api.revenuecat.com/v1${path}`, {
+  // Non-idempotent write (subscriber attribute set): retries:0 so a timeout never
+  // causes a duplicate/racing write.
+  const res = await fetchWithBudget(`https://api.revenuecat.com/v1${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
-  const text = await resBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new RevenueCatWriteError({ code: `revenuecat_${statusCode}`, status: statusCode, message: data?.message || data?.error || `HTTP ${statusCode}`, nextStep: 'Verify REVENUECAT_API_KEY (sk_) and app_user_id.' });
   return data as T;
@@ -35,12 +38,15 @@ async function rcPostV1<T = any>(path: string, body: unknown): Promise<T> {
 
 async function rcPostV2<T = any>(path: string, body: unknown): Promise<T> {
   const key = requireKey();
-  const { statusCode, body: resBody } = await request(`https://api.revenuecat.com/v2${path}`, {
+  // Non-idempotent write (grant/revoke a promotional entitlement): retries:0 so a
+  // timeout never grants (or revokes) a duplicate promotional period.
+  const res = await fetchWithBudget(`https://api.revenuecat.com/v2${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
-  const text = await resBody.text();
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new RevenueCatWriteError({ code: `revenuecat_${statusCode}`, status: statusCode, message: data?.message || data?.error || `HTTP ${statusCode}`, nextStep: 'Verify REVENUECAT_API_KEY (sk_), project_id, subscriber_id, and entitlement_id.' });
   return data as T;

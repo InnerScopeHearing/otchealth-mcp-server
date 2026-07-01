@@ -1,5 +1,5 @@
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 const env = loadEnv();
 export class SentryApiError extends Error {
   readonly code: string; readonly status: number; readonly nextStep: string;
@@ -17,8 +17,10 @@ function requireKey(): string {
 export function isPhiProject(slug: string): boolean { return /^medreview/i.test(slug || ''); }
 async function sentryGet<T = any>(path: string): Promise<T> {
   const key = requireKey();
-  const { statusCode, body } = await request(`${base()}${path}`, { method: 'GET', headers: { Authorization: `Bearer ${key}` } });
-  const text = await body.text(); let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
+  const res = await fetchWithBudget(`${base()}${path}`, { method: 'GET', headers: { Authorization: `Bearer ${key}` } }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text(); let data: any; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (statusCode >= 400) throw new SentryApiError({ code: `sentry_${statusCode}`, status: statusCode, message: data?.detail || `HTTP ${statusCode}`, nextStep: 'Verify SENTRY_AUTH_TOKEN scope + org slug.' });
   return data as T;
 }

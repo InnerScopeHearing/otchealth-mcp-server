@@ -9,9 +9,9 @@
  * All endpoints are REST (not GraphQL) to match the existing read client.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -136,7 +136,11 @@ async function shopifyRestWrite<T = unknown>(
   const started = Date.now();
   const bodyStr = body !== undefined ? JSON.stringify(body) : undefined;
   try {
-    const res = await request(url, {
+    // Every call through shopifyRestWrite() is a non-idempotent mutation (product/order/
+    // draft-order/fulfillment/inventory write, some HIGH-RISK e.g. completeDraftOrder and
+    // fulfillOrder trigger a real charge / shipment): retries:0 so a timeout never causes
+    // a duplicate order, fulfillment, or inventory write.
+    const res = await fetchWithBudget(url, {
       method,
       headers: {
         'x-shopify-access-token': token,
@@ -144,18 +148,16 @@ async function shopifyRestWrite<T = unknown>(
         accept: 'application/json',
       },
       body: bodyStr,
-      bodyTimeout: opts.timeoutMs ?? 30_000,
-      headersTimeout: opts.timeoutMs ?? 30_000,
-    });
-    const text = await res.body.text();
+    }, { timeoutMs: opts.timeoutMs ?? 30_000, retries: 0 });
+    const text = await res.text();
     const latency = Date.now() - started;
-    if (res.statusCode >= 200 && res.statusCode < 300) {
+    if (res.status >= 200 && res.status < 300) {
       logger.debug(
         {
           type: 'shopify_write_ok',
           method,
           path,
-          status: res.statusCode,
+          status: res.status,
           latency_ms: latency,
           correlation_id: opts.correlationId,
         },
@@ -163,7 +165,7 @@ async function shopifyRestWrite<T = unknown>(
       );
       return text ? (JSON.parse(text) as T) : ({} as T);
     }
-    throw mapError(res.statusCode, path, text);
+    throw mapError(res.status, path, text);
   } catch (err) {
     if (err instanceof ShopifyWriteError) throw err;
     const latency = Date.now() - started;

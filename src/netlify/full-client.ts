@@ -20,8 +20,8 @@
  *   Members / accounts — list accounts
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -76,16 +76,20 @@ async function netlifyFetch<T = unknown>(
     if (qs) url += `?${qs}`;
   }
 
-  const { statusCode, body: rb } = await request(url, {
+  // GET is read-only (retries:1); POST/PUT/PATCH/DELETE mutate sites/deploys/env vars/
+  // DNS/forms/snippets/keys, so retries:0 to avoid a duplicate mutation on a timeout.
+  const retries = method === 'GET' ? 1 : 0;
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
     body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
+  }, { retries });
 
-  const text = await rb.text();
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = text ? { raw: text } : null; }
 

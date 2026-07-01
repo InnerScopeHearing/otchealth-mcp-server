@@ -10,8 +10,8 @@
  * write operations can be audited and gated independently.
  */
 
-import { request } from 'undici';
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
 
@@ -103,7 +103,11 @@ async function stripeWrite<T = unknown>(
   const params = body ? flattenParams(body) : new URLSearchParams();
   const bodyStr = params.toString();
 
-  const { statusCode, body: respBody } = await request(url, {
+  // Every call through stripeWrite() is a non-idempotent financial mutation (refund,
+  // customer/subscription/price/payment-link create or cancel): retries:0 so a timeout
+  // NEVER causes a duplicate charge, refund, or subscription action. No idempotency key
+  // is wired here, so a retried POST/DELETE could otherwise double the side effect.
+  const res = await fetchWithBudget(url, {
     method,
     headers: {
       Authorization: `Basic ${auth}`,
@@ -111,9 +115,10 @@ async function stripeWrite<T = unknown>(
       'Stripe-Version': '2024-06-20',
     },
     body: bodyStr || undefined,
-  });
+  }, { retries: 0 });
 
-  const text = await respBody.text();
+  const statusCode = res.status;
+  const text = await res.text();
   let data: any;
   try {
     data = JSON.parse(text);
