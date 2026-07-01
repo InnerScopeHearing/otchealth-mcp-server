@@ -1,0 +1,19 @@
+name: Nightly Fleet Medic
+on:
+  schedule:
+    - cron: '0 8 * * *'   # daily 08:00 UTC
+  workflow_dispatch: {}    # manual trigger for testing
+permissions:
+  contents: read
+jobs:
+  medic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run nightly medic
+        env:
+          GH_PAT: ${{ secrets.OTC_AUTOMATION_PAT }}
+          REPO: ${{ github.repository }}
+          AGENT_LOGIN: openai-code-agent
+        run: |
+          curl -fsSL -o medic.mjs https://raw.githubusercontent.com/${{ github.repository }}/main/.github/scripts/nightly-medic.mjs
+          node medic.mjs

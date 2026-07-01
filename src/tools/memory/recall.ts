@@ -2,6 +2,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
+import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
+import { agenticRecall } from '../../memory/agentic.js';
 
 export function registerMemoryRecall(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -26,14 +28,48 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
       outputShape: {
         matches: z.array(z.unknown()),
         count: z.number(),
+        mode: z.string(),
       },
       handler: async (input) => {
-        if (!isConfigured()) {
-          return { data: { matches: [], count: 0 }, summary: 'Shared brain not configured; no results.' };
-        }
         const limit = input.limit ?? 25;
-        const terms = input.query.toLowerCase().split(/\s+/).filter(Boolean);
         const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
+
+        // Prefer AGENTIC HYBRID recall (Azure AI Search memory-exec): decomposes the query into
+        // focused sub-queries, fans out hybrid (BM25 + semantic-ranker) searches concurrently, and
+        // fuses with Reciprocal Rank Fusion. Highest-quality recall for the whole fleet. Falls
+        // through to flat semantic, then keyword, when search isn't configured or errors.
+        try {
+          const ar = await agenticRecall(input.query, { agent: agentFilter ?? undefined, top: 5 });
+          if (ar.mode === 'agentic-hybrid' && ar.results.length > 0) {
+            return {
+              data: { matches: ar.results, count: ar.results.length, mode: ar.mode },
+              summary: `${ar.results.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length}).`,
+            };
+          }
+        } catch {
+          /* fall through to flat semantic / keyword */
+        }
+
+        // Flat SEMANTIC recall fallback: matches by meaning over the same memory-exec index.
+        // Falls back to keyword over the blob feed when search isn't configured or errors.
+        if (semanticConfigured()) {
+          try {
+            const hits = await semanticSearch(input.query, agentFilter, limit);
+            if (hits) {
+              return {
+                data: { matches: hits, count: hits.length, mode: 'semantic' },
+                summary: `${hits.length} semantic match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+              };
+            }
+          } catch {
+            /* fall through to keyword */
+          }
+        }
+
+        if (!isConfigured()) {
+          return { data: { matches: [], count: 0, mode: 'none' }, summary: 'Shared brain not configured; no results.' };
+        }
+        const terms = input.query.toLowerCase().split(/\s+/).filter(Boolean);
         const all = await readSharedAll();
         const matches = all
           .filter((r) => !agentFilter || r.agent === agentFilter)
@@ -43,8 +79,8 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
           })
           .slice(0, limit);
         return {
-          data: { matches, count: matches.length },
-          summary: `${matches.length} match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+          data: { matches, count: matches.length, mode: 'keyword' },
+          summary: `${matches.length} keyword match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
         };
       },
     },

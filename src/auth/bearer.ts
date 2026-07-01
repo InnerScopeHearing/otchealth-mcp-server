@@ -3,12 +3,14 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked } from './revocation-store.js';
+import { isValidIssuedAccessToken, issuedAgent } from '../server/oauth.js';
 
 const env = loadEnv();
 
 export interface AuthContext {
   caller_hash: string;
   raw_token: string;
+  caller_agent: string;
 }
 
 function extractBearer(authHeader: string | undefined): string | null {
@@ -39,8 +41,24 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
     );
     return null;
   }
-  if (!safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) return null;
-  return { caller_hash: hashToken(token), raw_token: token };
+  // Accept: (1) a real issued OAuth 2.1 access token (HS256 JWT); (2) the static connector token
+  // (back-compat, identity=OAUTH_DEFAULT_AGENT); (3) the long-lived low-priv COPILOT_AGENT_TOKEN
+  // (identity='copilot-agent') for the GitHub Copilot coding agents' MCP header. All rotate-before-launch.
+  const issued = isValidIssuedAccessToken(token);
+  let staticAgent: string | null = null;
+  if (!issued) {
+    if (safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) {
+      staticAgent = env.OAUTH_DEFAULT_AGENT || '';
+    } else if (env.COPILOT_AGENT_TOKEN && env.COPILOT_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_AGENT_TOKEN)) {
+      // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
+      // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
+      staticAgent = 'copilot-agent';
+    } else {
+      return null;
+    }
+  }
+  const caller_agent = issued ? (issuedAgent(token) || '') : (staticAgent || '');
+  return { caller_hash: hashToken(token), raw_token: token, caller_agent };
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {

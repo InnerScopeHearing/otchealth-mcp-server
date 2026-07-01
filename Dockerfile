@@ -23,11 +23,17 @@ ENV PORT=8080
 
 WORKDIR /app
 
+# curl: used by the eval harness (eval-runner.mjs) and the HEALTHCHECK probe.
+RUN apk add --no-cache curl
+
 RUN addgroup -S app && adduser -S app -G app
 
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/package.json ./package.json
+# Ship the standalone eval harness (.mjs, not compiled) so the nightly eval Container Apps Job
+# can run `node eval/eval-runner.mjs` against the gateway for the regression baseline.
+COPY --from=build --chown=app:app /app/src/eval ./eval
 
 # ── Datadog observability (APM + logs + metrics) ──────────────────────────────
 # serverless-init wraps the app process and forwards dd-trace traces, logs, and metrics
