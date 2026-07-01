@@ -21,15 +21,15 @@ export interface CapturePayload {
 }
 
 /**
- * Pure, testable: build the PostHog capture body, or null when telemetry is disabled
- * (no key). No IO. The key is a parameter (defaulting to the env value) so tests can
- * exercise both the enabled and inert paths deterministically.
+ * Pure, testable, env-free: build the PostHog capture body, or null when telemetry is
+ * disabled (no key). No IO, no env read — the key is passed in, so this is deterministic
+ * and unit-testable without any environment setup.
  */
 export function buildCapturePayload(
   event: string,
   properties: Record<string, unknown>,
   distinctId?: string,
-  key: string = loadEnv().POSTHOG_GATEWAYOPS_KEY,
+  key?: string,
 ): CapturePayload | null {
   if (!key) return null;
   return {
@@ -43,16 +43,25 @@ export function buildCapturePayload(
 
 /**
  * Fire-and-forget capture to the PostHog ingestion endpoint. Never awaited by the caller,
- * never throws, times out fast (1.5s), and no-ops when no key is configured.
+ * never throws (env read is guarded), times out fast (1.5s), and no-ops when no key is
+ * configured. All env access is wrapped so a missing/invalid env can never reach the hot path.
  */
 export function captureGatewayEvent(
   event: string,
   properties: Record<string, unknown>,
   distinctId?: string,
 ): void {
-  const payload = buildCapturePayload(event, properties, distinctId);
+  let key = '';
+  let host = 'https://us.posthog.com';
+  try {
+    const env = loadEnv();
+    key = env.POSTHOG_GATEWAYOPS_KEY;
+    host = env.POSTHOG_HOST || host;
+  } catch {
+    return; // env not loadable in this context -> stay inert
+  }
+  const payload = buildCapturePayload(event, properties, distinctId, key);
   if (!payload) return;
-  const host = loadEnv().POSTHOG_HOST || 'https://us.posthog.com';
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 1500);
   void fetch(`${host}/i/v0/e/`, {
