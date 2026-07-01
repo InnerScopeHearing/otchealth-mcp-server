@@ -21,6 +21,13 @@ on:
         default: 'manual release from green main'
   push:
     branches: [main]
+    # Only redeploy when something that actually changes the built image changes. A workflow /
+    # infra / docs-only merge must NOT spend an ACR build + revision cutover.
+    paths-ignore:
+      - '.github/**'
+      - 'infra/**'
+      - 'docs/**'
+      - '**.md'
 
 permissions:
   id-token: write
@@ -102,3 +109,26 @@ jobs:
           az containerapp ingress traffic set -n "$APP" -g "$APP_RG" \
             --revision-weight "${{ steps.green.outputs.revision }}=100"
           echo "Live on ${{ steps.green.outputs.revision }} (digest ${{ steps.digest.outputs.ref }})."
+
+      # Self-healing: if anything after the GREEN revision came up failed (health gate, cutover),
+      # traffic never left the last-good (blue) revision. Deactivate the bad GREEN so it does not
+      # linger as an idle warm replica burning the shared free grant. Rollback is automatic: blue
+      # still holds 100% traffic.
+      - name: Roll back on failure (deactivate the bad GREEN; traffic stays on blue)
+        if: failure() && steps.green.outputs.revision != ''
+        run: |
+          echo "::warning::Deploy failed after GREEN came up. Traffic stayed on the last-good revision; deactivating ${{ steps.green.outputs.revision }}."
+          az containerapp revision deactivate -n "$APP" -g "$APP_RG" \
+            --revision "${{ steps.green.outputs.revision }}" || true
+
+      # Release hygiene: keep the now-active GREEN + the single most-recent inactive (instant
+      # rollback target); deactivate older inactive revisions so idle replicas stop burning the grant.
+      - name: Prune stale revisions (keep active + one warm rollback)
+        if: success()
+        run: |
+          set -euo pipefail
+          az containerapp revision list -n "$APP" -g "$APP_RG" -o json \
+            | jq -r '[.[] | select(.properties.active and .properties.trafficWeight==0)] | sort_by(.properties.createdTime) | .[:-1] | .[].name' \
+            | while read -r rev; do
+                [ -n "$rev" ] && (az containerapp revision deactivate -n "$APP" -g "$APP_RG" --revision "$rev" || true)
+              done

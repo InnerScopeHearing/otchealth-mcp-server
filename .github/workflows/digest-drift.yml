@@ -1,0 +1,88 @@
+name: digest-drift
+
+# Guards against out-of-band / hand deploys. The live gateway revision MUST run an immutable
+# @sha256 digest (never a mutable :tag like the :phase5 regression), and its g<sha> revision suffix
+# must be a commit that exists on main. On drift it fails the run and opens a single deduped issue.
+#
+# Auth is OIDC via the id-gateway-deployer managed identity (environment: production subject).
+
+on:
+  schedule:
+    - cron: '23 */6 * * *' # every 6h at :23
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: digest-drift
+  cancel-in-progress: false
+
+env:
+  APP: otchealth-mcp-gateway
+  APP_RG: rg-otchealth-apps-prod
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: 0918788a-f290-4a25-b4cd-2cf3a6faaf57
+          tenant-id: 4ab58580-cc9c-49f7-b5c7-a77f84fdc270
+          subscription-id: 55c84f6b-ef90-4259-a58b-50835cc4cab4
+
+      - name: Inspect the live revision
+        id: drift
+        run: |
+          set -euo pipefail
+          LIVE=$(az containerapp revision list -n "$APP" -g "$APP_RG" -o json \
+            | jq -c 'sort_by(.properties.trafficWeight) | reverse | .[0]')
+          NAME=$(echo "$LIVE" | jq -r '.name')
+          IMG=$(echo "$LIVE" | jq -r '.properties.template.containers[0].image')
+          echo "live revision: $NAME"
+          echo "live image:    $IMG"
+          DRIFT=""
+          # 1) must be an immutable digest, not a mutable tag (the phase5-style hand-deploy signature)
+          case "$IMG" in
+            *@sha256:*) : ;;
+            *) DRIFT="live image is a MUTABLE TAG, not an @sha256 digest: ${IMG} (a hand-deploy bypassed the pipeline)";;
+          esac
+          # 2) the g<sha> revision suffix must be a commit on the checked-out main HEAD
+          if [ -z "$DRIFT" ]; then
+            SUFFIX="${NAME##*--}"
+            SHA="${SUFFIX#g}"
+            if ! git merge-base --is-ancestor "$SHA" HEAD 2>/dev/null; then
+              DRIFT="live revision suffix ${SUFFIX} (${SHA}) is not a commit on main (untracked / hand deploy)"
+            fi
+          fi
+          {
+            echo "drift<<EOF"
+            echo "$DRIFT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$DRIFT" ]; then echo "::error::DIGEST DRIFT: $DRIFT"; else echo "OK: live is a green-main digest."; fi
+
+      - name: Open a deduped issue + fail on drift
+        if: steps.drift.outputs.drift != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRIFT: ${{ steps.drift.outputs.drift }}
+          TITLE: 'Gateway digest drift detected'
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq 'length')
+          if [ "$EXISTING" = "0" ]; then
+            printf '%s\n\n%s\n' "The live gateway revision is not a green-main @sha256 digest." "$DRIFT" \
+              | gh issue create --title "$TITLE" --body-file - || true
+          else
+            echo "An open drift issue already exists; not duplicating."
+          fi
+          exit 1
