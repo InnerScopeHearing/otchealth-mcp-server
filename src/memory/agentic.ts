@@ -15,7 +15,7 @@
  * is later added, update SEMANTIC_CONFIG below.
  */
 
-import { embed } from '../azure/foundry.js';
+import { embed, embedBatch } from '../azure/foundry.js';
 
 const INDEX = 'memory-exec';
 const API_VERSION = '2023-11-01';
@@ -108,15 +108,25 @@ async function hybridSearch(
   subQuery: string,
   top: number,
   c: { ep: string; key: string },
+  precomputedVector?: number[] | null,
 ): Promise<RawHit[]> {
   // TRUE HYBRID: BM25 keyword (search) + vector (contentVector) + 'sem' semantic ranker.
-  // Embed the sub-query via Foundry text-embedding-3-large; if embedding is unavailable
-  // (Foundry unconfigured/erroring) we still run keyword + semantic ranking.
-  let vector: number[] | null = null;
-  try {
-    vector = await embed(subQuery);
-  } catch {
-    vector = null;
+  // The caller (agenticRecall) embeds every sub-query in ONE batched Foundry call up front and
+  // passes the matching vector in as `precomputedVector`. If that batch call was skipped or
+  // failed for this sub-query (precomputedVector === undefined), fall back to embedding it here
+  // individually, the exact same per-call embed()->null try/catch this function always had, so
+  // a broken/partial batch degrades to the pre-batching behavior rather than losing vector search
+  // entirely. `null` (as opposed to undefined) means the batch ran and explicitly produced no
+  // vector for this query; that is honored as keyword+semantic-only, no per-call embed retry.
+  let vector: number[] | null;
+  if (precomputedVector !== undefined) {
+    vector = precomputedVector;
+  } else {
+    try {
+      vector = await embed(subQuery);
+    } catch {
+      vector = null;
+    }
   }
 
   const body: Record<string, unknown> = {
@@ -239,9 +249,21 @@ export async function agenticRecall(
   const perQueryTop = opts?.top ?? DEFAULT_TOP;
   const agentFilter = opts?.agent ?? null;
 
-  // Fan out all sub-query searches concurrently
+  // Embed every sub-query in ONE batched Foundry call instead of one embed() call per sub-query
+  // (previously 2-4 separate round trips inside the Promise.allSettled fan-out below). A failed
+  // or unconfigured batch is not fatal: `batchVectors` stays null and each hybridSearch() call
+  // transparently falls back to its own per-item embed(), exactly as before batching existed.
+  let batchVectors: number[][] | null = null;
+  try {
+    batchVectors = await embedBatch(subQueries);
+  } catch {
+    batchVectors = null;
+  }
+
+  // Fan out all sub-query searches concurrently, each with its precomputed vector (or undefined
+  // to trigger hybridSearch's own per-item embed() fallback when the batch didn't produce one).
   const settled = await Promise.allSettled(
-    subQueries.map((sq) => hybridSearch(sq, perQueryTop, c)),
+    subQueries.map((sq, i) => hybridSearch(sq, perQueryTop, c, batchVectors?.[i])),
   );
 
   const rankedLists: Array<{ subQuery: string; hits: RawHit[] }> = [];

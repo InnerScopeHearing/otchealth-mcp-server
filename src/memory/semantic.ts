@@ -7,6 +7,7 @@
  * Inert without AZURE_SEARCH_ENDPOINT + AZURE_SEARCH_QUERY_KEY (callers fall back to keyword).
  */
 import { loadEnv } from '../config/env.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const INDEX = 'memory-exec';
 const API_VERSION = '2023-11-01';
@@ -45,7 +46,9 @@ export async function semanticSearch(
   const c = cfg();
   if (!c) return null;
   const top = agent ? Math.max(limit * 4, 40) : limit;
-  const r = await fetch(`${c.ep}/indexes/${INDEX}/docs/search?api-version=${API_VERSION}`, {
+  // Bounded + one retry: search-by-POST is read-only, safe to repeat once on a network blip /
+  // 429 / 5xx (see src/util/fetch-budget.ts).
+  const r = await fetchWithBudget(`${c.ep}/indexes/${INDEX}/docs/search?api-version=${API_VERSION}`, {
     method: 'POST',
     headers: { 'api-key': c.key, 'Content-Type': 'application/json' },
     body: JSON.stringify({ search: query, top, queryType: 'simple', searchMode: 'any' }),

@@ -6,6 +6,7 @@
  */
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const API_VERSION = '2023-11-01';
 
@@ -57,8 +58,10 @@ export async function hybridSearch(
   };
   if (vector) body.vectorQueries = [{ kind: 'vector', vector, fields: 'contentVector', k: top }];
 
+  // Bounded + one retry: search-by-POST is a read-only query, safe to repeat once on a
+  // network blip / 429 / 5xx (see src/util/fetch-budget.ts).
   const doSearch = async (b: Record<string, unknown>) =>
-    fetch(`${ep}/indexes/${index}/docs/search?api-version=${API_VERSION}`, {
+    fetchWithBudget(`${ep}/indexes/${index}/docs/search?api-version=${API_VERSION}`, {
       method: 'POST',
       headers: { 'api-key': key, 'Content-Type': 'application/json' },
       body: JSON.stringify(b),
