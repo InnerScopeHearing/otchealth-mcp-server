@@ -126,7 +126,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       }
     }
 
-    const code = createAuthCode({
+    const code = await createAuthCode({
       clientId: client_id,
       redirectUri: redirect_uri,
       scope: 'mcp',
@@ -196,7 +196,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       return reply.status(400).send({ error: 'invalid_request', error_description: 'code required' });
     }
 
-    const rec = consumeAuthCode(code);
+    const rec = await consumeAuthCode(code);
     if (!rec) {
       return reply.status(400).send({ error: 'invalid_grant', error_description: 'code expired or invalid' });
     }

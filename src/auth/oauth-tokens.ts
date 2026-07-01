@@ -7,6 +7,7 @@
  * runs a single replica, so codes survive their TTL within one instance.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isConfigured as cosmosConfigured, createDoc, readDoc, deleteDoc } from '../agentstate/cosmos.js';
 
 const AUD = 'otchealth-mcp';
 
@@ -80,7 +81,18 @@ export function issueRefreshToken(clientId: string, scope: string, secret: strin
   return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'refresh', exp: now + ttlSeconds }, secret);
 }
 
-// ── Authorization-code store (short-lived, in-memory) ────────────────────────
+// ── Authorization-code store: Cosmos-backed when configured, in-memory fallback ──
+//
+// OAuth 2.1 requires the authorization code to be single-use, which is inherently STATEFUL
+// (unlike the access/refresh tokens above, which are stateless HS256 JWTs any replica can
+// verify). If the /authorize request and its /token exchange land on different replicas, or
+// straddle a blue-green revision cutover, an in-memory-only code is lost. So when Cosmos is
+// configured the code lives in the shared `oauthcodes` container (partition key = the code
+// itself, so every lookup is a point read); Cosmos native per-item TTL is the expiry backstop
+// and the explicit expiresAt check covers TTL's best-effort deletion lag. With no Cosmos
+// (tests / local dev) it falls back to an in-memory Map with a sweeper, exactly as before.
+const CODES_CONTAINER = 'oauthcodes';
+
 export interface AuthCodeRecord {
   clientId: string;
   redirectUri: string;
@@ -97,14 +109,48 @@ setInterval(() => {
   for (const [code, rec] of authCodes) if (rec.expiresAt < now) authCodes.delete(code);
 }, 60_000).unref?.();
 
-export function createAuthCode(rec: Omit<AuthCodeRecord, 'expiresAt'>, ttlMs = 5 * 60 * 1000): string {
+export async function createAuthCode(
+  rec: Omit<AuthCodeRecord, 'expiresAt'>,
+  ttlMs = 5 * 60 * 1000,
+): Promise<string> {
   const code = randomBytes(32).toString('hex');
-  authCodes.set(code, { ...rec, expiresAt: Date.now() + ttlMs });
+  const expiresAt = Date.now() + ttlMs;
+  if (cosmosConfigured()) {
+    // ttl is a backstop slightly past logical expiry; expiresAt is the authoritative check.
+    await createDoc(CODES_CONTAINER, code, { id: code, ...rec, expiresAt, ttl: Math.ceil(ttlMs / 1000) + 60 });
+  } else {
+    authCodes.set(code, { ...rec, expiresAt });
+  }
   return code;
 }
 
-/** One-time consume: returns the record and deletes it. Null if missing/expired. */
-export function consumeAuthCode(code: string): AuthCodeRecord | null {
+/** One-time consume: returns the record and deletes it. Null if missing/expired/malformed. */
+export async function consumeAuthCode(code: string): Promise<AuthCodeRecord | null> {
+  if (cosmosConfigured()) {
+    let found: { doc: Record<string, unknown> } | null;
+    try {
+      // A malformed code trips the Cosmos id-charset guard (throws) -> treat as invalid_grant.
+      found = await readDoc(CODES_CONTAINER, code, code);
+    } catch {
+      return null;
+    }
+    if (!found) return null;
+    try {
+      await deleteDoc(CODES_CONTAINER, code, code); // enforce single-use; ignore if already gone
+    } catch {
+      /* best-effort */
+    }
+    const d = found.doc as unknown as AuthCodeRecord;
+    if (!d.expiresAt || d.expiresAt < Date.now()) return null;
+    return {
+      clientId: d.clientId,
+      redirectUri: d.redirectUri,
+      scope: d.scope,
+      codeChallenge: d.codeChallenge,
+      codeChallengeMethod: d.codeChallengeMethod,
+      expiresAt: d.expiresAt,
+    };
+  }
   const rec = authCodes.get(code);
   if (!rec) return null;
   authCodes.delete(code);
