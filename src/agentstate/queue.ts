@@ -11,6 +11,7 @@
 
 import crypto from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { normalizeAgent } from './agents.js';
 
 function creds(): { account: string; key: string } | null {
   const env = loadEnv();
@@ -36,10 +37,13 @@ function buildSas(account: string, key: string, perm = 'racwlup', hours = 1): st
   return new URLSearchParams({ sv, ss, srt, sp: perm, st, se, spr: 'https', sig }).toString();
 }
 
-/** inbox-<agent>, validated to the Azure queue-name rules. */
+/**
+ * inbox-<agent>, validated to the Azure queue-name rules. Routes through normalizeAgent FIRST so
+ * the privilege wall (clo-personal is rejected) is enforced at every queue entry point, not just
+ * on the memory/ledger paths. Without this an inbox-clo-personal queue could be created/read.
+ */
 export function queueName(agent: string): string {
-  const a = (agent || '').trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9_-]{0,40}$/.test(a)) throw new Error(`invalid agent "${agent}"`);
+  const a = normalizeAgent(agent);
   const name = `inbox-${a.replace(/_/g, '-')}`.replace(/-+/g, '-');
   return name;
 }

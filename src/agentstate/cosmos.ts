@@ -132,12 +132,31 @@ function db(): string {
   return c.db;
 }
 
+/**
+ * Path-injection guard. Every container name and every id / partition-key value is interpolated
+ * into the Cosmos REST resourceLink + URL, so both must be validated against a static allowlist /
+ * the Cosmos-safe id charset BEFORE they touch a request. A caller-supplied task_id like
+ * "../colls/other/docs/x" must never escape its container.
+ */
+const CONTAINERS = new Set(['tasks', 'memory', 'events']);
+const ID_RE = /^[A-Za-z0-9_.\-]{1,255}$/;
+function assertColl(coll: string): void {
+  if (!CONTAINERS.has(coll)) throw new Error(`unknown container "${coll}" (allowed: ${[...CONTAINERS].join(', ')})`);
+}
+function assertId(value: string, label = 'id'): void {
+  if (typeof value !== 'string' || !ID_RE.test(value) || /^\.+$/.test(value)) {
+    throw new Error(`invalid ${label} (must match Cosmos id charset)`);
+  }
+}
+
 /** Create a document in a container (partition key value required). */
 export async function createDoc(
   coll: string,
   pkValue: string,
   doc: Record<string, unknown>,
 ): Promise<CosmosResponse> {
+  assertColl(coll);
+  assertId(pkValue, 'partition key');
   const link = `dbs/${db()}/colls/${coll}`;
   const res = await request('POST', 'docs', link, `${link}/docs`, { pk: pkValue, body: doc });
   if (!res.ok) throw new Error(`Cosmos createDoc ${coll} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
@@ -150,6 +169,9 @@ export async function readDoc(
   pkValue: string,
   id: string,
 ): Promise<{ doc: Record<string, unknown>; etag: string | null } | null> {
+  assertColl(coll);
+  assertId(pkValue, 'partition key');
+  assertId(id);
   const link = `dbs/${db()}/colls/${coll}/docs/${id}`;
   const res = await request('GET', 'docs', link, link, { pk: pkValue });
   if (res.status === 404) return null;
@@ -165,6 +187,9 @@ export async function replaceDoc(
   doc: Record<string, unknown>,
   ifMatch?: string,
 ): Promise<CosmosResponse> {
+  assertColl(coll);
+  assertId(pkValue, 'partition key');
+  assertId(id);
   const link = `dbs/${db()}/colls/${coll}/docs/${id}`;
   return request('PUT', 'docs', link, link, { pk: pkValue, body: doc, ifMatch });
 }
@@ -175,6 +200,8 @@ export async function upsertDoc(
   pkValue: string,
   doc: Record<string, unknown>,
 ): Promise<CosmosResponse> {
+  assertColl(coll);
+  assertId(pkValue, 'partition key');
   const link = `dbs/${db()}/colls/${coll}`;
   const res = await request('POST', 'docs', link, `${link}/docs`, { pk: pkValue, body: doc, upsert: true });
   if (!res.ok) throw new Error(`Cosmos upsertDoc ${coll} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
@@ -188,6 +215,8 @@ export async function queryDocs(
   parameters: { name: string; value: unknown }[] = [],
   opts: { pk?: string; max?: number } = {},
 ): Promise<Record<string, unknown>[]> {
+  assertColl(coll);
+  if (opts.pk !== undefined) assertId(opts.pk, 'partition key');
   const link = `dbs/${db()}/colls/${coll}`;
   const max = opts.max ?? 100;
   const out: Record<string, unknown>[] = [];

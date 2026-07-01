@@ -16,8 +16,43 @@
  */
 
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
+import net from 'node:net';
 import { loadEnv } from '../config/env.js';
 import { readDoc } from './cosmos.js';
+
+/** SSRF guard: reject any IP in a private/reserved/loopback/link-local/metadata range. */
+function ipBlocked(ip: string): boolean {
+  if (net.isIP(ip) === 4) {
+    const p = ip.split('.').map(Number);
+    if (p[0] === 10 || p[0] === 127 || p[0] === 0) return true;
+    if (p[0] === 169 && p[1] === 254) return true; // link-local + cloud metadata (IMDS)
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // CGNAT
+    if (p[0] === 192 && p[1] === 0 && p[2] === 0) return true;
+    if (p[0] === 198 && (p[1] === 18 || p[1] === 19)) return true; // benchmarking
+    if (p[0] >= 224) return true; // multicast + reserved
+    return false;
+  }
+  const v = ip.toLowerCase().replace(/^\[|\]$/g, '');
+  if (v === '::1' || v === '::') return true;
+  if (v.startsWith('fe80') || v.startsWith('fc') || v.startsWith('fd')) return true; // link-local + ULA
+  const m = v.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (m) return ipBlocked(m[1]); // IPv4-mapped
+  if (v.startsWith('2001:db8')) return true;
+  return false;
+}
+
+async function hostResolvesSafe(host: string): Promise<boolean> {
+  if (net.isIP(host)) return !ipBlocked(host);
+  try {
+    const addrs = await dns.lookup(host, { all: true });
+    return addrs.length > 0 && addrs.every((a) => !ipBlocked(a.address));
+  } catch {
+    return false;
+  }
+}
 
 export interface ResolveResult {
   resolved: boolean;
@@ -63,14 +98,19 @@ async function resolveBlob(rest: string): Promise<ResolveResult> {
   };
 }
 
+const RESOLVE_CONTAINERS = new Set(['tasks', 'memory', 'events']);
+const SAFE_SEGMENT = /^[A-Za-z0-9_.\-]+$/;
+
 async function resolveCosmos(rest: string): Promise<ResolveResult> {
-  // cosmos:<coll>/<pk>/<id>
+  // cosmos:<coll>/<pk>/<id> — coll restricted to the agent-state containers; segments charset-checked.
   const parts = rest.split('/');
-  if (parts.length < 3) {
-    return { resolved: false, scheme: 'cosmos', detail: 'expected cosmos:<coll>/<pk>/<id>' };
+  if (parts.length !== 3) {
+    return { resolved: false, scheme: 'cosmos', detail: 'expected cosmos:<tasks|memory|events>/<pk>/<id>' };
   }
-  const [coll, pk, ...idParts] = parts;
-  const id = idParts.join('/');
+  const [coll, pk, id] = parts;
+  if (!RESOLVE_CONTAINERS.has(coll) || !SAFE_SEGMENT.test(pk) || !SAFE_SEGMENT.test(id)) {
+    return { resolved: false, scheme: 'cosmos', detail: 'container must be tasks|memory|events and pk/id must be Cosmos-safe' };
+  }
   try {
     const hit = await readDoc(coll, pk, id);
     return { resolved: hit !== null, scheme: 'cosmos', detail: `${coll}/${pk}/${id} -> ${hit ? 'exists' : 'missing'}` };
@@ -80,15 +120,45 @@ async function resolveCosmos(rest: string): Promise<ResolveResult> {
 }
 
 async function resolveHttp(uri: string): Promise<ResolveResult> {
+  let current: URL;
   try {
-    let r = await fetch(uri, { method: 'HEAD', redirect: 'follow' });
-    if (r.status === 405 || r.status === 501) {
-      r = await fetch(uri, { method: 'GET', headers: { Range: 'bytes=0-0' }, redirect: 'follow' });
-    }
-    return { resolved: r.status < 400, scheme: 'https', detail: `HEAD ${uri} -> ${r.status}` };
-  } catch (e) {
-    return { resolved: false, scheme: 'https', detail: `fetch failed: ${(e as Error).message}` };
+    current = new URL(uri);
+  } catch {
+    return { resolved: false, scheme: 'https', detail: 'invalid url' };
   }
+  if (current.protocol !== 'https:') {
+    return { resolved: false, scheme: 'https', detail: 'only https:// artifact URLs are allowed' };
+  }
+  // Manual redirect handling with per-hop SSRF re-validation. (Residual DNS-rebinding TOCTOU is
+  // accepted for a convenience scheme; the primary artifact paths are blob:/cosmos:.)
+  for (let hop = 0; hop < 4; hop++) {
+    if (!(await hostResolvesSafe(current.hostname))) {
+      return { resolved: false, scheme: 'https', detail: `host ${current.hostname} resolves to a blocked/internal address` };
+    }
+    let r: Response;
+    try {
+      r = await fetch(current.toString(), { method: 'HEAD', redirect: 'manual' });
+      if (r.status === 405 || r.status === 501) {
+        r = await fetch(current.toString(), { method: 'GET', headers: { Range: 'bytes=0-0' }, redirect: 'manual' });
+      }
+    } catch {
+      return { resolved: false, scheme: 'https', detail: `fetch failed for ${current.hostname}` };
+    }
+    if (r.status >= 300 && r.status < 400) {
+      const loc = r.headers.get('location');
+      if (!loc) return { resolved: false, scheme: 'https', detail: `redirect without location from ${current.hostname}` };
+      try {
+        const next = new URL(loc, current);
+        if (next.protocol !== 'https:') return { resolved: false, scheme: 'https', detail: 'redirect to non-https blocked' };
+        current = next;
+      } catch {
+        return { resolved: false, scheme: 'https', detail: 'bad redirect target' };
+      }
+      continue;
+    }
+    return { resolved: r.status < 400, scheme: 'https', detail: `${current.hostname} -> ${r.status}` };
+  }
+  return { resolved: false, scheme: 'https', detail: 'too many redirects' };
 }
 
 async function resolveGithub(rest: string): Promise<ResolveResult> {

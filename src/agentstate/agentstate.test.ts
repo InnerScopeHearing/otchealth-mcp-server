@@ -45,3 +45,33 @@ test('queueName builds a valid Azure queue name', () => {
   assert.equal(queueName('cto'), 'inbox-cto');
   assert.equal(queueName('dev_ops'), 'inbox-dev-ops');
 });
+
+test('queueName enforces the privilege wall (clo-personal rejected)', () => {
+  assert.throws(() => queueName('clo-personal'), /privilege-walled/);
+});
+
+test('SSRF guard: only https, internal/metadata IPs rejected (no network)', async () => {
+  for (const uri of [
+    'http://example.com/x', // non-https
+    'https://169.254.169.254/latest/meta-data/', // cloud metadata (IMDS)
+    'https://127.0.0.1/x', // loopback
+    'https://10.0.0.5/x', // RFC1918
+    'https://192.168.1.1/x', // RFC1918
+    'https://[::1]/x', // IPv6 loopback
+  ]) {
+    const r = await resolveArtifact(uri);
+    assert.equal(r.resolved, false, `should reject "${uri}"`);
+  }
+});
+
+test('cosmos artifact resolver restricts containers + rejects traversal (no network)', async () => {
+  for (const uri of [
+    'cosmos:secrets/x/y', // container not allowlisted
+    'cosmos:tasks/fleet', // too few segments
+    'cosmos:tasks/fleet/..', // dot-only id
+    'cosmos:tasks/fleet/a b', // space (not in safe charset)
+  ]) {
+    const r = await resolveArtifact(uri);
+    assert.equal(r.resolved, false, `should reject "${uri}"`);
+  }
+});
