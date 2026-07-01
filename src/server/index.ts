@@ -69,19 +69,20 @@ async function main(): Promise<void> {
   });
 
   // Inbound rate limiting. The gateway is the keys-to-the-kingdom front door, so cap per-client
-  // request rate (defense in depth on top of Cloudflare edge limits + Bearer auth). Behind
-  // Cloudflare the true client IP is CF-Connecting-IP, not the immediate peer. A generous global
-  // default guards every route from floods; the OAuth endpoints set much stricter per-route limits
-  // (server/oauth.ts). /health is exempt so uptime monitoring is never throttled.
+  // request rate (defense in depth on top of Cloudflare edge limits + Bearer auth). A generous
+  // global default guards every route from floods; the OAuth endpoints set much stricter per-route
+  // limits (server/oauth.ts). /health is exempt so uptime monitoring is never throttled.
+  //
+  // Rate key = req.ip (the @fastify/rate-limit default), derived from the trusted proxy chain
+  // (trustProxy is on). We deliberately do NOT key on the client-controlled CF-Connecting-IP /
+  // True-Client-IP headers: a caller that reaches the app directly (bypassing Cloudflare) could
+  // forge them to rotate the key and slip the per-IP limit. The definitive spoof-resistance is the
+  // network-layer Cloudflare-only ingress lock (infra, tracked separately); once that is enforced,
+  // every request provably transits Cloudflare and req.ip / the CF headers become authoritative.
   await app.register(rateLimit, {
     global: true,
     max: 1000,
     timeWindow: '1 minute',
-    keyGenerator: (req) => {
-      const cf = req.headers['cf-connecting-ip'];
-      const tci = req.headers['true-client-ip'];
-      return (typeof cf === 'string' && cf) || (typeof tci === 'string' && tci) || req.ip;
-    },
     allowList: (req) => req.url === '/health',
   });
 
