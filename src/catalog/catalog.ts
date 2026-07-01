@@ -38,6 +38,11 @@ export function allTools(): CatalogEntry[] {
   return [...registeredTools];
 }
 
+/** Count of registered tools. Surfaced in /health so a deploy that regresses the catalog fails the gate. */
+export function toolCount(): number {
+  return registeredTools.length;
+}
+
 export interface ServiceInfo {
   description: string;
   ring: 'non-phi' | 'phi-carved-out';

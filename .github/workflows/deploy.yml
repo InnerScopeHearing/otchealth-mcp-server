@@ -1,0 +1,97 @@
+name: deploy
+
+# The golden-path release pipeline for the gateway. Deploys ONLY from green main, builds the
+# image ONCE and promotes it by immutable @sha256 DIGEST, brings up a GREEN revision at 0%
+# traffic, asserts health + the full tool catalog (regression guard for the 2026-07-01
+# 838->subset regression), then shifts traffic. The `production` GitHub Environment gates the
+# deploy behind a required reviewer (separation of duties). Auth is OIDC (no stored SP secret).
+#
+# NOTE: workflow_dispatch-only for now. Flip on `push: main` AFTER the OAuth auth-code + token
+# store moves from the in-memory Map to Cosmos, so a revision cutover stops dropping live
+# claude.ai/Hyperagent sessions (verifier-mandated ordering).
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this deploy (audit note)'
+        required: false
+        default: 'manual release from green main'
+  # push:
+  #   branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  ACR: acrotc55c84f6bef
+  APP: otchealth-mcp-gateway
+  APP_RG: rg-otchealth-apps-prod
+  IMAGE_REPO: otchealth-mcp-server
+  MIN_TOOLS: '800' # regression floor; the catalog is ~838
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production # human approval gate; reviewer must differ from the release opener
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build once (immutable, tagged by git sha)
+        run: az acr build -r "$ACR" -t "${IMAGE_REPO}:${GITHUB_SHA}" -f Dockerfile .
+
+      - name: Resolve immutable digest
+        id: digest
+        run: |
+          set -euo pipefail
+          DIGEST=$(az acr repository show -n "$ACR" --image "${IMAGE_REPO}:${GITHUB_SHA}" --query digest -o tsv)
+          echo "ref=${ACR}.azurecr.io/${IMAGE_REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Deploying digest ${DIGEST}"
+
+      - name: Ensure multiple-revision mode (blue-green)
+        run: az containerapp revision set-mode -n "$APP" -g "$APP_RG" --mode multiple
+
+      - name: Deploy GREEN revision (starts at 0% traffic)
+        id: green
+        run: |
+          set -euo pipefail
+          SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)"
+          az containerapp update -n "$APP" -g "$APP_RG" \
+            --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" >/dev/null
+          echo "revision=${APP}--${SUFFIX}" >> "$GITHUB_OUTPUT"
+
+      - name: Assert GREEN health + full tool catalog (regression guard)
+        run: |
+          set -euo pipefail
+          FQDN=$(az containerapp revision show -n "$APP" -g "$APP_RG" \
+            --revision "${{ steps.green.outputs.revision }}" --query properties.fqdn -o tsv)
+          for i in $(seq 1 25); do
+            code=$(curl -fsS -o /tmp/h.json -w '%{http_code}' "https://${FQDN}/health" 2>/dev/null || echo 000)
+            [ "$code" = "200" ] && break
+            sleep 6
+          done
+          cat /tmp/h.json
+          node -e '
+            const h = require("/tmp/h.json");
+            if (h.status !== "ok") { console.error("health not ok"); process.exit(1); }
+            const n = h.tool_count || 0, min = Number(process.env.MIN_TOOLS);
+            if (n < min) { console.error(`REGRESSION: tool_count ${n} < ${min}`); process.exit(1); }
+            console.log(`GREEN healthy: ${n} tools advertised (>= ${min}).`);
+          '
+
+      - name: Shift 100% traffic to GREEN (blue-green cutover)
+        run: |
+          az containerapp ingress traffic set -n "$APP" -g "$APP_RG" \
+            --revision-weight "${{ steps.green.outputs.revision }}=100"
+          echo "Live on ${{ steps.green.outputs.revision }} (digest ${{ steps.digest.outputs.ref }})."
