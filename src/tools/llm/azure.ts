@@ -15,6 +15,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
+import { captureGatewayEvent } from '../../telemetry/gateway-ops.js';
 
 const TASK_PROMPTS: Record<string, string> = {
   summarize: 'You are a precise summarizer. Produce a faithful, well-structured summary of the user content. Preserve key facts, numbers, names, and decisions. No preamble.',
@@ -78,6 +79,15 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             maxTokens: input.maxTokens ?? 1500,
             jsonMode: input.jsonMode ?? input.task === 'extract',
             tier,
+          });
+          // Observe-only per-call cost/usage event -> Gateway Ops project (fire-and-forget,
+          // inert unless POSTHOG_GATEWAYOPS_KEY is set; never affects the response).
+          captureGatewayEvent('gateway_llm_call', {
+            task: input.task,
+            tier,
+            model: res.model,
+            usage: res.usage ?? null,
+            output_chars: res.text.length,
           });
           return {
             data: { task: input.task, tier, output: res.text, model: res.model, usage: res.usage },

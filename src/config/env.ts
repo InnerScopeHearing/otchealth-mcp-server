@@ -173,6 +173,10 @@ const EnvSchema = z.object({
   // Connectors wired in P3 wave 2 (read-only; PostHog MedReview project carved out; depot reads only)
   POSTHOG_PERSONAL_API_KEY: z.string().optional().default(''),
   POSTHOG_HOST: z.string().optional().default('https://us.posthog.com'),
+  // Ingestion (project) key for the dedicated "Gateway Ops" PostHog project (id 493944),
+  // used only by src/telemetry/gateway-ops.ts to emit gateway OPS events (governance
+  // would-deny, per-call LLM cost). Empty => telemetry is inert (no events emitted).
+  POSTHOG_GATEWAYOPS_KEY: z.string().optional().default(''),
   DEPOT_TOKEN: z.string().optional().default(''),
 
   // Connectors wired in P3 wave 3 (read-only): GitHub App (reads) + Twilio (reads; sends are TCPA-gated, not wired)

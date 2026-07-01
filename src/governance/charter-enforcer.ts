@@ -33,6 +33,7 @@
  */
 
 import type { ToolCategory } from '../tools/registry.js';
+import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
 
 export type GovernanceMode = 'off' | 'report' | 'enforce';
 
@@ -171,6 +172,14 @@ export function checkGovernance(
         category,
         reason: result.reason,
       }),
+    );
+    // Observe-only: mirror the would-deny to the Gateway Ops PostHog project so report-mode
+    // has a readable sink (the prerequisite for graduating GOVERNANCE_MODE). Fire-and-forget;
+    // inert unless POSTHOG_GATEWAYOPS_KEY is set; never affects proceed.
+    captureGatewayEvent(
+      'gateway_governance_would_deny',
+      { agent: agentLane || null, tool: toolName, category, reason: result.reason },
+      agentLane || undefined,
     );
     return { proceed: true };
   }
