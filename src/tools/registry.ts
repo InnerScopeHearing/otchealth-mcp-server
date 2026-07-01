@@ -23,6 +23,7 @@ import { N8nWebhookError } from '../n8n/webhook-client.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor } from '../catalog/governance.js';
 import { currentCallerAgent } from '../server/request-context.js';
+import { checkGovernance } from '../governance/charter-enforcer.js';
 
 const env = loadEnv();
 
@@ -247,6 +248,38 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             correlation_id: correlationId,
             dry_run: dryRun,
             error: { code: 'forbidden_role', message: gmsg },
+          },
+        };
+      }
+
+      // Charter enforcement (Phase 5, report-mode by default; see governance/charter-enforcer.ts).
+      // GOVERNANCE_MODE is read fresh from process.env inside checkGovernance, so this is a pure
+      // no-op (handler always runs, nothing logged) unless GOVERNANCE_MODE is explicitly set to
+      // 'report' or 'enforce'. This is a coarser, per-agent-lane/category layer ADDITIONAL to the
+      // existing per-tool role gate above; neither replaces the other.
+      const charterCheck = checkGovernance(callerAgent, def.name, def.category);
+      if (!charterCheck.proceed && charterCheck.denial) {
+        const cmsg =
+          `Tool "${def.name}" denied by charter enforcement (GOVERNANCE_MODE=enforce). ` +
+          charterCheck.denial.reason;
+        logToolEnd({
+          correlation_id: correlationId,
+          tool: def.name,
+          caller_hash: callerHash,
+          outcome: 'rejected',
+          latency_ms: Date.now() - started,
+          error_code: 'charter_denied',
+          error_message: cmsg,
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: cmsg }],
+          structuredContent: {
+            result: null,
+            compliance_warning: null,
+            correlation_id: correlationId,
+            dry_run: dryRun,
+            error: { code: 'charter_denied', message: cmsg },
           },
         };
       }
