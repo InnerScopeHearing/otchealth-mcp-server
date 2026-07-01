@@ -884,6 +884,18 @@ import { registerTwilioMakeCall } from './twilio/make-call.js';
 import { registerTwilioSendMms } from './twilio/send-mms.js';
 import { registerTwilioSendSms } from './twilio/send-sms.js';
 
+// Phase 5 — Agent State Plane (Cosmos work-ledger + memory-of-record + Storage-Queue inbox)
+import { registerTaskCreate } from './agentstate/task-create.js';
+import { registerTaskClaim } from './agentstate/task-claim.js';
+import { registerTaskUpdate } from './agentstate/task-update.js';
+import { registerTaskComplete } from './agentstate/task-complete.js';
+import { registerTaskList } from './agentstate/task-list.js';
+import { registerTaskGet } from './agentstate/task-get.js';
+import { registerMemoryWrite } from './agentstate/memory-write.js';
+import { registerMemorySearch } from './agentstate/memory-search.js';
+import { registerAgentDispatch } from './agentstate/agent-dispatch.js';
+import { registerInboxRead } from './agentstate/inbox-read.js';
+
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
   // Read tools — direct App API
@@ -1763,4 +1775,17 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerTwilioTranscriptionGet(server, callerHash);
   registerTwilioTranscriptionList(server, callerHash);
   registerTwilioUsageRecordsList(server, callerHash);
+
+  // ===== Phase 5: Agent State Plane (the cross-engine work-ledger + memory + inbox) =====
+  // Reads always live; writes gated by ENABLE_WRITE_TOOLS + DRY_RUN_DEFAULT (pass dry_run=false).
+  registerTaskList(server, callerHash);
+  registerTaskGet(server, callerHash);
+  registerTaskCreate(server, callerHash);
+  registerTaskClaim(server, callerHash);
+  registerTaskUpdate(server, callerHash);
+  registerTaskComplete(server, callerHash); // done = artifact landed (enforced)
+  registerMemorySearch(server, callerHash);
+  registerMemoryWrite(server, callerHash);
+  registerInboxRead(server, callerHash);
+  registerAgentDispatch(server, callerHash);
 }

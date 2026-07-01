@@ -124,6 +124,22 @@ const EnvSchema = z.object({
   AZURE_COMMONS_STORAGE_ACCOUNT: z.string().optional().default(''),
   AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
 
+  // Agent State Plane - Cosmos DB for NoSQL work-ledger + structured memory-of-record.
+  // Inert without COSMOS_ENDPOINT/COSMOS_KEY. Non-PHI, non-MNPI, non-privileged by construction
+  // (the clo-personal lane is rejected). Verbatim-critical records live here, never in an
+  // LLM-consolidated store.
+  COSMOS_ENDPOINT: z.string().optional().default(''),
+  COSMOS_KEY: z.string().optional().default(''),
+  COSMOS_DB: z.string().optional().default('agent-state'),
+
+  // Agent inbox (Azure Storage Queue). Inert without these. Durable cross-agent handoff delivery.
+  AGENT_INBOX_STORAGE_ACCOUNT: z.string().optional().default(''),
+  AGENT_INBOX_STORAGE_KEY: z.string().optional().default(''),
+
+  // Optional: lets task_complete verify gh:commit/gh:pr artifact_uris. Absent -> gh: is rejected
+  // (agents land the artifact in the commons instead). Read-only classic/fine-grained token.
+  GITHUB_TOKEN: z.string().optional().default(''),
+
   // Wave A: Azure AI Content Safety (Prompt Shields + groundedness) — gateway-level guardrails.
   // Inert when unset (tools return a flagged "skipped" result rather than throwing).
   CONTENT_SAFETY_ENDPOINT: z.string().optional().default(''),
