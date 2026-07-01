@@ -140,7 +140,7 @@ function db(): string {
  * the Cosmos-safe id charset BEFORE they touch a request. A caller-supplied task_id like
  * "../colls/other/docs/x" must never escape its container.
  */
-const CONTAINERS = new Set(['tasks', 'memory', 'events']);
+const CONTAINERS = new Set(['tasks', 'memory', 'events', 'oauthcodes']);
 const ID_RE = /^[A-Za-z0-9_.\-]{1,255}$/;
 function assertColl(coll: string): void {
   if (!CONTAINERS.has(coll)) throw new Error(`unknown container "${coll}" (allowed: ${[...CONTAINERS].join(', ')})`);
@@ -194,6 +194,19 @@ export async function replaceDoc(
   assertId(id);
   const link = `dbs/${db()}/colls/${coll}/docs/${id}`;
   return request('PUT', 'docs', link, link, { pk: pkValue, body: doc, ifMatch });
+}
+
+/** Delete a document by id + partition key. Idempotent: treats 404 as success (already gone). */
+export async function deleteDoc(coll: string, pkValue: string, id: string): Promise<CosmosResponse> {
+  assertColl(coll);
+  assertId(pkValue, 'partition key');
+  assertId(id);
+  const link = `dbs/${db()}/colls/${coll}/docs/${id}`;
+  const res = await request('DELETE', 'docs', link, link, { pk: pkValue });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Cosmos deleteDoc ${coll}/${id} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
+  }
+  return res;
 }
 
 /** Upsert a document. */

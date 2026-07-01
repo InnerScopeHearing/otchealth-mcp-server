@@ -1,5 +1,6 @@
 import '../instrument.js'; // Datadog APM, must be first; no-ops unless DD_API_KEY is set.
 import Fastify from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { registerHealth } from './health.js';
@@ -65,6 +66,23 @@ async function main(): Promise<void> {
       },
       'http response',
     );
+  });
+
+  // Inbound rate limiting. The gateway is the keys-to-the-kingdom front door, so cap per-client
+  // request rate (defense in depth on top of Cloudflare edge limits + Bearer auth). Behind
+  // Cloudflare the true client IP is CF-Connecting-IP, not the immediate peer. A generous global
+  // default guards every route from floods; the OAuth endpoints set much stricter per-route limits
+  // (server/oauth.ts). /health is exempt so uptime monitoring is never throttled.
+  await app.register(rateLimit, {
+    global: true,
+    max: 1000,
+    timeWindow: '1 minute',
+    keyGenerator: (req) => {
+      const cf = req.headers['cf-connecting-ip'];
+      const tci = req.headers['true-client-ip'];
+      return (typeof cf === 'string' && cf) || (typeof tci === 'string' && tci) || req.ip;
+    },
+    allowList: (req) => req.url === '/health',
   });
 
   registerHealth(app);
