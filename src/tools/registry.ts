@@ -25,6 +25,11 @@ import { requiredRoleFor } from '../catalog/governance.js';
 import { currentCallerAgent } from '../server/request-context.js';
 import { checkGovernance } from '../governance/charter-enforcer.js';
 import { shouldOffload, offloadResult } from './result-store.js';
+import {
+  inboundShield,
+  outboundGroundedness,
+  type GroundingHint,
+} from '../safety/auto-guard.js';
 
 const env = loadEnv();
 
@@ -54,6 +59,13 @@ export interface ToolResultPayload {
   summary?: string;
   /** Optional before/after pair for audit log on writes. */
   audit?: { before?: unknown; after?: unknown };
+  /**
+   * Optional grounding hint to opt this tool's output into an automatic outbound groundedness check
+   * (Azure Content Safety). Supply the answer text + the source passages it should be grounded in.
+   * Only meaningful for tools whose output is model-generated free-text over known sources
+   * (e.g. a synthesized recall answer). Omit for tools where groundedness is undefined.
+   */
+  groundedness?: GroundingHint;
 }
 
 export type ToolHandler<Input> = (
@@ -326,12 +338,74 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       delete handlerInput.dry_run;
       delete handlerInput.acknowledge_warning;
 
+      // AUTO-GUARD (inbound): Prompt Shields on the tool-call args, BEFORE the handler runs (no side
+      // effect yet, so enforce-blocking here is safe for any category). Fail-open + mode-gated (SHIELD_MODE
+      // off|report|enforce, default report) + inert until CONTENT_SAFETY_* is set. report annotates only.
+      const shield = await inboundShield(def.name, handlerInput);
+      if (shield.blocked) {
+        const smsg =
+          `Tool "${def.name}" blocked by Prompt Shields (SHIELD_MODE=enforce): a prompt-injection / ` +
+          `jailbreak pattern was detected in the request arguments.`;
+        logToolEnd({
+          correlation_id: correlationId,
+          tool: def.name,
+          caller_hash: callerHash,
+          outcome: 'rejected',
+          latency_ms: Date.now() - started,
+          error_code: 'prompt_injection_blocked',
+          error_message: smsg,
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: smsg }],
+          structuredContent: {
+            result: null,
+            compliance_warning: null,
+            correlation_id: correlationId,
+            dry_run: dryRun,
+            prompt_shield: { attackDetected: true, mode: shield.mode, detail: shield.detail },
+            error: { code: 'prompt_injection_blocked', message: smsg },
+          },
+        };
+      }
+
       try {
         const payload = await def.handler(
           handlerInput as z.infer<z.ZodObject<Shape>>,
           ctx,
         );
         const { result, warning } = applyGuardrail(payload.data, acknowledged);
+
+        // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
+        // (query + text + sources). enforce-blocking is limited to READ tools — a write already ran, so
+        // blocking its output is pointless. Fail-open + mode-gated (GROUNDEDNESS_MODE off|report|enforce).
+        const ground = await outboundGroundedness(payload.groundedness, def.category === 'read');
+        if (ground.blocked) {
+          const gmsg =
+            `Tool "${def.name}" output withheld by groundedness detection (GROUNDEDNESS_MODE=enforce): ` +
+            `${(ground.ungroundedPercentage * 100).toFixed(0)}% of the answer is unsupported by its cited sources.`;
+          logToolEnd({
+            correlation_id: correlationId,
+            tool: def.name,
+            caller_hash: callerHash,
+            outcome: 'rejected',
+            latency_ms: Date.now() - started,
+            error_code: 'ungrounded_blocked',
+            error_message: gmsg,
+          });
+          return {
+            isError: true,
+            content: [{ type: 'text', text: gmsg }],
+            structuredContent: {
+              result: null,
+              compliance_warning: null,
+              correlation_id: correlationId,
+              dry_run: dryRun,
+              groundedness: { ungroundedDetected: true, ungroundedPercentage: ground.ungroundedPercentage, mode: ground.mode },
+              error: { code: 'ungrounded_blocked', message: gmsg },
+            },
+          };
+        }
 
         const endLog: ToolCallLogEnd = {
           correlation_id: correlationId,
@@ -350,6 +424,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           correlation_id: correlationId,
           dry_run: dryRun,
         };
+        // Surface auto-guard outcomes when they actually ran (report mode, or enforce-but-clean), so the
+        // signal is visible to the caller + audit without changing the result. Absent when not run/inert.
+        if (shield.ran) {
+          structured.prompt_shield = { attackDetected: shield.attackDetected, mode: shield.mode, detail: shield.detail };
+        }
+        if (ground.ran) {
+          structured.groundedness = { ungroundedDetected: ground.ungroundedDetected, ungroundedPercentage: ground.ungroundedPercentage, mode: ground.mode };
+        }
         let text = buildTextContent({ ...payload, data: result }, warning);
 
         // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +

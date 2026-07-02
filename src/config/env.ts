@@ -144,6 +144,13 @@ const EnvSchema = z.object({
   // Inert when unset (tools return a flagged "skipped" result rather than throwing).
   CONTENT_SAFETY_ENDPOINT: z.string().optional().default(''),
   CONTENT_SAFETY_KEY: z.string().optional().default(''),
+  // AUTO-GUARD modes are NOT in this schema on purpose: like COMPLIANCE_MODE / GOVERNANCE_MODE, they are
+  // read FRESH from process.env by src/safety/auto-guard.ts (via the registerTool wrapper) so they can be
+  // flipped by an env change with no code redeploy:
+  //   SHIELD_MODE       off | report (default) | enforce   — inbound Prompt Shields on tool args
+  //   GROUNDEDNESS_MODE off (default) | report | enforce    — outbound groundedness on tools that surface a hint
+  // 'report' runs the check and annotates/logs but never blocks; 'enforce' blocks (inbound: pre-handler;
+  // outbound: read-only tools only). All fail-open + inert until CONTENT_SAFETY_* above is set.
 
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
