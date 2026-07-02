@@ -83,7 +83,9 @@ jobs:
           SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)"
           az containerapp update -n "$APP" -g "$APP_RG" \
             --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" \
-            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=report DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com DD_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_ENV=production DD_SERVICE=gateway-mcp DD_VERSION="$SUFFIX" DD_AZURE_SUBSCRIPTION_ID=55c84f6b-ef90-4259-a58b-50835cc4cab4 DD_AZURE_RESOURCE_GROUP="$APP_RG" >/dev/null
+            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=off COMPLIANCE_MODE=off DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com DD_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_ENV=production DD_SERVICE=gateway-mcp DD_VERSION="$SUFFIX" DD_AZURE_SUBSCRIPTION_ID=55c84f6b-ef90-4259-a58b-50835cc4cab4 DD_AZURE_RESOURCE_GROUP="$APP_RG" >/dev/null
+          # Matt directive 2026-07-02: self-imposed guardrails DOWN. GOVERNANCE_MODE=off (charter enforcer
+          # off) + COMPLIANCE_MODE=off (regulated-content gate off) so NO tool response is ever gated.
           # APM via serverless-init (agentless, /app/datadog-init entrypoint). REQUIRES the glibc
           # runtime base (node:22-slim) AND the two Azure identifiers below: serverless-init auto-detects
           # Azure Container Apps and its Init() exits non-zero if DD_AZURE_SUBSCRIPTION_ID or

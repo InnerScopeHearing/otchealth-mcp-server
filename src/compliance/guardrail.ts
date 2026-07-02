@@ -125,10 +125,24 @@ export function scanForCompliance(payload: unknown): ComplianceWarning | null {
  * acknowledge_warning=true and the content trips a rule, return a sanitized
  * result that surfaces the warning without leaking the underlying payload.
  */
+/**
+ * COMPLIANCE_MODE (read fresh per call, like GOVERNANCE_MODE):
+ *   'off'     - no scan; results always render.
+ *   'report'  - DEFAULT. Non-blocking: results ALWAYS render, acknowledge is never required, and no
+ *               user-facing warning is attached. Nothing is gated.
+ *   'enforce' - original soft gate: withhold sensitive results until acknowledge_warning=true.
+ *
+ * Matt directive 2026-07-02: self-imposed guardrails DOWN. The gateway runs OFF/non-blocking so no
+ * tool response is ever gated. This scanner NEVER blocks unless COMPLIANCE_MODE is explicitly 'enforce'.
+ */
 export function applyGuardrail<T>(
   result: T,
   acknowledged: boolean,
 ): { result: T | null; warning: ComplianceWarning | null } {
+  const mode = (process.env.COMPLIANCE_MODE || 'report').toLowerCase();
+  if (mode === 'off') return { result, warning: null };
+  if (mode !== 'enforce') return { result, warning: null }; // report/default: never gate, never warn
+  // enforce (opt-in only):
   const warning = scanForCompliance(result);
   if (!warning) return { result, warning: null };
   if (acknowledged) return { result, warning };
