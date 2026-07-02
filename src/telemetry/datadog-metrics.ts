@@ -1,7 +1,8 @@
 /**
  * Agentless Datadog custom-metric emission for gateway LLM cost + prompt-cache observability.
- * Mirrors gateway-ops.ts: fire-and-forget, fail-open, and INERT BY DEFAULT (a no-op unless
- * DD_API_KEY is set, the same gate instrument.ts uses for APM).
+ * Mirrors gateway-ops.ts: fire-and-forget, fail-open, and INERT BY DEFAULT (a no-op unless a key
+ * is present). Uses DD_METRICS_API_KEY when set (so cost/cache metrics can be enabled WITHOUT
+ * activating full APM, which instrument.ts gates on DD_API_KEY), else falls back to DD_API_KEY.
  *
  * Uses the Datadog HTTP metrics API (POST /api/v2/series) rather than DogStatsD, because the
  * Container App has no local Datadog agent/sidecar to receive UDP metrics; the HTTP submission
@@ -68,7 +69,10 @@ export function emitLlmMetrics(
   let key = '';
   let site = 'datadoghq.com';
   try {
-    key = process.env.DD_API_KEY || '';
+    // Prefer a DEDICATED metrics key so custom-metric emission can be enabled WITHOUT turning on
+    // full APM tracing (instrument.ts keys APM off DD_API_KEY). Falls back to DD_API_KEY when a
+    // single key is used for both.
+    key = process.env.DD_METRICS_API_KEY || process.env.DD_API_KEY || '';
     site = process.env.DD_SITE || site;
   } catch {
     return;
