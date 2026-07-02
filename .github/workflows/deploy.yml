@@ -83,12 +83,12 @@ jobs:
           SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)"
           az containerapp update -n "$APP" -g "$APP_RG" \
             --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" \
-            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=report DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com >/dev/null
-          # NOTE: APM (DD_API_KEY/DD_ENV/DD_SERVICE/DD_VERSION) was tried and REVERTED 2026-07-02:
-          # dd-trace needs a Datadog Agent to forward traces, and this Container App has no agent
-          # sidecar, so setting DD_API_KEY put the gateway into CrashLoopBackOff (blue-green caught
-          # it, prod unaffected). To enable APM, first add a datadog/agent sidecar container (DD_API_KEY
-          # + DD_SITE) so dd-trace can reach it at localhost:8126, THEN re-add these env vars.
+            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=report DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com DD_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_ENV=production DD_SERVICE=gateway-mcp DD_VERSION="$SUFFIX" DD_AZURE_SUBSCRIPTION_ID=55c84f6b-ef90-4259-a58b-50835cc4cab4 DD_AZURE_RESOURCE_GROUP="$APP_RG" >/dev/null
+          # APM via serverless-init (agentless, /app/datadog-init entrypoint). REQUIRES the glibc
+          # runtime base (node:22-slim) AND the two Azure identifiers below: serverless-init auto-detects
+          # Azure Container Apps and its Init() exits non-zero if DD_AZURE_SUBSCRIPTION_ID or
+          # DD_AZURE_RESOURCE_GROUP is missing (proven by Datadog's containerapp_test.go; docs list both
+          # as Required). That missing pair was the exit-1 root cause. DD_LOGS_ENABLED is set in the image.
           echo "revision=${APP}--${SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Assert GREEN health + full tool catalog (regression guard)

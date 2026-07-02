@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1: build
 # ============================================================
-FROM node:22-alpine AS build
+FROM node:22 AS build
 
 WORKDIR /app
 
@@ -16,7 +16,10 @@ RUN npm run build && npm prune --omit=dev
 # ============================================================
 # Stage 2: runtime
 # ============================================================
-FROM node:22-alpine AS runtime
+# glibc base (Debian slim), NOT alpine/musl: Datadog serverless-init's /datadog-init is a
+# glibc-linked binary and cannot exec on musl. Build stage is full node:22 (glibc) so native
+# node_modules match the runtime ABI.
+FROM node:22-slim AS runtime
 
 ENV NODE_ENV=production
 ENV PORT=8080
@@ -24,9 +27,11 @@ ENV PORT=8080
 WORKDIR /app
 
 # curl: used by the eval harness (eval-runner.mjs) and the HEALTHCHECK probe.
-RUN apk add --no-cache curl
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -S app && adduser -S app -G app
+RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app
 
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
@@ -44,6 +49,7 @@ COPY --from=build --chown=app:app /app/src/eval ./eval
 COPY --from=datadog/serverless-init:1 --chown=app:app /datadog-init /app/datadog-init
 ENV DD_SITE=us3.datadoghq.com
 ENV DD_SERVICE=gateway-mcp
+ENV DD_LOGS_ENABLED=true
 ENV DD_LOGS_INJECTION=true
 ENV DD_SERVERLESS_LOG_PATH=/dev/stdout
 
@@ -52,7 +58,7 @@ USER app
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8080/health || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["/bin/sh", "-c", "if [ -n \"$DD_API_KEY\" ]; then exec /app/datadog-init \"$@\"; else exec \"$@\"; fi", "sh"]
 CMD ["node", "dist/server/index.js"]
