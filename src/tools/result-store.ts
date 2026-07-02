@@ -18,13 +18,22 @@ const THRESHOLD_CHARS = Number(process.env.JIT_RESULT_THRESHOLD_CHARS) || 40000;
 const TTL_SECONDS = Number(process.env.JIT_RESULT_TTL_SECONDS) || 3600;
 const HEAD_CHARS = 4000;
 const TAIL_CHARS = 1000;
+// Upper bound: a Cosmos document is capped at 2MB. Above ~1.6M chars the stored doc (which also
+// carries the full `data`) risks exceeding that, so we don't attempt offload and keep the result
+// inline (fail-open). Env-overridable.
+const MAX_OFFLOAD_CHARS = Number(process.env.JIT_RESULT_MAX_CHARS) || 1_600_000;
 // Page size for gateway_fetch_result. MUST stay below THRESHOLD_CHARS so a fetched page never
 // itself re-triggers offload (no recursion).
 export const PAGE_CHARS = 30000;
 
-/** True when a result is large enough to offload AND Cosmos is available to store it. */
+/** True when a result is large enough to offload, within the Cosmos doc cap, AND Cosmos is available. */
 export function shouldOffload(text: string): boolean {
-  return typeof text === 'string' && text.length > THRESHOLD_CHARS && cosmos.isConfigured();
+  return (
+    typeof text === 'string' &&
+    text.length > THRESHOLD_CHARS &&
+    text.length <= MAX_OFFLOAD_CHARS &&
+    cosmos.isConfigured()
+  );
 }
 
 /** Head+tail preview with a clear pointer to gateway_fetch_result. Pure/testable. */
@@ -65,10 +74,13 @@ export async function offloadResult(
   try {
     const resultId = cosmos.newId('jitres');
     const now = Date.now();
-    // Mirrors the oauthcodes TTL pattern: pk = id (point reads), Cosmos native `ttl` as the
-    // best-effort backstop, explicit expiresAt as the authoritative expiry check on read.
+    // The `cache` container partitions on /cacheScope (NOT /id), so the doc MUST carry a cacheScope
+    // field equal to the partition-key value we pass. We use resultId for both (cacheScope=id) so a
+    // point read is readDoc('cache', resultId, resultId). Cosmos native `ttl` is the best-effort
+    // backstop; explicit expiresAt is the authoritative expiry check on read.
     await cosmos.upsertDoc('cache', resultId, {
       id: resultId,
+      cacheScope: resultId,
       type: 'jit_result',
       correlation_id: correlationId,
       data,
