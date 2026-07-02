@@ -160,6 +160,21 @@ const EnvSchema = z.object({
   // Fail-open end to end: any cache error (Cosmos down, embed() throws) falls through to a normal
   // model call. Reuses the existing Cosmos `cache` container (COSMOS_ENDPOINT/COSMOS_KEY above) and
   // the existing Foundry embed() (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY above) — no new credentials.
+  //
+  // llm_azure FAQ/INTENT DEFLECTION (src/tools/llm/faq-deflect.ts). Also NOT in this schema on
+  // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh per call so it can
+  // be flipped without a redeploy:
+  //   FAQ_DEFLECT_MODE                  off (default) | on  — deterministic FAQ/intent check before
+  //                                     any llm_azure task='complete' model call; a high-confidence
+  //                                     match returns a curated canned answer with NO model call at
+  //                                     all (Claude AND Azure tokens saved). Long-tail/low-confidence
+  //                                     questions fall through to the normal llm_azure path unchanged.
+  //   FAQ_DEFLECT_SIMILARITY_THRESHOLD  cosine similarity floor for a deflection hit, 0..1 (default 0.93)
+  // Pattern = Azure AI App Template #41 (Language CLU/CQA conversational-agent accelerator),
+  // adapted cost-neutrally: reuses the existing Cosmos `cache` container (COSMOS_ENDPOINT/COSMOS_KEY
+  // above) and the existing Foundry embed() (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY above) under a
+  // distinct partition ("faq:global") instead of provisioning a new Azure AI Language resource.
+  // ORDER: FAQ deflection runs BEFORE the semantic cache, which runs before the model call.
 
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
