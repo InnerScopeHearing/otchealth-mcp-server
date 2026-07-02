@@ -11,7 +11,24 @@ process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
 process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 
-const { embedBatch, foundryConfigured } = await import('./foundry.js');
+const { embedBatch, foundryConfigured, promptCacheKey } = await import('./foundry.js');
+
+test('promptCacheKey: stable across calls sharing a system prefix, and independent of user content', () => {
+  const sys = { role: 'system' as const, content: 'You are a precise summarizer.' };
+  const a = promptCacheKey('gpt-5.1', [sys, { role: 'user', content: 'summarize A' }]);
+  const b = promptCacheKey('gpt-5.1', [sys, { role: 'user', content: 'a completely different body B' }]);
+  assert.equal(a, b, 'same system prefix + deployment -> same cache-affinity key regardless of user content');
+  assert.match(a, /^oc-[0-9a-f]{24}$/);
+});
+
+test('promptCacheKey: differs by deployment and by system prefix', () => {
+  const sys = { role: 'system' as const, content: 'You are a classifier.' };
+  assert.notEqual(promptCacheKey('gpt-5.1', [sys]), promptCacheKey('gpt-5.4', [sys]));
+  assert.notEqual(
+    promptCacheKey('gpt-5.1', [{ role: 'system', content: 'prompt one' }]),
+    promptCacheKey('gpt-5.1', [{ role: 'system', content: 'prompt two' }]),
+  );
+});
 
 // Pure network mocking via a direct globalThis.fetch reassignment (a genuine global, not another
 // module's live named export, so node:test's inability to redefine module exports does not apply

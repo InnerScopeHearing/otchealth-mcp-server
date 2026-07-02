@@ -12,6 +12,7 @@
  *   FOUNDRY_CHAT_DEPLOYMENT  default 'gpt-4.1-mini'
  *   FOUNDRY_EMBED_DEPLOYMENT default 'text-embedding-3-large'
  */
+import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 
@@ -117,6 +118,21 @@ export interface ChatMessage {
   content: string;
 }
 
+/**
+ * Stable cache-affinity key for Azure OpenAI automatic prompt caching. Azure caches identical
+ * request prefixes (>=1024 tokens) automatically; passing a CONSISTENT `user` value routes repeat
+ * calls that share the same stable prefix to the same cache node, materially improving the cache-hit
+ * rate. We derive the key from the deployment + the SYSTEM messages only (the stable prefix), and
+ * deliberately exclude the variable user content so the key stays constant across calls that share a
+ * system prompt (e.g. every groundedness check, every llm_azure summarize). `user` is a long-standing,
+ * optional Azure OpenAI field that is safely ignored where unsupported (never a 400), so this is a
+ * zero-risk routing hint, not a behavior change. Pure + deterministic (unit-tested).
+ */
+export function promptCacheKey(deployment: string, messages: ChatMessage[]): string {
+  const prefix = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+  return 'oc-' + createHash('sha256').update(`${deployment}\n${prefix}`).digest('hex').slice(0, 24);
+}
+
 /** Is the Azure Model Router configured? */
 export function routerConfigured(): boolean {
   const e = loadEnv();
@@ -126,7 +142,7 @@ export function routerConfigured(): boolean {
 /** Chat completion on a credit-funded Foundry deployment (default gpt-5.1), or the Model Router. */
 export async function chat(
   messages: ChatMessage[],
-  opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean; deployment?: string; tier?: 'standard' | 'high' | 'router' },
+  opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean; deployment?: string; tier?: 'standard' | 'high' | 'router'; cacheKey?: string },
 ): Promise<{ text: string; usage?: unknown; model: string }> {
   const c = cfg();
   if (!c) throw new FoundryError(0, 'Foundry not configured (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY unset)');
@@ -151,6 +167,9 @@ export async function chat(
   };
   if (typeof opts?.temperature === 'number') body.temperature = opts.temperature;
   if (opts?.jsonMode) body.response_format = { type: 'json_object' };
+  // Cache-affinity routing for Azure OpenAI automatic prompt caching (see promptCacheKey). Additive
+  // and safe: `user` is ignored where unsupported and never changes the completion.
+  body.user = opts?.cacheKey || promptCacheKey(deployment, messages);
   const j = await post<{ choices?: Array<{ message?: { content?: string } }>; usage?: unknown; model?: string }>(url, key, body);
   // The router echoes which underlying model it picked in `model`; surface that.
   return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: j.model || deployment };
