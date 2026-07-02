@@ -49,9 +49,18 @@ COPY --from=build --chown=app:app /app/src/eval ./eval
 COPY --from=datadog/serverless-init:1 --chown=app:app /datadog-init /app/datadog-init
 ENV DD_SITE=us3.datadoghq.com
 ENV DD_SERVICE=gateway-mcp
+ENV DD_APM_ENABLED=true
+# In-container mode: serverless-init disables the trace UDS and serves the trace-agent on TCP
+# 127.0.0.1:8126. dd-trace v5 probes the Unix socket first, so point it explicitly at the TCP
+# endpoint to avoid the socket-first miss and guarantee spans reach serverless-init.
+ENV DD_TRACE_AGENT_URL=http://127.0.0.1:8126
 ENV DD_LOGS_ENABLED=true
 ENV DD_LOGS_INJECTION=true
-ENV DD_SERVERLESS_LOG_PATH=/dev/stdout
+ENV DD_SOURCE=nodejs
+# NOTE: DD_SERVERLESS_LOG_PATH is intentionally NOT set. It activates serverless-init's FILE-TAILING
+# (sidecar) mode; in this in-container/entrypoint-wrap topology serverless-init captures the child's
+# stdout/stderr directly once DD_LOGS_ENABLED=true. Setting it (esp. to /dev/stdout) silently breaks
+# log forwarding (cmd/serverless-init/log/log.go: envVarTailFilePath).
 
 USER app
 
