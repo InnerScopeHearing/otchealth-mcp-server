@@ -83,7 +83,7 @@ jobs:
           SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)"
           az containerapp update -n "$APP" -g "$APP_RG" \
             --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" \
-            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=off COMPLIANCE_MODE=off DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com DD_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_ENV=production DD_SERVICE=gateway-mcp DD_VERSION="$SUFFIX" DD_AZURE_SUBSCRIPTION_ID=55c84f6b-ef90-4259-a58b-50835cc4cab4 DD_AZURE_RESOURCE_GROUP="$APP_RG" >/dev/null
+            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=off COMPLIANCE_MODE=off DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com DD_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_ENV=production DD_SERVICE=gateway-mcp DD_VERSION="$SUFFIX" DD_AZURE_SUBSCRIPTION_ID=55c84f6b-ef90-4259-a58b-50835cc4cab4 DD_AZURE_RESOURCE_GROUP="$APP_RG" CONTENT_SAFETY_ENDPOINT="${{ secrets.CONTENT_SAFETY_ENDPOINT }}" CONTENT_SAFETY_KEY="${{ secrets.CONTENT_SAFETY_KEY }}" >/dev/null
           # Matt directive 2026-07-02: self-imposed guardrails DOWN. GOVERNANCE_MODE=off (charter enforcer
           # off) + COMPLIANCE_MODE=off (regulated-content gate off) so NO tool response is ever gated.
           # APM via serverless-init (agentless, /app/datadog-init entrypoint). REQUIRES the glibc
@@ -91,6 +91,12 @@ jobs:
           # Azure Container Apps and its Init() exits non-zero if DD_AZURE_SUBSCRIPTION_ID or
           # DD_AZURE_RESOURCE_GROUP is missing (proven by Datadog's containerapp_test.go; docs list both
           # as Required). That missing pair was the exit-1 root cause. DD_LOGS_ENABLED is set in the image.
+          # CONTENT_SAFETY_ENDPOINT/KEY (2026-07-02): activate the already-wired Azure AI Content Safety
+          # tools (shield_check / groundedness_check / claims_check, src/safety/content-safety.ts). The
+          # code graceful-skips when these are unset, so the tools were registered but INERT in prod. The
+          # values live in the vault (GCP SM azure-contentsafety-endpoint/key) and were mirrored into the
+          # repo Actions secrets CONTENT_SAFETY_ENDPOINT/KEY (never committed as values). endpoint =
+          # https://cs-otchealth.cognitiveservices.azure.com (resource cs-otchealth).
           echo "revision=${APP}--${SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Assert GREEN health + full tool catalog (regression guard)
