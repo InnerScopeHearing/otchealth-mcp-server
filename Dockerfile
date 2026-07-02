@@ -26,9 +26,13 @@ ENV PORT=8080
 
 WORKDIR /app
 
-# curl: used by the eval harness (eval-runner.mjs) and the HEALTHCHECK probe.
+# curl: eval harness + HEALTHCHECK probe. ca-certificates: REQUIRED so the Go-based Datadog
+# serverless-init binary can verify TLS to the DD intake (trace.agent/http-intake/*.us3). Without it,
+# node:22-slim has no system CA bundle and serverless-init drops every payload with
+# "x509: certificate signed by unknown authority" (Node's own fetch bundles CAs, so direct API
+# calls still work, which is why only serverless-init forwarding failed).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app
