@@ -3,34 +3,48 @@
  *
  * HARD RING BOUNDARY (unwaivable): finance = MNPI/securities-sensitive; legal = attorney-privileged.
  * These must NEVER reach an external third-party AI client. Enforcement: the caller's OAuth-derived
- * agent lane (ctx.callerAgent) must EXACTLY match one of the index's allowed trusted lanes. The broad
- * 'cto'/default/static-connector identity is deliberately EXCLUDED, so the externally-reachable
- * connector can never retrieve privileged data — only a dedicated trusted per-role OAuth client
- * (which Matt mints and never hands to an external platform) can.
+ * agent lane (ctx.callerAgent) must EXACTLY match one of the index's allowed trusted lanes. An unknown
+ * or external caller resolves to '' and is refused.
  *
- * SCOPED MUTUAL CROSS-READ (CEO direction): the clo/clo-personal and cfo trusted lanes may read
- * each other's privileged indexes. This is intentionally limited to those three identities —
- * no other agent (coo/cro/cpo/cco/developer/app-leads/cto/etc.) is added to any array below.
+ * The broad 'cto'/default/static-connector identity is deliberately EXCLUDED from every privileged
+ * index. The cto identity is the widely-connected, externally-reachable connector for the agent-OS;
+ * keeping it out of MNPI + attorney-privileged data caps the blast radius of the most sensitive corpora
+ * and costs nothing operationally (cto retains full non-privileged recall via the open memory-exec brain).
+ * Only a dedicated trusted per-role OAuth client (which Matt mints and never hands to an external
+ * platform) can retrieve privileged data.
  *
- *   finance-cfo-source-docs            -> ['cfo', 'clo', 'clo-personal']
- *   finance-otchealth-cfo-source-docs  -> ['cfo', 'clo', 'clo-personal']
- *   finance-cfo-memory                 -> ['cfo', 'clo', 'clo-personal']
- *   legal-company                      -> ['clo', 'cfo']
- *   legal-personal                     -> ['clo-personal', 'clo', 'cfo']   (most sensitive; personal privilege)
- *   legal-personal-memory              -> ['clo-personal', 'clo', 'cfo']
+ * EXECUTIVE-RING CROSS-READ (CEO direction, 2026-07-02): the executive team shares privileged context so
+ * institutional knowledge compounds and requires less manual curation. Every privileged index is readable
+ * by the exec ring:
+ *   EXEC_RING = ['cfo','clo','clo-personal','coo','cro','cpo','cco']
+ * This is intentionally limited to the C-suite exec lanes. NON-exec identities are NEVER added to any
+ * array below: 'developer' (engineering IC), every app-lead/product agent (iheartest, innerease, flatstick,
+ * fourvault, fictionary, companion, otchealthmart, etc.), 'focus-group', AND the broad 'cto'/default
+ * connector identity. legal-personal/-memory carry the most sensitive personal-privilege content (incl.
+ * minors' data) and are included in the exec ring per explicit CEO direction.
+ *
+ *   finance-cfo-source-docs            -> EXEC_RING
+ *   finance-otchealth-cfo-source-docs  -> EXEC_RING
+ *   finance-cfo-memory                 -> EXEC_RING
+ *   legal-company                      -> EXEC_RING
+ *   legal-personal                     -> EXEC_RING   (most sensitive; personal privilege)
+ *   legal-personal-memory              -> EXEC_RING
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../azure/search.js';
 
+/** The executive ring: the only identities permitted on privileged indexes. Defined once, applied to all. */
+export const EXEC_RING = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco'] as const;
+
 export const INDEX_LANES: Record<string, string[]> = {
-  'finance-cfo-source-docs': ['cfo', 'clo', 'clo-personal'],
-  'finance-otchealth-cfo-source-docs': ['cfo', 'clo', 'clo-personal'],
-  'finance-cfo-memory': ['cfo', 'clo', 'clo-personal'],
-  'legal-company': ['clo', 'cfo'],
-  'legal-personal': ['clo-personal', 'clo', 'cfo'],
-  'legal-personal-memory': ['clo-personal', 'clo', 'cfo'],
+  'finance-cfo-source-docs': [...EXEC_RING],
+  'finance-otchealth-cfo-source-docs': [...EXEC_RING],
+  'finance-cfo-memory': [...EXEC_RING],
+  'legal-company': [...EXEC_RING],
+  'legal-personal': [...EXEC_RING],
+  'legal-personal-memory': [...EXEC_RING],
 };
 
 /** Pure ring-enforcement predicate, exported for unit testing without spinning up the MCP server. */
@@ -46,9 +60,9 @@ export function registerKbSearchPrivileged(server: McpServer, callerHash: Caller
       name: 'kb_search_privileged',
       category: 'read',
       annotations: {
-        title: 'Search a ring-gated dataroom index (trusted lane only)',
+        title: 'Search a ring-gated dataroom index (executive ring only)',
         description:
-          'Hybrid search over RING-GATED dataroom indexes (finance = MNPI; legal = attorney-privileged). Enforced to the trusted lanes on record for each index: finance-*/finance-cfo-memory allow cfo, clo, clo-personal; legal-company/legal-personal/legal-personal-memory allow clo, clo-personal, cfo (scoped clo<->cfo mutual read). The cto/default/external connector identity is refused, as is every other agent identity. Privileged data never reaches an external client.',
+          'Hybrid search over RING-GATED dataroom indexes (finance = MNPI; legal = attorney-privileged). Enforced to the executive ring on record for each index: cfo, clo, clo-personal, coo, cro, cpo, cco. The cto/default/external connector identity is refused, as is developer, every app-lead/product agent, and every other identity. Privileged data never reaches an external client.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -78,11 +92,11 @@ export function registerKbSearchPrivileged(server: McpServer, callerHash: Caller
         const top = input.top ?? 6;
         const lanes = INDEX_LANES[index] ?? [];
         const caller = ctx.callerAgent || '';
-        // RING ENFORCEMENT: caller must be one of the index's trusted lanes; cto/default/external excluded.
+        // RING ENFORCEMENT: caller must be one of the index's exec-ring lanes; cto/default/external excluded.
         if (!isLaneAllowed(index, caller)) {
           return {
             data: { index, matches: [], count: 0, mode: 'ring-forbidden', error: 'forbidden_ring' },
-            summary: `Refused: "${index}" requires the ${lanes.join('/')} trusted lane. Your identity: ${caller || '(none)'}. Privileged/MNPI data is never served to other lanes or external clients.`,
+            summary: `Refused: "${index}" requires one of the ${lanes.join('/')} trusted lanes. Your identity: ${caller || '(none)'}. Privileged/MNPI data is never served to other lanes or external clients.`,
           };
         }
         if (!searchConfigured()) {
