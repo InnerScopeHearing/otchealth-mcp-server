@@ -15,7 +15,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
-import { captureGatewayEvent } from '../../telemetry/gateway-ops.js';
+import { captureGatewayEvent, summarizeUsage, overSoftBudget } from '../../telemetry/gateway-ops.js';
 
 const TASK_PROMPTS: Record<string, string> = {
   summarize: 'You are a precise summarizer. Produce a faithful, well-structured summary of the user content. Preserve key facts, numbers, names, and decisions. No preamble.',
@@ -81,12 +81,17 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             tier,
           });
           // Observe-only per-call cost/usage event -> Gateway Ops project (fire-and-forget,
-          // inert unless POSTHOG_GATEWAYOPS_KEY is set; never affects the response).
+          // inert unless POSTHOG_GATEWAYOPS_KEY is set; never affects the response). Enriched with
+          // the flattened usage summary (incl. cached_tokens / cached_pct so the automatic-prompt-cache
+          // hit rate is visible) and a report-mode per-call soft-budget flag for the cost monitors.
+          const usageSummary = summarizeUsage(res.usage);
           captureGatewayEvent('gateway_llm_call', {
             task: input.task,
             tier,
             model: res.model,
             usage: res.usage ?? null,
+            ...usageSummary,
+            over_soft_budget: overSoftBudget(usageSummary),
             output_chars: res.text.length,
           });
           return {
