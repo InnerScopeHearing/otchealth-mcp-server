@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
 import { captureGatewayEvent, summarizeUsage, overSoftBudget } from '../../telemetry/gateway-ops.js';
+import { emitLlmMetrics } from '../../telemetry/datadog-metrics.js';
 
 const TASK_PROMPTS: Record<string, string> = {
   summarize: 'You are a precise summarizer. Produce a faithful, well-structured summary of the user content. Preserve key facts, numbers, names, and decisions. No preamble.',
@@ -94,6 +95,10 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             over_soft_budget: overSoftBudget(usageSummary),
             output_chars: res.text.length,
           });
+          // Same cost/cache signal to Datadog custom metrics (otc.gateway.llm.*), so the Fleet
+          // cost dashboard can chart cache-hit rate alongside the Azure token metrics. Inert unless
+          // DD_API_KEY is set; fire-and-forget, never affects the response.
+          emitLlmMetrics(res.model, input.task, usageSummary);
           return {
             data: { task: input.task, tier, output: res.text, model: res.model, usage: res.usage },
             summary: `llm_azure ${input.task} on ${res.model} (tier=${tier}, ${res.text.length} chars). Claude tokens saved.`,
