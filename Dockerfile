@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1: build
 # ============================================================
-FROM node:22 AS build
+FROM node:22-alpine AS build
 
 WORKDIR /app
 
@@ -16,11 +16,7 @@ RUN npm run build && npm prune --omit=dev
 # ============================================================
 # Stage 2: runtime
 # ============================================================
-# glibc base (Debian slim), NOT alpine/musl: Datadog serverless-init's /datadog-init is a
-# glibc-linked binary and fails to exec on musl (exit 127), which is what broke APM on the old
-# alpine runtime. slim keeps the image small while making serverless-init runnable. The build
-# stage is full node:22 (also glibc) so any native node_modules match the runtime ABI.
-FROM node:22-slim AS runtime
+FROM node:22-alpine AS runtime
 
 ENV NODE_ENV=production
 ENV PORT=8080
@@ -28,11 +24,9 @@ ENV PORT=8080
 WORKDIR /app
 
 # curl: used by the eval harness (eval-runner.mjs) and the HEALTHCHECK probe.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache curl
 
-RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app
+RUN addgroup -S app && adduser -S app -G app
 
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
@@ -58,7 +52,7 @@ USER app
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+    CMD wget -qO- http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["/bin/sh", "-c", "if [ -n \"$DD_API_KEY\" ]; then exec /app/datadog-init \"$@\"; else exec \"$@\"; fi", "sh"]
 CMD ["node", "dist/server/index.js"]
