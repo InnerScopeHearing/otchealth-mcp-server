@@ -18,6 +18,7 @@ import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.j
 import { captureGatewayEvent, summarizeUsage, overSoftBudget } from '../../telemetry/gateway-ops.js';
 import { emitLlmMetrics } from '../../telemetry/datadog-metrics.js';
 import { checkLlmCache, writeLlmCache } from './semantic-cache.js';
+import { checkFaqDeflect, seedFaqStore, faqDeflectOn } from './faq-deflect.js';
 
 const TASK_PROMPTS: Record<string, string> = {
   summarize: 'You are a precise summarizer. Produce a faithful, well-structured summary of the user content. Preserve key facts, numbers, names, and decisions. No preamble.',
@@ -59,6 +60,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         usage: z.unknown().optional(),
         error: z.string().optional(),
         cache_hit: z.boolean().optional(),
+        deflected: z.boolean().optional(),
       },
       handler: async (input, ctx) => {
         const tier = input.tier ?? 'standard';
@@ -68,6 +70,32 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             summary: 'llm_azure unavailable: Foundry endpoint/key not configured on the gateway.',
           };
         }
+
+        // DETERMINISTIC FAQ/INTENT DEFLECTION (FAQ_DEFLECT_MODE=on): for task='complete' inbound
+        // questions, check the curated FAQ store BEFORE touching the model at all. Mode-gated +
+        // fail-open, mirrors LLM_CACHE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any failure (Cosmos
+        // down, embed() throws) silently falls through to the normal chat() call below. See
+        // faq-deflect.ts for the store choice + why this over Azure AI Language CLU/CQA.
+        const faqHit = await checkFaqDeflect(input.input, input.task);
+        if (faqHit.hit && faqHit.answer) {
+          captureGatewayEvent('gateway_faq_deflect_hit', {
+            task: input.task,
+            tier,
+            faq_id: faqHit.faqId,
+            similarity: faqHit.similarity,
+          });
+          return {
+            data: { task: input.task, tier, output: faqHit.answer, model: 'faq-deflect', deflected: true },
+            summary:
+              `llm_azure ${input.task} answered by the FAQ deflection layer ` +
+              `(faq_id ${faqHit.faqId}, similarity ${faqHit.similarity?.toFixed(4)}). ` +
+              `No model call made — Claude AND Azure tokens saved.`,
+          };
+        }
+        // Best-effort self-heal of the curated store; cheap no-op once entries already exist with
+        // a live vector. Fire-and-forget so a seed failure never delays or affects this call.
+        if (input.task === 'complete' && faqDeflectOn()) void seedFaqStore().catch(() => undefined);
+
         const sys = TASK_PROMPTS[input.task] ?? TASK_PROMPTS.complete;
         const parts: string[] = [];
         if (input.instructions) parts.push(`Instructions: ${input.instructions}`);
