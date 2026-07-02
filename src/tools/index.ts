@@ -109,6 +109,7 @@ import { registerKbSearchPrivileged } from './kb/search-privileged.js';
 
 // Wave A+ — llm_azure commodity path (credit-funded gpt-4.1, tiered): the cost-protocol escape hatch
 import { registerLlmAzure } from './llm/azure.js';
+import { registerGatewayFetchResult } from './gateway-fetch-result.js';
 
 // ===== EXHAUSTIVE WAVE: complete per-connector CRUD surface =====
 import { registerCioActivitiesList } from './cio/activities-list.js';
@@ -1001,6 +1002,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerKbSearch(server, callerHash);
   registerKbSearchPrivileged(server, callerHash);
   registerLlmAzure(server, callerHash);
+  registerGatewayFetchResult(server, callerHash); // JIT tool-payload retrieval companion (read)
 
   // ===== FULL READ+WRITE WAVE: connector write tools =====
   registerCreateOrUpdateCustomer(server, callerHash);

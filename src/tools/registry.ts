@@ -24,6 +24,7 @@ import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor } from '../catalog/governance.js';
 import { currentCallerAgent } from '../server/request-context.js';
 import { checkGovernance } from '../governance/charter-enforcer.js';
+import { shouldOffload, offloadResult } from './result-store.js';
 
 const env = loadEnv();
 
@@ -343,13 +344,30 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (payload.audit?.after !== undefined) endLog.after = payload.audit.after;
         logToolEnd(endLog);
 
-        const structured = {
+        const structured: Record<string, unknown> = {
           result,
           compliance_warning: warning,
           correlation_id: correlationId,
           dry_run: dryRun,
         };
-        const text = buildTextContent({ ...payload, data: result }, warning);
+        let text = buildTextContent({ ...payload, data: result }, warning);
+
+        // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
+        // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
+        // Fail-open: offloadResult returns null on any error, so we keep the full inline result.
+        // Small results are untouched (backward-compatible).
+        if (shouldOffload(text)) {
+          const off = await offloadResult(text, result, correlationId);
+          if (off) {
+            text = off.preview;
+            structured.result = {
+              _jit_offloaded: true,
+              result_id: off.resultId,
+              total_bytes: off.totalBytes,
+              note: 'Full payload offloaded to keep context small; call gateway_fetch_result(result_id).',
+            };
+          }
+        }
 
         return {
           content: [{ type: 'text', text }],
