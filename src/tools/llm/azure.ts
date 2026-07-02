@@ -17,6 +17,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
 import { captureGatewayEvent, summarizeUsage, overSoftBudget } from '../../telemetry/gateway-ops.js';
 import { emitLlmMetrics } from '../../telemetry/datadog-metrics.js';
+import { checkLlmCache, writeLlmCache } from './semantic-cache.js';
 
 const TASK_PROMPTS: Record<string, string> = {
   summarize: 'You are a precise summarizer. Produce a faithful, well-structured summary of the user content. Preserve key facts, numbers, names, and decisions. No preamble.',
@@ -57,8 +58,9 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         model: z.string(),
         usage: z.unknown().optional(),
         error: z.string().optional(),
+        cache_hit: z.boolean().optional(),
       },
-      handler: async (input) => {
+      handler: async (input, ctx) => {
         const tier = input.tier ?? 'standard';
         if (!foundryConfigured()) {
           return {
@@ -75,6 +77,46 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
           { role: 'system', content: sys! },
           { role: 'user', content: parts.join('\n\n') },
         ];
+
+        // Cache key text: everything that shapes the answer besides task/tier/lane (which are
+        // baked into the cache partition, see semantic-cache.ts scopeFor) — instructions, labels,
+        // jsonMode, and the input content itself. Two calls that differ only in whitespace/wording
+        // but mean the same thing can still land within the similarity threshold.
+        const cachePrompt = [
+          input.instructions ?? '',
+          input.task === 'classify' ? (input.labels ?? []).join(',') : '',
+          input.jsonMode ? 'json' : '',
+          input.input,
+        ].join('\n---\n');
+
+        // SEMANTIC RESPONSE CACHE (LLM_CACHE_MODE=on): cache-check BEFORE the model call.
+        // Mode-gated + fail-open, mirroring COMPLIANCE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any
+        // cache failure (Cosmos down, embed() throws) silently falls through to a normal chat()
+        // call below. See semantic-cache.ts for the store choice + why.
+        const cacheLookup = await checkLlmCache(cachePrompt, ctx.callerAgent, input.task, tier);
+        if (cacheLookup.hit && cacheLookup.entry) {
+          captureGatewayEvent('gateway_llm_cache_hit', {
+            task: input.task,
+            tier,
+            model: cacheLookup.entry.model,
+            similarity: cacheLookup.similarity,
+          });
+          return {
+            data: {
+              task: input.task,
+              tier,
+              output: cacheLookup.entry.output,
+              model: cacheLookup.entry.model,
+              usage: cacheLookup.entry.usage,
+              cache_hit: true,
+            },
+            summary:
+              `llm_azure ${input.task} served from the semantic response cache ` +
+              `(similarity ${cacheLookup.similarity?.toFixed(4)}, model ${cacheLookup.entry.model}). ` +
+              `No fresh model call made — Claude AND Azure tokens saved.`,
+          };
+        }
+
         try {
           const res = await chat(messages, {
             maxTokens: input.maxTokens ?? 1500,
@@ -99,8 +141,17 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
           // cost dashboard can chart cache-hit rate alongside the Azure token metrics. Inert unless
           // DD_API_KEY is set; fire-and-forget, never affects the response.
           emitLlmMetrics(res.model, input.task, usageSummary);
+
+          // Best-effort write-back into the semantic cache (fire-and-forget; a write failure must
+          // never affect the response, mirrors memory/hot-cache.ts's writeCache pattern).
+          void writeLlmCache(cachePrompt, ctx.callerAgent, input.task, tier, {
+            output: res.text,
+            model: res.model,
+            usage: res.usage,
+          }).catch(() => undefined);
+
           return {
-            data: { task: input.task, tier, output: res.text, model: res.model, usage: res.usage },
+            data: { task: input.task, tier, output: res.text, model: res.model, usage: res.usage, cache_hit: false },
             summary: `llm_azure ${input.task} on ${res.model} (tier=${tier}, ${res.text.length} chars). Claude tokens saved.`,
           };
         } catch (e) {

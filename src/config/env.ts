@@ -152,6 +152,15 @@ const EnvSchema = z.object({
   // 'report' runs the check and annotates/logs but never blocks; 'enforce' blocks (inbound: pre-handler;
   // outbound: read-only tools only). All fail-open + inert until CONTENT_SAFETY_* above is set.
 
+  // llm_azure SEMANTIC RESPONSE CACHE (src/tools/llm/semantic-cache.ts). Also NOT in this schema on
+  // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh per call so it can be
+  // flipped without a redeploy:
+  //   LLM_CACHE_MODE                  off (default) | on  — cache-check before every llm_azure call
+  //   LLM_CACHE_SIMILARITY_THRESHOLD  cosine similarity floor for a hit, 0..1 (default 0.95)
+  // Fail-open end to end: any cache error (Cosmos down, embed() throws) falls through to a normal
+  // model call. Reuses the existing Cosmos `cache` container (COSMOS_ENDPOINT/COSMOS_KEY above) and
+  // the existing Foundry embed() (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY above) — no new credentials.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
