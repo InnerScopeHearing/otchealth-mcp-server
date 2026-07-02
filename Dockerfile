@@ -46,8 +46,12 @@ COPY --from=build --chown=app:app /app/src/eval ./eval
 # INERT unless DD_API_KEY is provided to the environment, so this image is safe to ship
 # everywhere; telemetry only flows where DD_API_KEY is set (the per-env gate). No
 # DD_API_KEY is baked in here, by design (the gateway is keys-to-the-kingdom).
-COPY --from=datadog/serverless-init:1 --chown=app:app /datadog-init /app/datadog-init
+COPY --from=datadog/serverless-init:1.9.16 --chown=app:app /datadog-init /app/datadog-init
 ENV DD_SITE=us3.datadoghq.com
+# TEMP DIAGNOSTIC (2026-07-02): surface serverless-init's own forwarding diagnostics to stdout so we
+# can see auth (403) vs egress (connection refused/DNS) vs downstream. Remove once traces/logs confirmed.
+ENV DD_LOG_LEVEL=debug
+ENV DD_TRACE_DEBUG=true
 ENV DD_SERVICE=gateway-mcp
 ENV DD_APM_ENABLED=true
 # In-container mode: serverless-init disables the trace UDS and serves the trace-agent on TCP
