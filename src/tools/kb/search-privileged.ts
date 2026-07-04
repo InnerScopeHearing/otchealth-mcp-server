@@ -16,7 +16,7 @@
  * EXECUTIVE-RING CROSS-READ (CEO direction, 2026-07-02): the executive team shares privileged context so
  * institutional knowledge compounds and requires less manual curation. Every privileged index is readable
  * by the exec ring:
- *   EXEC_RING = ['cfo','clo','clo-personal','coo','cro','cpo','cco']
+ *   EXEC_RING = ['cfo','clo','clo-personal','coo','cro','cpo','cco','exec']  ('exec' = unified chief, 2026-07-04)
  * This is intentionally limited to the C-suite exec lanes. NON-exec identities are NEVER added to any
  * array below: 'developer' (engineering IC), every app-lead/product agent (iheartest, innerease, flatstick,
  * fourvault, fictionary, companion, otchealthmart, etc.), 'focus-group', AND the broad 'cto'/default
@@ -35,8 +35,12 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../azure/search.js';
 
-/** The executive ring: the only identities permitted on privileged indexes. Defined once, applied to all. */
-export const EXEC_RING = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco'] as const;
+/** The executive ring: the only identities permitted on privileged indexes. Defined once, applied to all.
+ * 'exec' = the UNIFIED executive identity (CEO direction 2026-07-04): the solo operator wears every C-suite
+ * hat, so the individual chief lanes collapse into one 'exec' lane carrying the full exec cross-read. The
+ * per-chief lanes remain valid (unchanged) for anyone still using them. NON-exec identities are STILL never
+ * added below — 'cto' (the externally-reachable connector) + 'developer' + app-leads stay off MNPI/privileged. */
+export const EXEC_RING = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec'] as const;
 
 export const INDEX_LANES: Record<string, string[]> = {
   'finance-cfo-source-docs': [...EXEC_RING],
@@ -62,7 +66,7 @@ export function registerKbSearchPrivileged(server: McpServer, callerHash: Caller
       annotations: {
         title: 'Search a ring-gated dataroom index (executive ring only)',
         description:
-          'Hybrid search over RING-GATED dataroom indexes (finance = MNPI; legal = attorney-privileged). Enforced to the executive ring on record for each index: cfo, clo, clo-personal, coo, cro, cpo, cco. The cto/default/external connector identity is refused, as is developer, every app-lead/product agent, and every other identity. Privileged data never reaches an external client.',
+          'Hybrid search over RING-GATED dataroom indexes (finance = MNPI; legal = attorney-privileged). Enforced to the executive ring on record for each index: cfo, clo, clo-personal, coo, cro, cpo, cco, exec. The cto/default/external connector identity is refused, as is developer, every app-lead/product agent, and every other identity. Privileged data never reaches an external client.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

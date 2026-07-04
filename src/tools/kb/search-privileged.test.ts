@@ -14,8 +14,9 @@ const PRIVILEGED_INDEXES = [
   'legal-personal-memory',
 ];
 
-// The executive ring (CEO direction 2026-07-02): the C-suite lanes that share privileged context.
-const EXEC_AGENTS = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco'];
+// The executive ring (CEO direction 2026-07-02; 'exec' unified chief added 2026-07-04): the C-suite lanes
+// that share privileged context. 'exec' = the single unified executive identity for the solo operator.
+const EXEC_AGENTS = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec'];
 
 // Identities that must NEVER reach privileged data: the broad connector (cto/default), engineering IC,
 // app-lead/product agents, focus group, unknown callers.
