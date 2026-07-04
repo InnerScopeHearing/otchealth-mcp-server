@@ -55,8 +55,13 @@ export function registerWebSearch(server: McpServer, callerHash: CallerHashProvi
         try { token = await aad(); } catch (e) {
           return { data: { answer: '', citations: [], mode: 'error', error: String((e as Error).message) }, summary: 'Web search auth failed.' };
         }
-        const r = await fetchWithBudget(`${ep}/openai/v1/responses`, {
+        const ac = new AbortController();
+        const to = setTimeout(() => ac.abort(), 60_000); // web search legitimately takes 20-40s
+        let r: Response;
+        try {
+          r = await fetch(`${ep}/openai/v1/responses`, {
           method: 'POST',
+          signal: ac.signal,
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model,
@@ -66,7 +71,10 @@ export function registerWebSearch(server: McpServer, callerHash: CallerHashProvi
             tool_choice: 'auto',
             stream: false,
           }),
-        });
+          });
+        } catch (e) {
+          return { data: { answer: '', citations: [], mode: 'error', error: 'web_search timeout' }, summary: 'Web search timed out.' };
+        } finally { clearTimeout(to); }
         if (!r.ok) {
           const t = await r.text().catch(() => '');
           return { data: { answer: '', citations: [], mode: 'error', error: `responses ${r.status}` }, summary: `Web search failed: ${r.status} ${t.slice(0, 120)}` };
