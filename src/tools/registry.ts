@@ -22,7 +22,7 @@ import { CustomerIoApiError } from '../customerio/app-api-client.js';
 import { N8nWebhookError } from '../n8n/webhook-client.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor } from '../catalog/governance.js';
-import { currentCallerAgent } from '../server/request-context.js';
+import { currentCallerAgent, isConnectorSurface } from '../server/request-context.js';
 import { checkGovernance } from '../governance/charter-enforcer.js';
 import { shouldOffload, offloadResult } from './result-store.js';
 import {
@@ -32,6 +32,25 @@ import {
 } from '../safety/auto-guard.js';
 
 const env = loadEnv();
+
+// Curated toolset advertised to Claude Chat (DCR) connectors so the model gets a focused, FINDABLE set
+// instead of the full ~850-tool catalog (which Claude truncates, hiding brain_search). Override via
+// env CONNECTOR_TOOLSET (csv). catalog_list_tools is included so a connector can still discover the
+// full catalog on demand. Only DCR connector requests are curated; all other callers (startup catalog
+// warm, client_credentials lanes, static token) get the full set unchanged.
+const CONNECTOR_TOOLSET = new Set<string>(
+  (env.CONNECTOR_TOOLSET ||
+    [
+      'brain_search','web_search','kb_search','kb_search_privileged',
+      'memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team',
+      'llm_azure','catalog_list_tools','catalog_master','gateway_fetch_result',
+      'task_list','task_get','task_create','task_update','task_complete','inbox_read','agent_dispatch',
+      'posthog_query_hogql','posthog_insight_list',
+      'github_get_file_contents','github_list_pull_requests','github_issue_list','sentry_list_issues',
+      'graph_send_email','graph_list_messages','cio_get_customer','shield_check','groundedness_check',
+    ].join(',')
+  ).split(',').map((s) => s.trim()).filter(Boolean),
+);
 
 export type ToolCategory = 'read' | 'write_simple' | 'write_orchestrated';
 
@@ -144,6 +163,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   def: ToolDefinition<Shape, Output>,
   callerHashProvider: () => string,
 ): void {
+  // Claude Chat (DCR) connector requests get a CURATED, findable toolset (not the full ~850). All other
+  // callers see everything, and the startup catalog-warm runs with no request context so /health
+  // tool_count (deploy gate) is unaffected.
+  if (isConnectorSurface() && !CONNECTOR_TOOLSET.has(def.name)) return;
   // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
   recordTool({
     name: def.name,

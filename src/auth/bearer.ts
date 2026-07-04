@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked } from './revocation-store.js';
-import { isValidIssuedAccessToken, issuedAgent } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent, issuedClientId } from '../server/oauth.js';
 
 const env = loadEnv();
 
@@ -11,6 +11,8 @@ export interface AuthContext {
   caller_hash: string;
   raw_token: string;
   caller_agent: string;
+  /** True when the token was issued to a Dynamic-Client-Registration (Claude Chat) connector client. */
+  connector_surface: boolean;
 }
 
 function extractBearer(authHeader: string | undefined): string | null {
@@ -58,7 +60,9 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
     }
   }
   const caller_agent = issued ? (issuedAgent(token) || '') : (staticAgent || '');
-  return { caller_hash: hashToken(token), raw_token: token, caller_agent };
+  const clientId = issued ? issuedClientId(token) : null;
+  const connector_surface = Boolean(clientId && clientId.startsWith('dcr_'));
+  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface };
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {

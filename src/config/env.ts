@@ -68,6 +68,8 @@ const EnvSchema = z.object({
   OAUTH_DEFAULT_AGENT: z.string().optional().default(''),
   // Default ring lane bound to Dynamic-Client-Registration (Claude connector) clients.
   OAUTH_DCR_DEFAULT_AGENT: z.string().optional().default(''),
+  // Curated csv toolset advertised to Claude Chat DCR connector clients (empty -> built-in default).
+  CONNECTOR_TOOLSET: z.string().optional().default(''),
 
   // Semantic recall over the memory-exec Azure AI Search index (read-only QUERY key).
   // Inert when unset -> memory_recall falls back to keyword search over the blob feed.
