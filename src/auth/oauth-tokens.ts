@@ -162,3 +162,36 @@ export function verifyPkceS256(verifier: string, challenge: string): boolean {
   const hash = createHash('sha256').update(verifier).digest('base64url');
   return safeEqualStr(hash, challenge);
 }
+
+// ── Stateless Dynamic Client Registration (RFC 7591), PUBLIC clients (PKCE-only) ──────────────────────
+// A DCR client is issued to Claude.ai custom connectors so they can self-register and reach their ring
+// lane with NO secret to hand-carry. It is STATELESS: the client_id is an HMAC-signed blob carrying the
+// bound agent lane + allowed redirect_uris, signed with OAUTH_TOKEN_SIGNING_SECRET — so it needs no
+// storage and survives restarts / blue-green cutovers, and cannot be forged. PKCE (S256) is still
+// mandatory at authorize+token; the redirect_uri allow-list (Claude callback) is the second gate.
+export interface DcrClient { agent: string; redirectUris: string[]; iat: number; }
+
+export function registerStatelessClient(info: { agent: string; redirectUris: string[] }, secret: string): string {
+  const payload: DcrClient = { agent: info.agent, redirectUris: info.redirectUris, iat: Math.floor(Date.now() / 1000) };
+  const body = b64url(JSON.stringify(payload));
+  const sig = createHmac('sha256', secret).update(`dcr.${body}`).digest('base64url');
+  return `dcr_${body}.${sig}`;
+}
+
+export function parseStatelessClient(clientId: string, secret: string): DcrClient | null {
+  if (!clientId || !clientId.startsWith('dcr_')) return null;
+  const rest = clientId.slice(4);
+  const dot = rest.lastIndexOf('.');
+  if (dot < 0) return null;
+  const body = rest.slice(0, dot);
+  const sig = rest.slice(dot + 1);
+  const expected = createHmac('sha256', secret).update(`dcr.${body}`).digest('base64url');
+  if (!safeEqualStr(sig, expected)) return null;
+  try {
+    const d = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as DcrClient;
+    if (!d || typeof d.agent !== 'string' || !Array.isArray(d.redirectUris)) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
