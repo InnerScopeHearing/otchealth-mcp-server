@@ -1,0 +1,1 @@
+deploy-stamp: 2026-07-04 CTO golden-path redeploy of main to retire hand-deployed goccall1 (mutable tag) and restore a digest-pinned pipeline-tracked live revision (clears digest-drift). No code change.
