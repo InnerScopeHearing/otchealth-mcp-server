@@ -24,6 +24,41 @@ const SERVER_OPTIONS = {
  * transports is unsafe in stateless mode — tool registrations end up bound
  * to whichever transport was last connected and the others see empty results.
  */
+// For Claude Chat (DCR) connector responses ONLY, rewrite the outgoing JSON-RPC body to a SPEC-BARE
+// shape. The MCP SDK auto-injects fields Claude's web client treats as drop-triggers even when we pass
+// minimal configs: capabilities.tools.listChanged and a per-tool `execution` field (anthropics/claude-code#25081).
+// enableJsonResponse => a single JSON body, so we can buffer + rewrite on end. Non-JSON (SSE) passes through.
+function stripConnectorBody(obj: any): void {
+  const res = obj && obj.result;
+  if (!res) return;
+  if (res.capabilities && res.capabilities.tools) res.capabilities = { tools: {} };
+  if (Array.isArray(res.tools)) {
+    res.tools = res.tools.map((t: any) => {
+      const inputSchema = t && t.inputSchema ? { ...t.inputSchema } : t.inputSchema;
+      if (inputSchema && typeof inputSchema === 'object') delete (inputSchema as any).$schema;
+      return { name: t.name, description: t.description, inputSchema };
+    });
+  }
+}
+function installConnectorStrip(raw: import('node:http').ServerResponse): void {
+  const chunks: Buffer[] = [];
+  const origWrite = raw.write.bind(raw);
+  const origEnd = raw.end.bind(raw);
+  (raw as any).write = (chunk: any, ...rest: any[]): boolean => {
+    if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const cb = rest.find((r) => typeof r === 'function'); if (cb) cb();
+    return true;
+  };
+  (raw as any).end = (chunk: any, ..._rest: any[]) => {
+    if (chunk && typeof chunk !== 'function') chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    let body = Buffer.concat(chunks).toString('utf8');
+    try { const obj = JSON.parse(body); stripConnectorBody(obj); body = JSON.stringify(obj); } catch { /* SSE/non-JSON: pass through */ }
+    try { raw.setHeader('content-length', Buffer.byteLength(body)); } catch { /* headers may be sent */ }
+    return origEnd(body);
+  };
+  void origWrite;
+}
+
 export function registerMcpRoutes(app: FastifyInstance): void {
   // Warm the capability catalog at startup. Tools otherwise register lazily, per request (below),
   // so before the first MCP session the module-level catalog is empty and toolCount() (exposed on
@@ -69,6 +104,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           await mcp.connect(transport);
           reply.hijack();
           reply.raw.once('close', cleanup);
+          if (ctx.connector_surface) installConnectorStrip(reply.raw);
           await transport.handleRequest(request.raw, reply.raw, request.body);
         } catch (err) {
           logger.error(
