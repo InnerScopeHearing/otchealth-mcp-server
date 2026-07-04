@@ -30,6 +30,8 @@ import {
   issueRefreshToken,
   verifyToken,
   verifyPkceS256,
+  registerStatelessClient,
+  parseStatelessClient,
 } from '../auth/oauth-tokens.js';
 
 const env = loadEnv();
@@ -55,12 +57,33 @@ function resolveClient(clientId: string): ResolvedClient | null {
   return null;
 }
 
+// Claude.ai custom-connector OAuth callback(s). Allowed as redirect targets so a Claude Chat connector
+// can complete the authorization-code + PKCE flow. (The connector delivers the code to Claude, so the
+// redirect allow-list + PKCE are what protect the flow.)
+const CLAUDE_CALLBACKS = new Set<string>([
+  'https://claude.ai/api/mcp/auth_callback',
+  'https://claude.com/api/mcp/auth_callback',
+]);
+
+interface ResolvedAnyClient { secret: string; agent: string; isPublic: boolean; redirectUris?: string[]; }
+/** Resolve confidential (static/OAUTH_CLIENTS) clients OR stateless-DCR PUBLIC clients (dcr_...). */
+function resolveAnyClient(clientId: string): ResolvedAnyClient | null {
+  const rc = resolveClient(clientId);
+  if (rc) return { secret: rc.secret, agent: rc.agent, isPublic: false };
+  if (env.OAUTH_TOKEN_SIGNING_SECRET) {
+    const d = parseStatelessClient(clientId, env.OAUTH_TOKEN_SIGNING_SECRET);
+    if (d) return { secret: '', agent: (d.agent || '').toLowerCase(), isPublic: true, redirectUris: d.redirectUris };
+  }
+  return null;
+}
+
 function baseUrlOf(req: { protocol: string; hostname: string }): string {
   if (env.PUBLIC_BASE_URL) return env.PUBLIC_BASE_URL.replace(/\/$/, '');
   return `${req.protocol}://${req.hostname}`;
 }
 
 function allowedRedirect(uri: string): boolean {
+  if (CLAUDE_CALLBACKS.has(uri)) return true;
   const list = (env.OAUTH_REDIRECT_URIS || '')
     .split(',')
     .map((s) => s.trim())
@@ -78,6 +101,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       issuer: baseUrl,
       authorization_endpoint: `${baseUrl}/oauth/authorize`,
       token_endpoint: `${baseUrl}/oauth/token`,
+      registration_endpoint: `${baseUrl}/register`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
       code_challenge_methods_supported: ['S256'],
@@ -97,6 +121,32 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     });
   });
 
+  // ── RFC 7591: Dynamic Client Registration (PUBLIC, PKCE-only, lane-bound) ───
+  // Lets a Claude.ai custom connector self-register with no pre-shared secret. The issued client_id is
+  // a stateless HMAC-signed blob bound to a ring lane (OAUTH_DCR_DEFAULT_AGENT, default 'clo') and the
+  // Claude callback. No storage; survives cutovers. Redirect_uris are restricted to the Claude callback.
+  app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    if (!oauthConfigured()) return reply.status(404).send({ error: 'not_found' });
+    const body = (typeof req.body === 'string' ? {} : (req.body ?? {})) as Record<string, unknown>;
+    const uris = Array.isArray(body.redirect_uris) ? (body.redirect_uris as unknown[]).filter((u): u is string => typeof u === 'string') : [];
+    if (uris.length === 0 || !uris.every((u) => allowedRedirect(u))) {
+      return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be the Claude connector callback' });
+    }
+    const agent = (env.OAUTH_DCR_DEFAULT_AGENT || 'clo').toLowerCase();
+    const clientId = registerStatelessClient({ agent, redirectUris: uris }, env.OAUTH_TOKEN_SIGNING_SECRET);
+    reply.header('Cache-Control', 'no-store');
+    logger.info({ type: 'oauth_register', agent }, 'issued stateless DCR client');
+    return reply.status(201).send({
+      client_id: clientId,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      redirect_uris: uris,
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+      scope: 'mcp',
+    });
+  });
+
   // ── Authorization endpoint ─────────────────────────────────────────────────
   // Strict per-route rate limit (overrides the generous global default in server/index.ts): this
   // is an unauthenticated brute-force surface, so cap it hard per client IP.
@@ -112,8 +162,13 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     }
 
     if (oauthConfigured()) {
-      if (!client_id || !resolveClient(client_id)) {
+      const ac = client_id ? resolveAnyClient(client_id) : null;
+      if (!ac) {
         return reply.status(400).send({ error: 'invalid_client' });
+      }
+      // A public (DCR) client may only redirect to a URI it registered.
+      if (ac.isPublic && ac.redirectUris && !ac.redirectUris.includes(redirect_uri)) {
+        return reply.status(400).send({ error: 'invalid_request', error_description: 'redirect_uri not registered for this client' });
       }
     } else if (!client_id || client_id !== env.PERPLEXITY_CONNECTOR_TOKEN) {
       return reply.status(400).send({ error: 'invalid_client' });
@@ -180,8 +235,9 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       if (!claims || claims.typ !== 'refresh') {
         return reply.status(400).send({ error: 'invalid_grant', error_description: 'invalid refresh_token' });
       }
-      const rc = resolveClient(claims.sub);
-      if (!rc || client_secret !== rc.secret) return reply.status(401).send({ error: 'invalid_client' });
+      const rc = resolveAnyClient(claims.sub);
+      if (!rc) return reply.status(401).send({ error: 'invalid_client' });
+      if (!rc.isPublic && client_secret !== rc.secret) return reply.status(401).send({ error: 'invalid_client' });
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
@@ -212,12 +268,13 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     }
 
     if (oauthConfigured()) {
-      // Confidential client: require the matching secret (per-agent or single).
-      const rc = resolveClient(rec.clientId);
-      if (!rc || client_secret !== rc.secret) {
+      const rc = resolveAnyClient(rec.clientId);
+      if (!rc) return reply.status(401).send({ error: 'invalid_client' });
+      // Confidential clients must present their secret; PUBLIC (DCR) clients rely on PKCE alone.
+      if (!rc.isPublic && client_secret !== rc.secret) {
         return reply.status(401).send({ error: 'invalid_client', error_description: 'client_secret required' });
       }
-      // Mandatory PKCE verification.
+      // Mandatory PKCE verification (all clients).
       if (!rec.codeChallenge || !code_verifier || !verifyPkceS256(code_verifier, rec.codeChallenge)) {
         return reply.status(400).send({ error: 'invalid_grant', error_description: 'PKCE verification failed' });
       }
