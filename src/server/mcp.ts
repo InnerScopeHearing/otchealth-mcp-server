@@ -47,7 +47,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     reply.raw.setHeader('x-correlation-id', correlationId);
 
     await requestContext.run(
-      { callerHash: ctx.caller_hash, correlationId, callerAgent: ctx.caller_agent },
+      { callerHash: ctx.caller_hash, correlationId, callerAgent: ctx.caller_agent, connectorSurface: ctx.connector_surface },
       async () => {
         const mcp = new McpServer(SERVER_INFO, SERVER_OPTIONS);
         registerAllTools(mcp, currentCallerHash);

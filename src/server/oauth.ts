@@ -328,6 +328,14 @@ export function isValidIssuedAccessToken(token: string): boolean {
   return Boolean(claims && claims.typ === 'access');
 }
 
+/** The client_id (sub) embedded in a valid issued access token, or null. DCR connector clients start with 'dcr_'. */
+export function issuedClientId(token: string): string | null {
+  if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
+  const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
+  if (!claims || claims.typ !== 'access') return null;
+  return claims.sub || null;
+}
+
 /** The agent identity embedded in a valid issued access token (per-agent OAuth client), or null. */
 export function issuedAgent(token: string): string | null {
   if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
