@@ -42,7 +42,7 @@ const CONNECTOR_TOOLSET = new Set<string>(
   (env.CONNECTOR_TOOLSET ||
     [
       'brain_search','web_search','kb_search','kb_search_privileged',
-      'memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team',
+      'memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
       'llm_azure','catalog_list_tools','catalog_master','gateway_fetch_result',
       'task_list','task_get','task_create','task_update','task_complete','inbox_read','agent_dispatch',
       'posthog_query_hogql','posthog_insight_list',

@@ -30,8 +30,9 @@ export interface MemoryEntry {
   type: 'fact' | 'decision' | 'correction' | 'pitfall' | 'status';
   text: string;
   tags: string[];
-  agent: string;
+  agent: string; // the TARGET lane whose feed this entry lives on
   source?: string;
+  by?: string; // the WRITER (authenticated caller). Absent/=agent => self; !=agent => cross-agent note.
 }
 
 /** Privilege wall: never accept these as a target lane over the gateway. */
@@ -152,13 +153,16 @@ function nextId(rows: MemoryEntry[]): string {
   return `${day}-${String(n).padStart(3, '0')}`;
 }
 
-/** Append an entry to an agent's shared feed (the cross-agent brain). Returns the stored entry. */
+/** Append an entry to an agent's shared feed (the cross-agent brain). Returns the stored entry.
+ * `by` is the authenticated WRITER; when by !== agent this is a CROSS-LANE note (append-only,
+ * attributed) that the target sees via memory_inbound and acks via memory_reconcile on wake. */
 export async function appendShared(
   agent: string,
   type: MemoryEntry['type'],
   text: string,
   tags: string[],
   source?: string,
+  by?: string,
 ): Promise<MemoryEntry> {
   const a = normalizeAgent(agent);
   const existing = parseRows(await getText(sharedKey(a)), a);
@@ -170,10 +174,37 @@ export async function appendShared(
     tags,
     agent: a,
     ...(source ? { source } : {}),
+    ...(by && by !== a ? { by } : {}),
   };
   existing.push(entry);
   await putText(sharedKey(a), `${existing.map((r) => JSON.stringify(r)).join('\n')}\n`);
   return entry;
+}
+
+// ---- Cross-lane INBOUND + wake reconciliation (mirrors skills/kb-memory/mem.mjs) ----
+// A per-lane reconcile marker (ISO ts) lives beside the feed as `_MEMORY/_exec/<agent>.reconcile`
+// (not a .jsonl, so listShared/readSharedAll never pick it up). Inbound = entries on YOUR feed whose
+// `by` is another agent and whose ts is newer than your marker. This is the gateway-side twin of the
+// Claude Code wake first-duty, for connected Claude Chat / OS lanes.
+function reconcileKey(agent: string): string {
+  return `${SHARED_PREFIX}${agent}.reconcile`;
+}
+export async function readReconcileMarker(agent: string): Promise<string> {
+  const a = normalizeAgent(agent);
+  const t = await getText(reconcileKey(a));
+  return (t || '').trim();
+}
+export async function writeReconcileMarker(agent: string, iso: string): Promise<void> {
+  const a = normalizeAgent(agent);
+  await putText(reconcileKey(a), iso);
+}
+/** Notes OTHER agents wrote on `agent`'s feed since `marker` (or all, if no marker). Oldest first. */
+export async function readInbound(agent: string, marker: string): Promise<MemoryEntry[]> {
+  const a = normalizeAgent(agent);
+  const rows = parseRows(await getText(sharedKey(a)), a);
+  return rows
+    .filter((r) => r.by && r.by !== a && (!marker || (r.ts || '') > marker))
+    .sort((x, y) => (x.ts || '').localeCompare(y.ts || ''));
 }
 
 /** Read the whole shared exec feed (every agent), newest first. */

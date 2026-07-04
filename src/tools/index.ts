@@ -68,6 +68,8 @@ import { registerMemoryRemember } from './memory/remember.js';
 import { registerMemoryRecall } from './memory/recall.js';
 import { registerMemoryTeam } from './memory/team.js';
 import { registerMemoryPack } from './memory/pack.js';
+import { registerMemoryInbound } from './memory/inbound.js';
+import { registerMemoryReconcile } from './memory/reconcile.js';
 
 // Agent persona (cross-platform identity bootstrap)
 import { registerAgentPersona } from './agent/persona.js';
@@ -966,6 +968,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerMemoryTeam(server, callerHash);
   registerMemoryPack(server, callerHash);
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
+  registerMemoryInbound(server, callerHash); // read: cross-agent notes on your ledger (wake first-duty)
+  registerMemoryReconcile(server, callerHash); // write_simple: ack inbound (advances marker; deletes nothing)
 
   // ===== P2: Agent persona (cross-platform identity bootstrap) =====
   registerAgentPersona(server, callerHash);
