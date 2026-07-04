@@ -49,7 +49,13 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     await requestContext.run(
       { callerHash: ctx.caller_hash, correlationId, callerAgent: ctx.caller_agent, connectorSurface: ctx.connector_surface },
       async () => {
-        const mcp = new McpServer(SERVER_INFO, SERVER_OPTIONS);
+        // Connector (Claude Chat) clients get MINIMAL capabilities (no listChanged/logging): Claude's web
+        // client drops the whole tool list if initialize advertises capabilities it doesn't expect
+        // (anthropics/claude-code#25081). Full clients keep the rich capabilities.
+        const mcp = new McpServer(
+          SERVER_INFO,
+          ctx.connector_surface ? { capabilities: { tools: {} } } : SERVER_OPTIONS,
+        );
         registerAllTools(mcp, currentCallerHash);
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,

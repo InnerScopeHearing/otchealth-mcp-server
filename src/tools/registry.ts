@@ -166,7 +166,8 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // Claude Chat (DCR) connector requests get a CURATED, findable toolset (not the full ~850). All other
   // callers see everything, and the startup catalog-warm runs with no request context so /health
   // tool_count (deploy gate) is unaffected.
-  if (isConnectorSurface() && !CONNECTOR_TOOLSET.has(def.name)) return;
+  const connectorSurfaceForThisTool = isConnectorSurface();
+  if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
   recordTool({
     name: def.name,
@@ -198,21 +199,28 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     dry_run: z.boolean(),
   };
 
+  // Connector (Claude Chat) clients get a SPEC-BARE tool shape: name + description + inputSchema only.
+  // Claude's web client silently DROPS THE ENTIRE tool list from the model if the payload carries
+  // extra fields (title, annotations, outputSchema) — see anthropics/claude-code#25081. Full clients
+  // (OS, Claude Code via client_credentials) keep the rich shape.
+  const toolConfig = connectorSurfaceForThisTool
+    ? { description: def.annotations.description, inputSchema: inputShape }
+    : {
+        title: def.annotations.title,
+        description: def.annotations.description,
+        inputSchema: inputShape,
+        outputSchema: outputShape,
+        annotations: {
+          title: def.annotations.title,
+          readOnlyHint: def.annotations.readOnlyHint,
+          destructiveHint: def.annotations.destructiveHint,
+          idempotentHint: def.annotations.idempotentHint,
+          openWorldHint: def.annotations.openWorldHint,
+        },
+      };
   server.registerTool(
     def.name,
-    {
-      title: def.annotations.title,
-      description: def.annotations.description,
-      inputSchema: inputShape,
-      outputSchema: outputShape,
-      annotations: {
-        title: def.annotations.title,
-        readOnlyHint: def.annotations.readOnlyHint,
-        destructiveHint: def.annotations.destructiveHint,
-        idempotentHint: def.annotations.idempotentHint,
-        openWorldHint: def.annotations.openWorldHint,
-      },
-    },
+    toolConfig,
     async (rawArgs) => {
       const correlationId = newCorrelationId();
       const callerHash = callerHashProvider();
