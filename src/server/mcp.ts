@@ -49,7 +49,10 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     await requestContext.run(
       { callerHash: ctx.caller_hash, correlationId, callerAgent: ctx.caller_agent, connectorSurface: ctx.connector_surface },
       async () => {
-        const mcp = new McpServer(SERVER_INFO, SERVER_OPTIONS);
+        const mcp = new McpServer(
+          SERVER_INFO,
+          ctx.connector_surface ? { capabilities: { tools: {} } } : SERVER_OPTIONS,
+        );
         registerAllTools(mcp, currentCallerHash);
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
