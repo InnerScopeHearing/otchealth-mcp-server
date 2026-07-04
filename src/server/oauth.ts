@@ -93,6 +93,21 @@ function allowedRedirect(uri: string): boolean {
   return list.includes(uri);
 }
 
+// Map a Claude-Chat connector's client_name to a gateway ring lane. Ordered so multi-word codes match
+// before their prefixes (clo-personal before clo). Role-word aliases are a convenience; the lane CODE in
+// the name is the reliable path. Unknown -> OAUTH_DCR_DEFAULT_AGENT or 'clo'.
+const DCR_LANES: Array<[string, string]> = [
+  ['clo-personal', 'clo-personal'], ['clo', 'clo'], ['cfo', 'cfo'], ['coo', 'coo'], ['cpo', 'cpo'],
+  ['cro', 'cro'], ['cco', 'cco'], ['cto', 'cto'], ['developer', 'developer'],
+  ['legal', 'clo'], ['finance', 'cfo'], ['operations', 'coo'], ['product', 'cpo'],
+  ['revenue', 'cro'], ['compliance', 'cco'], ['technology', 'cto'], ['dev', 'developer'],
+];
+function laneFromClientName(name: string): string {
+  const n = name.toLowerCase();
+  for (const [needle, lane] of DCR_LANES) if (n.includes(needle)) return lane;
+  return (loadEnv().OAUTH_DCR_DEFAULT_AGENT || 'clo').toLowerCase();
+}
+
 export function registerOAuthRoutes(app: FastifyInstance): void {
   // ── RFC 8414: Authorization Server Metadata ────────────────────────────────
   app.get('/.well-known/oauth-authorization-server', async (req, reply) => {
@@ -132,7 +147,10 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     if (uris.length === 0 || !uris.every((u) => allowedRedirect(u))) {
       return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be the Claude connector callback' });
     }
-    const agent = (env.OAUTH_DCR_DEFAULT_AGENT || 'clo').toLowerCase();
+    // Per-lane binding: pick the ring lane from the connector's client_name (Claude Chat lets the user
+    // name the connector). Match an explicit lane code or a role alias; fall back to the configured
+    // default (clo). Restricted to a known lane allow-list so DCR can never mint an unknown lane.
+    const agent = laneFromClientName(String((body.client_name ?? '')));
     const clientId = registerStatelessClient({ agent, redirectUris: uris }, env.OAUTH_TOKEN_SIGNING_SECRET);
     reply.header('Cache-Control', 'no-store');
     logger.info({ type: 'oauth_register', agent }, 'issued stateless DCR client');
