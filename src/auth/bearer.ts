@@ -61,7 +61,10 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
   }
   const caller_agent = issued ? (issuedAgent(token) || '') : (staticAgent || '');
   const clientId = issued ? issuedClientId(token) : null;
-  const connector_surface = Boolean(clientId && clientId.startsWith('dcr_'));
+  // Connector clients: DCR public clients (dcr_) OR manually-registered confidential connector clients
+  // (occ_ = OTCHealth Connector Client) entered in Claude's Advanced settings to bypass the DCR tool-delivery
+  // bug (modelcontextprotocol#1675). Both get the curated, spec-bare connector surface.
+  const connector_surface = Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_')));
   return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface };
 }
 
