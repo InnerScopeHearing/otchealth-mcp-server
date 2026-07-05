@@ -29,18 +29,25 @@ export function registerTaskUpdate(server: McpServer, callerHash: CallerHashProv
         owner_agent: z.string().optional().describe('Reassign to a different agent.'),
         artifact_uri: z.string().optional().describe('Attach an in-progress artifact pointer (not verified until task_complete).'),
         board: z.string().optional().describe('Board partition (default "fleet").'),
+        expected_lease_version: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            'Fencing token from task_claim. If passed and the task has since been reclaimed by someone else (lease_version changed), the update is REJECTED instead of silently clobbering the new holder’s work.',
+          ),
       },
-      outputShape: { updated: z.boolean(), task: z.unknown() },
+      outputShape: { updated: z.boolean(), task: z.unknown(), fenced: z.boolean().optional() },
       handler: async (input, ctx) => {
         if (!isConfigured()) return { data: { updated: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
         if (input.status === 'done') {
           return { data: { updated: false, reason: 'use task_complete for done (it enforces done=artifact).' }, summary: 'Rejected: mark done via task_complete.' };
         }
         if (ctx.dryRun) return { data: { updated: false, preview: input, note: 'dry_run: pass dry_run=false to persist.' }, summary: `DRY RUN: would update ${input.task_id}.` };
-        const { task_id, actor, board, ...patch } = input;
-        const res = await updateTask(task_id, patch, actor, board);
+        const { task_id, actor, board, expected_lease_version, ...patch } = input;
+        const res = await updateTask(task_id, patch, actor, board, expected_lease_version);
         if (res.task) return { data: { updated: true, task: res.task }, summary: `Updated ${task_id}.`, audit: { after: res.task } };
-        return { data: { updated: false, reason: res.reason }, summary: `Not updated: ${res.reason}` };
+        return { data: { updated: false, fenced: res.fenced, reason: res.reason }, summary: `Not updated: ${res.reason}` };
       },
     },
     callerHash,

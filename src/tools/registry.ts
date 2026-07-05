@@ -44,7 +44,7 @@ const CONNECTOR_TOOLSET = new Set<string>(
       'brain_search','web_search','kb_search','kb_search_privileged',
       'memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
       'llm_azure','catalog_list_tools','catalog_master','gateway_fetch_result',
-      'task_list','task_get','task_create','task_update','task_complete','inbox_read','agent_dispatch',
+      'task_list','task_get','task_create','task_claim','task_update','task_complete','task_heartbeat','inbox_read','agent_dispatch',
       'posthog_query_hogql','posthog_insight_list',
       'github_get_file_contents','github_list_pull_requests','github_issue_list','sentry_list_issues',
       'graph_send_email','graph_list_messages','cio_get_customer','shield_check','groundedness_check',

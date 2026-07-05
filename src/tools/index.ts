@@ -894,6 +894,7 @@ import { registerTaskCreate } from './agentstate/task-create.js';
 import { registerTaskClaim } from './agentstate/task-claim.js';
 import { registerTaskUpdate } from './agentstate/task-update.js';
 import { registerTaskComplete } from './agentstate/task-complete.js';
+import { registerTaskHeartbeat } from './agentstate/task-heartbeat.js';
 import { registerTaskList } from './agentstate/task-list.js';
 import { registerTaskGet } from './agentstate/task-get.js';
 import { registerMemoryWrite } from './agentstate/memory-write.js';
@@ -1794,6 +1795,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerTaskClaim(server, callerHash);
   registerTaskUpdate(server, callerHash);
   registerTaskComplete(server, callerHash); // done = artifact landed (enforced)
+  registerTaskHeartbeat(server, callerHash); // extend a held lease (dead-man's-switch)
   registerMemorySearch(server, callerHash);
   registerMemoryWrite(server, callerHash);
   registerInboxRead(server, callerHash);

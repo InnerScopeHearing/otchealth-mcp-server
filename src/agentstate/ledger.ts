@@ -8,6 +8,17 @@
  *
  * The load-bearing rule lives in completeTask(): a task cannot reach `done` unless its
  * artifact_uri resolves (see resolver.ts). done = artifact landed, enforced here.
+ *
+ * FENCING (added 2026-07-05, P0-CLAIM-LEASE): claimTask/updateTask/completeTask already used
+ * per-write ETag optimistic concurrency, which stops a literal simultaneous double-write, but did
+ * NOT stop a "zombie worker" — a holder whose lease already expired and was reclaimed by someone
+ * else could still call updateTask/completeTask and silently clobber the new holder's work, because
+ * neither checked who currently holds the lease. `lease_version` is a monotonic fencing token:
+ * claimTask increments it on every successful claim; callers that pass `expected_lease_version` to
+ * updateTask/completeTask/heartbeatTask are rejected if it no longer matches (their lease was
+ * reclaimed out from under them). Passing it is OPTIONAL so existing callers are unaffected; new/
+ * careful callers get real protection. heartbeatTask is new: extends lease_until for a still-valid
+ * holder so a long task doesn't get reclaimed mid-execution.
  */
 
 import { createDoc, readDoc, replaceDoc, queryDocs, newId } from './cosmos.js';
@@ -35,6 +46,8 @@ export interface Task {
   updated_at: string;
   claim_ts: string | null;
   lease_until: string | null;
+  lease_version: number;
+  idempotency_key: string | null;
   done_ts: string | null;
   notes: string[];
 }
@@ -56,6 +69,15 @@ async function appendEvent(taskId: string, kind: string, actor: string, detail: 
   }
 }
 
+/** Deterministic id from an idempotency key, so retried creates with the SAME key never duplicate
+ *  a task — the caller gets the original task back instead. Same charset the Cosmos client allows. */
+function idFromIdempotencyKey(key: string): string {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (Math.imul(31, h) + key.charCodeAt(i)) | 0;
+  const hex = (h >>> 0).toString(16).padStart(8, '0');
+  return `t_idem_${hex}`;
+}
+
 export async function createTask(input: {
   title: string;
   description?: string;
@@ -64,12 +86,22 @@ export async function createTask(input: {
   priority?: Task['priority'];
   tags?: string[];
   board?: string;
-}): Promise<Task> {
+  idempotency_key?: string;
+}): Promise<{ task: Task; deduped: boolean }> {
   const owner = normalizeAgent(input.owner_agent);
   const board = (input.board || DEFAULT_BOARD).trim().toLowerCase();
+
+  // Idempotent create: if a task with this key already exists (on this board), return it as-is
+  // instead of creating a duplicate. This is the "retried dispatch must not double-work" guard.
+  if (input.idempotency_key) {
+    const existingId = idFromIdempotencyKey(`${board}:${input.idempotency_key}`);
+    const hit = await readDoc(TASKS, board, existingId);
+    if (hit) return { task: hit.doc as unknown as Task, deduped: true };
+  }
+
   const now = new Date().toISOString();
   const task: Task = {
-    id: newId('t'),
+    id: input.idempotency_key ? idFromIdempotencyKey(`${board}:${input.idempotency_key}`) : newId('t'),
     board,
     type: 'task',
     title: input.title,
@@ -84,12 +116,24 @@ export async function createTask(input: {
     updated_at: now,
     claim_ts: null,
     lease_until: null,
+    lease_version: 0,
+    idempotency_key: input.idempotency_key ?? null,
     done_ts: null,
     notes: [],
   };
-  await createDoc(TASKS, board, task as unknown as Record<string, unknown>);
+  try {
+    await createDoc(TASKS, board, task as unknown as Record<string, unknown>);
+  } catch (e) {
+    // Race: two callers with the same idempotency_key created concurrently — the loser re-reads
+    // and returns the winner's doc instead of erroring (still idempotent from the caller's view).
+    if (input.idempotency_key) {
+      const hit = await readDoc(TASKS, board, task.id);
+      if (hit) return { task: hit.doc as unknown as Task, deduped: true };
+    }
+    throw e;
+  }
   await appendEvent(task.id, 'created', input.created_by, `created for ${owner} (${task.priority})`);
-  return task;
+  return { task, deduped: false };
 }
 
 export async function getTask(id: string, board = DEFAULT_BOARD): Promise<Task | null> {
@@ -124,14 +168,47 @@ export async function claimTask(
     task.status = 'claimed';
     task.claim_ts = now.toISOString();
     task.lease_until = new Date(now.getTime() + LEASE_MINUTES * 60000).toISOString();
+    task.lease_version = (task.lease_version ?? 0) + 1;
     task.updated_at = now.toISOString();
     const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
     if (res.status === 412) continue; // lost the race; re-read and retry
     if (!res.ok) return { reason: `claim failed: ${res.status}` };
-    await appendEvent(id, 'claimed', who, `lease until ${task.lease_until}`);
+    await appendEvent(id, 'claimed', who, `lease until ${task.lease_until} (lease_version ${task.lease_version})`);
     return { task };
   }
   return { conflict: true, reason: 'concurrent claim, please retry' };
+}
+
+/** Extend a held lease so a long-running task isn't reclaimed mid-execution. Requires the caller
+ *  to still be the current owner_agent; if expected_lease_version is passed and no longer matches,
+ *  the lease was already reclaimed by someone else — reject rather than silently re-extending. */
+export async function heartbeatTask(
+  id: string,
+  agent: string,
+  board = DEFAULT_BOARD,
+  expectedLeaseVersion?: number,
+): Promise<{ task?: Task; reason?: string; fenced?: boolean }> {
+  const who = normalizeAgent(agent);
+  const hit = await readDoc(TASKS, board, id);
+  if (!hit) return { reason: 'not found' };
+  const task = hit.doc as unknown as Task;
+  if (task.status !== 'claimed' && task.status !== 'in_progress') {
+    return { reason: `cannot heartbeat a task in status "${task.status}"` };
+  }
+  if (task.owner_agent !== who) {
+    return { reason: `not the current lease holder (held by ${task.owner_agent})`, fenced: true };
+  }
+  if (expectedLeaseVersion !== undefined && task.lease_version !== expectedLeaseVersion) {
+    return { reason: `stale lease_version (task is now at ${task.lease_version}) — your lease was reclaimed`, fenced: true };
+  }
+  const now = new Date();
+  task.lease_until = new Date(now.getTime() + LEASE_MINUTES * 60000).toISOString();
+  task.updated_at = now.toISOString();
+  const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
+  if (res.status === 412) return { reason: 'conflict, re-read and retry' };
+  if (!res.ok) return { reason: `heartbeat failed: ${res.status}` };
+  await appendEvent(id, 'heartbeat', who, `lease extended to ${task.lease_until}`);
+  return { task };
 }
 
 export async function updateTask(
@@ -139,10 +216,14 @@ export async function updateTask(
   patch: { status?: TaskStatus; note?: string; artifact_uri?: string; owner_agent?: string; priority?: Task['priority'] },
   actor: string,
   board = DEFAULT_BOARD,
-): Promise<{ task?: Task; reason?: string }> {
+  expectedLeaseVersion?: number,
+): Promise<{ task?: Task; reason?: string; fenced?: boolean }> {
   const hit = await readDoc(TASKS, board, id);
   if (!hit) return { reason: 'not found' };
   const task = hit.doc as unknown as Task;
+  if (expectedLeaseVersion !== undefined && task.lease_version !== expectedLeaseVersion) {
+    return { reason: `stale lease_version (task is now at ${task.lease_version}) — your lease was reclaimed`, fenced: true };
+  }
   if (patch.status) task.status = patch.status;
   if (patch.priority) task.priority = patch.priority;
   if (patch.artifact_uri !== undefined) task.artifact_uri = patch.artifact_uri;
@@ -163,7 +244,8 @@ export async function completeTask(
   agent: string,
   note: string | undefined,
   board = DEFAULT_BOARD,
-): Promise<{ task?: Task; rejected?: boolean; reason?: string; resolution?: unknown }> {
+  expectedLeaseVersion?: number,
+): Promise<{ task?: Task; rejected?: boolean; reason?: string; resolution?: unknown; fenced?: boolean }> {
   const who = normalizeAgent(agent);
   const resolution = await resolveArtifact(artifactUri);
   if (!resolution.resolved) {
@@ -177,6 +259,9 @@ export async function completeTask(
   const hit = await readDoc(TASKS, board, id);
   if (!hit) return { reason: 'not found' };
   const task = hit.doc as unknown as Task;
+  if (expectedLeaseVersion !== undefined && task.lease_version !== expectedLeaseVersion) {
+    return { reason: `stale lease_version (task is now at ${task.lease_version}) — your lease was reclaimed, work may be duplicated`, fenced: true };
+  }
   const now = new Date().toISOString();
   task.status = 'done';
   task.artifact_uri = artifactUri;

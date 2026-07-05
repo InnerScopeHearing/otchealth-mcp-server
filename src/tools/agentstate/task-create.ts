@@ -27,8 +27,14 @@ export function registerTaskCreate(server: McpServer, callerHash: CallerHashProv
         priority: z.enum(['low', 'normal', 'high', 'urgent']).optional().describe('Default normal.'),
         tags: z.array(z.string()).optional().describe('Optional tags for filtering.'),
         board: z.string().optional().describe('Optional board partition (default "fleet").'),
+        idempotency_key: z
+          .string()
+          .optional()
+          .describe(
+            'Optional caller-chosen key (e.g. a dispatch/request id). Retrying task_create with the SAME key on the same board returns the ORIGINAL task instead of creating a duplicate — use this whenever a create might be retried (timeouts, at-least-once dispatch).',
+          ),
       },
-      outputShape: { created: z.boolean(), task: z.unknown() },
+      outputShape: { created: z.boolean(), task: z.unknown(), deduped: z.boolean().optional() },
       handler: async (input, ctx) => {
         if (!isConfigured()) {
           return { data: { created: false, task: null, note: 'agent-state Cosmos not configured on the gateway.' }, summary: 'Ledger not configured; nothing written.' };
@@ -39,8 +45,14 @@ export function registerTaskCreate(server: McpServer, callerHash: CallerHashProv
             summary: `DRY RUN: would create task "${input.title}" for ${input.owner_agent}.`,
           };
         }
-        const task = await createTask(input);
-        return { data: { created: true, task }, summary: `Created task ${task.id} for ${task.owner_agent} (status open).`, audit: { after: task } };
+        const { task, deduped } = await createTask(input);
+        return {
+          data: { created: !deduped, task, deduped },
+          summary: deduped
+            ? `Idempotent create: task ${task.id} already existed for this idempotency_key — returned the original, nothing duplicated.`
+            : `Created task ${task.id} for ${task.owner_agent} (status open).`,
+          audit: { after: task },
+        };
       },
     },
     callerHash,
