@@ -1,1 +1,53 @@
-aW1wb3J0IHR5cGUgeyBGYXN0aWZ5SW5zdGFuY2UgfSBmcm9tICdmYXN0aWZ5JzsKaW1wb3J0IHsgbG9hZEVudiB9IGZyb20gJy4uL2NvbmZpZy9lbnYuanMnOwppbXBvcnQgeyBnZXRSZXZvY2F0aW9uU3RhdGUgfSBmcm9tICcuLi9hdXRoL3Jldm9jYXRpb24tc3RvcmUuanMnOwppbXBvcnQgeyB0b29sQ291bnQgfSBmcm9tICcuLi9jYXRhbG9nL2NhdGFsb2cuanMnOwppbXBvcnQgeyB2YWxpZGF0ZUFkbWluVG9rZW4gfSBmcm9tICcuLi9hdXRoL2JlYXJlci5qcyc7CmltcG9ydCB7IHByb2JlRGVwZW5kZW5jaWVzIH0gZnJvbSAnLi9kZWVwLWhlYWx0aC5qcyc7Cgpjb25zdCBlbnYgPSBsb2FkRW52KCk7CgovKiogVGhlIC9oZWFsdGggcmVzcG9uc2UgYm9keS4gRXhwb3J0ZWQgc28gaXQgaXMgdW5pdC10ZXN0YWJsZSB3aXRob3V0IHN0YW5kaW5nIHVwIEZhc3RpZnkuICovCmV4cG9ydCBmdW5jdGlvbiBidWlsZEhlYWx0aFBheWxvYWQoKSB7CiAgY29uc3QgcmV2ID0gZ2V0UmV2b2NhdGlvblN0YXRlKCk7CiAgcmV0dXJuIHsKICAgIHN0YXR1czogJ29rJywKICAgIHNlcnZpY2U6ICdvdGNoZWFsdGgtbWNwLXNlcnZlcicsCiAgICB0aW1lOiBuZXcgRGF0ZSgpLnRvSVNPU3RyaW5nKCksCiAgICBlbnY6IGVudi5OT0RFX0VOViwKICAgIHJlYWRfb25seV9tb2RlOiBlbnYuUkVBRF9PTkxZX01PREUsCiAgICBlbmFibGVfd3JpdGVfdG9vbHM6IGVudi5FTkFCTEVfV1JJVEVfVE9PTFMsCiAgICBlbmFibGVfaGlnaF9yaXNrX3Rvb2xzOiBlbnYuRU5BQkxFX0hJR0hfUklTS19UT09MUywKICAgIGRyeV9ydW5fZGVmYXVsdDogZW52LkRSWV9SVU5fREVGQVVMVCwKICAgIGNpb193b3Jrc3BhY2VfaWQ6IGVudi5DSU9fV09SS1NQQUNFX0lELAogICAgY29ubmVjdG9yX3Rva2VuX3Jldm9rZWQ6IHJldi5yZXZva2VkX3Rva2VuX2hhc2ggIT09IG51bGwsCiAgICAvLyBSZWdyZXNzaW9uIGd1YXJkOiB0aGUgZGVwbG95IHBpcGVsaW5lIGFzc2VydHMgdGhpcyBzdGF5cyA+PSB0aGUgZXhwZWN0ZWQgY2F0YWxvZyBzaXplLAogICAgLy8gc28gYSBidWlsZCB0aGF0IGRyb3BzIHRoZSB0b29sIHN1cmZhY2UgKGFzIGhhcHBlbmVkIDIwMjYtMDctMDEpIGZhaWxzIHRoZSBoZWFsdGggZ2F0ZS4KICAgIHRvb2xfY291bnQ6IHRvb2xDb3VudCgpLAogIH07Cn0KCmV4cG9ydCBmdW5jdGlvbiByZWdpc3RlckhlYWx0aChhcHA6IEZhc3RpZnlJbnN0YW5jZSk6IHZvaWQgewogIGFwcC5nZXQoJy9oZWFsdGgnLCBhc3luYyAoKSA9PiBidWlsZEhlYWx0aFBheWxvYWQoKSk7CgogIC8vIEdFVCAvaGVhbHRoL2RlZXA6IGJvdW5kZWQgcmVhY2hhYmlsaXR5IHByb2JlIG9mIGV2ZXJ5IENPTkZJR1VSRUQgZG93bnN0cmVhbSBkZXBlbmRlbmN5CiAgLy8gKENvc21vcywgQXp1cmUgQUkgU2VhcmNoLCBGb3VuZHJ5KS4gRGlzdGluY3QgZnJvbSAvaGVhbHRoOiB0aGlzIHJvdXRlCiAgLy8gaXMgaW50ZW50aW9uYWxseSBOT1Qgb24gdGhlIGZhc3QgcGF0aCAoaXQgbWFrZXMgcmVhbCBuZXR3b3JrIGNhbGxzLCBlYWNoIGNhcHBlZCBhdCAycyksIHNvIGl0CiAgLy8gaXMgZ2F0ZWQgdG8gaW50ZXJuYWwvQ0kgY2FsbGVycyB2aWEgdGhlIGV4aXN0aW5nIEFETUlOX1JFVk9LRV9UT0tFTiBiZWFyZXIgKHRoZSBzYW1lIHBhdHRlcm4KICAvLyAvYWRtaW4vKiBhbHJlYWR5IHVzZXMpIHJhdGhlciB0aGFuIGxlZnQgb3BlbiB0byBwdWJsaWMgcG9sbGluZywgd2hpY2ggd291bGQgbGV0IGFuIG91dHNpZGUKICAvLyBjYWxsZXIgaGFtbWVyIENvc21vcy9TZWFyY2gvRm91bmRyeSBmb3IgZnJlZS4gSXQgaXMgTk9UIGluIHRoZSAvaGVhbHRoIHJhdGUtbGltaXQgYWxsb3dMaXN0LAogIC8vIHNvIGl0IHN0YXlzIHN1YmplY3QgdG8gdGhlIGdsb2JhbCBpbmJvdW5kIGxpbWl0IHRvby4KICBhcHAuZ2V0KCcvaGVhbHRoL2RlZXAnLCBhc3luYyAocmVxdWVzdCwgcmVwbHkpID0+IHsKICAgIGlmICghdmFsaWRhdGVBZG1pblRva2VuKHJlcXVlc3QuaGVhZGVyc1snYXV0aG9yaXphdGlvbiddKSkgewogICAgICByZXR1cm4gcmVwbHkuY29kZSg0MDEpLnNlbmQoewogICAgICAgIGVycm9yOiAndW5hdXRob3JpemVkJywKICAgICAgICBtZXNzYWdlOiAnTWlzc2luZyBvciBpbnZhbGlkIGFkbWluIHRva2VuLiBQcm92aWRlIEF1dGhvcml6YXRpb246IEJlYXJlciA8QURNSU5fUkVWT0tFX1RPS0VOPi4nLAogICAgICB9KTsKICAgIH0KICAgIGNvbnN0IGRlcHMgPSBhd2FpdCBwcm9iZURlcGVuZGVuY2llcygpOwogICAgY29uc3QgYW55RG93biA9IE9iamVjdC52YWx1ZXMoZGVwcykuc29tZSgodikgPT4gdiA9PT0gJ2Rvd24nKTsKICAgIHJldHVybiByZXBseS5jb2RlKGFueURvd24gPyA1MDMgOiAyMDApLnNlbmQoewogICAgICAuLi5kZXBzLAogICAgfSk7CiAgfSk7Cn0K
+import type { FastifyInstance } from 'fastify';
+import { loadEnv } from '../config/env.js';
+import { getRevocationState } from '../auth/revocation-store.js';
+import { toolCount } from '../catalog/catalog.js';
+import { validateAdminToken } from '../auth/bearer.js';
+import { probeDependencies } from './deep-health.js';
+
+const env = loadEnv();
+
+/** The /health response body. Exported so it is unit-testable without standing up Fastify. */
+export function buildHealthPayload() {
+  const rev = getRevocationState();
+  return {
+    status: 'ok',
+    service: 'otchealth-mcp-server',
+    time: new Date().toISOString(),
+    env: env.NODE_ENV,
+    read_only_mode: env.READ_ONLY_MODE,
+    enable_write_tools: env.ENABLE_WRITE_TOOLS,
+    enable_high_risk_tools: env.ENABLE_HIGH_RISK_TOOLS,
+    dry_run_default: env.DRY_RUN_DEFAULT,
+    cio_workspace_id: env.CIO_WORKSPACE_ID,
+    connector_token_revoked: rev.revoked_token_hash !== null,
+    // Regression guard: the deploy pipeline asserts this stays >= the expected catalog size,
+    // so a build that drops the tool surface (as happened 2026-07-01) fails the health gate.
+    tool_count: toolCount(),
+  };
+}
+
+export function registerHealth(app: FastifyInstance): void {
+  app.get('/health', async () => buildHealthPayload());
+
+  // GET /health/deep: bounded reachability probe of every CONFIGURED downstream dependency
+  // (Cosmos, Azure AI Search, Foundry). Distinct from /health: this route
+  // is intentionally NOT on the fast path (it makes real network calls, each capped at 2s), so it
+  // is gated to internal/CI callers via the existing ADMIN_REVOKE_TOKEN bearer (the same pattern
+  // /admin/* already uses) rather than left open to public polling, which would let an outside
+  // caller hammer Cosmos/Search/Foundry for free. It is NOT in the /health rate-limit allowList,
+  // so it stays subject to the global inbound limit too.
+  app.get('/health/deep', async (request, reply) => {
+    if (!validateAdminToken(request.headers['authorization'])) {
+      return reply.code(401).send({
+        error: 'unauthorized',
+        message: 'Missing or invalid admin token. Provide Authorization: Bearer <ADMIN_REVOKE_TOKEN>.',
+      });
+    }
+    const deps = await probeDependencies();
+    const anyDown = Object.values(deps).some((v) => v === 'down');
+    return reply.code(anyDown ? 503 : 200).send({
+      ...deps,
+    });
+  });
+}
