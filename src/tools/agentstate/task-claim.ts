@@ -24,7 +24,7 @@ export function registerTaskClaim(server: McpServer, callerHash: CallerHashProvi
         agent: z.string().describe('The agent claiming it (lowercase id).'),
         board: z.string().optional().describe('Board partition (default "fleet").'),
       },
-      outputShape: { claimed: z.boolean(), task: z.unknown() },
+      outputShape: { claimed: z.boolean(), task: z.unknown(), dead_lettered: z.boolean().optional() },
       handler: async (input, ctx) => {
         if (!isConfigured()) {
           return { data: { claimed: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
@@ -33,6 +33,16 @@ export function registerTaskClaim(server: McpServer, callerHash: CallerHashProvi
           return { data: { claimed: false, preview: input, note: 'dry_run: pass dry_run=false to claim.' }, summary: `DRY RUN: would claim ${input.task_id} for ${input.agent}.` };
         }
         const res = await claimTask(input.task_id, input.agent, input.board);
+        // A14-DEAD-LETTER: check dead_lettered FIRST — claimTask returns `task` set in BOTH the
+        // normal-success case and the dead-letter case, so checking `res.task` alone would wrongly
+        // report a dead-lettered task as "Claimed".
+        if (res.dead_lettered) {
+          return {
+            data: { claimed: false, task: res.task, dead_lettered: true, reason: res.reason },
+            summary: `NOT claimed — ${input.task_id} exceeded its retry budget and has been dead-lettered: ${res.reason}`,
+            audit: { after: res.task },
+          };
+        }
         if (res.task) return { data: { claimed: true, task: res.task }, summary: `Claimed ${input.task_id} for ${input.agent} (lease until ${res.task.lease_until}).`, audit: { after: res.task } };
         return { data: { claimed: false, conflict: res.conflict ?? false, reason: res.reason }, summary: `Not claimed: ${res.reason}` };
       },

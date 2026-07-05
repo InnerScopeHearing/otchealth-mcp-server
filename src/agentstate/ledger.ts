@@ -19,6 +19,19 @@
  * reclaimed out from under them). Passing it is OPTIONAL so existing callers are unaffected; new/
  * careful callers get real protection. heartbeatTask is new: extends lease_until for a still-valid
  * holder so a long task doesn't get reclaimed mid-execution.
+ *
+ * DEAD-LETTER (A14-DEAD-LETTER):
+ * `attempt_count` tracks how many times a task has been RECLAIMED (i.e. claimed after already
+ * having a claim_ts from a previous claim) — NOT how many times it has been claimed in total, so a
+ * clean "claim once, complete" task stays at attempt_count 0. It is distinct from lease_version
+ * (a fencing token, unrelated semantics, untouched by this change). Once attempt_count reaches
+ * MAX_CLAIM_ATTEMPTS, the NEXT claim attempt is redirected to a new terminal status, `dead_letter`,
+ * instead of being granted — see claimTask. This is deliberately an inline check in claimTask, not
+ * a periodic sweep: the decision needs only the one document claimTask already read (no fleet-wide
+ * view required), and doing it inline means the very next actor to touch the task is the one who
+ * observes and reacts to the terminal condition, with no cron lag. See the design doc for the
+ * known gap this does NOT cover (a claimed task whose lease expires and that nobody ever tries to
+ * claim again will not be swept into dead_letter by this alone).
  */
 
 import { createDoc, readDoc, replaceDoc, queryDocs, newId } from './cosmos.js';
@@ -29,6 +42,13 @@ const TASKS = 'tasks';
 const EVENTS = 'events';
 export const DEFAULT_BOARD = 'fleet';
 const LEASE_MINUTES = 45;
+
+// A14-DEAD-LETTER: max number of RECLAIMS (not total claims) before a task is retired to
+// `dead_letter` instead of being handed out again. 3 reclaims * LEASE_MINUTES(45) is up to ~2.25h of
+// a task cycling claim->fail->expire->reclaim before anyone/anything is told it's stuck. Tunable;
+// see design doc section 2 for the reasoning and the explicit "not fully confident" flag on this
+// number — raise to 5 if real retry-success-rate data says tasks legitimately need more attempts.
+export const MAX_CLAIM_ATTEMPTS = 3;
 
 export interface Task {
   id: string;
@@ -50,6 +70,10 @@ export interface Task {
   idempotency_key: string | null;
   done_ts: string | null;
   notes: string[];
+  // A14-DEAD-LETTER: count of RECLAIMS (claims after a prior claim_ts already existed), not
+  // total claims. 0 for a task that has only ever been claimed once (the common/happy path). See
+  // claimTask for the precise increment rule.
+  attempt_count: number;
 }
 
 async function appendEvent(taskId: string, kind: string, actor: string, detail: string): Promise<void> {
@@ -120,6 +144,7 @@ export async function createTask(input: {
     idempotency_key: input.idempotency_key ?? null,
     done_ts: null,
     notes: [],
+    attempt_count: 0, // A14-DEAD-LETTER
   };
   try {
     await createDoc(TASKS, board, task as unknown as Record<string, unknown>);
@@ -141,18 +166,31 @@ export async function getTask(id: string, board = DEFAULT_BOARD): Promise<Task |
   return hit ? (hit.doc as unknown as Task) : null;
 }
 
-/** Claim a task with a lease (optimistic concurrency; a lost race returns {conflict:true}). */
+/**
+ * Claim a task with a lease (optimistic concurrency; a lost race returns {conflict:true}).
+ *
+ * A14-DEAD-LETTER: if the task's attempt_count has already reached MAX_CLAIM_ATTEMPTS, this
+ * claim is refused and the task is instead transitioned to the terminal `dead_letter` status (see
+ * design doc for why this check lives here, inline, rather than in a periodic sweep). The caller
+ * gets back `{ dead_lettered: true, task }` instead of a granted claim, so a tool handler (e.g.
+ * task-claim.ts) can react — e.g. notify created_by/owner_agent via the agent inbox — without
+ * ledger.ts itself depending on the queue/inbox subsystem.
+ *
+ * attempt_count is incremented on this call ONLY when this is a RECLAIM — i.e. the task already had
+ * a claim_ts from a previous claim (whether it lapsed back to the same agent or a different one).
+ * A first-ever claim (status 'open', claim_ts null) leaves attempt_count at 0.
+ */
 export async function claimTask(
   id: string,
   agent: string,
   board = DEFAULT_BOARD,
-): Promise<{ task?: Task; conflict?: boolean; reason?: string }> {
+): Promise<{ task?: Task; conflict?: boolean; reason?: string; dead_lettered?: boolean }> {
   const who = normalizeAgent(agent);
   for (let attempt = 0; attempt < 2; attempt++) {
     const hit = await readDoc(TASKS, board, id);
     if (!hit) return { reason: 'not found' };
     const task = hit.doc as unknown as Task;
-    if (task.status === 'done' || task.status === 'cancelled') {
+    if (task.status === 'done' || task.status === 'cancelled' || task.status === 'dead_letter') {
       return { reason: `task already ${task.status}` };
     }
     const now = new Date();
@@ -164,6 +202,40 @@ export async function claimTask(
     if (leasedToOther) {
       return { conflict: true, reason: `leased to ${task.owner_agent} until ${task.lease_until}` };
     }
+
+    // A14-DEAD-LETTER: this task has already been reclaimed MAX_CLAIM_ATTEMPTS times with no
+    // one ever completing it — retire it instead of handing out yet another attempt. Checked BEFORE
+    // mutating anything so a claim that would exceed the cap never increments attempt_count further
+    // or extends a lease; it goes straight to dead_letter.
+    const currentAttemptCount = task.attempt_count ?? 0;
+    if (currentAttemptCount >= MAX_CLAIM_ATTEMPTS) {
+      task.status = 'dead_letter';
+      task.updated_at = now.toISOString();
+      task.notes = [
+        ...(task.notes ?? []),
+        `[${now.toISOString()}] ${who}: claim refused — attempt_count (${currentAttemptCount}) reached MAX_CLAIM_ATTEMPTS (${MAX_CLAIM_ATTEMPTS}); dead-lettered instead of reclaimed.`,
+      ];
+      const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
+      if (res.status === 412) continue; // lost the race; re-read and retry
+      if (!res.ok) return { reason: `dead-letter transition failed: ${res.status}` };
+      await appendEvent(
+        id,
+        'dead_lettered',
+        who,
+        `attempt_count ${currentAttemptCount} >= MAX_CLAIM_ATTEMPTS ${MAX_CLAIM_ATTEMPTS}; claim by ${who} refused`,
+      );
+      return { task, dead_lettered: true, reason: `task exceeded ${MAX_CLAIM_ATTEMPTS} claim attempts and has been dead-lettered` };
+    }
+
+    // A14-DEAD-LETTER: a RECLAIM is "this task already has a claim_ts from a previous claim
+    // and is being claimed again" — true whether the previous holder's lease lapsed back to the same
+    // agent or a different one. A brand-new task (status 'open', claim_ts null) is NOT a reclaim, so
+    // its first claim leaves attempt_count untouched (stays 0).
+    const isReclaim = task.status === 'claimed' && task.claim_ts !== null;
+    if (isReclaim) {
+      task.attempt_count = (task.attempt_count ?? 0) + 1;
+    }
+
     task.owner_agent = who;
     task.status = 'claimed';
     task.claim_ts = now.toISOString();
@@ -173,7 +245,12 @@ export async function claimTask(
     const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
     if (res.status === 412) continue; // lost the race; re-read and retry
     if (!res.ok) return { reason: `claim failed: ${res.status}` };
-    await appendEvent(id, 'claimed', who, `lease until ${task.lease_until} (lease_version ${task.lease_version})`);
+    await appendEvent(
+      id,
+      'claimed',
+      who,
+      `lease until ${task.lease_until} (lease_version ${task.lease_version}, attempt_count ${task.attempt_count})`,
+    );
     return { task };
   }
   return { conflict: true, reason: 'concurrent claim, please retry' };

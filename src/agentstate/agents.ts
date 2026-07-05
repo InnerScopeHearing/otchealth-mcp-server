@@ -17,7 +17,7 @@ export function normalizeAgent(agent: string): string {
   return a;
 }
 
-export const TASK_STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'done', 'cancelled'] as const;
+export const TASK_STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'done', 'cancelled', 'dead_letter'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export const MEMORY_KINDS = ['fact', 'decision', 'correction', 'pitfall', 'status'] as const;
