@@ -100,6 +100,7 @@ import { registerTwilioListMessages } from './twilio/list-messages.js';
 // Wave A — Azure AI Content Safety (Prompt Shields + groundedness): gateway-level guardrails
 import { registerShieldCheck } from './safety/shield-check.js';
 import { registerGroundednessCheck } from './safety/groundedness-check.js';
+import { registerClaimsCheck } from './safety/claims-check.js';
 
 // Wave A — Azure Document Intelligence (CFO invoices + CLO contracts, read/analyze only)
 import { registerDocintelAnalyzeInvoice } from './docintel/analyze-invoice.js';
@@ -1000,6 +1001,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Wave A: Azure AI Content Safety (prompt-injection defense + groundedness) =====
   registerShieldCheck(server, callerHash);
   registerGroundednessCheck(server, callerHash);
+  registerClaimsCheck(server, callerHash);
 
   // ===== Wave A: Azure Document Intelligence (CFO + CLO, read/analyze only, non-BAA) =====
   registerDocintelAnalyzeInvoice(server, callerHash);
