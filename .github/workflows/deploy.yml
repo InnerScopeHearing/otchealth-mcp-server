@@ -185,3 +185,26 @@ jobs:
             | while read -r rev; do
                 [ -n "$rev" ] && (az containerapp revision deactivate -n "$APP" -g "$APP_RG" --revision "$rev" || true)
               done
+
+      # P0-EVAL-CI (report-only phase, 2026-07-05): golden-case gateway eval, REPORT-ONLY. Placed as
+      # the ABSOLUTE LAST step and continue-on-error so a failure here can NEVER trigger the
+      # "Roll back on failure" step above (that step's `if: failure()` only sees steps that ran
+      # BEFORE it; nothing after this one in the job, so this step's own outcome cannot cause a
+      # rollback of an already-successful cutover). Traffic is already live on GREEN by the time
+      # this runs. NOTE: previously considered wiring otchealth-claude-tools' deploy-eval-gate.yml
+      # reusable workflow here instead — rejected after investigation: its Checkout step has no
+      # `repository:` input so cross-repo it checks out THIS repo (no skills/agent-evals/ here,
+      # every step 404s), its baseline.json is still an unpopulated seed (nothing to gate against
+      # yet), and its suite scores claude-tools' agent personas, not this gateway — not causally
+      # meaningful for a gateway cutover decision. This repo's own src/eval/eval-runner.mjs (hits
+      # the live gateway with a bearer token, absolute BASELINE_THRESHOLD) is the correct target.
+      # Needs a GATEWAY_BEARER secret (a client_credentials or connector token scoped read-mostly)
+      # to be added to this repo's Action secrets before this produces a real signal; until then it
+      # exits 2 with a clear "not configured" message every run — visible, not silently skipped.
+      - name: Golden-case eval (report-only; needs GATEWAY_BEARER secret to activate)
+        if: success()
+        continue-on-error: true
+        env:
+          GATEWAY_BASE_URL: https://mcp.otchealth.app
+          GATEWAY_BEARER: ${{ secrets.GATEWAY_BEARER }}
+        run: node src/eval/eval-runner.mjs
