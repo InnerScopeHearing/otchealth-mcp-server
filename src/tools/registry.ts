@@ -41,6 +41,8 @@ const CONNECTOR_TOOLSET = new Set<string>(
   (env.CONNECTOR_TOOLSET ||
     [
       'brain_search','web_search','kb_search','kb_search_privileged',
+      'legal_blob_list','legal_blob_get','legal_blob_put',
+      'graph_drive_list','graph_drive_download','graph_drive_upload',
       'memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
       'llm_azure','catalog_list_tools','catalog_master','gateway_fetch_result',
       'task_list','task_get','task_create','task_claim','task_update','task_complete','task_heartbeat','inbox_read','agent_dispatch',

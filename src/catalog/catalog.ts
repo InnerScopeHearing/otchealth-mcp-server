@@ -71,9 +71,16 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     available: [],
   },
   graph: {
-    description: 'Microsoft Graph: COO send-as email + inbox.',
-    ring: 'non-phi', auth: 'GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET', status: 'wired',
+    description: 'Microsoft Graph: COO send-as email + inbox + calendar/contacts, and OneDrive/Graph Drive role three-folder exchange (Outgoing/Incoming/Processed).',
+    ring: 'non-phi', auth: 'GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET / GRAPH_DRIVE_USER', status: 'wired',
     available: [],
+    rule: 'graph_drive_* are gated by folder-name role prefix: a caller may only touch its OWN role folders. Uploads are fail-closed against silent overwrite.',
+  },
+  legal: {
+    description: 'Legal document store on Azure Blob (account otchealthlegalstore): containers company + personal. RING-GATED — personal = attorney-privileged CA divorce/civil matters, the most sensitive corpus in the fleet.',
+    ring: 'non-phi', auth: 'AZURE_LEGAL_STORAGE_ACCOUNT / AZURE_LEGAL_STORAGE_KEY (SharedKey)', status: 'wired',
+    available: [],
+    rule: 'container=personal requires the legal-personal executive ring; container=company requires the legal-company ring (derived from kb/search-privileged INDEX_LANES). The cto/default/external identity is refused. legal_blob_put is fail-closed against silent overwrite.',
   },
   stripe: {
     description: 'Stripe read-only scoreboard (CFO/CRO visibility).',
