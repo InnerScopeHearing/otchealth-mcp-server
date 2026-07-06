@@ -2,11 +2,20 @@
  * POST /admin/revoke — kill-switch per ADR-001 Section 6.
  *
  * Auth: separate ADMIN_REVOKE_TOKEN bearer (NOT the connector token).
- * Effect: marks the current PERPLEXITY_CONNECTOR_TOKEN as revoked in an
- *         in-memory runtime override store. Subsequent bearer-auth checks
- *         from Perplexity reject the token, even though the env var is
- *         unchanged. Process restart clears the revocation — for permanent
- *         lockout, rotate the env var.
+ * Effect: marks a token as revoked in an in-memory runtime override store.
+ *         Subsequent bearer-auth checks reject that exact token, even though
+ *         its underlying secret/signing key is unchanged. Process restart
+ *         clears the revocation — for permanent lockout of a leaked static
+ *         token, rotate its env var; for a leaked OAuth-issued JWT, rotate
+ *         OAUTH_TOKEN_SIGNING_SECRET (fleet-wide blast radius - invalidates
+ *         every active session, use deliberately).
+ *
+ * Body: { "reason": "<3-500 chars>", "token"?: "<raw bearer token to revoke>" }
+ *       token is OPTIONAL and defaults to PERPLEXITY_CONNECTOR_TOKEN for
+ *       backward compatibility with the original kill-switch behavior. Pass
+ *       an explicit token (e.g. a leaked OAuth JWT found in git history) to
+ *       revoke that specific credential instead, without touching anything
+ *       else's active session.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -21,6 +30,7 @@ const env = loadEnv();
 const RevokeBody = z
   .object({
     reason: z.string().min(3).max(500),
+    token: z.string().min(16).max(4096).optional(),
   })
   .strict();
 
@@ -42,20 +52,23 @@ export function registerAdmin(app: FastifyInstance): void {
       return reply.code(400).send({
         error: 'invalid_input',
         message:
-          'Body must be { "reason": "<3-500 chars>" } describing why the token is being revoked.',
+          'Body must be { "reason": "<3-500 chars>", "token"?: "<raw bearer token>" }. ' +
+          'token defaults to PERPLEXITY_CONNECTOR_TOKEN if omitted.',
         issues: parsed.error.issues,
       });
     }
-    const state = revokeToken(env.PERPLEXITY_CONNECTOR_TOKEN, parsed.data.reason);
+    const targetToken = parsed.data.token ?? env.PERPLEXITY_CONNECTOR_TOKEN;
+    const state = revokeToken(targetToken, parsed.data.reason);
     logger.warn(
       {
         type: 'admin_revoke_applied',
         revoked_token_hash: state.revoked_token_hash,
         revoked_at: state.revoked_at,
         reason: state.revoked_reason,
+        explicit_token: Boolean(parsed.data.token),
         ip: request.ip,
       },
-      'PERPLEXITY_CONNECTOR_TOKEN revoked via /admin/revoke',
+      'token revoked via /admin/revoke',
     );
     return reply.code(200).send({
       status: 'revoked',
@@ -63,7 +76,9 @@ export function registerAdmin(app: FastifyInstance): void {
       revoked_token_hash: state.revoked_token_hash,
       reason: state.revoked_reason,
       note:
-        'Connector requests using this token will now return 401. Rotate PERPLEXITY_CONNECTOR_TOKEN in Railway and restart for permanent lockout.',
+        'Requests using this exact token will now return 401 until the process restarts. ' +
+        'For permanent lockout, rotate the underlying secret (env var for static tokens, ' +
+        'OAUTH_TOKEN_SIGNING_SECRET for issued JWTs - the latter invalidates every active session).',
     });
   });
 
