@@ -9,6 +9,7 @@ permissions:
 jobs:
   revoke:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Call /admin/revoke against the leaked developer JWT
         env:
