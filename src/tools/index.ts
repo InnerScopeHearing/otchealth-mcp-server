@@ -845,6 +845,13 @@ import { registerGraphCreateDraft } from './graph/create-draft.js';
 import { registerGraphMarkRead } from './graph/mark-read.js';
 import { registerGraphMoveMessage } from './graph/move-message.js';
 import { registerGraphReplyEmail } from './graph/reply-email.js';
+// Legal document store (Azure Blob, ring-gated) + OneDrive/Graph Drive role exchange (own-role gated).
+import { registerLegalBlobList } from './legal/blob-list.js';
+import { registerLegalBlobGet } from './legal/blob-get.js';
+import { registerLegalBlobPut } from './legal/blob-put.js';
+import { registerGraphDriveList } from './graph-drive/list.js';
+import { registerGraphDriveDownload } from './graph-drive/download.js';
+import { registerGraphDriveUpload } from './graph-drive/upload.js';
 import { registerGumroadDisableProduct } from './gumroad/disable-product.js';
 import { registerGumroadEnableProduct } from './gumroad/enable-product.js';
 import { registerGumroadUpdateProduct } from './gumroad/update-product.js';
@@ -1014,6 +1021,18 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerKbSearchPrivileged(server, callerHash);
   registerLlmAzure(server, callerHash);
   registerGatewayFetchResult(server, callerHash); // JIT tool-payload retrieval companion (read)
+
+  // ===== Legal document store (Azure Blob, RING-GATED) + OneDrive/Graph Drive role exchange =====
+  // legal_blob_*: personal container gated to the legal-personal executive ring, company to
+  // legal-company (derived from kb/search-privileged.ts INDEX_LANES — single source of truth).
+  // graph_drive_*: gated by folder-name role prefix to the caller's OWN role folders. The write
+  // tools (legal_blob_put, graph_drive_upload) are additionally fail-closed against silent overwrite.
+  registerLegalBlobList(server, callerHash);
+  registerLegalBlobGet(server, callerHash);
+  registerLegalBlobPut(server, callerHash);
+  registerGraphDriveList(server, callerHash);
+  registerGraphDriveDownload(server, callerHash);
+  registerGraphDriveUpload(server, callerHash);
 
   // ===== FULL READ+WRITE WAVE: connector write tools =====
   registerCreateOrUpdateCustomer(server, callerHash);

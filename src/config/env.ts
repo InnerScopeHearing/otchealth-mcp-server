@@ -140,6 +140,21 @@ const EnvSchema = z.object({
   AGENT_INBOX_STORAGE_ACCOUNT: z.string().optional().default(''),
   AGENT_INBOX_STORAGE_KEY: z.string().optional().default(''),
 
+  // Legal document store (Azure Blob, account otchealthlegalstore, containers company | personal).
+  // RING-GATED (personal = attorney-privileged CA divorce/civil matters — the most sensitive corpus
+  // in the fleet). SharedKey auth, mirrors skills/legal/legal.mjs (secrets azure-legal-storage-account
+  // / azure-legal-storage-key). Inert without these — legal_blob_* return a clear "not configured"
+  // result rather than throwing. The account defaults to otchealthlegalstore (as in the skill).
+  AZURE_LEGAL_STORAGE_ACCOUNT: z.string().optional().default('otchealthlegalstore'),
+  AZURE_LEGAL_STORAGE_KEY: z.string().optional().default(''),
+
+  // OneDrive / Graph Drive three-folder exchange (Outgoing/Incoming/Processed), per role. The
+  // gateway uses APP-ONLY Graph auth (GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET, Files.ReadWrite.All)
+  // and targets a specific user's drive: /users/{upn}/drive/root:/<path>. GRAPH_DRIVE_USER is the
+  // drive owner (the OneDrive whose role folders are exchanged, e.g. matthew@innd.com). Inert without
+  // Graph creds — graph_drive_* return a clear "not configured" result.
+  GRAPH_DRIVE_USER: z.string().optional().default(''),
+
   // Optional: lets task_complete verify gh:commit/gh:pr artifact_uris. Absent -> gh: is rejected
   // (agents land the artifact in the commons instead). Read-only classic/fine-grained token.
   GITHUB_TOKEN: z.string().optional().default(''),
