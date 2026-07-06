@@ -1,0 +1,35 @@
+name: revoke-leaked-developer-token
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  revoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /admin/revoke against the leaked developer JWT
+        env:
+          ADMIN_REVOKE_TOKEN: ${{ secrets.ADMIN_REVOKE_TOKEN }}
+        run: |
+          set -euo pipefail
+          LEAKED_JWT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL21jcC5vdGNoZWFsdGguYXBwIiwiYXVkIjoib3RjaGVhbHRoLW1jcCIsInN1YiI6ImNjX2RldmVsb3Blcl9jb21taXR0ZWQiLCJzY29wZSI6Im1jcCIsImFnZW50IjoiZGV2ZWxvcGVyIiwidHlwIjoiYWNjZXNzIiwiaWF0IjoxNzgzMTkzNDAxLCJleHAiOjE3OTg3NDU0MDF9.odYv8YdvlH-0plJ-olHH4jlEN7jKkPIvcitgFQt8Amk"
+          if [ -z "${ADMIN_REVOKE_TOKEN:-}" ]; then
+            echo "FATAL: ADMIN_REVOKE_TOKEN secret is not set on this repo" >&2
+            exit 1
+          fi
+          RESP=$(curl -s -w "\nHTTP_STATUS=%{http_code}\n" -X POST "https://mcp.otchealth.app/admin/revoke" \
+            -H "Authorization: Bearer ${ADMIN_REVOKE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"reason\": \"leaked in iheartest commit message def9e234a, sub=cc_developer_committed\", \"token\": \"${LEAKED_JWT}\"}")
+          echo "$RESP"
+
+      - name: Verify revocation state
+        env:
+          ADMIN_REVOKE_TOKEN: ${{ secrets.ADMIN_REVOKE_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -s "https://mcp.otchealth.app/admin/revoke" -H "Authorization: Bearer ${ADMIN_REVOKE_TOKEN}"
+          echo ""
