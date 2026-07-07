@@ -51,8 +51,12 @@ export function isConfigured(): boolean {
  * StringToSign = VERB \n Content-Encoding \n Content-Language \n Content-Length \n Content-MD5 \n
  *   Content-Type \n Date \n If-Modified-Since \n If-Match \n If-None-Match \n If-Unmodified-Since \n
  *   Range \n CanonicalizedHeaders + CanonicalizedResource.
- * The skill passes Content-Length via the 4th field (empty on GET) and Content-Type via the 6th,
- * with everything else blank — reproduced here so the wire signature is identical.
+ *
+ * ifNoneMatch MUST be passed whenever the actual outgoing request carries an If-None-Match header
+ * (e.g. putBlob's no-silent-overwrite guard sends "If-None-Match: *") — Azure validates the
+ * signature against the REAL header values it received, so an empty string here while a real
+ * header is sent produces AuthenticationFailed (this was a live bug: put failed 403 while
+ * get/list, which never send this header, worked fine).
  */
 export function azSig(
   account: string,
@@ -64,6 +68,7 @@ export function azSig(
   query: Record<string, string> | null,
   contentLength: string,
   contentType: string,
+  ifNoneMatch = '',
 ): string {
   const canonHeaders =
     Object.keys(xms)
@@ -82,7 +87,7 @@ export function azSig(
     '', // Date (using x-ms-date header instead)
     '', // If-Modified-Since
     '', // If-Match
-    '', // If-None-Match
+    ifNoneMatch || '', // If-None-Match
     '', // If-Unmodified-Since
     '', // Range
     canonHeaders + canonResource,
@@ -216,6 +221,12 @@ export interface BlobPutResult {
  * conditional header when overwrite=false so a race that creates the blob between the existence
  * check and the PUT is still refused server-side (412) — belt and suspenders for filed court
  * documents.
+ *
+ * BUGFIX (2026-07-06): the If-None-Match: * header sent below was previously NOT reflected in the
+ * SharedKey signature (azSig always signed an empty If-None-Match field), so every put without
+ * overwrite=true failed 403 AuthenticationFailed even with a fully correct key — Azure signs
+ * against what was ACTUALLY sent. Now threaded through to azSig so the signature matches the
+ * real request.
  */
 export async function putBlob(
   container: LegalContainer,
@@ -233,10 +244,11 @@ export async function putBlob(
     'x-ms-date': new Date().toUTCString(),
     'x-ms-version': AVER,
   };
-  const auth = azSig(c.account, c.key, 'PUT', container, encPath(path), xms, null, String(buf.length), ct);
+  const ifNoneMatch = overwrite ? '' : '*';
+  const auth = azSig(c.account, c.key, 'PUT', container, encPath(path), xms, null, String(buf.length), ct, ifNoneMatch);
   const headers: Record<string, string> = { ...xms, 'Content-Type': ct, Authorization: auth };
   // Server-side guard against a TOCTOU clobber: reject if the blob already exists.
-  if (!overwrite) headers['If-None-Match'] = '*';
+  if (!overwrite) headers['If-None-Match'] = ifNoneMatch;
   const r = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(path)}`, {
     method: 'PUT',
     headers,
