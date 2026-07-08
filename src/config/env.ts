@@ -71,6 +71,17 @@ const EnvSchema = z.object({
   // Curated csv toolset advertised to Claude Chat DCR connector clients (empty -> built-in default).
   CONNECTOR_TOOLSET: z.string().optional().default(''),
 
+  // Descope Agentic Identity Hub -- OPTIONAL parallel credential path for ONE pilot lane
+  // (Phase 2, 2026-07-08). Inert when DESCOPE_PROJECT_ID is unset -- does not touch or replace
+  // any existing OAuth lane above. When set, auth/bearer.ts additionally accepts a Descope-
+  // issued RS256 session JWT (minted via POST /v1/auth/accesskey/exchange against a Descope
+  // Access Key) as a valid credential, gated to DESCOPE_PILOT_LANES. See auth/descope.ts.
+  DESCOPE_PROJECT_ID: z.string().optional().default(''),
+  // CSV of `lane` custom-claim values accepted from a Descope token. Defaults to just the pilot
+  // lane ("clo") even if this var is left unset -- widening it is a config change, not a code
+  // change, but still requires DESCOPE_PROJECT_ID to be set for the feature to be reachable.
+  DESCOPE_PILOT_LANES: z.string().optional().default(''),
+
   // Semantic recall over the memory-exec Azure AI Search index (read-only QUERY key).
   // Inert when unset -> memory_recall falls back to keyword search over the blob feed.
   AZURE_SEARCH_ENDPOINT: z.string().optional().default(''),
