@@ -2,8 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeAgent } from './store.js';
 
-// Pure, no-network. normalizeAgent is the ring/privilege guard for the gateway memory surface.
-describe('memory store normalizeAgent (ring guard)', () => {
+// Pure, no-network. normalizeAgent is the shape guard for the gateway memory surface.
+describe('memory store normalizeAgent', () => {
   it('lowercases and trims a valid agent id', () => {
     assert.equal(normalizeAgent('CTO'), 'cto');
     assert.equal(normalizeAgent('  Haulai '), 'haulai');
@@ -11,9 +11,9 @@ describe('memory store normalizeAgent (ring guard)', () => {
     assert.equal(normalizeAgent('clo'), 'clo');
   });
 
-  it('REJECTS the privilege-walled clo-personal lane', () => {
-    assert.throws(() => normalizeAgent('clo-personal'), /privilege-walled/);
-    assert.throws(() => normalizeAgent('CLO-Personal'), /privilege-walled/);
+  it('ACCEPTS clo-personal (2026-07-07: privilege wall lifted per standing CEO directive)', () => {
+    assert.equal(normalizeAgent('clo-personal'), 'clo-personal');
+    assert.equal(normalizeAgent('CLO-Personal'), 'clo-personal');
   });
 
   it('rejects empty / invalid ids', () => {
