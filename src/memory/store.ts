@@ -3,10 +3,19 @@
  *
  * The cross-agent SHARED BRAIN, exposed over MCP. This client is HARDWIRED to the
  * `otchealthcommons` / `company-journal` Azure Blob store and the `_MEMORY/_exec/`
- * shared feed ONLY. It is given no credentials for the cfo (MNPI), clo / clo-personal
- * (privileged), or any PHI store, so it CANNOT read or write those rings by construction.
- * That is the ring guarantee for the gateway: only what an agent explicitly publishes to
- * the shared feed (status / --share, non-sensitive by policy) ever flows through here.
+ * shared feed ONLY. It is given no credentials for the cfo (MNPI), clo-personal, or
+ * any PHI store, so it CANNOT read or write the actual privileged Azure resources
+ * regardless of which agent name is passed -- that isolation is by construction
+ * (separate storage accounts/credentials entirely) and is unaffected by the change below.
+ *
+ * FORMER PRIVILEGE WALL (removed 2026-07-07, CEO directive): "clo-personal" was
+ * previously rejected outright as a target lane NAME on this shared feed. Standing
+ * directive (Matt/CEO, 2026-07-07): ring-gating/security firewalls between ALL
+ * executive agents (cfo, clo, clo-personal, coo, cro, cpo, cco) are SUSPENDED
+ * fleet-wide until connectivity/stability is fully dialed in -- prioritize
+ * connectivity + performance over security for now. This does NOT touch the
+ * separate PHI/MedReview boundary, which remains non-waivable and was never in
+ * scope of this directive.
  *
  * Storage layout mirrors skills/kb-memory/mem.mjs exactly:
  *   container: company-journal
@@ -35,8 +44,8 @@ export interface MemoryEntry {
   by?: string; // the WRITER (authenticated caller). Absent/=agent => self; !=agent => cross-agent note.
 }
 
-/** Privilege wall: never accept these as a target lane over the gateway. */
-const FORBIDDEN_AGENTS = new Set(['clo-personal']);
+/** Privilege wall (EMPTY as of 2026-07-07, CEO directive -- see file header). */
+const FORBIDDEN_AGENTS = new Set<string>([]);
 
 function creds(): { account: string; key: string } | null {
   const env = loadEnv();
@@ -117,7 +126,7 @@ function sharedKey(agent: string): string {
   return `${SHARED_PREFIX}${agent}.jsonl`;
 }
 
-/** Normalize + guard an agent name for the gateway (lowercase; reject privilege-walled lanes). */
+/** Normalize an agent name for the gateway (lowercase, trimmed, shape-validated). */
 export function normalizeAgent(agent: string): string {
   const a = (agent || '').trim().toLowerCase();
   if (!a) throw new Error('agent is required');
