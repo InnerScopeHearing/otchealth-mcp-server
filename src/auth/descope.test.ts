@@ -1,7 +1,24 @@
-import { test } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createPrivateKey, sign as cryptoSign, type KeyObject } from 'node:crypto';
-import { verifyDescopeClaims, type DescopeClaims } from './descope.js';
+import { verifyDescopeClaims, laneFromScope, type DescopeClaims } from './descope.js';
+
+// loadEnv() (called transitively by laneFromScope -> scopeLaneMap) caches its result for the
+// life of the process, so DESCOPE_SCOPE_LANE_MAP is deliberately left UNSET here -- these tests
+// exercise the built-in DEFAULT_SCOPE_LANE_MAP, which is exactly what's live in production today
+// (the 3 real Inbound App Clients provisioned 2026-07-08). Satisfy the unrelated required env
+// vars first, same pattern as oauth-tokens.test.ts's before() hook.
+before(() => {
+  const required: Record<string, string> = {
+    CIO_SITE_ID: 'test',
+    CIO_TRACK_KEY: 'test',
+    CIO_APP_API_BEARER: 'test',
+    PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
+    ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
+    N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+  };
+  for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+});
 
 // Hermetic: generates its own RSA keypair and self-signs test JWTs. No network, no real
 // Descope project touched -- mirrors this repo's convention of not unit-testing network-bound
@@ -86,4 +103,81 @@ test('verifyDescopeClaims rejects a malformed token (wrong number of segments)',
 
 test('verifyDescopeClaims rejects unparseable base64/JSON without throwing', () => {
   assert.equal(verifyDescopeClaims('not-base64!.also-not!.sig', keySet(), ISSUER), null);
+});
+
+// -- Scope-based lane resolution (Inbound App Client tokens, 2026-07-08 addition) --------------
+// agentFromDescopeToken() itself calls loadEnv()/verifyDescopeToken() (network + env-dependent),
+// so per this repo's hermetic-test convention we exercise the pure claim shape here instead:
+// verifyDescopeClaims() already proves signature/issuer/expiry verification works identically
+// regardless of which claims the payload carries (lane vs scope) -- these tests confirm a
+// scope-only payload (no `lane` claim at all, matching a real Inbound App Client token) verifies
+// successfully and carries the scope through unchanged, which is everything agentFromDescopeToken
+// needs from this layer before it does its own scope->lane mapping.
+
+test('verifyDescopeClaims accepts a scope-only payload with no lane claim (Inbound App Client shape)', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const token = signRs256({
+    iss: ISSUER,
+    sub: 'client-abc',
+    exp: now + 600,
+    scope: 'mcp:legal.read',
+  });
+  const claims = verifyDescopeClaims(token, keySet(), ISSUER);
+  assert.ok(claims);
+  assert.equal(claims?.lane, undefined);
+  assert.equal(claims?.scope, 'mcp:legal.read');
+});
+
+test('verifyDescopeClaims carries a multi-scope string through unchanged for later mapping', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const token = signRs256({
+    iss: ISSUER,
+    sub: 'client-abc',
+    exp: now + 600,
+    scope: 'mcp:legal.read mcp:legal.personal.read',
+  });
+  const claims = verifyDescopeClaims(token, keySet(), ISSUER);
+  assert.ok(claims);
+  assert.equal(claims?.scope, 'mcp:legal.read mcp:legal.personal.read');
+});
+
+// -- laneFromScope() direct unit tests, against the built-in DEFAULT_SCOPE_LANE_MAP -----------
+// (the 3 real Inbound App Client scopes live in production as of 2026-07-08: mcp:legal.read ->
+// clo, mcp:legal.personal.read -> clo-personal, mcp:infra.admin -> cto.)
+
+test('laneFromScope maps a single known scope to its lane', () => {
+  assert.equal(laneFromScope('mcp:legal.read'), 'clo');
+  assert.equal(laneFromScope('mcp:legal.personal.read'), 'clo-personal');
+  assert.equal(laneFromScope('mcp:infra.admin'), 'cto');
+});
+
+test('laneFromScope handles a space-separated multi-scope string that maps to the SAME lane', () => {
+  // A hypothetical Client granted two scopes that both belong to the clo lane -- not ambiguous,
+  // since they resolve to one distinct lane.
+  assert.equal(laneFromScope('mcp:legal.read mcp:legal.read'), 'clo');
+});
+
+test('laneFromScope rejects (returns null) scopes mapping to MORE THAN ONE distinct lane', () => {
+  // A Client somehow granted scopes for two different lanes must not let the token holder pick
+  // its own privilege level -- this must be rejected outright, never resolved to either lane.
+  assert.equal(laneFromScope('mcp:legal.read mcp:infra.admin'), null);
+  assert.equal(laneFromScope('mcp:legal.personal.read mcp:infra.admin'), null);
+});
+
+test('laneFromScope returns null for an unmapped/unknown scope', () => {
+  assert.equal(laneFromScope('mcp:unknown.scope'), null);
+});
+
+test('laneFromScope returns null for empty, whitespace-only, or non-string scope values', () => {
+  assert.equal(laneFromScope(''), null);
+  assert.equal(laneFromScope('   '), null);
+  assert.equal(laneFromScope(undefined), null);
+  assert.equal(laneFromScope(null), null);
+  assert.equal(laneFromScope(42), null);
+});
+
+test('laneFromScope: a known scope alongside an unmapped scope still resolves cleanly', () => {
+  // The unmapped scope is simply ignored (filtered out before the ambiguity check), not treated
+  // as a second distinct lane.
+  assert.equal(laneFromScope('mcp:legal.read mcp:unknown.scope'), 'clo');
 });
