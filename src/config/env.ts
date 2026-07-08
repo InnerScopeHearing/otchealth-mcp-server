@@ -71,16 +71,29 @@ const EnvSchema = z.object({
   // Curated csv toolset advertised to Claude Chat DCR connector clients (empty -> built-in default).
   CONNECTOR_TOOLSET: z.string().optional().default(''),
 
-  // Descope Agentic Identity Hub -- OPTIONAL parallel credential path for ONE pilot lane
+  // Descope Agentic Identity Hub -- OPTIONAL parallel credential path for approved pilot lanes
   // (Phase 2, 2026-07-08). Inert when DESCOPE_PROJECT_ID is unset -- does not touch or replace
   // any existing OAuth lane above. When set, auth/bearer.ts additionally accepts a Descope-
-  // issued RS256 session JWT (minted via POST /v1/auth/accesskey/exchange against a Descope
-  // Access Key) as a valid credential, gated to DESCOPE_PILOT_LANES. See auth/descope.ts.
+  // issued RS256 session JWT as a valid credential, gated to DESCOPE_PILOT_LANES. Two Descope
+  // mechanisms are both accepted: (1) Access Keys, exchanged via POST /v1/auth/accesskey/exchange,
+  // carrying an explicit `lane` custom claim; (2) Inbound App Clients (the object type that
+  // populates Descope's "Agentic Identity" Console dashboard), issued via the standard OAuth2
+  // client_credentials grant at POST /oauth2/v1/apps/token, carrying a `scope` claim instead --
+  // mapped to a lane via DESCOPE_SCOPE_LANE_MAP below. See auth/descope.ts.
   DESCOPE_PROJECT_ID: z.string().optional().default(''),
-  // CSV of `lane` custom-claim values accepted from a Descope token. Defaults to just the pilot
-  // lane ("clo") even if this var is left unset -- widening it is a config change, not a code
-  // change, but still requires DESCOPE_PROJECT_ID to be set for the feature to be reachable.
+  // CSV of lane values accepted from a Descope token (from either the `lane` claim or a mapped
+  // `scope`). Defaults to just the pilot lane ("clo") even if this var is left unset -- widening
+  // it is a config change, not a code change, but still requires DESCOPE_PROJECT_ID to be set
+  // for the feature to be reachable.
   DESCOPE_PILOT_LANES: z.string().optional().default(''),
+  // JSON object string mapping an Inbound App Client's OAuth `scope` value to a lane, e.g.
+  // {"mcp:legal.read":"clo"}. Optional -- an unset or malformed value falls back to a built-in
+  // default covering the 3 real Inbound App Clients provisioned 2026-07-08 (mcp:legal.read ->
+  // clo, mcp:legal.personal.read -> clo-personal, mcp:infra.admin -> cto), so this can stay
+  // unset in production today. Set it to widen/replace the mapping without a redeploy. A token
+  // whose scopes map to more than one distinct lane is always rejected as ambiguous, regardless
+  // of this map's contents -- see auth/descope.ts's laneFromScope().
+  DESCOPE_SCOPE_LANE_MAP: z.string().optional().default(''),
 
   // Semantic recall over the memory-exec Azure AI Search index (read-only QUERY key).
   // Inert when unset -> memory_recall falls back to keyword search over the blob feed.
