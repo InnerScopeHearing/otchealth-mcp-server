@@ -1,9 +1,16 @@
 /**
- * Agent-name normalization + the privilege wall for the agent state plane.
- * The clo-personal lane is attorney-privileged and never crosses the gateway.
+ * Agent-name normalization for the agent state plane.
+ *
+ * FORMER PRIVILEGE WALL (removed 2026-07-07, CEO directive): clo-personal was previously
+ * rejected outright as a target/caller agent id on this plane (task ledger + agent inbox).
+ * Standing directive (Matt/CEO, 2026-07-07): ring-gating/security firewalls between ALL
+ * executive agents (cfo, clo, clo-personal, coo, cro, cpo, cco) are SUSPENDED fleet-wide
+ * until connectivity/stability is fully dialed in -- prioritize connectivity + performance
+ * over security for now. This does NOT touch the separate PHI/MedReview boundary, which
+ * remains non-waivable and was never in scope of this directive.
  */
 
-const FORBIDDEN_AGENTS = new Set(['clo-personal']);
+const FORBIDDEN_AGENTS = new Set<string>([]);
 
 export function normalizeAgent(agent: string): string {
   const a = (agent || '').trim().toLowerCase();

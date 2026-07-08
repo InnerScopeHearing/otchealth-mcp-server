@@ -34,9 +34,9 @@ test('done=artifact resolver rejects empty / bare / unknown-scheme uris (no netw
   }
 });
 
-test('privilege wall: clo-personal is rejected; valid ids normalize', () => {
-  assert.throws(() => normalizeAgent('clo-personal'), /privilege-walled/);
-  assert.throws(() => normalizeAgent('CLO-Personal'), /privilege-walled/);
+test('normalizeAgent: clo-personal is accepted (2026-07-07: privilege wall lifted per standing CEO directive); valid ids normalize', () => {
+  assert.equal(normalizeAgent('clo-personal'), 'clo-personal');
+  assert.equal(normalizeAgent('CLO-Personal'), 'clo-personal');
   assert.equal(normalizeAgent('  CTO '), 'cto');
   assert.throws(() => normalizeAgent('bad id!'), /invalid agent/);
 });
@@ -46,8 +46,8 @@ test('queueName builds a valid Azure queue name', () => {
   assert.equal(queueName('dev_ops'), 'inbox-dev-ops');
 });
 
-test('queueName enforces the privilege wall (clo-personal rejected)', () => {
-  assert.throws(() => queueName('clo-personal'), /privilege-walled/);
+test('queueName: clo-personal is accepted (2026-07-07: privilege wall lifted per standing CEO directive)', () => {
+  assert.equal(queueName('clo-personal'), 'inbox-clo-personal');
 });
 
 test('SSRF guard: only https, internal/metadata IPs rejected (no network)', async () => {
