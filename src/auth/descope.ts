@@ -2,25 +2,46 @@
  * Descope Agentic Identity Hub -- OPTIONAL parallel credential path (Phase 2 pilot, 2026-07-08).
  *
  * Inert unless DESCOPE_PROJECT_ID is set. When configured, this accepts a Descope-issued RS256
- * session JWT (minted via POST /v1/auth/accesskey/exchange against a Descope Access Key created
- * in the Console/Management API) as an ADDITIONAL valid bearer credential for ONE pilot lane,
- * alongside -- not instead of -- the existing self-issued HS256 OAuth lanes in oauth-tokens.ts /
- * oauth.ts. Nothing about the existing credential paths changes.
+ * session JWT as an ADDITIONAL valid bearer credential for approved pilot lanes, alongside --
+ * not instead of -- the existing self-issued HS256 OAuth lanes in oauth-tokens.ts / oauth.ts.
+ * Nothing about the existing credential paths changes.
  *
- * Pilot scope: ONLY a token whose `lane` custom claim is in DESCOPE_PILOT_LANES (default: just
- * "clo") is accepted, even if it is validly signed by Descope. This keeps the blast radius to
- * the one lane Matt approved for the pilot (see the "Descope (OTCHealth)" Hyperagent skill and
- * the Descope Living Document for full context and the Phase 1 provisioning proof).
+ * TWO Descope-side credential mechanisms are both accepted here, resolved to a lane via TWO
+ * different claim paths on the same verified JWT:
+ *
+ * 1. Access Keys (minted via POST /v1/mgmt/accesskey/create, exchanged via
+ *    POST /v1/auth/accesskey/exchange) -- carry an explicit `lane` custom claim set at Access
+ *    Key creation time. This was the original (2026-07-08 Phase 2) pilot mechanism.
+ *
+ * 2. Inbound App Clients (minted via POST /v1/mgmt/thirdparty/app/create, token issued via
+ *    POST /oauth2/v1/apps/token with the standard OAuth2 client_credentials grant) -- carry NO
+ *    `lane` claim; instead they carry a standard OAuth `scope` string. Added 2026-07-08 (later
+ *    the same day) once we discovered Inbound App Clients are the object type that populates
+ *    Descope's "Agentic Identity" Console dashboard (Access Keys do not). A scope is mapped to
+ *    a lane via DESCOPE_SCOPE_LANE_MAP (or the built-in default below, matching the 3 real
+ *    Inbound App Clients provisioned that day). If a token's scope string maps to MORE THAN ONE
+ *    distinct lane, it is rejected as ambiguous rather than silently picking one -- a Client
+ *    ever granted multiple mapped scopes must not be able to pick its own privilege level.
+ *
+ * Pilot scope: regardless of which claim resolves a lane, the result MUST also be in
+ * DESCOPE_PILOT_LANES (default: just "clo") to be accepted -- this is the actual blast-radius
+ * control, checked once, downstream of both resolution paths (defense in depth). See the
+ * "Descope (OTCHealth)" Hyperagent skill and the Descope Living Document for full context and
+ * the live provisioning/testing history for both mechanisms.
  *
  * Signature verification is hand-rolled with node:crypto only (RS256 / RSASSA-PKCS1-v1_5), no
  * new npm dependency -- matching this repo's existing convention (see oauth-tokens.ts header:
  * "No external deps (node:crypto only)"). The JWKS is fetched once and cached in-memory for
  * JWKS_TTL_MS, so the common request path pays no network cost after the first verification.
+ * Both mechanisms above share the EXACT SAME issuer + JWKS signing key (confirmed live,
+ * 2026-07-08), so no change was needed to the JWKS-fetch/verify code itself for mechanism 2 --
+ * only to lane resolution, below.
  *
  * Per this repo's own testing convention (see oauth-tokens.test.ts's comment on the Cosmos auth
  * code path), the network-touching JWKS fetch is NOT unit tested -- only the pure signature/claim
  * verification logic is (descope.test.ts), using a locally generated RSA keypair. Live end-to-end
- * behavior is covered by manual smoke test against the real Descope pilot Access Key.
+ * behavior is covered by manual smoke test against real Descope pilot credentials (both an
+ * Access Key and an Inbound App Client).
  */
 import { createPublicKey, verify as cryptoVerify, type KeyObject } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
@@ -42,10 +63,21 @@ export interface DescopeClaims {
   lane?: string;
   ring?: string;
   pilot?: boolean;
+  scope?: string;
   [key: string]: unknown;
 }
 
 const JWKS_TTL_MS = 60 * 60 * 1000; // 1 hour -- Descope signing keys rotate infrequently.
+
+// Built-in fallback for the 3 real Inbound App Clients provisioned 2026-07-08. Overridable
+// (widenable or replaceable) via DESCOPE_SCOPE_LANE_MAP without a redeploy -- a JSON object
+// string, e.g. {"mcp:legal.read":"clo"}. An empty/malformed env value falls back to this default
+// rather than going inert, since these 3 mappings are already live and provisioned.
+const DEFAULT_SCOPE_LANE_MAP: Record<string, string> = {
+  'mcp:legal.read': 'clo',
+  'mcp:legal.personal.read': 'clo-personal',
+  'mcp:infra.admin': 'cto',
+};
 
 let jwksCache: { keys: Map<string, KeyObject>; fetchedAt: number; projectId: string } | null = null;
 
@@ -175,15 +207,66 @@ function pilotLanes(): Set<string> {
 }
 
 /**
+ * The scope->lane map for Inbound App Client tokens (mechanism 2 -- see file header). Reads
+ * DESCOPE_SCOPE_LANE_MAP (a JSON object string) fresh each call so it can be widened without a
+ * redeploy; falls back to DEFAULT_SCOPE_LANE_MAP if unset or malformed, since 3 real Inbound App
+ * Clients already depend on that default being active.
+ */
+function scopeLaneMap(): Record<string, string> {
+  const env = loadEnv();
+  const raw = env.DESCOPE_SCOPE_LANE_MAP;
+  if (!raw) return DEFAULT_SCOPE_LANE_MAP;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, string>;
+    }
+  } catch {
+    /* malformed JSON -- fall back to the default rather than going inert */
+  }
+  return DEFAULT_SCOPE_LANE_MAP;
+}
+
+/**
+ * Resolves a lane from a token's `scope` claim (space-separated OAuth scope string) via
+ * scopeLaneMap(). Returns null if there's no scope claim, no scope maps to a known lane, OR the
+ * scopes present map to MORE THAN ONE distinct lane (ambiguous -- rejected rather than guessed).
+ * Exported for direct hermetic unit testing (descope.test.ts) -- reads DESCOPE_SCOPE_LANE_MAP via
+ * loadEnv() each call, so tests toggle behavior by setting process.env before calling.
+ */
+export function laneFromScope(scope: unknown): string | null {
+  if (typeof scope !== 'string' || !scope.trim()) return null;
+  const map = scopeLaneMap();
+  const scopes = scope.split(/\s+/).filter(Boolean);
+  const mappedLanes = new Set(
+    scopes.map((s) => map[s]).filter((l): l is string => typeof l === 'string' && l.length > 0),
+  );
+  if (mappedLanes.size === 0) return null;
+  if (mappedLanes.size > 1) {
+    logger.warn(
+      { type: 'descope_scope_ambiguous', scopes, mappedLanes: [...mappedLanes] },
+      'Descope token scope maps to multiple distinct lanes; rejecting as ambiguous',
+    );
+    return null;
+  }
+  return [...mappedLanes][0].toLowerCase();
+}
+
+/**
  * High-level entry point used by auth/bearer.ts: verify the token AND enforce the pilot lane
  * allow-list (defense in depth -- a validly-signed Descope token for an out-of-scope lane is
- * still rejected here). Returns the agent identity string (the `lane` claim, lowercased) or
- * null. Never throws.
+ * still rejected here). Resolves a lane from either the `lane` custom claim (Access-Key-exchange
+ * tokens) or, failing that, the `scope` claim (Inbound App Client / client_credentials tokens --
+ * see file header for why there are two mechanisms). Returns the agent identity string
+ * (lowercased) or null. Never throws.
  */
 export async function agentFromDescopeToken(token: string): Promise<string | null> {
   const claims = await verifyDescopeToken(token);
   if (!claims) return null;
-  const lane = String(claims.lane || '').toLowerCase();
+
+  const laneClaim = String(claims.lane || '').toLowerCase();
+  const lane = laneClaim || laneFromScope(claims.scope);
+
   if (!lane || !pilotLanes().has(lane)) {
     logger.warn(
       { type: 'descope_lane_rejected', lane: lane || '(none)' },
