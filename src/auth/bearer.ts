@@ -4,6 +4,7 @@ import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked } from './revocation-store.js';
 import { isValidIssuedAccessToken, issuedAgent, issuedClientId } from '../server/oauth.js';
+import { agentFromDescopeToken } from './descope.js';
 
 const env = loadEnv();
 
@@ -33,7 +34,7 @@ function safeEqual(a: string, b: string): boolean {
  * the AuthContext (with SHA256 caller hash). On failure returns null and the
  * caller is responsible for sending 401. Never logs the raw token.
  */
-export function validateBearer(authHeader: string | undefined): AuthContext | null {
+export async function validateBearer(authHeader: string | undefined): Promise<AuthContext | null> {
   const token = extractBearer(authHeader);
   if (!token) return null;
   if (isRevoked(token)) {
@@ -43,23 +44,35 @@ export function validateBearer(authHeader: string | undefined): AuthContext | nu
     );
     return null;
   }
-  // Accept: (1) a real issued OAuth 2.1 access token (HS256 JWT); (2) the static connector token
-  // (back-compat, identity=OAUTH_DEFAULT_AGENT); (3) the long-lived low-priv COPILOT_AGENT_TOKEN
-  // (identity='copilot-agent') for the GitHub Copilot coding agents' MCP header. All rotate-before-launch.
+  // Accept: (1) a real issued OAuth 2.1 access token (HS256 JWT); (2) a Descope-issued RS256
+  // session JWT for the clo-lane pilot (Phase 2, 2026-07-08 -- inert unless DESCOPE_PROJECT_ID
+  // is configured, and gated to DESCOPE_PILOT_LANES regardless; see auth/descope.ts); (3) the
+  // static connector token (back-compat, identity=OAUTH_DEFAULT_AGENT); (4) the long-lived
+  // low-priv COPILOT_AGENT_TOKEN (identity='copilot-agent') for the GitHub Copilot coding
+  // agents' MCP header. All rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
+  let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
   if (!issued) {
-    if (safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) {
-      staticAgent = env.OAUTH_DEFAULT_AGENT || '';
-    } else if (env.COPILOT_AGENT_TOKEN && env.COPILOT_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_AGENT_TOKEN)) {
-      // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
-      // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
-      staticAgent = 'copilot-agent';
-    } else {
-      return null;
+    // Only worth attempting Descope verification if the token even looks like a JWT (3 dot-
+    // separated segments) -- cheap guard that avoids a pointless JWKS-cache lookup for the
+    // static-token paths below, which are opaque random strings, not JWTs.
+    if (token.split('.').length === 3) {
+      descopeAgent = await agentFromDescopeToken(token);
+    }
+    if (!descopeAgent) {
+      if (safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) {
+        staticAgent = env.OAUTH_DEFAULT_AGENT || '';
+      } else if (env.COPILOT_AGENT_TOKEN && env.COPILOT_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_AGENT_TOKEN)) {
+        // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
+        // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
+        staticAgent = 'copilot-agent';
+      } else {
+        return null;
+      }
     }
   }
-  const caller_agent = issued ? (issuedAgent(token) || '') : (staticAgent || '');
+  const caller_agent = issued ? (issuedAgent(token) || '') : (descopeAgent || staticAgent || '');
   const clientId = issued ? issuedClientId(token) : null;
   // Connector clients: DCR public clients (dcr_) OR manually-registered confidential connector clients
   // (occ_ = OTCHealth Connector Client) entered in Claude's Advanced settings to bypass the DCR tool-delivery
@@ -79,7 +92,7 @@ export async function requireConnectorAuth(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<AuthContext | undefined> {
-  const ctx = validateBearer(request.headers['authorization']);
+  const ctx = await validateBearer(request.headers['authorization']);
   if (!ctx) {
     logger.warn(
       {
