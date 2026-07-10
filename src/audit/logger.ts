@@ -2,7 +2,29 @@ import pino, { type Logger } from 'pino';
 import { randomUUID, createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 
-const env = loadEnv();
+function fallbackNodeEnv(v: string | undefined): 'development' | 'production' | 'test' {
+  if (v === 'development' || v === 'production' || v === 'test') return v;
+  return 'production';
+}
+
+function fallbackLogLevel(v: string | undefined): 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' {
+  if (v === 'trace' || v === 'debug' || v === 'info' || v === 'warn' || v === 'error' || v === 'fatal') return v;
+  return 'info';
+}
+
+function loggerConfig(): { NODE_ENV: 'development' | 'production' | 'test'; LOG_LEVEL: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' } {
+  try {
+    const env = loadEnv();
+    return { NODE_ENV: env.NODE_ENV, LOG_LEVEL: env.LOG_LEVEL };
+  } catch {
+    return {
+      NODE_ENV: fallbackNodeEnv(process.env.NODE_ENV),
+      LOG_LEVEL: fallbackLogLevel(process.env.LOG_LEVEL),
+    };
+  }
+}
+
+const env = loggerConfig();
 
 const redactPaths = [
   'authorization',
