@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, createPrivateKey, sign as cryptoSign, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from 'node:crypto';
 import { verifyDescopeClaims, laneFromScope, type DescopeClaims } from './descope.js';
 
 // loadEnv() (called transitively by laneFromScope -> scopeLaneMap) caches its result for the
@@ -32,7 +32,7 @@ function b64url(input: string | Buffer): string {
   return Buffer.from(input).toString('base64url');
 }
 
-function signRs256(claims: DescopeClaims, kid = KID, key: KeyObject = createPrivateKey(privateKey)): string {
+function signRs256(claims: DescopeClaims, kid = KID, key: KeyObject = privateKey): string {
   const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid }));
   const payload = b64url(JSON.stringify(claims));
   const data = `${header}.${payload}`;
