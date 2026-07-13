@@ -29,6 +29,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         text: z.string().min(1).describe('The fact/decision/correction/pitfall/status text. Keep it atomic and non-sensitive.'),
         tags: z.array(z.string()).optional().describe('Optional tags for recall, e.g. ["ebay","pricing"].'),
         source: z.string().optional().describe('Optional attribution, e.g. "Matt 2026-06-20".'),
+        supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES (e.g. "20260713-015"). Set it ONLY when this entry makes the older one FALSE, not merely related -- readers (wake, memory_pack) DROP the superseded entry so a retracted belief cannot resurface as a live truth. Use it whenever you correct a previously-stated fact.'),
       },
       outputShape: {
         written: z.boolean(),
@@ -56,13 +57,14 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
             agent,
             ...(input.source ? { source: input.source } : {}),
             ...(cross ? { by } : {}),
+            ...(input.supersedes ? { supersedes: input.supersedes } : {}),
           };
           return {
             data: { written: false, entry: preview, note: 'dry_run: not written. Pass dry_run=false to persist.' },
             summary: cross ? `DRY RUN: would write a cross-lane ${input.type} BY ${by} ON ${agent}'s feed.` : `DRY RUN: would publish a ${input.type} to ${agent}'s shared feed.`,
           };
         }
-        const entry = await appendShared(agent, input.type, input.text, input.tags ?? [], input.source, by || undefined);
+        const entry = await appendShared(agent, input.type, input.text, input.tags ?? [], input.source, by || undefined, input.supersedes);
         return {
           data: { written: true, entry },
           summary: cross
