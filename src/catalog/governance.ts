@@ -37,6 +37,7 @@ export const GOVERNANCE: GovRule[] = [
   // GitHub writes (single-initiator, mirrors existing push/PR/merge rules).
   { pattern: 'github_create_branch', requiredRole: 'cto', reason: 'Branch creation is CTO-only (single initiator).' },
   { pattern: 'github_create_or_update_file', requiredRole: 'cto', reason: 'Direct file commits are CTO-only.' },
+  { pattern: 'github_edit_file', requiredRole: 'cto', reason: 'Surgical in-place file edits (old_str/new_str) are a direct code write, same risk class as github_create_or_update_file. It is category write_simple, so the write_orchestrated default CTO gate does NOT cover it; this explicit rule is required or any write-enabled lane could edit files.' },
   { pattern: 'github_create_issue', requiredRole: 'cto', reason: 'Gateway issue creation is CTO-only.' },
   { pattern: 'github_comment_on_issue', requiredRole: 'cto', reason: 'Gateway issue/PR comments are CTO-only.' },
   { pattern: 'github_add_labels', requiredRole: 'cto', reason: 'Label writes are CTO-only.' },

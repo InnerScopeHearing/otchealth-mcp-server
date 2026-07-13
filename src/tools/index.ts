@@ -839,6 +839,7 @@ import { registerGitHubCommentOnIssue } from './github/comment-on-issue.js';
 import { registerGitHubCreateBranch } from './github/create-branch.js';
 import { registerGitHubCreateIssue } from './github/create-issue.js';
 import { registerGitHubCreateOrUpdateFile } from './github/create-or-update-file.js';
+import { registerGitHubEditFile } from './github/edit-file.js';
 import { registerGitHubCreateRelease } from './github/create-release.js';
 import { registerGitHubDispatchWorkflow } from './github/dispatch-workflow.js';
 import { registerGraphCreateCalendarEvent } from './graph/create-calendar-event.js';
@@ -1067,6 +1068,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubCreateBranch(server, callerHash);
   registerGitHubCreateIssue(server, callerHash);
   registerGitHubCreateOrUpdateFile(server, callerHash);
+  registerGitHubEditFile(server, callerHash); // surgical old_str/new_str edit (no full-content requirement)
   registerGitHubCreateRelease(server, callerHash);
   registerGitHubDispatchWorkflow(server, callerHash);
   registerGraphCreateCalendarEvent(server, callerHash);

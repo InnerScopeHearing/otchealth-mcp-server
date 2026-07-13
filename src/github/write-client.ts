@@ -13,6 +13,7 @@
 import { createSign } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { planStrEdit, assertShaMatch, makeEditPreview } from './edit-core.js';
 
 const env = loadEnv();
 
@@ -237,6 +238,68 @@ export async function createOrUpdateFile(opts: {
     path: opts.path,
     operation: opts.sha ? 'updated' : 'created',
   };
+}
+
+/**
+ * editFile — surgical in-place edit. Reads the file, replaces old_str with new_str, writes it back.
+ *
+ * WHY THIS EXISTS: every other write path on this gateway demands FULL FILE CONTENT. That made a
+ * 2-line change to a 65KB production file (skills/doc-indexer/indexer.mjs) unlandable from the Claude
+ * Chat CTO seat -- you cannot safely retype 65KB through a chat channel. A half-widened capability
+ * surface just moves the wall. This removes the wall.
+ *
+ * SAFETY MODEL: old_str MUST match exactly once unless replace_all is set (see planStrEdit). An
+ * ambiguous patch FAILS LOUD; it never guesses which occurrence you meant. Honors expected_sha
+ * (optimistic concurrency) and dry_run (returns a diff preview, writes nothing).
+ */
+export async function editFile(opts: {
+  owner: string;
+  repo: string;
+  path: string;
+  message: string;
+  old_str: string;
+  new_str: string;
+  branch?: string;
+  expected_sha?: string;
+  replace_all?: boolean;
+  dry_run?: boolean;
+}): Promise<{
+  executed: boolean;
+  dry_run: boolean;
+  path: string;
+  replacements: number;
+  sha: string;
+  commit?: string;
+  preview?: string;
+}> {
+  assertNotPhi(opts.repo);
+  // Lazy import: api-client.ts calls loadEnv() at module scope; a static top-level import here would
+  // execute that at module-load time and take the test suite red. Import at call time (runtime only).
+  const { getFileContents } = await import('./api-client.js');
+  const cur = await getFileContents(opts.owner, opts.repo, opts.path, opts.branch);
+  assertShaMatch(opts.path, cur.sha, opts.expected_sha);
+  const { next, matches } = planStrEdit(cur.text, opts.old_str, opts.new_str, opts.replace_all);
+
+  if (opts.dry_run) {
+    return {
+      executed: false,
+      dry_run: true,
+      path: opts.path,
+      replacements: matches,
+      sha: cur.sha,
+      preview: makeEditPreview(cur.text, opts.old_str, opts.new_str),
+    };
+  }
+  const r = await createOrUpdateFile({
+    owner: opts.owner,
+    repo: opts.repo,
+    path: opts.path,
+    message: opts.message,
+    content: next,
+    branch: opts.branch,
+    sha: cur.sha,
+  });
+  return { executed: true, dry_run: false, path: opts.path, replacements: matches, sha: cur.sha, commit: r.commit };
 }
 
 /**
