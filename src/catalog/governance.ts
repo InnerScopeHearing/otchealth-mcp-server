@@ -15,6 +15,12 @@ export interface GovRule {
 }
 
 export const GOVERNANCE: GovRule[] = [
+  // Azure control-plane tools (ITEM #2) are CTO-only: infra is CTO-owned. Covers the Phase A read
+  // tools (azure_jobs_list / azure_job_executions / azure_logs_query / azure_search_index_stats /
+  // azure_containerapp_get / azure_resource_list) AND every future Phase B write tool (azure_job_* /
+  // azure_containerapp_set_env / azure_search_*_upsert) by the same prefix, so a write tool can never
+  // ship un-gated by omission. Visible to all agents; executable only by the cto lane.
+  { pattern: 'azure_*', requiredRole: 'cto', reason: 'Azure control-plane (infra) is CTO-owned; read + write both CTO-only.' },
   // Builds / releases are CTO-only (visible to all, executable by CTO only).
   { pattern: 'depot_*', requiredRole: 'cto', reason: 'iOS/CI builds + TestFlight uploads are CTO-only (single initiator for consistency).' },
   { pattern: 'build_*', requiredRole: 'cto', reason: 'Build/release dispatch is CTO-only.' },
