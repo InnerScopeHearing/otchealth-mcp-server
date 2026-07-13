@@ -22,6 +22,8 @@ export interface MemoryRecord {
   text: string;
   tags: string[];
   source: string | null;
+  /** id of a record this one REPLACES (correction chain). See MemoryEntry.supersedes. */
+  supersedes?: string | null;
   created_at: string;
 }
 
@@ -31,6 +33,7 @@ export async function writeMemory(input: {
   text: string;
   tags?: string[];
   source?: string;
+  supersedes?: string;
 }): Promise<MemoryRecord> {
   const agent = normalizeAgent(input.agent);
   const rec: MemoryRecord = {
@@ -41,6 +44,7 @@ export async function writeMemory(input: {
     text: input.text,
     tags: input.tags ?? [],
     source: input.source ?? null,
+    ...(input.supersedes ? { supersedes: input.supersedes } : {}),
     created_at: new Date().toISOString(),
   };
   await createDoc(MEMORY, agent, rec as unknown as Record<string, unknown>);

@@ -42,6 +42,13 @@ export interface MemoryEntry {
   agent: string; // the TARGET lane whose feed this entry lives on
   source?: string;
   by?: string; // the WRITER (authenticated caller). Absent/=agent => self; !=agent => cross-agent note.
+  /**
+   * The id of an entry this one REPLACES (a correction chain). Set it when the new entry makes an
+   * older one FALSE -- not merely related. Readers (wake's collapseSuperseded, memory_pack) drop
+   * the superseded entry so a retracted belief cannot resurface as a live truth. Added 2026-07-13:
+   * before this the field did not exist, so the collapse logic could never fire.
+   */
+  supersedes?: string;
 }
 
 /** Privilege wall (EMPTY as of 2026-07-07, CEO directive -- see file header). */
@@ -172,6 +179,7 @@ export async function appendShared(
   tags: string[],
   source?: string,
   by?: string,
+  supersedes?: string,
 ): Promise<MemoryEntry> {
   const a = normalizeAgent(agent);
   const existing = parseRows(await getText(sharedKey(a)), a);
@@ -184,6 +192,7 @@ export async function appendShared(
     agent: a,
     ...(source ? { source } : {}),
     ...(by && by !== a ? { by } : {}),
+    ...(supersedes ? { supersedes } : {}),
   };
   existing.push(entry);
   await putText(sharedKey(a), `${existing.map((r) => JSON.stringify(r)).join('\n')}\n`);

@@ -26,6 +26,7 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
         text: z.string().min(1).describe('The atomic, non-sensitive memory text.'),
         tags: z.array(z.string()).optional(),
         source: z.string().optional().describe('Optional attribution, e.g. "Matt 2026-07-01".'),
+        supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES (e.g. "20260713-015"). Set it ONLY when this entry makes the older one FALSE, not merely related -- readers (wake, memory_pack) DROP the superseded entry so a retracted belief cannot resurface as a live truth. Use it whenever you correct a previously-stated fact.'),
       },
       outputShape: { written: z.boolean(), record: z.unknown() },
       handler: async (input, ctx) => {
