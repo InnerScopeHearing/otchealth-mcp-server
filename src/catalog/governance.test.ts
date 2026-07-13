@@ -11,6 +11,7 @@ import { requiredRoleFor } from './governance.js';
 const CONNECTOR_WRITE_TOOLS = [
   'github_create_branch',
   'github_create_or_update_file',
+  'github_edit_file',
   'github_push_files',
   'github_create_pull_request',
   'github_pr_update',

@@ -68,7 +68,7 @@ function connectorToolset(env: Env): Set<string> {
         // brain_search), not for security -- so the right size is "everything the seat actually needs",
         // which is ~66 tools, not 850.
         // write + branch
-        'github_create_branch','github_create_or_update_file','github_push_files','github_create_pull_request',
+        'github_create_branch','github_create_or_update_file','github_edit_file','github_push_files','github_create_pull_request',
         'github_pr_update','github_pr_update_branch','github_ref_delete',
         // LAND IT: merge is the tool whose absence forced the browser fallback
         'github_merge_pull_request','github_pr_create_review','github_comment_on_issue',
