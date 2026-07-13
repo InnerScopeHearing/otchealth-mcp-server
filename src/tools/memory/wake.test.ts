@@ -42,3 +42,29 @@ test('capText leaves short text and non-string text untouched', () => {
   const noText = { id: 'n', v: 1 };
   assert.deepEqual(capText(noText as unknown as Record<string, unknown>, 900), noText);
 });
+
+// --- supersedes is now a REAL field (fix 2026-07-13) -------------------------------------------
+// Before this, MemoryEntry had no `supersedes` property and nothing could write one, so
+// collapseSuperseded() was dead code: a retracted belief (e.g. the wrong daily-digest root cause
+// in 20260713-015) kept surfacing as a live truth. These tests pin the behaviour now that
+// memory_remember / memory_write can actually set it.
+
+test('collapseSuperseded drops a correction that a newer typed entry supersedes', () => {
+  const newer = entry('20260713-017', { supersedes: '20260713-015' });
+  const stale = entry('20260713-015');
+  const out = collapseSuperseded([newer, stale]);
+  assert.deepEqual(out.map((e) => e.id), ['20260713-017']);
+});
+
+test('collapseSuperseded follows a multi-link chain and keeps only the surviving head', () => {
+  const c = entry('c', { supersedes: 'b' });
+  const b = entry('b', { supersedes: 'a' });
+  const a = entry('a');
+  assert.deepEqual(collapseSuperseded([c, b, a]).map((e) => e.id), ['c']);
+});
+
+test('collapseSuperseded never drops an entry nothing supersedes', () => {
+  const x = entry('x', { supersedes: 'does-not-exist' });
+  const y = entry('y');
+  assert.deepEqual(collapseSuperseded([x, y]).map((e) => e.id).sort(), ['x', 'y']);
+});
