@@ -45,6 +45,10 @@ function connectorToolset(env: Env): Set<string> {
         'task_list','task_get','task_create','task_claim','task_update','task_complete','task_heartbeat','inbox_read','agent_dispatch',
         'posthog_query_hogql','posthog_insight_list',
         'github_get_file_contents','github_list_pull_requests','github_issue_list','sentry_list_issues',
+        // ITEM #2 Azure control-plane READ lane (Phase A). MUST be on the connector surface or the
+        // Claude Chat CTO cannot SEE them (execution stays cto-gated in governance.ts either way).
+        'azure_jobs_list','azure_job_executions','azure_logs_query','azure_search_index_stats',
+        'azure_containerapp_get','azure_resource_list',
         // CTO SHIP-LANE (2026-07-12, widened 2026-07-13): the connector surface must carry the COMPLETE
         // ship cycle -- branch, commit, PR, review, CI, MERGE, and workflow-dispatch. The 2026-07-12 pass
         // added the write tools but omitted merge/dispatch/review, so the Claude Chat CTO could open a PR

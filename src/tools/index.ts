@@ -910,6 +910,13 @@ import { registerMemoryWrite } from './agentstate/memory-write.js';
 import { registerMemorySearch } from './agentstate/memory-search.js';
 import { registerAgentDispatch } from './agentstate/agent-dispatch.js';
 import { registerInboxRead } from './agentstate/inbox-read.js';
+// ITEM #2 Azure control-plane READ tools (Phase A). MI-authenticated, least-privilege, cto-gated.
+import { registerAzureJobsList } from './azure/jobs-list.js';
+import { registerAzureJobExecutions } from './azure/job-executions.js';
+import { registerAzureLogsQuery } from './azure/logs-query.js';
+import { registerAzureSearchIndexStats } from './azure/search-index-stats.js';
+import { registerAzureContainerappGet } from './azure/containerapp-get.js';
+import { registerAzureResourceList } from './azure/resource-list.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -1823,4 +1830,18 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerMemoryWrite(server, callerHash);
   registerInboxRead(server, callerHash);
   registerAgentDispatch(server, callerHash);
+
+  // ===== ITEM #2: Azure control-plane READ tools (Phase A) =====
+  // The Claude Chat CTO can SEE Azure without a human: list jobs + their executions, query Log
+  // Analytics (KQL), read AI Search index doc counts, read a Container App (values-stripped), and
+  // inventory resources. Authenticated by the gateway's SYSTEM-ASSIGNED MANAGED IDENTITY (no stored
+  // SP secret), which holds ONLY least-privilege roles (Reader on 2 RGs, Log Analytics Reader on the
+  // shared workspace, Search Service Contributor on the 2 search services). All are cto-gated for
+  // EXECUTION (governance.ts azure_*) and every write path (Phase B) is deliberately absent here.
+  registerAzureJobsList(server, callerHash);
+  registerAzureJobExecutions(server, callerHash);
+  registerAzureLogsQuery(server, callerHash);
+  registerAzureSearchIndexStats(server, callerHash);
+  registerAzureContainerappGet(server, callerHash);
+  registerAzureResourceList(server, callerHash);
 }
