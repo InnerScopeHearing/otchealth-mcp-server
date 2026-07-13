@@ -36,9 +36,12 @@ param image string
 param targetPort int = 8080
 
 @minValue(1)
-param minReplicas int = 1
+param minReplicas int = 2
 @minValue(1)
-param maxReplicas int = 3
+param maxReplicas int = 10
+
+@description('HTTP concurrent-requests per replica that triggers scale-out (§6c capacity fix).')
+param httpConcurrentRequests int = 30
 
 param cpu string = '1.0'
 param memory string = '2Gi'
@@ -100,6 +103,19 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       scale: {
         minReplicas: minReplicas
         maxReplicas: maxReplicas
+        // §6c (2026-07-13): explicit concurrency rule so the app scales out under load instead of
+        // relying on the implicit default 10-concurrent scaler capped at maxReplicas (the 2026-07-07
+        // 7/7 outage cause at ~120 concurrent). deploy.yml sets the same values on each image update.
+        rules: [
+          {
+            name: 'http-concurrency'
+            http: {
+              metadata: {
+                concurrentRequests: string(httpConcurrentRequests)
+              }
+            }
+          }
+        ]
       }
     }
   }
