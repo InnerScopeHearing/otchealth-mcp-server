@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertNonPhiTarget, redactContainerApp, azureConfig } from './arm-client.js';
+import {
+  assertNonPhiTarget,
+  redactContainerApp,
+  azureConfig,
+  assertContainerAppEnvSafe,
+  mergeEnv,
+  GATEWAY_APP_NAME,
+} from './arm-client.js';
 
 test('assertNonPhiTarget refuses PHI-ring targets', () => {
   assert.throws(() => assertNonPhiTarget('medreview-prod'), /PHI-ring deny-list/);
@@ -75,6 +82,41 @@ test('redactContainerApp returns env-var NAMES only, never values or secret valu
   assert.equal(out.resourceGroup, 'rg-otchealth-apps-prod');
   assert.equal((out.scale as Record<string, unknown>).maxReplicas, 10);
   assert.equal(out.identity, 'SystemAssigned');
+});
+
+test('assertContainerAppEnvSafe hard-denies the gateway oauth-clients binding', () => {
+  // by env-var name (any casing / separator)
+  assert.throws(() => assertContainerAppEnvSafe(GATEWAY_APP_NAME, [{ name: 'oauth-clients', value: 'x' }]), /incident 20260713-019/);
+  assert.throws(() => assertContainerAppEnvSafe(GATEWAY_APP_NAME, [{ name: 'OAUTH_CLIENTS', value: 'x' }]), /oauth-clients/);
+  // by secretRef
+  assert.throws(() => assertContainerAppEnvSafe(GATEWAY_APP_NAME, [{ name: 'SOMETHING', secretRef: 'oauth-clients' }]), /oauth-clients/);
+});
+
+test('assertContainerAppEnvSafe allows safe env on the gateway and anything on other apps', () => {
+  assert.doesNotThrow(() => assertContainerAppEnvSafe(GATEWAY_APP_NAME, [{ name: 'LLM_CACHE_MODE', value: 'on' }]));
+  // oauth-clients is only denied ON THE GATEWAY; a different app is unaffected.
+  assert.doesNotThrow(() => assertContainerAppEnvSafe('some-other-app', [{ name: 'oauth-clients', value: 'x' }]));
+});
+
+test('mergeEnv is non-destructive: updates existing, adds new, drops nothing', () => {
+  const existing = [
+    { name: 'KEEP_ME', value: 'stays' },
+    { name: 'UPDATE_ME', value: 'old' },
+    { name: 'SECRET_BOUND', secretRef: 'some-secret' },
+  ];
+  const { merged, changed } = mergeEnv(existing, [
+    { name: 'UPDATE_ME', value: 'new' },
+    { name: 'BRAND_NEW', value: 'added' },
+    { name: 'NOW_SECRET', secretRef: 'kv-thing' },
+  ]);
+  const byName = Object.fromEntries(merged.map((e) => [e.name, e]));
+  assert.equal(byName['KEEP_ME'].value, 'stays', 'existing untouched var must survive');
+  assert.equal(byName['SECRET_BOUND'].secretRef, 'some-secret', 'existing secretRef must survive');
+  assert.equal(byName['UPDATE_ME'].value, 'new', 'existing var value updated');
+  assert.equal(byName['BRAND_NEW'].value, 'added', 'new var added');
+  assert.equal(byName['NOW_SECRET'].secretRef, 'kv-thing', 'new secretRef added');
+  assert.equal(merged.length, 5, 'nothing dropped (3 existing + 2 new)');
+  assert.deepEqual(changed.sort(), ['BRAND_NEW', 'NOW_SECRET', 'UPDATE_ME']);
 });
 
 test('azureConfig defaults are the known non-secret identifiers', () => {

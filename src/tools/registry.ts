@@ -49,6 +49,10 @@ function connectorToolset(env: Env): Set<string> {
         // Claude Chat CTO cannot SEE them (execution stays cto-gated in governance.ts either way).
         'azure_jobs_list','azure_job_executions','azure_logs_query','azure_search_index_stats',
         'azure_containerapp_get','azure_resource_list',
+        // ITEM #2 Phase B write tools -- MUST be on the connector surface or the Chat CTO cannot CALL
+        // them (execution stays cto + high-risk gated; dry_run defaults TRUE; oauth-clients denied).
+        'azure_job_execute','azure_job_upsert','azure_containerapp_set_env',
+        'azure_search_index_upsert','azure_search_indexer_upsert',
         // CTO SHIP-LANE (2026-07-12, widened 2026-07-13): the connector surface must carry the COMPLETE
         // ship cycle -- branch, commit, PR, review, CI, MERGE, and workflow-dispatch. The 2026-07-12 pass
         // added the write tools but omitted merge/dispatch/review, so the Claude Chat CTO could open a PR

@@ -917,6 +917,13 @@ import { registerAzureLogsQuery } from './azure/logs-query.js';
 import { registerAzureSearchIndexStats } from './azure/search-index-stats.js';
 import { registerAzureContainerappGet } from './azure/containerapp-get.js';
 import { registerAzureResourceList } from './azure/resource-list.js';
+// ITEM #2 Azure control-plane WRITE tools (Phase B). write_orchestrated, cto-gated, dry_run-default,
+// guarded (oauth-clients deny / PHI deny / non-destructive merge / no delete / no shell-out).
+import { registerAzureJobExecute } from './azure/job-execute.js';
+import { registerAzureJobUpsert } from './azure/job-upsert.js';
+import { registerAzureContainerappSetEnv } from './azure/containerapp-set-env.js';
+import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
+import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -1844,4 +1851,15 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAzureSearchIndexStats(server, callerHash);
   registerAzureContainerappGet(server, callerHash);
   registerAzureResourceList(server, callerHash);
+
+  // ===== ITEM #2: Azure control-plane WRITE tools (Phase B) =====
+  // The Chat CTO can now CHANGE Azure without a human: start a job, upsert a job, set container-app env
+  // (non-destructively; the gateway oauth-clients binding is hard-denied), and upsert AI Search indexes/
+  // indexers. All write_orchestrated (CTO-only + ENABLE_HIGH_RISK_TOOLS-gated), dry_run defaults TRUE,
+  // PHI-denied, typed ARM REST (no az shell-out), NO delete tools, NO Key Vault secret-value tool.
+  registerAzureJobExecute(server, callerHash);
+  registerAzureJobUpsert(server, callerHash);
+  registerAzureContainerappSetEnv(server, callerHash);
+  registerAzureSearchIndexUpsert(server, callerHash);
+  registerAzureSearchIndexerUpsert(server, callerHash);
 }
