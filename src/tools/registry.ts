@@ -45,13 +45,33 @@ function connectorToolset(env: Env): Set<string> {
         'task_list','task_get','task_create','task_claim','task_update','task_complete','task_heartbeat','inbox_read','agent_dispatch',
         'posthog_query_hogql','posthog_insight_list',
         'github_get_file_contents','github_list_pull_requests','github_issue_list','sentry_list_issues',
-        // CTO land-lane (2026-07-12): expose the git write + CI-status tools on the connector surface so the
-        // Claude Chat CTO can open claude/* draft PRs and read workflow runs itself. Role-gating in
-        // catalog/governance.ts still refuses every non-cto caller at execution time -- other exec
-        // connectors merely SEE these entries. Closes the engine-migration gap (Hyperagent's
-        // client_credentials lane got the full toolset; Claude Chat's DCR surface never got the writes).
+        // CTO SHIP-LANE (2026-07-12, widened 2026-07-13): the connector surface must carry the COMPLETE
+        // ship cycle -- branch, commit, PR, review, CI, MERGE, and workflow-dispatch. The 2026-07-12 pass
+        // added the write tools but omitted merge/dispatch/review, so the Claude Chat CTO could open a PR
+        // but not land it, and had to drive a human browser session to click Merge (slow, brittle, and a
+        // hard dependency on Matt being logged in). That is the SAME engine-migration gap as before, just
+        // one step further down the pipeline: Hyperagent's client_credentials lane always got the full 861
+        // tools; the Claude Chat DCR surface got a curated subset that was scoped when Chat was a STANDBY
+        // seat and never re-scoped when it became a PRIMARY one.
+        //
+        // NOT a privilege grant: execution-time role gating in catalog/governance.ts still refuses every
+        // non-cto caller. Other exec connectors merely SEE these entries and get refused if they call them.
+        // The curation exists for FINDABILITY (Claude truncates very long tool lists and was hiding
+        // brain_search), not for security -- so the right size is "everything the seat actually needs",
+        // which is ~66 tools, not 850.
+        // write + branch
         'github_create_branch','github_create_or_update_file','github_push_files','github_create_pull_request',
-        'github_pr_update','github_list_workflow_runs','github_workflow_run_get',
+        'github_pr_update','github_pr_update_branch','github_ref_delete',
+        // LAND IT: merge is the tool whose absence forced the browser fallback
+        'github_merge_pull_request','github_pr_create_review','github_comment_on_issue',
+        // trigger + observe CI directly (no browser, no human in the loop)
+        'github_dispatch_workflow','github_list_workflow_runs','github_workflow_run_get',
+        'github_workflow_run_rerun','github_workflow_run_list_jobs',
+        // read the state you need to decide whether landing is safe
+        'github_pr_get','github_pr_list_files','github_pr_list_commits','github_branch_get_protection',
+        'github_repo_list_branches','github_commit_get','github_commit_compare',
+        // issues (file + close follow-ups without leaving the seat)
+        'github_create_issue','github_issue_get','github_issue_update',
         'graph_send_email','graph_list_messages','cio_get_customer','shield_check','groundedness_check',
       ].join(',')
     ).split(',').map((s) => s.trim()).filter(Boolean),
