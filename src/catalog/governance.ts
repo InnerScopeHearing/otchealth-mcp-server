@@ -25,6 +25,7 @@ export const GOVERNANCE: GovRule[] = [
   // mirroring the build/release rule). All agents may read GitHub (github_list_*, get_file_contents).
   { pattern: 'github_push_files', requiredRole: 'cto', reason: 'Code pushes are CTO-only (single initiator).' },
   { pattern: 'github_create_pull_request', requiredRole: 'cto', reason: 'Opening PRs is CTO-only.' },
+  { pattern: 'github_pr_update', requiredRole: 'cto', reason: 'Updating a PR (title/body/base/state, incl. close/reopen) is a CTO-only PR write. It is category write_simple, so the write_orchestrated default CTO gate does NOT cover it; without this explicit rule any write-enabled lane could execute it. Added when the connector-surface widen exposed it on the DCR surface (2026-07-12).' },
   { pattern: 'github_merge_pull_request', requiredRole: 'cto', reason: 'Merging PRs is CTO-only.' },
   // ===== FULL READ+WRITE WAVE: write-tool role gates (CTO = the operator connector identity) =====
   // GitHub writes (single-initiator, mirrors existing push/PR/merge rules).
