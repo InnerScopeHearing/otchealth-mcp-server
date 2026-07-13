@@ -153,6 +153,16 @@ export async function pushFiles(
   return { commit: commit.sha, branch, files: files.length };
 }
 
+/** True when the GitHub App path is usable (the same path every github_* tool already uses). */
+export function isGithubAppConfigured(): boolean {
+  return Boolean(env.GITHUB_APP_INSTALLATION_ID);
+}
+
+/** Fetch a commit. Used by the artifact resolver to verify gh:commit: URIs. */
+export async function getCommit(owner: string, repo: string, sha: string): Promise<any> {
+  return githubGet(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}`);
+}
+
 export async function getPullRequest(owner: string, repo: string, number: number): Promise<any> {
   return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${number}`);
 }

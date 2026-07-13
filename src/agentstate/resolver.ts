@@ -11,8 +11,15 @@
  *                                      agents land durable work-product in the commons.
  *   cosmos:<coll>/<pk>/<id>         -> a document in the agent-state Cosmos db must exist.
  *   https://... (or http://)        -> an HTTP HEAD/GET must return < 400 (public artifacts).
- *   gh:commit:<owner>/<repo>@<sha>  -> a commit must exist (needs GITHUB_TOKEN; else rejected).
- *   gh:pr:<owner>/<repo>#<number>   -> a PR must exist (needs GITHUB_TOKEN; else rejected).
+ *   gh:commit:<owner>/<repo>@<sha>  -> a commit must exist.
+ *   gh:pr:<owner>/<repo>#<number>   -> a PR must exist.
+ *
+ * gh: auth (fixed 2026-07-13): prefer a raw GITHUB_TOKEN when set, else fall back to the GitHub
+ * App installation token -- the SAME path every github_* tool already uses. Before this, the
+ * resolver looked ONLY at GITHUB_TOKEN, which is not configured on the gateway, so EVERY gh:
+ * artifact was rejected even though the github_* tools worked fine. Net effect: no task in the
+ * fleet could be closed with a GitHub artifact -- the most natural artifact type for engineering
+ * work -- so real shipped work was left formally unclosed. Ledger pitfall 20260713-023.
  */
 
 import crypto from 'node:crypto';
@@ -162,34 +169,70 @@ async function resolveHttp(uri: string): Promise<ResolveResult> {
 }
 
 async function resolveGithub(rest: string): Promise<ResolveResult> {
-  const env = loadEnv();
-  const token = env.GITHUB_TOKEN;
-  if (!token) {
-    return {
-      resolved: false,
-      scheme: 'gh',
-      detail: 'GITHUB_TOKEN not configured on the gateway; land the artifact in the commons (blob:) instead',
-    };
-  }
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    Accept: 'application/vnd.github+json',
-    'User-Agent': 'otchealth-gateway',
-    'X-GitHub-Api-Version': '2022-11-28',
-  };
   const commitM = rest.match(/^commit:([^/]+)\/([^@]+)@(.+)$/);
-  if (commitM) {
-    const [, owner, repo, sha] = commitM;
-    const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`, { method: 'GET', headers });
-    return { resolved: r.status === 200, scheme: 'gh', detail: `commit ${owner}/${repo}@${sha.slice(0, 9)} -> ${r.status}` };
-  }
   const prM = rest.match(/^pr:([^/]+)\/([^#]+)#(\d+)$/);
-  if (prM) {
-    const [, owner, repo, num] = prM;
+  if (!commitM && !prM) {
+    return { resolved: false, scheme: 'gh', detail: 'expected gh:commit:<owner>/<repo>@<sha> or gh:pr:<owner>/<repo>#<n>' };
+  }
+
+  // Path A: an explicit GITHUB_TOKEN, if one is configured (kept for backwards compatibility).
+  // loadEnv() THROWS on an incomplete env; this is an enforcement boundary, so a config problem
+  // must degrade to a clean "not verified" rejection, never an exception thrown out of
+  // task_complete. Fail closed, explain why, never resolve true on error.
+  let token: string | undefined;
+  try {
+    token = loadEnv().GITHUB_TOKEN;
+  } catch {
+    token = undefined; // fall through to the GitHub App path below
+  }
+  if (token) {
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'otchealth-gateway',
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+    if (commitM) {
+      const [, owner, repo, sha] = commitM;
+      const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`, { method: 'GET', headers });
+      return { resolved: r.status === 200, scheme: 'gh', detail: `commit ${owner}/${repo}@${sha.slice(0, 9)} -> ${r.status}` };
+    }
+    const [, owner, repo, num] = prM!;
     const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${num}`, { method: 'GET', headers });
     return { resolved: r.status === 200, scheme: 'gh', detail: `pr ${owner}/${repo}#${num} -> ${r.status}` };
   }
-  return { resolved: false, scheme: 'gh', detail: 'expected gh:commit:<owner>/<repo>@<sha> or gh:pr:<owner>/<repo>#<n>' };
+
+  // Path B (the fix): the GitHub App installation token -- the same client the github_* tools use.
+  // Imported LAZILY: api-client.ts validates the whole gateway env at module load, so a static
+  // import here would make the resolver unloadable without every unrelated service credential.
+  let gh: typeof import('../github/api-client.js');
+  try {
+    gh = await import('../github/api-client.js');
+  } catch (e) {
+    return { resolved: false, scheme: 'gh', detail: `github client unavailable: ${(e as Error).message}` };
+  }
+  const { getCommit, getPullRequest, isGithubAppConfigured } = gh;
+  if (!isGithubAppConfigured()) {
+    return {
+      resolved: false,
+      scheme: 'gh',
+      detail: 'neither GITHUB_TOKEN nor the GitHub App is configured on the gateway; land the artifact in the commons (blob:) instead',
+    };
+  }
+  try {
+    if (commitM) {
+      const [, owner, repo, sha] = commitM;
+      await getCommit(owner, repo, sha);
+      return { resolved: true, scheme: 'gh', detail: `commit ${owner}/${repo}@${sha.slice(0, 9)} -> exists (github app)` };
+    }
+    const [, owner, repo, num] = prM!;
+    await getPullRequest(owner, repo, Number(num));
+    return { resolved: true, scheme: 'gh', detail: `pr ${owner}/${repo}#${num} -> exists (github app)` };
+  } catch (e) {
+    // A 404 (artifact genuinely absent) and a transport/auth failure both mean "not verified" --
+    // never resolve on error, or done=artifact stops being an enforcement.
+    return { resolved: false, scheme: 'gh', detail: `github app lookup failed: ${(e as Error).message}` };
+  }
 }
 
 /** Resolve an artifact_uri. Returns resolved=false for anything unrecognized or unreachable. */
