@@ -115,9 +115,10 @@ export interface ArmResult<T = unknown> {
   body: T | null;
 }
 
-/** ARM (management.azure.com) request via the MI token. `path` is an ARM path beginning with '/'. */
+/** ARM (management.azure.com) request via the MI token. `path` is an ARM path beginning with '/'.
+ *  No DELETE by design (ITEM #2 v1 ships no delete tools). */
 export async function armRequest<T = unknown>(
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH',
   path: string,
   body?: unknown,
 ): Promise<ArmResult<T>> {
@@ -211,6 +212,102 @@ export async function searchIndexDocCount(
   const count = j['@odata.count'];
   if (typeof count !== 'number') throw new Error(`search index count returned no @odata.count for ${indexName}`);
   return count;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Phase B write helpers (typed ARM REST; NO delete, NO az shell-out, NO secret-value surfacing).
+// ---------------------------------------------------------------------------------------------------
+
+/** The gateway's own Container App name + the secret whose overwrite took the whole fleet down
+ *  (incident 20260713-019). azure_containerapp_set_env hard-refuses to touch it. */
+export const GATEWAY_APP_NAME = 'otchealth-mcp-gateway';
+const OAUTH_CLIENTS_DENY = /^oauth[-_]?clients$/i;
+
+export interface EnvVarUpsert {
+  name: string;
+  value?: string;
+  secretRef?: string;
+}
+
+/**
+ * Fail-CLOSED guard for azure_containerapp_set_env. Refuses to touch the gateway's oauth-clients
+ * binding (by env-var name OR secretRef), which is the exact overwrite that dropped every connector
+ * client fleet-wide. Throws (never silently passes) on a violation.
+ */
+export function assertContainerAppEnvSafe(appName: string, upserts: EnvVarUpsert[]): void {
+  if (appName === GATEWAY_APP_NAME) {
+    for (const u of upserts) {
+      if (OAUTH_CLIENTS_DENY.test(u.name) || (u.secretRef && OAUTH_CLIENTS_DENY.test(u.secretRef))) {
+        throw new Error(
+          `azure_containerapp_set_env refused: env "${u.name}"${u.secretRef ? ` (secretRef ${u.secretRef})` : ''} ` +
+            `targets the gateway's oauth-clients binding. Overwriting it took every connector down ` +
+            `(incident 20260713-019); this tool cannot touch it. A canary guards it; do not defeat it.`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * NON-DESTRUCTIVE env merge: add/update the upserts into `existing` by name, NEVER dropping any
+ * existing var. This is what prevents the "set X and it wiped everything else" failure family. Pure +
+ * unit-tested. Returns the merged array + the list of names that were added/changed.
+ */
+export function mergeEnv(
+  existing: Array<Record<string, unknown>>,
+  upserts: EnvVarUpsert[],
+): { merged: Array<Record<string, unknown>>; changed: string[] } {
+  const merged = existing.map((e) => ({ ...e }));
+  const changed: string[] = [];
+  for (const u of upserts) {
+    const entry: Record<string, unknown> = { name: u.name };
+    if (u.secretRef) entry.secretRef = u.secretRef;
+    else entry.value = u.value ?? '';
+    const idx = merged.findIndex((e) => e.name === u.name);
+    if (idx >= 0) merged[idx] = entry;
+    else merged.push(entry);
+    changed.push(u.name);
+  }
+  return { merged, changed };
+}
+
+/** Admin key for a Search service via ARM listAdminKeys (Search Service Contributor). Needed for index/
+ *  indexer management (query keys cannot manage). Held in memory for one call; never returned/logged. */
+export async function searchAdminKey(serviceName: string): Promise<string> {
+  const { subscriptionId } = azureConfig();
+  const rg = process.env.AZURE_SEARCH_RG || 'otchealth-automation-rg';
+  const path =
+    `/subscriptions/${subscriptionId}/resourceGroups/${rg}/providers/Microsoft.Search/searchServices/` +
+    `${serviceName}/listAdminKeys?api-version=2023-11-01`;
+  const res = await armRequest<{ primaryKey?: string; secondaryKey?: string }>('POST', path);
+  const key = res.body?.primaryKey || res.body?.secondaryKey;
+  if (!key) throw new Error(`no admin key returned for search service ${serviceName}`);
+  return key;
+}
+
+/** Data-plane PUT of a Search index or indexer definition, authenticated by an admin key. */
+export async function searchResourcePut(
+  serviceName: string,
+  kind: 'indexes' | 'indexers',
+  name: string,
+  definition: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  const key = await searchAdminKey(serviceName);
+  const url = `https://${serviceName}.search.windows.net/${kind}/${encodeURIComponent(name)}?api-version=2023-11-01`;
+  const body = { ...definition, name };
+  const r = await fetchWithBudget(url, {
+    method: 'PUT',
+    headers: { 'api-key': key, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let parsed: unknown = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
+  if (!r.ok) {
+    const detail = (parsed as { error?: { message?: string } } | null)?.error?.message || text.slice(0, 300);
+    throw new Error(`search ${kind} PUT (${serviceName}/${name}) -> ${r.status}: ${detail}`);
+  }
+  return { status: r.status, body: parsed };
 }
 
 /**
