@@ -40,11 +40,18 @@ function connectorToolset(env: Env): Set<string> {
         'brain_search','web_search','kb_search','kb_search_privileged',
         'legal_blob_list','legal_blob_get','legal_blob_put',
         'graph_drive_list','graph_drive_download','graph_drive_upload',
-        'memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
+        'wake','memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
         'llm_azure','catalog_list_tools','catalog_master','gateway_fetch_result',
         'task_list','task_get','task_create','task_claim','task_update','task_complete','task_heartbeat','inbox_read','agent_dispatch',
         'posthog_query_hogql','posthog_insight_list',
         'github_get_file_contents','github_list_pull_requests','github_issue_list','sentry_list_issues',
+        // CTO land-lane (2026-07-12): expose the git write + CI-status tools on the connector surface so the
+        // Claude Chat CTO can open claude/* draft PRs and read workflow runs itself. Role-gating in
+        // catalog/governance.ts still refuses every non-cto caller at execution time -- other exec
+        // connectors merely SEE these entries. Closes the engine-migration gap (Hyperagent's
+        // client_credentials lane got the full toolset; Claude Chat's DCR surface never got the writes).
+        'github_create_branch','github_create_or_update_file','github_push_files','github_create_pull_request',
+        'github_pr_update','github_list_workflow_runs','github_workflow_run_get',
         'graph_send_email','graph_list_messages','cio_get_customer','shield_check','groundedness_check',
       ].join(',')
     ).split(',').map((s) => s.trim()).filter(Boolean),
