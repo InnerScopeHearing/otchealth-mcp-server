@@ -224,7 +224,10 @@ test('computeJobUpsertDrops FLAGS a dropped identity (the exact 07-05 failure)',
   assert.ok(drops.warnings.some((w) => /07-05/.test(w) && /identity/i.test(w)), 'must name the identity drop + the incident');
   assert.deepEqual(drops.droppedSecrets, ['sab64']);
   assert.ok(drops.droppedEnv.includes('AZURE_KEYVAULT_NAME'));
-  assert.ok(drops.droppedRegistries.includes('otchealthacr.azurecr.io'));
+  // Exact-array match (not .includes with a host literal, which CodeQL reads as incomplete URL
+  // substring sanitization even in a test assertion). It is also a stronger assertion: the live job
+  // has exactly one registry, so the full replace drops exactly it.
+  assert.deepEqual(drops.droppedRegistries, ['otchealthacr.azurecr.io']);
 });
 
 test('computeJobUpsertDrops: passing the identity through preserves it (no drop)', () => {
