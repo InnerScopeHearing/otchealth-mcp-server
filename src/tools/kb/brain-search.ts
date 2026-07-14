@@ -35,12 +35,17 @@
  *    comparable ACROSS indexes -- each index has its own scale -- so naively sorting by score would
  *    let one room's scoring quirks dominate. RRF ranks by POSITION, which is scale-free.
  *  - Per-room error isolation: one unreachable room degrades to a note, never a blank answer.
+ *  - RETRACTION FILTERING (2026-07-14): a belief the fleet has explicitly retracted via `supersedes`
+ *    is DROPPED from results. Before this, retrieval ignored `supersedes` entirely and served the
+ *    retracted 20260713-015 at RANK #1, above the very correction that superseded it. See
+ *    memory/retractions.ts. A ledger that cannot forget is not a memory -- it is a rumour mill.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../azure/search.js';
 import { isLaneAllowed } from './search-privileged.js';
+import { retractedIds, filterRetracted } from '../../memory/retractions.js';
 
 /** Rooms every agent may read (non-PHI / non-MNPI / non-privileged). */
 export const OPEN_ROOMS = ['memory-exec', 'commons-company-journal'] as const;
@@ -78,6 +83,8 @@ export interface FusedHit {
   score: number;
   source: string;
   text: string;
+  /** The index doc id (`{agent}__{entryId}`). Carried through so retracted beliefs can be identified. */
+  id?: unknown;
 }
 
 /**
@@ -86,14 +93,14 @@ export interface FusedHit {
  * Pure + unit-tested.
  */
 export function rrfFuse(
-  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string }> }>,
+  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown }> }>,
   top: number,
   k = 60,
 ): FusedHit[] {
   const fused: FusedHit[] = [];
   for (const { room, hits } of perRoom) {
     hits.forEach((h, i) => {
-      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text });
+      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id });
     });
   }
   return fused.sort((a, b) => b.score - a.score).slice(0, top);
@@ -108,7 +115,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal.',
+          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -125,6 +132,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         mode: z.string(),
         rooms_searched: z.array(z.string()),
         rooms_failed: z.array(z.string()).optional(),
+        retracted_dropped: z.array(z.string()).optional(),
         error: z.string().optional(),
       },
       handler: async (input, ctx) => {
@@ -149,7 +157,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
           rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop) })),
         );
 
-        const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string }> }> = [];
+        const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown }> }> = [];
         const searched: string[] = [];
         const failed: string[] = [];
         for (let i = 0; i < settled.length; i++) {
@@ -163,7 +171,13 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
           }
         }
 
-        const matches = rrfFuse(perRoom, top);
+        // Fuse a WIDER pool first, drop retracted beliefs, and only THEN trim to `top` -- otherwise
+        // removing a retracted hit would leave a hole instead of promoting a real result into its place.
+        const pool = rrfFuse(perRoom, top * 3);
+        const retracted = await retractedIds();
+        const { kept, dropped } = filterRetracted(pool, retracted);
+        const matches = kept.slice(0, top);
+
         const data: Record<string, unknown> = {
           matches,
           count: matches.length,
@@ -171,11 +185,16 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
           rooms_searched: searched,
         };
         if (failed.length) data.rooms_failed = failed;
+        // Disclose retractions rather than silently vanishing them -- an agent should be able to SEE
+        // that the brain deliberately withheld a belief the fleet has retracted.
+        if (dropped.length) data.retracted_dropped = dropped;
+
         return {
           data,
           summary:
             `${matches.length} match(es) for "${input.query}" — federated live across ${searched.length} room(s): ${searched.join(', ')}.` +
-            (failed.length ? ` ⚠ ${failed.length} room(s) unreachable: ${failed.join(', ')}.` : ''),
+            (dropped.length ? ` Dropped ${dropped.length} RETRACTED belief(s): ${dropped.join(', ')}.` : '') +
+            (failed.length ? ` ${failed.length} room(s) unreachable: ${failed.join(', ')}.` : ''),
         };
       },
     },
