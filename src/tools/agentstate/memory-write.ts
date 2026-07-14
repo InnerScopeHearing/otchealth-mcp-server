@@ -4,6 +4,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured } from '../../agentstate/cosmos.js';
 import { writeMemory } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
+import { indexMemoryNow } from '../../azure/search-write.js';
 
 export function registerMemoryWrite(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -14,7 +15,7 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Write a structured memory-of-record',
         description:
-          'Write a durable, byte-exact, queryable memory record (fact/decision/correction/pitfall/status) to the Cosmos memory store. This is the verbatim system-of-record for memory: never lossy, never LLM-rewritten. Non-PHI, non-MNPI, non-privileged (clo-personal rejected). Pass dry_run=false to persist.',
+          'Write a durable, byte-exact, queryable memory record (fact/decision/correction/pitfall/status) to the Cosmos memory store. This is the verbatim system-of-record for memory: never lossy, never LLM-rewritten. It is ALSO write-through indexed into the semantic brain, so it is immediately recallable via brain_search/kb_search (before 2026-07-14 it was durable but INVISIBLE to every semantic recall path). Non-PHI, non-MNPI, non-privileged (clo-personal rejected). Pass dry_run=false to persist.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -33,7 +34,23 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
         if (!isConfigured()) return { data: { written: false, note: 'agent-state Cosmos not configured.' }, summary: 'Memory store not configured.' };
         if (ctx.dryRun) return { data: { written: false, preview: input, note: 'dry_run: pass dry_run=false to persist.' }, summary: `DRY RUN: would write a ${input.kind} for ${input.agent}.` };
         const record = await writeMemory(input);
-        return { data: { written: true, record }, summary: `Wrote ${input.kind} ${record.id} to ${input.agent}'s memory-of-record.`, audit: { after: record } };
+        // WRITE-THROUGH: the Cosmos memory-of-record was previously indexed by NOTHING -- semantic.mjs
+        // indexes only the shared blob feed, so every memory_write was durable but UNFINDABLE by
+        // brain_search/kb_search. This makes the system-of-record actually recallable. Fail-open:
+        // the record is already committed to Cosmos, so an index outage must never fail the write.
+        const idx = await indexMemoryNow({
+          agent: record.agent,
+          id: record.id,
+          type: record.kind,
+          ts: record.created_at,
+          tags: record.tags,
+          text: record.text,
+        });
+        return {
+          data: { written: true, record, indexed: idx.indexed, ...(idx.reason ? { index_error: idx.reason } : {}) },
+          summary: `Wrote ${input.kind} ${record.id} to ${input.agent}'s memory-of-record${idx.indexed ? ' and indexed it for semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — it will remain invisible to brain_search)`}.`,
+          audit: { after: record },
+        };
       },
     },
     callerHash,

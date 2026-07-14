@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { appendShared, isConfigured, normalizeAgent, type MemoryEntry } from '../../memory/store.js';
+import { indexMemoryNow } from '../../azure/search-write.js';
 
 const TYPES = ['fact', 'decision', 'correction', 'pitfall', 'status'] as const;
 
@@ -65,11 +66,23 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
           };
         }
         const entry = await appendShared(agent, input.type, input.text, input.tags ?? [], input.source, by || undefined, input.supersedes);
+        // WRITE-THROUGH: make it semantically searchable NOW, not in up to 6 hours when brain-reindex
+        // next runs. Fail-open -- the entry is already durable in blob, and the 6-hourly reindex is
+        // the backstop, so an index outage must never fail the write. We report the outcome rather
+        // than swallowing it: a silent indexing failure is exactly how we lost 12 days of recall.
+        const idx = await indexMemoryNow({
+          agent,
+          id: entry.id,
+          type: entry.type,
+          ts: entry.ts,
+          tags: entry.tags,
+          text: entry.text,
+        });
         return {
-          data: { written: true, entry },
+          data: { written: true, entry, indexed: idx.indexed, ...(idx.reason ? { index_error: idx.reason } : {}) },
           summary: cross
             ? `Cross-lane ${input.type} ${entry.id} written BY ${by} ON ${agent}'s feed (append-only, attributed). ${agent} sees it via memory_inbound on next wake.`
-            : `Published ${input.type} ${entry.id} to ${agent}'s shared feed (id ${entry.id}).`,
+            : `Published ${input.type} ${entry.id} to ${agent}'s shared feed${idx.indexed ? ' and indexed it for instant semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — searchable after the next brain-reindex)`}.`,
           audit: { after: entry },
         };
       },
