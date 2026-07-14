@@ -360,3 +360,200 @@ export function redactContainerApp(body: Record<string, unknown>): Record<string
     secretNames,
   };
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Container Apps JOB helpers (azure_job_get / azure_job_update / azure_job_upsert hardening).
+//
+// WHY THESE EXIST (incident: the 07-05 daily-digest anomaly). A flurry of full-PUT "Create or Update
+// Job" calls that day dropped the job's top-level `identity` (the UAMI) and/or env, so cfo-store could
+// no longer read the commons storage key from Key Vault -> "Missing storage key" -> the cron failed
+// while a same-day manual run (caught between PUTs) passed. Root lesson: "a PUT that omits a field is
+// a deletion", one layer up on a JOB. azure_job_update below does a TARGETED PATCH (never a
+// full-replace); redactJob SURFACES the identity so you can SEE whether a job still has its UAMI; and
+// computeJobUpsertDrops makes a full-PUT's silent deletions LOUD before they happen.
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * Redact a Microsoft.App/jobs GET body to a values-stripped shape: image (+ digest), IDENTITY (type +
+ * user-assigned identity resource ids -- ids are references, not secrets, and seeing them is how you
+ * diagnose the 07-05 "lost its UAMI" failure), trigger/cron, replica policy, env-var NAMES ONLY, and
+ * secret/registry NAMES ONLY. Never returns an env-var VALUE or a secret VALUE. Pure + unit-tested.
+ */
+export function redactJob(body: Record<string, unknown>): Record<string, unknown> {
+  const props = (body.properties || {}) as Record<string, unknown>;
+  const config = (props.configuration || {}) as Record<string, unknown>;
+  const template = (props.template || {}) as Record<string, unknown>;
+  const containers = Array.isArray(template.containers) ? (template.containers as Record<string, unknown>[]) : [];
+  const sched = (config.scheduleTriggerConfig || {}) as Record<string, unknown>;
+  const identityRaw = (body.identity || {}) as Record<string, unknown>;
+  const uami = (identityRaw.userAssignedIdentities || {}) as Record<string, unknown>;
+
+  const safeContainers = containers.map((c) => {
+    const env = Array.isArray(c.env) ? (c.env as Record<string, unknown>[]) : [];
+    return {
+      name: c.name,
+      image: c.image,
+      envVarNames: env.map((e) => ({
+        name: e.name as string,
+        ...(e.secretRef ? { secretRef: e.secretRef as string } : {}),
+        fromSecret: Boolean(e.secretRef),
+      })),
+      resources: c.resources,
+    };
+  });
+
+  const secretsRaw = Array.isArray(config.secrets) ? (config.secrets as Record<string, unknown>[]) : [];
+  const registriesRaw = Array.isArray(config.registries) ? (config.registries as Record<string, unknown>[]) : [];
+
+  return {
+    name: body.name,
+    resourceGroup: typeof body.id === 'string' ? body.id.split('/')[4] : undefined,
+    location: body.location,
+    provisioningState: props.provisioningState,
+    environmentId: props.environmentId,
+    identity: {
+      type: identityRaw.type || 'None',
+      // resource ids only (no values). This is the field whose silent loss caused the 07-05 incident.
+      userAssignedIdentities: Object.keys(uami),
+    },
+    triggerType: config.triggerType,
+    cron: sched.cronExpression,
+    parallelism: sched.parallelism,
+    replicaCompletionCount: sched.replicaCompletionCount,
+    replicaTimeout: config.replicaTimeout,
+    replicaRetryLimit: config.replicaRetryLimit,
+    containers: safeContainers,
+    secretNames: secretsRaw.map((s) => s.name as string).filter(Boolean),
+    registries: registriesRaw.map((r) => ({ server: r.server, identity: r.identity })),
+  };
+}
+
+export interface JobPatchChanges {
+  image?: string;
+  cron?: string;
+  replicaTimeout?: number;
+  replicaRetryLimit?: number;
+}
+export interface JobPatchResult {
+  patchBody: Record<string, unknown>;
+  diff: Array<{ field: string; from: unknown; to: unknown }>;
+  touched: string[];
+}
+
+/**
+ * Build a TARGETED PATCH body for a job update from the LIVE job, changing ONLY the requested fields
+ * and preserving everything else. This is the safe realization of "GET-modify-write": it is a PATCH
+ * (JSON-merge-patch), never a full-replace PUT, so any field not named here is untouched by
+ * construction. For `image` it sends the FULL existing containers array with only [0].image swapped
+ * (arrays are replaced wholesale under merge-patch, so a partial container would drop env/resources).
+ * For `cron` it sends the full existing scheduleTriggerConfig with only cronExpression changed. Pure +
+ * unit-tested; throws if no change is requested or the live job has no container to repoint.
+ */
+export function applyJobPatch(existing: Record<string, unknown>, changes: JobPatchChanges): JobPatchResult {
+  const props = (existing.properties || {}) as Record<string, unknown>;
+  const config = (props.configuration || {}) as Record<string, unknown>;
+  const template = (props.template || {}) as Record<string, unknown>;
+  const containers = Array.isArray(template.containers) ? (template.containers as Record<string, unknown>[]) : [];
+  const sched = (config.scheduleTriggerConfig || {}) as Record<string, unknown>;
+
+  const diff: Array<{ field: string; from: unknown; to: unknown }> = [];
+  const touched: string[] = [];
+  const patchProps: Record<string, unknown> = {};
+  const patchConfig: Record<string, unknown> = {};
+
+  if (changes.image !== undefined) {
+    if (!containers.length) throw new Error('cannot set image: the live job has no container to repoint.');
+    const cloned = JSON.parse(JSON.stringify(containers)) as Record<string, unknown>[];
+    const from = cloned[0].image;
+    cloned[0].image = changes.image;
+    patchProps.template = { containers: cloned };
+    diff.push({ field: 'image', from, to: changes.image });
+    touched.push('image');
+  }
+  if (changes.cron !== undefined) {
+    const from = sched.cronExpression;
+    patchConfig.scheduleTriggerConfig = { ...sched, cronExpression: changes.cron };
+    diff.push({ field: 'cron', from, to: changes.cron });
+    touched.push('cron');
+  }
+  if (changes.replicaTimeout !== undefined) {
+    diff.push({ field: 'replicaTimeout', from: config.replicaTimeout, to: changes.replicaTimeout });
+    patchConfig.replicaTimeout = changes.replicaTimeout;
+    touched.push('replicaTimeout');
+  }
+  if (changes.replicaRetryLimit !== undefined) {
+    diff.push({ field: 'replicaRetryLimit', from: config.replicaRetryLimit, to: changes.replicaRetryLimit });
+    patchConfig.replicaRetryLimit = changes.replicaRetryLimit;
+    touched.push('replicaRetryLimit');
+  }
+  if (!touched.length) throw new Error('azure_job_update: no change requested (provide at least one of image/cron/replica_timeout/replica_retry_limit).');
+  if (Object.keys(patchConfig).length) patchProps.configuration = patchConfig;
+  return { patchBody: { properties: patchProps }, diff, touched };
+}
+
+export interface JobUpsertDrops {
+  droppedIdentity: boolean;
+  droppedSecrets: string[];
+  droppedEnv: string[];
+  droppedRegistries: string[];
+  warnings: string[];
+}
+
+/**
+ * Compute what a full-PUT `azure_job_upsert` would silently DELETE, by diffing the live job against
+ * the PUT body. A full replace drops any field the PUT body omits: the top-level identity (the 07-05
+ * killer), configuration.secrets, a container's env vars, and configuration.registries. Returns the
+ * dropped NAMES (never values) + human-readable warnings, so the dry_run can surface them LOUDLY
+ * before anyone applies the PUT. Pure + unit-tested.
+ */
+export function computeJobUpsertDrops(
+  existing: Record<string, unknown> | null,
+  putBody: { identity?: unknown; properties?: Record<string, unknown> },
+): JobUpsertDrops {
+  const warnings: string[] = [];
+  if (!existing) {
+    return { droppedIdentity: false, droppedSecrets: [], droppedEnv: [], droppedRegistries: [], warnings: [] };
+  }
+  const eProps = (existing.properties || {}) as Record<string, unknown>;
+  const eConfig = (eProps.configuration || {}) as Record<string, unknown>;
+  const eTemplate = (eProps.template || {}) as Record<string, unknown>;
+  const eIdentity = (existing.identity || {}) as Record<string, unknown>;
+  const eUami = Object.keys((eIdentity.userAssignedIdentities || {}) as Record<string, unknown>);
+  const eHasIdentity = (eIdentity.type && eIdentity.type !== 'None') || eUami.length > 0;
+
+  const pProps = (putBody.properties || {}) as Record<string, unknown>;
+  const pConfig = (pProps.configuration || {}) as Record<string, unknown>;
+  const pTemplate = (pProps.template || {}) as Record<string, unknown>;
+  const pIdentity = (putBody.identity || {}) as Record<string, unknown>;
+  const pUami = Object.keys((pIdentity.userAssignedIdentities || {}) as Record<string, unknown>);
+  const pHasIdentity = (pIdentity.type && pIdentity.type !== 'None') || pUami.length > 0;
+
+  const droppedIdentity = Boolean(eHasIdentity && !pHasIdentity);
+  if (droppedIdentity) {
+    warnings.push(
+      `WILL DROP the job's managed identity (${eIdentity.type}${eUami.length ? `, UAMI: ${eUami.map((u) => u.split('/').pop()).join(',')}` : ''}). ` +
+        `This is the exact 07-05 failure: without its UAMI the job cannot read Key Vault (storage key, GitHub App JWT). Provide identity in the PUT body to preserve it.`,
+    );
+  }
+
+  const names = (arr: unknown): string[] =>
+    (Array.isArray(arr) ? (arr as Record<string, unknown>[]) : []).map((x) => (x.name || x.server) as string).filter(Boolean);
+  const eSecrets = names(eConfig.secrets);
+  const pSecrets = new Set(names(pConfig.secrets));
+  const droppedSecrets = eSecrets.filter((n) => !pSecrets.has(n));
+  if (droppedSecrets.length) warnings.push(`WILL DROP secret(s): ${droppedSecrets.join(', ')}.`);
+
+  const eContainers = Array.isArray(eTemplate.containers) ? (eTemplate.containers as Record<string, unknown>[]) : [];
+  const pContainers = Array.isArray(pTemplate.containers) ? (pTemplate.containers as Record<string, unknown>[]) : [];
+  const eEnv = names(eContainers[0]?.env);
+  const pEnv = new Set(names(pContainers[0]?.env));
+  const droppedEnv = eEnv.filter((n) => !pEnv.has(n));
+  if (droppedEnv.length) warnings.push(`WILL DROP env var(s) on the primary container: ${droppedEnv.join(', ')}.`);
+
+  const eReg = names(eConfig.registries);
+  const pReg = new Set(names(pConfig.registries));
+  const droppedRegistries = eReg.filter((n) => !pReg.has(n));
+  if (droppedRegistries.length) warnings.push(`WILL DROP registry/registries: ${droppedRegistries.join(', ')} (image pulls may fail).`);
+
+  return { droppedIdentity, droppedSecrets, droppedEnv, droppedRegistries, warnings };
+}

@@ -914,6 +914,7 @@ import { registerInboxRead } from './agentstate/inbox-read.js';
 // ITEM #2 Azure control-plane READ tools (Phase A). MI-authenticated, least-privilege, cto-gated.
 import { registerAzureJobsList } from './azure/jobs-list.js';
 import { registerAzureJobExecutions } from './azure/job-executions.js';
+import { registerAzureJobGet } from './azure/job-get.js';
 import { registerAzureLogsQuery } from './azure/logs-query.js';
 import { registerAzureSearchIndexStats } from './azure/search-index-stats.js';
 import { registerAzureContainerappGet } from './azure/containerapp-get.js';
@@ -922,6 +923,7 @@ import { registerAzureResourceList } from './azure/resource-list.js';
 // guarded (oauth-clients deny / PHI deny / non-destructive merge / no delete / no shell-out).
 import { registerAzureJobExecute } from './azure/job-execute.js';
 import { registerAzureJobUpsert } from './azure/job-upsert.js';
+import { registerAzureJobUpdate } from './azure/job-update.js';
 import { registerAzureContainerappSetEnv } from './azure/containerapp-set-env.js';
 import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
 import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
@@ -1852,6 +1854,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAzureLogsQuery(server, callerHash);
   registerAzureSearchIndexStats(server, callerHash);
   registerAzureContainerappGet(server, callerHash);
+  registerAzureJobGet(server, callerHash);
   registerAzureResourceList(server, callerHash);
 
   // ===== ITEM #2: Azure control-plane WRITE tools (Phase B) =====
@@ -1861,6 +1864,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // PHI-denied, typed ARM REST (no az shell-out), NO delete tools, NO Key Vault secret-value tool.
   registerAzureJobExecute(server, callerHash);
   registerAzureJobUpsert(server, callerHash);
+  registerAzureJobUpdate(server, callerHash);
   registerAzureContainerappSetEnv(server, callerHash);
   registerAzureSearchIndexUpsert(server, callerHash);
   registerAzureSearchIndexerUpsert(server, callerHash);
