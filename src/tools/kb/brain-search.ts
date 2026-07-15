@@ -122,7 +122,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default — pass include_ops=true to see it. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal.',
+          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default. Pass include_ops=true to see it. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

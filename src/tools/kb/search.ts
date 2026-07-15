@@ -24,7 +24,7 @@ export function registerKbSearch(server: McpServer, callerHash: CallerHashProvid
       annotations: {
         title: 'Search an open fleet knowledge index (hybrid)',
         description:
-          'Hybrid (keyword + vector + semantic-ranker) search over an OPEN fleet index: "commons-company-journal" or "memory-exec". Finance/legal are ring-gated — use kb_search_privileged with a trusted role. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default — pass include_ops=true to see it. Ground answers in the company knowledge base before asserting facts.',
+          'Hybrid (keyword + vector + semantic-ranker) search over an OPEN fleet index: "commons-company-journal" or "memory-exec". Finance/legal are ring-gated — use kb_search_privileged with a trusted role. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default. Pass include_ops=true to see it. Ground answers in the company knowledge base before asserting facts.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
