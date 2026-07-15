@@ -46,13 +46,30 @@
  *    fused results. Pass `include_ops:true` to see it (e.g. "what has the CFO been doing lately").
  *    Query-side only -- no indexing/data change. Fails open: a filter problem on a given room falls
  *    back to an unfiltered query for that room rather than breaking the room.
+ *  - DEEP MODE (Phase 4A, 2026-07-15): `mode:'deep'` delegates to memory/deep-retrieval.ts -- an
+ *    LLM-planned, multi-round agentic retrieval that ALSO synthesizes a cited answer, instead of
+ *    just returning raw passages. `mode:'fast'` (the default, and the ONLY mode that existed before
+ *    this change) is the untouched code path below, byte-identical to before. Gated by BOTH the
+ *    caller's explicit request and the DEEP_RETRIEVAL_MODE kill-switch (config/env.ts) -- see
+ *    handleBrainSearch. The handler body is exported as `handleBrainSearch` (rather than kept as an
+ *    inline arrow function) so it is directly unit-testable without spinning up an MCP server,
+ *    mirroring how memory/agentic.ts's exported functions are tested.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
-import { registerTool, type CallerHashProvider } from '../registry.js';
+import { z, type ZodRawShape } from 'zod';
+import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../azure/search.js';
 import { isLaneAllowed } from './search-privileged.js';
 import { retractedIds, filterRetracted } from '../../memory/retractions.js';
+import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
+import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
+
+// Re-exported so the pre-existing `import { rrfFuse, ... } from './brain-search.js'` in
+// brain-search.test.ts keeps working unchanged -- the implementation moved to memory/rrf.ts (see
+// that file's header) so memory/deep-retrieval.ts can reuse it without a tools -> memory -> tools
+// import cycle, but this remains the SAME function, not a reimplementation.
+export { rrfFuse };
+export type { FusedHit };
 
 /** Rooms every agent may read (non-PHI / non-MNPI / non-privileged). */
 export const OPEN_ROOMS = ['memory-exec', 'commons-company-journal'] as const;
@@ -86,33 +103,140 @@ export function roomsFor(caller: string | undefined | null, domain?: string): st
   return permitted.filter((r) => wanted.includes(r));
 }
 
-export interface FusedHit {
-  score: number;
-  source: string;
-  text: string;
-  /** The index doc id (`{agent}__{entryId}`). Carried through so retracted beliefs can be identified. */
-  id?: unknown;
-  /** Source path of the parent doc (chunked doc rooms), threaded through for citation. */
-  path?: string;
-}
+// FusedHit + rrfFuse now live in memory/rrf.ts and are imported + re-exported above.
 
 /**
- * Reciprocal Rank Fusion across rooms. Scores from different indexes are on different scales and
- * are NOT comparable; RRF fuses by RANK, which is scale-free. k=60 is the standard damping constant.
- * Pure + unit-tested.
+ * Declared once and shared between the tool registration (registerBrainSearch, below) and the
+ * handler's own TS parameter type (BrainSearchInput) so the two can never drift out of sync --
+ * `satisfies ZodRawShape` keeps it structurally checked against registerTool's expectations.
  */
-export function rrfFuse(
-  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string }> }>,
-  top: number,
-  k = 60,
-): FusedHit[] {
-  const fused: FusedHit[] = [];
-  for (const { room, hits } of perRoom) {
-    hits.forEach((h, i) => {
-      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id, path: h.path });
-    });
+export const brainSearchInputShape = {
+  query: z.string().min(1).describe('Natural-language query.'),
+  top: z.number().int().min(1).max(25).optional().describe('Max results (default 8).'),
+  domain: z.string().optional().describe('Optional domain filter: exec|commons|ops|finance|legal.'),
+  include_ops: z
+    .boolean()
+    .optional()
+    .describe(
+      'Include operational exhaust (status/episode/heartbeat/digest-style ledger chatter) that is EXCLUDED by default. Default false. Set true for questions ABOUT the operational chatter itself, e.g. "what has the CFO been working on."',
+    ),
+  mode: z
+    .enum(['fast', 'deep'])
+    .optional()
+    .default('fast')
+    .describe(
+      'fast (default): one hybrid search pass per room, fused by rank -- the original brain_search behavior, unchanged. deep: agentic retrieval -- an LLM plans 2-4 sub-queries (and may narrow which of your permitted rooms to target), runs them, does ONE bounded evaluate-refine round if the results look thin, then synthesizes a cited answer from ONLY the retrieved passages. Slower and spends one or more Foundry calls; use it for a question fast mode answered poorly. Behaves exactly like fast when the DEEP_RETRIEVAL_MODE kill-switch is off.',
+    ),
+} satisfies ZodRawShape;
+
+export type BrainSearchInput = z.infer<z.ZodObject<typeof brainSearchInputShape>>;
+
+/**
+ * The tool handler, extracted to a standalone exported function so it is directly unit-testable
+ * (stub globalThis.fetch, call this with a fake ToolContext) without spinning up an MCP server --
+ * mirrors how memory/agentic.ts's exported functions are tested. registerBrainSearch below wires
+ * this in unchanged; nothing about registration or the MCP surface changes.
+ */
+export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContext): Promise<ToolResultPayload> {
+  const top = input.top ?? 8;
+  const includeOps = input.include_ops ?? false;
+  if (!searchConfigured()) {
+    return {
+      data: { matches: [], count: 0, mode: 'unconfigured', rooms_searched: [], include_ops: includeOps },
+      summary: 'AI Search not configured.',
+    };
   }
-  return fused.sort((a, b) => b.score - a.score).slice(0, top);
+  const rooms = roomsFor(ctx.callerAgent, input.domain);
+  if (rooms.length === 0) {
+    return {
+      data: { matches: [], count: 0, mode: 'no-rooms', rooms_searched: [], include_ops: includeOps },
+      summary: `No readable rooms for domain "${input.domain}".`,
+    };
+  }
+
+  // DEEP MODE (Phase 4A): an LLM-planned, multi-round agentic retrieval that ALSO synthesizes a
+  // cited answer, gated by BOTH the caller's explicit request (mode:'deep') AND the operator
+  // kill-switch DEEP_RETRIEVAL_MODE (default on; read fresh from process.env here, same convention
+  // as COLD_START_MODE/JIT_DOCTRINE_MODE -- see config/env.ts). When either condition is not met,
+  // execution falls straight through to the untouched fast path below: deepRetrieve is not even
+  // called, so 'fast' (the default, and every existing caller that never passes `mode` at all)
+  // stays the EXACT prior code path, byte-identical output shape.
+  if (input.mode === 'deep' && parseDeepRetrievalMode(process.env.DEEP_RETRIEVAL_MODE) === 'on') {
+    const deep = await deepRetrieve(input.query, { rooms, top, includeOps });
+    const data: Record<string, unknown> = {
+      matches: deep.hits,
+      count: deep.hits.length,
+      mode: deep.mode,
+      rooms_searched: deep.rooms_searched,
+      include_ops: includeOps,
+      answer: deep.answer,
+      citations: deep.citations,
+      sub_queries: deep.sub_queries,
+      rounds_used: deep.rounds_used,
+    };
+    if (deep.rooms_failed?.length) data.rooms_failed = deep.rooms_failed;
+    if (deep.retracted_dropped?.length) data.retracted_dropped = deep.retracted_dropped;
+
+    const roundWord = deep.rounds_used === 1 ? 'round' : 'rounds';
+    const sqWord = deep.sub_queries.length === 1 ? 'sub-query' : 'sub-queries';
+    return {
+      data,
+      summary:
+        `deep (${deep.rounds_used} ${roundWord}, ${deep.sub_queries.length} ${sqWord}): ${deep.hits.length} cited ` +
+        `passage(s) for "${input.query}" across ${deep.rooms_searched.length} room(s): ${deep.rooms_searched.join(', ')}.` +
+        (deep.rooms_failed?.length ? ` ${deep.rooms_failed.length} room(s) unreachable: ${deep.rooms_failed.join(', ')}.` : '') +
+        (deep.retracted_dropped?.length ? ` Dropped ${deep.retracted_dropped.length} RETRACTED belief(s).` : ''),
+    };
+  }
+
+  // ---- fast path: the ORIGINAL brain_search behavior, untouched line-for-line ----
+  // Over-fetch per room so RRF has depth to fuse from, then trim to `top`.
+  const perRoomTop = Math.min(25, Math.max(top, 10));
+  const settled = await Promise.allSettled(
+    rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps }) })),
+  );
+
+  const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown }> }> = [];
+  const searched: string[] = [];
+  const failed: string[] = [];
+  for (let i = 0; i < settled.length; i++) {
+    const s = settled[i];
+    if (s.status === 'fulfilled' && s.value.res) {
+      perRoom.push({ room: s.value.room, hits: s.value.res.matches });
+      searched.push(s.value.room);
+    } else {
+      // One dead room must never blank the brain. Degrade, disclose, continue.
+      failed.push(rooms[i]);
+    }
+  }
+
+  // Fuse a WIDER pool first, drop retracted beliefs, and only THEN trim to `top` -- otherwise
+  // removing a retracted hit would leave a hole instead of promoting a real result into its place.
+  const pool = rrfFuse(perRoom, top * 3);
+  const retracted = await retractedIds();
+  const { kept, dropped } = filterRetracted(pool, retracted);
+  const matches = kept.slice(0, top);
+
+  const data: Record<string, unknown> = {
+    matches,
+    count: matches.length,
+    mode: 'federated-rrf',
+    rooms_searched: searched,
+    include_ops: includeOps,
+  };
+  if (failed.length) data.rooms_failed = failed;
+  // Disclose retractions rather than silently vanishing them -- an agent should be able to SEE
+  // that the brain deliberately withheld a belief the fleet has retracted.
+  if (dropped.length) data.retracted_dropped = dropped;
+
+  return {
+    data,
+    summary:
+      `${matches.length} match(es) for "${input.query}" — federated live across ${searched.length} room(s): ${searched.join(', ')}.` +
+      (includeOps ? ' Operational chatter (status/episode/heartbeat/digest) INCLUDED.' : '') +
+      (dropped.length ? ` Dropped ${dropped.length} RETRACTED belief(s): ${dropped.join(', ')}.` : '') +
+      (failed.length ? ` ${failed.length} room(s) unreachable: ${failed.join(', ')}.` : ''),
+  };
 }
 
 export function registerBrainSearch(server: McpServer, callerHash: CallerHashProvider): void {
@@ -124,23 +248,13 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default. Pass include_ops=true to see it. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal.',
+          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default. Pass include_ops=true to see it. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field).',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: false,
       },
-      inputShape: {
-        query: z.string().min(1).describe('Natural-language query.'),
-        top: z.number().int().min(1).max(25).optional().describe('Max results (default 8).'),
-        domain: z.string().optional().describe('Optional domain filter: exec|commons|ops|finance|legal.'),
-        include_ops: z
-          .boolean()
-          .optional()
-          .describe(
-            'Include operational exhaust (status/episode/heartbeat/digest-style ledger chatter) that is EXCLUDED by default. Default false. Set true for questions ABOUT the operational chatter itself, e.g. "what has the CFO been working on."',
-          ),
-      },
+      inputShape: brainSearchInputShape,
       outputShape: {
         matches: z.array(z.unknown()),
         count: z.number(),
@@ -150,72 +264,13 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         retracted_dropped: z.array(z.string()).optional(),
         include_ops: z.boolean(),
         error: z.string().optional(),
+        // deep mode only -- absent in fast mode, which stays byte-identical to before this change.
+        answer: z.string().optional(),
+        citations: z.array(z.unknown()).optional(),
+        sub_queries: z.array(z.string()).optional(),
+        rounds_used: z.number().optional(),
       },
-      handler: async (input, ctx) => {
-        const top = input.top ?? 8;
-        const includeOps = input.include_ops ?? false;
-        if (!searchConfigured()) {
-          return {
-            data: { matches: [], count: 0, mode: 'unconfigured', rooms_searched: [], include_ops: includeOps },
-            summary: 'AI Search not configured.',
-          };
-        }
-        const rooms = roomsFor(ctx.callerAgent, input.domain);
-        if (rooms.length === 0) {
-          return {
-            data: { matches: [], count: 0, mode: 'no-rooms', rooms_searched: [], include_ops: includeOps },
-            summary: `No readable rooms for domain "${input.domain}".`,
-          };
-        }
-
-        // Over-fetch per room so RRF has depth to fuse from, then trim to `top`.
-        const perRoomTop = Math.min(25, Math.max(top, 10));
-        const settled = await Promise.allSettled(
-          rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps }) })),
-        );
-
-        const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown }> }> = [];
-        const searched: string[] = [];
-        const failed: string[] = [];
-        for (let i = 0; i < settled.length; i++) {
-          const s = settled[i];
-          if (s.status === 'fulfilled' && s.value.res) {
-            perRoom.push({ room: s.value.room, hits: s.value.res.matches });
-            searched.push(s.value.room);
-          } else {
-            // One dead room must never blank the brain. Degrade, disclose, continue.
-            failed.push(rooms[i]);
-          }
-        }
-
-        // Fuse a WIDER pool first, drop retracted beliefs, and only THEN trim to `top` -- otherwise
-        // removing a retracted hit would leave a hole instead of promoting a real result into its place.
-        const pool = rrfFuse(perRoom, top * 3);
-        const retracted = await retractedIds();
-        const { kept, dropped } = filterRetracted(pool, retracted);
-        const matches = kept.slice(0, top);
-
-        const data: Record<string, unknown> = {
-          matches,
-          count: matches.length,
-          mode: 'federated-rrf',
-          rooms_searched: searched,
-          include_ops: includeOps,
-        };
-        if (failed.length) data.rooms_failed = failed;
-        // Disclose retractions rather than silently vanishing them -- an agent should be able to SEE
-        // that the brain deliberately withheld a belief the fleet has retracted.
-        if (dropped.length) data.retracted_dropped = dropped;
-
-        return {
-          data,
-          summary:
-            `${matches.length} match(es) for "${input.query}" — federated live across ${searched.length} room(s): ${searched.join(', ')}.` +
-            (includeOps ? ' Operational chatter (status/episode/heartbeat/digest) INCLUDED.' : '') +
-            (dropped.length ? ` Dropped ${dropped.length} RETRACTED belief(s): ${dropped.join(', ')}.` : '') +
-            (failed.length ? ` ${failed.length} room(s) unreachable: ${failed.join(', ')}.` : ''),
-        };
-      },
+      handler: handleBrainSearch,
     },
     callerHash,
   );
