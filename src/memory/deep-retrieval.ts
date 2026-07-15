@@ -449,11 +449,16 @@ async function runDeepFlow(query: string, rooms: string[], top: number, includeO
 /**
  * The universal fallback: EXACTLY brain_search's fast-path shape (one hybridSearch pass per room,
  * rrfFuse, retraction filter) with no LLM involvement at all. This is what deep mode degrades to
- * when anything upstream goes wrong in a way the inline fail-opens did not already absorb. Wrapped
- * in its OWN try/catch as a last-resort belt-and-braces: even if AI Search itself is unreachable,
- * this returns a valid (empty) result shape rather than ever propagating a throw to the caller.
+ * when anything upstream goes wrong in a way the inline fail-opens did not already absorb (planning,
+ * retrieval, and synthesis are each ALSO individually fail-open -- see runDeepFlow / planQuery /
+ * refineSubQueries / synthesizeAnswer -- so in practice this outer fallback is reached only for a
+ * genuinely unexpected error, not an ordinary upstream outage; those already degrade gracefully
+ * without leaving the agentic flow). Wrapped in its OWN try/catch as a last-resort belt-and-braces:
+ * even if AI Search itself is unreachable, this returns a valid (empty) result shape rather than
+ * ever propagating a throw to the caller. Exported as a test seam (deepRetrieve.test.ts exercises it
+ * directly) as well as being deepRetrieve's own internal fallback.
  */
-async function fallbackFastSearch(query: string, rooms: string[], top: number, includeOps: boolean): Promise<DeepRetrieveResult> {
+export async function fallbackFastSearch(query: string, rooms: string[], top: number, includeOps: boolean): Promise<DeepRetrieveResult> {
   try {
     const perRoomTop = Math.min(25, Math.max(top, 10));
     const settled = await Promise.allSettled(

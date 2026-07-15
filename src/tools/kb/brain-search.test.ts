@@ -1,6 +1,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { roomsFor, rrfFuse, OPEN_ROOMS, RING_ROOMS } from './brain-search.js';
+
+// Satisfy loadEnv()'s required vars (searchConfigured()/foundryConfigured() go through loadEnv via
+// azure/search.ts and azure/foundry.ts), then configure Azure AI Search so handleBrainSearch's real
+// code paths (not the 'unconfigured' early return) run below. Mirrors src/memory/agentic.test.ts and
+// src/azure/search.test.ts's preamble exactly. Foundry is deliberately left UNCONFIGURED here: the
+// tests below only exercise the fast path and the deep-mode kill-switch (which must short-circuit
+// BEFORE any Foundry call), so an unconfigured Foundry is itself part of proving those two paths
+// never need it.
+process.env.CIO_SITE_ID ||= 'test';
+process.env.CIO_TRACK_KEY ||= 'test';
+process.env.CIO_APP_API_BEARER ||= 'test';
+process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
+process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
+process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
+process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
+process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
+
+const { roomsFor, rrfFuse, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
+const { z } = await import('zod');
+
+// Pure network mocking via globalThis.fetch — the same seam src/memory/agentic.test.ts and
+// src/azure/search.test.ts use, since this repo's ESM build does not let node:test's mock.method()
+// redefine another module's live named export.
+async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = stub;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+function isSearchUrl(url: string): boolean {
+  return url.includes('/indexes/') && url.includes('/docs/search');
+}
+
+/** A minimal-but-complete fake ToolContext (only callerAgent is actually read by handleBrainSearch). */
+function fakeCtx(callerAgent: string) {
+  return { correlationId: 'test-corr', callerHash: 'test-hash', dryRun: false, acknowledgeWarning: false, callerAgent };
+}
 
 // --- ring safety: federation must NEVER become a side door around a privilege boundary ---
 
@@ -35,35 +75,105 @@ test('an unknown domain returns all permitted rooms rather than silently nothing
   assert.deepEqual(roomsFor('cto', 'not-a-domain'), [...OPEN_ROOMS]);
 });
 
-// --- RRF: scores across indexes are NOT comparable; fusion must go by RANK ---
+// --- RRF: rrfFuse's own behavior is now tested at its source, src/memory/rrf.test.ts. This just
+// proves the re-export contract brain-search.ts's header promises (existing importers unaffected).
 
-test('rrfFuse ranks by position, not by raw score (scale-free across indexes)', () => {
-  // roomB's raw scores are 100x roomA's. A naive score sort would let roomB dominate entirely.
-  const fused = rrfFuse(
-    [
-      { room: 'a', hits: [{ score: 1, text: 'a1' }, { score: 0.9, text: 'a2' }] },
-      { room: 'b', hits: [{ score: 900, text: 'b1' }, { score: 800, text: 'b2' }] },
-    ],
-    4,
-  );
-  // rank-1 hits from BOTH rooms must outrank the rank-2 hits from either.
-  const top2 = fused.slice(0, 2).map((h) => h.text).sort();
-  assert.deepEqual(top2, ['a1', 'b1'], 'both rank-1 hits should surface above any rank-2 hit');
+test('rrfFuse is re-exported from brain-search.js unchanged (backward-compat for existing importers)', () => {
+  const fused = rrfFuse([{ room: 'a', hits: [{ text: 'x' }] }], 1);
+  assert.equal(fused[0]?.text, 'x');
 });
 
-test('rrfFuse tags every hit with its source room and respects top', () => {
-  const fused = rrfFuse(
-    [
-      { room: 'memory-exec', hits: [{ text: 'x' }, { text: 'y' }] },
-      { room: 'commons-company-journal', hits: [{ text: 'z' }] },
-    ],
-    2,
-  );
-  assert.equal(fused.length, 2);
-  for (const h of fused) assert.ok(h.source.length > 0, 'every hit must name its source room');
+// --- mode:'fast' is unchanged (regression), and mode:'deep' respects the DEEP_RETRIEVAL_MODE
+// kill-switch. handleBrainSearch is the extracted, directly-callable handler (see brain-search.ts).
+
+test('the wire-level zod schema defaults `mode` to "fast" when the caller omits it entirely', () => {
+  const parsed = z.object(brainSearchInputShape).parse({ query: 'ping' });
+  assert.equal(parsed.mode, 'fast');
 });
 
-test('rrfFuse survives an empty room without throwing', () => {
-  const fused = rrfFuse([{ room: 'a', hits: [] }, { room: 'b', hits: [{ text: 'b1' }] }], 5);
-  assert.deepEqual(fused.map((h) => h.text), ['b1']);
+/** Stubs the AI Search docs/search endpoint with one canned hit; THROWS on anything else (in
+ *  particular an embeddings or chat/completions call), so a test using this stub can assert
+ *  "Foundry was never reached" simply by not failing with an "unexpected fetch" error. */
+function mockSearchOnlyFetch(): typeof fetch {
+  return (async (url: string | URL) => {
+    const u = String(url);
+    if (isSearchUrl(u)) {
+      return new Response(JSON.stringify({ value: [{ id: 'x1', text: 'a fast-mode hit', '@search.rerankerScore': 1.0 }] }), {
+        status: 200,
+      });
+    }
+    throw new Error(`unexpected fetch to ${u} (this path must never reach an embeddings/chat endpoint)`);
+  }) as typeof fetch;
+}
+
+test('handleBrainSearch mode:"fast" is a regression: same output shape as brain_search before deep mode existed', async () => {
+  await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+    const result = await handleBrainSearch({ query: 'what is the ASC key id', mode: 'fast' }, fakeCtx('cto'));
+    const data = result.data as Record<string, unknown>;
+    assert.equal(data.mode, 'federated-rrf');
+    assert.ok(Array.isArray(data.matches));
+    assert.equal(typeof data.count, 'number');
+    assert.ok(Array.isArray(data.rooms_searched));
+    assert.equal(data.include_ops, false);
+    for (const deepOnlyField of ['answer', 'citations', 'sub_queries', 'rounds_used']) {
+      assert.ok(!(deepOnlyField in data), `fast mode must NOT carry the deep-only field "${deepOnlyField}"`);
+    }
+  });
+});
+
+test('DEEP_RETRIEVAL_MODE=off: mode:"deep" behaves EXACTLY like mode:"fast" (kill-switch short-circuits before deepRetrieve/Foundry is ever reached)', async () => {
+  const prior = process.env.DEEP_RETRIEVAL_MODE;
+  process.env.DEEP_RETRIEVAL_MODE = 'off';
+  try {
+    await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+      // mockSearchOnlyFetch throws on anything that looks like an embeddings/chat call, so if the
+      // kill-switch failed to short-circuit and deepRetrieve() (or its planning chat() call) ran
+      // anyway, this test fails with "unexpected fetch" rather than silently passing.
+      const result = await handleBrainSearch({ query: 'what is the ASC key id', mode: 'deep' }, fakeCtx('cto'));
+      const data = result.data as Record<string, unknown>;
+      assert.equal(data.mode, 'federated-rrf', 'kill-switched-off deep must produce the FAST mode marker, not deep-agentic');
+      for (const deepOnlyField of ['answer', 'citations', 'sub_queries', 'rounds_used']) {
+        assert.ok(!(deepOnlyField in data), `kill-switched-off deep must NOT carry the deep-only field "${deepOnlyField}"`);
+      }
+    });
+  } finally {
+    if (prior === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
+    else process.env.DEEP_RETRIEVAL_MODE = prior;
+  }
+});
+
+test('DEEP_RETRIEVAL_MODE unset (default "on"): mode:"deep" takes the deep path (never the fast marker)', async () => {
+  // This file's preamble deliberately leaves Foundry unconfigured, so ordinarily every LLM step
+  // inside deepRetrieve would individually fail open (trivial plan, no refine, "unavailable"
+  // synthesis note). But loadEnv() caches per-process, and node:test's isolation-per-file is an
+  // assumption about the test RUNNER, not this repo's code -- so this stub tolerates an
+  // embeddings/chat call too (unlike mockSearchOnlyFetch) rather than asserting on Foundry's
+  // configured-ness, which is not what this test is actually about. What this test IS about: the
+  // kill-switch being ON (or unset) really does route through deepRetrieve and produce a DEEP mode
+  // marker + the deep-only fields, and deepRetrieve never throws either way. The mirror-image
+  // "switch really is OFF" property is what the strict test above proves (it is a STRUCTURAL
+  // guarantee there -- deepRetrieve is never even called -- so it does not share this concern).
+  assert.equal(process.env.DEEP_RETRIEVAL_MODE, undefined, 'sanity: no leftover override from another test');
+  const tolerantFetch = (async (url: string | URL) => {
+    const u = String(url);
+    if (isSearchUrl(u)) {
+      return new Response(JSON.stringify({ value: [{ id: 'x1', text: 'a hit', '@search.rerankerScore': 1 }] }), { status: 200 });
+    }
+    if (u.includes('/embeddings')) return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200 });
+    if (u.includes('/chat/completions')) {
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"sub_queries":["q"]}' } }], model: 'test' }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch to ${u}`);
+  }) as typeof fetch;
+  await withStubbedFetch(tolerantFetch, async () => {
+    const result = await handleBrainSearch({ query: 'what is the ASC key id', mode: 'deep' }, fakeCtx('cto'));
+    const data = result.data as Record<string, unknown>;
+    assert.ok(
+      data.mode === 'deep-agentic' || data.mode === 'deep-fallback-fast',
+      `expected a deep-mode marker, got "${String(data.mode)}"`,
+    );
+    assert.equal(typeof data.answer, 'string');
+    assert.ok(Array.isArray(data.sub_queries));
+    assert.equal(typeof data.rounds_used, 'number');
+  });
 });
