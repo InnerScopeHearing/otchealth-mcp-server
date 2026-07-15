@@ -27,9 +27,14 @@
  *  - 'compaction-note'    summary/annotation of OLDER status rows and superseded-chain bookkeeping
  *                         (`historyNote`, e.g. "X: superseded N earlier value(s) ... a -> b -> c") —
  *                         a byproduct of ledger maintenance, not a first-class assertion.
- *  - 'episode'            Named explicitly by the room-hygiene spec (episodic/session-summary
- *                         records). No current writer emits this type; included defensively so a
- *                         future producer is excluded automatically with zero code change.
+ *  - 'episode'            CONFIRMED live as of the Phase 2 capture plane (2026-07):
+ *                         safety/journal.ts auto-journals every successful, mutating, non-dry-run
+ *                         gateway tool call as an 'episode' Cosmos memory (write-through indexed
+ *                         the same way every other memory_write is), and tools/memory/checkpoint.ts
+ *                         writes one 'episode' marker per checkpoint() call. Both are exactly the
+ *                         high-volume, low-signal operational exhaust this list exists to exclude
+ *                         from default knowledge queries -- they were originally listed here
+ *                         defensively (see git history), before either producer existed.
  *  - 'heartbeat'          Named explicitly by the spec. NOTE: this is distinct from the agentstate
  *  - 'fleet-watch'        task-ledger's `task_heartbeat` tool (src/agentstate/ledger.ts) — that is a
  *                         separate Cosmos work-queue, never indexed into memory-exec at all. These

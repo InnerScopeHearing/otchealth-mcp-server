@@ -27,5 +27,11 @@ export function normalizeAgent(agent: string): string {
 export const TASK_STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'done', 'cancelled', 'dead_letter'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-export const MEMORY_KINDS = ['fact', 'decision', 'correction', 'pitfall', 'status'] as const;
+// 'episode' added 2026-07 (Phase 2 capture plane): a best-effort, auto-journaled record of a
+// mutating tool call (safety/journal.ts) or an explicit checkpoint marker (tools/memory/checkpoint.ts).
+// It is a first-class Cosmos memory KIND like any other -- writable via memory_write, filterable via
+// memory_search -- but it is OPERATIONAL EXHAUST for knowledge retrieval: memory/room-hygiene.ts
+// already lists 'episode' in EXHAUST_RECORD_TYPES, so brain_search/kb_search exclude it by default
+// (surfaced only with include_ops=true). Do not add it to any "durable knowledge" allowlist.
+export const MEMORY_KINDS = ['fact', 'decision', 'correction', 'pitfall', 'status', 'episode'] as const;
 export type MemoryKind = (typeof MEMORY_KINDS)[number];

@@ -71,6 +71,7 @@ import { registerMemoryPack } from './memory/pack.js';
 import { registerMemoryInbound } from './memory/inbound.js';
 import { registerWake } from './memory/wake.js';
 import { registerMemoryReconcile } from './memory/reconcile.js';
+import { registerCheckpoint } from './memory/checkpoint.js';
 
 // Agent persona (cross-platform identity bootstrap)
 import { registerAgentPersona } from './agent/persona.js';
@@ -998,6 +999,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerMemoryInbound(server, callerHash); // read: cross-agent notes on your ledger (wake first-duty)
   registerWake(server, callerHash); // read: ONE federated boot call (pack + cosmos memory + active tasks + inbox peek + inbound)
   registerMemoryReconcile(server, callerHash); // write_simple: ack inbound (advances marker; deletes nothing)
+  registerCheckpoint(server, callerHash); // write_simple: platform-agnostic session-end capture; resets capture-pressure
 
   // ===== P2: Agent persona (cross-platform identity bootstrap) =====
   registerAgentPersona(server, callerHash);
