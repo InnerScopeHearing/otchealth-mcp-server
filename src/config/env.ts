@@ -248,6 +248,21 @@ const EnvSchema = z.object({
   // counter are PER-REPLICA (the gateway runs 2-10 replicas) -- acceptable for a soft nudge; the
   // durable signal is the episodes themselves in Cosmos, not the in-memory counter.
 
+  // JIT DOCTRINE v1 (Phase 2, src/safety/jit-doctrine.ts). Also NOT in this schema on purpose, same
+  // reasoning as COLD_START_MODE above -- read fresh from process.env per call so it can be flipped
+  // without a redeploy:
+  //   JIT_DOCTRINE_MODE  off | warn (default)
+  // Binds a known, ledgered pitfall (JIT_DOCTRINE_BINDINGS, keyed by exact tool name or tool-name
+  // prefix) to the tool it applies to, and attaches it to the response of THAT tool call -- doctrine
+  // at the point of use, not only at wake(). Evaluated for EVERY tool category (read and write),
+  // unlike COLD_START_MODE/CAPTURE_MODE which only apply to mutating calls: a pitfall on a read tool
+  // (e.g. a PostHog read defaulting to the PHI project) is exactly when the warning is needed. 'warn'
+  // is the only active mode (no 'enforce' in v1, always advisory, never blocks). 'off' is a full
+  // no-op. Throttled once per (caller, tool) pair per process (an in-memory Set, no TTL, no new
+  // store, PER-REPLICA like the capture plane above) so the same pitfall does not nag on every call.
+  // Fail-open end to end: an unrecognized tool, an unavailable bearer identity, or any internal
+  // error, always returns no doctrine rather than ever throwing or affecting the call.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
