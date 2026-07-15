@@ -44,3 +44,46 @@ test('buildCapturePayload: distinct_id defaults to "gateway" when omitted', () =
   const p = buildCapturePayload('gateway_governance_would_deny', {}, undefined, 'phc_x');
   assert.equal(p!.distinct_id, 'gateway');
 });
+
+// Phase 2 SLO telemetry emits (gw_mutation / gw_checkpoint / gw_doctrine_surfaced), wired into
+// tools/registry.ts (gw_mutation, gw_doctrine_surfaced) and tools/memory/checkpoint.ts
+// (gw_checkpoint), all via captureGatewayEvent -> buildCapturePayload -- the same pure helper
+// exercised above. These tests lock in the event NAMES and property SHAPES so a future refactor
+// cannot silently rename or reshape the fields the capture-rate (gw_checkpoint / gw_mutation) and
+// doctrine-coverage (gw_doctrine_surfaced) SLOs are computed from. The network fire-and-forget
+// itself is out of scope here (captureGatewayEvent's own contract, already inert-by-default per the
+// tests above).
+
+test('Phase 2 SLO: gw_mutation payload shape (capture-rate denominator)', () => {
+  const p = buildCapturePayload('gw_mutation', { tool: 'checkpoint', journaled: true }, 'cto', 'phc_test');
+  assert.ok(p);
+  assert.equal(p!.event, 'gw_mutation');
+  assert.equal(p!.distinct_id, 'cto');
+  assert.equal(p!.properties.tool, 'checkpoint');
+  assert.equal(p!.properties.journaled, true);
+});
+
+test('Phase 2 SLO: gw_checkpoint payload shape (capture-rate numerator)', () => {
+  const p = buildCapturePayload('gw_checkpoint', { agent: 'cto', written: 2, distilled: 1 }, 'cto', 'phc_test');
+  assert.ok(p);
+  assert.equal(p!.event, 'gw_checkpoint');
+  assert.equal(p!.distinct_id, 'cto');
+  assert.equal(p!.properties.agent, 'cto');
+  assert.equal(p!.properties.written, 2);
+  assert.equal(p!.properties.distilled, 1);
+});
+
+test('Phase 2 SLO: gw_doctrine_surfaced payload shape (doctrine-coverage)', () => {
+  const p = buildCapturePayload('gw_doctrine_surfaced', { tool: 'posthog_query_hogql', pitfalls: 2 }, 'cto', 'phc_test');
+  assert.ok(p);
+  assert.equal(p!.event, 'gw_doctrine_surfaced');
+  assert.equal(p!.distinct_id, 'cto');
+  assert.equal(p!.properties.tool, 'posthog_query_hogql');
+  assert.equal(p!.properties.pitfalls, 2);
+});
+
+test('Phase 2 SLO: all three emits stay inert (null payload) with no PostHog key configured', () => {
+  assert.equal(buildCapturePayload('gw_mutation', { tool: 'x', journaled: false }, 'cto', ''), null);
+  assert.equal(buildCapturePayload('gw_checkpoint', { agent: 'cto', written: 0, distilled: 0 }, 'cto', ''), null);
+  assert.equal(buildCapturePayload('gw_doctrine_surfaced', { tool: 'x', pitfalls: 1 }, 'cto', ''), null);
+});
