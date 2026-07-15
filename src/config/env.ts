@@ -276,6 +276,22 @@ const EnvSchema = z.object({
   // callers. deepRetrieve() is ALSO fail-open end to end regardless of this flag (see its own file
   // header): this switch is an operator kill-switch, not the only safety net.
 
+  // INCIDENT MATCH (Phase 4 component C, src/safety/incident-match.ts). Also NOT in this schema on
+  // purpose, same reasoning as JIT_DOCTRINE_MODE/AUTO_JOURNAL_MODE above -- read fresh from
+  // process.env per call so it can be flipped without a redeploy:
+  //   INCIDENT_MATCH_MODE  off | on (default)
+  // The incident_match tool takes free text describing the current situation and semantically
+  // searches memory-exec (filtered to type in (pitfall, correction)) for the single most similar
+  // past incident, surfacing it only when its score clears a confidence threshold. 'on' is the only
+  // active mode beyond 'off' (no 'enforce' -- this is always advisory, explicitly invoked, and never
+  // blocks). Throttled once per (caller, matched-incident-id) pair per process (an in-memory Set, no
+  // TTL, no new store, PER-REPLICA like the capture plane above) purely as an `already_surfaced`
+  // annotation -- unlike JIT_DOCTRINE_MODE's throttle, it never hides a real match (see the file
+  // header's THROTTLE IS ANNOTATION-ONLY section for why). Fail-open end to end: an unconfigured
+  // Search/Foundry, a network outage, or any internal error always returns "no match" rather than
+  // ever throwing or affecting the caller. Standalone in this pass -- NOT yet wired into the shared
+  // hot mutation path (registry.ts) the way jit-doctrine is; that is a documented fast-follow.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
