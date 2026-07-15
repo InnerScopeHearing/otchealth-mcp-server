@@ -35,6 +35,7 @@ import {
   buildCaptureNudgeMessage,
   type CapturePressureOutcome,
 } from '../safety/capture-pressure.js';
+import { evaluateJitDoctrine } from '../safety/jit-doctrine.js';
 
 // Curated toolset advertised to Claude Chat (DCR) connectors so the model gets a focused, FINDABLE set
 // instead of the full ~850-tool catalog (which Claude truncates, hiding brain_search). Override via
@@ -562,6 +563,21 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (ground.ran) {
           structured.groundedness = { ungroundedDetected: ground.ungroundedDetected, ungroundedPercentage: ground.ungroundedPercentage, mode: ground.mode };
         }
+
+        // JIT DOCTRINE (Phase 2): bind a known, ledgered pitfall to the tool at the exact moment of
+        // use, riding along on THIS call's response instead of relying on the agent to remember what
+        // wake() told it at session start. Evaluated for EVERY tool category (read AND write) --
+        // unlike cold_start/capture_pressure below, a pitfall bound to a READ tool (e.g. a posthog_
+        // read defaulting to the PHI project, or legal_blob_get reaching into the privileged personal
+        // room) is exactly the moment the agent needs the warning, so this is deliberately NOT gated
+        // on `def.category !== 'read'`. Advisory only in v1 (no enforce mode, never blocks); fail-open
+        // by construction and never throws (safety/jit-doctrine.ts). Throttled once per (caller, tool)
+        // per process so the same pitfall does not nag on every subsequent call.
+        const jitDoctrine = evaluateJitDoctrine(callerHash, def.name);
+        if (jitDoctrine.pitfalls.length) {
+          structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
+        }
+
         // coldStart.cold here can only mean mode='warn' (enforce+cold already returned above), so this
         // is always the non-fatal nudge, never a refusal. Surfaced in BOTH the structured content and
         // the text block (mirrors how compliance_warning is prepended) so it is maximally visible.
@@ -584,6 +600,11 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         const capturePlanePrelude: string[] = [];
         if (coldStart.cold) capturePlanePrelude.push(COLD_START_MESSAGE);
         if (capturePressure?.nudge) capturePlanePrelude.push(buildCaptureNudgeMessage(capturePressure.mutations));
+        // Composes with (does not replace) the cold_start/capture_pressure prelude lines above --
+        // all three channel into the SAME capturePlanePrelude array/text block.
+        if (jitDoctrine.pitfalls.length) {
+          capturePlanePrelude.push(`DOCTRINE: ${jitDoctrine.pitfalls.join(' | ')}`);
+        }
         let text = buildTextContent(
           { ...payload, data: result },
           warning,
