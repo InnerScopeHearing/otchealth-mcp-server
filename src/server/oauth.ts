@@ -104,19 +104,47 @@ const DCR_LANES: Array<[string, string]> = [
   ['legal', 'clo'], ['finance', 'cfo'], ['operations', 'coo'], ['product', 'cpo'],
   ['revenue', 'cro'], ['compliance', 'cco'], ['technology', 'cto'], ['dev', 'developer'],
 ];
-// SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15, layer 2): the fallback used to be
-// 'clo' -- a privileged EXEC_RING lane -- so ANY unrecognized connector name (which is exactly what a
-// self-registered, unauthorized Claude.ai custom connector has) silently resolved to a privileged
-// identity. It now defaults to 'external-read', a lane that is not in EXEC_RING and is not cto/developer,
-// so it gets tools/registry.ts's minimal EXTERNAL_READONLY_TOOLSET (layer 1) and is refused outright by
-// every ring check (kb_search_privileged, legal_blob_*, and memory-write.ts's own gate, layer 3). Known
-// exec aliases in DCR_LANES above are UNCHANGED (e.g. a connector explicitly named "CFO Finance" still
-// maps to 'cfo') -- only the UNRECOGNIZED-name fallback moved off a privileged default.
+
+/** Escape a string for safe interpolation into a RegExp. Today's DCR needles are all simple
+ * (lowercase + a single hyphen), but escaping keeps the boundary matcher correct if a needle is
+ * ever added that contains a regex metacharacter. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15, layers 2 + 5): word-boundary
+// matchers precompiled once, PRESERVING DCR_LANES order so multi-word codes (clo-personal) still win
+// over their prefixes (clo). Layer 5 (this) closes a substring-collision hole in the layer-2 fix:
+// the old matcher used `n.includes(needle)`, so an ORDINARY connector name silently resolved to a
+// PRIVILEGED lane because an English word happened to contain a lane code -- "My Custom Connector",
+// "Directory Bot", "Factory Assistant" all contain "cto" (conne-CTO-r, dire-CTO-ry, fa-CTO-ry) and
+// resolved to the cto ship lane; "Cloud Sync" contains "clo" (CLO-ud) and resolved to the clo
+// EXEC_RING lane. Virtually EVERY connector name contains "connector" -> "cto", so the layer-2
+// fallback almost never even fired. `\b<needle>\b` fixes this: "connector" has no word boundary
+// around its internal "cto" (it is preceded by a word char 'e'), so `\bcto\b` does NOT match it,
+// while it DOES match "CTO", "OTCHealth CTO", "cto-connector"; "cloud" has no `\bclo\b` match (the
+// "clo" is followed by the word char 'u'), so "Cloud Sync" now correctly falls through to the
+// non-privileged 'external-read' fallback. Precedence for real multi-word codes is unchanged:
+// "clo-personal matter" matches `\bclo-personal\b` (tested first in the ordered list) before
+// `\bclo\b` is ever evaluated, so it still resolves to clo-personal.
+const DCR_LANE_MATCHERS: Array<[RegExp, string]> = DCR_LANES.map(
+  ([needle, lane]) => [new RegExp(`\\b${escapeRegExp(needle)}\\b`), lane],
+);
+
+// The fallback used to be 'clo' -- a privileged EXEC_RING lane -- so ANY unrecognized connector name
+// (which is exactly what a self-registered, unauthorized Claude.ai custom connector has) silently
+// resolved to a privileged identity. It now defaults to 'external-read', a lane that is not in
+// EXEC_RING and is not cto/developer, so it gets tools/registry.ts's minimal EXTERNAL_READONLY_TOOLSET
+// (layer 1) and is refused outright by every ring check (kb_search_privileged, legal_blob_*, and
+// memory-write.ts's own gate, layer 3). Known exec aliases in DCR_LANES above are UNCHANGED (e.g. a
+// connector explicitly named "CFO Finance" still maps to 'cfo'; "CTO" or "OTCHealth CTO" still maps
+// to 'cto') -- only the UNRECOGNIZED-name fallback moved off a privileged default, and only names
+// that CONTAIN a lane code as a WHOLE WORD (not merely as a substring) now resolve to that lane.
 /** Exported for unit testing without spinning up the HTTP server (mirrors isLaneAllowed() /
  * isLegalContainerAllowed()'s "pure predicate, exported for hermetic tests" pattern). */
 export function laneFromClientName(name: string): string {
   const n = name.toLowerCase();
-  for (const [needle, lane] of DCR_LANES) if (n.includes(needle)) return lane;
+  for (const [re, lane] of DCR_LANE_MATCHERS) if (re.test(n)) return lane;
   return (loadEnv().OAUTH_DCR_DEFAULT_AGENT || 'external-read').toLowerCase();
 }
 

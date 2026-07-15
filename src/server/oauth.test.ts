@@ -30,14 +30,13 @@ before(() => {
 });
 
 // NOTE ON TEST-STRING CHOICE: DCR_LANES matches by plain substring (`n.includes(needle)`), so a name
-// containing an ORDINARY ENGLISH WORD that happens to contain a lane needle also matches -- e.g.
-// "My Custom Connector" and "Directory Bot" both contain "cto" (conne-CTO-r, dire-CTO-ry) and resolve
-// to 'cto'; "Cloud Sync" contains "clo" (CLOud) and resolves to 'clo'. That is a SEPARATE, PRE-EXISTING
-// substring-collision issue in the matching algorithm itself (present before this change and NOT
-// touched by it -- the task scope is the FALLBACK default only; DCR_LANES matching is explicitly
-// out of scope here). Flagged to the CTO in this PR's report for a follow-up decision. The test
-// strings below are deliberately chosen to contain NONE of the DCR_LANES needles, so they exercise
-// only the fallback path this Part actually changes.
+// containing an ORDINARY ENGLISH WORD that happened to contain a lane needle also matched -- e.g.
+// "My Custom Connector" and "Directory Bot" both contain "cto" (conne-CTO-r, dire-CTO-ry) and used
+// to resolve to 'cto'; "Cloud Sync" contains "clo" (CLOud) and used to resolve to 'clo'. That was a
+// substring-collision hole in the matching algorithm itself; Part 5 (below) CLOSES it by switching
+// to word-boundary (`\b<needle>\b`) matching. The strings below still contain none of the DCR_LANES
+// needles as WHOLE WORDS, so they exercise the fallback path; the dedicated collision cases (words
+// that contain a needle only as a substring) are in the Part-5 block further down.
 test("SAFETY-CRITICAL: an unrecognized connector name defaults to 'external-read', not a privileged lane (THE HOLE this closes)", async () => {
   const { laneFromClientName } = await import('./oauth.js');
   assert.equal(laneFromClientName('randostring'), 'external-read');
@@ -62,4 +61,38 @@ test('multi-word codes still match before their prefixes (clo-personal before cl
   const { laneFromClientName } = await import('./oauth.js');
   assert.equal(laneFromClientName('clo-personal'), 'clo-personal');
   assert.equal(laneFromClientName('clo'), 'clo');
+});
+
+// ── Part 5: word-boundary DCR lane matching (closes the substring-collision hole) ──────────────
+// The layer-2 fix moved the FALLBACK off 'clo', but the matcher still used n.includes(needle), so
+// an ordinary connector name containing a lane code as a SUBSTRING resolved to that (often
+// privileged) lane before the fallback ever ran. Virtually every connector name contains
+// "connector" -> "cto", so the fallback almost never fired -- the hole was still wide open. Part 5
+// switches to `\b<needle>\b`, so only a WHOLE-WORD lane code routes to a lane; everything else falls
+// through to the non-privileged 'external-read'. These cases lock that behavior.
+
+test("SAFETY-CRITICAL Part 5: substring-collision names resolve to 'external-read', not a privileged lane", async () => {
+  const { laneFromClientName } = await import('./oauth.js');
+  // Each of these contains a lane code only as an internal substring (no word boundary around it):
+  //   "connector"/"directory"/"factory"/"vector" contain "cto"/"cro" mid-word; "cloud" contains "clo".
+  for (const name of ['My Custom Connector', 'Cloud Sync', 'Directory Bot', 'Factory Assistant', 'Vector Store', 'some random connector']) {
+    assert.equal(laneFromClientName(name), 'external-read', `${name} must fall through to external-read, not a privileged/ship lane`);
+  }
+});
+
+test('Part 5: legitimate whole-word lane codes + role aliases still route correctly', async () => {
+  const { laneFromClientName } = await import('./oauth.js');
+  assert.equal(laneFromClientName('CTO'), 'cto');
+  assert.equal(laneFromClientName('OTCHealth CTO Connector'), 'cto'); // 'cto' as a whole word wins; 'connector' does NOT collide
+  assert.equal(laneFromClientName('CFO Finance'), 'cfo');
+  assert.equal(laneFromClientName('Legal Assistant'), 'clo'); // 'legal' role alias as a whole word
+  assert.equal(laneFromClientName('Technology Bot'), 'cto'); // 'technology' role alias as a whole word
+});
+
+test('Part 5: clo-personal precedence is PRESERVED under word-boundary matching', async () => {
+  const { laneFromClientName } = await import('./oauth.js');
+  // `\bclo-personal\b` is tested before `\bclo\b` (ordered list), so this resolves to clo-personal,
+  // never to the broader clo lane -- the single most important precedence to keep intact.
+  assert.equal(laneFromClientName('clo-personal matter'), 'clo-personal');
+  assert.equal(laneFromClientName('CLO-PERSONAL divorce file'), 'clo-personal');
 });
