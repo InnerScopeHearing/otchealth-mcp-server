@@ -1,5 +1,5 @@
 /**
- * Azure Cosmos DB for NoSQL data-plane client (dependency-free, master-key HMAC auth).
+ * Azure Cosmos DB for NoSQL data-plane client (dependency-free -- no vendor SDK; two auth modes).
  *
  * This is the write/read path for the AGENT STATE PLANE: the work-ledger (`tasks`),
  * the structured memory-of-record (`memory`), and the append-only transition log (`events`).
@@ -7,28 +7,52 @@
  * the gateway stays the single engine-portable front door (any engine calls the gateway tool,
  * the gateway calls Cosmos).
  *
- * Auth (do NOT "tidy" the casing — it is load-bearing, see agentstate.test.ts):
+ * AUTH MODE (COSMOS_AUTH_MODE, src/config/env.ts): 'key' (default) or 'aad'. Purely additive -- an
+ * unset/'key' deployment is byte-for-byte today's behavior; 'aad' is the Phase 6 migration off the
+ * Cosmos master key onto the gateway Container App's managed identity (granted "Cosmos DB Built-in
+ * Data Contributor" on the account), a prerequisite to later disabling local (key) auth.
+ *
+ * key mode auth (do NOT "tidy" the casing — it is load-bearing, see agentstate.test.ts):
  *   stringToSign = verb.toLowerCase() + "\n" + resType.toLowerCase() + "\n" +
  *                  resourceLink + "\n" + date.toLowerCase() + "\n" + "" + "\n"
  *   sig = base64( HMAC-SHA256( base64decode(masterKey), stringToSign ) )
  *   Authorization = urlencode("type=master&ver=1.0&sig=" + sig)
  * resourceLink keeps its original case (db/container/doc ids are case-sensitive).
  *
- * Inert without creds: if COSMOS_ENDPOINT/COSMOS_KEY are unset, isConfigured() is false and the
- * agent-state tools return a clear "not configured" result instead of throwing.
+ * aad mode auth: no HMAC, no string-to-sign -- the whole Authorization value IS the bearer token.
+ *   Authorization = urlencode("type=aad&ver=1.0&sig=" + <raw AAD access token>)
+ * Confirmed against Microsoft's "Access Control on Azure Cosmos DB Resources" REST reference
+ * (learn.microsoft.com/en-us/rest/api/cosmos-db/access-control-on-cosmosdb-resources): "{hashsignature}
+ * denotes the hashed token signature OR the oauth token if you are using Azure Cosmos DB RBAC" -- sig
+ * is the RAW bearer token (no "Bearer " prefix), encoded exactly like the master token. The token is
+ * minted via miToken() (src/azure/arm-client.ts) against the resource `https://cosmos.azure.com`, the
+ * same first-party App ID URI the @azure/cosmos SDK's own AAD_DEFAULT_SCOPE
+ * (`https://cosmos.azure.com/.default`) resolves to for ANY Cosmos account the caller's managed
+ * identity has RBAC on -- not a per-account `https://<account>.documents.azure.com` audience.
+ * x-ms-version stays 2018-12-31 in both modes (community-confirmed working for the aad token type
+ * despite some docs suggesting 2021-03-15 is required).
+ *
+ * Inert without creds: if COSMOS_ENDPOINT is unset, isConfigured() is false and the agent-state
+ * tools return a clear "not configured" result instead of throwing. In key mode COSMOS_KEY is also
+ * required (exactly as before this flag existed); in aad mode it is not -- auth comes from the
+ * managed identity instead.
  */
 
 import crypto from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { miToken } from '../azure/arm-client.js';
 
 /** Cosmos data-plane REST api-version. Supports docs CRUD + cross-partition query. */
 const COSMOS_API_VERSION = '2018-12-31';
+
+type CosmosAuthMode = 'key' | 'aad';
 
 interface CosmosConfig {
   endpoint: string;
   key: string;
   db: string;
+  authMode: CosmosAuthMode;
 }
 
 function cfg(): CosmosConfig | null {
@@ -36,15 +60,22 @@ function cfg(): CosmosConfig | null {
   const endpoint = env.COSMOS_ENDPOINT;
   const key = env.COSMOS_KEY;
   const db = env.COSMOS_DB;
-  if (!endpoint || !key) return null;
-  return { endpoint: endpoint.replace(/\/+$/, ''), key, db };
+  const authMode = env.COSMOS_AUTH_MODE;
+  if (!endpoint) return null;
+  // key mode (default): COSMOS_KEY is required, EXACTLY the same gate as before this flag existed
+  // (the old check was `if (!endpoint || !key) return null`, which for every deployment that
+  // leaves COSMOS_AUTH_MODE unset -- i.e. authMode is always 'key' -- is identical to this).
+  // aad mode: auth comes from the managed identity, so COSMOS_KEY is NOT required.
+  if (authMode === 'key' && !key) return null;
+  return { endpoint: endpoint.replace(/\/+$/, ''), key, db, authMode };
 }
 
 export function isConfigured(): boolean {
   return cfg() !== null;
 }
 
-/** The Cosmos master-key Authorization header value (URL-encoded token). Pure + testable. */
+/** The Cosmos master-key Authorization header value (URL-encoded token). Pure + testable.
+ *  key-mode ONLY -- unused and untouched in aad mode, see aadAuthToken() below. */
 export function authToken(
   verb: string,
   resType: string,
@@ -58,6 +89,42 @@ export function authToken(
     .update(stringToSign, 'utf8')
     .digest('base64');
   return encodeURIComponent(`type=master&ver=1.0&sig=${sig}`);
+}
+
+/** The Cosmos-for-NoSQL AAD Authorization header value (URL-encoded). Pure + testable in isolation
+ *  from the token fetch: `sig` is the RAW AAD access token (no HMAC, no "Bearer " prefix), encoded
+ *  exactly like the master-key token. See the file header for the Microsoft-docs citation. */
+export function aadAuthToken(accessToken: string): string {
+  return encodeURIComponent(`type=aad&ver=1.0&sig=${accessToken}`);
+}
+
+/** The well-known first-party Cosmos DB resource / App ID URI (see file header). Passed bare -- no
+ *  `/.default` suffix, no trailing slash -- because miToken() talks to the legacy IDENTITY_ENDPOINT
+ *  `resource=` query-parameter token endpoint (api-version 2019-08-01), not MSAL's `scope=`; this is
+ *  the same convention arm-client.ts already uses for ARM_RESOURCE/LOGS_RESOURCE. */
+const COSMOS_AAD_RESOURCE = 'https://cosmos.azure.com';
+
+/**
+ * Mint the managed-identity bearer token for the Cosmos data plane (miToken caches it in-memory,
+ * refreshing shortly before expiry -- see arm-client.ts's miToken; one token serves every request
+ * across the process, the same pattern already used for the ARM/Log Analytics/Search audiences).
+ *
+ * Fails LOUD by design: a token-fetch failure throws a clear, Cosmos-labelled error rather than
+ * silently falling back to the master key. During the migration COSMOS_KEY stays enabled as the
+ * deliberate, OPERATOR-DRIVEN fallback (flip COSMOS_AUTH_MODE back to 'key') -- never an automatic
+ * one, which could mask a genuinely broken AAD path (missing RBAC grant, no managed identity
+ * attached, IMDS unreachable) behind an apparently-working deploy.
+ */
+async function cosmosAadToken(): Promise<string> {
+  try {
+    return await miToken(COSMOS_AAD_RESOURCE);
+  } catch (e) {
+    throw new Error(
+      `Cosmos AAD token fetch failed (COSMOS_AUTH_MODE=aad): ${(e as Error).message}. This does NOT ` +
+        `fall back to the master key automatically -- set COSMOS_AUTH_MODE=key (the operational ` +
+        `fallback) once you've diagnosed why the managed-identity token mint is failing.`,
+    );
+  }
 }
 
 export interface CosmosResponse<T = Record<string, unknown>> {
@@ -86,10 +153,19 @@ async function request(
   opts: RequestOptions = {},
 ): Promise<CosmosResponse> {
   const c = cfg();
-  if (!c) throw new Error('Cosmos agent-state not configured (COSMOS_ENDPOINT/COSMOS_KEY unset).');
+  if (!c) {
+    throw new Error(
+      'Cosmos agent-state not configured (COSMOS_ENDPOINT unset, or COSMOS_KEY unset while ' +
+        'COSMOS_AUTH_MODE=key).',
+    );
+  }
   const date = new Date().toUTCString();
+  // aad mode: the whole Authorization value comes from the managed-identity token, no HMAC
+  // involved at all. key mode (default): EXACTLY the pre-existing authToken()/HMAC call, untouched.
+  const authorization =
+    c.authMode === 'aad' ? aadAuthToken(await cosmosAadToken()) : authToken(verb, resType, resourceLink, date, c.key);
   const headers: Record<string, string> = {
-    Authorization: authToken(verb, resType, resourceLink, date, c.key),
+    Authorization: authorization,
     'x-ms-date': date,
     'x-ms-version': COSMOS_API_VERSION,
     Accept: 'application/json',
