@@ -36,6 +36,7 @@ import {
   type CapturePressureOutcome,
 } from '../safety/capture-pressure.js';
 import { evaluateJitDoctrine } from '../safety/jit-doctrine.js';
+import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
 
 // Curated toolset advertised to Claude Chat (DCR) connectors so the model gets a focused, FINDABLE set
 // instead of the full ~850-tool catalog (which Claude truncates, hiding brain_search). Override via
@@ -538,7 +539,8 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         //      the episode write (capture-pressure counting still runs -- a separate, lighter signal).
         if (def.category !== 'read' && !dryRun) {
           if (def.name !== 'checkpoint') recordMutation(callerHash);
-          if (parseAutoJournalMode(process.env.AUTO_JOURNAL_MODE) === 'on') {
+          const journaled = parseAutoJournalMode(process.env.AUTO_JOURNAL_MODE) === 'on';
+          if (journaled) {
             void journalMutation({
               tool: def.name,
               actor: callerAgent,
@@ -547,6 +549,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
               result,
             }).catch(() => undefined);
           }
+          // PHASE 2 SLO TELEMETRY (observe-only): the denominator for the capture-rate SLO
+          // (gw_checkpoint / gw_mutation, computed downstream in PostHog). Fires on the SAME gate as
+          // the auto-journal above -- every successful mutating, non-dry-run call, including
+          // checkpoint itself (checkpoint is excluded only from recordMutation's capture-pressure
+          // counter above, not from this gate). captureGatewayEvent is fire-and-forget, inert unless
+          // POSTHOG_GATEWAYOPS_KEY is set, and never throws -- it cannot add latency or a new failure
+          // mode here.
+          captureGatewayEvent('gw_mutation', { tool: def.name, journaled }, callerHash);
         }
 
         const structured: Record<string, unknown> = {
@@ -576,6 +586,11 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         const jitDoctrine = evaluateJitDoctrine(callerHash, def.name);
         if (jitDoctrine.pitfalls.length) {
           structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
+          // PHASE 2 SLO TELEMETRY (observe-only): feeds the doctrine-coverage SLO -- how often a
+          // bound pitfall actually reached the caller at the point of use. Same fire-and-forget,
+          // never-throws guarantee as the gw_mutation emit above; fires for read AND write tools,
+          // mirroring evaluateJitDoctrine's own unconditional (not category-gated) evaluation.
+          captureGatewayEvent('gw_doctrine_surfaced', { tool: def.name, pitfalls: jitDoctrine.pitfalls.length }, callerHash);
         }
 
         // coldStart.cold here can only mean mode='warn' (enforce+cold already returned above), so this

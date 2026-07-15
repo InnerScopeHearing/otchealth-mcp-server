@@ -30,6 +30,7 @@ import { indexMemoryNow } from '../../azure/search-write.js';
 import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
 import { buildEpisodeText } from '../../safety/journal.js';
 import { recordCheckpoint } from '../../safety/capture-pressure.js';
+import { captureGatewayEvent } from '../../telemetry/gateway-ops.js';
 
 const DISTILL_KINDS = ['fact', 'decision', 'correction', 'pitfall'] as const;
 type DistillKind = (typeof DISTILL_KINDS)[number];
@@ -216,6 +217,13 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         });
         if (episodeId) written.push(episodeId);
         recordCheckpoint(ctx.callerHash);
+
+        // PHASE 2 SLO TELEMETRY (observe-only): the numerator for the capture-rate SLO
+        // (gw_checkpoint / gw_mutation, computed downstream in PostHog). Only reached on a real
+        // (non-dry-run) checkpoint -- the dry_run branch returns early above. captureGatewayEvent is
+        // fire-and-forget, inert unless POSTHOG_GATEWAYOPS_KEY is set, and never throws, so it cannot
+        // add latency or a new failure mode to this response.
+        captureGatewayEvent('gw_checkpoint', { agent: input.agent, written: written.length, distilled }, ctx.callerHash);
 
         return {
           data: { written, distilled, checkpoint: true },
