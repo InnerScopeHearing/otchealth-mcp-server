@@ -28,6 +28,13 @@ import {
   type GroundingHint,
 } from '../safety/auto-guard.js';
 import { evaluateColdStart, markWoken, COLD_START_MESSAGE } from '../safety/cold-start.js';
+import { journalMutation, parseAutoJournalMode } from '../safety/journal.js';
+import {
+  recordMutation,
+  evaluateCapturePressure,
+  buildCaptureNudgeMessage,
+  type CapturePressureOutcome,
+} from '../safety/capture-pressure.js';
 
 // Curated toolset advertised to Claude Chat (DCR) connectors so the model gets a focused, FINDABLE set
 // instead of the full ~850-tool catalog (which Claude truncates, hiding brain_search). Override via
@@ -41,7 +48,7 @@ function connectorToolset(env: Env): Set<string> {
         'brain_search','web_search','kb_search','kb_search_privileged',
         'legal_blob_list','legal_blob_get','legal_blob_put',
         'graph_drive_list','graph_drive_download','graph_drive_upload',
-        'wake','memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
+        'wake','checkpoint','memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
         'llm_azure','catalog_list_tools','catalog_master','gateway_fetch_result',
         'task_list','task_get','task_create','task_claim','task_update','task_complete','task_heartbeat','inbox_read','agent_dispatch',
         'posthog_query_hogql','posthog_insight_list',
@@ -511,6 +518,36 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (payload.audit?.after !== undefined) endLog.after = payload.audit.after;
         logToolEnd(endLog);
 
+        // CAPTURE PLANE (Phase 2): a successful MUTATING, non-dry-run call -- the SAME gate the
+        // cold-start block above already computed (coldStart is only evaluated for
+        // def.category !== 'read'; dryRun is checked here explicitly since cold-start doesn't
+        // gate on it). Two independent, fail-open-by-construction effects:
+        //  (1) recordMutation bumps this caller's capture-pressure counter (safety/capture-pressure.ts).
+        //      Never throws. SKIPPED for the checkpoint tool itself: checkpoint's own handler
+        //      already called recordCheckpoint (which resets mutations to 0) before returning, so
+        //      counting the checkpoint call as "one more mutation" here would immediately re-inflate
+        //      the counter it just reset, contradicting checkpoint's own "capture pressure reset"
+        //      response in the SAME round trip. Mirrors the def.name === 'wake' special-case above
+        //      for markWoken (a tool whose success has a side effect on this same safety plane).
+        //  (2) journalMutation fires a best-effort "episode" memory of this call (safety/journal.ts),
+        //      including for checkpoint itself (a "cto called checkpoint" episode is still useful
+        //      signal, unlike the mutation count above). It is NOT awaited -- fired with void +
+        //      .catch() so a Cosmos/Search outage can never add latency to, or fail, this response.
+        //      Reads and dry-runs are never journaled or counted. AUTO_JOURNAL_MODE=off skips only
+        //      the episode write (capture-pressure counting still runs -- a separate, lighter signal).
+        if (def.category !== 'read' && !dryRun) {
+          if (def.name !== 'checkpoint') recordMutation(callerHash);
+          if (parseAutoJournalMode(process.env.AUTO_JOURNAL_MODE) === 'on') {
+            void journalMutation({
+              tool: def.name,
+              actor: callerAgent,
+              correlationId,
+              args: handlerInput,
+              result,
+            }).catch(() => undefined);
+          }
+        }
+
         const structured: Record<string, unknown> = {
           result,
           compliance_warning: warning,
@@ -528,10 +565,30 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // coldStart.cold here can only mean mode='warn' (enforce+cold already returned above), so this
         // is always the non-fatal nudge, never a refusal. Surfaced in BOTH the structured content and
         // the text block (mirrors how compliance_warning is prepended) so it is maximally visible.
+        let capturePressure: CapturePressureOutcome | null = null;
         if (def.category !== 'read') {
           structured.cold_start = { cold: coldStart.cold, blocked: false, mode: coldStart.mode };
+          // CAPTURE-PRESSURE (Phase 2): always surfaced for a mutating call (informational, mirrors
+          // cold_start above) regardless of whether THIS call was journaled -- the counter tracks
+          // mutation VOLUME since the last checkpoint(), not per-call journaling success. Never
+          // touches the mutations/checkpoints counters themselves (only an internal lastNudgeAt
+          // timestamp on a live nudge), so it is safe to call even on a dry_run preview. Fail-open
+          // by construction; never throws (safety/capture-pressure.ts).
+          capturePressure = evaluateCapturePressure(callerHash);
+          structured.capture_pressure = {
+            mutations: capturePressure.mutations,
+            threshold: capturePressure.threshold,
+            mode: capturePressure.mode,
+          };
         }
-        let text = buildTextContent({ ...payload, data: result }, warning, coldStart.cold ? COLD_START_MESSAGE : undefined);
+        const capturePlanePrelude: string[] = [];
+        if (coldStart.cold) capturePlanePrelude.push(COLD_START_MESSAGE);
+        if (capturePressure?.nudge) capturePlanePrelude.push(buildCaptureNudgeMessage(capturePressure.mutations));
+        let text = buildTextContent(
+          { ...payload, data: result },
+          warning,
+          capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
+        );
 
         // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
         // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).

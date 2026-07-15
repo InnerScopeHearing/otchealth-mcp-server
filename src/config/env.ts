@@ -229,6 +229,25 @@ const EnvSchema = z.object({
   // the handler runs. 'off' is a full no-op. Reads are NEVER gated. Fail-open end to end: an
   // unavailable bearer identity, or any internal error, always ALLOWS the call.
 
+  // CAPTURE PLANE (Phase 2, src/safety/journal.ts + src/safety/capture-pressure.ts +
+  // src/tools/memory/checkpoint.ts). THREE env flags, all NOT in this schema on purpose, same
+  // reasoning as COLD_START_MODE above -- read fresh from process.env per call so they can be
+  // flipped without a redeploy:
+  //   AUTO_JOURNAL_MODE          off | on (default)
+  // Every SUCCESSFUL, MUTATING, non-dry-run tool call fires a best-effort "episode" memory (fired
+  // WITHOUT being awaited, so it can never add latency or fail the response it rides on). 'off'
+  // skips the episode write entirely; capture-pressure counting (below) still runs regardless.
+  //   CAPTURE_MODE               off | warn (default)
+  //   CAPTURE_PRESSURE_THRESHOLD a positive integer (default 10)
+  // Tracks, per bearer identity (a separate in-memory Map from cold-start's, no TTL, no new
+  // store), how many mutating tool calls have happened since the caller last called checkpoint().
+  // 'warn' attaches a non-fatal CAPTURE_PRESSURE nudge once the threshold is crossed, urging a
+  // checkpoint() call; there is no 'enforce' mode (this is always advisory). 'off' is a full
+  // no-op. Reads and dry-runs are NEVER counted. Fail-open end to end: an unavailable bearer
+  // identity, or any internal error, never affects the call. Both the episode-write path and the
+  // counter are PER-REPLICA (the gateway runs 2-10 replicas) -- acceptable for a soft nudge; the
+  // durable signal is the episodes themselves in Cosmos, not the in-memory counter.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
