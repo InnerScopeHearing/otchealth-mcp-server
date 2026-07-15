@@ -39,6 +39,13 @@
  *    is DROPPED from results. Before this, retrieval ignored `supersedes` entirely and served the
  *    retracted 20260713-015 at RANK #1, above the very correction that superseded it. See
  *    memory/retractions.ts. A ledger that cannot forget is not a memory -- it is a rumour mill.
+ *  - ROOM HYGIENE (2026-07-15): operational exhaust (status/episode/heartbeat/digest-style ledger
+ *    chatter — see memory/room-hygiene.ts) is EXCLUDED by default from every room that carries a
+ *    `type` discriminator (memory-exec, finance-cfo-memory, legal-personal-memory). A high-volume
+ *    "what I'm working on" status entry can otherwise dilute or outrank a real fact/decision in the
+ *    fused results. Pass `include_ops:true` to see it (e.g. "what has the CFO been doing lately").
+ *    Query-side only -- no indexing/data change. Fails open: a filter problem on a given room falls
+ *    back to an unfiltered query for that room rather than breaking the room.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -115,7 +122,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal.',
+          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default — pass include_ops=true to see it. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -125,6 +132,12 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         query: z.string().min(1).describe('Natural-language query.'),
         top: z.number().int().min(1).max(25).optional().describe('Max results (default 8).'),
         domain: z.string().optional().describe('Optional domain filter: exec|commons|ops|finance|legal.'),
+        include_ops: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include operational exhaust (status/episode/heartbeat/digest-style ledger chatter) that is EXCLUDED by default. Default false. Set true for questions ABOUT the operational chatter itself, e.g. "what has the CFO been working on."',
+          ),
       },
       outputShape: {
         matches: z.array(z.unknown()),
@@ -133,20 +146,22 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         rooms_searched: z.array(z.string()),
         rooms_failed: z.array(z.string()).optional(),
         retracted_dropped: z.array(z.string()).optional(),
+        include_ops: z.boolean(),
         error: z.string().optional(),
       },
       handler: async (input, ctx) => {
         const top = input.top ?? 8;
+        const includeOps = input.include_ops ?? false;
         if (!searchConfigured()) {
           return {
-            data: { matches: [], count: 0, mode: 'unconfigured', rooms_searched: [] },
+            data: { matches: [], count: 0, mode: 'unconfigured', rooms_searched: [], include_ops: includeOps },
             summary: 'AI Search not configured.',
           };
         }
         const rooms = roomsFor(ctx.callerAgent, input.domain);
         if (rooms.length === 0) {
           return {
-            data: { matches: [], count: 0, mode: 'no-rooms', rooms_searched: [] },
+            data: { matches: [], count: 0, mode: 'no-rooms', rooms_searched: [], include_ops: includeOps },
             summary: `No readable rooms for domain "${input.domain}".`,
           };
         }
@@ -154,7 +169,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         // Over-fetch per room so RRF has depth to fuse from, then trim to `top`.
         const perRoomTop = Math.min(25, Math.max(top, 10));
         const settled = await Promise.allSettled(
-          rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop) })),
+          rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps }) })),
         );
 
         const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown }> }> = [];
@@ -183,6 +198,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
           count: matches.length,
           mode: 'federated-rrf',
           rooms_searched: searched,
+          include_ops: includeOps,
         };
         if (failed.length) data.rooms_failed = failed;
         // Disclose retractions rather than silently vanishing them -- an agent should be able to SEE
@@ -193,6 +209,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
           data,
           summary:
             `${matches.length} match(es) for "${input.query}" — federated live across ${searched.length} room(s): ${searched.join(', ')}.` +
+            (includeOps ? ' Operational chatter (status/episode/heartbeat/digest) INCLUDED.' : '') +
             (dropped.length ? ` Dropped ${dropped.length} RETRACTED belief(s): ${dropped.join(', ')}.` : '') +
             (failed.length ? ` ${failed.length} room(s) unreachable: ${failed.join(', ')}.` : ''),
         };
