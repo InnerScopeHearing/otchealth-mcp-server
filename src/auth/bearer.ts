@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked } from './revocation-store.js';
-import { isValidIssuedAccessToken, issuedAgent, issuedClientId } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent, issuedClientId, baseUrlOf } from '../server/oauth.js';
 import { agentFromDescopeToken } from './descope.js';
 
 const env = loadEnv();
@@ -101,6 +101,14 @@ export async function requireConnectorAuth(
         ip: request.ip,
       },
       'connector auth rejected',
+    );
+    // RFC 9728: point spec-compliant MCP clients at the protected-resource metadata endpoint so they
+    // can discover the authorization server instead of failing silently on a bare 401. Uses the same
+    // base-url derivation as the OAuth metadata routes (oauth.ts's baseUrlOf), so this always names
+    // the correct host whether PUBLIC_BASE_URL is set or derived from the request.
+    reply.header(
+      'WWW-Authenticate',
+      `Bearer resource_metadata="${baseUrlOf(request)}/.well-known/oauth-protected-resource"`,
     );
     await reply.code(401).send({
       error: 'unauthorized',

@@ -66,10 +66,20 @@ const EnvSchema = z.object({
   OAUTH_CLIENTS: z.string().optional().default(''),
   // Agent identity for the single OAUTH_CLIENT_ID connection (the original Hyperagent CTO connector).
   OAUTH_DEFAULT_AGENT: z.string().optional().default(''),
-  // Default ring lane bound to Dynamic-Client-Registration (Claude connector) clients.
+  // DEPRECATED / NO-OP as of the Phase 6 connector-ring closure (2026-07-15): public self-registered
+  // DCR (Claude connector) clients are now hard-bound to the non-privileged 'external-read' lane in
+  // server/oauth.ts regardless of connector name, so this override is no longer consumed by any code.
+  // Kept in the schema so an existing deployment that still sets it does not fail env validation.
   OAUTH_DCR_DEFAULT_AGENT: z.string().optional().default(''),
-  // Curated csv toolset advertised to Claude Chat DCR connector clients (empty -> built-in default).
+  // Curated csv toolset advertised to Claude Chat DCR connector clients whose lane is a SHIP lane
+  // (cto/developer/EXEC_RING; empty -> built-in default CTO_SHIP_LANE_TOOLSET, tools/registry.ts).
   CONNECTOR_TOOLSET: z.string().optional().default(''),
+  // Curated csv toolset advertised to every OTHER connector lane (an unrecognized/self-named
+  // connector, an empty caller lane, or any lane not in the ship set; empty -> built-in default
+  // EXTERNAL_READONLY_TOOLSET, tools/registry.ts). SECURITY-CRITICAL: this is what an external,
+  // unauthorized connector sees -- keep it a minimal, non-privileged read set. See
+  // tools/registry.connector-lanes.test.ts.
+  EXTERNAL_READONLY_TOOLSET: z.string().optional().default(''),
 
   // Descope Agentic Identity Hub -- OPTIONAL parallel credential path for approved pilot lanes
   // (Phase 2, 2026-07-08). Inert when DESCOPE_PROJECT_ID is unset -- does not touch or replace
