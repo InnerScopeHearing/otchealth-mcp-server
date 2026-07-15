@@ -120,6 +120,10 @@ import { registerBrainSearch } from './kb/brain-search.js';
 import { registerWebSearch } from './web/web-search.js';
 import { registerKbSearchPrivileged } from './kb/search-privileged.js';
 
+// Phase 6 — OpenAI ChatGPT / Deep Research connector contract (search + fetch, non-privileged only)
+import { registerOpenAiSearch } from './kb/openai-search.js';
+import { registerOpenAiFetch } from './kb/openai-fetch.js';
+
 // Wave A+ — llm_azure commodity path (credit-funded gpt-4.1, tiered): the cost-protocol escape hatch
 import { registerLlmAzure } from './llm/azure.js';
 import { registerGatewayFetchResult } from './gateway-fetch-result.js';
@@ -1049,6 +1053,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerBrainSearch(server, callerHash);
   registerWebSearch(server, callerHash);
   registerKbSearchPrivileged(server, callerHash);
+  // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. NON-PRIVILEGED rooms only —
+  // see kb/openai-search.ts + kb/openai-fetch.ts headers for the ring-safety argument.
+  registerOpenAiSearch(server, callerHash);
+  registerOpenAiFetch(server, callerHash);
   registerLlmAzure(server, callerHash);
   registerGatewayFetchResult(server, callerHash); // JIT tool-payload retrieval companion (read)
 

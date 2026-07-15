@@ -188,6 +188,21 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     ring: 'non-phi', auth: 'GITHUB_TOKEN', status: 'wired',
     available: [],
   },
+  // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. The tool names `search`/`fetch`
+  // carry no prefix (a fixed third-party naming requirement), so deriveService() buckets each as
+  // its own singleton service rather than a shared "openai" prefix group.
+  search: {
+    description: 'OpenAI ChatGPT / Deep Research connector: hybrid search over the non-privileged company brain (memory-exec, commons-company-journal only). See kb/openai-search.ts.',
+    ring: 'non-phi', auth: 'AZURE_SEARCH_ENDPOINT / AZURE_SEARCH_QUERY_KEY', status: 'wired',
+    available: [],
+    rule: 'Room selection is hard-capped to the non-privileged allow-set for every caller, including cto/exec — stricter than brain_search on purpose. OPENAI_SEARCH_MODE=off disables it.',
+  },
+  fetch: {
+    description: 'OpenAI ChatGPT / Deep Research connector: resolve a search() citation id to full text. See kb/openai-fetch.ts.',
+    ring: 'non-phi', auth: 'AZURE_SEARCH_ENDPOINT / AZURE_SEARCH_QUERY_KEY', status: 'wired',
+    available: [],
+    rule: 'Re-derives the room from the id and re-checks it against the non-privileged allow-set on every call; never trusts the id. OPENAI_SEARCH_MODE=off disables it.',
+  },
 };
 
 export interface ServiceListing {

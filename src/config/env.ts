@@ -302,6 +302,18 @@ const EnvSchema = z.object({
   // ever throwing or affecting the caller. Standalone in this pass -- NOT yet wired into the shared
   // hot mutation path (registry.ts) the way jit-doctrine is; that is a documented fast-follow.
 
+  // OPENAI CONNECTOR CONTRACT (Phase 6, src/tools/kb/openai-search.ts + openai-fetch.ts). Also NOT
+  // in this schema on purpose, same reasoning as INCIDENT_MATCH_MODE/DEEP_RETRIEVAL_MODE above --
+  // read fresh from process.env per call so it can be flipped without a redeploy:
+  //   OPENAI_SEARCH_MODE  off | on (default)
+  // Gates the `search` + `fetch` tool pair (the fixed, no-prefix tool names the OpenAI ChatGPT /
+  // Deep Research MCP connector contract requires). 'off' makes both tools return an inert,
+  // clearly-labeled disabled response with no Azure Search call at all. This is a SHARED switch --
+  // fetch.ts imports and reads the SAME parser search.ts exports, so the pair is one on/off unit,
+  // never independently toggled (no fetch-without-search half state). Ring-safety (never a
+  // privileged room; fetch re-derives + re-checks the room from the id on every call) is NOT gated
+  // by this switch and cannot be turned off by it -- see those files' headers.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
