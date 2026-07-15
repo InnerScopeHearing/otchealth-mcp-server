@@ -204,3 +204,125 @@ export async function hybridSearch(
   matches = filterExhaustHits(matches, includeOps);
   return { matches, mode: vector ? 'hybrid+semantic' : 'keyword' };
 }
+
+export interface FetchedDocument {
+  /** The doc key as understood within this room (chunked rooms: the parent identifier, i.e. the
+   *  same value hybridSearch cites as `id` for a chunked hit — see the CHUNKED-room note below). */
+  key: string;
+  title?: string;
+  text: string;
+  path?: string;
+  /** 'direct' = flat-room GET-by-key. 'reassembled' = chunked-room chunks concatenated in order. */
+  mode: 'direct' | 'reassembled';
+}
+
+/** Recover the numeric suffix of a `parentKey#N` chunk_id for ordering reassembled text. Missing/
+ *  malformed suffixes sort first (0) rather than throwing — a best-effort order, never a hard fail. */
+function chunkOrdinal(chunkId: unknown): number {
+  const s = typeof chunkId === 'string' ? chunkId : '';
+  const m = s.match(/#(\d+)$/);
+  return m ? Number.parseInt(m[1], 10) : 0;
+}
+
+/**
+ * Fetch ONE document by its room-scoped key — the get-by-key companion to hybridSearch's ranked
+ * query, added for the OpenAI connector's `fetch` tool (src/tools/kb/openai-fetch.ts): resolve a
+ * citation id into full text, rather than searching for one.
+ *
+ * FLAT rooms: `key` IS the index's real document key (the same value hybridSearch surfaces as
+ * `id`), so this is a direct `GET /indexes/{index}/docs/{key}`.
+ *
+ * CHUNKED rooms (see isChunkedRoom): the index's real per-row key is `chunk_id` (one row per
+ * CHUNK of a source document), but the "id" hybridSearch/brain_search cite for a chunked hit is the
+ * PARENT identifier (parent_id, falling back to path/id/chunk_id — see hybridSearch's `_parent`
+ * derivation above). A direct GET using that parent identifier as the key would 404 (it is not the
+ * index's key field), so this reassembles the parent's text instead: query every chunk whose
+ * parent_id matches `key`, order by chunk ordinal, and concatenate. Tries an exact server-side
+ * `$filter` first (correct + cheap); on a 400 (parent_id not filterable on some room, or any other
+ * filter rejection) or a thrown network error, falls back ONCE to a keyword search restricted to
+ * parent_id/path with a client-side EXACT-match check on the results — approximate but never breaks
+ * the room, and the exact-match check means a loose tokenized match can never leak an unrelated
+ * document's chunks under this key. Mirrors hybridSearch's own try-filtered-then-fallback shape.
+ *
+ * Returns null when unconfigured, `key` is empty, or the document genuinely does not exist (404 /
+ * no matching chunks / empty reassembled text). Throws only on a real transport/server error that
+ * survives the one fallback attempt (mirrors hybridSearch's own contract: a filter problem never
+ * throws, a real outage does).
+ */
+export async function getDocumentByKey(index: string, key: string): Promise<FetchedDocument | null> {
+  const e = loadEnv();
+  const ep = (e.AZURE_SEARCH_ENDPOINT || '').replace(/\/+$/, '');
+  const searchKey = e.AZURE_SEARCH_QUERY_KEY || '';
+  if (!ep || !searchKey || !key) return null;
+
+  if (isChunkedRoom(index)) {
+    return getChunkedDocument(ep, searchKey, index, key);
+  }
+
+  const r = await fetchWithBudget(
+    `${ep}/indexes/${index}/docs/${encodeURIComponent(key)}?api-version=${API_VERSION}`,
+    { method: 'GET', headers: { 'api-key': searchKey } },
+  );
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`getDocumentByKey ${r.status}`);
+  const doc = (await r.json()) as Record<string, unknown>;
+  return {
+    key,
+    title: typeof doc['title'] === 'string' ? (doc['title'] as string) : undefined,
+    text: pickText(doc),
+    path: typeof doc['path'] === 'string' ? (doc['path'] as string) : undefined,
+    mode: 'direct',
+  };
+}
+
+async function getChunkedDocument(
+  ep: string,
+  searchKey: string,
+  index: string,
+  key: string,
+): Promise<FetchedDocument | null> {
+  const select = 'chunk_id,parent_id,title,path,chunk';
+  const doSearch = (body: Record<string, unknown>) =>
+    fetchWithBudget(`${ep}/indexes/${index}/docs/search?api-version=${API_VERSION}`, {
+      method: 'POST',
+      headers: { 'api-key': searchKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  const escaped = key.replace(/'/g, "''");
+  const primaryBody: Record<string, unknown> = { search: '*', filter: `parent_id eq '${escaped}'`, select, top: 50 };
+  // Approximate fallback when the exact $filter itself is rejected: a plain keyword search
+  // restricted to parent_id/path. The client-side EXACT match below still gates what survives.
+  const fallbackBody: Record<string, unknown> = { search: key, searchFields: 'parent_id,path', queryType: 'simple', select, top: 50 };
+
+  let r: Response;
+  let usedFallback = false;
+  try {
+    r = await doSearch(primaryBody);
+    if (r.status === 400) {
+      r = await doSearch(fallbackBody);
+      usedFallback = true;
+    }
+  } catch {
+    r = await doSearch(fallbackBody);
+    usedFallback = true;
+  }
+  if (!r.ok) throw new Error(`getDocumentByKey ${r.status}`);
+  const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
+  let rows = j.value || [];
+  if (usedFallback) {
+    rows = rows.filter((d) => String(d['parent_id'] ?? '') === key || String(d['path'] ?? '') === key);
+  }
+  if (!rows.length) return null;
+  rows.sort((a, b) => chunkOrdinal(a['chunk_id']) - chunkOrdinal(b['chunk_id']));
+  const text = rows.map((d) => (typeof d['chunk'] === 'string' ? d['chunk'] : '')).filter(Boolean).join('\n\n');
+  if (!text) return null;
+  const first = rows[0];
+  return {
+    key,
+    title: typeof first['title'] === 'string' ? (first['title'] as string) : undefined,
+    text,
+    path: typeof first['path'] === 'string' ? (first['path'] as string) : undefined,
+    mode: 'reassembled',
+  };
+}
