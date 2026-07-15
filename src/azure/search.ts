@@ -58,6 +58,17 @@ export interface HybridSearchOptions {
   /** Include operational exhaust (status/episode/heartbeat/digest chatter). Default: unchanged
    *  (no filtering) when `opts` itself is omitted — see the file header. */
   includeOps?: boolean;
+  /**
+   * Raw OData $filter override, e.g. "type eq 'pitfall' or type eq 'correction'". When set, this
+   * REPLACES the room-hygiene exhaust filter entirely (`includeOps` is ignored) -- the caller is
+   * asking for a specific, precise slice of the room (e.g. incident-match's pitfall/correction-only
+   * recall query), not "every knowledge type except operational exhaust". Still governed by the
+   * SAME fail-open retry as the exhaust filter below: a 400 caused by this filter (e.g. queried
+   * against a room with no `type` field at all) falls back to a plain, filter-free keyword query
+   * exactly like every other filter path here. Ignored for chunked doc rooms (no `type` field;
+   * same reasoning as the exhaust filter skip below).
+   */
+  filter?: string;
 }
 
 function pickText(doc: Record<string, unknown>): string {
@@ -107,7 +118,8 @@ export async function hybridSearch(
   // to keyword-only, silently dropping vector+semantic recall. Skip the filter for chunked rooms.
   // (Pure string build — cannot throw. Flat rooms with no `type` field still 400 and fall through the
   // fail-open retry below to a filter-free query, exactly as before.)
-  const filter = includeOps || chunked ? undefined : buildExhaustFilterClause('type');
+  // opts.filter (when present) takes precedence over the exhaust clause -- see HybridSearchOptions.
+  const filter = chunked ? undefined : opts?.filter ?? (includeOps ? undefined : buildExhaustFilterClause('type'));
 
   // Chunked rooms return N chunks per parent doc; over-fetch so post-dedup we can still surface `top`
   // distinct parents. Flat rooms fetch exactly `top` (unchanged).

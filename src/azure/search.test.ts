@@ -348,3 +348,48 @@ test('hybridSearch (flat room): still uses contentVector, no select, exact `top`
     },
   );
 });
+
+// --- behavior 5: opts.filter, a raw $filter override (added for incident-match's pitfall/correction-only query) ---
+
+test('hybridSearch: opts.filter is sent verbatim, overriding the room-hygiene exhaust filter entirely', async () => {
+  let capturedBody: Record<string, unknown> | undefined;
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        capturedBody = init?.body ? JSON.parse(init.body as string) : undefined;
+        return new Response(JSON.stringify({ value: [MIXED_DOCS[0]] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      // includeOps:false would normally build the exhaust NOT-clause; opts.filter must win instead.
+      const res = await hybridSearch('memory-exec', 'query', 5, {
+        includeOps: false,
+        filter: "type eq 'pitfall' or type eq 'correction'",
+      });
+      assert.ok(res);
+      assert.equal(capturedBody?.filter, "type eq 'pitfall' or type eq 'correction'");
+    },
+  );
+});
+
+test('hybridSearch: opts.filter is IGNORED for chunked rooms (no `type` field to filter on)', async () => {
+  let capturedBody: Record<string, unknown> | undefined;
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        capturedBody = init?.body ? JSON.parse(init.body as string) : undefined;
+        return new Response(JSON.stringify({ value: [] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      await hybridSearch('legal-company', 'query', 5, { filter: "type eq 'pitfall'" });
+      assert.equal(capturedBody?.filter, undefined, 'chunked rooms never send a type filter, even an explicit override');
+    },
+  );
+});
