@@ -263,6 +263,19 @@ const EnvSchema = z.object({
   // Fail-open end to end: an unrecognized tool, an unavailable bearer identity, or any internal
   // error, always returns no doctrine rather than ever throwing or affecting the call.
 
+  // DEEP RETRIEVAL MODE (Phase 4A, src/memory/deep-retrieval.ts). Also NOT in this schema on
+  // purpose, same reasoning as COLD_START_MODE/JIT_DOCTRINE_MODE above -- read fresh from
+  // process.env per call (in src/tools/kb/brain-search.ts's handler) so it can be flipped without
+  // a redeploy:
+  //   DEEP_RETRIEVAL_MODE  off | on (default)
+  // Gates brain_search's mode:'deep' path. 'on' (the default) runs the full agentic pipeline (an
+  // LLM query-plan -> multi-room, multi-subquery retrieval -> ONE bounded evaluate-refine round if
+  // the pool looks thin -> a cited LLM synthesis). 'off' makes mode:'deep' behave EXACTLY like
+  // mode:'fast' -- deepRetrieve() is not even called -- an instant, zero-extra-Foundry-cost rollback
+  // if the agentic path misbehaves or Foundry capacity needs to be reserved for higher-priority
+  // callers. deepRetrieve() is ALSO fail-open end to end regardless of this flag (see its own file
+  // header): this switch is an operator kill-switch, not the only safety net.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
