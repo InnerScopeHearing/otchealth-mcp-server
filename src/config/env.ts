@@ -169,6 +169,15 @@ const EnvSchema = z.object({
   COSMOS_ENDPOINT: z.string().optional().default(''),
   COSMOS_KEY: z.string().optional().default(''),
   COSMOS_DB: z.string().optional().default('agent-state'),
+  // Auth mode for the Cosmos data-plane client (src/agentstate/cosmos.ts). 'key' (default) is
+  // TODAY'S behavior byte-for-byte: master-key HMAC auth via COSMOS_KEY. 'aad' switches to an
+  // Azure AD bearer token minted from the gateway Container App's managed identity (granted
+  // "Cosmos DB Built-in Data Contributor" on the account) -- the Phase 6 migration off the Cosmos
+  // master key, a prerequisite to later disabling local (key) auth on the account. Purely
+  // additive: this var unset (or explicitly 'key') means ZERO change to any deployed behavior.
+  // See cosmos.ts's file header for the aad Authorization header format + the Microsoft-docs
+  // citation for it.
+  COSMOS_AUTH_MODE: z.enum(['key', 'aad']).default('key'),
 
   // Agent inbox (Azure Storage Queue). Inert without these. Durable cross-agent handoff delivery.
   AGENT_INBOX_STORAGE_ACCOUNT: z.string().optional().default(''),
