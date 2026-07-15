@@ -135,8 +135,11 @@ export async function hybridSearch(
       body: JSON.stringify(b),
     });
 
+  // The keyword fail-open fallback carries NO select and no vector: if the primary 400 came FROM the
+  // select (naming a field absent on the live index, e.g. a room not yet cut over to the chunked
+  // schema), repeating the select would 400 AGAIN and turn a graceful keyword degradation into a hard
+  // throw. A bare keyword query is always valid on any index shape.
   const fallbackBody: Record<string, unknown> = { search: query, top: fetchTop, queryType: 'simple', searchMode: 'any' };
-  if (chunked) fallbackBody.select = 'chunk_id,parent_id,title,path,chunk';
 
   // FAIL-OPEN: a filter/semantic-ranker problem must never take a room down. A 400 (semantic
   // ranker unsupported on this SKU, OR — when a type-exclusion filter is attached — a room whose
@@ -155,14 +158,16 @@ export async function hybridSearch(
   }
   if (!r.ok) throw new Error(`search ${r.status}`);
   const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
-  const raw = (j.value || []).map((d) => ({
+  const raw = (j.value || []).map((d, i) => ({
     score: (typeof d['@search.rerankerScore'] === 'number' ? d['@search.rerankerScore'] : d['@search.score']) as number | undefined,
     text: pickText(d).slice(0, 1200),
     id: d['id'] ?? d['chunk_id'] ?? d['key'] ?? '',
     type: typeof d['type'] === 'string' ? (d['type'] as string) : undefined,
     path: typeof d['path'] === 'string' ? (d['path'] as string) : undefined,
-    // Dedup key for chunked rooms: the parent document. Flat rooms never dedup (each is its own key).
-    _parent: String(d['parent_id'] ?? d['path'] ?? d['id'] ?? d['chunk_id'] ?? ''),
+    // Dedup key for chunked rooms: the parent document. The `__row${i}` final fallback guarantees a
+    // unique key when a doc has none of parent_id/path/id/chunk_id, so unrelated hits can never merge
+    // onto an empty ''. Flat rooms never dedup (each is its own key).
+    _parent: String(d['parent_id'] ?? d['path'] ?? d['id'] ?? d['chunk_id'] ?? `__row${i}`),
   }));
 
   let hits = raw;

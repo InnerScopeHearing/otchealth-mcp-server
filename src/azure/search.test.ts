@@ -299,6 +299,34 @@ test('hybridSearch (chunked room): over-fetches (top*3, capped at 50) so dedup c
   );
 });
 
+test('FAIL-OPEN (chunked room): a 400 degrades to a BARE keyword query with NO select (regression guard for the fallback-select bug)', async () => {
+  let searchCallCount = 0;
+  const sentBodies: Array<Record<string, unknown>> = [];
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        searchCallCount++;
+        sentBodies.push(init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {});
+        // Simulate a room not yet cut over to the chunked schema: text_vector/select fields absent -> 400.
+        if (searchCallCount === 1) return new Response(JSON.stringify({ error: { message: 'unknown field text_vector' } }), { status: 400 });
+        return new Response(JSON.stringify({ value: CHUNKED_DOCS }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-company', 'contract', 8, { includeOps: false });
+      assert.ok(res, 'a chunked-room 400 must degrade to keyword, never throw');
+      assert.equal(searchCallCount, 2, 'primary + one keyword fallback');
+      assert.equal(sentBodies[1]?.select, undefined, 'the fallback must NOT repeat the select (else it 400s again -> hard throw)');
+      assert.equal(sentBodies[1]?.vectorQueries, undefined, 'the fallback is a bare keyword query');
+      assert.equal(sentBodies[1]?.queryType, 'simple');
+      assert.equal(res!.matches.length, 2, 'dedup still collapses the fallback chunks to their parents');
+    },
+  );
+});
+
 test('hybridSearch (flat room): still uses contentVector, no select, exact `top` — byte-identical to before', async () => {
   let capturedBody: Record<string, unknown> | undefined;
   await withStubbedFetch(
