@@ -3,17 +3,20 @@ import assert from 'node:assert/strict';
 
 // oauth.ts calls loadEnv() at module top level (`const env = loadEnv();`), so it must be imported
 // AFTER the required env vars are set -- dynamic import inside each test, run after before() has
-// populated process.env. Mirrors catalog-warm.test.ts's pattern for the same underlying reason.
+// populated process.env. Mirrors catalog-warm.test.ts's / bearer.test.ts's pattern for the same
+// underlying reason. loadEnv() caches on first call, and node's test runner isolates each test file
+// in its own process, so the env set here is what oauth.ts sees.
 //
-// Pins the Phase 5/6 connector-ring closure (2026-07-15), layer 2: laneFromClientName()'s fallback
-// for an UNRECOGNIZED connector name used to be 'clo' -- a privileged EXEC_RING lane. Any Claude.ai
-// account holder who added this gateway as a custom connector and gave it a name that didn't match
-// any known lane code/alias got a bearer token bound to 'clo', which passed every privileged ring
-// check (kb_search_privileged, legal_blob_*) and (pre-Part-1) saw the full privileged toolset. The
-// fallback now resolves to 'external-read', a non-privileged lane. Known exec aliases (e.g. a
-// connector explicitly named "CFO Finance") are UNCHANGED and still map to their lane -- this test
-// locks that both facts stay true: the unrecognized-name fallback is fixed, and the deliberate
-// aliasing feature for named lanes is not touched by this change.
+// Phase 6 (2026-07-15) -- the ACTUAL fix for the DCR self-mint hole. A self-registered PUBLIC (DCR)
+// client has NO identity proof (no pre-shared secret; PKCE is self-supplied; the auth code is
+// readable off the /authorize 302 redirect), so anyone can complete its flow. Parts 2 + 5 hardened
+// the old name->lane inference (fallback off 'clo', word-boundary matching) but could not make it
+// safe, because the connector NAME is attacker-controlled by construction: naming a connector
+// "Finance Tracker" bound the privileged cfo lane. Part 6 removes the inference entirely -- every
+// public DCR client is hard-bound to the non-privileged 'external-read' lane REGARDLESS of name.
+// These tests are the regression lock for that.
+
+const SIGNING_SECRET = 'd'.repeat(48);
 
 before(() => {
   const required: Record<string, string> = {
@@ -23,76 +26,105 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    // Arm OAuth 2.1 so /register is active (oauthConfigured() needs a signing secret + a client id).
+    OAUTH_TOKEN_SIGNING_SECRET: SIGNING_SECRET,
+    OAUTH_CLIENT_ID: 'confidential-client',
+    OAUTH_CLIENT_SECRET: 'e'.repeat(32),
+    // OAUTH_DEFAULT_AGENT deliberately left unset (defaults to '' -> not privileged), so the startup
+    // guard does not fire during these tests. The guard's own condition is unit-tested via the
+    // exported isPrivilegedDefaultAgent() helper below.
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
-  // Deliberately leave OAUTH_DCR_DEFAULT_AGENT unset so the built-in default ('external-read') is
-  // what gets exercised below, not an operator override.
 });
 
-// NOTE ON TEST-STRING CHOICE: DCR_LANES matches by plain substring (`n.includes(needle)`), so a name
-// containing an ORDINARY ENGLISH WORD that happened to contain a lane needle also matched -- e.g.
-// "My Custom Connector" and "Directory Bot" both contain "cto" (conne-CTO-r, dire-CTO-ry) and used
-// to resolve to 'cto'; "Cloud Sync" contains "clo" (CLOud) and used to resolve to 'clo'. That was a
-// substring-collision hole in the matching algorithm itself; Part 5 (below) CLOSES it by switching
-// to word-boundary (`\b<needle>\b`) matching. The strings below still contain none of the DCR_LANES
-// needles as WHOLE WORDS, so they exercise the fallback path; the dedicated collision cases (words
-// that contain a needle only as a substring) are in the Part-5 block further down.
-test("SAFETY-CRITICAL: an unrecognized connector name defaults to 'external-read', not a privileged lane (THE HOLE this closes)", async () => {
-  const { laneFromClientName } = await import('./oauth.js');
-  assert.equal(laneFromClientName('randostring'), 'external-read');
-  assert.equal(laneFromClientName('Untitled MCP Client'), 'external-read');
-  assert.equal(laneFromClientName('Perplexity Assistant'), 'external-read');
-  assert.equal(laneFromClientName(''), 'external-read');
-});
+const CLAUDE_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
 
-test('known exec aliases in DCR_LANES still map correctly (unchanged, deliberately not touched)', async () => {
-  const { laneFromClientName } = await import('./oauth.js');
-  assert.equal(laneFromClientName('CFO connector'), 'cfo');
-  assert.equal(laneFromClientName('CFO Finance'), 'cfo');
-  assert.equal(laneFromClientName('CTO'), 'cto');
-  assert.equal(laneFromClientName('legal ops'), 'clo');
-  assert.equal(laneFromClientName('clo-personal thread'), 'clo-personal');
-  assert.equal(laneFromClientName('developer seat'), 'developer');
-  assert.equal(laneFromClientName('Compliance Officer'), 'cco');
-  assert.equal(laneFromClientName('Revenue bot'), 'cro');
-});
+// The client_name values a real caller might choose -- from plain-English business phrases that used
+// to collide into a privileged lane, through explicit lane codes, to the empty name. EVERY one must
+// now bind 'external-read'. This is the whole point of Part 6.
+const CLIENT_NAMES = [
+  'Finance Tracker',         // used to -> cfo (contains "finance")
+  'CFO Finance',             // used to -> cfo (explicit code)
+  'Technology Solutions',    // used to -> cto (contains "technology")
+  'Legal Eagle Docs',        // used to -> clo (contains "legal")
+  'clo-personal matter',     // used to -> clo-personal (the most sensitive lane)
+  'OTCHealth CTO Connector', // used to -> cto
+  'My Custom Connector',     // used to -> cto (substring "cto" inside "connector")
+  '',                        // empty name
+];
 
-test('multi-word codes still match before their prefixes (clo-personal before clo, unchanged)', async () => {
-  const { laneFromClientName } = await import('./oauth.js');
-  assert.equal(laneFromClientName('clo-personal'), 'clo-personal');
-  assert.equal(laneFromClientName('clo'), 'clo');
-});
+test('SAFETY-CRITICAL Part 6: POST /register binds external-read REGARDLESS of client_name', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+  const { parseStatelessClient } = await import('../auth/oauth-tokens.js');
 
-// ── Part 5: word-boundary DCR lane matching (closes the substring-collision hole) ──────────────
-// The layer-2 fix moved the FALLBACK off 'clo', but the matcher still used n.includes(needle), so
-// an ordinary connector name containing a lane code as a SUBSTRING resolved to that (often
-// privileged) lane before the fallback ever ran. Virtually every connector name contains
-// "connector" -> "cto", so the fallback almost never fired -- the hole was still wide open. Part 5
-// switches to `\b<needle>\b`, so only a WHOLE-WORD lane code routes to a lane; everything else falls
-// through to the non-privileged 'external-read'. These cases lock that behavior.
+  const app = Fastify();
+  registerOAuthRoutes(app);
 
-test("SAFETY-CRITICAL Part 5: substring-collision names resolve to 'external-read', not a privileged lane", async () => {
-  const { laneFromClientName } = await import('./oauth.js');
-  // Each of these contains a lane code only as an internal substring (no word boundary around it):
-  //   "connector"/"directory"/"factory"/"vector" contain "cto"/"cro" mid-word; "cloud" contains "clo".
-  for (const name of ['My Custom Connector', 'Cloud Sync', 'Directory Bot', 'Factory Assistant', 'Vector Store', 'some random connector']) {
-    assert.equal(laneFromClientName(name), 'external-read', `${name} must fall through to external-read, not a privileged/ship lane`);
+  for (const client_name of CLIENT_NAMES) {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/register',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK], client_name }),
+    });
+    assert.equal(res.statusCode, 201, `/register should succeed for name ${JSON.stringify(client_name)}`);
+    const clientId = res.json().client_id as string;
+    assert.ok(clientId.startsWith('dcr_'), 'a public DCR client_id starts with dcr_');
+    const decoded = parseStatelessClient(clientId, SIGNING_SECRET);
+    assert.ok(decoded, 'the issued client_id must decode + verify against the signing secret');
+    assert.equal(
+      decoded!.agent,
+      'external-read',
+      `client_name ${JSON.stringify(client_name)} must bind external-read, never a privileged/ship lane`,
+    );
   }
+
+  await app.close();
 });
 
-test('Part 5: legitimate whole-word lane codes + role aliases still route correctly', async () => {
-  const { laneFromClientName } = await import('./oauth.js');
-  assert.equal(laneFromClientName('CTO'), 'cto');
-  assert.equal(laneFromClientName('OTCHealth CTO Connector'), 'cto'); // 'cto' as a whole word wins; 'connector' does NOT collide
-  assert.equal(laneFromClientName('CFO Finance'), 'cfo');
-  assert.equal(laneFromClientName('Legal Assistant'), 'clo'); // 'legal' role alias as a whole word
-  assert.equal(laneFromClientName('Technology Bot'), 'cto'); // 'technology' role alias as a whole word
+test('Part 6: /register still validates redirect_uris (missing/empty -> 400, unchanged)', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+
+  const app = Fastify();
+  registerOAuthRoutes(app);
+
+  // Empty redirect_uris is rejected UNCONDITIONALLY (independent of OAUTH_REDIRECT_URIS config),
+  // proving the redirect-validation branch above the lane binding is intact after the Part 6 edit.
+  // (A non-https / non-allow-listed reject depends on OAUTH_REDIRECT_URIS being set, so it is not a
+  // config-independent assertion; the empty-list reject is.)
+  const res = await app.inject({
+    method: 'POST',
+    url: '/register',
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ redirect_uris: [], client_name: 'CFO Finance' }),
+  });
+  assert.equal(res.statusCode, 400, 'empty redirect_uris must be rejected');
+  assert.equal(res.json().error, 'invalid_redirect_uri');
+
+  await app.close();
 });
 
-test('Part 5: clo-personal precedence is PRESERVED under word-boundary matching', async () => {
-  const { laneFromClientName } = await import('./oauth.js');
-  // `\bclo-personal\b` is tested before `\bclo\b` (ordered list), so this resolves to clo-personal,
-  // never to the broader clo lane -- the single most important precedence to keep intact.
-  assert.equal(laneFromClientName('clo-personal matter'), 'clo-personal');
-  assert.equal(laneFromClientName('CLO-PERSONAL divorce file'), 'clo-personal');
+// ── The OAUTH_DEFAULT_AGENT startup guard (reviewer nit) ───────────────────────────────────────
+// isPrivilegedDefaultAgent() is the guard's condition, extracted + exported for a hermetic test
+// (capturing pino output in-process is fiddly and brittle). It gates a loud logger.warn at startup
+// if the static-token lane is ever set to a privileged EXEC_RING lane.
+test('Part 6 guard: isPrivilegedDefaultAgent flags EXEC_RING lanes and clears safe ones', async () => {
+  const { isPrivilegedDefaultAgent } = await import('./oauth.js');
+  const { EXEC_RING } = await import('../tools/kb/search-privileged.js');
+
+  for (const lane of EXEC_RING) {
+    assert.equal(isPrivilegedDefaultAgent(lane), true, `${lane} is privileged and must be flagged`);
+  }
+  // The safe lanes: cto (prod's actual value, NOT in EXEC_RING), the non-privileged floor, developer,
+  // and the empty/absent value must all be CLEAR (guard does not fire).
+  assert.equal(isPrivilegedDefaultAgent('cto'), false, "prod's 'cto' must not trip the guard");
+  assert.equal(isPrivilegedDefaultAgent('external-read'), false);
+  assert.equal(isPrivilegedDefaultAgent('developer'), false);
+  assert.equal(isPrivilegedDefaultAgent(''), false);
+  assert.equal(isPrivilegedDefaultAgent(undefined), false);
+  assert.equal(isPrivilegedDefaultAgent(null), false);
+  // Case-insensitive (env values may be mixed case).
+  assert.equal(isPrivilegedDefaultAgent('CFO'), true);
 });

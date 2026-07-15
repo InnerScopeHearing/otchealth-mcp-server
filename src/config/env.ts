@@ -66,7 +66,10 @@ const EnvSchema = z.object({
   OAUTH_CLIENTS: z.string().optional().default(''),
   // Agent identity for the single OAUTH_CLIENT_ID connection (the original Hyperagent CTO connector).
   OAUTH_DEFAULT_AGENT: z.string().optional().default(''),
-  // Default ring lane bound to Dynamic-Client-Registration (Claude connector) clients.
+  // DEPRECATED / NO-OP as of the Phase 6 connector-ring closure (2026-07-15): public self-registered
+  // DCR (Claude connector) clients are now hard-bound to the non-privileged 'external-read' lane in
+  // server/oauth.ts regardless of connector name, so this override is no longer consumed by any code.
+  // Kept in the schema so an existing deployment that still sets it does not fail env validation.
   OAUTH_DCR_DEFAULT_AGENT: z.string().optional().default(''),
   // Curated csv toolset advertised to Claude Chat DCR connector clients whose lane is a SHIP lane
   // (cto/developer/EXEC_RING; empty -> built-in default CTO_SHIP_LANE_TOOLSET, tools/registry.ts).

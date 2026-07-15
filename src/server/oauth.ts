@@ -33,6 +33,7 @@ import {
   registerStatelessClient,
   parseStatelessClient,
 } from '../auth/oauth-tokens.js';
+import { EXEC_RING } from '../tools/kb/search-privileged.js';
 
 const env = loadEnv();
 
@@ -95,60 +96,43 @@ function allowedRedirect(uri: string): boolean {
   return list.includes(uri);
 }
 
-// Map a Claude-Chat connector's client_name to a gateway ring lane. Ordered so multi-word codes match
-// before their prefixes (clo-personal before clo). Role-word aliases are a convenience; the lane CODE in
-// the name is the reliable path. Unknown -> OAUTH_DCR_DEFAULT_AGENT or 'external-read' (non-privileged).
-const DCR_LANES: Array<[string, string]> = [
-  ['clo-personal', 'clo-personal'], ['clo', 'clo'], ['cfo', 'cfo'], ['coo', 'coo'], ['cpo', 'cpo'],
-  ['cro', 'cro'], ['cco', 'cco'], ['cto', 'cto'], ['developer', 'developer'],
-  ['legal', 'clo'], ['finance', 'cfo'], ['operations', 'coo'], ['product', 'cpo'],
-  ['revenue', 'cro'], ['compliance', 'cco'], ['technology', 'cto'], ['dev', 'developer'],
-];
+// SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15, Part 6 -- the actual fix): there is
+// intentionally NO mapping from a connector's client_name to a ring lane anymore. A self-registered
+// PUBLIC (DCR) client has NO identity proof -- it presents no pre-shared secret, supplies its own PKCE
+// verifier, and the auth code is readable off the /authorize 302 Location header -- so anyone can
+// complete its flow. Deriving a privileged lane from a caller-CHOSEN name was therefore a self-mint
+// hole: naming a connector "Finance Tracker" used to bind the privileged cfo lane. Parts 2 + 5 hardened
+// that name->lane inference (fallback off 'clo', word-boundary matching) but could not make it SAFE,
+// because the name is attacker-controlled by construction. Part 6 removes the inference entirely: every
+// public DCR client is hard-bound to the non-privileged 'external-read' lane at /register below. A
+// privileged lane is reachable ONLY through a CONFIDENTIAL client (resolveClient / OAUTH_CLIENTS /
+// occ_) whose secret Matt provisioned in config and which IS secret-checked at the token endpoint. The
+// former DCR_LANES table, escapeRegExp, DCR_LANE_MATCHERS, and laneFromClientName existed ONLY to do
+// that unsafe mapping and were deleted with it.
 
-/** Escape a string for safe interpolation into a RegExp. Today's DCR needles are all simple
- * (lowercase + a single hyphen), but escaping keeps the boundary matcher correct if a needle is
- * ever added that contains a regex metacharacter. */
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15, layers 2 + 5): word-boundary
-// matchers precompiled once, PRESERVING DCR_LANES order so multi-word codes (clo-personal) still win
-// over their prefixes (clo). Layer 5 (this) closes a substring-collision hole in the layer-2 fix:
-// the old matcher used `n.includes(needle)`, so an ORDINARY connector name silently resolved to a
-// PRIVILEGED lane because an English word happened to contain a lane code -- "My Custom Connector",
-// "Directory Bot", "Factory Assistant" all contain "cto" (conne-CTO-r, dire-CTO-ry, fa-CTO-ry) and
-// resolved to the cto ship lane; "Cloud Sync" contains "clo" (CLO-ud) and resolved to the clo
-// EXEC_RING lane. Virtually EVERY connector name contains "connector" -> "cto", so the layer-2
-// fallback almost never even fired. `\b<needle>\b` fixes this: "connector" has no word boundary
-// around its internal "cto" (it is preceded by a word char 'e'), so `\bcto\b` does NOT match it,
-// while it DOES match "CTO", "OTCHealth CTO", "cto-connector"; "cloud" has no `\bclo\b` match (the
-// "clo" is followed by the word char 'u'), so "Cloud Sync" now correctly falls through to the
-// non-privileged 'external-read' fallback. Precedence for real multi-word codes is unchanged:
-// "clo-personal matter" matches `\bclo-personal\b` (tested first in the ordered list) before
-// `\bclo\b` is ever evaluated, so it still resolves to clo-personal.
-const DCR_LANE_MATCHERS: Array<[RegExp, string]> = DCR_LANES.map(
-  ([needle, lane]) => [new RegExp(`\\b${escapeRegExp(needle)}\\b`), lane],
-);
-
-// The fallback used to be 'clo' -- a privileged EXEC_RING lane -- so ANY unrecognized connector name
-// (which is exactly what a self-registered, unauthorized Claude.ai custom connector has) silently
-// resolved to a privileged identity. It now defaults to 'external-read', a lane that is not in
-// EXEC_RING and is not cto/developer, so it gets tools/registry.ts's minimal EXTERNAL_READONLY_TOOLSET
-// (layer 1) and is refused outright by every ring check (kb_search_privileged, legal_blob_*, and
-// memory-write.ts's own gate, layer 3). Known exec aliases in DCR_LANES above are UNCHANGED (e.g. a
-// connector explicitly named "CFO Finance" still maps to 'cfo'; "CTO" or "OTCHealth CTO" still maps
-// to 'cto') -- only the UNRECOGNIZED-name fallback moved off a privileged default, and only names
-// that CONTAIN a lane code as a WHOLE WORD (not merely as a substring) now resolve to that lane.
-/** Exported for unit testing without spinning up the HTTP server (mirrors isLaneAllowed() /
- * isLegalContainerAllowed()'s "pure predicate, exported for hermetic tests" pattern). */
-export function laneFromClientName(name: string): string {
-  const n = name.toLowerCase();
-  for (const [re, lane] of DCR_LANE_MATCHERS) if (re.test(n)) return lane;
-  return (loadEnv().OAUTH_DCR_DEFAULT_AGENT || 'external-read').toLowerCase();
+/** True if `agent` (a resolved lane) is a privileged EXEC_RING lane. Exported so the startup guard's
+ * CONDITION is unit-testable without capturing logger output -- mirrors this repo's "extract the pure
+ * predicate, export it for hermetic tests" convention (isLaneAllowed / isShipLane / memoryWriteRefusal). */
+export function isPrivilegedDefaultAgent(agent: string | undefined | null): boolean {
+  return (EXEC_RING as readonly string[]).includes((agent || '').toLowerCase());
 }
 
 export function registerOAuthRoutes(app: FastifyInstance): void {
+  // STARTUP GUARD (Phase 6 reviewer nit): OAUTH_DEFAULT_AGENT is the lane bound to the static
+  // PERPLEXITY_CONNECTOR_TOKEN and to the single confidential OAUTH_CLIENT_ID connection. Those are
+  // broadly-held, long-lived credentials, so if OAUTH_DEFAULT_AGENT is ever set to a privileged
+  // EXEC_RING lane, every static-token caller would silently carry MNPI/attorney-privileged access.
+  // Production uses 'cto' (NOT in EXEC_RING, so this never fires there). This is a loud warning, not a
+  // hard fail: a deliberately secret-provisioned confidential exec client is still possible, but a
+  // misconfiguration is impossible to miss in the logs. (Warn-only, not a clamp, so it cannot break a
+  // legitimately-provisioned confidential exec connection.)
+  if (isPrivilegedDefaultAgent(env.OAUTH_DEFAULT_AGENT)) {
+    logger.warn(
+      { type: 'oauth_default_agent_privileged', agent: (env.OAUTH_DEFAULT_AGENT || '').toLowerCase() },
+      'OAUTH_DEFAULT_AGENT is set to a privileged EXEC_RING lane; static-token callers would get privileged access. Set it to a non-privileged lane (e.g. cto or external-read) unless this is a deliberate, secret-provisioned confidential exec client.',
+    );
+  }
+
   // ── RFC 8414: Authorization Server Metadata ────────────────────────────────
   app.get('/.well-known/oauth-authorization-server', async (req, reply) => {
     const baseUrl = baseUrlOf(req);
@@ -176,9 +160,9 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     });
   });
 
-  // ── RFC 7591: Dynamic Client Registration (PUBLIC, PKCE-only, lane-bound) ───
+  // ── RFC 7591: Dynamic Client Registration (PUBLIC, PKCE-only, external-read ONLY) ───
   // Lets a Claude.ai custom connector self-register with no pre-shared secret. The issued client_id is
-  // a stateless HMAC-signed blob bound to a ring lane (OAUTH_DCR_DEFAULT_AGENT, default 'clo') and the
+  // a stateless HMAC-signed blob bound to the non-privileged 'external-read' lane (see below) and the
   // Claude callback. No storage; survives cutovers. Redirect_uris are restricted to the Claude callback.
   app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     if (!oauthConfigured()) return reply.status(404).send({ error: 'not_found' });
@@ -187,14 +171,17 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     if (uris.length === 0 || !uris.every((u) => allowedRedirect(u))) {
       return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be the Claude connector callback' });
     }
-    // Per-lane binding: pick the ring lane from the connector's client_name (Claude Chat lets the user
-    // name the connector). Match an explicit lane code or a role alias; fall back to the configured
-    // default (external-read, non-privileged). Restricted to a known lane allow-list so DCR can never
-    // mint an unknown lane.
-    const agent = laneFromClientName(String((body.client_name ?? '')));
+    // SECURITY-CRITICAL (Phase 6): a self-registered PUBLIC client has NO identity proof (no pre-shared
+    // secret; PKCE is self-supplied; the auth code is readable off the /authorize 302 redirect), so it
+    // can ONLY ever bind the non-privileged 'external-read' lane -- REGARDLESS of what the caller names
+    // the connector. The client_name is deliberately ignored here: deriving a privileged lane from an
+    // attacker-controlled name was the self-mint hole. A privileged lane requires a CONFIDENTIAL client
+    // (OAUTH_CLIENTS / OAUTH_CLIENT_ID / occ_) whose secret Matt provisioned and which is secret-checked
+    // at the token endpoint.
+    const agent = 'external-read';
     const clientId = registerStatelessClient({ agent, redirectUris: uris }, env.OAUTH_TOKEN_SIGNING_SECRET);
     reply.header('Cache-Control', 'no-store');
-    logger.info({ type: 'oauth_register', agent }, 'issued stateless DCR client');
+    logger.info({ type: 'oauth_register', agent }, 'issued stateless DCR client (external-read lane)');
     return reply.status(201).send({
       client_id: clientId,
       client_id_issued_at: Math.floor(Date.now() / 1000),
