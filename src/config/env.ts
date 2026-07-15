@@ -68,8 +68,15 @@ const EnvSchema = z.object({
   OAUTH_DEFAULT_AGENT: z.string().optional().default(''),
   // Default ring lane bound to Dynamic-Client-Registration (Claude connector) clients.
   OAUTH_DCR_DEFAULT_AGENT: z.string().optional().default(''),
-  // Curated csv toolset advertised to Claude Chat DCR connector clients (empty -> built-in default).
+  // Curated csv toolset advertised to Claude Chat DCR connector clients whose lane is a SHIP lane
+  // (cto/developer/EXEC_RING; empty -> built-in default CTO_SHIP_LANE_TOOLSET, tools/registry.ts).
   CONNECTOR_TOOLSET: z.string().optional().default(''),
+  // Curated csv toolset advertised to every OTHER connector lane (an unrecognized/self-named
+  // connector, an empty caller lane, or any lane not in the ship set; empty -> built-in default
+  // EXTERNAL_READONLY_TOOLSET, tools/registry.ts). SECURITY-CRITICAL: this is what an external,
+  // unauthorized connector sees -- keep it a minimal, non-privileged read set. See
+  // tools/registry.connector-lanes.test.ts.
+  EXTERNAL_READONLY_TOOLSET: z.string().optional().default(''),
 
   // Descope Agentic Identity Hub -- OPTIONAL parallel credential path for approved pilot lanes
   // (Phase 2, 2026-07-08). Inert when DESCOPE_PROJECT_ID is unset -- does not touch or replace

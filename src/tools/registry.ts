@@ -37,63 +37,126 @@ import {
 } from '../safety/capture-pressure.js';
 import { evaluateJitDoctrine } from '../safety/jit-doctrine.js';
 import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
+import { EXEC_RING } from './kb/search-privileged.js';
 
-// Curated toolset advertised to Claude Chat (DCR) connectors so the model gets a focused, FINDABLE set
-// instead of the full ~850-tool catalog (which Claude truncates, hiding brain_search). Override via
-// env CONNECTOR_TOOLSET (csv). catalog_list_tools is included so a connector can still discover the
-// full catalog on demand. Only DCR connector requests are curated; all other callers (startup catalog
-// warm, client_credentials lanes, static token) get the full set unchanged.
-function connectorToolset(env: Env): Set<string> {
-  return new Set<string>(
-    (env.CONNECTOR_TOOLSET ||
-      [
-        'brain_search','web_search','kb_search','kb_search_privileged',
-        'legal_blob_list','legal_blob_get','legal_blob_put',
-        'graph_drive_list','graph_drive_download','graph_drive_upload',
-        'wake','checkpoint','memory_recall','memory_search','memory_write','memory_remember','memory_pack','memory_team','memory_inbound','memory_reconcile',
-        'llm_azure','catalog_list_tools','catalog_master','gateway_fetch_result',
-        'task_list','task_get','task_create','task_claim','task_update','task_complete','task_heartbeat','inbox_read','agent_dispatch',
-        'posthog_query_hogql','posthog_insight_list',
-        'github_get_file_contents','github_list_pull_requests','github_issue_list','sentry_list_issues',
-        // ITEM #2 Azure control-plane READ lane (Phase A). MUST be on the connector surface or the
-        // Claude Chat CTO cannot SEE them (execution stays cto-gated in governance.ts either way).
-        'azure_jobs_list','azure_job_executions','azure_logs_query','azure_search_index_stats',
-        'azure_containerapp_get','azure_resource_list',
-        // ITEM #2 Phase B write tools -- MUST be on the connector surface or the Chat CTO cannot CALL
-        // them (execution stays cto + high-risk gated; dry_run defaults TRUE; oauth-clients denied).
-        'azure_job_execute','azure_job_upsert','azure_containerapp_set_env',
-        'azure_search_index_upsert','azure_search_indexer_upsert',
-        // CTO SHIP-LANE (2026-07-12, widened 2026-07-13): the connector surface must carry the COMPLETE
-        // ship cycle -- branch, commit, PR, review, CI, MERGE, and workflow-dispatch. The 2026-07-12 pass
-        // added the write tools but omitted merge/dispatch/review, so the Claude Chat CTO could open a PR
-        // but not land it, and had to drive a human browser session to click Merge (slow, brittle, and a
-        // hard dependency on Matt being logged in). That is the SAME engine-migration gap as before, just
-        // one step further down the pipeline: Hyperagent's client_credentials lane always got the full 861
-        // tools; the Claude Chat DCR surface got a curated subset that was scoped when Chat was a STANDBY
-        // seat and never re-scoped when it became a PRIMARY one.
-        //
-        // NOT a privilege grant: execution-time role gating in catalog/governance.ts still refuses every
-        // non-cto caller. Other exec connectors merely SEE these entries and get refused if they call them.
-        // The curation exists for FINDABILITY (Claude truncates very long tool lists and was hiding
-        // brain_search), not for security -- so the right size is "everything the seat actually needs",
-        // which is ~66 tools, not 850.
-        // write + branch
-        'github_create_branch','github_create_or_update_file','github_edit_file','github_push_files','github_create_pull_request',
-        'github_pr_update','github_pr_update_branch','github_ref_delete',
-        // LAND IT: merge is the tool whose absence forced the browser fallback
-        'github_merge_pull_request','github_pr_create_review','github_comment_on_issue',
-        // trigger + observe CI directly (no browser, no human in the loop)
-        'github_dispatch_workflow','github_list_workflow_runs','github_workflow_run_get',
-        'github_workflow_run_rerun','github_workflow_run_list_jobs',
-        // read the state you need to decide whether landing is safe
-        'github_pr_get','github_pr_list_files','github_pr_list_commits','github_branch_get_protection',
-        'github_repo_list_branches','github_commit_get','github_commit_compare',
-        // issues (file + close follow-ups without leaving the seat)
-        'github_create_issue','github_issue_get','github_issue_update',
-        'graph_send_email','graph_list_messages','cio_get_customer','shield_check','groundedness_check',
-      ].join(',')
-    ).split(',').map((s) => s.trim()).filter(Boolean),
-  );
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
+// the model gets a focused, FINDABLE set instead of the full ~850-tool catalog (which Claude
+// truncates, hiding brain_search). WHICH curated set a given connector request sees depends on the
+// caller's OAuth-derived agent lane (see connectorToolset() below) -- this split is a SECURITY
+// BOUNDARY, not just a findability curation:
+//
+//   CTO_SHIP_LANE_TOOLSET       the full ship-cycle toolset (branch/commit/PR/review/CI/merge/
+//                               dispatch, the PRIVILEGED kb_search_privileged + legal_blob_* +
+//                               memory_write, the Azure control plane, ...). Handed ONLY to a
+//                               connector lane that is cto, developer, or in the executive ring
+//                               (EXEC_RING). See isShipLane().
+//   EXTERNAL_READONLY_TOOLSET   a minimal, non-privileged read set. Handed to EVERY OTHER connector
+//                               lane: an unrecognized/self-named connector, an empty caller lane, or
+//                               any lane not in the ship set.
+//
+// SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15): before this split there was ONE
+// global toolset for every connector, and oauth.ts's laneFromClientName() defaulted an UNRECOGNIZED
+// connector name to the 'clo' lane (a privileged EXEC_RING lane). Combined, that meant any Claude.ai
+// account holder who added this gateway as a custom connector and gave it an unrecognized name got a
+// bearer token whose lane ('clo') passed kb_search_privileged's / legal_blob_*'s ring check AND whose
+// connector toolset already advertised those privileged tools plus memory_write -- a live external
+// privileged-access hole. This split is layer 1 of the fix (the toolset itself no longer advertises
+// privileged tools to a non-ship lane); oauth.ts's DCR default lane is layer 2 (an unrecognized name
+// no longer resolves to a privileged lane at all); memory-write.ts's own ring gate is layer 3
+// (defense-in-depth: refuses the call outright even if a future toolset override or the confidential
+// occ_ client path ever lets a non-ship lane reach it). See registry.connector-lanes.test.ts.
+//
+// Overridable via env for BOTH lists: CONNECTOR_TOOLSET (csv) overrides the ship set (back-compat
+// with the pre-split var name); EXTERNAL_READONLY_TOOLSET (csv) overrides the external set.
+// Empty/unset means "use the built-in default" for that set. Only DCR/occ_ connector requests are
+// curated at all -- every other caller (the startup catalog warm, client_credentials fleet lanes,
+// the static connector token) sees the full ~850-tool catalog unchanged (see isConnectorSurface() in
+// server/request-context.ts).
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
+  'brain_search', 'web_search', 'kb_search', 'kb_search_privileged',
+  'legal_blob_list', 'legal_blob_get', 'legal_blob_put',
+  'graph_drive_list', 'graph_drive_download', 'graph_drive_upload',
+  'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
+  'llm_azure', 'catalog_list_tools', 'catalog_master', 'gateway_fetch_result',
+  'task_list', 'task_get', 'task_create', 'task_claim', 'task_update', 'task_complete', 'task_heartbeat', 'inbox_read', 'agent_dispatch',
+  'posthog_query_hogql', 'posthog_insight_list',
+  'github_get_file_contents', 'github_list_pull_requests', 'github_issue_list', 'sentry_list_issues',
+  // ITEM #2 Azure control-plane READ lane (Phase A). MUST be on the connector surface or the
+  // Claude Chat CTO cannot SEE them (execution stays cto-gated in governance.ts either way).
+  'azure_jobs_list', 'azure_job_executions', 'azure_logs_query', 'azure_search_index_stats',
+  'azure_containerapp_get', 'azure_resource_list',
+  // ITEM #2 Phase B write tools -- MUST be on the connector surface or the Chat CTO cannot CALL
+  // them (execution stays cto + high-risk gated; dry_run defaults TRUE; oauth-clients denied).
+  'azure_job_execute', 'azure_job_upsert', 'azure_containerapp_set_env',
+  'azure_search_index_upsert', 'azure_search_indexer_upsert',
+  // CTO SHIP-LANE (2026-07-12, widened 2026-07-13): the connector surface must carry the COMPLETE
+  // ship cycle -- branch, commit, PR, review, CI, MERGE, and workflow-dispatch. The 2026-07-12 pass
+  // added the write tools but omitted merge/dispatch/review, so the Claude Chat CTO could open a PR
+  // but not land it, and had to drive a human browser session to click Merge (slow, brittle, and a
+  // hard dependency on Matt being logged in). That is the SAME engine-migration gap as before, just
+  // one step further down the pipeline: Hyperagent's client_credentials lane always got the full 861
+  // tools; the Claude Chat DCR surface got a curated subset that was scoped when Chat was a STANDBY
+  // seat and never re-scoped when it became a PRIMARY one.
+  //
+  // NOT a privilege grant on its own: execution-time role gating in catalog/governance.ts still
+  // refuses every non-cto caller for the write tools below. Other exec connectors used to merely SEE
+  // these entries and get refused if they called them -- as of the 2026-07-15 lane split, a non-ship
+  // connector lane no longer even SEES this list at all (it gets EXTERNAL_READONLY_TOOLSET instead),
+  // which is this file's actual security boundary; governance.ts's execution-time gating remains a
+  // second, independent layer under it.
+  // write + branch
+  'github_create_branch', 'github_create_or_update_file', 'github_edit_file', 'github_push_files', 'github_create_pull_request',
+  'github_pr_update', 'github_pr_update_branch', 'github_ref_delete',
+  // LAND IT: merge is the tool whose absence forced the browser fallback
+  'github_merge_pull_request', 'github_pr_create_review', 'github_comment_on_issue',
+  // trigger + observe CI directly (no browser, no human in the loop)
+  'github_dispatch_workflow', 'github_list_workflow_runs', 'github_workflow_run_get',
+  'github_workflow_run_rerun', 'github_workflow_run_list_jobs',
+  // read the state you need to decide whether landing is safe
+  'github_pr_get', 'github_pr_list_files', 'github_pr_list_commits', 'github_branch_get_protection',
+  'github_repo_list_branches', 'github_commit_get', 'github_commit_compare',
+  // issues (file + close follow-ups without leaving the seat)
+  'github_create_issue', 'github_issue_get', 'github_issue_update',
+  'graph_send_email', 'graph_list_messages', 'cio_get_customer', 'shield_check', 'groundedness_check',
+] as const;
+
+/**
+ * The minimal, non-privileged read set handed to every connector lane that is NOT a ship lane (see
+ * isShipLane() below): an unrecognized/self-named connector, an empty caller lane, or any other
+ * unknown lane. Deliberately excludes kb_search_privileged, legal_blob_*, every memory WRITE tool,
+ * and every github/azure/graph write tool.
+ */
+export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
+  'brain_search', 'kb_search', 'web_search', 'catalog_list_tools', 'catalog_master',
+  'wake', 'memory_recall', 'memory_search', 'gateway_fetch_result',
+] as const;
+
+/**
+ * True when `lane` is entitled to the full CTO_SHIP_LANE_TOOLSET: the cto/developer engineering
+ * identities, or any executive-ring lane. EXEC_RING is IMPORTED (never re-declared) from
+ * kb/search-privileged.ts -- the single source of truth for the executive ring, so this can never
+ * silently drift from the privileged-index / legal-blob ring gates. Every other lane -- including an
+ * empty/unknown caller and any unrecognized connector name -- is NOT a ship lane and falls through
+ * to EXTERNAL_READONLY_TOOLSET in connectorToolset() below. Exported so other authorization checks
+ * that want "the same set that gets the ship toolset" (e.g. memory-write.ts's ring gate) reuse this
+ * EXACT predicate instead of re-declaring it.
+ */
+export function isShipLane(lane: string): boolean {
+  return lane === 'cto' || lane === 'developer' || (EXEC_RING as readonly string[]).includes(lane);
+}
+
+/**
+ * The per-lane curated connector toolset for THIS request. `lane` is the caller's OAuth-derived
+ * agent identity (currentCallerAgent()) at tool-registration time -- registerTool() below always
+ * runs inside requestContext.run() (see server/mcp.ts), so this is always live, never stale.
+ */
+export function connectorToolset(env: Env, lane: string): Set<string> {
+  const csv = isShipLane(lane)
+    ? env.CONNECTOR_TOOLSET || CTO_SHIP_LANE_TOOLSET.join(',')
+    : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
+  return new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
 }
 
 export type ToolCategory = 'read' | 'write_simple' | 'write_orchestrated';
@@ -231,10 +294,12 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   callerHashProvider: () => string,
 ): void {
   const env = loadEnv();
-  const CONNECTOR_TOOLSET = connectorToolset(env);
-  // Claude Chat (DCR) connector requests get a CURATED, findable toolset (not the full ~850). All other
-  // callers see everything, and the startup catalog-warm runs with no request context so /health
-  // tool_count (deploy gate) is unaffected.
+  const CONNECTOR_TOOLSET = connectorToolset(env, currentCallerAgent());
+  // Claude Chat (DCR) connector requests get a CURATED, findable toolset (not the full ~850) --
+  // WHICH curated set depends on the caller's OAuth lane (ship vs external-readonly); see
+  // connectorToolset() above, this file's actual security boundary. All other callers see
+  // everything, and the startup catalog-warm runs with no request context (currentCallerAgent() ===
+  // '', isConnectorSurface() === false) so /health tool_count (deploy gate) is unaffected.
   const connectorSurfaceForThisTool = isConnectorSurface();
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
