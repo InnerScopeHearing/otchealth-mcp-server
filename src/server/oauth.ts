@@ -77,7 +77,9 @@ function resolveAnyClient(clientId: string): ResolvedAnyClient | null {
   return null;
 }
 
-function baseUrlOf(req: { protocol: string; hostname: string }): string {
+/** Exported so auth/bearer.ts can point a 401's WWW-Authenticate header at the same base URL the
+ * OAuth metadata endpoints use (RFC 9728 protected-resource discovery) without re-deriving it. */
+export function baseUrlOf(req: { protocol: string; hostname: string }): string {
   if (env.PUBLIC_BASE_URL) return env.PUBLIC_BASE_URL.replace(/\/$/, '');
   return `${req.protocol}://${req.hostname}`;
 }
