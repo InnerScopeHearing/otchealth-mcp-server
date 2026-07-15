@@ -104,6 +104,12 @@ import { registerShieldCheck } from './safety/shield-check.js';
 import { registerGroundednessCheck } from './safety/groundedness-check.js';
 import { registerClaimsCheck } from './safety/claims-check.js';
 
+// Phase 4 (component C) — incident-match recall ("you have been here before"): standalone,
+// explicitly-invoked semantic recall of the most similar past pitfall/correction. See
+// safety/incident-match.ts for the fail-open core; wiring it into the hot mutation path
+// (alongside jit-doctrine) is a documented fast-follow, not done this pass.
+import { registerIncidentMatch } from './safety/incident-match.js';
+
 // Wave A — Azure Document Intelligence (CFO invoices + CLO contracts, read/analyze only)
 import { registerDocintelAnalyzeInvoice } from './docintel/analyze-invoice.js';
 import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js';
@@ -1030,6 +1036,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerShieldCheck(server, callerHash);
   registerGroundednessCheck(server, callerHash);
   registerClaimsCheck(server, callerHash);
+
+  // ===== Phase 4 (component C): incident-match recall ("you have been here before") =====
+  registerIncidentMatch(server, callerHash);
 
   // ===== Wave A: Azure Document Intelligence (CFO + CLO, read/analyze only, non-BAA) =====
   registerDocintelAnalyzeInvoice(server, callerHash);
