@@ -27,6 +27,7 @@ import {
   outboundGroundedness,
   type GroundingHint,
 } from '../safety/auto-guard.js';
+import { evaluateColdStart, markWoken, COLD_START_MESSAGE } from '../safety/cold-start.js';
 
 // Curated toolset advertised to Claude Chat (DCR) connectors so the model gets a focused, FINDABLE set
 // instead of the full ~850-tool catalog (which Claude truncates, hiding brain_search). Override via
@@ -165,8 +166,15 @@ const COMMON_INPUT: ZodRawShape = {
     ),
 };
 
-function buildTextContent(payload: ToolResultPayload, warning: ComplianceWarning | null): string {
+function buildTextContent(
+  payload: ToolResultPayload,
+  warning: ComplianceWarning | null,
+  coldStartWarning?: string,
+): string {
   const lines: string[] = [];
+  if (coldStartWarning) {
+    lines.push(coldStartWarning);
+  }
   if (warning) {
     lines.push('COMPLIANCE_WARNING: Pass acknowledge_warning=true to render the underlying data.');
     lines.push(JSON.stringify(warning, null, 2));
@@ -369,6 +377,38 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         };
       }
 
+      // COLD-START GATE: a MUTATING tool (any non-'read' category) called by a session that has not
+      // called wake() recently gets a non-fatal warning (mode=warn, the default) or is refused
+      // outright (mode=enforce). Reads are NEVER gated -- evaluateColdStart isn't even called for
+      // them. Fail-open by construction (evaluateColdStart never throws; see safety/cold-start.ts).
+      const coldStart = def.category === 'read'
+        ? { cold: false, block: false, mode: 'off' as const }
+        : evaluateColdStart(callerHash);
+      if (coldStart.block) {
+        const cmsg = `${COLD_START_MESSAGE} (COLD_START_MODE=enforce; tool "${def.name}" was refused.)`;
+        logToolEnd({
+          correlation_id: correlationId,
+          tool: def.name,
+          caller_hash: callerHash,
+          outcome: 'rejected',
+          latency_ms: Date.now() - started,
+          error_code: 'cold_start_enforced',
+          error_message: cmsg,
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: cmsg }],
+          structuredContent: {
+            result: null,
+            compliance_warning: null,
+            correlation_id: correlationId,
+            dry_run: dryRun,
+            cold_start: { cold: true, blocked: true, mode: coldStart.mode },
+            error: { code: 'cold_start_enforced', message: cmsg },
+          },
+        };
+      }
+
       const ctx: ToolContext = { correlationId, callerHash, dryRun, acknowledgeWarning: acknowledged, callerAgent };
 
       logToolStart({
@@ -421,6 +461,12 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           handlerInput as z.infer<z.ZodObject<Shape>>,
           ctx,
         );
+        // COLD-START GATE bookkeeping: a successful wake() call marks this bearer identity "awake"
+        // for the TTL, clearing the cold-start warning for its subsequent mutating calls. Best-effort
+        // (markWoken never throws), so it can never turn a good wake() call into a failure.
+        if (def.name === 'wake') {
+          markWoken(callerHash);
+        }
         const { result, warning } = applyGuardrail(payload.data, acknowledged);
 
         // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
@@ -479,7 +525,13 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (ground.ran) {
           structured.groundedness = { ungroundedDetected: ground.ungroundedDetected, ungroundedPercentage: ground.ungroundedPercentage, mode: ground.mode };
         }
-        let text = buildTextContent({ ...payload, data: result }, warning);
+        // coldStart.cold here can only mean mode='warn' (enforce+cold already returned above), so this
+        // is always the non-fatal nudge, never a refusal. Surfaced in BOTH the structured content and
+        // the text block (mirrors how compliance_warning is prepended) so it is maximally visible.
+        if (def.category !== 'read') {
+          structured.cold_start = { cold: coldStart.cold, blocked: false, mode: coldStart.mode };
+        }
+        let text = buildTextContent({ ...payload, data: result }, warning, coldStart.cold ? COLD_START_MESSAGE : undefined);
 
         // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
         // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
