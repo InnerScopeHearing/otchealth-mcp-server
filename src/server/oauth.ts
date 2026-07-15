@@ -95,17 +95,27 @@ function allowedRedirect(uri: string): boolean {
 
 // Map a Claude-Chat connector's client_name to a gateway ring lane. Ordered so multi-word codes match
 // before their prefixes (clo-personal before clo). Role-word aliases are a convenience; the lane CODE in
-// the name is the reliable path. Unknown -> OAUTH_DCR_DEFAULT_AGENT or 'clo'.
+// the name is the reliable path. Unknown -> OAUTH_DCR_DEFAULT_AGENT or 'external-read' (non-privileged).
 const DCR_LANES: Array<[string, string]> = [
   ['clo-personal', 'clo-personal'], ['clo', 'clo'], ['cfo', 'cfo'], ['coo', 'coo'], ['cpo', 'cpo'],
   ['cro', 'cro'], ['cco', 'cco'], ['cto', 'cto'], ['developer', 'developer'],
   ['legal', 'clo'], ['finance', 'cfo'], ['operations', 'coo'], ['product', 'cpo'],
   ['revenue', 'cro'], ['compliance', 'cco'], ['technology', 'cto'], ['dev', 'developer'],
 ];
-function laneFromClientName(name: string): string {
+// SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15, layer 2): the fallback used to be
+// 'clo' -- a privileged EXEC_RING lane -- so ANY unrecognized connector name (which is exactly what a
+// self-registered, unauthorized Claude.ai custom connector has) silently resolved to a privileged
+// identity. It now defaults to 'external-read', a lane that is not in EXEC_RING and is not cto/developer,
+// so it gets tools/registry.ts's minimal EXTERNAL_READONLY_TOOLSET (layer 1) and is refused outright by
+// every ring check (kb_search_privileged, legal_blob_*, and memory-write.ts's own gate, layer 3). Known
+// exec aliases in DCR_LANES above are UNCHANGED (e.g. a connector explicitly named "CFO Finance" still
+// maps to 'cfo') -- only the UNRECOGNIZED-name fallback moved off a privileged default.
+/** Exported for unit testing without spinning up the HTTP server (mirrors isLaneAllowed() /
+ * isLegalContainerAllowed()'s "pure predicate, exported for hermetic tests" pattern). */
+export function laneFromClientName(name: string): string {
   const n = name.toLowerCase();
   for (const [needle, lane] of DCR_LANES) if (n.includes(needle)) return lane;
-  return (loadEnv().OAUTH_DCR_DEFAULT_AGENT || 'clo').toLowerCase();
+  return (loadEnv().OAUTH_DCR_DEFAULT_AGENT || 'external-read').toLowerCase();
 }
 
 export function registerOAuthRoutes(app: FastifyInstance): void {
@@ -149,7 +159,8 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     }
     // Per-lane binding: pick the ring lane from the connector's client_name (Claude Chat lets the user
     // name the connector). Match an explicit lane code or a role alias; fall back to the configured
-    // default (clo). Restricted to a known lane allow-list so DCR can never mint an unknown lane.
+    // default (external-read, non-privileged). Restricted to a known lane allow-list so DCR can never
+    // mint an unknown lane.
     const agent = laneFromClientName(String((body.client_name ?? '')));
     const clientId = registerStatelessClient({ agent, redirectUris: uris }, env.OAUTH_TOKEN_SIGNING_SECRET);
     reply.header('Cache-Control', 'no-store');
