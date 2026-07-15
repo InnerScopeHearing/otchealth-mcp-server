@@ -34,7 +34,8 @@ function testEnv(): Env {
 
 test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each other in intent: the external set is a strict, minimal subset of tool names', () => {
   // Sanity check on the fixtures themselves before testing the routing that hands them out.
-  assert.equal(EXTERNAL_READONLY_TOOLSET.length, 9);
+  // 9 original read tools + Phase 6's search/fetch (OpenAI connector contract) = 11.
+  assert.equal(EXTERNAL_READONLY_TOOLSET.length, 11);
   for (const name of EXTERNAL_READONLY_TOOLSET) {
     assert.ok(CTO_SHIP_LANE_TOOLSET.includes(name), `${name} should also be reachable on the ship lane`);
   }
@@ -60,10 +61,12 @@ test('(c) every EXEC_RING lane gets the full ship-lane set', () => {
   }
 });
 
-test("(d) 'external-read' lane set is EXACTLY the 9 read tools and excludes every privileged/write tool", () => {
+test("(d) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 search/fetch) and excludes every privileged/write tool", () => {
   const set = connectorToolset(testEnv(), 'external-read');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
-  assert.equal(set.size, 9);
+  assert.equal(set.size, 11);
+  assert.ok(set.has('search'), 'external-read must see the OpenAI connector search tool');
+  assert.ok(set.has('fetch'), 'external-read must see the OpenAI connector fetch tool');
   for (const forbidden of [
     'kb_search_privileged',
     'legal_blob_list', 'legal_blob_get', 'legal_blob_put',

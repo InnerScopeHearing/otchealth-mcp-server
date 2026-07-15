@@ -76,6 +76,10 @@ import { EXEC_RING } from './kb/search-privileged.js';
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'web_search', 'kb_search', 'kb_search_privileged',
+  // Phase 6: the OpenAI ChatGPT / Deep Research connector contract (search/fetch — see
+  // kb/openai-search.ts). Non-privileged by construction even on this lane: the tools re-derive
+  // and re-check the ring per call, they are not widened just because cto/exec can see them here.
+  'search', 'fetch',
   'legal_blob_list', 'legal_blob_get', 'legal_blob_put',
   'graph_drive_list', 'graph_drive_download', 'graph_drive_upload',
   'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
@@ -131,6 +135,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
 export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
   'brain_search', 'kb_search', 'web_search', 'catalog_list_tools', 'catalog_master',
   'wake', 'memory_recall', 'memory_search', 'gateway_fetch_result',
+  // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. Deliberately safe to hand to
+  // EVERY external/unrecognized lane: both tools are non-privileged by construction (they reuse
+  // brain-search.ts's roomsFor() and fetch independently re-derives + re-checks the ring per call
+  // rather than trusting the id) — see kb/openai-search.ts + kb/openai-fetch.ts headers.
+  'search', 'fetch',
 ] as const;
 
 /**
