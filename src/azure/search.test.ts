@@ -240,3 +240,111 @@ test('a non-400, non-ok response (e.g. a real 500) still throws — fail-open on
     },
   );
 });
+
+// --- behavior 4: CHUNKED doc rooms (Phase-3 S1) — text_vector field, chunk->parent dedup, cite path ---
+
+const CHUNKED_DOCS = [
+  { chunk_id: 'p1#0', parent_id: 'p1', path: 'legal/contractA.pdf', chunk: 'chunk zero of contract A', '@search.rerankerScore': 3.5 },
+  { chunk_id: 'p1#1', parent_id: 'p1', path: 'legal/contractA.pdf', chunk: 'chunk one of contract A', '@search.rerankerScore': 3.9 },
+  { chunk_id: 'p2#0', parent_id: 'p2', path: 'legal/contractB.pdf', chunk: 'chunk zero of contract B', '@search.rerankerScore': 3.2 },
+];
+
+test('hybridSearch (chunked room): dedups chunks to one hit per parent, cites the parent path, picks the best-scoring chunk', async () => {
+  let capturedBody: Record<string, unknown> | undefined;
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        capturedBody = init?.body ? JSON.parse(init.body as string) : undefined;
+        return new Response(JSON.stringify({ value: CHUNKED_DOCS }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-company', 'contract', 8, { includeOps: false });
+      assert.ok(res);
+      assert.equal(res!.matches.length, 2, "p1's two chunks collapse to one hit -> two distinct parents");
+      assert.deepEqual(res!.matches.map((m) => m.id).sort(), ['p1', 'p2'], 'hits are cited by parent_id, not chunk_id');
+      const p1 = res!.matches.find((m) => m.id === 'p1')!;
+      assert.equal(p1.path, 'legal/contractA.pdf', 'parent path is carried for citation');
+      assert.equal(p1.text, 'chunk one of contract A', 'the higher-scored chunk (p1#1) represents the parent');
+      const vq = (capturedBody?.vectorQueries as Array<Record<string, unknown>>)[0];
+      assert.equal(vq.fields, 'text_vector', 'chunked rooms query text_vector, never contentVector');
+      assert.equal(capturedBody?.filter, undefined, 'no type filter on a chunked room (it has no type field)');
+      assert.equal(capturedBody?.select, 'chunk_id,parent_id,title,path,chunk', 'lean select omits the 3072-float vector');
+    },
+  );
+});
+
+test('hybridSearch (chunked room): over-fetches (top*3, capped at 50) so dedup can still return `top` parents', async () => {
+  let capturedTop: unknown;
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        const b = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {};
+        capturedTop = b.top;
+        return new Response(JSON.stringify({ value: CHUNKED_DOCS }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      await hybridSearch('finance-cfo-source-docs', 'q', 8);
+      assert.equal(capturedTop, 24, 'chunked over-fetch = top*3');
+      await hybridSearch('commons-company-journal', 'q', 20);
+      assert.equal(capturedTop, 50, 'capped at 50');
+    },
+  );
+});
+
+test('FAIL-OPEN (chunked room): a 400 degrades to a BARE keyword query with NO select (regression guard for the fallback-select bug)', async () => {
+  let searchCallCount = 0;
+  const sentBodies: Array<Record<string, unknown>> = [];
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        searchCallCount++;
+        sentBodies.push(init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {});
+        // Simulate a room not yet cut over to the chunked schema: text_vector/select fields absent -> 400.
+        if (searchCallCount === 1) return new Response(JSON.stringify({ error: { message: 'unknown field text_vector' } }), { status: 400 });
+        return new Response(JSON.stringify({ value: CHUNKED_DOCS }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-company', 'contract', 8, { includeOps: false });
+      assert.ok(res, 'a chunked-room 400 must degrade to keyword, never throw');
+      assert.equal(searchCallCount, 2, 'primary + one keyword fallback');
+      assert.equal(sentBodies[1]?.select, undefined, 'the fallback must NOT repeat the select (else it 400s again -> hard throw)');
+      assert.equal(sentBodies[1]?.vectorQueries, undefined, 'the fallback is a bare keyword query');
+      assert.equal(sentBodies[1]?.queryType, 'simple');
+      assert.equal(res!.matches.length, 2, 'dedup still collapses the fallback chunks to their parents');
+    },
+  );
+});
+
+test('hybridSearch (flat room): still uses contentVector, no select, exact `top` — byte-identical to before', async () => {
+  let capturedBody: Record<string, unknown> | undefined;
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        capturedBody = init?.body ? JSON.parse(init.body as string) : undefined;
+        return new Response(JSON.stringify({ value: [MIXED_DOCS[0]] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      await hybridSearch('memory-exec', 'q', 6, { includeOps: true });
+      const vq = (capturedBody?.vectorQueries as Array<Record<string, unknown>>)[0];
+      assert.equal(vq.fields, 'contentVector', 'flat rooms keep contentVector');
+      assert.equal(capturedBody?.select, undefined, 'flat rooms send no select');
+      assert.equal(capturedBody?.top, 6, 'flat rooms fetch exactly top');
+    },
+  );
+});

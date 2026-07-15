@@ -92,6 +92,8 @@ export interface FusedHit {
   text: string;
   /** The index doc id (`{agent}__{entryId}`). Carried through so retracted beliefs can be identified. */
   id?: unknown;
+  /** Source path of the parent doc (chunked doc rooms), threaded through for citation. */
+  path?: string;
 }
 
 /**
@@ -100,14 +102,14 @@ export interface FusedHit {
  * Pure + unit-tested.
  */
 export function rrfFuse(
-  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown }> }>,
+  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string }> }>,
   top: number,
   k = 60,
 ): FusedHit[] {
   const fused: FusedHit[] = [];
   for (const { room, hits } of perRoom) {
     hits.forEach((h, i) => {
-      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id });
+      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id, path: h.path });
     });
   }
   return fused.sort((a, b) => b.score - a.score).slice(0, top);
