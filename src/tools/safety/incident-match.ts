@@ -1,5 +1,5 @@
 /**
- * MCP tool: incident_match — "you have been here before." Give it free text describing what is
+ * MCP tool: incident_match. "You have been here before": give it free text describing what is
  * happening right now (an error, a plan, a symptom) and it semantically searches the shared brain
  * (memory-exec) for the single most similar PAST pitfall or correction, if one clears a confidence
  * threshold. Advisory recall, not a gate: no match is a normal, successful result, never an error.

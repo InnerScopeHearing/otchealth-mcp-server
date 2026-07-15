@@ -65,7 +65,7 @@ export interface HybridSearchOptions {
    * recall query), not "every knowledge type except operational exhaust". Still governed by the
    * SAME fail-open retry as the exhaust filter below: a 400 caused by this filter (e.g. queried
    * against a room with no `type` field at all) falls back to a plain, filter-free keyword query
-   * exactly like every other filter path here. Ignored for chunked doc rooms (no `type` field —
+   * exactly like every other filter path here. Ignored for chunked doc rooms (no `type` field;
    * same reasoning as the exhaust filter skip below).
    */
   filter?: string;

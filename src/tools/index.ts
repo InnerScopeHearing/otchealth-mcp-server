@@ -104,7 +104,7 @@ import { registerShieldCheck } from './safety/shield-check.js';
 import { registerGroundednessCheck } from './safety/groundedness-check.js';
 import { registerClaimsCheck } from './safety/claims-check.js';
 
-// Phase 4 (component C) — incident-match recall ("you have been here before"): standalone,
+// Phase 4 (component C): incident-match recall ("you have been here before"). Standalone,
 // explicitly-invoked semantic recall of the most similar past pitfall/correction. See
 // safety/incident-match.ts for the fail-open core; wiring it into the hot mutation path
 // (alongside jit-doctrine) is a documented fast-follow, not done this pass.

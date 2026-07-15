@@ -1,5 +1,5 @@
 /**
- * INCIDENT MATCH (Phase 4, component C) — "you have been here before." Takes free text describing
+ * INCIDENT MATCH (Phase 4, component C): "you have been here before." Takes free text describing
  * what is happening RIGHT NOW and semantically surfaces the single most similar PAST pitfall or
  * correction recorded in the shared brain (memory-exec), if one clears a confidence threshold.
  *
