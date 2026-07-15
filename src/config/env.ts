@@ -219,6 +219,16 @@ const EnvSchema = z.object({
   // distinct partition ("faq:global") instead of provisioning a new Azure AI Language resource.
   // ORDER: FAQ deflection runs BEFORE the semantic cache, which runs before the model call.
 
+  // COLD-START GATE (src/safety/cold-start.ts, Phase 1 coldstart-doctrine). Also NOT in this schema
+  // on purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh per call so it can
+  // be flipped without a redeploy:
+  //   COLD_START_MODE  off | warn (default) | enforce
+  // Tracks, per bearer identity (an in-memory Map, TTL ~6h, no new store), whether `wake` has been
+  // called recently. 'warn' attaches a non-fatal COLD_START warning to a MUTATING (non-'read') tool
+  // call from a session that skipped wake(); the tool still runs. 'enforce' refuses the call before
+  // the handler runs. 'off' is a full no-op. Reads are NEVER gated. Fail-open end to end: an
+  // unavailable bearer identity, or any internal error, always ALLOWS the call.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
