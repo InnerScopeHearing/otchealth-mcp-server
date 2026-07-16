@@ -53,6 +53,22 @@ const EnvSchema = z.object({
   // Stripe (read-only)
   STRIPE_SECRET_KEY: z.string().optional().default(''),
 
+  // Xero (accounting of record; QuickBooks RETIRED 2026-07-16). READ-ONLY tools, executive-ring
+  // gated (MNPI). One Xero app; per-org BOOTSTRAP refresh tokens — Xero rotates refresh tokens on
+  // every use, so after first use the live chain is maintained in Cosmos (tools/xero/client.ts)
+  // and these env secrets are only re-read when their value CHANGES (operator re-consent).
+  XERO_CLIENT_ID: z.string().optional().default(''),
+  XERO_CLIENT_SECRET: z.string().optional().default(''),
+  XERO_RT_OTCHEALTH: z.string().optional().default(''),
+  XERO_RT_INND: z.string().optional().default(''),
+  XERO_RT_HEARINGASSIST: z.string().optional().default(''),
+  XERO_RT_PERSONAL: z.string().optional().default(''),
+  // Optional tenantId pins (else tenant resolves via /connections + name heuristics).
+  XERO_TENANT_OTCHEALTH: z.string().optional().default(''),
+  XERO_TENANT_INND: z.string().optional().default(''),
+  XERO_TENANT_HEARINGASSIST: z.string().optional().default(''),
+  XERO_TENANT_PERSONAL: z.string().optional().default(''),
+
   // OAuth 2.1 (confidential client). When OAUTH_CLIENT_ID + OAUTH_TOKEN_SIGNING_SECRET are set,
   // the gateway issues real expiring JWT access/refresh tokens (PKCE S256 mandatory). When unset,
   // the legacy static-connector-token behavior is preserved for back-compat.
