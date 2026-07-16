@@ -325,6 +325,74 @@ test('SAFETY-CRITICAL (B3): invalid_grant NEVER clobbers a concurrent live winne
   assert.equal(wrote, false, 'must NOT write a tombstone over a live winner');
 });
 
+test('SAFETY-CRITICAL (B3 residual): a success-path 412 against a same-family DEAD tombstone REVIVES with the fresh live chain (never discards a valid rotation)', async () => {
+  const bHash = bootstrapHash(process.env.XERO_RT_OTCHEALTH as string);
+  const expired = buildTokenDoc({
+    org: 'otchealth', refreshToken: 'rt-0', accessToken: 'at-expired', expiresInSeconds: 0,
+    tenantId: 'tenant-1', tenantName: 'OTCHealth Inc.', bootstrapHash: bHash,
+  });
+  const deadTomb = buildTokenDoc({
+    org: 'otchealth', refreshToken: '', accessToken: '', expiresInSeconds: 0,
+    tenantId: 'tenant-1', tenantName: 'OTCHealth Inc.', bootstrapHash: bHash,
+  });
+  deadTomb.status = 'dead';
+  let reads = 0;
+  let replaces = 0;
+  const deps = {
+    fetchImpl: (async (url: string | URL) => {
+      if (isHost(url, 'identity.xero.com')) return grantResponse(1);
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch,
+    read: (async () => {
+      reads += 1;
+      // read1: our starting expired doc. read2 (adoptWinner after 412) + read3 (revive read): the
+      // racer's DEAD tombstone (holds no token material).
+      return reads === 1 ? { doc: expired, etag: 'E0' } : { doc: deadTomb, etag: 'E-dead' };
+    }) as never,
+    replace: (async () => {
+      replaces += 1;
+      return replaces === 1 ? { ok: false, status: 412, body: {}, etag: null } : { ok: true, status: 200, body: {}, etag: 'E2' };
+    }) as never,
+    create: (async () => {
+      throw new Error('create must not be called when a doc exists');
+    }) as never,
+  };
+  const a = await getOrgAccess('otchealth', { deps: deps as never });
+  assert.equal(a.accessToken, 'at-1', 'must revive the dead tombstone with the freshly-rotated live token, not throw');
+  assert.equal(replaces, 2, 'one 412 on the live-write, then one successful revive replace of the tombstone');
+});
+
+test('SAFETY-CRITICAL (B3 tombstone path): a 412 on the dead-mark re-adopts a live winner rather than dead-marking over it', async () => {
+  const bHash = bootstrapHash(process.env.XERO_RT_OTCHEALTH as string);
+  const expired = buildTokenDoc({
+    org: 'otchealth', refreshToken: 'rt-superseded', accessToken: 'at-x', expiresInSeconds: 0,
+    tenantId: 'tenant-1', tenantName: 'n', bootstrapHash: bHash,
+  });
+  const winner = buildTokenDoc({
+    org: 'otchealth', refreshToken: 'rt-w', accessToken: 'at-winner', expiresInSeconds: 1800,
+    tenantId: 'tenant-1', tenantName: 'n', bootstrapHash: bHash,
+  });
+  let reads = 0;
+  const deps = {
+    fetchImpl: (async (url: string | URL) => {
+      if (isHost(url, 'identity.xero.com')) return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch,
+    read: (async () => {
+      reads += 1;
+      // read1: expired start. read2 (adopt-first, no winner yet): still expired. read3 (after the
+      // tombstone-replace 412): the live winner a concurrent replica just persisted.
+      return reads <= 2 ? { doc: expired, etag: 'E0' } : { doc: winner, etag: 'E-w' };
+    }) as never,
+    replace: (async () => ({ ok: false, status: 412, body: {}, etag: null })) as never, // the dead-mark replace races and 412s
+    create: (async () => {
+      throw new Error('create must not be called (doc exists)');
+    }) as never,
+  };
+  const a = await getOrgAccess('otchealth', { deps: deps as never });
+  assert.equal(a.accessToken, 'at-winner', 'the 412 on the tombstone write must re-adopt the live winner');
+});
+
 test('SAFETY-CRITICAL (S2): every registered xero tool has its OWN in-handler ring gate — no gate can be dropped', () => {
   // The handlers each enforce EXEC_RING in-line (tools.ts). This structural lock pins that there is
   // exactly one isXeroAllowed(ctx.callerAgent) guard per registered tool, so a future copy-paste

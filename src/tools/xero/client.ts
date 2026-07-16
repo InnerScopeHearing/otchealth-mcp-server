@@ -353,6 +353,18 @@ export async function getOrgAccess(org: XeroOrg, opts: { forceRefresh?: boolean;
       if (res.status === 412) {
         const winner = await adoptWinner(deps, id, bHash);
         if (winner) return winner;
+        // Residual-race repair: the racer may have written a same-family DEAD tombstone (which holds
+        // NO token material) just before us. We hold a freshly-VALIDATED live grant, so REVIVE it
+        // (replace the tombstone with our live chain) rather than discard a valid rotation and force
+        // a needless re-consent. Safe because a tombstone carries no token; bounded to one attempt.
+        const cur = await deps.read(CACHE_COLL, id, id);
+        const cdoc = cur?.doc as XeroTokenDoc | undefined;
+        if (cur?.etag && cdoc?.status === 'dead' && cdoc.bootstrapHash === bHash) {
+          const revived = await deps.replace(CACHE_COLL, id, id, next, cur.etag);
+          if (revived.ok) return { accessToken: next.accessToken, tenantId: next.tenantId, tenantName: next.tenantName };
+          const w2 = await adoptWinner(deps, id, bHash);
+          if (w2) return w2;
+        }
         throw new Error(`Xero org "${org}": lost a rotation race and the winner's chain is unusable; retry`);
       }
       if (!res.ok) throw new Error(`Xero org "${org}": token persist failed (${res.status}); NOT returning an unpersisted chain`);
