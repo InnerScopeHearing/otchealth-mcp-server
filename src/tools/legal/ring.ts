@@ -14,14 +14,14 @@
  * impossible, because there is only one array. Any future change to the privileged ring is a single
  * reviewable diff in search-privileged.ts + its pinned test.
  *
- * NOTE ON THE TASK BRIEF vs. CODE-OF-RECORD: prior documentation described legal-personal as
- * clo-personal/clo/cfo. The code-of-record (search-privileged.ts, EXEC_RING, effective 2026-07-04)
- * gates legal-personal to the full executive ring: cfo, clo, clo-personal, coo, cro, cpo, cco, exec.
- * This module intentionally matches the CODE (the enforced reality for the sibling search tool) so
- * the two access paths to the same corpus are consistent. clo-personal, clo, and cfo remain within
- * that ring, so the brief's named lanes are all satisfied. If the intended ring for personal legal
- * data is actually narrower than the exec ring, that is a policy decision to make in ONE place
- * (search-privileged.ts INDEX_LANES) and it will flow to both the search tool and these blob tools.
+ * PERSONAL-LEGAL RING (code-of-record, Matt direction 2026-07-16): the `personal` container maps to the
+ * `legal-personal` index, which search-privileged.ts gates to PERSONAL_LEGAL_RING = ['clo-personal','exec']
+ * — strictly NARROWER than the exec ring. The individual chiefs (cfo/coo/cro/cpo/cco) and the company-legal
+ * 'clo' lane are STRIPPED; only the dedicated personal-legal lane and the unified One-Brain chief may read
+ * it. Because lanesForContainer('personal') DERIVES from INDEX_LANES below, this blob gate inherits that
+ * ring automatically — the two access paths to the same privileged corpus can never drift. The `company`
+ * container keeps the full exec ring. Any future ring-width change is a single reviewable diff in
+ * search-privileged.ts INDEX_LANES and it flows to both the search tool and these blob tools.
  */
 
 import { INDEX_LANES } from '../kb/search-privileged.js';

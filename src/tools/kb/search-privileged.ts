@@ -13,22 +13,28 @@
  * Only a dedicated trusted per-role OAuth client (which Matt mints and never hands to an external
  * platform) can retrieve privileged data.
  *
- * EXECUTIVE-RING CROSS-READ (CEO direction, 2026-07-02): the executive team shares privileged context so
- * institutional knowledge compounds and requires less manual curation. Every privileged index is readable
- * by the exec ring:
+ * EXECUTIVE-RING CROSS-READ (CEO direction, 2026-07-02): the executive team shares privileged FINANCE and
+ * COMPANY-LEGAL context so institutional knowledge compounds and requires less manual curation. Those
+ * indexes are readable by the full exec ring:
  *   EXEC_RING = ['cfo','clo','clo-personal','coo','cro','cpo','cco','exec']  ('exec' = unified chief, 2026-07-04)
- * This is intentionally limited to the C-suite exec lanes. NON-exec identities are NEVER added to any
- * array below: 'developer' (engineering IC), every app-lead/product agent (iheartest, innerease, flatstick,
- * fourvault, fictionary, companion, otchealthmart, etc.), 'focus-group', AND the broad 'cto'/default
- * connector identity. legal-personal/-memory carry the most sensitive personal-privilege content (incl.
- * minors' data) and are included in the exec ring per explicit CEO direction.
+ * NON-exec identities are NEVER added to any array below: 'developer' (engineering IC), every app-lead/
+ * product agent (iheartest, innerease, flatstick, fourvault, fictionary, companion, otchealthmart, etc.),
+ * 'focus-group', AND the broad 'cto'/default connector identity.
+ *
+ * PERSONAL-LEGAL CARVE-OUT (Matt direction, 2026-07-16 — NARROWER than the exec ring): legal-personal and
+ * legal-personal-memory carry the most sensitive attorney-privileged content (CA divorce/family/civil,
+ * incl. minors' data). They are gated to PERSONAL_LEGAL_RING = ['clo-personal','exec'] ONLY — the dedicated
+ * personal-legal lane plus the unified One-Brain chief. The individual chiefs (cfo/coo/cro/cpo/cco) AND the
+ * company-legal 'clo' lane are STRIPPED. This closes a confirmed cross-ring leak (a cfo-lane brain_search
+ * returned personal-legal rooms). It supersedes the 2026-07-02 blanket "all privileged -> exec ring" line
+ * for these two rooms ONLY; finance + company-legal keep the full exec cross-read.
  *
  *   finance-cfo-source-docs            -> EXEC_RING
  *   finance-otchealth-cfo-source-docs  -> EXEC_RING
  *   finance-cfo-memory                 -> EXEC_RING
  *   legal-company                      -> EXEC_RING
- *   legal-personal                     -> EXEC_RING   (most sensitive; personal privilege)
- *   legal-personal-memory              -> EXEC_RING
+ *   legal-personal                     -> PERSONAL_LEGAL_RING   (most sensitive; clo-personal + exec only)
+ *   legal-personal-memory              -> PERSONAL_LEGAL_RING
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -42,13 +48,21 @@ import { hybridSearch, searchConfigured } from '../../azure/search.js';
  * added below — 'cto' (the externally-reachable connector) + 'developer' + app-leads stay off MNPI/privileged. */
 export const EXEC_RING = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec'] as const;
 
+/** The PERSONAL-LEGAL ring: strictly NARROWER than EXEC_RING. Gates the two most sensitive rooms
+ * (legal-personal, legal-personal-memory — attorney-privileged CA divorce/family/civil, incl. minors'
+ * data) to the dedicated personal-legal lane plus the unified One-Brain chief ONLY. Both members are
+ * already in EXEC_RING, so this is a pure TIGHTENING (it removes cfo/coo/cro/cpo/cco and company-legal
+ * 'clo'), never a widening. Ring-width decision: Matt, 2026-07-16 (Option B), closing a confirmed
+ * cross-ring leak where a cfo-lane brain_search returned legal-personal content. */
+export const PERSONAL_LEGAL_RING = ['clo-personal', 'exec'] as const;
+
 export const INDEX_LANES: Record<string, string[]> = {
   'finance-cfo-source-docs': [...EXEC_RING],
   'finance-otchealth-cfo-source-docs': [...EXEC_RING],
   'finance-cfo-memory': [...EXEC_RING],
   'legal-company': [...EXEC_RING],
-  'legal-personal': [...EXEC_RING],
-  'legal-personal-memory': [...EXEC_RING],
+  'legal-personal': [...PERSONAL_LEGAL_RING],
+  'legal-personal-memory': [...PERSONAL_LEGAL_RING],
 };
 
 /** Pure ring-enforcement predicate, exported for unit testing without spinning up the MCP server. */

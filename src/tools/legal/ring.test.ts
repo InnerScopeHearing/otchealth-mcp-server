@@ -13,9 +13,14 @@ test('legal container lanes are DERIVED from the sibling privileged index (singl
   assert.deepEqual(lanesForContainer('company'), INDEX_LANES['legal-company']);
 });
 
-test('personal container: the brief-named lanes (clo-personal, clo, cfo) are all allowed', () => {
-  for (const lane of ['clo-personal', 'clo', 'cfo']) {
+test('personal container (Option B, 2026-07-16): reachable ONLY by clo-personal + exec; cfo + company-legal clo are STRIPPED', () => {
+  // allowed: exactly the narrowed personal-legal ring
+  for (const lane of ['clo-personal', 'exec']) {
     assert.equal(isLegalContainerAllowed('personal', lane), true, `${lane} should read legal/personal`);
+  }
+  // denied: the individual chiefs and the company-legal lane (this is the cross-ring exposure that was closed)
+  for (const lane of ['cfo', 'clo', 'coo', 'cro', 'cpo', 'cco']) {
+    assert.equal(isLegalContainerAllowed('personal', lane), false, `${lane} must NOT reach legal/personal (clo-personal/exec only)`);
   }
 });
 
