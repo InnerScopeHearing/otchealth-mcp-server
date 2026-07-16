@@ -395,14 +395,17 @@ test('SAFETY-CRITICAL (B3 tombstone path): a 412 on the dead-mark re-adopts a li
 
 test('SAFETY-CRITICAL (S2): every registered xero tool has its OWN in-handler ring gate — no gate can be dropped', () => {
   // The handlers each enforce EXEC_RING in-line (tools.ts). This structural lock pins that there is
-  // exactly one isXeroAllowed(ctx.callerAgent) guard per registered tool, so a future copy-paste
-  // (e.g. adding xero_payments) that drops the gate line fails CI instead of exposing MNPI.
+  // exactly one isXeroAllowed(ctx.callerAgent) guard per registerTool call-site, so a future copy-paste
+  // (e.g. adding a xero_* tool) that drops the gate line fails CI instead of exposing MNPI. NOTE: the
+  // count is registerTool CALL-SITES, not tool names — the shared registerPagedAccountingRead helper is
+  // ONE gated site that registers 4 paged reads, so 16 sites == 19 tool names (18 read + xero_request
+  // write). Every site is gated, including the write lane.
   const src = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
   const tools = (src.match(/registerTool\(/g) || []).length;
   const gates = (src.match(/isXeroAllowed\(ctx\.callerAgent\)/g) || []).length;
   const refusals = (src.match(/return ringRefusal\(/g) || []).length;
-  assert.equal(tools, 6, 'expected exactly 6 registered xero tools');
-  assert.equal(gates, tools, 'every registered xero tool MUST call isXeroAllowed(ctx.callerAgent)');
+  assert.equal(tools, 16, 'expected exactly 16 registerTool call-sites (15 explicit + 1 shared helper)');
+  assert.equal(gates, tools, 'every registerTool call-site MUST call isXeroAllowed(ctx.callerAgent)');
   assert.equal(refusals, tools, 'every gate MUST return ringRefusal on a non-exec caller');
 });
 
