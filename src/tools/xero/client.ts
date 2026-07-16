@@ -47,6 +47,24 @@ const FETCH_TIMEOUT_MS = 15000;
 export const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token';
 export const XERO_CONNECTIONS_URL = 'https://api.xero.com/connections';
 export const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0';
+/**
+ * The five Xero product APIs the consented scopes reach. Each is a separate base path but all share
+ * the OAuth2 bearer + Xero-tenant-id header + rate-limit headers, so one xeroGet serves them all.
+ *   accounting: settings/contacts/attachments/budgets/payments/invoices/creditnotes/banktransactions/
+ *               banktransfers/manualjournals + all Reports (api.xro/2.0)
+ *   payroll:    US payroll employees/payruns/payslips/timesheets/settings (payroll.xro/1.0)
+ *   assets:     fixed-asset register (assets.xro/1.0)
+ *   projects:   projects/tasks/time (projects.xro/2.0)
+ *   files:      files/folders/associations (files.xro/1.0)
+ */
+export const XERO_API_BASES = {
+  accounting: 'https://api.xero.com/api.xro/2.0',
+  payroll: 'https://api.xero.com/payroll.xro/1.0',
+  assets: 'https://api.xero.com/assets.xro/1.0',
+  projects: 'https://api.xero.com/projects.xro/2.0',
+  files: 'https://api.xero.com/files.xro/1.0',
+} as const;
+export type XeroApi = keyof typeof XERO_API_BASES;
 
 /** The four orgs of record. Env slots follow XERO_RT_<KEY> / XERO_TENANT_<KEY>. */
 export const XERO_ORGS = ['otchealth', 'innd', 'hearingassist', 'personal'] as const;
@@ -397,14 +415,15 @@ export interface XeroGetResult {
 }
 
 /**
- * GET a Xero Accounting API path for an org. Handles auth, tenant header, one forced-refresh retry
- * on 401, and rate-header surfacing. READ-ONLY on purpose: no method parameter exists.
+ * GET a path on one of the Xero product APIs for an org (opts.api selects the base; default
+ * 'accounting'). Handles auth, tenant header, one forced-refresh retry on 401, and rate-header
+ * surfacing. READ-ONLY on purpose: no method parameter exists, so no path can mutate the books.
  */
 export async function xeroGet(
   org: XeroOrg,
   path: string,
   params: Record<string, string | undefined> = {},
-  opts: { modifiedAfter?: string; deps?: TokenDeps } = {},
+  opts: { modifiedAfter?: string; deps?: TokenDeps; api?: XeroApi } = {},
 ): Promise<XeroGetResult> {
   const deps = opts.deps ?? defaultDeps;
   if (!path.startsWith('/')) throw new Error('path must start with /');
@@ -413,9 +432,10 @@ export async function xeroGet(
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   lastCallAt.set(org, Date.now());
 
+  const base = XERO_API_BASES[opts.api ?? 'accounting'];
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, v);
-  const url = `${XERO_API_BASE}${path}${qs.size ? `?${qs}` : ''}`;
+  const url = `${base}${path}${qs.size ? `?${qs}` : ''}`;
 
   const attempt = async (force: boolean): Promise<Response> => {
     const { accessToken, tenantId } = await getOrgAccess(org, { forceRefresh: force, deps });
@@ -443,6 +463,65 @@ export async function xeroGet(
   return {
     status: r.status,
     body,
+    dayLimitRemaining: r.headers.get('X-DayLimit-Remaining'),
+    minuteLimitRemaining: r.headers.get('X-MinLimit-Remaining'),
+  };
+}
+
+/**
+ * POST / PUT / DELETE a path on a Xero product API for an org — the WRITE path. Same auth, tenant
+ * header, one-forced-refresh-on-401 retry, and rate-header surfacing as xeroGet, but sends a method
+ * + JSON body. The CFO seat is authorized for full read+write on the books (Matt directive
+ * 2026-07-16). NOTE: Xero writes are BOOKKEEPING — they post to the ledger; they do not move real
+ * money (bank execution happens at the bank, not here).
+ */
+export async function xeroRequest(
+  org: XeroOrg,
+  method: 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+  params: Record<string, string | undefined> = {},
+  opts: { deps?: TokenDeps; api?: XeroApi } = {},
+): Promise<XeroGetResult> {
+  const deps = opts.deps ?? defaultDeps;
+  if (!path.startsWith('/')) throw new Error('path must start with /');
+
+  const wait = MIN_SPACING_MS - (Date.now() - (lastCallAt.get(org) ?? 0));
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastCallAt.set(org, Date.now());
+
+  const base = XERO_API_BASES[opts.api ?? 'accounting'];
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, v);
+  const url = `${base}${path}${qs.size ? `?${qs}` : ''}`;
+  const payload = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
+
+  const attempt = async (force: boolean): Promise<Response> => {
+    const { accessToken, tenantId } = await getOrgAccess(org, { forceRefresh: force, deps });
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${accessToken}`,
+      'Xero-tenant-id': tenantId,
+      Accept: 'application/json',
+    };
+    if (payload !== undefined) headers['Content-Type'] = 'application/json';
+    return deps.fetchImpl(url, { method, headers, body: payload, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  };
+
+  let r = await attempt(false);
+  if (r.status === 401) r = await attempt(true); // stale cached access token — refresh once and retry
+  const text = await r.text();
+  let respBody: unknown = text;
+  try {
+    respBody = JSON.parse(text);
+  } catch {
+    /* 204 No Content and some errors are non-JSON */
+  }
+  if (!r.ok) {
+    throw new Error(`Xero ${method} ${path} (${org}) -> HTTP ${r.status}: ${text.slice(0, 300)}`);
+  }
+  return {
+    status: r.status,
+    body: respBody,
     dayLimitRemaining: r.headers.get('X-DayLimit-Remaining'),
     minuteLimitRemaining: r.headers.get('X-MinLimit-Remaining'),
   };

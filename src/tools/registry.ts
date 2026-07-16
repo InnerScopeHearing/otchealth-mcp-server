@@ -129,6 +129,9 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // cannot SEE them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that
   // sees them is still refused at call time; this list only controls VISIBILITY, not authorization.
   'xero_orgs', 'xero_report', 'xero_accounts', 'xero_manual_journals', 'xero_bank_transactions', 'xero_invoices',
+  'xero_get', 'xero_contacts', 'xero_payments', 'xero_credit_notes', 'xero_bank_transfers', 'xero_budgets',
+  'xero_settings', 'xero_attachments', 'xero_payroll', 'xero_assets', 'xero_projects', 'xero_files',
+  'xero_request', // the write lane (POST/PUT/DELETE); execution stays EXEC_RING-gated in-handler
 ] as const;
 
 /**
