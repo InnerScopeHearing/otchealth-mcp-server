@@ -27,6 +27,17 @@ const {
 } = await import('./client.js');
 const { EXEC_RING } = await import('../kb/search-privileged.js');
 
+// Exact-hostname match for the mock fetch routers below. Parsing the URL and comparing hostname
+// (rather than a substring .includes) is the sanctioned fix for CodeQL's "incomplete URL substring
+// sanitization" query — and it is simply the correct way to route a stubbed fetch by host anyway.
+const isHost = (u: string | URL, host: string): boolean => {
+  try {
+    return new URL(String(u)).hostname === host;
+  } catch {
+    return false;
+  }
+};
+
 // ---------------------------------------------------------------------------------------------
 // RING LOCK — xero_* is MNPI; exactly the executive ring, nothing else, single source of truth.
 // ---------------------------------------------------------------------------------------------
@@ -109,12 +120,12 @@ function makeDeps(state: { doc: AnyDoc | null; etag: string | null }) {
   const deps = {
     fetchImpl: (async (url: string | URL) => {
       const u = String(url);
-      if (u.includes('identity.xero.com')) {
+      if (isHost(u, 'identity.xero.com')) {
         calls.push('grant');
         grantN += 1;
         return grantResponse(grantN);
       }
-      if (u.includes('api.xero.com/connections')) {
+      if (isHost(u, 'api.xero.com')) {
         calls.push('connections');
         return connectionsResponse();
       }
@@ -220,7 +231,7 @@ test('losing the ETag race adopts the WINNER chain and never persists the fork',
   const deps = {
     fetchImpl: (async (url: string | URL) => {
       const u = String(url);
-      if (u.includes('identity.xero.com')) {
+      if (isHost(u, 'identity.xero.com')) {
         calls.push('grant');
         return grantResponse(99);
       }
@@ -250,7 +261,7 @@ test('invalid_grant on first use dead-marks via CREATE (no doc), with an actiona
   const created: AnyDoc[] = [];
   const deps = {
     fetchImpl: (async (url: string | URL) => {
-      if (String(url).includes('identity.xero.com')) return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+      if (isHost(url, 'identity.xero.com')) return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
       throw new Error(`unexpected fetch ${url}`);
     }) as typeof fetch,
     read: (async () => (state.doc ? { doc: state.doc, etag: state.etag } : null)) as never,
@@ -292,7 +303,7 @@ test('SAFETY-CRITICAL (B3): invalid_grant NEVER clobbers a concurrent live winne
   let wrote = false;
   const deps = {
     fetchImpl: (async (url: string | URL) => {
-      if (String(url).includes('identity.xero.com')) return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+      if (isHost(url, 'identity.xero.com')) return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
       throw new Error(`unexpected fetch ${url}`);
     }) as typeof fetch,
     read: (async () => {
@@ -339,7 +350,7 @@ test('a persist FAILURE never returns an unpersisted chain (fail-closed on durab
   });
   const deps = {
     fetchImpl: (async (url: string | URL) => {
-      if (String(url).includes('identity.xero.com')) return grantResponse(7);
+      if (isHost(url, 'identity.xero.com')) return grantResponse(7);
       throw new Error(`unexpected fetch ${url}`);
     }) as typeof fetch,
     read: (async () => ({ doc: expired, etag: 'etag-1' })) as never,
