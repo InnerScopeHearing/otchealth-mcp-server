@@ -267,9 +267,9 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       reply.header('Cache-Control', 'no-store');
       logger.info({ type: 'oauth_client_credentials', agent: rc.agent }, 'issued client_credentials access token');
       return reply.send({
-        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
+        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS),
         token_type: 'Bearer',
-        expires_in: 3600,
+        expires_in: env.OAUTH_CC_TTL_SECONDS,
         scope: 'mcp',
       });
     }
@@ -289,7 +289,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
         access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
         token_type: 'Bearer',
         expires_in: 3600,
-        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
+        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_REFRESH_TTL_SECONDS),
         scope: claims.scope,
       });
     }
@@ -329,7 +329,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
         access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
         token_type: 'Bearer',
         expires_in: 3600,
-        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
+        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_REFRESH_TTL_SECONDS),
         scope: rec.scope,
       });
     }
