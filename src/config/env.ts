@@ -61,6 +61,28 @@ const EnvSchema = z.object({
   OAUTH_TOKEN_SIGNING_SECRET: z.string().optional().default(''),
   OAUTH_REDIRECT_URIS: z.string().optional().default(''),
   PUBLIC_BASE_URL: z.string().optional().default(''),
+  // client_credentials (machine-to-machine) access-token lifetime, in seconds. The M2M lane tokens
+  // (e.g. the Claude Code gateway-connect hook) carry NO refresh token, so a long-running turn that
+  // outlives a 1h token 401s mid-turn until the next prompt re-mints. These tokens are lane-scoped,
+  // revocable, and re-minted every prompt, so a longer lifetime is a safe mid-turn margin, not new
+  // exposure. Default 24h (operator-chosen 2026-07-16) covers any autonomous turn; tune without a
+  // redeploy. The human authorization_code/refresh path is deliberately left at 1h (it has silent
+  // refresh). Bounded 60s..24h so a typo cannot mint an effectively-permanent token.
+  OAUTH_CC_TTL_SECONDS: z
+    .string()
+    .default('86400')
+    .transform((v) => Number.parseInt(v, 10))
+    .refine((n) => Number.isFinite(n) && n >= 60 && n <= 86400, 'OAUTH_CC_TTL_SECONDS must be 60..86400'),
+  // Refresh-token lifetime, in seconds, for the human authorization_code/refresh path (the Claude Chat
+  // executive connectors). The refresh token rotates on every use, so an actively-used connector renews
+  // itself forever; this ceiling only bites a connector left IDLE past it, which then needs a manual
+  // reconnect. Default 90d (was a hardcoded 30d) so executives reconnect far less often. Bounded
+  // 1 day..1 year. Does not affect the access-token lifetime (still 1h; silent refresh covers it).
+  OAUTH_REFRESH_TTL_SECONDS: z
+    .string()
+    .default('7776000')
+    .transform((v) => Number.parseInt(v, 10))
+    .refine((n) => Number.isFinite(n) && n >= 86400 && n <= 31536000, 'OAUTH_REFRESH_TTL_SECONDS must be 86400..31536000'),
   // Per-agent OAuth clients (P2b): JSON array [{"client_id":"..","secret":"..","agent":"developer"}].
   // Each connecting client maps to an agent lane; the issued token carries that agent identity.
   OAUTH_CLIENTS: z.string().optional().default(''),
