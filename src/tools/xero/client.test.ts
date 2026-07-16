@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 // Satisfy loadEnv()'s required vars BEFORE the first loadEnv call (same preamble as
 // brain-search.test.ts), plus the Xero + Cosmos config the token manager reads.
@@ -57,6 +58,19 @@ test('SAFETY-CRITICAL: the token doc pins ttl:-1 so the cache container TTL can 
   assert.equal(doc.ttl, -1, 'ttl must be -1 (never expire); anything else silently kills the chain in 7 days');
   assert.equal(doc.status, 'live');
   assert.ok(doc.expiresAt > Date.now() && doc.expiresAt <= Date.now() + 1800_000, 'expiresAt carries the margin');
+});
+
+test('SAFETY-CRITICAL (B1): the token doc carries cacheScope === its id, the /cacheScope partition key of the `cache` container', () => {
+  // Without this field Cosmos extracts partition key `undefined`, mismatches the header, and 400s
+  // EVERY persist — silently burning the single-use bootstrap consent on the first call.
+  for (const org of XERO_ORGS) {
+    const doc = buildTokenDoc({
+      org, refreshToken: 'rt', accessToken: 'at', expiresInSeconds: 1800,
+      tenantId: 't', tenantName: 'n', bootstrapHash: 'h',
+    });
+    assert.equal(doc.cacheScope, doc.id, `${org}: cacheScope must equal id (the pk we pass to Cosmos)`);
+    assert.equal(doc.cacheScope, tokenDocId(org));
+  }
 });
 
 test('tokenDocId uses the Cosmos-legal id charset for every org (no colons)', () => {
@@ -173,8 +187,11 @@ test('a CHANGED bootstrap secret supersedes the stored chain (operator re-consen
   const state = { doc: stale as AnyDoc, etag: 'etag-1' };
   const { deps, calls } = makeDeps(state);
   const a = await getOrgAccess('otchealth', { deps });
-  // Chain restarted from the env bootstrap: a grant ran and the stored doc was replaced.
+  // Chain restarted from the env bootstrap: a grant ran and the stored doc was REPLACED (B2) — NOT
+  // created against the still-existing superseded doc (which would 409 and burn the new consent).
   assert.ok(calls.includes('grant'));
+  assert.ok(calls.includes('persist:replace'), 'B2: re-consent must supersede via REPLACE (keep the etag)');
+  assert.ok(!calls.includes('persist:create'), 'B2: must NOT create over the existing superseded doc');
   assert.equal(a.accessToken, 'at-1');
   assert.equal((state.doc as AnyDoc).bootstrapHash, bootstrapHash(process.env.XERO_RT_OTCHEALTH as string));
 });
@@ -228,24 +245,22 @@ test('losing the ETag race adopts the WINNER chain and never persists the fork',
   assert.ok(!calls.includes('persist:create') && !calls.includes('persist:upsert'), 'the fork is never persisted');
 });
 
-test('invalid_grant marks the org DEAD with an actionable re-consent error (and stores NO tokens)', async () => {
+test('invalid_grant on first use dead-marks via CREATE (no doc), with an actionable error and NO token material', async () => {
   const state = { doc: null as AnyDoc | null, etag: null as string | null };
-  const persisted: AnyDoc[] = [];
+  const created: AnyDoc[] = [];
   const deps = {
     fetchImpl: (async (url: string | URL) => {
-      const u = String(url);
-      if (u.includes('identity.xero.com')) {
-        return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
-      }
-      throw new Error(`unexpected fetch ${u}`);
+      if (String(url).includes('identity.xero.com')) return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+      throw new Error(`unexpected fetch ${url}`);
     }) as typeof fetch,
     read: (async () => (state.doc ? { doc: state.doc, etag: state.etag } : null)) as never,
-    replace: (async () => ({ ok: true, status: 200, body: {}, etag: null })) as never,
-    create: (async () => ({ ok: true, status: 201, body: {}, etag: null })) as never,
-    upsert: (async (_c: string, _p: string, doc: AnyDoc) => {
-      persisted.push(doc);
+    replace: (async () => {
+      throw new Error('replace must not be called when no doc exists');
+    }) as never,
+    create: (async (_c: string, _p: string, doc: AnyDoc) => {
+      created.push(doc);
       state.doc = doc;
-      return { ok: true, status: 200, body: doc, etag: null };
+      return { ok: true, status: 201, body: doc, etag: 'etag-dead' };
     }) as never,
   };
   await assert.rejects(
@@ -253,10 +268,63 @@ test('invalid_grant marks the org DEAD with an actionable re-consent error (and 
     (e: Error) => /re-consent/.test(e.message) && /XERO_RT_OTCHEALTH/.test(e.message),
     'the error must tell the operator exactly what to do',
   );
-  assert.equal(persisted.length, 1, 'a dead tombstone is persisted');
-  assert.equal(persisted[0].status, 'dead');
-  assert.equal(persisted[0].refreshToken, '', 'no token material in the tombstone');
-  assert.equal(persisted[0].accessToken, '');
+  assert.equal(created.length, 1, 'a dead tombstone is created');
+  assert.equal(created[0].status, 'dead');
+  assert.equal(created[0].refreshToken, '', 'no token material in the tombstone');
+  assert.equal(created[0].accessToken, '');
+  assert.equal(created[0].cacheScope, created[0].id, 'the tombstone MUST carry the /cacheScope partition key');
+});
+
+test('SAFETY-CRITICAL (B3): invalid_grant NEVER clobbers a concurrent live winner — it adopts it instead of dead-marking', async () => {
+  // A same-family doc is expired -> we refresh with its (now superseded) chain token and get
+  // invalid_grant. Meanwhile another replica rotated a fresh live chain. The dead-mark path must
+  // re-read, see the live winner, and RETURN it — never overwrite it with a tombstone.
+  const bHash = bootstrapHash(process.env.XERO_RT_OTCHEALTH as string);
+  const expired = buildTokenDoc({
+    org: 'otchealth', refreshToken: 'rt-superseded', accessToken: 'at-expired', expiresInSeconds: 0,
+    tenantId: 'tenant-1', tenantName: 'OTCHealth Inc.', bootstrapHash: bHash,
+  });
+  const winner = buildTokenDoc({
+    org: 'otchealth', refreshToken: 'rt-winner', accessToken: 'at-winner', expiresInSeconds: 1800,
+    tenantId: 'tenant-1', tenantName: 'OTCHealth Inc.', bootstrapHash: bHash,
+  });
+  let reads = 0;
+  let wrote = false;
+  const deps = {
+    fetchImpl: (async (url: string | URL) => {
+      if (String(url).includes('identity.xero.com')) return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch,
+    read: (async () => {
+      reads += 1;
+      // 1st read: the expired doc we start from. adoptWinner's read (2nd): the live winner.
+      return reads === 1 ? { doc: expired, etag: 'etag-old' } : { doc: winner, etag: 'etag-new' };
+    }) as never,
+    replace: (async () => {
+      wrote = true;
+      return { ok: true, status: 200, body: {}, etag: null };
+    }) as never,
+    create: (async () => {
+      wrote = true;
+      return { ok: true, status: 201, body: {}, etag: null };
+    }) as never,
+  };
+  const a = await getOrgAccess('otchealth', { deps: deps as never });
+  assert.equal(a.accessToken, 'at-winner', 'must adopt the concurrent live winner');
+  assert.equal(wrote, false, 'must NOT write a tombstone over a live winner');
+});
+
+test('SAFETY-CRITICAL (S2): every registered xero tool has its OWN in-handler ring gate — no gate can be dropped', () => {
+  // The handlers each enforce EXEC_RING in-line (tools.ts). This structural lock pins that there is
+  // exactly one isXeroAllowed(ctx.callerAgent) guard per registered tool, so a future copy-paste
+  // (e.g. adding xero_payments) that drops the gate line fails CI instead of exposing MNPI.
+  const src = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
+  const tools = (src.match(/registerTool\(/g) || []).length;
+  const gates = (src.match(/isXeroAllowed\(ctx\.callerAgent\)/g) || []).length;
+  const refusals = (src.match(/return ringRefusal\(/g) || []).length;
+  assert.equal(tools, 6, 'expected exactly 6 registered xero tools');
+  assert.equal(gates, tools, 'every registered xero tool MUST call isXeroAllowed(ctx.callerAgent)');
+  assert.equal(refusals, tools, 'every gate MUST return ringRefusal on a non-exec caller');
 });
 
 test('a persist FAILURE never returns an unpersisted chain (fail-closed on durability)', async () => {

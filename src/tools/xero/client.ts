@@ -39,8 +39,10 @@ import {
   readDoc,
   replaceDoc,
   createDoc,
-  upsertDoc,
 } from '../../agentstate/cosmos.js';
+
+/** Bounded network deadline for every Xero call — a hung refresh must never wedge a replica. */
+const FETCH_TIMEOUT_MS = 15000;
 
 export const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token';
 export const XERO_CONNECTIONS_URL = 'https://api.xero.com/connections';
@@ -75,6 +77,10 @@ export function bootstrapHash(envRefreshToken: string): string {
 
 export interface XeroTokenDoc extends Record<string, unknown> {
   id: string;
+  /** LOAD-BEARING: the `cache` container partitions on /cacheScope (NOT /id). Cosmos extracts the
+   * partition key from THIS field of the body; it must equal the pk we pass (= tokenDocId(org)) or
+   * every create/replace/upsert returns 400. Matches the repo convention (result-store.ts cacheScope=id). */
+  cacheScope: string;
   /** LOAD-BEARING: -1 disables the cache container's 7-day default TTL for this doc. */
   ttl: number;
   org: XeroOrg;
@@ -102,6 +108,7 @@ export function buildTokenDoc(input: {
 }): XeroTokenDoc {
   return {
     id: tokenDocId(input.org),
+    cacheScope: tokenDocId(input.org), // partition key of the `cache` container (see interface note)
     ttl: -1,
     org: input.org,
     status: 'live',
@@ -146,9 +153,8 @@ export interface TokenDeps {
   read: typeof readDoc;
   replace: typeof replaceDoc;
   create: typeof createDoc;
-  upsert: typeof upsertDoc;
 }
-const defaultDeps: TokenDeps = { fetchImpl: fetch, read: readDoc, replace: replaceDoc, create: createDoc, upsert: upsertDoc };
+const defaultDeps: TokenDeps = { fetchImpl: fetch, read: readDoc, replace: replaceDoc, create: createDoc };
 
 const CACHE_COLL = 'cache';
 
@@ -191,6 +197,7 @@ async function refreshGrant(
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   const body = await r.text();
   if (!r.ok) {
@@ -210,6 +217,7 @@ async function resolveTenant(
 ): Promise<{ tenantId: string; tenantName: string }> {
   const r = await deps.fetchImpl(XERO_CONNECTIONS_URL, {
     headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!r.ok) throw new Error(`Xero /connections failed: HTTP ${r.status}`);
   const conns = (await r.json()) as Array<{ tenantId: string; tenantName?: string }>;
@@ -226,14 +234,38 @@ async function resolveTenant(
   return { tenantId: hit.tenantId, tenantName: hit.tenantName || '' };
 }
 
+type OrgAccess = { accessToken: string; tenantId: string; tenantName: string };
+
+/**
+ * If Cosmos now holds a LIVE doc for this org from the SAME consent family (bootstrapHash) with a
+ * still-valid access token, return it. This is how a replica that LOST a write race (or that just
+ * hit invalid_grant on a superseded token) adopts the WINNER's chain instead of clobbering it or
+ * persisting a fork. Family-matching is essential: never adopt a superseded (old-secret) chain.
+ */
+async function adoptWinner(deps: TokenDeps, id: string, bHash: string): Promise<OrgAccess | null> {
+  const w = await deps.read(CACHE_COLL, id, id);
+  const wdoc = w?.doc as XeroTokenDoc | undefined;
+  if (
+    wdoc &&
+    wdoc.status === 'live' &&
+    wdoc.bootstrapHash === bHash &&
+    wdoc.accessToken &&
+    wdoc.expiresAt > Date.now() &&
+    wdoc.tenantId
+  ) {
+    return { accessToken: wdoc.accessToken, tenantId: wdoc.tenantId, tenantName: wdoc.tenantName };
+  }
+  return null;
+}
+
 /**
  * Get a live access token + tenant for an org. Refreshes (and PERSISTS FIRST) when needed.
- * Multi-replica safe: ETag replace; a 412 loser adopts the winner's tokens and discards its fork.
+ * Multi-replica safe: every persist is an ETag'd REPLACE (or a first-use CREATE); a 412/409 loser
+ * adopts the winner's chain and NEVER persists its fork. Operator re-consent (a changed bootstrap
+ * secret) supersedes the stored doc via REPLACE (not create), and the dead-mark on invalid_grant is
+ * itself ETag'd so it can never overwrite a concurrent replica's freshly-rotated live chain.
  */
-export async function getOrgAccess(
-  org: XeroOrg,
-  opts: { forceRefresh?: boolean; deps?: TokenDeps } = {},
-): Promise<{ accessToken: string; tenantId: string; tenantName: string }> {
+export async function getOrgAccess(org: XeroOrg, opts: { forceRefresh?: boolean; deps?: TokenDeps } = {}): Promise<OrgAccess> {
   const deps = opts.deps ?? defaultDeps;
   const env = loadEnv() as unknown as Record<string, unknown>;
   const clientId = String(env.XERO_CLIENT_ID || '');
@@ -247,44 +279,60 @@ export async function getOrgAccess(
 
   return withOrgLock(org, async () => {
     const existing = await deps.read(CACHE_COLL, id, id);
-    let doc = existing?.doc as XeroTokenDoc | undefined;
-    let etag = existing?.etag ?? null;
+    const doc = existing?.doc as XeroTokenDoc | undefined;
+    const etag = existing?.etag ?? null; // KEEP this even on re-consent — we REPLACE the old doc, never create over it.
+    const sameFamily = Boolean(doc && doc.bootstrapHash === bHash);
+    // reconsent: a doc exists but from an OLDER bootstrap secret. It is superseded via the replace below.
 
-    // Operator re-consent path: a NEW bootstrap secret supersedes any stored chain (even a dead one).
-    if (doc && doc.bootstrapHash !== bHash) {
-      doc = undefined;
-      etag = null;
-    }
-    if (doc?.status === 'dead') throw new XeroDeadOrgError(org, doc.deadReason || 'marked dead');
+    // A dead-mark only blocks when it is the SAME consent family. A dead doc from an OLDER family is
+    // the documented recovery trigger — the re-consent (fresh XERO_RT_<ORG>) supersedes it below.
+    if (doc?.status === 'dead' && sameFamily) throw new XeroDeadOrgError(org, doc.deadReason || 'marked dead');
 
-    // Fresh-enough cached access token: no refresh, no rotation.
-    if (!opts.forceRefresh && doc && doc.accessToken && doc.expiresAt > Date.now() && doc.tenantId) {
+    // Fresh cached access token from THIS family: no refresh, no rotation.
+    if (!opts.forceRefresh && sameFamily && doc?.status === 'live' && doc.accessToken && doc.expiresAt > Date.now() && doc.tenantId) {
       return { accessToken: doc.accessToken, tenantId: doc.tenantId, tenantName: doc.tenantName };
     }
 
-    // Refresh the chain (from the stored chain, or the bootstrap secret on first use).
-    const chainToken = doc?.refreshToken || bootstrap;
+    // Refresh from the stored chain when it is the same live family; otherwise from the env bootstrap
+    // secret (first use OR operator re-consent). On re-consent we still hold `etag`, so we REPLACE.
+    const chainToken = sameFamily && doc?.refreshToken ? doc.refreshToken : bootstrap;
     const grant = await refreshGrant(deps, clientId, clientSecret, chainToken);
+
     if (grant === 'invalid_grant') {
-      // Chain is dead. Persist the tombstone (best-effort) with an actionable reason.
-      const dead: XeroTokenDoc = {
-        ...(doc ??
-          buildTokenDoc({ org, refreshToken: '', accessToken: '', expiresInSeconds: 0, tenantId: '', tenantName: '', bootstrapHash: bHash })),
-        status: 'dead',
+      // Never clobber a live winner: if a concurrent replica just rotated a live chain, adopt it.
+      const winner = await adoptWinner(deps, id, bHash);
+      if (winner) return winner;
+      // ETag'd dead-mark (B3): a plain upsert here could overwrite another replica's fresh live chain.
+      const dead = buildTokenDoc({
+        org,
         refreshToken: '',
         accessToken: '',
-        deadReason: `invalid_grant at ${new Date().toISOString()} (chain consumed elsewhere or expired)`,
-      };
+        expiresInSeconds: 0,
+        tenantId: doc?.tenantId || '',
+        tenantName: doc?.tenantName || '',
+        bootstrapHash: bHash,
+      });
+      dead.status = 'dead';
+      dead.deadReason = `invalid_grant (chain consumed elsewhere or expired)`;
       try {
-        await deps.upsert(CACHE_COLL, id, dead);
+        if (etag) {
+          const res = await deps.replace(CACHE_COLL, id, id, dead, etag);
+          if (res.status === 412) {
+            const w = await adoptWinner(deps, id, bHash);
+            if (w) return w; // a concurrent live chain won the race — use it, don't dead-mark
+          }
+        } else {
+          await deps.create(CACHE_COLL, id, dead);
+        }
       } catch {
-        /* tombstone is advisory */
+        const w = await adoptWinner(deps, id, bHash);
+        if (w) return w; // create 409 raced with a live winner
       }
       throw new XeroDeadOrgError(org, 'invalid_grant from identity.xero.com');
     }
 
-    // Resolve the tenant (reuse the stored one; a chain refresh does not change tenants).
-    const tenant = doc?.tenantId
+    // Resolve the tenant (reuse the stored one only within the same family; re-consent re-resolves).
+    const tenant = sameFamily && doc?.tenantId
       ? { tenantId: doc.tenantId, tenantName: doc.tenantName }
       : await resolveTenant(deps, grant.accessToken, org, pin);
 
@@ -298,17 +346,13 @@ export async function getOrgAccess(
       bootstrapHash: bHash,
     });
 
-    // PERSIST BEFORE USE — the new refresh token must be durable before we return the access token.
+    // PERSIST BEFORE USE. REPLACE when a doc exists (normal rotation OR re-consent supersede); CREATE
+    // only on true first use. A race resolves by adopting the winner (same family), never a fork.
     if (etag) {
       const res = await deps.replace(CACHE_COLL, id, id, next, etag);
       if (res.status === 412) {
-        // Another replica rotated first. Adopt the WINNER's chain; discard our fork (grace window
-        // makes the double-refresh harmless as long as the fork is never persisted or reused).
-        const winner = await deps.read(CACHE_COLL, id, id);
-        const wdoc = winner?.doc as XeroTokenDoc | undefined;
-        if (wdoc?.status === 'live' && wdoc.accessToken) {
-          return { accessToken: wdoc.accessToken, tenantId: wdoc.tenantId, tenantName: wdoc.tenantName };
-        }
+        const winner = await adoptWinner(deps, id, bHash);
+        if (winner) return winner;
         throw new Error(`Xero org "${org}": lost a rotation race and the winner's chain is unusable; retry`);
       }
       if (!res.ok) throw new Error(`Xero org "${org}": token persist failed (${res.status}); NOT returning an unpersisted chain`);
@@ -316,12 +360,8 @@ export async function getOrgAccess(
       try {
         await deps.create(CACHE_COLL, id, next);
       } catch (e) {
-        // 409 = another replica created it first — same adopt-the-winner rule.
-        const winner = await deps.read(CACHE_COLL, id, id);
-        const wdoc = winner?.doc as XeroTokenDoc | undefined;
-        if (wdoc?.status === 'live' && wdoc.accessToken) {
-          return { accessToken: wdoc.accessToken, tenantId: wdoc.tenantId, tenantName: wdoc.tenantName };
-        }
+        const winner = await adoptWinner(deps, id, bHash);
+        if (winner) return winner;
         throw e;
       }
     }
@@ -373,7 +413,7 @@ export async function xeroGet(
       Accept: 'application/json',
     };
     if (opts.modifiedAfter) headers['If-Modified-Since'] = opts.modifiedAfter;
-    return deps.fetchImpl(url, { headers });
+    return deps.fetchImpl(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   };
 
   let r = await attempt(false);

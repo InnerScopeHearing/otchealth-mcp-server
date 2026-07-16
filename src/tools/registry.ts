@@ -124,6 +124,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // issues (file + close follow-ups without leaving the seat)
   'github_create_issue', 'github_issue_get', 'github_issue_update',
   'graph_send_email', 'graph_list_messages', 'cio_get_customer', 'shield_check', 'groundedness_check',
+  // Xero (read-only accounting of record). MUST be on the connector surface or the Claude Chat CFO
+  // (the whole reason this service exists — no filesystem/CLI to reach the old skills/xero path)
+  // cannot SEE them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that
+  // sees them is still refused at call time; this list only controls VISIBILITY, not authorization.
+  'xero_orgs', 'xero_report', 'xero_accounts', 'xero_manual_journals', 'xero_bank_transactions', 'xero_invoices',
 ] as const;
 
 /**
