@@ -938,6 +938,7 @@ import { registerAzureJobUpdate } from './azure/job-update.js';
 import { registerAzureContainerappSetEnv } from './azure/containerapp-set-env.js';
 import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
 import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
+import { registerXeroTools } from './xero/tools.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -1887,4 +1888,6 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAzureContainerappSetEnv(server, callerHash);
   registerAzureSearchIndexUpsert(server, callerHash);
   registerAzureSearchIndexerUpsert(server, callerHash);
+  // Xero (read-only, executive-ring gated in-handler; MNPI — see tools/xero/client.ts).
+  registerXeroTools(server, callerHash);
 }
