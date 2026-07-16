@@ -8,6 +8,7 @@ import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
 import { registerOAuthRoutes } from './oauth.js';
 import { registerWebhookRoutes } from './webhooks.js';
+import { loadRevocations } from '../auth/revocation-store.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -117,6 +118,14 @@ async function main(): Promise<void> {
       });
     }
   });
+
+  // Load the durable token-revocation blocklist into memory BEFORE accepting requests, so a leaked
+  // token that was revoked stays rejected across restarts / blue-green redeploys (the blocklist is
+  // persisted in Cosmos). Fail-open by construction (loadRevocations never throws).
+  const revokedCount = await loadRevocations();
+  if (revokedCount > 0) {
+    logger.warn({ type: 'revocations_loaded', count: revokedCount }, 'loaded durable token revocations at boot');
+  }
 
   try {
     const address = await app.listen({ port: env.PORT, host: '0.0.0.0' });
