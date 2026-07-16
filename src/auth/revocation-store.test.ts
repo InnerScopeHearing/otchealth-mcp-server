@@ -6,6 +6,8 @@ import {
   getRevocationState,
   clearRevocation,
   loadRevocations,
+  startRevocationReloader,
+  stopRevocationReloader,
 } from './revocation-store.js';
 
 // revocation-store lazily calls loadEnv() (via cosmosConfigured()), which validates the WHOLE env.
@@ -67,4 +69,12 @@ test('loadRevocations is safe (fail-open) with no Cosmos configured', async () =
 
 test('isRevoked short-circuits cheaply when nothing is revoked', () => {
   assert.equal(isRevoked('anything'), false);
+});
+
+test('the reconciler is idempotent and safe with no Cosmos (no-op, no throw)', () => {
+  // Without Cosmos configured (test env) the reloader must no-op rather than spin a timer.
+  assert.doesNotThrow(() => startRevocationReloader());
+  assert.doesNotThrow(() => startRevocationReloader()); // second call must not double-schedule
+  assert.doesNotThrow(() => stopRevocationReloader());
+  assert.doesNotThrow(() => stopRevocationReloader()); // stopping when not running is safe
 });

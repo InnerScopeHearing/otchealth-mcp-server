@@ -8,7 +8,7 @@ import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
 import { registerOAuthRoutes } from './oauth.js';
 import { registerWebhookRoutes } from './webhooks.js';
-import { loadRevocations } from '../auth/revocation-store.js';
+import { loadRevocations, startRevocationReloader } from '../auth/revocation-store.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -126,6 +126,10 @@ async function main(): Promise<void> {
   if (revokedCount > 0) {
     logger.warn({ type: 'revocations_loaded', count: revokedCount }, 'loaded durable token revocations at boot');
   }
+  // Behind Front Door / APIM the gateway can run >1 replica; a /admin/revoke only lands on one. This
+  // reconciler re-pulls the durable blocklist from Cosmos on an interval so any revoke reaches every
+  // replica within ~30s without a restart. Idempotent; no-op without Cosmos; unref'd (never blocks exit).
+  startRevocationReloader();
 
   try {
     const address = await app.listen({ port: env.PORT, host: '0.0.0.0' });
