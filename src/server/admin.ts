@@ -58,7 +58,7 @@ export function registerAdmin(app: FastifyInstance): void {
       });
     }
     const targetToken = parsed.data.token ?? env.PERPLEXITY_CONNECTOR_TOKEN;
-    const state = revokeToken(targetToken, parsed.data.reason);
+    const state = await revokeToken(targetToken, parsed.data.reason);
     logger.warn(
       {
         type: 'admin_revoke_applied',
@@ -76,9 +76,10 @@ export function registerAdmin(app: FastifyInstance): void {
       revoked_token_hash: state.revoked_token_hash,
       reason: state.revoked_reason,
       note:
-        'Requests using this exact token will now return 401 until the process restarts. ' +
-        'For permanent lockout, rotate the underlying secret (env var for static tokens, ' +
-        'OAUTH_TOKEN_SIGNING_SECRET for issued JWTs - the latter invalidates every active session).',
+        'Requests using this exact token now return 401. The revocation is DURABLE (persisted to ' +
+        'Cosmos and reloaded into memory on restart/redeploy), so it survives deploys until the token ' +
+        'expires. To invalidate EVERY issued JWT at once (not just this one), rotate ' +
+        'OAUTH_TOKEN_SIGNING_SECRET instead.',
     });
   });
 
@@ -93,7 +94,7 @@ export function registerAdmin(app: FastifyInstance): void {
     if (!validateAdminToken(request.headers['authorization'])) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    clearRevocation();
+    await clearRevocation();
     logger.warn(
       { type: 'admin_revoke_cleared', ip: request.ip },
       'revocation cleared via /admin/clear-revoke',
