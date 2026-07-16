@@ -127,3 +127,34 @@ export async function clearRevocation(): Promise<void> {
     }
   }
 }
+
+// ── Multi-replica propagation ──────────────────────────────────────────────────────────────────────
+// The gateway runs behind Front Door / APIM and can serve from MORE THAN ONE replica. A /admin/revoke
+// lands on exactly ONE replica: it updates that replica's in-memory set + Cosmos, but the OTHER replicas
+// keep their stale set until they reboot. Verified live 2026-07-16: right after a single revoke, the
+// leaked token was still HTTP 200 on ~half of requests. So each replica periodically re-pulls the durable
+// blocklist from Cosmos, making any revoke fleet-wide within one interval with NO restart and no manual
+// fan-out. loadRevocations() is add-only (never un-revokes on a transient empty read -> fail-SAFE for a
+// kill-switch); a genuine clear is handled per-replica + the Cosmos delete, and a lagging replica that
+// keeps a cleared token rejected for one extra interval is the safe direction to err. Cheap: one tiny
+// kind-filtered query on a handful of docs.
+const RELOAD_MS = Number(process.env.REVOCATION_RELOAD_MS) || 30_000;
+let _reloadTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Start the periodic Cosmos reconciler (idempotent; no-op without Cosmos). Called once from server boot. */
+export function startRevocationReloader(): void {
+  if (_reloadTimer || !cosmosConfigured()) return;
+  _reloadTimer = setInterval(() => {
+    void loadRevocations();
+  }, RELOAD_MS);
+  // Do not keep the event loop alive just for this timer.
+  (_reloadTimer as unknown as { unref?: () => void }).unref?.();
+}
+
+/** Stop the reconciler (test teardown / graceful shutdown). */
+export function stopRevocationReloader(): void {
+  if (_reloadTimer) {
+    clearInterval(_reloadTimer);
+    _reloadTimer = null;
+  }
+}
