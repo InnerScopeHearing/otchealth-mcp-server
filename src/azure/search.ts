@@ -19,7 +19,7 @@ import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { buildExhaustFilterClause, filterExhaustHits } from '../memory/room-hygiene.js';
-import { rerankByAuthority } from '../memory/authority-rerank.js';
+import { rerankByAuthority, rerankEnabled } from '../memory/authority-rerank.js';
 
 const API_VERSION = '2023-11-01';
 
@@ -123,8 +123,16 @@ export async function hybridSearch(
   const filter = chunked ? undefined : opts?.filter ?? (includeOps ? undefined : buildExhaustFilterClause('type'));
 
   // Chunked rooms return N chunks per parent doc; over-fetch so post-dedup we can still surface `top`
-  // distinct parents. Flat rooms fetch exactly `top` (unchanged).
-  const fetchTop = chunked ? Math.min(50, top * 3) : top;
+  // distinct parents. FLAT MEMORY rooms also over-fetch when the authority re-rank is active, so the
+  // re-rank has a real candidate pool — otherwise it could only reorder the exact `top` the engine
+  // returned and could never promote a current decision that relevance-ranked just outside the window.
+  // With the re-rank OFF, flat rooms fetch exactly `top` (byte-identical to before). The re-rank is
+  // ALSO skipped when the caller passed an explicit opts.filter: that means they asked for a PRECISE
+  // slice (e.g. incident-match's pitfall/correction-only query) and want pure relevance order within
+  // it, not an authority reshuffle. The re-rank is for the GENERAL recall path (brain_search / kb_search
+  // / memory_recall), where "surface the current load-bearing fact" is the goal.
+  const rerankOn = rerankEnabled(e.MEMORY_RERANK_MODE) && !opts?.filter;
+  const fetchTop = chunked ? Math.min(50, top * 3) : rerankOn ? Math.min(30, top * 3) : top;
 
   const body: Record<string, unknown> = {
     search: query,
@@ -208,8 +216,11 @@ export async function hybridSearch(
     // or correction of near-equal relevance (Wave 1, the CORRECTION-plague fix). Chunked DOC rooms
     // (finance/legal source docs) never enter this branch, so document retrieval is untouched. The
     // re-rank is a no-op on rooms whose docs carry no type/ts/source (all multipliers -> 1.0, stable
-    // sort preserves the engine's relevance order). Kill-switch: MEMORY_RERANK_MODE=off.
-    hits = rerankByAuthority(hits, { mode: e.MEMORY_RERANK_MODE });
+    // sort preserves the engine's relevance order). Kill-switch: MEMORY_RERANK_MODE=off. When on, the
+    // room over-fetched (fetchTop above), so slice back to `top` AFTER re-ranking — this is how a
+    // current decision that relevance-ranked at, say, #12 gets promoted into the returned top-N.
+    // rerankOn already folds in both the kill-switch and the "no explicit filter" rule.
+    if (rerankOn) hits = rerankByAuthority(hits, { mode: e.MEMORY_RERANK_MODE }).slice(0, top);
   }
 
   // Strip the internal dedup + re-rank signal keys; the client-side exhaust backstop (belt + braces)
