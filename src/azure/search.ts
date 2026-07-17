@@ -19,6 +19,7 @@ import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { buildExhaustFilterClause, filterExhaustHits } from '../memory/room-hygiene.js';
+import { rerankByAuthority } from '../memory/authority-rerank.js';
 
 const API_VERSION = '2023-11-01';
 
@@ -176,6 +177,11 @@ export async function hybridSearch(
     id: d['id'] ?? d['chunk_id'] ?? d['key'] ?? '',
     type: typeof d['type'] === 'string' ? (d['type'] as string) : undefined,
     path: typeof d['path'] === 'string' ? (d['path'] as string) : undefined,
+    // Authority/freshness signals for the memory-room re-rank (stripped before returning KbHit, so the
+    // client output shape is unchanged). Absent on chunked doc rooms — those skip the re-rank anyway.
+    ts: typeof d['ts'] === 'string' ? (d['ts'] as string) : undefined,
+    source: typeof d['source'] === 'string' ? (d['source'] as string) : undefined,
+    by: typeof d['by'] === 'string' ? (d['by'] as string) : undefined,
     // Dedup key for chunked rooms: the parent document. The `__row${i}` final fallback guarantees a
     // unique key when a doc has none of parent_id/path/id/chunk_id, so unrelated hits can never merge
     // onto an empty ''. Flat rooms never dedup (each is its own key).
@@ -196,11 +202,19 @@ export async function hybridSearch(
       .sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))
       .slice(0, top)
       .map((h) => ({ ...h, id: h._parent || h.id }));
+  } else {
+    // FLAT MEMORY ROOMS (memory-exec, finance-cfo-memory, commons-*, legal-*-memory): re-rank by
+    // authority + freshness so a stale/retracted episode can no longer outrank the current decision
+    // or correction of near-equal relevance (Wave 1, the CORRECTION-plague fix). Chunked DOC rooms
+    // (finance/legal source docs) never enter this branch, so document retrieval is untouched. The
+    // re-rank is a no-op on rooms whose docs carry no type/ts/source (all multipliers -> 1.0, stable
+    // sort preserves the engine's relevance order). Kill-switch: MEMORY_RERANK_MODE=off.
+    hits = rerankByAuthority(hits, { mode: e.MEMORY_RERANK_MODE });
   }
 
-  // Strip the internal dedup key; the client-side exhaust backstop (belt + braces) still runs — a
-  // no-op on chunked/typeless docs and byte-identical to before on flat memory rooms.
-  let matches: KbHit[] = hits.map(({ _parent, ...h }) => h);
+  // Strip the internal dedup + re-rank signal keys; the client-side exhaust backstop (belt + braces)
+  // still runs. The KbHit output shape is unchanged (ts/source/by never leave this function).
+  let matches: KbHit[] = hits.map(({ _parent, ts, source, by, ...h }) => h);
   matches = filterExhaustHits(matches, includeOps);
   return { matches, mode: vector ? 'hybrid+semantic' : 'keyword' };
 }
