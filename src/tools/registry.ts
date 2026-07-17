@@ -76,6 +76,13 @@ import { EXEC_RING } from './kb/search-privileged.js';
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'web_search', 'kb_search', 'kb_search_privileged',
+  // kb_get_document: whole-document retrieval from the finance/legal doc rooms (paginated, ring-gated
+  // in get-document.ts). MUST be on the connector surface or the Claude Chat CFO cannot SEE it -- and
+  // kb_search returns only chunk SNIPPETS, so without this the CFO can never pull a full source doc
+  // (a bank statement, a filing) end to end. The 2026-07-15 lane split shipped kb_get_document (#130)
+  // into the catalog but never added it here, so it stayed invisible on every exec DCR connector (the
+  // CFO reported "102 tools, kb_get_document absent"). VISIBILITY only; the ring gate stays in-handler.
+  'kb_get_document',
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract (search/fetch — see
   // kb/openai-search.ts). Non-privileged by construction even on this lane: the tools re-derive
   // and re-check the ring per call, they are not widened just because cto/exec can see them here.

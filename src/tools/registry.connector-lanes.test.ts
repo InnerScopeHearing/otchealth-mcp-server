@@ -46,6 +46,9 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET].sort());
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
+  // Regression guard (2026-07-17): the CFO reported kb_get_document was invisible on its DCR
+  // connector because #130 shipped the tool into the catalog but never added it to this ship set.
+  assert.ok(set.has('kb_get_document'), 'ship lane must expose whole-doc retrieval (the CFO census gap)');
 });
 
 test('(b) developer lane gets the full ship-lane set', () => {
@@ -68,7 +71,7 @@ test("(d) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 s
   assert.ok(set.has('search'), 'external-read must see the OpenAI connector search tool');
   assert.ok(set.has('fetch'), 'external-read must see the OpenAI connector fetch tool');
   for (const forbidden of [
-    'kb_search_privileged',
+    'kb_search_privileged', 'kb_get_document',
     'legal_blob_list', 'legal_blob_get', 'legal_blob_put',
     'memory_write', 'memory_remember',
     'github_push_files', 'github_merge_pull_request', 'github_create_pull_request',
