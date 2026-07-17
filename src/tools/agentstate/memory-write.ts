@@ -3,8 +3,10 @@ import { z } from 'zod';
 import { registerTool, isShipLane, type CallerHashProvider } from '../registry.js';
 import { isConfigured } from '../../agentstate/cosmos.js';
 import { writeMemory } from '../../agentstate/memory.js';
-import { MEMORY_KINDS } from '../../agentstate/agents.js';
+import { MEMORY_KINDS, normalizeAgent } from '../../agentstate/agents.js';
 import { indexMemoryNow } from '../../azure/search-write.js';
+import { embed } from '../../azure/foundry.js';
+import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { currentCallerAgent, isConnectorSurface } from '../../server/request-context.js';
 
 /**
@@ -69,7 +71,17 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
         }
         if (!isConfigured()) return { data: { written: false, note: 'agent-state Cosmos not configured.' }, summary: 'Memory store not configured.' };
         if (ctx.dryRun) return { data: { written: false, preview: input, note: 'dry_run: pass dry_run=false to persist.' }, summary: `DRY RUN: would write a ${input.kind} for ${input.agent}.` };
-        const record = await writeMemory(input);
+        // Embed ONCE and reuse for both auto-supersession detection and the index write below.
+        let vector: number[] | null = null;
+        try { vector = await embed(input.text); } catch { vector = null; }
+        // AUTO-SUPERSESSION (W1-2): does this new entry contradict a near-prior same-agent one? Fail-open
+        // (never blocks/breaks the write); sets supersedes only under MEMORY_AUTOSUPERSEDE_MODE=auto; and
+        // NEVER overrides an explicit caller-provided supersedes (the agent already knows what it retires).
+        const sup = input.supersedes
+          ? { action: 'none' as const, reason: 'caller set supersedes', supersedeId: undefined as string | undefined }
+          : await detectSupersession({ agent: normalizeAgent(input.agent), kind: input.kind, text: input.text, vector });
+        const supersedes = input.supersedes ?? (sup.action === 'auto-link' ? sup.supersedeId : undefined);
+        const record = await writeMemory({ ...input, supersedes });
         // WRITE-THROUGH: the Cosmos memory-of-record was previously indexed by NOTHING -- semantic.mjs
         // indexes only the shared blob feed, so every memory_write was durable but UNFINDABLE by
         // brain_search/kb_search. This makes the system-of-record actually recallable. Fail-open:
@@ -81,10 +93,23 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
           ts: record.created_at,
           tags: record.tags,
           text: record.text,
+          vector,
         });
+        const supNote =
+          sup.action === 'auto-link'
+            ? ` Auto-superseded ${sup.supersedeId} (contradiction detected).`
+            : sup.action === 'suggest'
+              ? ` Possible contradiction with ${sup.supersedeId} flagged for reconcile.`
+              : '';
         return {
-          data: { written: true, record, indexed: idx.indexed, ...(idx.reason ? { index_error: idx.reason } : {}) },
-          summary: `Wrote ${input.kind} ${record.id} to ${input.agent}'s memory-of-record${idx.indexed ? ' and indexed it for semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — it will remain invisible to brain_search)`}.`,
+          data: {
+            written: true,
+            record,
+            indexed: idx.indexed,
+            ...(idx.reason ? { index_error: idx.reason } : {}),
+            ...(sup.action !== 'none' ? { supersede: sup } : {}),
+          },
+          summary: `Wrote ${input.kind} ${record.id} to ${input.agent}'s memory-of-record${idx.indexed ? ' and indexed it for semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — it will remain invisible to brain_search)`}.${supNote}`,
           audit: { after: record },
         };
       },

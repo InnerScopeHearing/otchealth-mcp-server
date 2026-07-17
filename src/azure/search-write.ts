@@ -91,6 +91,15 @@ export async function indexMemoryNow(input: {
   tags?: string[];
   text: string;
   index?: string;
+  /**
+   * Precomputed embedding, REUSED instead of re-embedding. The write path (memory_write /
+   * memory_remember) now embeds the text once for auto-supersession detection and hands the same
+   * vector here, so we do not embed the identical text twice. Semantics: `undefined` (the default,
+   * every pre-existing caller) => embed here as before; a real array => index with it; `null` => an
+   * upstream embed already FAILED, so index without a vector and do NOT retry (still fully
+   * keyword+semantic searchable — degrade, never drop).
+   */
+  vector?: number[] | null;
 }): Promise<IndexResult> {
   const index = input.index || 'memory-exec';
   const docId = memoryDocId(input.agent, input.id);
@@ -106,11 +115,17 @@ export async function indexMemoryNow(input: {
     const key = await searchAdminKey(service);
 
     // Embed for vector recall. If embedding is unavailable, still index -- keyword+semantic beats nothing.
-    let vector: number[] | null = null;
-    try {
-      vector = await embed(input.text);
-    } catch {
-      vector = null;
+    // Reuse a caller-supplied vector when present (the write path already embedded this exact text);
+    // only embed here when the caller did not pass the field at all (undefined).
+    let vector: number[] | null;
+    if (input.vector !== undefined) {
+      vector = input.vector;
+    } else {
+      try {
+        vector = await embed(input.text);
+      } catch {
+        vector = null;
+      }
     }
 
     const doc = buildMemoryDoc({ ...input, vector });

@@ -152,6 +152,16 @@ const EnvSchema = z.object({
   // Default ON. Set to 'off' to fall back to pure relevance order (byte-identical to pre-Wave-1).
   MEMORY_RERANK_MODE: z.string().optional().default('on'),
 
+  // Auto-supersession at write (src/memory/auto-supersede*.ts, Wave 1 W1-2). Graduated rollout:
+  //   off     -> detection skipped entirely (DEFAULT: ship the write-path change DARK, zero runtime
+  //              change, so the deploy is a true no-op on the memory-of-record).
+  //   suggest -> detect a contradiction with a near-prior same-agent entry + emit a reconcile beacon,
+  //              but do NOT link supersedes (watch the beacons + latency before trusting it).
+  //   auto    -> additionally link supersedes so the contradicted belief retires with no agent
+  //              discipline. Flip here only AFTER the golden-recall suite proves the classifier's
+  //              precision (a false positive would silently retire a TRUE belief). Fail-open always.
+  MEMORY_AUTOSUPERSEDE_MODE: z.string().optional().default('off'),
+
   // Feature flags
   READ_ONLY_MODE: z
     .enum(['true', 'false'])
