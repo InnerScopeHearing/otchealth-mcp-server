@@ -79,6 +79,61 @@ export function overSoftBudget(summary: UsageSummary, softCapTokens = 60000): bo
   return summary.total_tokens > softCapTokens;
 }
 
+/** Caller-assigned latency bucket for a single LLM (or cache-served) call, used to slice p95 by
+ * call kind on the dashboard: 'hot' for a user-blocking interactive call, 'background' for a
+ * fire-and-forget/best-effort call, 'normal' for everything else (the default). */
+export type LatencyClass = 'hot' | 'normal' | 'background';
+
+export interface LatencyFields {
+  duration_ms: number;
+  /** Time-to-first-token. Present ONLY when the caller genuinely measured a streaming response. */
+  ttft_ms?: number;
+  cache_hit: boolean;
+  cached_pct: number;
+  model: string;
+  latency_class: LatencyClass;
+}
+
+/**
+ * Pure, env-free, no Date.now() inside: build the latency + cache telemetry fields for one LLM
+ * call (or a cache-served response standing in for one), to spread into a gateway_llm_call /
+ * gateway_llm_cache_hit capture's properties. The caller measures `startedAt`/`endedAt` (usually
+ * bracketing just the chat() call, or the cache lookup) so this stays deterministic and provable
+ * without network or a real clock, see gateway-ops.test.ts.
+ *
+ * `ttftMs` is included ONLY when the caller genuinely measured a time-to-first-token (a streaming
+ * response); omitted otherwise rather than defaulted to 0 or to duration_ms, so an absent field on
+ * the dashboard always means "not observed," never "instant." Foundry's chat() (azure/foundry.ts)
+ * has no streaming mode today, so no current caller can supply a real ttftMs, this stays wired
+ * for when one exists.
+ *
+ * `cachedPct` is a pass-through (reuse summarizeUsage's cached_pct, do not recompute it here) and
+ * defaults to 0 when the caller has no usage object to derive it from (e.g. a cache-served
+ * response with no fresh token usage). `latencyClass` defaults to 'normal' when the caller does
+ * not tag the call.
+ */
+export function buildLatencyFields(opts: {
+  startedAt: number;
+  endedAt: number;
+  model: string;
+  cacheHit: boolean;
+  cachedPct?: number;
+  ttftMs?: number;
+  latencyClass?: LatencyClass;
+}): LatencyFields {
+  const fields: LatencyFields = {
+    duration_ms: Math.max(0, opts.endedAt - opts.startedAt),
+    cache_hit: opts.cacheHit,
+    cached_pct: opts.cachedPct ?? 0,
+    model: opts.model,
+    latency_class: opts.latencyClass ?? 'normal',
+  };
+  if (typeof opts.ttftMs === 'number' && Number.isFinite(opts.ttftMs)) {
+    fields.ttft_ms = opts.ttftMs;
+  }
+  return fields;
+}
+
 /**
  * Fire-and-forget capture to the PostHog ingestion endpoint. Never awaited by the caller,
  * never throws (env read is guarded), times out fast (1.5s), and no-ops when no key is

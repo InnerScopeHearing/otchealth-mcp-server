@@ -105,6 +105,13 @@ resource api 'Microsoft.ApiManagement/service/apis@2023-09-01-preview' = {
 // the gateway through this one APIM instance. counter-key is a policy expression, never a literal
 // secret value; APIM stores only the derived counter, not the token itself.
 //
+// W1-6 follow-on: APIM route-level response caching (cache-lookup/cache-store policies) was
+// considered for the hot LLM/read paths and deliberately left out of the speed-instrumentation
+// PR. It needs its own design pass (cache-key/vary-by semantics per tool, and this MCP surface
+// mixes read and write tools behind one route) rather than being bolted on alongside telemetry.
+// Same for separated per-task/tier Azure OpenAI deployments (azure/foundry.ts currently shares one
+// deployment across tasks) for rate-limit isolation. Both are infra changes, not this PR's scope.
+//
 // Bicep's ''' multiline string is a RAW/verbatim literal (it does not interpolate ${...}), so the
 // numeric values are substituted with format()'s {n} placeholders instead. The counter-key policy
 // expression's own GetValueOrDefault("Authorization","") call needs literal double quotes, which
