@@ -162,6 +162,11 @@ const EnvSchema = z.object({
   //              precision (a false positive would silently retire a TRUE belief). Fail-open always.
   MEMORY_AUTOSUPERSEDE_MODE: z.string().optional().default('off'),
 
+  // Kill-switch for the deterministic current-value entity lookup in brain_search (Wave 1 W1-3,
+  // src/memory/entity-lookup.ts). Default ON: a query that resolves to a known typed-entity key gets
+  // that key's CURRENT value promoted ahead of the semantic top-k. Set 'off' for pure semantic recall.
+  ENTITY_LOOKUP_MODE: z.string().optional().default('on'),
+
   // Feature flags
   READ_ONLY_MODE: z
     .enum(['true', 'false'])
