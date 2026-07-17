@@ -63,6 +63,7 @@ import { isLaneAllowed } from './search-privileged.js';
 import { retractedIds, filterRetracted } from '../../memory/retractions.js';
 import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
 import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
+import { lookupEntity } from '../../memory/entity-lookup.js';
 
 // Re-exported so the pre-existing `import { rrfFuse, ... } from './brain-search.js'` in
 // brain-search.test.ts keeps working unchanged -- the implementation moved to memory/rrf.ts (see
@@ -215,7 +216,30 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   const pool = rrfFuse(perRoom, top * 3);
   const retracted = await retractedIds();
   const { kept, dropped } = filterRetracted(pool, retracted);
-  const matches = kept.slice(0, top);
+
+  // W1-3 DETERMINISTIC CURRENT-VALUE PROMOTION (fail-open, kill-switch ENTITY_LOOKUP_MODE). If the
+  // query resolves to a known typed-entity key ("what is the ASC key id", "n8n base url"), surface
+  // that key's CURRENT value AHEAD of the semantic top-k -- structurally unable to return a superseded
+  // value, instead of whatever the reranker floated up. Ring-safe: the source is the commons feed and
+  // entity rows are already in memory-exec (an OPEN_ROOM), so this changes RANKING, not exposure.
+  const entity = await lookupEntity(input.query, process.env.ENTITY_LOOKUP_MODE);
+  let matches: unknown[] = kept.slice(0, top);
+  if (entity) {
+    const recorded = (entity.ts || '').slice(0, 10);
+    const authoritative: Record<string, unknown> = {
+      id: entity.id,
+      text: `${entity.ekey} = ${entity.evalue}${entity.source ? ` (source: ${entity.source})` : ''}${recorded ? ` [current value, recorded ${recorded}]` : ' [current value]'}`,
+      score: Number.POSITIVE_INFINITY,
+      type: 'entity',
+      authoritative: true,
+    };
+    // Prepend the deterministic answer; drop any semantic duplicate of the same row so it is not
+    // listed twice. Keep at least the authoritative hit even if top somehow rounds it out.
+    matches = [
+      authoritative,
+      ...kept.filter((m) => String((m as { id?: unknown }).id ?? '') !== entity.id),
+    ].slice(0, Math.max(top, 1));
+  }
 
   const data: Record<string, unknown> = {
     matches,
@@ -224,6 +248,15 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     rooms_searched: searched,
     include_ops: includeOps,
   };
+  if (entity) {
+    data.entity_answer = {
+      key: entity.ekey,
+      value: entity.evalue,
+      recorded: entity.ts,
+      id: entity.id,
+      ...(entity.source ? { source: entity.source } : {}),
+    };
+  }
   if (failed.length) data.rooms_failed = failed;
   // Disclose retractions rather than silently vanishing them -- an agent should be able to SEE
   // that the brain deliberately withheld a belief the fleet has retracted.
@@ -232,6 +265,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   return {
     data,
     summary:
+      (entity ? `Current value: ${entity.ekey} = ${entity.evalue}. ` : '') +
       `${matches.length} match(es) for "${input.query}" — federated live across ${searched.length} room(s): ${searched.join(', ')}.` +
       (includeOps ? ' Operational chatter (status/episode/heartbeat/digest) INCLUDED.' : '') +
       (dropped.length ? ` Dropped ${dropped.length} RETRACTED belief(s): ${dropped.join(', ')}.` : '') +
@@ -263,6 +297,8 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         rooms_failed: z.array(z.string()).optional(),
         retracted_dropped: z.array(z.string()).optional(),
         include_ops: z.boolean(),
+        // W1-3: the deterministic current-value answer when the query resolved to a typed-entity key.
+        entity_answer: z.unknown().optional(),
         error: z.string().optional(),
         // deep mode only -- absent in fast mode, which stays byte-identical to before this change.
         answer: z.string().optional(),
