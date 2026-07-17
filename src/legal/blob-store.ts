@@ -169,6 +169,28 @@ function looksTextual(contentType: string | null): boolean {
  * Returns text for textual content types, otherwise base64 (binary-safe). `forceBase64` always
  * returns base64. 404 -> { found: false }.
  */
+/**
+ * Generic SharedKey blob GET against ANY account/container, using the same proven signer.
+ * Exists so other ring-gated stores (the finance dataroom behind kb_get_document) reuse the
+ * exact azSig construction instead of re-deriving Azure SharedKey signing (the known footgun this
+ * file's header warns about). Returns raw bytes; the caller decides text vs base64 handling.
+ */
+export async function fetchBlobRaw(
+  account: string,
+  key: string,
+  container: string,
+  path: string,
+): Promise<{ found: boolean; contentType: string | null; buf: Buffer | null }> {
+  const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
+  const auth = azSig(account, key, 'GET', container, encPath(path), xms, null, '', '');
+  const r = await fetch(`https://${account}.blob.core.windows.net/${container}/${encPath(path)}`, {
+    headers: { ...xms, Authorization: auth },
+  });
+  if (r.status === 404) return { found: false, contentType: null, buf: null };
+  if (!r.ok) throw new Error(`blob get ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  return { found: true, contentType: r.headers.get('content-type'), buf: Buffer.from(await r.arrayBuffer()) };
+}
+
 export async function getBlob(
   container: LegalContainer,
   path: string,
