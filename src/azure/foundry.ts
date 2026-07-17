@@ -139,7 +139,13 @@ export function routerConfigured(): boolean {
   return Boolean(e.FOUNDRY_ROUTER_ENDPOINT && e.FOUNDRY_ROUTER_KEY);
 }
 
-/** Chat completion on a credit-funded Foundry deployment (default gpt-5.1), or the Model Router. */
+/**
+ * Chat completion on a credit-funded Foundry deployment (default gpt-5.1), or the Model Router.
+ * Non-streaming (a single awaited fetch -> full JSON body): callers can time the whole call
+ * wall-clock (duration_ms), but can never derive a genuine time-to-first-token from this path. See
+ * telemetry/gateway-ops.ts buildLatencyFields, which omits ttft_ms rather than faking it for
+ * exactly this reason.
+ */
 export async function chat(
   messages: ChatMessage[],
   opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean; deployment?: string; tier?: 'standard' | 'high' | 'router'; cacheKey?: string },

@@ -24,6 +24,10 @@ import { isConfigured as inboxConfigured, readMessages } from '../../agentstate/
  * tasks, an inbox PEEK (never drains — draining stays an explicit inbox_read act), and unreconciled
  * cross-agent inbound notes. Each subsystem is fetched in parallel and error-isolated: one
  * unconfigured/failing store degrades to a per-section error string instead of blanking the wake.
+ * (W1-6 audit, 2026-07-17: re-verified every sub-read below is an immediately-invoked async IIFE
+ * assigned to a promise before the shared Promise.allSettled, so every underlying network call is
+ * already in flight concurrently, matching brain-search.ts's per-room fan-out pattern. No sequential
+ * await chain was found, so no change was needed here.)
  *
  * Size discipline (finding F6, memory_pack ~70KB JIT-offloads): corrections are superseded-collapsed
  * (a correction referenced by a newer correction's `supersedes` is dropped — the newer one IS the

@@ -15,7 +15,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
-import { captureGatewayEvent, summarizeUsage, overSoftBudget } from '../../telemetry/gateway-ops.js';
+import { captureGatewayEvent, summarizeUsage, overSoftBudget, buildLatencyFields, type LatencyClass } from '../../telemetry/gateway-ops.js';
 import { emitLlmMetrics } from '../../telemetry/datadog-metrics.js';
 import { checkLlmCache, writeLlmCache } from './semantic-cache.js';
 import { checkFaqDeflect, seedFaqStore, faqDeflectOn } from './faq-deflect.js';
@@ -51,6 +51,12 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         labels: z.array(z.string()).optional().describe('For task=classify: the candidate labels.'),
         jsonMode: z.boolean().optional().describe('Force strict JSON output (recommended for extract/classify pipelines).'),
         maxTokens: z.number().int().min(16).max(8192).optional().describe('Max output tokens (default 1500).'),
+        latencyClass: z
+          .enum(['hot', 'normal', 'background'])
+          .optional()
+          .describe(
+            'Telemetry tag for p95-by-class dashboards: "hot" for a user-blocking interactive call, "background" for a fire-and-forget/best-effort call, "normal" (default) otherwise. Does not change execution, only how the call is bucketed.',
+          ),
       },
       outputShape: {
         task: z.string(),
@@ -64,6 +70,9 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
       },
       handler: async (input, ctx) => {
         const tier = input.tier ?? 'standard';
+        // W1-6 SPEED INSTRUMENTATION: caller-passed telemetry bucket (see buildLatencyFields in
+        // telemetry/gateway-ops.ts). Purely a dashboard tag -- never changes execution.
+        const latencyClass: LatencyClass = input.latencyClass ?? 'normal';
         if (!foundryConfigured()) {
           return {
             data: { task: input.task, tier, output: '', model: '', error: 'foundry_unconfigured' },
@@ -121,13 +130,27 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         // Mode-gated + fail-open, mirroring COMPLIANCE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any
         // cache failure (Cosmos down, embed() throws) silently falls through to a normal chat()
         // call below. See semantic-cache.ts for the store choice + why.
+        const cacheCheckStarted = Date.now();
         const cacheLookup = await checkLlmCache(cachePrompt, ctx.callerAgent, input.task, tier);
         if (cacheLookup.hit && cacheLookup.entry) {
+          // W1-6: same latency+cache shape as the real-call path below (buildLatencyFields), tagged
+          // cache_hit:true, so p95 latency is directly comparable across cache_hit in PostHog --
+          // this is the measurement that PROVES the semantic cache's hot path is faster, rather than
+          // just asserting it.
           captureGatewayEvent('gateway_llm_cache_hit', {
             task: input.task,
             tier,
-            model: cacheLookup.entry.model,
             similarity: cacheLookup.similarity,
+            // buildLatencyFields below already supplies `model` (identical value); listed once to
+            // satisfy TS2783 (duplicate object key), not a behavior change.
+            ...buildLatencyFields({
+              startedAt: cacheCheckStarted,
+              endedAt: Date.now(),
+              model: cacheLookup.entry.model,
+              cacheHit: true,
+              cachedPct: 100,
+              latencyClass,
+            }),
           });
           return {
             data: {
@@ -146,24 +169,41 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         }
 
         try {
+          // W1-6: bracket ONLY the chat() call itself (not cache lookup / prompt assembly above) so
+          // duration_ms is the true per-LLM-call wall-clock latency. Foundry's chat() has no
+          // streaming mode today, so ttft_ms can never be genuinely measured here -- buildLatencyFields
+          // omits it rather than faking a value (see gateway-ops.ts).
+          const modelStarted = Date.now();
           const res = await chat(messages, {
             maxTokens: input.maxTokens ?? 1500,
             jsonMode: input.jsonMode ?? input.task === 'extract',
             tier,
           });
+          const modelEnded = Date.now();
           // Observe-only per-call cost/usage event -> Gateway Ops project (fire-and-forget,
           // inert unless POSTHOG_GATEWAYOPS_KEY is set; never affects the response). Enriched with
           // the flattened usage summary (incl. cached_tokens / cached_pct so the automatic-prompt-cache
-          // hit rate is visible) and a report-mode per-call soft-budget flag for the cost monitors.
+          // hit rate is visible), a report-mode per-call soft-budget flag for the cost monitors, and
+          // the buildLatencyFields shape (duration_ms/cache_hit/model/latency_class, ttft_ms when
+          // genuinely available) so p95 latency is visible per class right alongside cost.
           const usageSummary = summarizeUsage(res.usage);
           captureGatewayEvent('gateway_llm_call', {
             task: input.task,
             tier,
-            model: res.model,
             usage: res.usage ?? null,
             ...usageSummary,
             over_soft_budget: overSoftBudget(usageSummary),
             output_chars: res.text.length,
+            // buildLatencyFields below already supplies `model` (identical value); listed once to
+            // satisfy TS2783 (duplicate object key), not a behavior change.
+            ...buildLatencyFields({
+              startedAt: modelStarted,
+              endedAt: modelEnded,
+              model: res.model,
+              cacheHit: false,
+              cachedPct: usageSummary.cached_pct,
+              latencyClass,
+            }),
           });
           // Same cost/cache signal to Datadog custom metrics (otc.gateway.llm.*), so the Fleet
           // cost dashboard can chart cache-hit rate alongside the Azure token metrics. Inert unless
