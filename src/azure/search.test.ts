@@ -340,11 +340,15 @@ test('hybridSearch (flat room): still uses contentVector, no select, exact `top`
       throw new Error(`unexpected fetch to ${u}`);
     }) as typeof fetch,
     async () => {
+      // Default (re-rank ON): flat memory rooms OVER-FETCH so the authority re-rank has a candidate
+      // pool (min(30, top*3) = 18 for top=6). contentVector + no-select are unchanged.
       await hybridSearch('memory-exec', 'q', 6, { includeOps: true });
       const vq = (capturedBody?.vectorQueries as Array<Record<string, unknown>>)[0];
       assert.equal(vq.fields, 'contentVector', 'flat rooms keep contentVector');
       assert.equal(capturedBody?.select, undefined, 'flat rooms send no select');
-      assert.equal(capturedBody?.top, 6, 'flat rooms fetch exactly top');
+      assert.equal(capturedBody?.top, 18, 'flat rooms over-fetch (top*3, capped 30) for the re-rank pool');
+      // (The kill-switch OFF path — fetch exactly `top`, byte-identical order — is unit-tested in
+      // authority-rerank.test.ts; loadEnv() caches, so it cannot be flipped mid-process here.)
     },
   );
 });

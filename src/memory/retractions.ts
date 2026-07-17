@@ -84,7 +84,11 @@ export async function retractedIds(): Promise<Set<string>> {
       'memory',
       "SELECT c.supersedes FROM c WHERE c.type = 'memory' AND IS_DEFINED(c.supersedes)",
       [],
-      { max: 500 },
+      // Was {max:500}: at fleet scale that silently TRUNCATES the retracted set, re-opening the exact
+      // rank-#1-retracted-belief bug this module exists to close (a superseded id past #500 would no
+      // longer be filtered). Lift to 5000 (a projection of one tiny field over the supersedes-bearing
+      // subset only, so it stays cheap). The query already selects just `supersedes`.
+      { max: 5000 },
     );
     for (const id of collectRetracted(rows as Array<{ supersedes?: unknown }>)) ids.add(id);
   } catch {

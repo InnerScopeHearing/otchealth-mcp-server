@@ -148,6 +148,10 @@ const EnvSchema = z.object({
   AZURE_SEARCH_ENDPOINT: z.string().optional().default(''),
   AZURE_SEARCH_QUERY_KEY: z.string().optional().default(''),
 
+  // Kill-switch for the memory-room authority+freshness re-rank (src/memory/authority-rerank.ts).
+  // Default ON. Set to 'off' to fall back to pure relevance order (byte-identical to pre-Wave-1).
+  MEMORY_RERANK_MODE: z.string().optional().default('on'),
+
   // Feature flags
   READ_ONLY_MODE: z
     .enum(['true', 'false'])
