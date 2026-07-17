@@ -229,6 +229,13 @@ const EnvSchema = z.object({
   AZURE_LEGAL_STORAGE_ACCOUNT: z.string().optional().default('otchealthlegalstore'),
   AZURE_LEGAL_STORAGE_KEY: z.string().optional().default(''),
 
+  // Finance dataroom store (the CFO source-docs blobs behind the finance-* AI Search rooms, account
+  // otchealthcfodata). Powers kb_get_document — ring-gated WHOLE-document retrieval (search returns
+  // snippets; an audit census must tie to the dollar, so the CFO needs complete files with provable
+  // counts). Same SharedKey mechanics as the legal store. Inert without the key.
+  AZURE_CFO_STORAGE_ACCOUNT: z.string().optional().default('otchealthcfodata'),
+  AZURE_CFO_STORAGE_KEY: z.string().optional().default(''),
+
   // OneDrive / Graph Drive three-folder exchange (Outgoing/Incoming/Processed), per role. The
   // gateway uses APP-ONLY Graph auth (GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET, Files.ReadWrite.All)
   // and targets a specific user's drive: /users/{upn}/drive/root:/<path>. GRAPH_DRIVE_USER is the
