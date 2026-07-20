@@ -5,6 +5,7 @@ import { requireConnectorAuth } from '../auth/bearer.js';
 import { logger, newCorrelationId } from '../audit/logger.js';
 import { currentCallerHash, requestContext } from './request-context.js';
 import { registerAllTools } from '../tools/index.js';
+import { wrapCompressibleResponse } from './compress-response.js';
 
 const SERVER_INFO = {
   name: 'otchealth-mcp',
@@ -69,7 +70,11 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           await mcp.connect(transport);
           reply.hijack();
           reply.raw.once('close', cleanup);
-          await transport.handleRequest(request.raw, reply.raw, request.body);
+          // Compress the JSON response (the ~1.9MB tools/list catalog gzips ~16x). The wrapper only
+          // intercepts writeHead/write/end and only for compressible JSON/text; SSE and clients that
+          // do not accept gzip pass through the real socket untouched. Cleanup stays on reply.raw.
+          const res = wrapCompressibleResponse(reply.raw, request.headers['accept-encoding']);
+          await transport.handleRequest(request.raw, res, request.body);
         } catch (err) {
           logger.error(
             {
