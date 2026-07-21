@@ -73,22 +73,78 @@ test('probeDependencies: reports "down" for a configured dependency that returns
   assert.equal(result.search, 'down');
 });
 
+test('probeDependencies: Search probe targets a zero-result document search, not the index metadata GET', async () => {
+  process.env.AZURE_SEARCH_ENDPOINT = 'https://fake-search.example.com';
+  process.env.AZURE_SEARCH_QUERY_KEY = 'fake-query-key';
+  let calledUrl: string | undefined;
+  let calledMethod: string | undefined;
+  let calledBody: string | undefined;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    calledUrl = String(url);
+    calledMethod = init?.method;
+    calledBody = init?.body as string | undefined;
+    return new Response(JSON.stringify({ value: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  const { probeDependencies } = await import('./deep-health.js');
+  const result = await probeDependencies();
+  assert.equal(result.search, 'ok');
+  // 2026-07-21: GET /indexes/{name} (index metadata/schema) is an index-MANAGEMENT operation that a
+  // query key cannot perform (Azure returns 403 regardless of key validity or service health), so
+  // this probe always reported 'down' until fixed. It now POSTs a top:0 document search, the
+  // operation a query key is actually authorized for, on the same index.
+  assert.match(calledUrl ?? '', /\/indexes\/memory-exec\/docs\/search\?api-version=/);
+  assert.equal(calledMethod, 'POST');
+  assert.equal(calledBody, JSON.stringify({ search: '*', top: 0 }));
+});
+
 test('probeDependencies: reports "ok" for a configured, reachable dependency', async () => {
   process.env.FOUNDRY_OPENAI_ENDPOINT = 'https://fake-foundry.example.com';
   process.env.FOUNDRY_KEY = 'fake-foundry-key';
   let calledUrl: string | undefined;
-  globalThis.fetch = (async (url: unknown) => {
+  let calledBody: string | undefined;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     calledUrl = String(url);
+    calledBody = init?.body as string | undefined;
     return new Response(JSON.stringify({ data: [] }), { status: 200 });
   }) as typeof fetch;
 
   const { probeDependencies } = await import('./deep-health.js');
   const result = await probeDependencies();
   assert.equal(result.foundry, 'ok');
-  // Regression guard: the Foundry probe must hit the cheap deployments-list metadata GET, never a
-  // chat/completions or embeddings endpoint (those cost tokens on every /health/deep poll).
-  assert.match(calledUrl ?? '', /\/openai\/deployments\?api-version=/);
-  assert.doesNotMatch(calledUrl ?? '', /chat\/completions|embeddings/);
+  // 2026-07-21: /openai/deployments (list-all) 404s on this fleet's actual Foundry resource shape
+  // regardless of API version (confirmed live against 4 distinct versions), so the probe now targets
+  // a real deployment's embeddings endpoint with a deliberately empty input array instead. This
+  // regression guard now asserts the CORRECTED target, replacing an earlier guard that asserted the
+  // broken list-all endpoint and explicitly forbade this one.
+  assert.match(calledUrl ?? '', /\/openai\/deployments\/text-embedding-3-large\/embeddings\?api-version=/);
+  assert.equal(calledBody, JSON.stringify({ input: [] }));
+});
+
+test('probeDependencies: reports "ok" for Foundry on a 400 (Azure\'s fast empty-input validation reject), not just a 2xx', async () => {
+  process.env.FOUNDRY_OPENAI_ENDPOINT = 'https://fake-foundry.example.com';
+  process.env.FOUNDRY_KEY = 'fake-foundry-key';
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: { message: "Invalid 'input': input cannot be an empty array." } }), { status: 400 })) as typeof fetch;
+
+  const { probeDependencies } = await import('./deep-health.js');
+  const result = await probeDependencies();
+  // A 400 here means the request was authenticated and reached a real deployment before Azure
+  // rejected the (deliberately) empty input; that is the reachability signal this probe wants. A
+  // sibling test below confirms a genuinely UNAUTHENTICATED call (a bad key) gets 401, not 400, so
+  // this 400-as-ok mapping cannot be satisfied by an unreachable or misconfigured dependency.
+  assert.equal(result.foundry, 'ok');
+});
+
+test('probeDependencies: reports "down" for Foundry on a 401 (bad key), not confused with the 400 reachability signal', async () => {
+  process.env.FOUNDRY_OPENAI_ENDPOINT = 'https://fake-foundry.example.com';
+  process.env.FOUNDRY_KEY = 'wrong-key';
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: { code: '401', message: 'Access denied due to invalid subscription key' } }), { status: 401 })) as typeof fetch;
+
+  const { probeDependencies } = await import('./deep-health.js');
+  const result = await probeDependencies();
+  assert.equal(result.foundry, 'down');
 });
 
 test('probeDependencies: all three "ok" together when every dependency is configured and reachable', async () => {
