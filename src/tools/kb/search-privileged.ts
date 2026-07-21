@@ -16,7 +16,7 @@
  * EXECUTIVE-RING CROSS-READ (CEO direction, 2026-07-02): the executive team shares privileged FINANCE and
  * COMPANY-LEGAL context so institutional knowledge compounds and requires less manual curation. Those
  * indexes are readable by the full exec ring:
- *   EXEC_RING = ['cfo','clo','clo-personal','coo','cro','cpo','cco','exec']  ('exec' = unified chief, 2026-07-04)
+ *   EXEC_RING = ['cfo','clo','clo-personal','cpo','cco','exec']  ('exec' = unified chief, 2026-07-04)
  * NON-exec identities are NEVER added to any array below: 'developer' (engineering IC), every app-lead/
  * product agent (iheartest, innerease, flatstick, fourvault, fictionary, companion, otchealthmart, etc.),
  * 'focus-group', AND the broad 'cto'/default connector identity.
@@ -24,7 +24,7 @@
  * PERSONAL-LEGAL CARVE-OUT (Matt direction, 2026-07-16 — NARROWER than the exec ring): legal-personal and
  * legal-personal-memory carry the most sensitive attorney-privileged content (CA divorce/family/civil,
  * incl. minors' data). They are gated to PERSONAL_LEGAL_RING = ['clo-personal','exec'] ONLY — the dedicated
- * personal-legal lane plus the unified One-Brain chief. The individual chiefs (cfo/coo/cro/cpo/cco) AND the
+ * personal-legal lane plus the unified One-Brain chief. The individual chiefs (cfo/cpo/cco) AND the
  * company-legal 'clo' lane are STRIPPED. This closes a confirmed cross-ring leak (a cfo-lane brain_search
  * returned personal-legal rooms). It supersedes the 2026-07-02 blanket "all privileged -> exec ring" line
  * for these two rooms ONLY; finance + company-legal keep the full exec cross-read.
@@ -35,6 +35,13 @@
  *   legal-company                      -> EXEC_RING
  *   legal-personal                     -> PERSONAL_LEGAL_RING   (most sensitive; clo-personal + exec only)
  *   legal-personal-memory              -> PERSONAL_LEGAL_RING
+ *
+ * COO/CRO REMOVED FROM THE EXEC RING (Matt direction, 2026-07-21, least-privilege): newly-provisioned coo
+ * and cro gateway lanes are no longer members of EXEC_RING. They now resolve to OPEN_ROOMS only (memory-exec,
+ * commons-company-journal) on every surface derived from EXEC_RING, including this tool, brain_search,
+ * legal_blob_*, and xero_*. This honors the CRO securities firewall (the revenue lane never reaches finance
+ * MNPI or company-legal) and tightens the privileged rooms to cfo, clo, clo-personal, cpo, cco, exec. cpo
+ * and cco are unchanged.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -46,12 +53,12 @@ import { hybridSearch, searchConfigured } from '../../azure/search.js';
  * hat, so the individual chief lanes collapse into one 'exec' lane carrying the full exec cross-read. The
  * per-chief lanes remain valid (unchanged) for anyone still using them. NON-exec identities are STILL never
  * added below — 'cto' (the externally-reachable connector) + 'developer' + app-leads stay off MNPI/privileged. */
-export const EXEC_RING = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec'] as const;
+export const EXEC_RING = ['cfo', 'clo', 'clo-personal', 'cpo', 'cco', 'exec'] as const;
 
 /** The PERSONAL-LEGAL ring: strictly NARROWER than EXEC_RING. Gates the two most sensitive rooms
  * (legal-personal, legal-personal-memory — attorney-privileged CA divorce/family/civil, incl. minors'
  * data) to the dedicated personal-legal lane plus the unified One-Brain chief ONLY. Both members are
- * already in EXEC_RING, so this is a pure TIGHTENING (it removes cfo/coo/cro/cpo/cco and company-legal
+ * already in EXEC_RING, so this is a pure TIGHTENING (it removes cfo/cpo/cco and company-legal
  * 'clo'), never a widening. Ring-width decision: Matt, 2026-07-16 (Option B), closing a confirmed
  * cross-ring leak where a cfo-lane brain_search returned legal-personal content. */
 export const PERSONAL_LEGAL_RING = ['clo-personal', 'exec'] as const;
@@ -80,7 +87,7 @@ export function registerKbSearchPrivileged(server: McpServer, callerHash: Caller
       annotations: {
         title: 'Search a ring-gated dataroom index (executive ring only)',
         description:
-          'Hybrid search over RING-GATED dataroom indexes (finance = MNPI; legal = attorney-privileged). Enforced to the executive ring on record for each index: cfo, clo, clo-personal, coo, cro, cpo, cco, exec. The cto/default/external connector identity is refused, as is developer, every app-lead/product agent, and every other identity. Privileged data never reaches an external client.',
+          'Hybrid search over RING-GATED dataroom indexes (finance = MNPI; legal = attorney-privileged). Enforced to the executive ring on record for each index: cfo, clo, clo-personal, cpo, cco, exec. The cto/default/external connector identity is refused, as is developer, coo, cro, every app-lead/product agent, and every other identity. Privileged data never reaches an external client.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
