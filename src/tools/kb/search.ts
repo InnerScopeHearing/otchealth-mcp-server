@@ -4,8 +4,10 @@
  *   - 'memory-exec'              -> all agents (the shared exec brain)
  * Finance/legal indexes are RING-GATED and live in kb_search_privileged (trusted lanes only).
  *
- * ROOM HYGIENE: operational exhaust (status/episode/heartbeat/digest-style ledger chatter — see
- * memory/room-hygiene.ts) is excluded from memory-exec by default. Pass include_ops:true to see it.
+ * ROOM HYGIENE (demote, not delete): operational exhaust (status/episode/heartbeat/digest-style
+ * ledger chatter, see memory/room-hygiene.ts) is deprioritized in memory-exec by default, ranked
+ * after genuine results rather than removed, so it can still surface when nothing else scores as
+ * well. Pass include_ops:true to see it at full relevance rank.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -24,7 +26,7 @@ export function registerKbSearch(server: McpServer, callerHash: CallerHashProvid
       annotations: {
         title: 'Search an open fleet knowledge index (hybrid)',
         description:
-          'Hybrid (keyword + vector + semantic-ranker) search over an OPEN fleet index: "commons-company-journal" or "memory-exec". Finance/legal are ring-gated — use kb_search_privileged with a trusted role. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default. Pass include_ops=true to see it. Ground answers in the company knowledge base before asserting facts.',
+          'Hybrid (keyword + vector + semantic-ranker) search over an OPEN fleet index: "commons-company-journal" or "memory-exec". Finance/legal are ring-gated, use kb_search_privileged with a trusted role. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Ground answers in the company knowledge base before asserting facts.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
