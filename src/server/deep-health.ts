@@ -37,11 +37,16 @@ export interface DeepHealthDeps {
 
 const PROBE_TIMEOUT_MS = 2000;
 /** The always-open, always-present index every configured Search account carries (see
- *  tools/kb/search.ts OPEN_INDEXES). Its /indexes/{name} metadata GET is a cheap, no-query
- *  reachability check, never a search/query call. */
+ *  tools/kb/search.ts OPEN_INDEXES). Used for a zero-result document search, the query-key-scoped
+ *  reachability check this probe actually needs (see probeSearch()'s own comment for why a plain
+ *  GET on this index's metadata does not work here). */
 const SEARCH_PROBE_INDEX = 'memory-exec';
 const SEARCH_API_VERSION = '2023-11-01';
 const FOUNDRY_API_VERSION = '2024-08-01-preview';
+/** A deployment guaranteed to exist wherever FOUNDRY_KEY is configured (this fleet's embedding
+ *  model, used fleet-wide for every indexing/recall pipeline); see probeFoundry()'s own comment for
+ *  why the reachability check has to target a specific deployment rather than list all of them. */
+const FOUNDRY_PROBE_DEPLOYMENT = 'text-embedding-3-large';
 
 /** Mirrors agentstate/cosmos.ts's authToken() (kept in that file; this is a same-shape,
  *  independent implementation so deep-health.ts never imports/mutates the other in-flight
@@ -89,11 +94,22 @@ async function probeSearch(): Promise<DependencyStatus> {
   if (!endpointRaw || !key) return 'unconfigured';
   try {
     const endpoint = endpointRaw.replace(/\/+$/, '');
+    // 2026-07-21 FIX: this used to GET /indexes/{name} (the index's own metadata/schema), which is
+    // an index-MANAGEMENT operation. Azure AI Search query keys are scoped to document operations
+    // only (search, suggest, autocomplete, lookup); they are structurally forbidden from reading an
+    // index's definition, which needs an admin key. So this probe returned 403 on every call
+    // regardless of whether the query key or the service was actually healthy, and nobody caught it
+    // because this gate never ran for real until the ADMIN_REVOKE_TOKEN/GATEWAY_BEARER repo secrets
+    // that unblock the OTHER two deploy gates were finally set (this probe has no such dependency of
+    // its own, but the whole step was skipped alongside them). A zero-result document search on the
+    // SAME index is the operation a query key is actually authorized for, and is exactly as cheap
+    // (matches zero documents by construction, so Search does no real ranking work).
     const res = await fetch(
-      `${endpoint}/indexes/${SEARCH_PROBE_INDEX}?api-version=${SEARCH_API_VERSION}`,
+      `${endpoint}/indexes/${SEARCH_PROBE_INDEX}/docs/search?api-version=${SEARCH_API_VERSION}`,
       {
-        method: 'GET',
-        headers: { 'api-key': key },
+        method: 'POST',
+        headers: { 'api-key': key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ search: '*', top: 0 }),
         signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
       },
     );
@@ -109,14 +125,32 @@ async function probeFoundry(): Promise<DependencyStatus> {
   if (!endpointRaw || !key) return 'unconfigured';
   try {
     const endpoint = endpointRaw.replace(/\/+$/, '');
-    // The deployments-list endpoint is a cheap metadata GET: it never runs a chat completion or
-    // an embedding, so a poll on every deploy / every /health/deep call never burns tokens.
-    const res = await fetch(`${endpoint}/openai/deployments?api-version=${FOUNDRY_API_VERSION}`, {
-      method: 'GET',
-      headers: { 'api-key': key },
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-    });
-    return res.ok ? 'ok' : 'down';
+    // 2026-07-21 FIX: this used to GET /openai/deployments (list every deployment on the resource),
+    // which 404s on this Foundry resource regardless of API version (confirmed against 2024-08-01-
+    // preview, 2024-10-21, 2023-05-15, 2024-02-01, all 404 "Resource not found") -- this resource
+    // shape only serves deployment-SPECIFIC action routes (.../deployments/{name}/chat/completions,
+    // .../deployments/{name}/embeddings, exactly what azure/foundry.ts's own real calls already use),
+    // not a bare list-all route. So this probe reported 'down' unconditionally, real outage or not,
+    // and nobody caught it for the same reason probeSearch()'s bug went uncaught: this gate never ran
+    // for real until 2026-07-21. Fix: hit a real deployment's embeddings endpoint (the same one every
+    // indexing/recall pipeline already depends on) with a deliberately empty input array. Azure OpenAI
+    // rejects an empty input at request-validation time with a fast 400, before it ever invokes the
+    // model, so this proves the deployment is reachable and the key authenticates without spending on
+    // a billed embedding call, honoring the "never a billed chat/embedding call" rule in this file's
+    // header exactly as before, just against a route that actually exists on this resource.
+    const res = await fetch(
+      `${endpoint}/openai/deployments/${FOUNDRY_PROBE_DEPLOYMENT}/embeddings?api-version=${FOUNDRY_API_VERSION}`,
+      {
+        method: 'POST',
+        headers: { 'api-key': key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: [] }),
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      },
+    );
+    // A 400 here is Azure's fast input-validation rejection of the deliberately empty array, which
+    // only happens once the request has been authenticated and routed to a real deployment -- that
+    // IS the reachability signal this probe wants, so treat it as 'ok' alongside a literal 2xx.
+    return res.ok || res.status === 400 ? 'ok' : 'down';
   } catch {
     return 'down';
   }
