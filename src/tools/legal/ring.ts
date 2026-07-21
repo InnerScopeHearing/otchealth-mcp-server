@@ -16,12 +16,15 @@
  *
  * PERSONAL-LEGAL RING (code-of-record, Matt direction 2026-07-16): the `personal` container maps to the
  * `legal-personal` index, which search-privileged.ts gates to PERSONAL_LEGAL_RING = ['clo-personal','exec']
- * — strictly NARROWER than the exec ring. The individual chiefs (cfo/coo/cro/cpo/cco) and the company-legal
+ * This is strictly NARROWER than the exec ring. The individual chiefs (cfo/cpo/cco) and the company-legal
  * 'clo' lane are STRIPPED; only the dedicated personal-legal lane and the unified One-Brain chief may read
  * it. Because lanesForContainer('personal') DERIVES from INDEX_LANES below, this blob gate inherits that
  * ring automatically — the two access paths to the same privileged corpus can never drift. The `company`
  * container keeps the full exec ring. Any future ring-width change is a single reviewable diff in
  * search-privileged.ts INDEX_LANES and it flows to both the search tool and these blob tools.
+ *
+ * COO/CRO (2026-07-21): removed from EXEC_RING entirely (see search-privileged.ts), so they no longer
+ * reach the `company` container either, not only `personal`. Least-privilege, Matt direction.
  */
 
 import { INDEX_LANES } from '../kb/search-privileged.js';

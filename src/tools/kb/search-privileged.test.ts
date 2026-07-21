@@ -22,21 +22,29 @@ const ALL_PRIVILEGED_INDEXES = [...EXEC_RING_INDEXES, ...PERSONAL_LEGAL_INDEXES]
 
 // The executive ring (CEO direction 2026-07-02; 'exec' unified chief added 2026-07-04): the C-suite lanes
 // that share privileged FINANCE + COMPANY-LEGAL context. 'exec' = the single unified executive identity.
-const EXEC_AGENTS = ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec'];
+// coo/cro REMOVED 2026-07-21 (Matt direction, least-privilege), see EXCLUDED_AGENTS + the dedicated
+// regression test below.
+const EXEC_AGENTS = ['cfo', 'clo', 'clo-personal', 'cpo', 'cco', 'exec'];
 
 // The personal-legal ring — the ONLY lanes allowed on the two personal-legal rooms.
 const PERSONAL_LEGAL_AGENTS = ['clo-personal', 'exec'];
 
 // Exec lanes STRIPPED from personal-legal: allowed on finance/company-legal, DENIED on the personal rooms.
 // This set is exactly the cross-ring exposure that Option B closed (a cfo-lane read reached personal-legal).
-const EXEC_BUT_NOT_PERSONAL_LEGAL = ['cfo', 'clo', 'coo', 'cro', 'cpo', 'cco'];
+// coo/cro are NOT in this set: they are no longer exec lanes at all (removed from EXEC_RING entirely,
+// 2026-07-21), so they belong in EXCLUDED_AGENTS instead, refused on every privileged index.
+const EXEC_BUT_NOT_PERSONAL_LEGAL = ['cfo', 'clo', 'cpo', 'cco'];
 
 // Identities that must NEVER reach privileged data: the broad connector (cto/default), engineering IC,
-// app-lead/product agents, focus group, unknown callers.
+// app-lead/product agents, focus group, unknown callers, and (2026-07-21, least-privilege) coo/cro,
+// removed from EXEC_RING entirely so newly-provisioned coo/cro clients cannot read finance MNPI or
+// company legal.
 const EXCLUDED_AGENTS = [
   'cto',
   'default',
   'developer',
+  'coo',
+  'cro',
   'iheartest',
   'innerease',
   'flatstick',
@@ -53,6 +61,29 @@ test('exec ring: every exec lane is allowed on the finance + company-legal index
   for (const index of EXEC_RING_INDEXES) {
     for (const agent of EXEC_AGENTS) {
       assert.equal(isLaneAllowed(index, agent), true, `${agent} should be allowed on ${index}`);
+    }
+  }
+});
+
+// --- REGRESSION (2026-07-21, least-privilege): coo/cro removed from EXEC_RING entirely -----------------
+
+test('REGRESSION: coo and cro are NOT members of EXEC_RING', () => {
+  assert.ok(!(EXEC_RING as readonly string[]).includes('coo'), 'coo must not be in EXEC_RING');
+  assert.ok(!(EXEC_RING as readonly string[]).includes('cro'), 'cro must not be in EXEC_RING');
+  assert.deepEqual([...EXEC_RING].sort(), ['cco', 'cfo', 'clo', 'clo-personal', 'cpo', 'exec']);
+});
+
+test('REGRESSION: a coo caller and a cro caller are refused on finance-cfo-source-docs and legal-company', () => {
+  for (const agent of ['coo', 'cro']) {
+    assert.equal(isLaneAllowed('finance-cfo-source-docs', agent), false, `${agent} must NOT reach finance-cfo-source-docs`);
+    assert.equal(isLaneAllowed('legal-company', agent), false, `${agent} must NOT reach legal-company`);
+  }
+});
+
+test('REGRESSION: coo and cro are refused on EVERY privileged index (finance + company-legal + personal-legal)', () => {
+  for (const agent of ['coo', 'cro']) {
+    for (const index of ALL_PRIVILEGED_INDEXES) {
+      assert.equal(isLaneAllowed(index, agent), false, `${agent} must NOT reach ${index}`);
     }
   }
 });

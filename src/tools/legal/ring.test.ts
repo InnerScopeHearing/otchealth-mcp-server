@@ -19,8 +19,15 @@ test('personal container (Option B, 2026-07-16): reachable ONLY by clo-personal 
     assert.equal(isLegalContainerAllowed('personal', lane), true, `${lane} should read legal/personal`);
   }
   // denied: the individual chiefs and the company-legal lane (this is the cross-ring exposure that was closed)
-  for (const lane of ['cfo', 'clo', 'coo', 'cro', 'cpo', 'cco']) {
+  for (const lane of ['cfo', 'clo', 'cpo', 'cco']) {
     assert.equal(isLegalContainerAllowed('personal', lane), false, `${lane} must NOT reach legal/personal (clo-personal/exec only)`);
+  }
+});
+
+test('REGRESSION (2026-07-21, least-privilege): coo and cro are removed from EXEC_RING and refused on legal-company too, not only legal-personal', () => {
+  for (const lane of ['coo', 'cro']) {
+    assert.equal(isLegalContainerAllowed('company', lane), false, `${lane} must NOT reach legal/company (removed from EXEC_RING)`);
+    assert.equal(isLegalContainerAllowed('personal', lane), false, `${lane} must NOT reach legal/personal`);
   }
 });
 

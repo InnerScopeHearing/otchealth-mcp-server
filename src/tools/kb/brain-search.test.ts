@@ -62,6 +62,14 @@ test('an EXEC_RING caller (cfo) reaches the ring rooms too', () => {
   assert.ok(rooms.includes('memory-exec'));
 });
 
+test('REGRESSION (2026-07-21, least-privilege): coo and cro are removed from EXEC_RING, roomsFor() gives them ONLY the open rooms', () => {
+  for (const caller of ['coo', 'cro']) {
+    const rooms = roomsFor(caller);
+    assert.deepEqual(rooms, [...OPEN_ROOMS], `caller=${caller}`);
+    for (const r of RING_ROOMS) assert.ok(!rooms.includes(r), `${caller} must not reach ${r}`);
+  }
+});
+
 test('a domain filter cannot escalate: cto asking for finance gets NO finance rooms', () => {
   assert.deepEqual(roomsFor('cto', 'finance'), []);
 });

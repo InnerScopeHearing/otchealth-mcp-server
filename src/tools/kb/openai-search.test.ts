@@ -68,7 +68,7 @@ test('(a) nonPrivilegedRoomsFor: an external/unrecognized caller gets ONLY the o
 });
 
 test('(a) SECURITY: nonPrivilegedRoomsFor caps EVEN an EXEC_RING caller (cfo/exec) to the open rooms — stricter than brain_search on purpose', () => {
-  for (const caller of ['cfo', 'clo', 'clo-personal', 'exec', 'coo']) {
+  for (const caller of ['cfo', 'clo', 'clo-personal', 'exec', 'cpo']) {
     const rooms = nonPrivilegedRoomsFor(caller);
     assert.deepEqual(rooms.sort(), [...OPEN_ROOMS].sort(), `caller=${caller}`);
     for (const ring of RING_ROOMS) assert.ok(!rooms.includes(ring), `${caller} must never reach ${ring} THROUGH THIS TOOL PAIR`);
