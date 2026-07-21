@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { INDEX_LANES, EXEC_RING, PERSONAL_LEGAL_RING, isLaneAllowed } from './search-privileged.js';
+import {
+  INDEX_LANES,
+  EXEC_RING,
+  PERSONAL_LEGAL_RING,
+  OPS_RING,
+  isLaneAllowed,
+  isExecRingLane,
+  isOpsRingLane,
+  privilegeTierOf,
+} from './search-privileged.js';
 
 // Pins the ring-gating map for kb_search_privileged. Any future widening of a privileged ring must be
 // an explicit, reviewable diff to THIS file — never a silent side effect of an unrelated change.
@@ -179,4 +188,98 @@ test('SAFETY-CRITICAL: the union of all lane arrays is EXACTLY the exec ring —
   assert.deepEqual([...seen].sort(), [...EXEC_AGENTS].sort());
   // and the exported EXEC_RING constant matches the intended ring exactly
   assert.deepEqual([...EXEC_RING].sort(), [...EXEC_AGENTS].sort());
+});
+
+// --- WAVE 3 ITEM 3.2: the OPS_RING three-tier split (2026-07-21) ---------------------------------
+// This is a PURELY ADDITIVE architectural change. cpo and cco are NOT moved anywhere by it: they must
+// remain exactly where they already are (full EXEC_RING members). Populating OPS_RING is item 3.1's
+// separate, still-open decision; these tests pin today's state (empty) plus the invariants any future
+// population must keep (disjoint from EXEC_RING and PERSONAL_LEGAL_RING, never smuggled into INDEX_LANES).
+
+test('OPS_RING starts EMPTY (item 3.1, populating it, has not happened yet)', () => {
+  assert.deepEqual([...OPS_RING], []);
+});
+
+test('REGRESSION (this task must not decide 3.1): cpo and cco remain exactly where they already were, full EXEC_RING members, not moved to OPS_RING or removed', () => {
+  assert.ok((EXEC_RING as readonly string[]).includes('cpo'), 'cpo must remain in EXEC_RING');
+  assert.ok((EXEC_RING as readonly string[]).includes('cco'), 'cco must remain in EXEC_RING');
+  assert.equal(isOpsRingLane('cpo'), false, 'cpo must not be in OPS_RING (3.1 has not decided this)');
+  assert.equal(isOpsRingLane('cco'), false, 'cco must not be in OPS_RING (3.1 has not decided this)');
+  assert.deepEqual([...EXEC_RING].sort(), [...EXEC_AGENTS].sort(), 'EXEC_RING membership is byte-identical to before this change');
+});
+
+test('isOpsRingLane: false for every known lane today (the ring is empty), including exec lanes, non-exec lanes, and unknown/absent callers', () => {
+  for (const lane of [...EXEC_AGENTS, ...EXCLUDED_AGENTS, 'randostring']) {
+    assert.equal(isOpsRingLane(lane), false, `${lane} must not be in the currently-empty OPS_RING`);
+  }
+  assert.equal(isOpsRingLane(''), false);
+  assert.equal(isOpsRingLane(undefined), false);
+  assert.equal(isOpsRingLane(null), false);
+});
+
+test('isExecRingLane: true for exactly the exec agents, false for everyone else, matching isLaneAllowed on an EXEC_RING index', () => {
+  for (const agent of EXEC_AGENTS) {
+    assert.equal(isExecRingLane(agent), true, `${agent} should be an exec-ring lane`);
+  }
+  for (const agent of [...EXCLUDED_AGENTS, 'randostring']) {
+    assert.equal(isExecRingLane(agent), false, `${agent} should not be an exec-ring lane`);
+  }
+  assert.equal(isExecRingLane(''), false);
+  assert.equal(isExecRingLane(undefined), false);
+  assert.equal(isExecRingLane(null), false);
+});
+
+test('OPS_RING is disjoint from EXEC_RING (no lane double-counted across tiers)', () => {
+  const exec = new Set<string>(EXEC_RING);
+  for (const lane of OPS_RING) {
+    assert.equal(exec.has(lane), false, `${lane} must not be in both OPS_RING and EXEC_RING`);
+  }
+});
+
+test('OPS_RING is disjoint from PERSONAL_LEGAL_RING', () => {
+  const personal = new Set<string>(PERSONAL_LEGAL_RING);
+  for (const lane of OPS_RING) {
+    assert.equal(personal.has(lane), false, `${lane} must not be in both OPS_RING and PERSONAL_LEGAL_RING`);
+  }
+});
+
+test('OPS_RING grants no access to any privileged index, INDEX_LANES has no ops-only entries and OPS_RING lanes (if any existed) would still be refused via isLaneAllowed', () => {
+  // Structural: no INDEX_LANES value is exactly OPS_RING or references it. Every value today is
+  // exactly EXEC_RING or PERSONAL_LEGAL_RING, spread from those constants, never OPS_RING.
+  const execSet = new Set<string>(EXEC_RING);
+  const personalSet = new Set<string>(PERSONAL_LEGAL_RING);
+  for (const [index, lanes] of Object.entries(INDEX_LANES)) {
+    const asExec = lanes.length === execSet.size && lanes.every((l) => execSet.has(l));
+    const asPersonal = lanes.length === personalSet.size && lanes.every((l) => personalSet.has(l));
+    assert.ok(asExec || asPersonal, `${index} must be gated to exactly EXEC_RING or PERSONAL_LEGAL_RING, never OPS_RING`);
+  }
+});
+
+test('privilegeTierOf: classifies exec lanes as "exec", and every currently-known non-exec lane as "none" (OPS_RING is empty)', () => {
+  for (const agent of EXEC_AGENTS) {
+    assert.equal(privilegeTierOf(agent), 'exec', `${agent} should classify as exec`);
+  }
+  for (const agent of [...EXCLUDED_AGENTS, 'randostring']) {
+    assert.equal(privilegeTierOf(agent), 'none', `${agent} should classify as none (no ops lane exists yet)`);
+  }
+  assert.equal(privilegeTierOf(''), 'none');
+  assert.equal(privilegeTierOf(undefined), 'none');
+  assert.equal(privilegeTierOf(null), 'none');
+});
+
+test('privilegeTierOf: exec wins over ops if a lane were ever (mistakenly) present in both rings (fails safe toward the more scrutinized tier)', () => {
+  // OPS_RING is empty today, so this precedence rule cannot be observed against live data. Prove it
+  // directly by temporarily forcing the overlap (OPS_RING is `readonly` only at the TYPE level; the
+  // underlying array is an ordinary mutable runtime array) and restoring it in a finally, so this test
+  // can never leak state into any other test regardless of pass/fail.
+  const mutable = OPS_RING as unknown as string[];
+  mutable.push('exec'); // 'exec' is already a real EXEC_RING member -- simulate the mistaken overlap
+  try {
+    assert.equal(isOpsRingLane('exec'), true, 'sanity: the forced overlap is visible to isOpsRingLane');
+    assert.equal(isExecRingLane('exec'), true, 'sanity: exec is still an exec-ring lane');
+    assert.equal(privilegeTierOf('exec'), 'exec', 'exec must win over ops on overlap (fail safe toward more scrutiny)');
+  } finally {
+    mutable.length = 0; // restore OPS_RING to empty for every other test in this file
+  }
+  assert.deepEqual([...OPS_RING], [], 'OPS_RING is restored to empty after this test');
 });
