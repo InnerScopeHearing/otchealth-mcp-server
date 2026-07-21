@@ -243,7 +243,7 @@ test('OPS_RING is disjoint from PERSONAL_LEGAL_RING', () => {
   }
 });
 
-test('OPS_RING grants no access to any privileged index — INDEX_LANES has no ops-only entries and OPS_RING lanes (if any existed) would still be refused via isLaneAllowed', () => {
+test('OPS_RING grants no access to any privileged index, INDEX_LANES has no ops-only entries and OPS_RING lanes (if any existed) would still be refused via isLaneAllowed', () => {
   // Structural: no INDEX_LANES value is exactly OPS_RING or references it. Every value today is
   // exactly EXEC_RING or PERSONAL_LEGAL_RING, spread from those constants, never OPS_RING.
   const execSet = new Set<string>(EXEC_RING);
