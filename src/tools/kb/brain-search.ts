@@ -39,13 +39,16 @@
  *    is DROPPED from results. Before this, retrieval ignored `supersedes` entirely and served the
  *    retracted 20260713-015 at RANK #1, above the very correction that superseded it. See
  *    memory/retractions.ts. A ledger that cannot forget is not a memory -- it is a rumour mill.
- *  - ROOM HYGIENE (2026-07-15): operational exhaust (status/episode/heartbeat/digest-style ledger
- *    chatter — see memory/room-hygiene.ts) is EXCLUDED by default from every room that carries a
- *    `type` discriminator (memory-exec, finance-cfo-memory, legal-personal-memory). A high-volume
- *    "what I'm working on" status entry can otherwise dilute or outrank a real fact/decision in the
- *    fused results. Pass `include_ops:true` to see it (e.g. "what has the CFO been doing lately").
- *    Query-side only -- no indexing/data change. Fails open: a filter problem on a given room falls
- *    back to an unfiltered query for that room rather than breaking the room.
+ *  - ROOM HYGIENE (2026-07-15, DEMOTE not delete as of 2026-07-21): operational exhaust
+ *    (status/episode/heartbeat/digest-style ledger chatter, see memory/room-hygiene.ts) is
+ *    DEPRIORITIZED by default from every room that carries a `type` discriminator (memory-exec,
+ *    finance-cfo-memory, legal-personal-memory), not removed: a high-volume "what I'm working on"
+ *    status entry sorts after genuine facts/decisions in the fused results instead of diluting or
+ *    outranking them, but it can still surface if a room genuinely has nothing better to offer, so
+ *    a query never comes back empty just because its best match happens to be exhaust-typed. Pass
+ *    `include_ops:true` for full inclusion at native relevance rank (e.g. "what has the CFO been
+ *    doing lately"). Query-side only -- no indexing/data change. Fails open: a filter problem on a
+ *    given room falls back to an unfiltered query for that room rather than breaking the room.
  *  - DEEP MODE (Phase 4A, 2026-07-15): `mode:'deep'` delegates to memory/deep-retrieval.ts -- an
  *    LLM-planned, multi-round agentic retrieval that ALSO synthesizes a cited answer, instead of
  *    just returning raw passages. `mode:'fast'` (the default, and the ONLY mode that existed before
@@ -119,7 +122,7 @@ export const brainSearchInputShape = {
     .boolean()
     .optional()
     .describe(
-      'Include operational exhaust (status/episode/heartbeat/digest-style ledger chatter) that is EXCLUDED by default. Default false. Set true for questions ABOUT the operational chatter itself, e.g. "what has the CFO been working on."',
+      'Include operational exhaust (status/episode/heartbeat/digest-style ledger chatter) at full relevance rank. By default (false) it is DEPRIORITIZED, not removed: it sorts after genuine facts/decisions and only fills a result slot when there is nothing better, so it can still appear rather than being impossible to return. Set true for questions ABOUT the operational chatter itself, e.g. "what has the CFO been working on."',
     ),
   mode: z
     .enum(['fast', 'deep'])
@@ -285,7 +288,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain — federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is excluded by default. Pass include_ops=true to see it. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field).',
+          'Hybrid semantic search across the LIVE company brain, federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field).',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

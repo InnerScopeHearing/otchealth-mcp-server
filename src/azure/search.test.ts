@@ -49,9 +49,12 @@ const MIXED_DOCS = [
   { id: 'cto__4', type: 'compaction-digest', text: '42 status rows between X and Y', '@search.rerankerScore': 2.8 },
 ];
 
-// --- behavior 1: exhaust excluded BY DEFAULT when the tool layer opts in (opts.includeOps=false) ---
+// --- behavior 1: exhaust DEPRIORITIZED (demoted, not deleted) BY DEFAULT when the tool layer opts
+// in (opts.includeOps=false) -- 2026-07-21: a hard server-side $filter can only exclude, never
+// demote, so the default path no longer builds or sends one; demotion happens client-side, after
+// retrieval, once the exhaust rows are actually in hand to be re-ranked. ---
 
-test('hybridSearch: includeOps=false sends a server-side $filter excluding every exhaust type', async () => {
+test('hybridSearch: includeOps=false sends NO server-side filter -- demotion is a client-side re-rank, not a query-time exclude', async () => {
   let capturedBody: Record<string, unknown> | undefined;
   await withStubbedFetch(
     (async (url: string | URL, init?: RequestInit) => {
@@ -66,22 +69,19 @@ test('hybridSearch: includeOps=false sends a server-side $filter excluding every
     async () => {
       const res = await hybridSearch('memory-exec', 'ASC key id', 10, { includeOps: false });
       assert.ok(res);
-      assert.ok(typeof capturedBody?.filter === 'string', 'a filter clause must be sent');
-      const filter = capturedBody!.filter as string;
-      for (const t of ['status', 'episode', 'heartbeat', 'fleet-watch', 'digest', 'compaction-digest', 'compaction-note']) {
-        assert.ok(filter.includes(`type ne '${t}'`), `filter should exclude "${t}": ${filter}`);
-      }
+      assert.equal(capturedBody?.filter, undefined, 'no $filter should be sent by default, even with includeOps:false');
     },
   );
 });
 
-test('hybridSearch: includeOps=false strips any exhaust-typed doc client-side too (post-filter backstop), even if the server returned one', async () => {
+test('hybridSearch: includeOps=false DEMOTES exhaust-typed docs (moved after genuine hits) rather than dropping them', async () => {
   await withStubbedFetch(
     (async (url: string | URL) => {
       const u = String(url);
       if (isEmbeddingsUrl(u)) return embeddingsOk();
       if (isSearchUrl(u)) {
-        // Simulate a server that (for whatever reason) still returned a mix of exhaust + knowledge.
+        // A mix of exhaust + knowledge docs, unfiltered (the only kind of response the default
+        // query can get now, since no exhaust $filter is ever sent).
         return new Response(JSON.stringify({ value: MIXED_DOCS }), { status: 200 });
       }
       throw new Error(`unexpected fetch to ${u}`);
@@ -89,8 +89,40 @@ test('hybridSearch: includeOps=false strips any exhaust-typed doc client-side to
     async () => {
       const res = await hybridSearch('memory-exec', 'query', 10, { includeOps: false });
       assert.ok(res);
-      const types = res!.matches.map((m) => m.type);
-      assert.deepEqual(types.sort(), ['decision', 'fact']);
+      // ALL 4 docs come back -- nothing is dropped -- but the exhaust-typed ones (status,
+      // compaction-digest) sort after the genuine ones (decision, fact). The within-group order
+      // here reflects the (default-on) authority re-rank: decision (1.5x) and fact (1.2x) both
+      // outrank compaction-digest (1.0x, unmatched by the authority table) and status (0.85x).
+      assert.equal(res!.matches.length, 4, 'exhaust hits are demoted, never dropped');
+      assert.deepEqual(
+        res!.matches.map((m) => m.type),
+        ['decision', 'fact', 'compaction-digest', 'status'],
+        'both non-exhaust hits sort ahead of both exhaust hits',
+      );
+    },
+  );
+});
+
+test('hybridSearch: includeOps=false still respects `top` -- exhaust only fills slots non-exhaust hits do not fill', async () => {
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: MIXED_DOCS }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      // Only 2 of the 4 mocked docs are non-exhaust (decision, fact). Asking for top 2 must
+      // return ONLY those two -- the exhaust hits must never crowd out a genuine hit that fits.
+      const top2 = await hybridSearch('memory-exec', 'query', 2, { includeOps: false });
+      assert.ok(top2);
+      assert.deepEqual(top2!.matches.map((m) => m.type), ['decision', 'fact']);
+
+      // Asking for top 3 (more genuine hits than exist) backfills with the highest-ranked exhaust
+      // hit rather than returning a truncated 2-hit answer.
+      const top3 = await hybridSearch('memory-exec', 'query', 3, { includeOps: false });
+      assert.ok(top3);
+      assert.deepEqual(top3!.matches.map((m) => m.type), ['decision', 'fact', 'compaction-digest']);
     },
   );
 });
@@ -142,7 +174,7 @@ test('hybridSearch: omitting opts entirely (e.g. kb_search_privileged\'s call si
 
 // --- behavior 3: FAIL-OPEN — a filter problem never breaks search ---
 
-test('FAIL-OPEN: a 400 on the filtered/semantic attempt falls back to a plain filter-free query and still returns results', async () => {
+test('FAIL-OPEN: a 400 on the semantic attempt falls back to a plain query and still returns results, demoted not dropped', async () => {
   let searchCallCount = 0;
   const sentBodies: Array<Record<string, unknown>> = [];
   await withStubbedFetch(
@@ -154,26 +186,28 @@ test('FAIL-OPEN: a 400 on the filtered/semantic attempt falls back to a plain fi
         const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {};
         sentBodies.push(body);
         if (searchCallCount === 1) {
-          // Simulates: room has no filterable `type` field (doc-indexer profile room), OR the
-          // semantic ranker is unsupported on this SKU. Either way: 400.
-          return new Response(JSON.stringify({ error: { message: 'bad filter or unsupported query type' } }), { status: 400 });
+          // Simulates the semantic ranker being unsupported on this SKU (a room's schema mismatch
+          // no longer causes this since no exhaust $filter is ever sent by default any more). 400.
+          return new Response(JSON.stringify({ error: { message: 'unsupported query type' } }), { status: 400 });
         }
-        // The fallback attempt: plain simple query, no filter, no semantic — still returns docs
-        // (with `type` present, so the client-side backstop below has something to prove).
+        // The fallback attempt: plain simple query, no semantic -- still returns the full mix (with
+        // `type` present, so the demotion re-rank below has something to prove).
         return new Response(JSON.stringify({ value: MIXED_DOCS }), { status: 200 });
       }
       throw new Error(`unexpected fetch to ${u}`);
     }) as typeof fetch,
     async () => {
       const res = await hybridSearch('memory-exec', 'query', 10, { includeOps: false });
-      assert.ok(res, 'must not throw / return null on a filter-related 400');
-      assert.equal(searchCallCount, 2, 'exactly one retry: the filtered attempt + the filter-free fallback');
-      assert.equal(sentBodies[1]?.filter, undefined, 'the fallback body must not carry the filter');
+      assert.ok(res, 'must not throw / return null on a semantic-layer 400');
+      assert.equal(searchCallCount, 2, 'exactly one retry: the enriched attempt + the plain fallback');
+      assert.equal(sentBodies[0]?.filter, undefined, 'no exhaust filter is sent by default, even on the primary attempt');
       assert.equal(sentBodies[1]?.queryType, 'simple', 'the fallback body must be the plain simple query');
-      // The client-side post-filter backstop still holds even though the server-side filter was
-      // dropped by the fail-open path — this is the "belt + braces" the search.ts header describes.
-      const types = res!.matches.map((m) => m.type);
-      assert.deepEqual(types.sort(), ['decision', 'fact']);
+      // The demotion re-rank still runs on the fallback's results: all 4 docs come back, exhaust
+      // sorted after genuine hits -- never dropped, per the file header's demote-not-delete design.
+      assert.deepEqual(
+        res!.matches.map((m) => m.type),
+        ['decision', 'fact', 'compaction-digest', 'status'],
+      );
     },
   );
 });
@@ -387,7 +421,7 @@ test('hybridSearch (flat room): still uses contentVector, no select, exact `top`
 
 // --- behavior 5: opts.filter, a raw $filter override (added for incident-match's pitfall/correction-only query) ---
 
-test('hybridSearch: opts.filter is sent verbatim, overriding the room-hygiene exhaust filter entirely', async () => {
+test('hybridSearch: opts.filter is sent verbatim, and disables the room-hygiene demotion re-rank entirely', async () => {
   let capturedBody: Record<string, unknown> | undefined;
   await withStubbedFetch(
     (async (url: string | URL, init?: RequestInit) => {
@@ -400,7 +434,9 @@ test('hybridSearch: opts.filter is sent verbatim, overriding the room-hygiene ex
       throw new Error(`unexpected fetch to ${u}`);
     }) as typeof fetch,
     async () => {
-      // includeOps:false would normally build the exhaust NOT-clause; opts.filter must win instead.
+      // opts.filter is a precise, caller-authored slice (e.g. incident-match's pitfall/
+      // correction-only query): it is sent verbatim, and it is the ONLY filter this function ever
+      // sends now (the default demote-not-delete path never builds its own).
       const res = await hybridSearch('memory-exec', 'query', 5, {
         includeOps: false,
         filter: "type eq 'pitfall' or type eq 'correction'",

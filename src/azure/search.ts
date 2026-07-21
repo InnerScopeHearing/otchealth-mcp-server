@@ -4,21 +4,26 @@
  * semantic ranker, with graceful degradation to keyword-only on 400 / missing embeddings.
  * Read-only: uses AZURE_SEARCH_QUERY_KEY.
  *
- * ROOM HYGIENE (default): operational exhaust (status/episode/heartbeat/digest-style chatter —
- * see src/memory/room-hygiene.ts) is excluded from every call unless the caller opts in via
- * `opts.includeOps`. Applied server-side via an OData $filter on `type` where the index has that
- * field (memory-exec, finance-cfo-memory, legal-personal-memory); rooms with no `type` field
- * (the doc-indexer profile rooms) 400 on the filter and fall open to a filter-free query, which
- * is correct there since those rooms never carried this vocabulary in the first place. A
- * client-side post-filter backstop runs unconditionally as belt + braces. `opts` defaults to
- * "no filtering" (the pre-existing, unchanged behavior) when omitted entirely, so any existing
- * caller that does not pass it (e.g. kb_search_privileged) is byte-for-byte unaffected; the tool
- * layer (brain_search, kb_search) is what makes exclusion the default by always passing opts.
+ * ROOM HYGIENE (default, 2026-07-21 demote-not-delete): operational exhaust (status/episode/
+ * heartbeat/digest-style chatter -- see src/memory/room-hygiene.ts) is DEPRIORITIZED, not removed,
+ * from every call unless the caller opts in via `opts.includeOps`. A hard server-side $filter can
+ * only ever exclude, never demote, so the default (no `opts.filter` given) query no longer applies
+ * one: it fetches an over-fetched, unfiltered candidate pool, then room-hygiene's
+ * `demoteExhaustHits` re-ranks that pool client-side so every exhaust-typed hit sorts after every
+ * non-exhaust hit before the final truncation to `top`. This guarantees exhaust never crowds out a
+ * genuine hit (as long as enough genuine hits exist in the fetched pool), while still letting an
+ * exhaust hit surface when a room genuinely has nothing better -- see room-hygiene.ts's file header
+ * for the recall regression this fixes. A caller that wants the OLD strict-exclusion behavior can
+ * still get it by passing `buildExhaustFilterClause()` as `opts.filter` explicitly (see
+ * room-hygiene.ts's updated doc comment on that helper). `opts` defaults to "no filtering, no
+ * demotion" (the pre-existing, unchanged behavior) when omitted entirely, so any existing caller
+ * that does not pass it (e.g. kb_search_privileged) is byte-for-byte unaffected; the tool layer
+ * (brain_search, kb_search) is what makes demotion the default by always passing opts.
  */
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
-import { buildExhaustFilterClause, filterExhaustHits } from '../memory/room-hygiene.js';
+import { demoteExhaustHits } from '../memory/room-hygiene.js';
 import { rerankByAuthority, rerankEnabled } from '../memory/authority-rerank.js';
 
 const API_VERSION = '2023-11-01';
@@ -114,25 +119,30 @@ export async function hybridSearch(
   const chunked = isChunkedRoom(index);
   const vecField = chunked ? 'text_vector' : 'contentVector';
 
-  // Exhaust filtering is a MEMORY-room concern (only those rooms carry the `type` discriminator).
-  // Chunked doc rooms have no `type` field, so attaching the filter there only ever 400s -> fail-open
-  // to keyword-only, silently dropping vector+semantic recall. Skip the filter for chunked rooms.
-  // (Pure string build — cannot throw. Flat rooms with no `type` field still 400 and fall through the
-  // fail-open retry below to a filter-free query, exactly as before.)
-  // opts.filter (when present) takes precedence over the exhaust clause -- see HybridSearchOptions.
-  const filter = chunked ? undefined : opts?.filter ?? (includeOps ? undefined : buildExhaustFilterClause('type'));
+  // Room hygiene no longer builds a hard exhaust $filter by default (see room-hygiene.ts's
+  // 2026-07-21 CORRECTION): a $filter can only exclude, never demote, so demoting exhaust hits
+  // needs them retrieved in the first place. The only $filter this function ever sends now is one
+  // the CALLER supplies explicitly via opts.filter (e.g. incident-match's pitfall/correction-only
+  // slice, or a caller that wants buildExhaustFilterClause()'s old strict-exclusion behavior on
+  // purpose). Chunked doc rooms still never get a filter of any kind (no `type` field to filter
+  // on; attaching one only ever 400s -> fail-open to keyword-only, silently dropping vector+semantic
+  // recall). Flat rooms with no `type` field still 400 on a caller-supplied filter and fall through
+  // the fail-open retry below to a filter-free query, exactly as before.
+  const filter = chunked ? undefined : opts?.filter;
 
   // Chunked rooms return N chunks per parent doc; over-fetch so post-dedup we can still surface `top`
-  // distinct parents. FLAT MEMORY rooms also over-fetch when the authority re-rank is active, so the
-  // re-rank has a real candidate pool — otherwise it could only reorder the exact `top` the engine
-  // returned and could never promote a current decision that relevance-ranked just outside the window.
-  // With the re-rank OFF, flat rooms fetch exactly `top` (byte-identical to before). The re-rank is
-  // ALSO skipped when the caller passed an explicit opts.filter: that means they asked for a PRECISE
-  // slice (e.g. incident-match's pitfall/correction-only query) and want pure relevance order within
-  // it, not an authority reshuffle. The re-rank is for the GENERAL recall path (brain_search / kb_search
-  // / memory_recall), where "surface the current load-bearing fact" is the goal.
+  // distinct parents. FLAT MEMORY rooms also over-fetch when the authority re-rank is active, or when
+  // room-hygiene demotion is active (DEMOTE_MODE below), so there is a real candidate pool to reorder
+  // -- otherwise a query could only ever reorder the exact `top` the engine returned and could never
+  // promote a current decision (rerank) or a genuine non-exhaust hit (demotion) that relevance-ranked
+  // just outside the naive window. With BOTH off, flat rooms fetch exactly `top` (byte-identical to
+  // before). Both are skipped when the caller passed an explicit opts.filter: that means they asked
+  // for a PRECISE slice (e.g. incident-match's pitfall/correction-only query) and want pure relevance
+  // order within it, not a reshuffle. Demotion is also skipped when the caller asked for full
+  // inclusion (includeOps=true) -- there is nothing to demote once everything is wanted.
   const rerankOn = rerankEnabled(e.MEMORY_RERANK_MODE) && !opts?.filter;
-  const fetchTop = chunked ? Math.min(50, top * 3) : rerankOn ? Math.min(30, top * 3) : top;
+  const demoteMode = !chunked && !opts?.filter && !includeOps;
+  const fetchTop = chunked ? Math.min(50, top * 3) : rerankOn || demoteMode ? Math.min(30, top * 3) : top;
 
   const body: Record<string, unknown> = {
     search: query,
@@ -218,16 +228,24 @@ export async function hybridSearch(
     // (finance/legal source docs) never enter this branch, so document retrieval is untouched. The
     // re-rank is a no-op on rooms whose docs carry no type/ts/source (all multipliers -> 1.0, stable
     // sort preserves the engine's relevance order). Kill-switch: MEMORY_RERANK_MODE=off. When on, the
-    // room over-fetched (fetchTop above), so slice back to `top` AFTER re-ranking — this is how a
-    // current decision that relevance-ranked at, say, #12 gets promoted into the returned top-N.
-    // rerankOn already folds in both the kill-switch and the "no explicit filter" rule.
-    if (rerankOn) hits = rerankByAuthority(hits, { mode: e.MEMORY_RERANK_MODE }).slice(0, top);
+    // room over-fetched (fetchTop above) so the re-rank has a real candidate pool -- a current decision
+    // that relevance-ranked at, say, #12 can be promoted ahead of a weaker hit. Truncation to `top`
+    // happens LATER, after room-hygiene demotion (below), NOT here: slicing here first would let the
+    // re-rank's own truncation permanently drop a genuine hit before demotion ever got a chance to
+    // move a competing exhaust hit out of the way, which would reintroduce the exact "top slot crowded
+    // out by chatter" failure this whole change exists to fix. rerankOn already folds in both the
+    // kill-switch and the "no explicit filter" rule.
+    if (rerankOn) hits = rerankByAuthority(hits, { mode: e.MEMORY_RERANK_MODE });
   }
 
-  // Strip the internal dedup + re-rank signal keys; the client-side exhaust backstop (belt + braces)
-  // still runs. The KbHit output shape is unchanged (ts/source/by never leave this function).
+  // Strip the internal dedup + re-rank signal keys, then apply room hygiene as the FINAL step so it
+  // sees (and truncates) the full over-fetched, re-ranked pool: demoteExhaustHits moves any
+  // exhaust-typed hit to the end (never crowding out a non-exhaust hit that fits within `top`, but
+  // never permanently dropping one either) and only then slices to `top`. `includeOps=true` is a
+  // no-op reorder, just the same `top` truncation every caller already expects. The KbHit output
+  // shape is unchanged (ts/source/by never leave this function).
   let matches: KbHit[] = hits.map(({ _parent, ts, source, by, ...h }) => h);
-  matches = filterExhaustHits(matches, includeOps);
+  matches = demoteExhaustHits(matches, includeOps, top);
   return { matches, mode: vector ? 'hybrid+semantic' : 'keyword' };
 }
 

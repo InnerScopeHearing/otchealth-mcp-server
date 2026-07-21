@@ -5,7 +5,7 @@ import {
   KNOWLEDGE_RECORD_TYPES,
   isExhaustType,
   buildExhaustFilterClause,
-  filterExhaustHits,
+  demoteExhaustHits,
 } from './room-hygiene.js';
 
 // --- the lists themselves: no overlap, and the confirmed-real types are present ---
@@ -67,41 +67,112 @@ test('buildExhaustFilterClause: is pure — same input, same output, never throw
   assert.equal(buildExhaustFilterClause('type'), buildExhaustFilterClause('type'));
 });
 
-// --- filterExhaustHits ---
+// --- demoteExhaustHits (2026-07-21: demote, never hard-delete) ---
 
-test('filterExhaustHits: drops exhaust-typed hits by default (includeOps=false)', () => {
+test('demoteExhaustHits (a): an all-non-exhaust input is unchanged in order (and is the SAME array reference, no allocation)', () => {
   const hits = [
     { id: '1', type: 'fact', text: 'ASC key id is 9MR7PJHRYH' },
-    { id: '2', type: 'status', text: 'still working on the PlantID backend' },
-    { id: '3', type: 'decision', text: 'ship build 46' },
-    { id: '4', type: 'compaction-digest', text: '42 status rows between X and Y' },
+    { id: '2', type: 'decision', text: 'ship build 46' },
+    { id: '3', type: 'pitfall', text: 'do not hardcode the ASC key' },
+    { id: '4', type: 'correction', text: 'the key id was wrong, corrected here' },
   ];
-  const result = filterExhaustHits(hits, false);
-  assert.deepEqual(result.map((h) => h.id), ['1', '3']);
+  const result = demoteExhaustHits(hits, false);
+  assert.deepEqual(result.map((h) => h.id), ['1', '2', '3', '4']);
+  assert.equal(result, hits, 'no exhaust present -> same array reference (fast path)');
 });
 
-test('filterExhaustHits: includeOps=true is a true no-op (same array reference, nothing dropped)', () => {
+test('demoteExhaustHits (b): a mix reorders exhaust hits to the end WITHOUT dropping any, preserving each group\'s relative order', () => {
+  const hits = [
+    { id: '1', type: 'status', text: 'still working on X' },
+    { id: '2', type: 'fact', text: 'ASC key id is 9MR7PJHRYH' },
+    { id: '3', type: 'episode', text: 'auto-journaled tool call' },
+    { id: '4', type: 'decision', text: 'ship build 46' },
+    { id: '5', type: 'compaction-digest', text: '42 status rows between X and Y' },
+    { id: '6', type: 'pitfall', text: 'do not hardcode the ASC key' },
+  ];
+  const result = demoteExhaustHits(hits, false);
+  // non-exhaust (2, 4, 6) first in their original relative order, THEN exhaust (1, 3, 5) in
+  // their original relative order -- nothing is dropped, count is unchanged.
+  assert.deepEqual(result.map((h) => h.id), ['2', '4', '6', '1', '3', '5']);
+  assert.equal(result.length, hits.length);
+});
+
+test('demoteExhaustHits (c): an all-exhaust input returns everything (nothing to demote against), order preserved', () => {
+  const hits = [
+    { id: '1', type: 'status', text: 'still working on X' },
+    { id: '2', type: 'episode', text: 'auto-journaled tool call' },
+    { id: '3', type: 'heartbeat', text: 'still alive' },
+  ];
+  const result = demoteExhaustHits(hits, false);
+  assert.deepEqual(result.map((h) => h.id), ['1', '2', '3']);
+});
+
+test('demoteExhaustHits (d): top-N truncation prioritizes non-exhaust -- exhaust never crowds out a genuine hit that fits', () => {
+  const hits = [
+    { id: 'e1', type: 'status', text: 'chatter 1' },
+    { id: 'n1', type: 'fact', text: 'fact 1' },
+    { id: 'n2', type: 'decision', text: 'decision 1' },
+    { id: 'e2', type: 'episode', text: 'chatter 2' },
+    { id: 'n3', type: 'pitfall', text: 'pitfall 1' },
+  ];
+  // 3 non-exhaust hits exist; asking for top 2 must return ONLY genuine hits, never an exhaust one.
+  const top2 = demoteExhaustHits(hits, false, 2);
+  assert.deepEqual(top2.map((h) => h.id), ['n1', 'n2']);
+
+  // Asking for top 4 (more than the 3 genuine hits available) backfills with exhaust to reach the
+  // requested count, rather than returning a truncated 3-hit result.
+  const top4 = demoteExhaustHits(hits, false, 4);
+  assert.deepEqual(top4.map((h) => h.id), ['n1', 'n2', 'n3', 'e1']);
+
+  // Asking for more than the total hit count returns everything, genuine-first, nothing invented.
+  const top10 = demoteExhaustHits(hits, false, 10);
+  assert.deepEqual(top10.map((h) => h.id), ['n1', 'n2', 'n3', 'e1', 'e2']);
+});
+
+test('demoteExhaustHits (e): includeOps=true is a full-inclusion no-op -- input order preserved, no demotion, same array reference when no limit is given', () => {
+  const hits = [
+    { id: '1', type: 'status', text: 'chatter' },
+    { id: '2', type: 'fact', text: 'a fact' },
+    { id: '3', type: 'episode', text: 'more chatter' },
+  ];
+  const result = demoteExhaustHits(hits, true);
+  assert.deepEqual(result.map((h) => h.id), ['1', '2', '3'], 'order must be untouched, nothing demoted');
+  assert.equal(result, hits, 'must return the SAME array reference when includeOps is true and no limit is given');
+});
+
+test('demoteExhaustHits: includeOps=true still respects an explicit limit (truncation, not demotion)', () => {
+  const hits = [
+    { id: '1', type: 'status', text: 'chatter' },
+    { id: '2', type: 'fact', text: 'a fact' },
+    { id: '3', type: 'episode', text: 'more chatter' },
+  ];
+  const result = demoteExhaustHits(hits, true, 2);
+  assert.deepEqual(result.map((h) => h.id), ['1', '2'], 'plain truncation, original order, no reordering');
+});
+
+test('demoteExhaustHits (f): empty input returns empty and never throws, for both includeOps values and with/without a limit', () => {
+  assert.deepEqual(demoteExhaustHits([], false), []);
+  assert.deepEqual(demoteExhaustHits([], true), []);
+  assert.deepEqual(demoteExhaustHits([], false, 5), []);
+  assert.deepEqual(demoteExhaustHits([], true, 5), []);
+});
+
+test('demoteExhaustHits (g): a hit with no `type` field at all (doc-indexer profile rooms) is treated as non-exhaust, never demoted', () => {
+  const hits = [
+    { id: 'a', text: 'a doc-indexer chunk with no type field at all' },
+    { id: 'b', type: 'status', text: 'chatter' },
+    { id: 'c', text: 'another chunk with no type field' },
+  ];
+  const result = demoteExhaustHits(hits, false);
+  assert.deepEqual(result.map((h) => h.id), ['a', 'c', 'b'], 'both no-type hits stay ahead of the status hit');
+});
+
+test('demoteExhaustHits: is pure -- same input, same output, never mutates the input array', () => {
   const hits = [
     { id: '1', type: 'status', text: 'chatter' },
     { id: '2', type: 'fact', text: 'a fact' },
   ];
-  const result = filterExhaustHits(hits, true);
-  assert.equal(result, hits, 'must return the SAME array reference when includeOps is true');
-});
-
-test('filterExhaustHits: a hit with no `type` field is never dropped (rooms with no type field are untouched)', () => {
-  const hits = [{ id: 'a', text: 'a doc-indexer chunk with no type field at all' }, { id: 'b', type: 'status', text: 'chatter' }];
-  const result = filterExhaustHits(hits, false);
-  assert.deepEqual(result.map((h) => h.id), ['a']);
-});
-
-test('filterExhaustHits: returns the SAME array reference when nothing would be dropped (fast path, no allocation)', () => {
-  const hits = [{ id: '1', type: 'fact' }, { id: '2', type: 'decision' }];
-  const result = filterExhaustHits(hits, false);
-  assert.equal(result, hits);
-});
-
-test('filterExhaustHits: empty input never throws', () => {
-  assert.deepEqual(filterExhaustHits([], false), []);
-  assert.deepEqual(filterExhaustHits([], true), []);
+  const before = [...hits];
+  demoteExhaustHits(hits, false, 1);
+  assert.deepEqual(hits, before, 'the input array must not be mutated');
 });

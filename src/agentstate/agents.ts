@@ -31,7 +31,9 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 // mutating tool call (safety/journal.ts) or an explicit checkpoint marker (tools/memory/checkpoint.ts).
 // It is a first-class Cosmos memory KIND like any other -- writable via memory_write, filterable via
 // memory_search -- but it is OPERATIONAL EXHAUST for knowledge retrieval: memory/room-hygiene.ts
-// already lists 'episode' in EXHAUST_RECORD_TYPES, so brain_search/kb_search exclude it by default
-// (surfaced only with include_ops=true). Do not add it to any "durable knowledge" allowlist.
+// already lists 'episode' in EXHAUST_RECORD_TYPES, so brain_search/kb_search deprioritize it by
+// default (2026-07-21: demoted, not dropped, so it can still surface if nothing else scores as
+// well; full inclusion at native rank with include_ops=true). Do not add it to any "durable
+// knowledge" allowlist.
 export const MEMORY_KINDS = ['fact', 'decision', 'correction', 'pitfall', 'status', 'episode'] as const;
 export type MemoryKind = (typeof MEMORY_KINDS)[number];
