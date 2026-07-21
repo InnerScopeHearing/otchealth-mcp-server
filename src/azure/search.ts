@@ -162,16 +162,17 @@ export async function hybridSearch(
   // throw. A bare keyword query is always valid on any index shape.
   const fallbackBody: Record<string, unknown> = { search: query, top: fetchTop, queryType: 'simple', searchMode: 'any' };
 
-  // FAIL-OPEN: a filter/semantic-ranker problem must never take a room down. A 400 (semantic
-  // ranker unsupported on this SKU, OR — when a type-exclusion filter is attached — a room whose
-  // schema has no filterable `type` field) falls through to the plain, filter-free query. A
-  // THROWN error on the filtered attempt (e.g. a network blip coinciding with the extra filter
-  // clause) gets the same one-shot fallback rather than propagating a filter-construction problem
-  // as a search outage.
+  // FAIL-OPEN: a semantic/filter-layer problem must never take a room down. ANY non-2xx on the
+  // enriched attempt (400 = semantic ranker unsupported / filter names an absent field, 402 =
+  // semantic quota exhausted — the 2026-07-20 fleet-wide "brain offline" incident, 429 = throttled,
+  // 5xx = transient service error) falls through ONCE to the plain, filter-free keyword query,
+  // which has no metered/semantic dependency and is valid on any index shape. Only if the FALLBACK
+  // itself is non-2xx do we throw — so a genuine full outage still surfaces, but a failure in any
+  // enrichment layer (semantic billing, vectorizer, filter schema) degrades instead of going dark.
   let r: Response;
   try {
     r = await doSearch(body);
-    if (r.status === 400) {
+    if (!r.ok) {
       r = await doSearch(fallbackBody);
     }
   } catch {

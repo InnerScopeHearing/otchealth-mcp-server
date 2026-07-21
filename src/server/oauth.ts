@@ -286,9 +286,12 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       if (!rc.isPublic && client_secret !== rc.secret) return reply.status(401).send({ error: 'invalid_client' });
       reply.header('Cache-Control', 'no-store');
       return reply.send({
-        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
+        // Same 24h TTL as client_credentials (OAUTH_CC_TTL_SECONDS). The 2026-07-16 TTL fix only
+        // covered the CC grant; Chat/Cowork connectors (authorization_code + refresh) kept the old
+        // hardcoded 1h and dropped mid-session — the recurring "brain went offline" experience.
+        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS),
         token_type: 'Bearer',
-        expires_in: 3600,
+        expires_in: env.OAUTH_CC_TTL_SECONDS,
         refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_REFRESH_TTL_SECONDS),
         scope: claims.scope,
       });
@@ -326,9 +329,10 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       }
       reply.header('Cache-Control', 'no-store');
       return reply.send({
-        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent),
+        // 24h, matching the CC grant (see the refresh_token grant note above).
+        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS),
         token_type: 'Bearer',
-        expires_in: 3600,
+        expires_in: env.OAUTH_CC_TTL_SECONDS,
         refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_REFRESH_TTL_SECONDS),
         scope: rec.scope,
       });

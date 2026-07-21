@@ -206,8 +206,11 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
       perRoom.push({ room: s.value.room, hits: s.value.res.matches });
       searched.push(s.value.room);
     } else {
-      // One dead room must never blank the brain. Degrade, disclose, continue.
-      failed.push(rooms[i]);
+      // One dead room must never blank the brain. Degrade, disclose, continue — WITH the reason,
+      // so an agent (or the canary) can tell quota/semantic from auth from index-missing without
+      // a human tailing gateway logs (the 2026-07-20 402 incident was undiagnosable client-side).
+      const why = s.status === 'rejected' ? String((s.reason as Error)?.message ?? s.reason).slice(0, 80) : 'empty result';
+      failed.push(`${rooms[i]}: ${why}`);
     }
   }
 

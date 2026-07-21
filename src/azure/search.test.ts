@@ -227,7 +227,39 @@ test('FAIL-OPEN: a room with no `type` field at all (doc-indexer profile room) i
   );
 });
 
-test('a non-400, non-ok response (e.g. a real 500) still throws — fail-open only covers the FILTER, not real outages', async () => {
+// THE 2026-07-20 INCIDENT, ENCODED AS A TEST. The S1 free semantic quota exhausted and every
+// semantic query returned 402 — and because fail-open only covered 400, the whole brain went
+// dark fleet-wide. The contract is now: ANY non-2xx on the enriched attempt gets ONE plain
+// keyword fallback (no semantic/metered dependency); only a fallback failure throws.
+test('FAIL-OPEN WIDENED: a 402 (semantic quota exhausted) on the enriched attempt degrades to the plain query instead of going dark', async () => {
+  let searchCallCount = 0;
+  const sentBodies: Array<Record<string, unknown>> = [];
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) {
+        searchCallCount++;
+        const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {};
+        sentBodies.push(body);
+        if (searchCallCount === 1) {
+          return new Response(JSON.stringify({ error: { message: 'Semantic search quota exceeded' } }), { status: 402 });
+        }
+        return new Response(JSON.stringify({ value: MIXED_DOCS }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('memory-exec', 'query', 10, { includeOps: false });
+      assert.ok(res, 'a metered-dependency 402 must degrade, never throw');
+      assert.equal(searchCallCount, 2, 'exactly one retry: the enriched attempt + the plain fallback');
+      assert.equal(sentBodies[1]?.queryType, 'simple', 'the fallback body must be the plain simple query');
+      assert.ok(res!.matches.length > 0, 'degraded results still flow');
+    },
+  );
+});
+
+test('a TRUE outage (fallback also non-2xx) still throws — fail-open degrades the enrichment layer, it does not hide a dead service', async () => {
   await withStubbedFetch(
     (async (url: string | URL) => {
       const u = String(url);

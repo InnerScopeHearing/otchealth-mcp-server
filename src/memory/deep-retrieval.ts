@@ -387,7 +387,8 @@ async function runRetrievalRound(
       perRoom.push(s.value);
       searched.push(s.value.room);
     } else {
-      failed.push(rooms[i]!);
+      // Disclose WHY the room failed (quota vs auth vs missing index), not just that it did.
+      failed.push(`${rooms[i]!}: ${String((s.reason as Error)?.message ?? s.reason).slice(0, 80)}`);
     }
   });
   return { perRoom, searched, failed };
@@ -421,7 +422,8 @@ async function runDeepFlow(query: string, rooms: string[], top: number, includeO
       subQueries = [...subQueries, ...refined];
       pool = [...pool, ...round2.perRoom];
       for (const r of round2.searched) searched.add(r);
-      for (const r of round2.failed) if (!searched.has(r)) failed.add(r);
+      // failed entries are "room: reason" — compare on the room name, not the whole string.
+      for (const r of round2.failed) if (!searched.has(r.split(':')[0]!)) failed.add(r);
       fusedPreview = dedupeById(rrfFuse(pool, top * 3));
     }
   }
@@ -472,7 +474,8 @@ export async function fallbackFastSearch(query: string, rooms: string[], top: nu
         perRoom.push({ room: s.value.room, hits: s.value.res.matches });
         searched.push(s.value.room);
       } else {
-        failed.push(rooms[i]!);
+        const why = s.status === 'rejected' ? String((s.reason as Error)?.message ?? s.reason).slice(0, 80) : 'empty result';
+        failed.push(`${rooms[i]!}: ${why}`);
       }
     });
     const pool = rrfFuse(perRoom, top * 3);

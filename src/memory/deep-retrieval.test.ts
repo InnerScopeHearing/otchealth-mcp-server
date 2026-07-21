@@ -472,7 +472,10 @@ test('deepRetrieve FAIL-OPEN: AI Search itself throwing (e.g. a real 500) on EVE
       assert.equal(res.mode, 'deep-agentic', 'a room-level outage stays inside the agentic flow, it does not need the outer fallback');
       assert.deepEqual(res.hits, []);
       assert.equal(res.answer, NO_CONTEXT_ANSWER);
-      assert.deepEqual(res.rooms_failed, ['memory-exec']);
+      // rooms_failed entries now carry the failure REASON ("room: why") so agents can distinguish
+      // quota vs auth vs missing-index without gateway logs.
+      assert.equal(res.rooms_failed?.length, 1);
+      assert.match(res.rooms_failed![0]!, /^memory-exec: /);
       assert.deepEqual(res.rooms_searched, []);
     },
   );
