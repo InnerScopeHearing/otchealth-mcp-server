@@ -12,7 +12,7 @@ export function registerAzureSearchIndexStats(server: McpServer, callerHash: Cal
       annotations: {
         title: 'Azure AI Search: index document count',
         description:
-          'Exact document count for an Azure AI Search index via a read-only count query (search=*, count=true). Use it to prove an index is populated and healthy (e.g. otchealth-brain ~67k docs on otchealth-brain-search, or memory-exec on otchealth-dataroom-search). Auto-detects which of the two search services hosts the index if you do not name one. Read-only; never returns the API key.',
+          'Exact document count for an Azure AI Search index via a read-only count query (search=*, count=true). Use it to prove an index is populated and healthy (e.g. memory-exec or finance-cfo-source-docs on otchealth-dataroom-s1, the LIVE service). Auto-detects the hosting service from the configured list if you do not name one. Read-only; never returns the API key.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -23,7 +23,7 @@ export function registerAzureSearchIndexStats(server: McpServer, callerHash: Cal
         service: z
           .string()
           .optional()
-          .describe('Search service name (otchealth-brain-search | otchealth-dataroom-search). Omit to auto-detect.'),
+          .describe('Search service name (default: otchealth-dataroom-s1, the live service). Omit to auto-detect.'),
       },
       outputShape: { service: z.string(), index: z.string(), documentCount: z.number() },
       handler: async (input) => {

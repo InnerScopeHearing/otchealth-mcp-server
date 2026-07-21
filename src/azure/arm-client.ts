@@ -39,7 +39,10 @@ export function azureConfig(): {
     // The RGs the MI holds Reader on. jobs/resource listing default across these; a target outside
     // them 403s (surfaced, not hidden).
     readerResourceGroups: csv(process.env.AZURE_READER_RGS, 'rg-otchealth-apps-prod,otchealth-automation-rg'),
-    searchServices: csv(process.env.AZURE_SEARCH_SERVICES, 'otchealth-brain-search,otchealth-dataroom-search'),
+    // Default = the LIVE S1 service only. The two prior defaults are both DELETED (otchealth-brain-search
+    // 2026-07-14, otchealth-dataroom-search 2026-07-20) — a stale default here made the self-diagnostic
+    // tools probe dead DNS. Keep this in lockstep with the index-writer registry (expected-indexes.json).
+    searchServices: csv(process.env.AZURE_SEARCH_SERVICES, 'otchealth-dataroom-s1'),
   };
 }
 

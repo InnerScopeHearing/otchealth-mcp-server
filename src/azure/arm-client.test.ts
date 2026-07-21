@@ -166,7 +166,9 @@ test('azureConfig defaults are the known non-secret identifiers', () => {
   const c = azureConfig();
   assert.equal(c.subscriptionId, '55c84f6b-ef90-4259-a58b-50835cc4cab4');
   assert.ok(c.readerResourceGroups.includes('otchealth-automation-rg'));
-  assert.ok(c.searchServices.includes('otchealth-brain-search'));
+  // The LIVE service only. Both prior defaults are DELETED services (otchealth-brain-search
+  // 2026-07-14, otchealth-dataroom-search 2026-07-20) and must never return as defaults.
+  assert.deepEqual(c.searchServices, ['otchealth-dataroom-s1']);
 });
 
 // ===== azure_job_get / azure_job_update / azure_job_upsert hardening (07-05 guardrails) =====

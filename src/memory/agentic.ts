@@ -151,8 +151,10 @@ async function hybridSearch(
     },
   );
 
-  // Gracefully degrade if semantic ranker not provisioned on this SKU
-  if (r.status === 400) {
+  // Gracefully degrade on ANY non-2xx from the enriched attempt (400 = semantic unsupported,
+  // 402 = semantic quota exhausted [the 2026-07-20 incident], 429/5xx = transient) — the plain
+  // keyword fallback has no semantic dependency, so only a true outage fails both attempts.
+  if (!r.ok) {
     const fallbackBody: Record<string, unknown> = {
       search: subQuery,
       top,

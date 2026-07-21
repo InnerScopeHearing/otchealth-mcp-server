@@ -19,7 +19,7 @@ export function registerAzureSearchIndexUpsert(server: McpServer, callerHash: Ca
         openWorldHint: true,
       },
       inputShape: {
-        service: z.string().min(1).describe('Search service name (otchealth-brain-search | otchealth-dataroom-search).'),
+        service: z.string().min(1).describe('Search service name (the live service is otchealth-dataroom-s1).'),
         index_name: z.string().min(1).describe('Index name.'),
         definition: z.record(z.unknown()).describe('The index definition (fields[], plus optional semantic/vectorSearch config). `name` is set from index_name.'),
       },
