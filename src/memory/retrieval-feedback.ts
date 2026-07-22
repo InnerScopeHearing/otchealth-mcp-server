@@ -52,6 +52,7 @@
  */
 import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
 import { looksLikeSecretValue } from '../safety/journal.js';
+import { evaluateBroadcastMnpiGate } from '../safety/mnpi-gate.js';
 
 // ---- pure core: the reference id --------------------------------------------------------------
 
@@ -262,12 +263,32 @@ export function buildFeedbackEventProperties(input: {
 
 // ---- IO shell -----------------------------------------------------------------------------------
 
+export interface RecordRetrievalFeedbackResult {
+  recorded: boolean;
+  /** Populated only when recorded is false because the MNPI gate blocked this feedback. */
+  mnpiBlockedReason?: string;
+}
+
 /**
  * Fire a best-effort `gw_retrieval_feedback` capture. FAIL-OPEN BY CONSTRUCTION: wrapped in its
  * own try/catch (defense in depth on top of captureGatewayEvent's own never-throws contract, the
  * same belt-and-suspenders convention journal.ts's call site uses). Synchronous and non-blocking:
  * captureGatewayEvent never returns a promise the caller could accidentally await-and-stall on, so
  * calling this can never add latency to the retrieval_feedback tool response.
+ *
+ * MNPI GATE (hard, code-level, added after this file's initial build -- see safety/mnpi-gate.ts):
+ * `ref.query` is the caller's ORIGINAL search query (truncated, embedded at tag time by
+ * buildFeedbackRef) and `reason` is arbitrary free text; both flow straight into a
+ * gw_retrieval_feedback PostHog event in the Gateway Ops project, a non-privileged, broadly-shared
+ * destination -- exactly the same "broadcast-style tool with no legitimate destination for EXEC_RING/
+ * MNPI content" shape web_search / memory_remember / memory_write / checkpoint are already hard-gated
+ * on. brain_search (the tool this ref usually comes from) DOES federate across ring-gated finance/
+ * legal rooms for EXEC_RING lanes, so a caller's own query text can itself be MNPI/privileged (e.g.
+ * "burn rate on the Series A before the public filing"), and unlike a hit's retrieved content, that
+ * query text was NOT already screened by anything upstream. Scanned and hard-blocked here, before the
+ * capture, for every caller including EXEC_RING -- mirrors evaluateBroadcastMnpiGate's other call
+ * sites exactly. On a block, recordRetrievalFeedback returns {recorded:false, mnpiBlockedReason} so
+ * the tool handler can report the truth instead of claiming a success that did not happen.
  */
 export function recordRetrievalFeedback(input: {
   ref: ReferenceFields;
@@ -275,11 +296,17 @@ export function recordRetrievalFeedback(input: {
   reason?: string;
   caller?: string;
   now?: number;
-}): void {
+}): RecordRetrievalFeedbackResult {
   try {
+    const gate = evaluateBroadcastMnpiGate({ query: input.ref.query, reason: input.reason });
+    if (gate.blocked) {
+      return { recorded: false, mnpiBlockedReason: gate.reason };
+    }
     const props = buildFeedbackEventProperties(input);
     captureGatewayEvent(RETRIEVAL_FEEDBACK_EVENT, props, input.caller);
+    return { recorded: true };
   } catch {
     /* FAIL-OPEN: a feedback-capture failure must be completely invisible to the caller. */
+    return { recorded: true };
   }
 }

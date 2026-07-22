@@ -28,7 +28,7 @@ export function registerRetrievalFeedback(server: McpServer, callerHash: CallerH
       annotations: {
         title: 'Report feedback on a brain_search / kb_search hit',
         description:
-          'OPT-IN: report whether a specific hit from a prior brain_search or kb_search call was actually useful. Pass the `feedback_ref` token that call attached to the hit (never construct one by hand) plus a rating: "useful" (you acted on it), "not_useful" (noise/irrelevant), or "cited" (you directly quoted/referenced it in a downstream answer or action). No need to re-send the hit content or the original query, the ref already carries what is needed. Best-effort and fire-and-forget: this never blocks, never fails loudly, and changes zero retrieval behavior on its own, it only accumulates signal for a future retrieval-quality pass. Nothing requires you to call this; skip it freely.',
+          'OPT-IN: report whether a specific hit from a prior brain_search or kb_search call was actually useful. Pass the `feedback_ref` token that call attached to the hit (never construct one by hand) plus a rating: "useful" (you acted on it), "not_useful" (noise/irrelevant), or "cited" (you directly quoted/referenced it in a downstream answer or action). No need to re-send the hit content or the original query, the ref already carries what is needed. Best-effort and fire-and-forget: this never blocks, never fails loudly, and changes zero retrieval behavior on its own, it only accumulates signal for a future retrieval-quality pass. Nothing requires you to call this; skip it freely. MNPI GATE (hard, code-level): the ref\'s embedded original query and any free-text reason are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker before the feedback event is captured; a match is refused for every caller, no exception (this telemetry destination is never a legitimate home for that content).',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -87,7 +87,16 @@ export function registerRetrievalFeedback(server: McpServer, callerHash: CallerH
 
         // Fire-and-forget: recordRetrievalFeedback is synchronous and fail-open by construction
         // (memory/retrieval-feedback.ts), so this can never add latency to, or fail, this response.
-        recordRetrievalFeedback({ ref: parsed, rating: input.rating, reason: input.reason, caller: ctx.callerAgent });
+        // MNPI GATE: the ref's original query (plus any free-text reason) is scanned before capture;
+        // a match is a hard block, no caller exception (see memory/retrieval-feedback.ts's header).
+        const result = recordRetrievalFeedback({ ref: parsed, rating: input.rating, reason: input.reason, caller: ctx.callerAgent });
+
+        if (!result.recorded) {
+          return {
+            data: { recorded: false, ref: refSummary, error: 'mnpi_blocked' },
+            summary: `Feedback NOT recorded: ${result.mnpiBlockedReason}`,
+          };
+        }
 
         return {
           data: { recorded: true, ref: refSummary },

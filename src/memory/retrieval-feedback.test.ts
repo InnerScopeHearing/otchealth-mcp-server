@@ -295,8 +295,57 @@ test('recordRetrievalFeedback: is genuinely fire-and-forget -- returns before th
   try {
     const ref: ReferenceFields = { tool: 'brain_search', room: 'memory-exec', hitId: 'h3', query: 'q', ts: Date.now() };
     const returned = recordRetrievalFeedback({ ref, rating: 'cited' });
-    assert.equal(returned, undefined, 'synchronous void return, nothing to await');
+    assert.deepEqual(returned, { recorded: true }, 'synchronous result, nothing to await, clean content is not MNPI-blocked');
     assert.equal(fetchWasCalled, true, 'sanity: the stub really was reached (key is configured in this file)');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+// ---- recordRetrievalFeedback: MNPI GATE (safety/mnpi-gate.ts's evaluateBroadcastMnpiGate) --------
+// The ref's embedded original query (brain_search federates across ring-gated finance/legal rooms for
+// EXEC_RING lanes, so the CALLER's query text -- not just a hit's retrieved content -- can itself be
+// MNPI/privileged) and the free-text `reason` both flow into a PostHog Gateway Ops event, a
+// non-privileged, broadly-shared destination. Same "broadcast-style tool, no legitimate destination
+// for that content" shape as web_search / memory_remember / memory_write / checkpoint.
+
+test('recordRetrievalFeedback: an EXEC_RING room reference in the ref.query is a HARD BLOCK, no capture attempted', () => {
+  const original = globalThis.fetch;
+  let fetchWasCalled = false;
+  globalThis.fetch = ((..._args: unknown[]) => { fetchWasCalled = true; return Promise.resolve(new Response('{}')); }) as unknown as typeof fetch;
+  try {
+    const ref: ReferenceFields = { tool: 'brain_search', room: 'finance-cfo-memory', hitId: 'h4', query: 'summarized from finance-cfo-memory: the burn rate is X', ts: Date.now() };
+    const result = recordRetrievalFeedback({ ref, rating: 'useful', caller: 'cfo' });
+    assert.equal(result.recorded, false);
+    assert.match(result.mnpiBlockedReason ?? '', /HARD BLOCK/);
+    assert.equal(fetchWasCalled, false, 'a blocked capture must never reach the network call');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('recordRetrievalFeedback: an explicit MNPI marker in the free-text reason is a HARD BLOCK even for an EXEC_RING caller', () => {
+  const original = globalThis.fetch;
+  let fetchWasCalled = false;
+  globalThis.fetch = ((..._args: unknown[]) => { fetchWasCalled = true; return Promise.resolve(new Response('{}')); }) as unknown as typeof fetch;
+  try {
+    const ref: ReferenceFields = { tool: 'brain_search', room: 'memory-exec', hitId: 'h5', query: 'clean query text', ts: Date.now() };
+    const result = recordRetrievalFeedback({ ref, rating: 'cited', reason: '[MNPI] the acquisition closes next week', caller: 'exec' });
+    assert.equal(result.recorded, false);
+    assert.match(result.mnpiBlockedReason ?? '', /HARD BLOCK/);
+    assert.equal(fetchWasCalled, false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('recordRetrievalFeedback: clean query and reason are never blocked (unaffected legitimate use)', () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (() => Promise.resolve(new Response('{}'))) as unknown as typeof fetch;
+  try {
+    const ref: ReferenceFields = { tool: 'kb_search', room: 'commons-company-journal', hitId: 'h6', query: 'what is the going rate for a golf app subscription', ts: Date.now() };
+    const result = recordRetrievalFeedback({ ref, rating: 'not_useful', reason: 'irrelevant to the question asked' });
+    assert.deepEqual(result, { recorded: true });
   } finally {
     globalThis.fetch = original;
   }
