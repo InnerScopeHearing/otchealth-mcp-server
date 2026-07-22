@@ -119,6 +119,28 @@ const EnvSchema = z.object({
   // tools/registry.connector-lanes.test.ts.
   EXTERNAL_READONLY_TOOLSET: z.string().optional().default(''),
 
+  // PER-LANE TOOL-CATALOG CURATION for INTERNAL client_credentials lanes (Wave 6 item 6.2,
+  // src/safety/tool-catalog-curation.ts + src/config/lane-toolsets.ts). Extends the SAME idea as
+  // CONNECTOR_TOOLSET / EXTERNAL_READONLY_TOOLSET above to cto/cfo/clo/clo-personal/coo/cro/cpo/cco/
+  // developer/exec, which today always see the full ~850-tool catalog (isConnectorSurface() is only
+  // ever true for a dcr_/occ_ client id, never a client_credentials lane). Also NOT in this schema on
+  // purpose, same reasoning as SHIELD_MODE/COLD_START_MODE/JIT_DOCTRINE_MODE above -- read fresh from
+  // process.env per call so it can be flipped without a redeploy:
+  //   TOOL_CATALOG_CURATION_MODE  off | report (DEFAULT) | curate
+  // 'report' (the default) NEVER restricts what any lane sees -- every internal lane keeps getting the
+  // full catalog exactly as before this feature shipped. It only fires a fire-and-forget
+  // gw_lane_tool_used telemetry event per actual tool call (via the existing captureGatewayEvent /
+  // POSTHOG_GATEWAYOPS_KEY pattern), annotated against that lane's SEED allowlist in
+  // config/lane-toolsets.ts, so a real usage picture can build before anyone commits to curating
+  // anything. 'curate' is the non-default opt-in that actually narrows a known internal lane's
+  // advertised tools/list response to its seed allowlist (registry.ts's registerTool early-returns
+  // before registering a tool outside the list -- mirrors the pre-existing connector-surface early
+  // return just above it). 'off' silences the telemetry too (a no-op). An unrecognized lane (not in
+  // KNOWN_INTERNAL_LANES) is NEVER curated or logged in any mode -- fail-open by construction, see
+  // tool-catalog-curation.ts's header. Execution-time ring/role gating (kb/search-privileged.ts,
+  // catalog/governance.ts) is completely UNCHANGED by this feature either way; this only controls
+  // what appears in a tools/list response, never what a call is authorized to do.
+
   // Descope Agentic Identity Hub -- OPTIONAL parallel credential path for approved pilot lanes
   // (Phase 2, 2026-07-08). Inert when DESCOPE_PROJECT_ID is unset -- does not touch or replace
   // any existing OAuth lane above. When set, auth/bearer.ts additionally accepts a Descope-
