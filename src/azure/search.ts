@@ -19,12 +19,25 @@
  * demotion" (the pre-existing, unchanged behavior) when omitted entirely, so any existing caller
  * that does not pass it (e.g. kb_search_privileged) is byte-for-byte unaffected; the tool layer
  * (brain_search, kb_search) is what makes demotion the default by always passing opts.
+ *
+ * SHADOW EVAL (Wave 7 item 7.2, default OFF -- see safety/shadow-eval.ts): `hybridSearch` is the
+ * one seam every caller funnels through, so a sampled, fire-and-forget candidate-variant re-run is
+ * wired in right here rather than at each of its ~7 call sites. It NEVER affects the value this
+ * function returns; see the exported `hybridSearch` wrapper's own comment for exactly how.
  */
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { demoteExhaustHits } from '../memory/room-hygiene.js';
 import { rerankByAuthority, rerankEnabled } from '../memory/authority-rerank.js';
+import {
+  parseShadowEvalMode,
+  parseShadowSampleRate,
+  shouldSampleShadow,
+  resolveShadowStrategy,
+  captureShadowComparison,
+  isRingGatedIndexName,
+} from '../safety/shadow-eval.js';
 
 const API_VERSION = '2023-11-01';
 
@@ -93,11 +106,49 @@ export function searchConfigured(): boolean {
   return Boolean(e.AZURE_SEARCH_ENDPOINT && e.AZURE_SEARCH_QUERY_KEY);
 }
 
+/**
+ * hybridSearch is the single seam EVERY caller (kb_search, brain_search, kb_search_privileged,
+ * incident_match, deep-retrieval, auto-supersede, ...) funnels through, so it is also the natural
+ * seam for SHADOW EVAL (Wave 7 item 7.2, safety/shadow-eval.ts): a fire-and-forget, sampled,
+ * candidate-variant re-run whose result is captured for offline comparison and NEVER returned to
+ * the caller. This thin wrapper does exactly two things beyond the original behavior: it calls the
+ * (renamed, otherwise byte-identical) internal implementation for the LIVE result, then, only
+ * after that live result is already final, fires an un-awaited shadow re-run if
+ * SHADOW_EVAL_MODE=on and this call was sampled. See runShadowEvalIfSampled below and
+ * safety/shadow-eval.ts's file header for the full design.
+ */
 export async function hybridSearch(
   index: string,
   query: string,
   top: number,
   opts?: HybridSearchOptions,
+): Promise<{ matches: KbHit[]; mode: string } | null> {
+  const result = await runHybridSearch(index, query, top, opts);
+  if (result) {
+    // SHADOW EVAL: fired AFTER `result` is already computed and about to be returned unchanged.
+    // Deliberately NOT awaited (`void ... .catch()`, matching safety/journal.ts's journalMutation
+    // call-site convention exactly) so the shadow branch's own network calls can never add latency
+    // to, or fail, this response. See azure/search.test.ts for a live proof that this function
+    // resolves before the shadow branch's own fetch even settles.
+    void runShadowEvalIfSampled(index, query, top, opts, result).catch(() => undefined);
+  }
+  return result;
+}
+
+/**
+ * `rerankModeOverride`, when given, REPLACES the env-derived MEMORY_RERANK_MODE for this one call
+ * only. Used exclusively by the shadow path (a strategy's `rerankModeOverride`) so a candidate
+ * re-rank variant can diverge from the live env value without a second env mutation anywhere.
+ * `undefined` (every pre-existing call site, including the public hybridSearch's own live-path
+ * call above) reads process.env exactly as before this parameter existed: byte-identical
+ * behavior for every caller that does not know this parameter exists.
+ */
+async function runHybridSearch(
+  index: string,
+  query: string,
+  top: number,
+  opts?: HybridSearchOptions,
+  rerankModeOverride?: string,
 ): Promise<{ matches: KbHit[]; mode: string } | null> {
   const e = loadEnv();
   const ep = (e.AZURE_SEARCH_ENDPOINT || '').replace(/\/+$/, '');
@@ -140,7 +191,12 @@ export async function hybridSearch(
   // for a PRECISE slice (e.g. incident-match's pitfall/correction-only query) and want pure relevance
   // order within it, not a reshuffle. Demotion is also skipped when the caller asked for full
   // inclusion (includeOps=true) -- there is nothing to demote once everything is wanted.
-  const rerankOn = rerankEnabled(e.MEMORY_RERANK_MODE) && !opts?.filter;
+  // Resolved ONCE and reused everywhere the rerank mode is consulted below (both the enabled-check
+  // and rerankByAuthority's own call), so a shadow strategy's rerankModeOverride can never partially
+  // apply -- e.g. override 'on' while env MEMORY_RERANK_MODE is 'off' must make rerankByAuthority
+  // itself apply the multipliers, not just size the over-fetch pool as if it would.
+  const rerankMode = rerankModeOverride ?? e.MEMORY_RERANK_MODE;
+  const rerankOn = rerankEnabled(rerankMode) && !opts?.filter;
   const demoteMode = !chunked && !opts?.filter && !includeOps;
   const fetchTop = chunked ? Math.min(50, top * 3) : rerankOn || demoteMode ? Math.min(30, top * 3) : top;
 
@@ -235,7 +291,7 @@ export async function hybridSearch(
     // move a competing exhaust hit out of the way, which would reintroduce the exact "top slot crowded
     // out by chatter" failure this whole change exists to fix. rerankOn already folds in both the
     // kill-switch and the "no explicit filter" rule.
-    if (rerankOn) hits = rerankByAuthority(hits, { mode: e.MEMORY_RERANK_MODE });
+    if (rerankOn) hits = rerankByAuthority(hits, { mode: rerankMode });
   }
 
   // Strip the internal dedup + re-rank signal keys, then apply room hygiene as the FINAL step so it
@@ -247,6 +303,68 @@ export async function hybridSearch(
   let matches: KbHit[] = hits.map(({ _parent, ts, source, by, ...h }) => h);
   matches = demoteExhaustHits(matches, includeOps, top);
   return { matches, mode: vector ? 'hybrid+semantic' : 'keyword' };
+}
+
+/**
+ * SHADOW EVAL orchestration (Wave 7 item 7.2). Decides whether THIS call should also run a
+ * candidate variant, and if so runs it + captures the comparison. Never awaited by the public
+ * hybridSearch wrapper above (see its own comment). Everything in this function happens strictly
+ * AFTER the live result the caller receives is already final.
+ *
+ * Every step here fails open: an unset/garbage SHADOW_EVAL_MODE is 'off' (no-op, the common case
+ * for the fleet today); an unset/garbage SHADOW_EVAL_STRATEGY resolves to 'baseline' rather than
+ * throwing; a thrown error from the candidate re-run itself is caught and captured as
+ * `shadowError` rather than propagated (this function's own promise still resolves cleanly, and
+ * the call site's `.catch(() => undefined)` is defense in depth on top of that). Nothing in this
+ * function can throw synchronously before its first await either, so `void runShadowEvalIfSampled(
+ * ...)` at the call site can never itself throw.
+ */
+async function runShadowEvalIfSampled(
+  index: string,
+  query: string,
+  top: number,
+  opts: HybridSearchOptions | undefined,
+  liveResult: { matches: KbHit[]; mode: string },
+): Promise<void> {
+  if (parseShadowEvalMode(process.env.SHADOW_EVAL_MODE) !== 'on') return;
+  // CROSS-RING GATE: never even RUN a shadow re-run for a ring-gated (kb_search_privileged-only)
+  // index -- the comparison record's destination (memory-exec, via captureShadowComparison's
+  // default) is an OPEN index, a more permissive destination than the ring-gated room the live
+  // query was actually against. Checked here (not just inside captureShadowComparison) so a
+  // privileged room's query never even pays the extra embed+search cost, and so there is no window
+  // where a ring-gated result briefly exists before capture. See shadow-eval.ts's own header.
+  if (isRingGatedIndexName(index)) return;
+  const rate = parseShadowSampleRate(process.env.SHADOW_EVAL_SAMPLE_RATE);
+  // Math.random() here (never in the pure shouldSampleShadow itself, which takes `rand` as a
+  // parameter precisely so it stays seedable/testable) -- see shadow-eval.ts's file header.
+  if (!shouldSampleShadow(rate, Math.random)) return;
+
+  const strategy = resolveShadowStrategy(process.env.SHADOW_EVAL_STRATEGY);
+  const shadowOpts: HybridSearchOptions = { ...opts };
+  if (strategy.overrides.includeOpsOverride !== undefined) {
+    shadowOpts.includeOps = strategy.overrides.includeOpsOverride;
+  }
+
+  const startedAt = Date.now();
+  let shadowResult: { matches: KbHit[]; mode: string } | null = null;
+  let shadowError: string | undefined;
+  try {
+    shadowResult = await runHybridSearch(index, query, top, shadowOpts, strategy.overrides.rerankModeOverride);
+  } catch (err) {
+    shadowError = err instanceof Error ? err.message : String(err);
+  }
+  const elapsedMs = Date.now() - startedAt;
+
+  await captureShadowComparison({
+    index,
+    query,
+    top,
+    strategy: strategy.name,
+    live: { mode: liveResult.mode, hits: liveResult.matches },
+    shadow: shadowResult ? { mode: shadowResult.mode, hits: shadowResult.matches } : null,
+    shadowError,
+    elapsedMs,
+  });
 }
 
 export interface FetchedDocument {
