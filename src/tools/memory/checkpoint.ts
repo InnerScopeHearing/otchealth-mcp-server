@@ -80,14 +80,24 @@ export function parseDistillResponse(raw: string): DistilledMemory[] {
   }
 }
 
-/** Call the shared Azure LLM client (azure/foundry.ts) to distill a summary. Throws on transport/
- *  API failure -- the caller wraps this in its own try/catch (fail-open at the call site). */
-async function distillSummary(summary: string): Promise<DistilledMemory[]> {
+/**
+ * Call the shared Azure LLM client (azure/foundry.ts) to distill a summary. Throws on transport/
+ * API failure -- the caller wraps this in its own try/catch (fail-open at the call site).
+ *
+ * Tier: 'router' -- this is a bounded extraction task (a strict-JSON list of 0-3 short atomic
+ * memories, capped output, always parsed defensively by parseDistillResponse which fails safe to
+ * an empty list on anything malformed), the same task shape the fleet's own llm_azure tool already
+ * lets external callers route through the Azure Model Router. Asking the router to pick the
+ * cheapest-sufficient model here is the FLEET COST PROTOCOL applied to an internal call site that
+ * previously hardcoded a static tier itself. When FOUNDRY_ROUTER_ENDPOINT/KEY are unset, chat()
+ * degrades this to the exact same 'standard' deployment used before this change (see foundry.ts).
+ */
+export async function distillSummary(summary: string): Promise<DistilledMemory[]> {
   const messages: ChatMessage[] = [
     { role: 'system', content: DISTILL_SYSTEM_PROMPT },
     { role: 'user', content: summary.slice(0, MAX_SUMMARY_INPUT_CHARS) },
   ];
-  const res = await chat(messages, { maxTokens: 700, jsonMode: true, tier: 'standard' });
+  const res = await chat(messages, { maxTokens: 700, jsonMode: true, tier: 'router' });
   return parseDistillResponse(res.text);
 }
 
