@@ -273,10 +273,16 @@ const EnvSchema = z.object({
   // AUTO-GUARD modes are NOT in this schema on purpose: like COMPLIANCE_MODE / GOVERNANCE_MODE, they are
   // read FRESH from process.env by src/safety/auto-guard.ts (via the registerTool wrapper) so they can be
   // flipped by an env change with no code redeploy:
-  //   SHIELD_MODE       off | report (default) | enforce   — inbound Prompt Shields on tool args
-  //   GROUNDEDNESS_MODE off (default) | report | enforce    — outbound groundedness on tools that surface a hint
+  //   SHIELD_MODE           off | report (default) | enforce, inbound Prompt Shields on tool args
+  //   GROUNDEDNESS_MODE     off (default) | report | enforce, outbound groundedness on tools that surface a hint
+  //   RETRIEVAL_SHIELD_MODE off | report (default) | enforce, Prompt Shields' document scan on retrieved
+  //                         passages, run by src/memory/deep-retrieval.ts right before it concatenates them
+  //                         into a synthesis prompt (the indirect-injection vector, a malicious instruction
+  //                         hidden inside a retrieved document). enforce withholds only the synthesized
+  //                         answer, never the raw retrieved passages. See auto-guard.ts's retrievalShield().
   // 'report' runs the check and annotates/logs but never blocks; 'enforce' blocks (inbound: pre-handler;
-  // outbound: read-only tools only). All fail-open + inert until CONTENT_SAFETY_* above is set.
+  // outbound: read-only tools only; retrieval: the synthesis step only). All fail-open + inert until
+  // CONTENT_SAFETY_* above is set.
 
   // llm_azure SEMANTIC RESPONSE CACHE (src/tools/llm/semantic-cache.ts). Also NOT in this schema on
   // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh per call so it can be
