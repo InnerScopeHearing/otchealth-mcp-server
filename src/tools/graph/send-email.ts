@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { sendEmail } from '../../graph/api-client.js';
+import { evaluateEmailMnpiGate } from '../../safety/mnpi-gate.js';
 
 export function registerGraphSendEmail(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
@@ -9,7 +10,7 @@ export function registerGraphSendEmail(server: McpServer, callerHash: CallerHash
     category: 'write_orchestrated',
     annotations: {
       title: 'Send email as COO',
-      description: 'Send an email as coo@otchealthmart.com via Microsoft Graph. Uses application permissions (Mail.Send). Scoped autonomy: reply to Matt trusted addresses without approval; external/regulated stays gated.',
+      description: 'Send an email as coo@otchealthmart.com via Microsoft Graph. Uses application permissions (Mail.Send). Scoped autonomy: reply to Matt trusted addresses without approval; external/regulated stays gated. MNPI GATE (hard, code-level, not an LLM judgment): subject/body/recipients are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE send; a match to any external recipient is refused outright, a match to all-internal recipients requires an EXEC_RING caller lane.',
       readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true,
     },
     inputShape: {
@@ -27,7 +28,22 @@ export function registerGraphSendEmail(server: McpServer, callerHash: CallerHash
       to: z.string(),
       subject: z.string(),
     },
-    handler: async (input, _ctx) => {
+    handler: async (input, ctx) => {
+      // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
+      // Graph call. Code-level, not an LLM judgment: a match to an EXTERNAL recipient is refused for
+      // every caller; a match with every recipient internal requires an EXEC_RING caller lane.
+      const recipientsCsv = [input.to, input.cc, input.bcc].filter(Boolean).join(',');
+      const mnpiGate = evaluateEmailMnpiGate(
+        { subject: input.subject, body: input.body, to: input.to, cc: input.cc, bcc: input.bcc, reply_to: input.reply_to },
+        recipientsCsv,
+        ctx.callerAgent,
+      );
+      if (mnpiGate.blocked) {
+        return {
+          data: { sent: false, to: input.to, subject: input.subject, mnpi_gate: mnpiGate },
+          summary: `Refused: ${mnpiGate.reason}`,
+        };
+      }
       const toList = input.to.split(',').map((e: string) => e.trim()).filter(Boolean);
       const ccList = input.cc ? input.cc.split(',').map((e: string) => e.trim()).filter(Boolean) : undefined;
       const bccList = input.bcc ? input.bcc.split(',').map((e: string) => e.trim()).filter(Boolean) : undefined;

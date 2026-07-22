@@ -8,6 +8,7 @@ import { indexMemoryNow } from '../../azure/search-write.js';
 import { embed } from '../../azure/foundry.js';
 import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { currentCallerAgent, isConnectorSurface } from '../../server/request-context.js';
+import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
 
 /**
  * RING GATE (defense-in-depth; layer 3 of the Phase 5/6 connector-ring closure, 2026-07-15).
@@ -30,6 +31,16 @@ import { currentCallerAgent, isConnectorSurface } from '../../server/request-con
  * Non-connector-surface callers (client_credentials fleet lanes, the static PERPLEXITY_CONNECTOR_TOKEN)
  * are UNCHANGED by this gate -- it only narrows the connector surface, which is exactly where an
  * unauthenticated/self-registered external identity can reach this tool.
+ *
+ * MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts), an ORTHOGONAL check
+ * applied in the handler below regardless of connector surface: memoryWriteRefusal above gates WHO
+ * (which lane, and only over the connector surface) may write at all; the MNPI gate additionally
+ * scans WHAT is being written and hard-blocks for EVERY caller, connector or not, including a normal
+ * client_credentials fleet-lane agent, because this record is write-through indexed into memory-exec,
+ * a room every agent's brain_search reaches. Without this second, content-based check, an ordinary
+ * fleet agent (never a connector, so memoryWriteRefusal never engages) could still write EXEC_RING/
+ * MNPI content straight into a room read by everyone. See mnpi-gate.ts's header for why this one gate
+ * fails closed and is never mode-switched to report-only, unlike every other check in safety/.
  */
 export function memoryWriteRefusal(connectorSurface: boolean, lane: string): string | null {
   if (!connectorSurface) return null;
@@ -46,7 +57,7 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Write a structured memory-of-record',
         description:
-          'Write a durable, byte-exact, queryable memory record (fact/decision/correction/pitfall/status) to the Cosmos memory store. This is the verbatim system-of-record for memory: never lossy, never LLM-rewritten. It is ALSO write-through indexed into the semantic brain, so it is immediately recallable via brain_search/kb_search (before 2026-07-14 it was durable but INVISIBLE to every semantic recall path). Non-PHI, non-MNPI, non-privileged (clo-personal rejected). Over a Claude Chat connector surface, only the cto/developer/executive-ring lanes may write. Pass dry_run=false to persist.',
+          'Write a durable, byte-exact, queryable memory record (fact/decision/correction/pitfall/status) to the Cosmos memory store. This is the verbatim system-of-record for memory: never lossy, never LLM-rewritten. It is ALSO write-through indexed into the semantic brain, so it is immediately recallable via brain_search/kb_search (before 2026-07-14 it was durable but INVISIBLE to every semantic recall path). Non-PHI, non-MNPI, non-privileged (clo-personal rejected). Over a Claude Chat connector surface, only the cto/developer/executive-ring lanes may write. MNPI GATE (hard, code-level, every caller including client_credentials fleet lanes): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused outright, because this record is broadly recallable via brain_search. Pass dry_run=false to persist.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -67,6 +78,17 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
           return {
             data: { written: false, note: refusal },
             summary: `Refused: connector lane "${currentCallerAgent() || '(none)'}" is not authorized to write fleet memory. Only the executive ring plus cto/developer may write memory over a connector surface.`,
+          };
+        }
+        // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs for EVERY
+        // caller, connector or not (see the file-header note above memoryWriteRefusal for why this is
+        // an orthogonal, always-on check). The record is write-through indexed into memory-exec, a
+        // room every agent's brain_search reaches: a content match is a HARD BLOCK, no exception.
+        const mnpiGate = evaluateBroadcastMnpiGate({ text: input.text, tags: (input.tags ?? []).join(' '), source: input.source, agent: input.agent });
+        if (mnpiGate.blocked) {
+          return {
+            data: { written: false, note: mnpiGate.reason },
+            summary: `Refused: ${mnpiGate.reason}`,
           };
         }
         if (!isConfigured()) return { data: { written: false, note: 'agent-state Cosmos not configured.' }, summary: 'Memory store not configured.' };

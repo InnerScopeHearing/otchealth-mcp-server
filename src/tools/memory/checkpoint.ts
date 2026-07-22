@@ -31,6 +31,7 @@ import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.j
 import { buildEpisodeText } from '../../safety/journal.js';
 import { recordCheckpoint } from '../../safety/capture-pressure.js';
 import { captureGatewayEvent } from '../../telemetry/gateway-ops.js';
+import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
 
 const DISTILL_KINDS = ['fact', 'decision', 'correction', 'pitfall'] as const;
 type DistillKind = (typeof DISTILL_KINDS)[number];
@@ -123,7 +124,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
-          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes any explicit "memories" verbatim, server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the credit-funded Azure LLM is configured, always writes an episode marker, and always resets the capture-pressure counter for this caller. Fail-open: an LLM or index error still persists what it can. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent).',
+          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes any explicit "memories" verbatim, server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the credit-funded Azure LLM is configured, always writes an episode marker, and always resets the capture-pressure counter for this caller. Fail-open: an LLM or index error still persists what it can. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -153,6 +154,19 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         checkpoint: z.boolean(),
       },
       handler: async (input, ctx) => {
+        // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
+        // write, over the summary AND every explicit memory's text. Unlike the rest of this handler
+        // (deliberately fail-open per its own doc comment), this check is a HARD BLOCK for every
+        // caller on a match: the underlying store is the same memory-exec room memory_write and
+        // memory_remember write into, always broadly recallable, never a legitimate MNPI destination.
+        const memoriesText = (input.memories ?? []).map((m) => m.text).join('\n');
+        const mnpiGate = evaluateBroadcastMnpiGate({ summary: input.summary, memories_text: memoriesText });
+        if (mnpiGate.blocked) {
+          return {
+            data: { written: [], distilled: 0, checkpoint: false, note: mnpiGate.reason },
+            summary: `Refused: ${mnpiGate.reason}`,
+          };
+        }
         if (!isConfigured()) {
           return {
             data: { written: [], distilled: 0, checkpoint: false, note: 'agent-state Cosmos not configured.' },
