@@ -184,6 +184,9 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     };
     if (deep.rooms_failed?.length) data.rooms_failed = deep.rooms_failed;
     if (deep.retracted_dropped?.length) data.retracted_dropped = deep.retracted_dropped;
+    // Only present when the content-level injection screen actually ran (RETRIEVAL_SHIELD_MODE != off
+    // AND Content Safety configured) -- see memory/deep-retrieval.ts's runDeepFlow.
+    if (deep.injection_screen) data.injection_screen = deep.injection_screen;
 
     const roundWord = deep.rounds_used === 1 ? 'round' : 'rounds';
     const sqWord = deep.sub_queries.length === 1 ? 'sub-query' : 'sub-queries';
@@ -193,7 +196,10 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
         `deep (${deep.rounds_used} ${roundWord}, ${deep.sub_queries.length} ${sqWord}): ${deep.hits.length} cited ` +
         `passage(s) for "${input.query}" across ${deep.rooms_searched.length} room(s): ${deep.rooms_searched.join(', ')}.` +
         (deep.rooms_failed?.length ? ` ${deep.rooms_failed.length} room(s) unreachable: ${deep.rooms_failed.join(', ')}.` : '') +
-        (deep.retracted_dropped?.length ? ` Dropped ${deep.retracted_dropped.length} RETRACTED belief(s).` : ''),
+        (deep.retracted_dropped?.length ? ` Dropped ${deep.retracted_dropped.length} RETRACTED belief(s).` : '') +
+        (deep.injection_screen?.attackDetected
+          ? ` INJECTION SCREEN flagged a retrieved passage (mode=${deep.injection_screen.mode}).`
+          : ''),
     };
   }
 
@@ -297,7 +303,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain, federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field). Each returned match carries a `feedback_ref` token; optionally report back with the retrieval_feedback tool (useful/not_useful/cited) once you know whether a hit actually helped, no content re-send needed -- this feeds future recall-quality work.',
+          'Hybrid semantic search across the LIVE company brain, federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field); deep mode also screens the retrieved passages for embedded prompt-injection attempts before synthesizing (see injection_screen). Each returned match carries a `feedback_ref` token; optionally report back with the retrieval_feedback tool (useful/not_useful/cited) once you know whether a hit actually helped, no content re-send needed -- this feeds future recall-quality work.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -320,6 +326,9 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         citations: z.array(z.unknown()).optional(),
         sub_queries: z.array(z.string()).optional(),
         rounds_used: z.number().optional(),
+        // deep mode only, and only present when the injection screen actually ran (Content Safety
+        // configured AND RETRIEVAL_SHIELD_MODE != off) -- see memory/deep-retrieval.ts.
+        injection_screen: z.unknown().optional(),
       },
       handler: handleBrainSearch,
     },

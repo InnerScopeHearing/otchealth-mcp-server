@@ -9,6 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { fetchWithBudget } from '../../util/fetch-budget.js';
+import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
 
 let tok: { v: string; exp: number } = { v: '', exp: 0 };
 async function aad(): Promise<string> {
@@ -37,7 +38,7 @@ export function registerWebSearch(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Open-web research (Grounding with Bing, read-only)',
         description:
-          'Search the public web and return a grounded answer with source citations. Use for external/public-world topics only (news, market/competitor data, regulations, general research). NEVER pass company-confidential, personal, legal, customer, or PHI content here — use brain_search for those. Read-only.',
+          'Search the public web and return a grounded answer with source citations. Use for external/public-world topics only (news, market/competitor data, regulations, general research). NEVER pass company-confidential, personal, legal, customer, or PHI content here — use brain_search for those. Read-only. MNPI GATE (hard, code-level): the query is scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the request leaves the gateway; a match is refused for every caller, no exception (the public web is never a legitimate destination for that content).',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: false,
@@ -46,6 +47,13 @@ export function registerWebSearch(server: McpServer, callerHash: CallerHashProvi
       inputShape: { query: z.string().min(1).describe('Public-world research query.') },
       outputShape: { answer: z.string(), citations: z.array(z.unknown()), mode: z.string(), error: z.string().optional() },
       handler: async (input) => {
+        // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE the
+        // query ever leaves the gateway. The public web is, by construction, always external/non-
+        // privileged: a match is a HARD BLOCK for every caller, no EXEC_RING exception.
+        const mnpiGate = evaluateBroadcastMnpiGate({ query: input.query });
+        if (mnpiGate.blocked) {
+          return { data: { answer: '', citations: [], mode: 'blocked', error: mnpiGate.reason }, summary: `Refused: ${mnpiGate.reason}` };
+        }
         const ep = (process.env.WEBSEARCH_PROJECT_ENDPOINT || '').replace(/\/+$/, '');
         const model = process.env.WEBSEARCH_MODEL || 'gpt-5.4';
         if (!ep || !process.env.WEBSEARCH_SP_CLIENT_ID || !process.env.WEBSEARCH_SP_SECRET) {
