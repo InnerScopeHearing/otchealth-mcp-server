@@ -17,7 +17,7 @@ process.env.FOUNDRY_ROUTER_KEY ||= 'test-router-key';
 
 const { parseDistillResponse, distillSummary } = await import('./checkpoint.js');
 
-// Pure network mocking via globalThis.fetch — the same seam src/memory/deep-retrieval.test.ts and
+// Pure network mocking via globalThis.fetch, the same seam src/memory/deep-retrieval.test.ts and
 // src/memory/agentic.test.ts use.
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
