@@ -67,6 +67,7 @@ import { retractedIds, filterRetracted } from '../../memory/retractions.js';
 import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
 import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
 import { lookupEntity } from '../../memory/entity-lookup.js';
+import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 
 // Re-exported so the pre-existing `import { rrfFuse, ... } from './brain-search.js'` in
 // brain-search.test.ts keeps working unchanged -- the implementation moved to memory/rrf.ts (see
@@ -167,9 +168,12 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   // stays the EXACT prior code path, byte-identical output shape.
   if (input.mode === 'deep' && parseDeepRetrievalMode(process.env.DEEP_RETRIEVAL_MODE) === 'on') {
     const deep = await deepRetrieve(input.query, { rooms, top, includeOps });
+    // Tag each hit with a feedback_ref (pure/synchronous, see memory/retrieval-feedback.ts) so a
+    // later retrieval_feedback call can report whether it was useful without re-sending content.
+    const taggedHits = tagWithFeedbackRefs(deep.hits, { tool: 'brain_search', query: input.query, defaultRoom: 'federated' });
     const data: Record<string, unknown> = {
-      matches: deep.hits,
-      count: deep.hits.length,
+      matches: taggedHits,
+      count: taggedHits.length,
       mode: deep.mode,
       rooms_searched: deep.rooms_searched,
       include_ops: includeOps,
@@ -247,9 +251,14 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     ].slice(0, Math.max(top, 1));
   }
 
+  // Tag each hit with a feedback_ref (pure/synchronous, see memory/retrieval-feedback.ts) so a
+  // later retrieval_feedback call can report whether it was useful without re-sending content.
+  // Runs AFTER the entity-answer promotion above so the synthetic authoritative row gets tagged too.
+  const taggedMatches = tagWithFeedbackRefs(matches, { tool: 'brain_search', query: input.query, defaultRoom: 'federated' });
+
   const data: Record<string, unknown> = {
-    matches,
-    count: matches.length,
+    matches: taggedMatches,
+    count: taggedMatches.length,
     mode: 'federated-rrf',
     rooms_searched: searched,
     include_ops: includeOps,
@@ -288,7 +297,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain, federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field).',
+          'Hybrid semantic search across the LIVE company brain, federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field). Each returned match carries a `feedback_ref` token; optionally report back with the retrieval_feedback tool (useful/not_useful/cited) once you know whether a hit actually helped, no content re-send needed -- this feeds future recall-quality work.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

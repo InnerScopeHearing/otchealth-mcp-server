@@ -72,6 +72,8 @@ import { registerMemoryInbound } from './memory/inbound.js';
 import { registerWake } from './memory/wake.js';
 import { registerMemoryReconcile } from './memory/reconcile.js';
 import { registerCheckpoint } from './memory/checkpoint.js';
+// Wave 7 item 7.1 (production feedback loop): opt-in reporting on brain_search/kb_search hits.
+import { registerRetrievalFeedback } from './memory/retrieval-feedback.js';
 
 // Agent persona (cross-platform identity bootstrap)
 import { registerAgentPersona } from './agent/persona.js';
@@ -1053,6 +1055,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Wave A+: fleet knowledge RAG + commodity LLM (credit-funded) =====
   registerKbSearch(server, callerHash);
   registerBrainSearch(server, callerHash);
+  registerRetrievalFeedback(server, callerHash); // write_simple: opt-in feedback on a brain_search/kb_search hit (Wave 7 item 7.1)
   registerWebSearch(server, callerHash);
   registerKbSearchPrivileged(server, callerHash);
   registerKbGetDocument(server, callerHash);

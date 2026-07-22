@@ -13,6 +13,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../azure/search.js';
+import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 
 const OPEN_INDEXES = new Set(['commons-company-journal', 'memory-exec']);
 const RING_GATED_PREFIXES = ['finance-', 'legal-'];
@@ -26,7 +27,7 @@ export function registerKbSearch(server: McpServer, callerHash: CallerHashProvid
       annotations: {
         title: 'Search an open fleet knowledge index (hybrid)',
         description:
-          'Hybrid (keyword + vector + semantic-ranker) search over an OPEN fleet index: "commons-company-journal" or "memory-exec". Finance/legal are ring-gated, use kb_search_privileged with a trusted role. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Ground answers in the company knowledge base before asserting facts.',
+          'Hybrid (keyword + vector + semantic-ranker) search over an OPEN fleet index: "commons-company-journal" or "memory-exec". Finance/legal are ring-gated, use kb_search_privileged with a trusted role. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Ground answers in the company knowledge base before asserting facts. Each returned match carries a `feedback_ref` token; optionally report back with the retrieval_feedback tool (useful/not_useful/cited) once you know whether a hit actually helped, no content re-send needed.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -73,8 +74,12 @@ export function registerKbSearch(server: McpServer, callerHash: CallerHashProvid
         try {
           const res = await hybridSearch(index, input.query, top, { includeOps });
           if (!res) return { data: { index, matches: [], count: 0, mode: 'unconfigured', include_ops: includeOps }, summary: 'AI Search not configured.' };
+          // Tag each hit with a stable, short-lived feedback_ref (pure/synchronous, cannot fail or
+          // add latency) so a later call can report whether it was useful without re-sending content.
+          // See memory/retrieval-feedback.ts.
+          const tagged = tagWithFeedbackRefs(res.matches, { tool: 'kb_search', query: input.query, defaultRoom: index });
           return {
-            data: { index, matches: res.matches, count: res.matches.length, mode: res.mode, include_ops: includeOps },
+            data: { index, matches: tagged, count: tagged.length, mode: res.mode, include_ops: includeOps },
             summary: `${res.matches.length} ${res.mode} match(es) in "${index}" for "${input.query}".` + (includeOps ? ' Operational chatter included.' : ''),
           };
         } catch (e) {
