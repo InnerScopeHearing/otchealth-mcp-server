@@ -20,6 +20,7 @@ interface Spies {
   searchCalls: number;
   chatCalls: number;
   emits: Array<{ event: string; props: Record<string, unknown> }>;
+  chatOpts: Array<Record<string, unknown> | undefined>;
 }
 
 function makeDeps(over: {
@@ -29,7 +30,7 @@ function makeDeps(over: {
   candVec?: number[] | null;
   chatText?: string;
 }): { deps: Partial<SupersedeRuntimeDeps>; spies: Spies } {
-  const spies: Spies = { searchCalls: 0, chatCalls: 0, emits: [] };
+  const spies: Spies = { searchCalls: 0, chatCalls: 0, emits: [], chatOpts: [] };
   const deps: Partial<SupersedeRuntimeDeps> = {
     mode: () => over.mode,
     search: async () => {
@@ -38,8 +39,9 @@ function makeDeps(over: {
       return { matches: over.hits ?? [], mode: 'test' };
     },
     embedText: async () => (over.candVec === undefined ? A : over.candVec),
-    chatFn: async () => {
+    chatFn: async (_messages, opts) => {
       spies.chatCalls++;
+      spies.chatOpts.push(opts as Record<string, unknown> | undefined);
       return { text: over.chatText ?? '{"contradicts":true,"confidence":0.9,"reason":"value changed"}', model: 'fake' };
     },
     emit: (event, props) => spies.emits.push({ event, props }),
@@ -83,6 +85,17 @@ test('AUTO: confident same-subject contradiction -> auto-link + linked beacon', 
   assert.equal(spies.chatCalls, 1);
   assert.equal(spies.emits[0]?.event, 'memory_supersede_linked');
   assert.equal(spies.emits[0]?.props.superseded_id, '20260101-007');
+});
+
+test('COST ROUTER: the contradiction check asks the router to pick a model, not a hardcoded tier', async () => {
+  // Wave 6, item 6.3: this call site used to hardcode tier:'standard'. It now asks the shared
+  // Azure Model Router (tier:'router') to pick the cheapest-sufficient model for this bounded
+  // classification task, per the FLEET COST PROTOCOL. This pins that choice at the call site so a
+  // future edit that quietly reverts to a hardcoded tier fails this test.
+  const { deps, spies } = makeDeps({ mode: 'auto', hits: [hit('cto__20260101-007', 'fact')], candVec: A });
+  await detectSupersession(NEW, deps);
+  assert.equal(spies.chatCalls, 1);
+  assert.equal(spies.chatOpts[0]?.tier, 'router');
 });
 
 test('SUGGEST (default posture): the SAME contradiction only suggests, never links', async () => {
