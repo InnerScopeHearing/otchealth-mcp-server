@@ -70,11 +70,19 @@
  * ============================ NON-PHI RING ============================
  * This module adds no new PHI path: it only ever captures gateway retrieval metadata (query text,
  * bounded plus secret-checked; hit ids/scores/types, never full match text) for rooms the caller
- * was already authorized to query. It does not change ring-gating, does not add a new room, and
- * never captures a ring-gated room's shadow comparison under a DIFFERENT (more permissive)
- * identity than the live call already used. The shadow re-run reuses the exact same `index` and
- * caller-supplied options the live call was given; only the named strategy's ranking/demotion
- * knobs differ.
+ * was already authorized to query. It does not change ring-gating and does not add a new room. The
+ * shadow re-run reuses the exact same `index` and caller-supplied options the live call was given;
+ * only the named strategy's ranking/demotion knobs differ.
+ *
+ * CROSS-RING GATE (the destination, not just the identity): `hybridSearch` is also the seam
+ * kb_search_privileged funnels through, so a shadow-eval comparison could otherwise be sampled for a
+ * ring-gated finance/legal query. The comparison record is always written under the fixed
+ * 'shadow-eval' agent partition and indexed into the DEFAULT index (memory-exec, an OPEN room any
+ * caller can read via kb_search/brain_search) -- a DIFFERENT, MORE PERMISSIVE destination than the
+ * ring-gated room the live query was actually against, even though the sampling/identity itself never
+ * changes. `isRingGatedIndexName`/`RING_GATED_INDEX_NAMES` below gate this: azure/search.ts's
+ * `runShadowEvalIfSampled` skips even RUNNING the shadow re-run for a ring-gated index (no cost, no
+ * capture), and `captureShadowComparison` repeats the same check as defense in depth.
  */
 import { writeMemory } from '../agentstate/memory.js';
 import { indexMemoryNow } from '../azure/search-write.js';
@@ -241,6 +249,38 @@ export function sanitizeShadowQuery(query: string): string {
     : q;
 }
 
+/**
+ * RING GATE (added after this file's initial build -- see tools/kb/search-privileged.ts's
+ * INDEX_LANES for the canonical list this must stay in sync with; a cross-file test in
+ * shadow-eval.test.ts imports INDEX_LANES directly and asserts the two enumerations match).
+ *
+ * hybridSearch (azure/search.ts) is the seam EVERY caller funnels through, including
+ * kb_search_privileged against a ring-gated finance/legal room (MNPI, attorney-privileged). A
+ * shadow-eval comparison is always written under the FIXED 'shadow-eval' agent partition and
+ * indexed into the DEFAULT (memory-exec) index -- an OPEN index any caller can read via
+ * kb_search/brain_search, not the ring-gated room the live query was actually against. Without
+ * this gate, sampling a privileged-room query would leak its (sanitized-for-secrets-but-not-for-
+ * MNPI) query text, the room's real name, and its hit ids into that open index the moment
+ * SHADOW_EVAL_MODE is ever flipped to 'on'. This list is duplicated rather than imported from
+ * search-privileged.ts on purpose: that file imports hybridSearch FROM azure/search.ts, and
+ * azure/search.ts imports THIS module, so importing search-privileged.ts here would create a real
+ * cycle (search.ts -> shadow-eval.ts -> search-privileged.ts -> search.ts) this module's own
+ * header already commits to avoiding.
+ */
+export const RING_GATED_INDEX_NAMES = new Set([
+  'finance-cfo-source-docs',
+  'finance-otchealth-cfo-source-docs',
+  'finance-cfo-memory',
+  'legal-company',
+  'legal-personal',
+  'legal-personal-memory',
+]);
+
+/** True when `index` is one of the ring-gated (kb_search_privileged-only) rooms above. Pure. */
+export function isRingGatedIndexName(index: string): boolean {
+  return RING_GATED_INDEX_NAMES.has(index);
+}
+
 /** Whole-serialized-comparison cap, mirroring journal.ts's MAX_TOTAL_CHARS pattern (a bigger
  *  budget than journal.ts's 800: this payload carries two bounded hit lists, not one args blob). */
 export const MAX_COMPARISON_CHARS = 2000;
@@ -306,6 +346,12 @@ export const SHADOW_EVAL_AGENT = 'shadow-eval';
 export async function captureShadowComparison(input: ShadowComparisonInput): Promise<void> {
   try {
     if (!cosmosConfigured()) return;
+    // RING GATE (defense in depth; the primary gate is in azure/search.ts's runShadowEvalIfSampled,
+    // which skips even RUNNING the shadow re-run for a ring-gated index so this never gets called
+    // for one in practice). See isRingGatedIndexName's own doc comment for why this check exists at
+    // all: the destination index below (memory-exec, via indexMemoryNow's default) is OPEN, not the
+    // ring-gated room the live query was actually against.
+    if (isRingGatedIndexName(input.index)) return;
     const text = buildShadowComparisonText(input);
     const record = await writeMemory({
       agent: SHADOW_EVAL_AGENT,

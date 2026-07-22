@@ -36,6 +36,7 @@ import {
   shouldSampleShadow,
   resolveShadowStrategy,
   captureShadowComparison,
+  isRingGatedIndexName,
 } from '../safety/shadow-eval.js';
 
 const API_VERSION = '2023-11-01';
@@ -326,6 +327,13 @@ async function runShadowEvalIfSampled(
   liveResult: { matches: KbHit[]; mode: string },
 ): Promise<void> {
   if (parseShadowEvalMode(process.env.SHADOW_EVAL_MODE) !== 'on') return;
+  // CROSS-RING GATE: never even RUN a shadow re-run for a ring-gated (kb_search_privileged-only)
+  // index -- the comparison record's destination (memory-exec, via captureShadowComparison's
+  // default) is an OPEN index, a more permissive destination than the ring-gated room the live
+  // query was actually against. Checked here (not just inside captureShadowComparison) so a
+  // privileged room's query never even pays the extra embed+search cost, and so there is no window
+  // where a ring-gated result briefly exists before capture. See shadow-eval.ts's own header.
+  if (isRingGatedIndexName(index)) return;
   const rate = parseShadowSampleRate(process.env.SHADOW_EVAL_SAMPLE_RATE);
   // Math.random() here (never in the pure shouldSampleShadow itself, which takes `rand` as a
   // parameter precisely so it stays seedable/testable) -- see shadow-eval.ts's file header.

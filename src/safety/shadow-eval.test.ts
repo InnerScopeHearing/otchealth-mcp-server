@@ -32,7 +32,10 @@ const {
   captureShadowComparison,
   SHADOW_EVAL_AGENT,
   MAX_COMPARISON_CHARS,
+  isRingGatedIndexName,
+  RING_GATED_INDEX_NAMES,
 } = await import('./shadow-eval.js');
+const { INDEX_LANES } = await import('../tools/kb/search-privileged.js');
 
 // ---- parseShadowEvalMode -----------------------------------------------------------------------
 
@@ -410,4 +413,45 @@ test('captureShadowComparison: never throws even given a deliberately malformed 
 test('SHADOW_EVAL_AGENT is a stable, valid agent id (fixed Cosmos partition for a nightly job to enumerate)', () => {
   assert.equal(SHADOW_EVAL_AGENT, 'shadow-eval');
   assert.match(SHADOW_EVAL_AGENT, /^[a-z0-9][a-z0-9_-]{0,40}$/);
+});
+
+// ---- CROSS-RING GATE (isRingGatedIndexName / RING_GATED_INDEX_NAMES) -----------------------------
+// The comparison record's destination (memory-exec, an OPEN index) is more permissive than a
+// ring-gated finance/legal room the live query could have actually been against (hybridSearch is
+// also kb_search_privileged's seam). This list is DUPLICATED from tools/kb/search-privileged.ts's
+// INDEX_LANES (not imported, to avoid a real import cycle -- see the doc comment on
+// isRingGatedIndexName), so this test is the thing that actually keeps them from silently drifting
+// apart: it imports INDEX_LANES directly (a test file is not part of the runtime import graph, so
+// no cycle risk here) and asserts the two enumerations name the exact same rooms.
+
+test('RING_GATED_INDEX_NAMES matches tools/kb/search-privileged.ts INDEX_LANES exactly (no drift)', () => {
+  const fromSearchPrivileged = Object.keys(INDEX_LANES).sort();
+  const fromShadowEval = [...RING_GATED_INDEX_NAMES].sort();
+  assert.deepEqual(fromShadowEval, fromSearchPrivileged);
+});
+
+test('isRingGatedIndexName: every ring-gated room name is recognized', () => {
+  for (const name of Object.keys(INDEX_LANES)) {
+    assert.equal(isRingGatedIndexName(name), true, `${name} should be ring-gated`);
+  }
+});
+
+test('isRingGatedIndexName: an open room (memory-exec, commons-company-journal) or an unknown name is NOT ring-gated', () => {
+  assert.equal(isRingGatedIndexName('memory-exec'), false);
+  assert.equal(isRingGatedIndexName('commons-company-journal'), false);
+  assert.equal(isRingGatedIndexName('some-room-that-does-not-exist'), false);
+  assert.equal(isRingGatedIndexName(''), false);
+});
+
+test('captureShadowComparison: SKIPS a ring-gated index entirely (never writes, even if Cosmos were configured)', async () => {
+  const result = await captureShadowComparison({
+    index: 'finance-cfo-memory',
+    query: 'burn rate before the public filing',
+    top: 8,
+    strategy: 'baseline',
+    live: { mode: 'hybrid+semantic', hits: LIVE_HITS },
+    shadow: { mode: 'hybrid+semantic', hits: SHADOW_HITS },
+    elapsedMs: 5,
+  });
+  assert.equal(result, undefined, 'a ring-gated index must never reach writeMemory, regardless of Cosmos configuration');
 });

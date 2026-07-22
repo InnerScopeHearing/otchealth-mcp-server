@@ -528,6 +528,34 @@ test('shadow eval ON but SHADOW_EVAL_SAMPLE_RATE=0: still exactly one embed + on
   }
 });
 
+test('shadow eval ON + rate=1 against a RING-GATED index (kb_search_privileged\'s seam): the shadow re-run never even RUNS, no extra network call, cross-ring gate', async () => {
+  // Ring-gated: the comparison record's destination (memory-exec, an OPEN index) would otherwise be
+  // a MORE PERMISSIVE destination than the finance/legal room this query is actually against. See
+  // safety/shadow-eval.ts's isRingGatedIndexName / RING_GATED_INDEX_NAMES.
+  process.env.SHADOW_EVAL_MODE = 'on';
+  process.env.SHADOW_EVAL_SAMPLE_RATE = '1';
+  let fetchCount = 0;
+  try {
+    await withStubbedFetch(
+      (async (url: string | URL) => {
+        fetchCount++;
+        const u = String(url);
+        if (isEmbeddingsUrl(u)) return embeddingsOk();
+        if (isSearchUrl(u)) return new Response(JSON.stringify({ value: [MIXED_DOCS[0]] }), { status: 200 });
+        throw new Error(`unexpected fetch to ${u}`);
+      }) as typeof fetch,
+      async () => {
+        const res = await hybridSearch('finance-cfo-memory', 'burn rate before the public filing', 10, { includeOps: false });
+        assert.ok(res, 'the LIVE call itself must still succeed normally, only the shadow branch is gated');
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(fetchCount, 2, 'a ring-gated index must skip the shadow branch entirely even at sample rate 1: exactly 1 embed + 1 search, no second round trip');
+      },
+    );
+  } finally {
+    clearShadowEnv();
+  }
+});
+
 test('shadow eval ON + sampled ALWAYS: the caller receives the LIVE path result UNCHANGED, even though the sampled strategy would clearly rank differently', async () => {
   // Deliberately scored so relevance dominates the authority re-rank (mirrors authority-rerank.ts's
   // own "a strongly-more-relevant hit still wins" design): the exhaust-typed 'status' doc has a much
