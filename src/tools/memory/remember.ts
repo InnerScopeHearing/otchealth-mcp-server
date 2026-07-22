@@ -5,6 +5,7 @@ import { appendShared, isConfigured, normalizeAgent, type MemoryEntry } from '..
 import { indexMemoryNow } from '../../azure/search-write.js';
 import { embed } from '../../azure/foundry.js';
 import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
+import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
 
 const TYPES = ['fact', 'decision', 'correction', 'pitfall', 'status'] as const;
 
@@ -17,7 +18,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
       annotations: {
         title: 'Write to the shared brain',
         description:
-          'Append an entry to the cross-agent shared memory (kb-memory commons feed) so every connected AI sees it. Use for a fact, decision, correction, pitfall, or status. Set "agent" to write ON ANOTHER lane\'s feed (a cross-lane note / hand-off): it is APPEND-ONLY and auto-attributed to YOUR token identity (by=<you>), and the target lane sees it via memory_inbound and acks with memory_reconcile on wake. Omit "agent" to write your own feed. Writes ONLY to the shared, non-sensitive commons feed: never put MNPI (INND) or PHI (MedReview) detail here. (2026-07-07: the clo-personal lane wall was lifted per standing CEO directive -- ring-gating between executive agents is suspended fleet-wide until connectivity/stability is fully dialed in.)',
+          'Append an entry to the cross-agent shared memory (kb-memory commons feed) so every connected AI sees it. Use for a fact, decision, correction, pitfall, or status. Set "agent" to write ON ANOTHER lane\'s feed (a cross-lane note / hand-off): it is APPEND-ONLY and auto-attributed to YOUR token identity (by=<you>), and the target lane sees it via memory_inbound and acks with memory_reconcile on wake. Omit "agent" to write your own feed. Writes ONLY to the shared, non-sensitive commons feed: never put MNPI (INND) or PHI (MedReview) detail here. (2026-07-07: the clo-personal lane wall was lifted per standing CEO directive -- ring-gating between executive agents is suspended fleet-wide until connectivity/stability is fully dialed in.) MNPI GATE (hard, code-level, not just this instruction): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused for every caller, no exception, because the commons feed is always broadly shared and non-privileged.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -40,6 +41,16 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         note: z.string().optional(),
       },
       handler: async (input, ctx) => {
+        // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
+        // store write. The commons feed is, by construction, always broadly shared/non-privileged:
+        // a match is a HARD BLOCK for every caller, including an EXEC_RING lane writing its own feed.
+        const mnpiGate = evaluateBroadcastMnpiGate({ text: input.text, tags: (input.tags ?? []).join(' '), source: input.source, agent: input.agent });
+        if (mnpiGate.blocked) {
+          return {
+            data: { written: false, entry: null, note: mnpiGate.reason },
+            summary: `Refused: ${mnpiGate.reason}`,
+          };
+        }
         if (!isConfigured()) {
           return {
             data: { written: false, entry: null, note: 'Shared brain not configured (AZURE_COMMONS_STORAGE_ACCOUNT/KEY unset).' },

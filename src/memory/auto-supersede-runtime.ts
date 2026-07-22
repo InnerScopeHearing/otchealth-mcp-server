@@ -156,7 +156,16 @@ async function detectInner(
     return { action: 'none', reason: `nearest similarity ${similarity.toFixed(3)} < ${NEAR_DUPLICATE_THRESHOLD}` };
   }
 
-  // 4. Near-duplicate confirmed -> spend one cheap contradiction check.
+  // 4. Near-duplicate confirmed -> spend one cheap contradiction check. Tier 'router' -- this is a
+  //    bounded classification call (a strict {contradicts, confidence, reason<=140 chars} verdict,
+  //    parsed defensively by parseContradictionVerdict which fails safe to contradicts:false on
+  //    anything malformed), the exact "cheap classification task" shape the FLEET COST PROTOCOL
+  //    means for the Azure Model Router. Model-quality variance here is already absorbed by two
+  //    independent gates upstream of any real effect: the near-duplicate cosine gate that ran just
+  //    above, and decideSupersession()'s own MIN_CONFIDENCE floor plus its 'suggest'-not-'auto'
+  //    default posture (see auto-supersede.ts) -- a weaker verdict degrades to no-op, never a bad
+  //    write. When FOUNDRY_ROUTER_ENDPOINT/KEY are unset, chat() degrades this to the same
+  //    'standard' deployment used before this change (see foundry.ts).
   const { system, user } = buildContradictionPrompt(input.text, best.text);
   let raw = '';
   try {
@@ -164,7 +173,7 @@ async function detectInner(
       { role: 'system', content: system },
       { role: 'user', content: user },
     ];
-    const r = await deps.chatFn(messages, { temperature: 0, maxTokens: 120, jsonMode: true, tier: 'standard' });
+    const r = await deps.chatFn(messages, { temperature: 0, maxTokens: 120, jsonMode: true, tier: 'router' });
     raw = r.text || '';
   } catch {
     raw = '';

@@ -37,6 +37,11 @@ import {
 } from '../safety/capture-pressure.js';
 import { evaluateJitDoctrine } from '../safety/jit-doctrine.js';
 import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
+import {
+  parseToolCatalogCurationMode,
+  evaluateCatalogCuration,
+  recordLaneToolUsage,
+} from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -326,6 +331,19 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // '', isConnectorSurface() === false) so /health tool_count (deploy gate) is unaffected.
   const connectorSurfaceForThisTool = isConnectorSurface();
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
+  // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
+  // client_credentials lanes (cto/cfo/clo/clo-personal/coo/cro/cpo/cco/developer/exec), which today
+  // always see the full catalog because isConnectorSurface() is only ever true for a dcr_/occ_ client
+  // (auth/bearer.ts). DEFAULT (TOOL_CATALOG_CURATION_MODE unset, or 'report', or 'off') NEVER filters
+  // here -- evaluateCatalogCuration()'s advertise is only ever false when the mode is explicitly
+  // 'curate' AND the lane is a KNOWN internal lane AND the tool is outside that lane's seed allowlist
+  // (config/lane-toolsets.ts). See safety/tool-catalog-curation.ts for the full mode contract.
+  const catalogCurationMode = parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE);
+  const laneForThisTool = currentCallerAgent();
+  const catalogCuration = connectorSurfaceForThisTool
+    ? null
+    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, def.name);
+  if (catalogCuration && !catalogCuration.advertise) return;
   // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
   recordTool({
     name: def.name,
@@ -419,6 +437,29 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 
       // Governance: every agent SEES every tool, but some actions are role-gated for EXECUTION.
       const callerAgent = currentCallerAgent();
+
+      // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2), REPORT-MODE telemetry: fire-and-forget,
+      // never blocks, never affects the outcome below. Re-reads TOOL_CATALOG_CURATION_MODE fresh from
+      // process.env here (rather than reusing the registration-time value above) so this stays
+      // flippable without a redeploy, mirroring COLD_START_MODE / JIT_DOCTRINE_MODE's convention of
+      // re-parsing the env var at the point of use rather than trusting a value captured earlier.
+      // Fires for every actual call attempt from a known internal lane (report or curate mode; 'off'
+      // and the connector-surface path are inert here, see recordLaneToolUsage / evaluateCatalogCuration).
+      // This is the usage-data mechanism the module header describes -- it never restricts anything
+      // by itself; only the registration-time gate above (mode='curate' only) ever does that.
+      if (!connectorSurfaceForThisTool) {
+        recordLaneToolUsage(
+          evaluateCatalogCuration(
+            parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE),
+            callerAgent,
+            def.name,
+          ),
+          callerAgent,
+          def.name,
+          callerHash,
+        );
+      }
+
       let gov = requiredRoleFor(def.name);
       // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
       // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
