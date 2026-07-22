@@ -387,6 +387,35 @@ const EnvSchema = z.object({
   // privileged room; fetch re-derives + re-checks the room from the id on every call) is NOT gated
   // by this switch and cannot be turned off by it -- see those files' headers.
 
+  // SHADOW EVAL (Wave 7 item 7.2, src/safety/shadow-eval.ts + src/azure/search.ts's hybridSearch).
+  // THREE env flags, all NOT in this schema on purpose, same reasoning as COLD_START_MODE above --
+  // read fresh from process.env per call so they can be flipped without a redeploy:
+  //   SHADOW_EVAL_MODE          off (default) | on
+  // 'off' is a complete no-op (the pre-existing hybridSearch code path, byte-identical). 'on' makes
+  // EVERY hybridSearch call (every kb_search/brain_search/kb_search_privileged/incident_match/
+  // deep-retrieval query) eligible for shadow sampling -- unlike this fleet's other advisory
+  // kill-switches, this one defaults OFF rather than on, because the "on" state has a real,
+  // non-zero cost per sampled call (a second embed + a second Azure AI Search query), so it is an
+  // explicit operator opt-in, not an ambient default.
+  //   SHADOW_EVAL_SAMPLE_RATE   a float in [0, 1], default 0.05 (5%)
+  // The fraction of hybridSearch calls (once SHADOW_EVAL_MODE=on) that ALSO run a candidate
+  // variant. Unparseable/unset falls back to the 5% default rather than sampling 0% or 100% by
+  // accident. Bounds the extra cost: at 5%, shadow eval roughly doubles the retrieval cost of one
+  // call in twenty, not every call.
+  //   SHADOW_EVAL_STRATEGY      baseline (default) | demote-off | demote-on | rerank-off | rerank-on
+  // Names which candidate ranking/demotion variant the sampled shadow run applies (see
+  // shadow-eval.ts's SHADOW_STRATEGIES registry to add a new one). An unknown/unset name falls back
+  // to 'baseline' (a genuine no-op re-run, useful as a sanity check on the eval pipeline itself)
+  // rather than throwing or disabling shadow mode outright.
+  // The shadow run's result is NEVER returned to the caller -- only the live path's result is, byte-
+  // identical to before this feature existed. The shadow run's result is captured (fire-and-forget,
+  // reusing safety/journal.ts's exact writeMemory + indexMemoryNow pattern, as a kind:'episode'
+  // memory tagged 'shadow-eval' so it is deprioritized by room-hygiene like any other operational
+  // exhaust) for a nightly comparison job to read later -- that job is not part of this change, this
+  // only makes the comparison DATA available. Fail-open end to end: an unconfigured Cosmos, a
+  // Search/Foundry outage, or the candidate re-run itself throwing all degrade to "no comparison
+  // written" rather than ever affecting the live call's latency, result, or failure rate.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),

@@ -465,3 +465,212 @@ test('hybridSearch: opts.filter is IGNORED for chunked rooms (no `type` field to
     },
   );
 });
+
+// ==================================================================================================
+// SHADOW EVAL (Wave 7 item 7.2, src/safety/shadow-eval.ts). hybridSearch's fire-and-forget,
+// sampled, candidate-variant re-run. SHADOW_EVAL_* are read FRESH per call (never part of the
+// cached loadEnv() schema, see config/env.ts's file-header comment), so they are safe to flip
+// between tests within this one file/process, unlike AZURE_SEARCH_*/FOUNDRY_* above. COSMOS_ENDPOINT
+// is never set anywhere in this file, so captureShadowComparison's Cosmos write is always a
+// fail-open no-op here. These tests only need to prove the ORCHESTRATION contract, not the
+// capture's own persistence (that is shadow-eval.test.ts's job).
+// ==================================================================================================
+
+function clearShadowEnv(): void {
+  delete process.env.SHADOW_EVAL_MODE;
+  delete process.env.SHADOW_EVAL_SAMPLE_RATE;
+  delete process.env.SHADOW_EVAL_STRATEGY;
+}
+
+test('shadow eval OFF (default, unset): hybridSearch makes exactly one embed + one search call, no extra network activity at all', async () => {
+  clearShadowEnv();
+  let fetchCount = 0;
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      fetchCount++;
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: [MIXED_DOCS[0], MIXED_DOCS[2]] }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('memory-exec', 'ASC key id', 10, { includeOps: false });
+      assert.ok(res);
+      // Give any accidental fire-and-forget work a moment to have started, if it were going to.
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(fetchCount, 2, 'SHADOW_EVAL_MODE unset must mean zero extra calls: 1 embed + 1 search, exactly as before this feature existed');
+    },
+  );
+});
+
+test('shadow eval ON but SHADOW_EVAL_SAMPLE_RATE=0: still exactly one embed + one search call, "on" alone does not force sampling', async () => {
+  process.env.SHADOW_EVAL_MODE = 'on';
+  process.env.SHADOW_EVAL_SAMPLE_RATE = '0';
+  let fetchCount = 0;
+  try {
+    await withStubbedFetch(
+      (async (url: string | URL) => {
+        fetchCount++;
+        const u = String(url);
+        if (isEmbeddingsUrl(u)) return embeddingsOk();
+        if (isSearchUrl(u)) return new Response(JSON.stringify({ value: [MIXED_DOCS[0]] }), { status: 200 });
+        throw new Error(`unexpected fetch to ${u}`);
+      }) as typeof fetch,
+      async () => {
+        const res = await hybridSearch('memory-exec', 'ASC key id', 10, { includeOps: false });
+        assert.ok(res);
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(fetchCount, 2, 'a sample rate of 0 must never trigger the shadow branch');
+      },
+    );
+  } finally {
+    clearShadowEnv();
+  }
+});
+
+test('shadow eval ON + sampled ALWAYS: the caller receives the LIVE path result UNCHANGED, even though the sampled strategy would clearly rank differently', async () => {
+  // Deliberately scored so relevance dominates the authority re-rank (mirrors authority-rerank.ts's
+  // own "a strongly-more-relevant hit still wins" design): the exhaust-typed 'status' doc has a much
+  // higher raw score than the genuine 'fact' doc, so status still ranks ABOVE fact after the
+  // (default-on) authority re-rank -- demote-not-delete's own client-side reorder is the ONLY thing
+  // that can still move it after fact. With includeOps:false (the live opts here) that reorder DOES
+  // happen; with includeOps:true (the 'demote-off' shadow strategy) it deliberately does not. So the
+  // two settings provably diverge, which is exactly what makes this a meaningful "never leaks the
+  // shadow's answer" proof rather than a coincidental match.
+  const DIVERGENT_DOCS = [
+    { id: 'x1', type: 'status', text: 'a high-score status row', '@search.rerankerScore': 100 },
+    { id: 'x2', type: 'fact', text: 'a low-score fact row', '@search.rerankerScore': 1 },
+  ];
+  const stub = (async (url: string | URL) => {
+    const u = String(url);
+    if (isEmbeddingsUrl(u)) return embeddingsOk();
+    if (isSearchUrl(u)) return new Response(JSON.stringify({ value: DIVERGENT_DOCS }), { status: 200 });
+    throw new Error(`unexpected fetch to ${u}`);
+  }) as typeof fetch;
+
+  clearShadowEnv();
+  const baseline = await withStubbedFetch(stub, () => hybridSearch('memory-exec', 'q', 10, { includeOps: false }));
+  assert.ok(baseline);
+  assert.deepEqual(
+    baseline!.matches.map((m) => m.type),
+    ['fact', 'status'],
+    'sanity check on the fixture: WITHOUT shadow eval, demotion already reorders status after fact',
+  );
+
+  let fetchCount = 0;
+  process.env.SHADOW_EVAL_MODE = 'on';
+  process.env.SHADOW_EVAL_SAMPLE_RATE = '1';
+  process.env.SHADOW_EVAL_STRATEGY = 'demote-off';
+  let sampled: Awaited<ReturnType<typeof hybridSearch>>;
+  try {
+    sampled = await withStubbedFetch(
+      (async (url: string | URL) => {
+        fetchCount++;
+        return stub(url as string);
+      }) as typeof fetch,
+      async () => {
+        const r = await hybridSearch('memory-exec', 'q', 10, { includeOps: false });
+        // The shadow branch is fire-and-forget: hybridSearch above already resolved (proving it did
+        // NOT wait on it), but its own embed+search round trip is very likely still mid-flight at
+        // this exact point. Give it a moment to actually finish BEFORE withStubbedFetch's `finally`
+        // restores the real (unstubbed) fetch, so the shadow branch's second call lands on OUR
+        // counting stub rather than racing the restore.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return r;
+      },
+    );
+  } finally {
+    clearShadowEnv();
+  }
+
+  assert.ok(sampled);
+  assert.deepEqual(
+    sampled!.matches,
+    baseline!.matches,
+    'the caller-visible result must be byte-identical whether or not a shadow strategy that would rank differently ran',
+  );
+  assert.deepEqual(
+    sampled!.matches.map((m) => m.type),
+    ['fact', 'status'],
+    'must still reflect the LIVE opts (includeOps:false), never the shadow strategy\'s includeOps:true',
+  );
+  // Proves the shadow branch genuinely executed a SECOND embed+search round trip (not just that the
+  // live result happened to be unaffected because nothing ran): 2 calls for the live path, 2 more
+  // for the sampled shadow path.
+  assert.equal(fetchCount, 4, 'a sampled call runs BOTH the live path and one full shadow re-run');
+});
+
+test('shadow eval: fire-and-forget, hybridSearch resolves BEFORE the shadow branch\'s own network call even settles', async () => {
+  let liveEmbedsSeen = 0;
+  let shadowFetchStarted = false;
+  let releaseShadowFetch: (() => void) | undefined;
+  const shadowGate = new Promise<void>((resolve) => {
+    releaseShadowFetch = resolve;
+  });
+
+  process.env.SHADOW_EVAL_MODE = 'on';
+  process.env.SHADOW_EVAL_SAMPLE_RATE = '1';
+  process.env.SHADOW_EVAL_STRATEGY = 'baseline';
+
+  try {
+    await withStubbedFetch(
+      (async (url: string | URL) => {
+        const u = String(url);
+        if (isEmbeddingsUrl(u)) {
+          liveEmbedsSeen++;
+          if (liveEmbedsSeen === 1) return embeddingsOk(); // the LIVE path's embed: resolves fast
+          // Every subsequent embeddings call belongs to the shadow branch: stall it until the test
+          // explicitly releases it, so we can prove hybridSearch does not wait on it.
+          shadowFetchStarted = true;
+          await shadowGate;
+          return embeddingsOk();
+        }
+        if (isSearchUrl(u)) return new Response(JSON.stringify({ value: [MIXED_DOCS[0]] }), { status: 200 });
+        throw new Error(`unexpected fetch to ${u}`);
+      }) as typeof fetch,
+      async () => {
+        const startedAt = Date.now();
+        const res = await hybridSearch('memory-exec', 'q', 10, { includeOps: false });
+        const elapsedMs = Date.now() - startedAt;
+        assert.ok(res);
+        assert.ok(
+          elapsedMs < 500,
+          `hybridSearch must return without waiting on the shadow branch (took ${elapsedMs}ms while the shadow fetch was deliberately held open)`,
+        );
+        assert.equal(shadowFetchStarted, true, 'the shadow branch must actually have been INITIATED (fire), just not awaited (forget)');
+        // Clean up: release the stalled fetch and give its chain a moment to drain before this test
+        // (and the fetch stub) goes out of scope.
+        releaseShadowFetch?.();
+        await new Promise((r) => setTimeout(r, 20));
+      },
+    );
+  } finally {
+    clearShadowEnv();
+  }
+});
+
+test('shadow eval: an unrecognized SHADOW_EVAL_STRATEGY falls back to a harmless no-op "baseline" re-run rather than throwing or disabling shadow mode', async () => {
+  process.env.SHADOW_EVAL_MODE = 'on';
+  process.env.SHADOW_EVAL_SAMPLE_RATE = '1';
+  process.env.SHADOW_EVAL_STRATEGY = 'not-a-real-strategy';
+  let fetchCount = 0;
+  try {
+    await withStubbedFetch(
+      (async (url: string | URL) => {
+        fetchCount++;
+        const u = String(url);
+        if (isEmbeddingsUrl(u)) return embeddingsOk();
+        if (isSearchUrl(u)) return new Response(JSON.stringify({ value: [MIXED_DOCS[0]] }), { status: 200 });
+        throw new Error(`unexpected fetch to ${u}`);
+      }) as typeof fetch,
+      async () => {
+        const res = await hybridSearch('memory-exec', 'q', 10, { includeOps: false });
+        assert.ok(res, 'an unknown strategy name must never make hybridSearch throw or return null');
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(fetchCount, 4, 'the shadow branch still runs (as the baseline fallback), it just does not override anything');
+      },
+    );
+  } finally {
+    clearShadowEnv();
+  }
+});
