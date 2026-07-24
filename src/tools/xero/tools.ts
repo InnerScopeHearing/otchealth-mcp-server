@@ -620,8 +620,8 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         title: 'Xero: upload a source-document attachment (executive ring only)',
         description:
           'Upload a source document (contract, statement, work paper) as an attachment on a Xero accounting record: endpoint="ManualJournals", guid=<JournalID>, fileName="executed-spa.pdf", contentBase64=<base64-encoded file bytes>, mimeType="application/pdf". ' +
-          'This is NOT the same as xero_request — Xero\\'s attachment API requires the raw file bytes with the correct Content-Type header, which this tool sends correctly (xero_request always sends JSON and cannot upload a real file). ' +
-          '10MB cap on this gateway (Xero\\'s own limit is 25MB); for larger files, host externally and attach a link instead. ' +
+          'This is NOT the same as xero_request — the Xero attachment API requires the raw file bytes with the correct Content-Type header, which this tool sends correctly (xero_request always sends JSON and cannot upload a real file). ' +
+          '10MB cap on this gateway (Xero own limit is 25MB); for larger files, host externally and attach a link instead. ' +
           'dry_run defaults TRUE and only validates + previews (decodes and size-checks the payload without calling Xero); pass dry_run:false to actually upload. ' +
           'IMPORTANT: a 200 response from this tool is NOT sufficient proof the attachment persisted — always follow up with xero_attachments on the same endpoint/guid to independently confirm the file actually appears before reporting success.',
         readOnlyHint: false,
@@ -865,7 +865,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Xero: write — POST/PUT/DELETE any scoped endpoint (executive ring only)',
         description:
-          'Create / update / void on any Xero API the tokens are scoped for (the CFO write lane). method = POST | PUT | DELETE. api = accounting (default) | payroll | assets | projects | files. path starts with "/", e.g. "/Invoices", "/Contacts", "/Payments", "/ManualJournals", "/BankTransactions", "/CreditNotes", "/Accounts". body is the JSON payload — for accounting collections wrap in the plural key, e.g. {"Invoices":[{...}]}. Xero writes are BOOKKEEPING (they post to the ledger, they do NOT move real money). dry_run defaults TRUE and previews without sending; pass dry_run:false to actually write. Do NOT use this for attachment uploads — Xero\\'s Attachments API needs raw file bytes with the file\\'s Content-Type, which this JSON-only tool cannot send; use xero_attachment_upload instead. MNPI: executive-ring lanes only.',
+          'Create / update / void on any Xero API the tokens are scoped for (the CFO write lane). method = POST | PUT | DELETE. api = accounting (default) | payroll | assets | projects | files. path starts with "/", e.g. "/Invoices", "/Contacts", "/Payments", "/ManualJournals", "/BankTransactions", "/CreditNotes", "/Accounts". body is the JSON payload — for accounting collections wrap in the plural key, e.g. {"Invoices":[{...}]}. Xero writes are BOOKKEEPING (they post to the ledger, they do NOT move real money). dry_run defaults TRUE and previews without sending; pass dry_run:false to actually write. Do NOT use this for attachment uploads — the Xero Attachments API needs raw file bytes with the file\'s Content-Type, which this JSON-only tool cannot send; use xero_attachment_upload instead. MNPI: executive-ring lanes only.',
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
