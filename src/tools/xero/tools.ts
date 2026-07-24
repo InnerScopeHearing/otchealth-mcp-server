@@ -1,6 +1,6 @@
 /**
  * xero_* tools — full READ + WRITE for the executive ring (see client.ts header for the ring +
- * token-rotation design). 19 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
+ * token-rotation design). 20 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
  * OAuth scope surface (accounting + all reports + payroll + files + assets + projects), across all
  * four orgs, rate-governed. The CFO seat is authorized for full read+write on the books (Matt
  * directive 2026-07-16); Xero writes are bookkeeping (they post to the ledger, they do NOT move real
@@ -24,7 +24,8 @@
  *   xero_budgets            budgets (list or one by id)
  *   xero_settings           Organisation | TaxRates | TrackingCategories | Currencies | Users |
  *                           BrandingThemes | ContactGroups | Items
- *   xero_attachments        source-doc attachments on a record
+ *   xero_attachments        source-doc attachments on a record (list/read only — see xero_attachment_upload for writes)
+ *   xero_attachment_upload  upload a source-doc attachment (dry-run-first) — see client.ts xeroUploadAttachment
  * Other product APIs:
  *   xero_payroll            Employees | PayRuns | PayItems | PayrollCalendars | Timesheets | Settings (payroll.xro/1.0)
  *   xero_assets             Assets | AssetTypes | Settings (assets.xro/1.0)
@@ -49,6 +50,7 @@ import {
   getOrgAccess,
   xeroGet,
   xeroRequest,
+  xeroUploadAttachment,
 } from './client.js';
 
 const ORG_ENUM = z.enum(XERO_ORGS).describe('Which org: otchealth | innd | hearingassist | personal.');
@@ -65,6 +67,17 @@ const REPORTS = [
   'TenNinetyNine',
 ] as const;
 const API_ENUM = Object.keys(XERO_API_BASES) as [XeroApi, ...XeroApi[]];
+const ATTACHMENT_ENDPOINT_ENUM = [
+  'Invoices',
+  'CreditNotes',
+  'BankTransactions',
+  'BankTransfers',
+  'Payments',
+  'ManualJournals',
+  'Receipts',
+  'Contacts',
+  'PurchaseOrders',
+] as const;
 
 function unconfigured(tool: string) {
   return {
@@ -571,7 +584,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Xero: list attachments on a record (executive ring only)',
         description:
-          'List the attachments (source docs) on a specific accounting record, e.g. endpoint="Invoices", guid=<InvoiceID>. Returns attachment metadata (filename, mime type, url). MNPI: executive-ring lanes only. Read-only.',
+          'List the attachments (source docs) on a specific accounting record, e.g. endpoint="Invoices", guid=<InvoiceID>. Returns attachment metadata (filename, mime type, url). Use this to independently VERIFY an xero_attachment_upload actually persisted — its own response is not sufficient proof. MNPI: executive-ring lanes only. Read-only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -590,6 +603,98 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         if (!xeroConfigured()) return unconfigured('xero_attachments');
         const res = await xeroGet(input.org as XeroOrg, `/${input.endpoint}/${encodeURIComponent(input.guid)}/Attachments`, {});
         return { data: { org: input.org, body: res.body }, summary: `Xero attachments on ${input.endpoint}/${input.guid} (${input.org}).` };
+      },
+    },
+    callerHash,
+  );
+
+  // --- Attachment WRITE (fixes FND-20260724-f6df: the universal xero_request write tool always
+  // sends JSON, but Xero's Attachments API requires raw file bytes + the file's real Content-Type.
+  // This dedicated tool calls xeroUploadAttachment(), which sends the request correctly. ---
+  registerTool(
+    server,
+    {
+      name: 'xero_attachment_upload',
+      category: 'write_simple',
+      annotations: {
+        title: 'Xero: upload a source-document attachment (executive ring only)',
+        description:
+          'Upload a source document (contract, statement, work paper) as an attachment on a Xero accounting record: endpoint="ManualJournals", guid=<JournalID>, fileName="executed-spa.pdf", contentBase64=<base64-encoded file bytes>, mimeType="application/pdf". ' +
+          'This is NOT the same as xero_request — the Xero attachment API requires the raw file bytes with the correct Content-Type header, which this tool sends correctly (xero_request always sends JSON and cannot upload a real file). ' +
+          '10MB cap on this gateway (Xero own limit is 25MB); for larger files, host externally and attach a link instead. ' +
+          'dry_run defaults TRUE and only validates + previews (decodes and size-checks the payload without calling Xero); pass dry_run:false to actually upload. ' +
+          'IMPORTANT: a 200 response from this tool is NOT sufficient proof the attachment persisted — always follow up with xero_attachments on the same endpoint/guid to independently confirm the file actually appears before reporting success.',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: {
+        org: ORG_ENUM,
+        endpoint: z.enum(ATTACHMENT_ENDPOINT_ENUM).describe('Which record type the attachment hangs off.'),
+        guid: z.string().describe('The record GUID to attach the document to.'),
+        fileName: z.string().min(1).describe('File name including extension, e.g. "executed-spa.pdf".'),
+        contentBase64: z.string().min(1).describe('The file content, base64-encoded.'),
+        mimeType: z.string().min(1).describe('The file\'s actual MIME type, e.g. "application/pdf", "image/png".'),
+      },
+      outputShape: {
+        org: z.string(),
+        endpoint: z.string(),
+        guid: z.string(),
+        fileName: z.string(),
+        bytes: z.number().optional(),
+        body: z.unknown(),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_attachment_upload', ctx.callerAgent);
+        if (!xeroConfigured()) return unconfigured('xero_attachment_upload');
+
+        let buf: Buffer;
+        try {
+          buf = Buffer.from(input.contentBase64, 'base64');
+        } catch {
+          return {
+            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'bad_base64' },
+            summary: 'xero_attachment_upload: contentBase64 did not decode as valid base64.',
+          };
+        }
+        if (buf.length === 0) {
+          return {
+            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'empty_content' },
+            summary: 'xero_attachment_upload: decoded content is empty.',
+          };
+        }
+
+        if (ctx.dryRun) {
+          return {
+            data: {
+              org: input.org,
+              endpoint: input.endpoint,
+              guid: input.guid,
+              fileName: input.fileName,
+              bytes: buf.length,
+              body: null,
+              error: 'dry_run',
+            },
+            summary: `DRY RUN (nothing uploaded): would PUT ${buf.length} bytes as "${input.fileName}" (${input.mimeType}) to ${input.endpoint}/${input.guid} for ${input.org}. Re-call with dry_run:false to execute, then verify with xero_attachments.`,
+          };
+        }
+
+        const res = await xeroUploadAttachment(
+          input.org as XeroOrg,
+          input.endpoint,
+          input.guid,
+          input.fileName,
+          buf,
+          input.mimeType,
+        );
+        return {
+          data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, body: res.body },
+          summary:
+            `Xero attachment upload "${input.fileName}" (${buf.length} bytes) to ${input.endpoint}/${input.guid} for ${input.org} — HTTP ${res.status}. ` +
+            `NOT independently verified yet — call xero_attachments(org:"${input.org}", endpoint:"${input.endpoint}", guid:"${input.guid}") before reporting this as successful.`,
+        };
       },
     },
     callerHash,
@@ -760,7 +865,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Xero: write — POST/PUT/DELETE any scoped endpoint (executive ring only)',
         description:
-          'Create / update / void on any Xero API the tokens are scoped for (the CFO write lane). method = POST | PUT | DELETE. api = accounting (default) | payroll | assets | projects | files. path starts with "/", e.g. "/Invoices", "/Contacts", "/Payments", "/ManualJournals", "/BankTransactions", "/CreditNotes". body is the JSON payload — for accounting collections wrap in the plural key, e.g. {"Invoices":[{...}]}. Xero writes are BOOKKEEPING (they post to the ledger, they do NOT move real money). dry_run defaults TRUE and previews without sending; pass dry_run:false to actually write. MNPI: executive-ring lanes only.',
+          'Create / update / void on any Xero API the tokens are scoped for (the CFO write lane). method = POST | PUT | DELETE. api = accounting (default) | payroll | assets | projects | files. path starts with "/", e.g. "/Invoices", "/Contacts", "/Payments", "/ManualJournals", "/BankTransactions", "/CreditNotes", "/Accounts". body is the JSON payload — for accounting collections wrap in the plural key, e.g. {"Invoices":[{...}]}. Xero writes are BOOKKEEPING (they post to the ledger, they do NOT move real money). dry_run defaults TRUE and previews without sending; pass dry_run:false to actually write. Do NOT use this for attachment uploads — the Xero Attachments API needs raw file bytes with the file\'s Content-Type, which this JSON-only tool cannot send; use xero_attachment_upload instead. MNPI: executive-ring lanes only.',
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,

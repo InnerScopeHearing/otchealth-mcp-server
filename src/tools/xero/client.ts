@@ -415,6 +415,42 @@ export interface XeroGetResult {
 }
 
 /**
+ * Extract the actual human-readable cause from a Xero error response body, when the body is a
+ * Xero-shaped JSON error object. Xero's ValidationException shape nests the real reason inside
+ * Elements[].ValidationErrors[].Message — the top-level Message is always the generic
+ * "A validation exception occurred" boilerplate, so surfacing only the top-level text (or a
+ * short slice of the raw body) throws away the one piece of information that actually explains
+ * the failure. Falls back to a longer raw-text slice when the body isn't the expected shape, so
+ * this never throws and never returns less information than before.
+ * (FND-20260724-68f5: the previous fixed-length slice cut the response off before this detail.)
+ */
+export function extractXeroErrorDetail(rawText: string, maxRawFallbackChars = 2000): string {
+  try {
+    const parsed = JSON.parse(rawText) as {
+      Type?: string;
+      Message?: string;
+      Elements?: Array<{ ValidationErrors?: Array<{ Message?: string }> }>;
+    };
+    const messages: string[] = [];
+    if (Array.isArray(parsed.Elements)) {
+      for (const el of parsed.Elements) {
+        for (const ve of el.ValidationErrors ?? []) {
+          if (ve.Message) messages.push(ve.Message);
+        }
+      }
+    }
+    if (messages.length) {
+      const top = parsed.Message ? `${parsed.Message}: ` : '';
+      return `${top}${messages.join(' | ')}`;
+    }
+    if (parsed.Message) return parsed.Message;
+  } catch {
+    /* not JSON (or not Xero's error shape) — fall through to the raw-text fallback below */
+  }
+  return rawText.slice(0, maxRawFallbackChars);
+}
+
+/**
  * GET a path on one of the Xero product APIs for an org (opts.api selects the base; default
  * 'accounting'). Handles auth, tenant header, one forced-refresh retry on 401, and rate-header
  * surfacing. READ-ONLY on purpose: no method parameter exists, so no path can mutate the books.
@@ -458,7 +494,9 @@ export async function xeroGet(
     /* some errors are plain text */
   }
   if (!r.ok && r.status !== 304) {
-    throw new Error(`Xero GET ${path} (${org}) -> HTTP ${r.status}: ${text.slice(0, 200)}`);
+    // FND-20260724-68f5 fix: surface the real ValidationErrors detail, not a fixed-length slice
+    // of raw text that cut off before the actual cause every time.
+    throw new Error(`Xero GET ${path} (${org}) -> HTTP ${r.status}: ${extractXeroErrorDetail(text)}`);
   }
   return {
     status: r.status,
@@ -517,7 +555,95 @@ export async function xeroRequest(
     /* 204 No Content and some errors are non-JSON */
   }
   if (!r.ok) {
-    throw new Error(`Xero ${method} ${path} (${org}) -> HTTP ${r.status}: ${text.slice(0, 300)}`);
+    // FND-20260724-68f5 fix: same real-detail extraction as xeroGet, not a fixed-length raw slice.
+    throw new Error(`Xero ${method} ${path} (${org}) -> HTTP ${r.status}: ${extractXeroErrorDetail(text)}`);
+  }
+  return {
+    status: r.status,
+    body: respBody,
+    dayLimitRemaining: r.headers.get('X-DayLimit-Remaining'),
+    minuteLimitRemaining: r.headers.get('X-MinLimit-Remaining'),
+  };
+}
+
+/** Max attachment size this gateway will forward to Xero. Xero's own documented limit is 25MB per
+ * file; we cap well under that (10MB) since the gateway also has to hold the decoded buffer and
+ * relay it within FETCH_TIMEOUT_MS. Reject client-side with a clear error rather than let a huge
+ * base64 payload time out or 500 partway through (FND-20260724-f6df: a 7.8MB payload previously
+ * failed as an opaque gateway internal_error with no explanation). */
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Upload a source-document attachment to a Xero accounting record — the ACTUAL Xero Attachments
+ * API contract, which is categorically different from every other write in this file: Xero expects
+ * the RAW FILE BYTES as the request body with the file's own Content-Type header (e.g.
+ * "application/pdf", "image/png") on PUT/POST to /{Endpoint}/{Guid}/Attachments/{FileName} — NOT a
+ * JSON-wrapped payload. xeroRequest() above unconditionally sends `Content-Type: application/json`
+ * and JSON.stringifies whatever body it's given, so routing an attachment through it silently sends
+ * Xero a JSON blob instead of a file: small payloads round-trip a plausible-looking 200 + AttachmentID
+ * (Xero creates the attachment record but the "file" is the JSON text, not real content) while larger
+ * ones fail outright once Xero's own size/content validation kicks in. This is the confirmed root
+ * cause of FND-20260724-f6df (verified independently via xero_attachments showing Attachments:[] on
+ * every prior attempt, at every size tried).
+ *
+ * Uses PUT (Xero's documented method for attachment upload; creates on first call, replaces on a
+ * repeat call with the same filename — safer than POST's create-a-duplicate-on-retry behavior for
+ * this specific endpoint).
+ */
+export async function xeroUploadAttachment(
+  org: XeroOrg,
+  endpoint: 'Invoices' | 'CreditNotes' | 'BankTransactions' | 'BankTransfers' | 'Payments' | 'ManualJournals' | 'Receipts' | 'Contacts' | 'PurchaseOrders',
+  guid: string,
+  fileName: string,
+  contentBytes: Buffer,
+  mimeType: string,
+  opts: { deps?: TokenDeps } = {},
+): Promise<XeroGetResult> {
+  const deps = opts.deps ?? defaultDeps;
+  if (contentBytes.length === 0) throw new Error('xeroUploadAttachment: empty file content');
+  if (contentBytes.length > MAX_ATTACHMENT_BYTES) {
+    throw new Error(
+      `xeroUploadAttachment: ${contentBytes.length} bytes exceeds this gateway's ${MAX_ATTACHMENT_BYTES} byte cap ` +
+        `(Xero's own limit is 25MB; this gateway caps lower for reliable relay within its request timeout). ` +
+        `Split the document or host it externally and attach a link instead.`,
+    );
+  }
+
+  const wait = MIN_SPACING_MS - (Date.now() - (lastCallAt.get(org) ?? 0));
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastCallAt.set(org, Date.now());
+
+  const url = `${XERO_API_BASES.accounting}/${endpoint}/${encodeURIComponent(guid)}/Attachments/${encodeURIComponent(fileName)}`;
+
+  const attempt = async (force: boolean): Promise<Response> => {
+    const { accessToken, tenantId } = await getOrgAccess(org, { forceRefresh: force, deps });
+    return deps.fetchImpl(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Xero-tenant-id': tenantId,
+        Accept: 'application/json',
+        // THE ACTUAL FIX: the file's real Content-Type, and the raw bytes as the body — never
+        // application/json, never a JSON-stringified wrapper object.
+        'Content-Type': mimeType || 'application/octet-stream',
+        'Content-Length': String(contentBytes.length),
+      },
+      body: contentBytes,
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  };
+
+  let r = await attempt(false);
+  if (r.status === 401) r = await attempt(true);
+  const text = await r.text();
+  let respBody: unknown = text;
+  try {
+    respBody = JSON.parse(text);
+  } catch {
+    /* non-JSON error bodies happen */
+  }
+  if (!r.ok) {
+    throw new Error(`Xero attachment upload ${endpoint}/${guid}/${fileName} (${org}) -> HTTP ${r.status}: ${extractXeroErrorDetail(text)}`);
   }
   return {
     status: r.status,
