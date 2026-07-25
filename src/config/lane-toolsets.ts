@@ -76,6 +76,11 @@ const CTO_INFRA = [
   'posthog_*', 'sentry_*', 'gumroad_*', 'docintel_*', 'graph_*', 'cio_*', 'stripe_*', 'twilio_*',
   'elevenlabs_*', 'xero_*', 'legal_blob_*', 'shopify_*', 'intercom_*', 'revenuecat_*',
 ] as const;
+// The customer-service-engine Graph mail tools (2026-07-25, CRO handoff): send/list/get/mark-read,
+// all mailbox-allowlisted server-side (see graph/api-client.ts's allowedMailboxes()). Named
+// explicitly rather than 'graph_*' for the non-CTO/exec lanes below, since those lanes should NOT
+// also see graph_drive_* (OneDrive) or any future graph_* addition without an explicit decision.
+const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_get_message', 'graph_mark_read'] as const;
 
 export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // The mastermind seat: infra, builds, releases, the full ship cycle, and every read surface it uses
@@ -95,13 +100,13 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.
   cfo: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'xero_*', 'stripe_*', 'docintel_*', 'graph_drive_*', 'graph_send_email', 'graph_list_messages',
+    'xero_*', 'stripe_*', 'docintel_*', 'graph_drive_*', ...GRAPH_MAIL,
   ],
   // Company legal: legal_blob_* (company ring), contract/document intelligence, comms, plus the
   // shared read/memory/task surface.
   clo: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS,
-    'legal_blob_*', 'docintel_*', 'graph_send_email', 'graph_list_messages',
+    'legal_blob_*', 'docintel_*', ...GRAPH_MAIL,
   ],
   // Personal legal (attorney-privileged CA matters, PERSONAL_LEGAL_RING-gated): a strict SUBSET of
   // clo's list -- no graph_send_email/graph_list_messages, personal matters are not routed through
@@ -115,14 +120,15 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // in-handler, this list keeps the advertised set honest with that reality.
   coo: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'graph_send_email', 'graph_list_messages', 'cio_*',
+    ...GRAPH_MAIL, 'cio_*',
   ],
   // Revenue / commerce: storefront, lifecycle CRM, help center, digital-products cash lane, revenue
   // analytics. Also removed from EXEC_RING 2026-07-21 (securities firewall: revenue never touches
-  // finance MNPI or company-legal).
+  // finance MNPI or company-legal). GRAPH_MAIL added 2026-07-25 (CRO customer-service-engine
+  // handoff): the CS engine sends/reads as care@/sarah@/helen@/ray@ via this lane.
   cro: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'shopify_*', 'stripe_*', 'cio_*', 'intercom_*', 'gumroad_*', 'revenuecat_*', 'posthog_*',
+    'shopify_*', 'stripe_*', 'cio_*', 'intercom_*', 'gumroad_*', 'revenuecat_*', 'posthog_*', ...GRAPH_MAIL,
   ],
   // Product: app analytics, crash/error tracking, subscription entitlements, the privileged RAG rooms
   // (a dormant EXEC_RING member per search-privileged.ts -- no live client yet, seeded here for

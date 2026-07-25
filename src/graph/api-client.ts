@@ -36,6 +36,38 @@ function requireGraphConfig(): { tenantId: string; clientId: string; clientSecre
   };
 }
 
+/**
+ * ALLOWLIST for every Graph mailbox tool (2026-07-25, CRO customer-service-engine handoff).
+ *
+ * WHY THIS EXISTS: the "Exec Fleet Microsoft Graph (INND)" app registration (GRAPH_CLIENT_ID) holds
+ * broad, already-admin-consented application permissions -- Mail.ReadWrite, Mail.Send,
+ * MailboxFolder.ReadWrite.All, MailboxSettings.ReadWrite, MailboxItem.ReadWrite.All -- which, as
+ * APPLICATION (not delegated) permissions, let it act on ANY mailbox in the tenant by default,
+ * including all ~50-60 legacy mailboxes never intended for this integration. Microsoft Graph itself
+ * has NO mechanism to scope an application permission to a subset of mailboxes -- that requires an
+ * Exchange Online ApplicationAccessPolicy (New-ApplicationAccessPolicy), an Exchange-Online-
+ * PowerShell-only operation with no Graph REST equivalent, not yet provisioned as of this commit.
+ * Until that policy exists, THIS allowlist is the only defense-in-depth boundary preventing an
+ * over-broad `mailbox` argument from touching a legacy mailbox. Env-overridable
+ * (GRAPH_CS_MAILBOXES, comma-separated) so new personas can be added without a redeploy; defaults
+ * to the customer-service engine's 5 known addresses.
+ */
+function allowedMailboxes(): Set<string> {
+  const csv = env.GRAPH_CS_MAILBOXES || 'care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com';
+  return new Set(csv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+}
+
+function assertAllowedMailbox(mailbox: string): void {
+  if (!allowedMailboxes().has(mailbox.toLowerCase())) {
+    throw new GraphApiError({
+      code: 'mailbox_not_allowed',
+      status: 0,
+      message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a code-level guard standing in for the ApplicationAccessPolicy that has not been provisioned yet -- it deliberately refuses to touch any mailbox outside the customer-service engine's known set.`,
+      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES (and, once provisioned, the real Exchange ApplicationAccessPolicy).',
+    });
+  }
+}
+
 // ----- Token cache -----
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
@@ -125,7 +157,7 @@ async function graphRequest<T = unknown>(
   return data as T;
 }
 
-// ----- Send Email (the headline tool for COO) -----
+// ----- Send Email -----
 
 export interface SendEmailOpts {
   to: string | string[];
@@ -136,10 +168,18 @@ export interface SendEmailOpts {
   bcc?: string[];
   replyTo?: string;
   saveToSentItems?: boolean;
+  /**
+   * The customer-service persona mailbox to send AS (e.g. care@, sarah@, helen@, ray@, coo@).
+   * Defaults to GRAPH_SENDER_EMAIL (coo@otchealthmart.com) for back-compat. Checked against
+   * allowedMailboxes() -- see that function's header for why.
+   */
+  from?: string;
 }
 
 export async function sendEmail(opts: SendEmailOpts): Promise<void> {
   const config = requireGraphConfig();
+  const sender = opts.from ?? config.senderEmail;
+  assertAllowedMailbox(sender);
   const toRecipients = (Array.isArray(opts.to) ? opts.to : [opts.to]).map(email => ({
     emailAddress: { address: email },
   }));
@@ -163,7 +203,7 @@ export async function sendEmail(opts: SendEmailOpts): Promise<void> {
     message.replyTo = [{ emailAddress: { address: opts.replyTo } }];
   }
 
-  await graphRequest('POST', `/users/${config.senderEmail}/sendMail`, {
+  await graphRequest('POST', `/users/${sender}/sendMail`, {
     body: {
       message,
       saveToSentItems: opts.saveToSentItems ?? true,
@@ -171,21 +211,58 @@ export async function sendEmail(opts: SendEmailOpts): Promise<void> {
   });
 }
 
-// ----- Read mailbox (for future use) -----
+// ----- List mailbox messages -----
 
 export async function listMessages(opts?: {
+  mailbox?: string;
   folder?: string;
   top?: number;
   filter?: string;
+  since?: string;
+  unreadOnly?: boolean;
 }): Promise<any[]> {
   const config = requireGraphConfig();
+  const mailbox = opts?.mailbox ?? config.senderEmail;
+  assertAllowedMailbox(mailbox);
   const folder = opts?.folder ?? 'inbox';
-  let path = `/users/${config.senderEmail}/mailFolders/${folder}/messages`;
+  let path = `/users/${mailbox}/mailFolders/${folder}/messages`;
   const params = new URLSearchParams();
   if (opts?.top) params.set('$top', String(opts.top));
-  if (opts?.filter) params.set('$filter', opts.filter);
+  // Compose $filter from the explicit filter param plus since/unreadOnly convenience params,
+  // joined with 'and' -- OData requires a single $filter expression, not multiple.
+  const filterParts: string[] = [];
+  if (opts?.filter) filterParts.push(opts.filter);
+  if (opts?.since) filterParts.push(`receivedDateTime ge ${opts.since}`);
+  if (opts?.unreadOnly) filterParts.push('isRead eq false');
+  if (filterParts.length) params.set('$filter', filterParts.join(' and '));
+  params.set('$orderby', 'receivedDateTime desc');
   const qs = params.toString();
   if (qs) path += `?${qs}`;
   const resp = await graphRequest<{ value: any[] }>('GET', path);
   return resp.value ?? [];
+}
+
+// ----- Get a single message (full body + attachment metadata) -----
+
+export async function getMessage(mailbox: string, messageId: string): Promise<any> {
+  assertAllowedMailbox(mailbox);
+  const path = `/users/${mailbox}/messages/${encodeURIComponent(messageId)}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,body,hasAttachments`;
+  const message = await graphRequest<any>('GET', path);
+  if (message.hasAttachments) {
+    const attResp = await graphRequest<{ value: any[] }>(
+      'GET',
+      `/users/${mailbox}/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,contentType,size,isInline`,
+    );
+    message._attachments = attResp.value ?? [];
+  }
+  return message;
+}
+
+// ----- Mark a message read/unread -----
+
+export async function markRead(mailbox: string, messageId: string, isRead: boolean): Promise<void> {
+  assertAllowedMailbox(mailbox);
+  await graphRequest('PATCH', `/users/${mailbox}/messages/${encodeURIComponent(messageId)}`, {
+    body: { isRead },
+  });
 }

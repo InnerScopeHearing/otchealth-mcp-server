@@ -47,6 +47,8 @@ import { registerCloudflareCreateDnsRecord } from './cloudflare/create-dns-recor
 // Phase 3 — Microsoft Graph (COO email send-as + inbox)
 import { registerGraphSendEmail } from './graph/send-email.js';
 import { registerGraphListMessages } from './graph/list-messages.js';
+import { registerGraphGetMessage } from './graph/get-message.js';
+import { registerGraphMarkRead } from './graph/mark-read.js';
 
 // Phase 3 — Stripe (read-only: CFO scoreboard + CRO visibility)
 import { registerStripeGetBalance } from './stripe/get-balance.js';
@@ -991,6 +993,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 3: Microsoft Graph (COO send-as + inbox) =====
   registerGraphSendEmail(server, callerHash);
   registerGraphListMessages(server, callerHash);
+  registerGraphGetMessage(server, callerHash);
+  registerGraphMarkRead(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
 
   // ===== Phase 3: Stripe (read-only scoreboard) =====
   registerStripeGetBalance(server, callerHash);
