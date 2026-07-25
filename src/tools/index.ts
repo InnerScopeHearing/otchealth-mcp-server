@@ -942,6 +942,7 @@ import { registerAzureContainerappSetEnv } from './azure/containerapp-set-env.js
 import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
 import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
 import { registerXeroTools } from './xero/tools.js';
+import { registerMailArchiveTools } from './mail/tools.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -1895,4 +1896,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAzureSearchIndexerUpsert(server, callerHash);
   // Xero (read-only, executive-ring gated in-handler; MNPI — see tools/xero/client.ts).
   registerXeroTools(server, callerHash);
+  // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
+  // for the retirement timeline this must be replaced before).
+  registerMailArchiveTools(server, callerHash);
 }
