@@ -69,6 +69,17 @@ const EnvSchema = z.object({
   XERO_TENANT_HEARINGASSIST: z.string().optional().default(''),
   XERO_TENANT_PERSONAL: z.string().optional().default(''),
 
+  // Mail archive (TEMPORARY — see tools/mail/client.ts header). EWS app-only client_credentials
+  // against the Office 365 Exchange Online resource, reusing the otchealth-mail-readonly app
+  // registration's client id/secret/tenant (a distinct EWS-resource app-role grant, separate from
+  // its Graph permissions). Single hardcoded target mailbox (default matthew@innd.com). Bridges the
+  // CFO agent to the Online Archive mailbox until this is replaced ahead of the EWS shutdown
+  // (phased disable 2026-10-01, full shutdown 2027-04-01).
+  MAIL_ARCHIVE_EWS_CLIENT_ID: z.string().optional().default(''),
+  MAIL_ARCHIVE_EWS_CLIENT_SECRET: z.string().optional().default(''),
+  MAIL_ARCHIVE_EWS_TENANT_ID: z.string().optional().default(''),
+  MAIL_ARCHIVE_MAILBOX: z.string().optional().default('matthew@innd.com'),
+
   // OAuth 2.1 (confidential client). When OAUTH_CLIENT_ID + OAUTH_TOKEN_SIGNING_SECRET are set,
   // the gateway issues real expiring JWT access/refresh tokens (PKCE S256 mandatory). When unset,
   // the legacy static-connector-token behavior is preserved for back-compat.
