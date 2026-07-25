@@ -20,7 +20,7 @@ import {
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor } from '../catalog/governance.js';
-import { currentCallerAgent, isConnectorSurface } from '../server/request-context.js';
+import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult } from './result-store.js';
 import {
   inboundShield,
@@ -764,7 +764,16 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
         // Fail-open: offloadResult returns null on any error, so we keep the full inline result.
         // Small results are untouched (backward-compatible).
-        if (shouldOffload(text)) {
+        //
+        // M365 EXCEPTION (2026-07-25): skip offloading entirely for M365 declarative-agent static-
+        // token callers (isM365StaticAuth()). Confirmed via direct reproduction that M365 Copilot's
+        // own tool-calling orchestrator does NOT reliably chain into gateway_fetch_result when it
+        // sees the offload stub -- it reports "no content available" instead, even when
+        // gateway_fetch_result is a declared, callable tool on that same agent (Matt hit this live on
+        // wake(), whose payload is routinely >40KB). Other engines (Claude Code, Hyperagent) are
+        // UNCHANGED -- they reliably use the two-hop pattern today, so this is scoped narrowly to the
+        // one consumer confirmed not to support it, not a global behavior change.
+        if (shouldOffload(text) && !isM365StaticAuth()) {
           const off = await offloadResult(text, result, correlationId);
           if (off) {
             text = off.preview;
