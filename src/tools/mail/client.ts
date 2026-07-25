@@ -133,8 +133,12 @@ function tagText(xml: string, tag: string): string | undefined {
   const m = new RegExp(`<t:${tag}[^>]*>([\\s\\S]*?)<\\/t:${tag}>`).exec(xml);
   return m ? m[1] : undefined;
 }
-function allBlocks(xml: string, openTag: string, closeTag: string): string[] {
-  const re = new RegExp(`<${openTag}[^>]*>[\\s\\S]*?<${closeTag}>`, 'g');
+function allBlocks(xml: string, tagPattern: string): string[] {
+  // Closing tag is always derived from the same pattern (never passed separately) — a prior
+  // version took the close tag as a second caller-supplied string and every call site got the
+  // slash placement wrong (e.g. "t:\/Folder>" instead of "\/t:Folder>"), so nothing ever matched
+  // and every parse silently returned []. Deriving it here makes that whole bug class impossible.
+  const re = new RegExp(`<${tagPattern}[^>]*>[\\s\\S]*?<\\/${tagPattern}>`, 'g');
   return xml.match(re) ?? [];
 }
 
@@ -152,7 +156,7 @@ export async function ewsListArchiveFolders(): Promise<ArchiveFolder[]> {
     `<m:ParentFolderIds><t:DistinguishedFolderId Id="archivemsgfolderroot" /></m:ParentFolderIds></m:FindFolder>`;
   const xml = await ewsCall(body);
   const folders: ArchiveFolder[] = [];
-  for (const block of allBlocks(xml, 't:(?:Folder|CalendarFolder|ContactsFolder|SearchFolder|TasksFolder)', 't:\\/(?:Folder|CalendarFolder|ContactsFolder|SearchFolder|TasksFolder)>')) {
+  for (const block of allBlocks(xml, 't:(?:Folder|CalendarFolder|ContactsFolder|SearchFolder|TasksFolder)')) {
     const idTag = /<t:FolderId Id="([^"]*)" ChangeKey="([^"]*)"/.exec(block);
     const displayName = tagText(block, 'DisplayName');
     if (!idTag || !displayName) continue;
@@ -217,7 +221,7 @@ export async function ewsSearchItems(opts: {
     `<m:ParentFolderIds><t:FolderId Id="${esc(opts.folderId)}" /></m:ParentFolderIds></m:FindItem>`;
   const xml = await ewsCall(body);
   const hits: ArchiveSearchHit[] = [];
-  for (const block of allBlocks(xml, 't:Message', 't:\\/Message>').concat(allBlocks(xml, 't:Item', 't:\\/Item>'))) {
+  for (const block of allBlocks(xml, 't:Message').concat(allBlocks(xml, 't:Item'))) {
     const idTag = /<t:ItemId Id="([^"]*)" ChangeKey="([^"]*)"/.exec(block);
     if (!idTag) continue;
     const fromMatch = /<t:Mailbox>[\s\S]*?<t:EmailAddress>([^<]*)<\/t:EmailAddress>/.exec(block);
@@ -260,7 +264,7 @@ export async function ewsGetMessage(itemId: string): Promise<ArchiveMessage> {
   const toBlock = /<t:ToRecipients>([\s\S]*?)<\/t:ToRecipients>/.exec(xml)?.[1] ?? '';
   const toRecipients = [...toBlock.matchAll(/<t:EmailAddress>([^<]*)<\/t:EmailAddress>/g)].map((m) => m[1]);
   const attachments: ArchiveAttachmentMeta[] = [];
-  for (const block of allBlocks(xml, 't:(?:File|Item)Attachment', 't:\\/(?:File|Item)Attachment>')) {
+  for (const block of allBlocks(xml, 't:(?:File|Item)Attachment')) {
     const idTag = /<t:AttachmentId Id="([^"]*)"/.exec(block);
     if (!idTag) continue;
     attachments.push({
