@@ -25,7 +25,7 @@ function extractBearer(authHeader: string | undefined): string | null {
 /**
  * Extract the M365 declarative-agent static token from the request's query string.
  *
- * WHY THIS EXISTS (2026-07-25, developer-lane MCP wiring): a Microsoft 365 declarative agent's
+ * WHY THIS EXISTS (2026-07-25, fleet-wide MCP wiring): a Microsoft 365 declarative agent's
  * "RemoteMCPServer" runtime (ai-plugin.json schema v2.4+) supports exactly two auth modes —
  * OAuthPluginVault and None (confirmed via deep research 2026-07-25; ApiKeyPluginVault is
  * explicitly NOT supported for MCP plugins, and OAuthPluginVault's auth-config record can only be
@@ -36,8 +36,8 @@ function extractBearer(authHeader: string | undefined): string | null {
  * part of a URL a JSON-RPC-over-HTTP POST reliably preserves end to end. This is a documented,
  * unrestricted pattern (no Microsoft schema rule forbids a token in spec.url) — not a workaround
  * that violates anything, just an inelegant consequence of ApiKeyPluginVault not existing for MCP.
- * Rotating the token means republishing the app package (Graph POST to appCatalogs/teamsApps), the
- * same non-interactive mechanism already used to publish this agent in the first place.
+ * Rotating a token means republishing that agent's app package (Graph POST to appCatalogs/teamsApps),
+ * the same non-interactive mechanism already used to publish it in the first place.
  */
 function extractQueryToken(request: FastifyRequest): string | null {
   const q = request.query as Record<string, unknown> | undefined;
@@ -50,6 +50,26 @@ function safeEqual(a: string, b: string): boolean {
   const bb = Buffer.from(b, 'utf8');
   if (ab.length !== bb.length) return false;
   return timingSafeEqual(ab, bb);
+}
+
+/**
+ * Static M365 declarative-agent tokens, one per fleet lane, all following the identical
+ * zero-portal-step auth:none + query-string-token pattern first proven on the developer lane
+ * (2026-07-25). Kept as individually named env vars (matching this file's existing convention for
+ * PERPLEXITY_CONNECTOR_TOKEN / COPILOT_AGENT_TOKEN) rather than a generic JSON blob, so each lane's
+ * token can be independently rotated without touching the others. None of these widen what a lane
+ * can DO — they are a second, non-interactive front door to the SAME lane identities the Hyperagent
+ * "OTCHealth Gateway (<Role>)" skills already reach via OAuth client_credentials.
+ */
+function m365StaticAgentTokens(): Record<string, string> {
+  return {
+    cto: env.M365_CTO_MCP_TOKEN,
+    cfo: env.M365_CFO_MCP_TOKEN,
+    clo: env.M365_CLO_MCP_TOKEN,
+    coo: env.M365_COO_MCP_TOKEN,
+    cro: env.M365_CRO_MCP_TOKEN,
+    developer: env.M365_DEVELOPER_MCP_TOKEN,
+  };
 }
 
 /**
@@ -72,10 +92,11 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
   // is configured, and gated to DESCOPE_PILOT_LANES regardless; see auth/descope.ts); (3) the
   // static connector token (back-compat, identity=OAUTH_DEFAULT_AGENT); (4) the long-lived
   // low-priv COPILOT_AGENT_TOKEN (identity='copilot-agent') for the GitHub Copilot coding
-  // agents' MCP header; (5) the long-lived M365_DEVELOPER_MCP_TOKEN (identity='developer') for
-  // the M365 declarative Developer agent's MCP runtime (see extractQueryToken's header for why
-  // this one travels as a query-string value wrapped into a synthetic "Bearer <token>" string by
-  // requireConnectorAuth below, rather than a real Authorization header). All rotate-before-launch.
+  // agents' MCP header; (5) one of the M365 declarative-agent per-lane static tokens (see
+  // m365StaticAgentTokens above) for each fleet agent's own MCP runtime (see extractQueryToken's
+  // header for why these travel as a query-string value wrapped into a synthetic "Bearer <token>"
+  // string by requireConnectorAuth below, rather than a real Authorization header). All
+  // rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
@@ -93,13 +114,15 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
         // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
         // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
         staticAgent = 'copilot-agent';
-      } else if (env.M365_DEVELOPER_MCP_TOKEN && env.M365_DEVELOPER_MCP_TOKEN.length >= 32 && safeEqual(token, env.M365_DEVELOPER_MCP_TOKEN)) {
-        // Same ship-lane identity the Hyperagent "OTCHealth Gateway (Developer)" skill already uses
-        // via OAuth client_credentials -- this is just a second, non-interactive front door to the
-        // SAME lane for the M365 declarative agent, not a new/wider privilege grant.
-        staticAgent = 'developer';
       } else {
-        return null;
+        const m365Hit = Object.entries(m365StaticAgentTokens()).find(
+          ([, v]) => v && v.length >= 32 && safeEqual(token, v),
+        );
+        if (m365Hit) {
+          staticAgent = m365Hit[0];
+        } else {
+          return null;
+        }
       }
     }
   }
