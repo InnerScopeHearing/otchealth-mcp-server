@@ -22,6 +22,29 @@ function extractBearer(authHeader: string | undefined): string | null {
   return m && m[1] ? m[1].trim() : null;
 }
 
+/**
+ * Extract the M365 declarative-agent static token from the request's query string.
+ *
+ * WHY THIS EXISTS (2026-07-25, developer-lane MCP wiring): a Microsoft 365 declarative agent's
+ * "RemoteMCPServer" runtime (ai-plugin.json schema v2.4+) supports exactly two auth modes —
+ * OAuthPluginVault and None (confirmed via deep research 2026-07-25; ApiKeyPluginVault is
+ * explicitly NOT supported for MCP plugins, and OAuthPluginVault's auth-config record can only be
+ * created through the Teams Developer Portal UI — no Graph API or CLI path exists for it, so it's
+ * not a real non-interactive option). With auth:None, Copilot's MCP runtime injects NO header of
+ * any kind — the ONLY thing under our control is the static `spec.url` baked into the published
+ * manifest. So the "credential" has to travel as part of that URL, and a query string is the only
+ * part of a URL a JSON-RPC-over-HTTP POST reliably preserves end to end. This is a documented,
+ * unrestricted pattern (no Microsoft schema rule forbids a token in spec.url) — not a workaround
+ * that violates anything, just an inelegant consequence of ApiKeyPluginVault not existing for MCP.
+ * Rotating the token means republishing the app package (Graph POST to appCatalogs/teamsApps), the
+ * same non-interactive mechanism already used to publish this agent in the first place.
+ */
+function extractQueryToken(request: FastifyRequest): string | null {
+  const q = request.query as Record<string, unknown> | undefined;
+  const v = q?.m365_dev_token;
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
 function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a, 'utf8');
   const bb = Buffer.from(b, 'utf8');
@@ -49,7 +72,10 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
   // is configured, and gated to DESCOPE_PILOT_LANES regardless; see auth/descope.ts); (3) the
   // static connector token (back-compat, identity=OAUTH_DEFAULT_AGENT); (4) the long-lived
   // low-priv COPILOT_AGENT_TOKEN (identity='copilot-agent') for the GitHub Copilot coding
-  // agents' MCP header. All rotate-before-launch.
+  // agents' MCP header; (5) the long-lived M365_DEVELOPER_MCP_TOKEN (identity='developer') for
+  // the M365 declarative Developer agent's MCP runtime (see extractQueryToken's header for why
+  // this one travels as a query-string value wrapped into a synthetic "Bearer <token>" string by
+  // requireConnectorAuth below, rather than a real Authorization header). All rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
@@ -67,6 +93,11 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
         // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
         // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
         staticAgent = 'copilot-agent';
+      } else if (env.M365_DEVELOPER_MCP_TOKEN && env.M365_DEVELOPER_MCP_TOKEN.length >= 32 && safeEqual(token, env.M365_DEVELOPER_MCP_TOKEN)) {
+        // Same ship-lane identity the Hyperagent "OTCHealth Gateway (Developer)" skill already uses
+        // via OAuth client_credentials -- this is just a second, non-interactive front door to the
+        // SAME lane for the M365 declarative agent, not a new/wider privilege grant.
+        staticAgent = 'developer';
       } else {
         return null;
       }
@@ -92,7 +123,15 @@ export async function requireConnectorAuth(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<AuthContext | undefined> {
-  const ctx = await validateBearer(request.headers['authorization']);
+  let ctx = await validateBearer(request.headers['authorization']);
+  if (!ctx) {
+    // No Authorization header matched -- try the M365 declarative-agent query-string token (see
+    // extractQueryToken's doc comment). Wrapping it as a synthetic "Bearer <token>" string reuses
+    // validateBearer's existing safeEqual/timing-safe comparison and revocation check verbatim,
+    // rather than duplicating that logic for a second token source.
+    const queryToken = extractQueryToken(request);
+    if (queryToken) ctx = await validateBearer(`Bearer ${queryToken}`);
+  }
   if (!ctx) {
     logger.warn(
       {

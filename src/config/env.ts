@@ -19,6 +19,19 @@ const EnvSchema = z.object({
   // NO GitHub writes, NO builds). Inert when unset. Rotate-before-launch.
   COPILOT_AGENT_TOKEN: z.string().optional().default(''),
 
+  // Long-lived token for the M365 declarative Developer agent's native MCP runtime
+  // (ai-plugin.json "RemoteMCPServer", auth type "None"). See auth/bearer.ts's extractQueryToken
+  // for why this travels as a ?m365_dev_token= query-string value baked into the published
+  // manifest's spec.url, not a real Authorization header — ApiKeyPluginVault is not supported for
+  // MCP plugins and OAuthPluginVault requires a Teams Developer Portal UI step with no API/CLI
+  // path, so this is the only fully non-interactive option (confirmed via research 2026-07-25).
+  // Maps to caller_agent='developer' — the SAME lane the Hyperagent "OTCHealth Gateway (Developer)"
+  // skill already uses via OAuth client_credentials; this is a second front door to that lane, not
+  // a new/wider privilege grant. Inert when unset. Rotate-before-launch (rotation = replace this
+  // secret + republish the app package via the same Graph appCatalogs/teamsApps call already used
+  // to publish it).
+  M365_DEVELOPER_MCP_TOKEN: z.string().optional().default(''),
+
   // n8n
   N8N_BASE_URL: z
     .string()
