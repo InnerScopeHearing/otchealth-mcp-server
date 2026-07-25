@@ -368,8 +368,20 @@ export async function ewsGetMessage(itemId: string): Promise<ArchiveMessage> {
   }
   const bodyType = tagAttr(xml, 'Body', 'BodyType');
   const rawBody = tagText(xml, 'Body');
-  const unescapedBody = rawBody !== undefined ? unescapeXmlText(rawBody) : undefined;
-  const bodyText = unescapedBody !== undefined && bodyType === 'HTML' ? stripHtml(unescapedBody) : unescapedBody;
+  // Pass 1: undo the SOAP wire's OWN XML escaping (the whole Body value is XML text content) —
+  // this recovers the real HTML/text source, tags and all.
+  const wireUnescaped = rawBody !== undefined ? unescapeXmlText(rawBody) : undefined;
+  // Pass 2 (HTML only, 2026-07-25 fix): the recovered HTML source often has its OWN entities
+  // (e.g. Outlook writes "&nbsp;" and escapes "<email@x.com>" as "&lt;email@x.com&gt;" inside
+  // quoted headers so it isn't parsed as a tag) — those are legitimate HTML content, encoded a
+  // SECOND time on top of pass 1's XML escaping. Strip real tags first, then unescape again to
+  // resolve the HTML's own entities into plain readable text.
+  const bodyText =
+    wireUnescaped !== undefined
+      ? bodyType === 'HTML'
+        ? unescapeXmlText(stripHtml(wireUnescaped))
+        : wireUnescaped
+      : undefined;
   return {
     itemId,
     subject: tagTextUnescaped(xml, 'Subject'),
