@@ -9,10 +9,11 @@
  * Microsoft Graph API CANNOT reach an in-place/Online Archive mailbox (dead end since 2020;
  * confirmed by research). The ONLY way in is Exchange Web Services (EWS) — which Microsoft is
  * RETIRING: phased disable starts 2026-10-01, full shutdown 2027-04-01, and In-Place Archive is
- * explicitly named as an affected capability. This module exists to unblock the CFO agent for
- * the next few days/weeks, NOT as the long-term design. Before Oct 2026 this must be replaced —
- * most likely by exporting/migrating the archive content into a store Graph (or a durable
- * non-EWS path) can reach. Flag this in every status update until it's replaced.
+ * explicitly named as an affected capability. This module exists to unblock the CFO agent's
+ * FY2021 close (Matt + CFO directive 2026-07-25: EWS retirement is a known, deliberately
+ * deferred risk while this volume work is in flight — not something to re-raise on every call).
+ * Before Oct 2026 this must be replaced — most likely by exporting/migrating the archive content
+ * into a store Graph (or a durable non-EWS path) can reach.
  *
  * ===================== AUTH =====================
  * App-only OAuth2 client_credentials against the "Office 365 Exchange Online" resource
@@ -31,6 +32,34 @@
  * Read-only: FindFolder / FindItem / GetItem / GetAttachment. No send, no delete, no write.
  * XML PARSING NOTE: this is regex-based extraction over the known EWS response shape, not a real
  * XML parser — acceptable for a temporary bridge, NOT something to build further on.
+ *
+ * ===================== 2026-07-25 FIXES (CFO field report during FY2021 close) =====================
+ * 1. tagText()'s opening-tag match was unanchored (`<t:Content[^>]*>` also matches
+ *    `<t:ContentType>` and `<t:ContentId>`, since "Type"/"Id" are just more non-`>` characters).
+ *    FileAttachment's schema order is Name, ContentType, ContentId, ContentLocation, Content —
+ *    so `tagText(xml, 'Content')` was matching the OPENING of `<t:ContentType>` (the first
+ *    "Content*" tag in the document) and capturing everything up to the real `</t:Content>`
+ *    close tag — i.e. the ContentType value, the ContentId value, and only THEN the actual
+ *    base64, all concatenated. This is the exact corruption the CFO reported. Fixed with a
+ *    lookahead requiring the character after the tag name to be whitespace, `/`, or `>` — the
+ *    same fix applied to allBlocks() defensively, even though no current caller happens to hit
+ *    the same collision, to kill this entire bug class rather than patching one call site.
+ * 2. FindItem's "Default" shape does not include DateTimeReceived without asking for it
+ *    explicitly — added item:DateTimeReceived to the search AdditionalProperties list (it was
+ *    already being *read* from the response, just never *requested*, so every read silently
+ *    matched nothing and returned undefined).
+ * 3. GetItem requested BodyType "Text" explicitly, which returns empty for HTML-only mail
+ *    instead of falling back — switched to "Best" (worst case failure changed from "silently empty"
+ *    to "yields the HTML source", which combined with the new bodyType field lets a caller tell the
+ *    difference and strip tags itself, or trust the auto-stripped fallback below).
+ * 4. Added bodyContains to ewsSearchItems (same Contains-filter mechanism as subjectContains, on
+ *    item:Body) — subject-only search was a hard ceiling for anything named generically in the
+ *    subject line but detailed in the body (wire amounts, originators, etc).
+ *    attachmentNameContains was requested too but is NOT implemented: EWS's FindItem restriction
+ *    language has no indexed FieldURI for an attachment's filename, so this cannot be done
+ *    server-side without enumerating every hasAttachments:true item via GetItem — a caller wanting
+ *    this should search broadly then filter attachment names client-side against
+ *    mail_archive_get_message results.
  */
 import { loadEnv } from '../../config/env.js';
 import { EXEC_RING } from '../kb/search-privileged.js';
@@ -64,6 +93,22 @@ function targetMailbox(): string {
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** Strip HTML tags + collapse whitespace for the plain-text fallback when a message is HTML-only. */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim();
 }
 
 // --- token cache (per-replica, no rotation needed — client_credentials mints a fresh token) ---
@@ -129,16 +174,20 @@ async function ewsCall(bodyXml: string): Promise<string> {
 }
 
 // --- lightweight regex extraction helpers (see file header: not a real XML parser, temporary) ---
+// Both anchor the tag name with a lookahead requiring the next char to be whitespace, "/", or ">"
+// — otherwise "Content" also matches "ContentType"/"ContentId" (2026-07-25 fix, see file header).
 function tagText(xml: string, tag: string): string | undefined {
-  const m = new RegExp(`<t:${tag}[^>]*>([\\s\\S]*?)<\\/t:${tag}>`).exec(xml);
+  const m = new RegExp(`<t:${tag}(?=[\\s/>])[^>]*>([\\s\\S]*?)<\\/t:${tag}>`).exec(xml);
   return m ? m[1] : undefined;
 }
+function tagAttr(xml: string, tag: string, attr: string): string | undefined {
+  const m = new RegExp(`<t:${tag}(?=[\\s/>])([^>]*)>`).exec(xml);
+  if (!m) return undefined;
+  const a = new RegExp(`${attr}="([^"]*)"`).exec(m[1]);
+  return a ? a[1] : undefined;
+}
 function allBlocks(xml: string, tagPattern: string): string[] {
-  // Closing tag is always derived from the same pattern (never passed separately) — a prior
-  // version took the close tag as a second caller-supplied string and every call site got the
-  // slash placement wrong (e.g. "t:\/Folder>" instead of "\/t:Folder>"), so nothing ever matched
-  // and every parse silently returned []. Deriving it here makes that whole bug class impossible.
-  const re = new RegExp(`<${tagPattern}[^>]*>[\\s\\S]*?<\\/${tagPattern}>`, 'g');
+  const re = new RegExp(`<${tagPattern}(?=[\\s/>])[^>]*>[\\s\\S]*?<\\/${tagPattern}>`, 'g');
   return xml.match(re) ?? [];
 }
 
@@ -194,6 +243,7 @@ export interface ArchiveSearchHit {
 export async function ewsSearchItems(opts: {
   folderId: string;
   subjectContains?: string;
+  bodyContains?: string;
   from?: string; // ISO date, inclusive lower bound on DateTimeReceived
   to?: string; // ISO date, inclusive upper bound on DateTimeReceived
   maxResults?: number;
@@ -202,6 +252,11 @@ export async function ewsSearchItems(opts: {
   if (opts.subjectContains) {
     clauses.push(
       `<t:Contains ContainmentMode="Substring" ContainmentComparison="IgnoreCase"><t:FieldURI FieldURI="item:Subject" /><t:Constant Value="${esc(opts.subjectContains)}" /></t:Contains>`,
+    );
+  }
+  if (opts.bodyContains) {
+    clauses.push(
+      `<t:Contains ContainmentMode="Substring" ContainmentComparison="IgnoreCase"><t:FieldURI FieldURI="item:Body" /><t:Constant Value="${esc(opts.bodyContains)}" /></t:Contains>`,
     );
   }
   if (opts.from) {
@@ -214,7 +269,9 @@ export async function ewsSearchItems(opts: {
   const max = Math.min(Math.max(1, opts.maxResults ?? 25), 100);
   const body =
     `<m:FindItem Traversal="Shallow"><m:ItemShape><t:BaseShape>Default</t:BaseShape>` +
-    `<t:AdditionalProperties><t:FieldURI FieldURI="message:From" /><t:FieldURI FieldURI="item:HasAttachments" /></t:AdditionalProperties></m:ItemShape>` +
+    // item:DateTimeReceived is explicitly requested here (2026-07-25 fix) — FindItem's "Default"
+    // shape does not include it on its own, unlike GetItem.
+    `<t:AdditionalProperties><t:FieldURI FieldURI="message:From" /><t:FieldURI FieldURI="item:HasAttachments" /><t:FieldURI FieldURI="item:DateTimeReceived" /></t:AdditionalProperties></m:ItemShape>` +
     `<m:IndexedPageItemView MaxEntriesReturned="${max}" Offset="0" BasePoint="Beginning" />` +
     `<m:SortOrder><t:FieldOrder Order="Descending"><t:FieldURI FieldURI="item:DateTimeReceived" /></t:FieldOrder></m:SortOrder>` +
     restriction +
@@ -251,13 +308,17 @@ export interface ArchiveMessage {
   from?: string;
   toRecipients: string[];
   dateTimeReceived?: string;
+  bodyType?: string;
   bodyText?: string;
   attachments: ArchiveAttachmentMeta[];
 }
 
 export async function ewsGetMessage(itemId: string): Promise<ArchiveMessage> {
   const body =
-    `<m:GetItem><m:ItemShape><t:BaseShape>AllProperties</t:BaseShape><t:BodyType>Text</t:BodyType></m:ItemShape>` +
+    // BodyType "Best" (2026-07-25 fix, was "Text"): "Text" returns EMPTY for HTML-only mail
+    // instead of falling back — "Best" returns plain text when it exists, else the HTML source,
+    // and bodyType below tells the caller which one it got.
+    `<m:GetItem><m:ItemShape><t:BaseShape>AllProperties</t:BaseShape><t:BodyType>Best</t:BodyType></m:ItemShape>` +
     `<m:ItemIds><t:ItemId Id="${esc(itemId)}" /></m:ItemIds></m:GetItem>`;
   const xml = await ewsCall(body);
   const fromMatch = /<t:From>[\s\S]*?<t:EmailAddress>([^<]*)<\/t:EmailAddress>/.exec(xml);
@@ -275,13 +336,17 @@ export async function ewsGetMessage(itemId: string): Promise<ArchiveMessage> {
       isInline: tagText(block, 'IsInline') === 'true',
     });
   }
+  const bodyType = tagAttr(xml, 'Body', 'BodyType');
+  const rawBody = tagText(xml, 'Body');
+  const bodyText = rawBody && bodyType === 'HTML' ? stripHtml(rawBody) : rawBody;
   return {
     itemId,
     subject: tagText(xml, 'Subject'),
     from: fromMatch?.[1],
     toRecipients,
     dateTimeReceived: tagText(xml, 'DateTimeReceived'),
-    bodyText: tagText(xml, 'Body'),
+    bodyType,
+    bodyText,
     attachments,
   };
 }
