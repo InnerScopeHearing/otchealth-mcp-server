@@ -285,3 +285,53 @@ export async function putBlob(
   if (!r.ok) throw new Error(`legal blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
   return { path, container, bytes: buf.length, contentType: ct };
 }
+
+export interface BlobPutRawResult {
+  path: string;
+  container: string;
+  bytes: number;
+  contentType: string;
+}
+
+/**
+ * Generic SharedKey blob PUT against ANY account/container (2026-07-25, added for
+ * mail_archive_save_attachment_to_dataroom) — the write-side counterpart to fetchBlobRaw above.
+ * Same reasoning: reuse the proven azSig construction rather than re-deriving Azure SharedKey
+ * signing for a second store. Binary-safe (pass base64 or text). Same fail-closed
+ * no-silent-clobber default as putBlob, and the same BUGFIX documented above putBlob (If-None-Match
+ * must be threaded into azSig, not just sent on the wire, or the signature won't match what Azure
+ * actually received and every non-overwrite PUT 403s).
+ */
+export async function putBlobRaw(
+  account: string,
+  key: string,
+  container: string,
+  path: string,
+  body: { text?: string; base64?: string; contentType?: string },
+  overwrite = false,
+): Promise<BlobPutRawResult> {
+  const buf = body.base64 != null ? Buffer.from(body.base64, 'base64') : Buffer.from(body.text ?? '', 'utf8');
+  const ct = body.contentType || (body.base64 != null ? 'application/octet-stream' : 'application/json');
+  const xms: Record<string, string> = {
+    'x-ms-blob-type': 'BlockBlob',
+    'x-ms-date': new Date().toUTCString(),
+    'x-ms-version': AVER,
+  };
+  const ifNoneMatch = overwrite ? '' : '*';
+  const auth = azSig(account, key, 'PUT', container, encPath(path), xms, null, String(buf.length), ct, ifNoneMatch);
+  const headers: Record<string, string> = { ...xms, 'Content-Type': ct, Authorization: auth };
+  if (!overwrite) headers['If-None-Match'] = ifNoneMatch;
+  const r = await fetch(`https://${account}.blob.core.windows.net/${container}/${encPath(path)}`, {
+    method: 'PUT',
+    headers,
+    body: buf,
+  });
+  if (r.status === 409 || r.status === 412) {
+    throw new Error(
+      `blob put refused: a blob already exists at ${container}/${path} (HTTP ${r.status}). ` +
+        `Pass overwrite=true to intentionally replace it.`,
+    );
+  }
+  if (!r.ok) throw new Error(`blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  return { path, container, bytes: buf.length, contentType: ct };
+}
