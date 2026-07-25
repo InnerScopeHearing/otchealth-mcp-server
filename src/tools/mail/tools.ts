@@ -8,6 +8,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { loadEnv } from '../../config/env.js';
+import { putBlobRaw } from '../../legal/blob-store.js';
+import { isSafeBlobPath } from '../kb/get-document.js';
 import {
   isMailArchiveAllowed,
   mailRingRefusal,
@@ -18,6 +21,14 @@ import {
   ewsGetMessage,
   ewsGetAttachment,
 } from './client.js';
+
+/** Same physical store kb_get_document reads from (account otchealthcfodata, container
+ * cfo-source-docs) — see that file's header for the account/container mapping. Attachments saved
+ * here land under a dedicated mail-archive-attachments/ prefix so they're visually distinct from
+ * the doc-indexer's own _TEXT/ sidecars, but they're the SAME container so kb_get_document can
+ * read them straight back by path once saved. */
+const DATAROOM_CONTAINER = 'cfo-source-docs';
+const DATAROOM_ROOT = 'mail-archive-attachments';
 
 const TEMP_NOTICE =
   'TEMPORARY: this tool reads via Exchange Web Services (EWS), which Microsoft is retiring ' +
@@ -155,6 +166,85 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
         return {
           data: { name: att.name, contentType: att.contentType, bytes: att.bytes, contentBase64: att.contentBase64 },
           summary: `Downloaded "${att.name ?? '(unnamed)'}" (${att.contentType ?? 'unknown type'}, ${att.bytes} bytes).`,
+        };
+      },
+    },
+    callerHash,
+  );
+
+  // --- 2026-07-25 addition (CFO P2, FY2021 close volume): write straight to the finance dataroom
+  // instead of round-tripping base64 through the caller. Durably preserves the evidence in the
+  // same store kb_get_document reads from, and skips the base64/token overhead entirely for the
+  // 200-500 attachments the FY2021 close needs. dry_run defaults true (decodes + previews the
+  // target path without writing), same pattern as xero_attachment_upload. ---
+  registerTool(
+    server,
+    {
+      name: 'mail_archive_save_attachment_to_dataroom',
+      category: 'write_simple',
+      annotations: {
+        title: 'Mail archive: save an attachment to the finance dataroom (executive ring only, TEMPORARY)',
+        description:
+          `Download an attachment by attachmentId (from mail_archive_get_message) and write it directly to the finance dataroom (account otchealthcfodata, container ${DATAROOM_CONTAINER}, under ${DATAROOM_ROOT}/<prefix>/<filename>) instead of returning base64. Returns the blob path — fetch it back anytime with kb_get_document (index "finance-cfo-source-docs" or "finance-otchealth-cfo-source-docs", same path). ` +
+          `prefix organizes a close/audit batch, e.g. "fy2021-close-innd/gs-capital-notes". filename defaults to the attachment's own name from EWS; override it if that name collides or is unhelpful (e.g. many bank statements literally named "statement.pdf"). ` +
+          `dry_run defaults TRUE — downloads from EWS and previews the target path/size without writing to the dataroom; pass dry_run:false to actually save. Refuses to silently overwrite an existing blob unless overwrite:true. Note: this does NOT get indexed by the doc-indexer / show up in kb_search_privileged automatically — it is reachable by exact path via kb_get_document immediately, but won't surface in a semantic search until a future reindex. ${TEMP_NOTICE}`,
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      inputShape: {
+        attachmentId: z.string().describe('The attachmentId from mail_archive_get_message.'),
+        prefix: z.string().min(1).describe('Folder path under mail-archive-attachments/ to organize this batch, e.g. "fy2021-close-innd/gs-capital-notes".'),
+        filename: z.string().optional().describe("Override the blob's filename. Defaults to the attachment's own name from EWS."),
+        overwrite: z.boolean().optional().describe('Allow replacing an existing blob at the same path. Default false (refuses to silently clobber).'),
+      },
+      outputShape: {
+        path: z.string().optional(),
+        container: z.string().optional(),
+        bytes: z.number().optional(),
+        contentType: z.string().optional(),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!isMailArchiveAllowed(ctx.callerAgent)) return mailRingRefusal('mail_archive_save_attachment_to_dataroom', ctx.callerAgent);
+        if (!mailArchiveConfigured()) return unconfigured('mail_archive_save_attachment_to_dataroom');
+        const env = loadEnv();
+        if (!env.AZURE_CFO_STORAGE_KEY) {
+          return {
+            data: { error: 'unconfigured' },
+            summary: 'mail_archive_save_attachment_to_dataroom: the finance dataroom is not configured (AZURE_CFO_STORAGE_KEY unset).',
+          };
+        }
+
+        const att = await ewsGetAttachment(input.attachmentId);
+        const filename = input.filename || att.name || input.attachmentId;
+        const relPath = `${DATAROOM_ROOT}/${input.prefix}/${filename}`;
+        if (!isSafeBlobPath(relPath)) {
+          return {
+            data: { error: 'invalid_path' },
+            summary: 'Refused: prefix/filename must not contain ".." or path traversal, and must be container-relative.',
+          };
+        }
+
+        if (ctx.dryRun) {
+          return {
+            data: { path: relPath, container: DATAROOM_CONTAINER, bytes: att.bytes, contentType: att.contentType },
+            summary: `DRY RUN (nothing saved): would write "${att.name ?? '(unnamed)'}" (${att.bytes} bytes, ${att.contentType ?? 'unknown type'}) to ${DATAROOM_CONTAINER}/${relPath}. Re-call with dry_run:false to actually save.`,
+          };
+        }
+
+        const put = await putBlobRaw(
+          env.AZURE_CFO_STORAGE_ACCOUNT,
+          env.AZURE_CFO_STORAGE_KEY,
+          DATAROOM_CONTAINER,
+          relPath,
+          { base64: att.contentBase64, contentType: att.contentType || 'application/octet-stream' },
+          input.overwrite ?? false,
+        );
+        return {
+          data: { path: put.path, container: put.container, bytes: put.bytes, contentType: put.contentType },
+          summary: `Saved "${att.name ?? '(unnamed)'}" (${put.bytes} bytes) to ${put.container}/${put.path}. Fetch it back anytime with kb_get_document.`,
         };
       },
     },
