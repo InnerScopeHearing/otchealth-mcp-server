@@ -32,6 +32,19 @@ const EnvSchema = z.object({
   // to publish it).
   M365_DEVELOPER_MCP_TOKEN: z.string().optional().default(''),
 
+  // Fleet-wide extension of the SAME auth:none + query-string-token pattern above (2026-07-25
+  // deep-research fix), one static token per remaining fleet lane's own M365 declarative agent
+  // RemoteMCPServer runtime. Each maps to that lane's existing caller_agent identity via
+  // auth/bearer.ts's m365StaticAgentTokens() map — a second non-interactive front door to the
+  // SAME lane the Hyperagent "OTCHealth Gateway (<Role>)" skill already reaches via OAuth
+  // client_credentials, not a new/wider privilege grant. All inert when unset; all
+  // rotate-before-launch (rotation = replace the secret + republish that agent's app package).
+  M365_CTO_MCP_TOKEN: z.string().optional().default(''),
+  M365_CFO_MCP_TOKEN: z.string().optional().default(''),
+  M365_CLO_MCP_TOKEN: z.string().optional().default(''),
+  M365_COO_MCP_TOKEN: z.string().optional().default(''),
+  M365_CRO_MCP_TOKEN: z.string().optional().default(''),
+
   // n8n
   N8N_BASE_URL: z
     .string()
