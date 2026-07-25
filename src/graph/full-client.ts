@@ -48,6 +48,30 @@ function requireGraphConfig(): { tenantId: string; clientId: string; clientSecre
   };
 }
 
+/**
+ * ALLOWLIST for mailbox-scoped operations (2026-07-25, CRO customer-service-engine handoff).
+ * Mirrors api-client.ts's allowedMailboxes()/assertAllowedMailbox() EXACTLY (duplicated, not
+ * imported, to respect this file's own "self-contained" design note above) -- see that file's
+ * header for the full rationale: this app's application permissions are tenant-wide with no
+ * Graph-level mailbox scoping, so this is the real, live security boundary until an Exchange
+ * Online ApplicationAccessPolicy is provisioned (EXO-PowerShell-only, no Graph REST equivalent).
+ */
+function allowedMailboxes(): Set<string> {
+  const csv = env.GRAPH_CS_MAILBOXES || 'care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com';
+  return new Set(csv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+}
+
+function assertAllowedMailbox(mailbox: string): void {
+  if (!allowedMailboxes().has(mailbox.toLowerCase())) {
+    throw new GraphFullError({
+      code: 'mailbox_not_allowed',
+      status: 0,
+      message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a code-level guard standing in for the ApplicationAccessPolicy that has not been provisioned yet.`,
+      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES (and, once provisioned, the real Exchange ApplicationAccessPolicy).',
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Token cache
 // ---------------------------------------------------------------------------
@@ -153,9 +177,14 @@ function getSenderEmail(): string {
 // MAIL — Messages
 // ===========================================================================
 
-/** GET /users/{sender}/messages/{id} */
-export async function getMessage(messageId: string): Promise<any> {
-  const sender = getSenderEmail();
+/**
+ * GET /users/{mailbox}/messages/{id}. `mailbox` defaults to GRAPH_SENDER_EMAIL for back-compat
+ * with every existing caller (graph_message_get was hardcoded to the sender before 2026-07-25);
+ * pass an explicit allowlisted mailbox to read a different one (see assertAllowedMailbox above).
+ */
+export async function getMessage(messageId: string, mailbox?: string): Promise<any> {
+  const sender = mailbox ?? getSenderEmail();
+  assertAllowedMailbox(sender);
   return graphRequest<any>('GET', `/users/${sender}/messages/${messageId}`);
 }
 

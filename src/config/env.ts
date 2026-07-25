@@ -70,11 +70,18 @@ const EnvSchema = z.object({
   CLOUDFLARE_API_TOKEN: z.string().optional().default(''),
   CLOUDFLARE_ZONE_ID: z.string().optional().default(''),
 
-  // Microsoft Graph (COO send-as coo@otchealthmart.com)
+  // Microsoft Graph (Exec Fleet Microsoft Graph app; send/read-as multiple CS personas)
   GRAPH_TENANT_ID: z.string().optional().default(''),
   GRAPH_CLIENT_ID: z.string().optional().default(''),
   GRAPH_CLIENT_SECRET: z.string().optional().default(''),
   GRAPH_SENDER_EMAIL: z.string().optional().default('coo@otchealthmart.com'),
+  // Allowlist of mailboxes the graph_* mail tools (send/list/get/mark-read) are permitted to touch
+  // (see graph/api-client.ts's allowedMailboxes() header for why this exists: the app's application
+  // permissions -- Mail.ReadWrite, Mail.Send, etc. -- are tenant-wide by default with no Graph-level
+  // way to scope them; this is a code-level stand-in for the Exchange Online ApplicationAccessPolicy
+  // that has not been provisioned yet, added 2026-07-25 for the CRO customer-service-engine handoff).
+  // CSV, case-insensitive. Defaults to the 5 known CS personas.
+  GRAPH_CS_MAILBOXES: z.string().optional().default('care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com'),
 
   // Stripe (read-only)
   STRIPE_SECRET_KEY: z.string().optional().default(''),
