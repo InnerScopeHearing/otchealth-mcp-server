@@ -60,6 +60,14 @@
  *    server-side without enumerating every hasAttachments:true item via GetItem — a caller wanting
  *    this should search broadly then filter attachment names client-side against
  *    mail_archive_get_message results.
+ * 5. (found while verifying fix #3) Body/Subject text is XML-entity-escaped in the raw SOAP
+ *    response (literal `&lt;html&gt;`, not `<html>` — any XML text content escapes &/</>/"/').
+ *    The first cut of the "Best" bodyType fix tried to strip HTML tags BEFORE decoding entities,
+ *    so there were no literal `<`/`>` characters to match and tag-stripping did nothing — visible
+ *    live as raw `<html><head>...` text still coming through after the "fix". unescapeXmlText()
+ *    now runs first, tag-stripping second. Also applied to Subject (and now always applied to
+ *    Body regardless of bodyType, not just when HTML) since any of these can legitimately contain
+ *    "&" in real business text ("Smith & Wesson") and would otherwise render as "Smith &amp; Wesson".
  */
 import { loadEnv } from '../../config/env.js';
 import { EXEC_RING } from '../kb/search-privileged.js';
@@ -95,17 +103,34 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-/** Strip HTML tags + collapse whitespace for the plain-text fallback when a message is HTML-only. */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
+/**
+ * Undo XML entity-escaping. EVERY tagText() extraction holds literal SOAP XML text content, which
+ * always escapes `&`, `<`, `>`, `"`, `'` regardless of the value's own semantics — e.g. a plain-text
+ * body containing "Smith & Wesson" comes back as "Smith &amp; Wesson", not because it's HTML, but
+ * because it's XML. `&amp;` is decoded LAST (standard order) so a double-escaped `&amp;lt;` doesn't
+ * get over-decoded into a literal `<`.
+ */
+function unescapeXmlText(s: string): string {
+  return s
+    .replace(/&#xD;/gi, '')
     .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Strip HTML tags + collapse whitespace for the plain-text fallback when a message is HTML-only.
+ * Expects ALREADY-unescaped input (call unescapeXmlText first) — 2026-07-25 fix: an earlier version
+ * tried to strip tags before decoding entities, so there were no literal `<`/`>` characters to match
+ * yet, and the tag-strip did nothing (exactly the "raw HTML, not stripped" behavior reported).
+ */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
     .replace(/[ \t]+/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .trim();
@@ -189,6 +214,11 @@ function tagAttr(xml: string, tag: string, attr: string): string | undefined {
 function allBlocks(xml: string, tagPattern: string): string[] {
   const re = new RegExp(`<${tagPattern}(?=[\\s/>])[^>]*>[\\s\\S]*?<\\/${tagPattern}>`, 'g');
   return xml.match(re) ?? [];
+}
+/** tagText() + unescapeXmlText() in one step, preserving undefined. */
+function tagTextUnescaped(xml: string, tag: string): string | undefined {
+  const v = tagText(xml, tag);
+  return v !== undefined ? unescapeXmlText(v) : undefined;
 }
 
 export interface ArchiveFolder {
@@ -285,7 +315,7 @@ export async function ewsSearchItems(opts: {
     hits.push({
       itemId: idTag[1],
       changeKey: idTag[2],
-      subject: tagText(block, 'Subject'),
+      subject: tagTextUnescaped(block, 'Subject'),
       dateTimeReceived: tagText(block, 'DateTimeReceived'),
       hasAttachments: tagText(block, 'HasAttachments') === 'true',
       from: fromMatch?.[1],
@@ -338,10 +368,11 @@ export async function ewsGetMessage(itemId: string): Promise<ArchiveMessage> {
   }
   const bodyType = tagAttr(xml, 'Body', 'BodyType');
   const rawBody = tagText(xml, 'Body');
-  const bodyText = rawBody && bodyType === 'HTML' ? stripHtml(rawBody) : rawBody;
+  const unescapedBody = rawBody !== undefined ? unescapeXmlText(rawBody) : undefined;
+  const bodyText = unescapedBody !== undefined && bodyType === 'HTML' ? stripHtml(unescapedBody) : unescapedBody;
   return {
     itemId,
-    subject: tagText(xml, 'Subject'),
+    subject: tagTextUnescaped(xml, 'Subject'),
     from: fromMatch?.[1],
     toRecipients,
     dateTimeReceived: tagText(xml, 'DateTimeReceived'),
