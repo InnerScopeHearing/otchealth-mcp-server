@@ -45,6 +45,27 @@ function requireGraphConfig(): { tenantId: string; clientId: string; clientSecre
   };
 }
 
+/**
+ * ALLOWLIST for mailbox-scoped operations (2026-07-25, CRO customer-service-engine handoff).
+ * Mirrors api-client.ts's allowedMailboxes()/assertAllowedMailbox() EXACTLY (duplicated, not
+ * imported, to respect this file's own "self-contained" design note above).
+ */
+function allowedMailboxes(): Set<string> {
+  const csv = env.GRAPH_CS_MAILBOXES || 'care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com';
+  return new Set(csv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+}
+
+function assertAllowedMailbox(mailbox: string): void {
+  if (!allowedMailboxes().has(mailbox.toLowerCase())) {
+    throw new GraphWriteError({
+      code: 'mailbox_not_allowed',
+      status: 0,
+      message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a code-level guard standing in for the ApplicationAccessPolicy that has not been provisioned yet.`,
+      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES (and, once provisioned, the real Exchange ApplicationAccessPolicy).',
+    });
+  }
+}
+
 // ---- Token cache (separate from read client so each module is self-contained) ----
 
 let tokenCache: { token: string; expiresAt: number } | null = null;
@@ -223,10 +244,17 @@ export async function moveMessage(opts: MoveMessageOpts): Promise<MovedMessage> 
 export interface MarkReadOpts {
   messageId: string;
   isRead: boolean;
+  /**
+   * Mailbox to operate on (2026-07-25, CRO customer-service-engine handoff). Defaults to
+   * GRAPH_SENDER_EMAIL for back-compat with every existing caller. Checked against
+   * assertAllowedMailbox() -- see that function's header for why.
+   */
+  mailbox?: string;
 }
 
 export async function markRead(opts: MarkReadOpts): Promise<void> {
-  const sender = getSenderEmail();
+  const sender = opts.mailbox ?? getSenderEmail();
+  assertAllowedMailbox(sender);
   await graphRequest('PATCH', `/users/${sender}/messages/${opts.messageId}`, {
     body: { isRead: opts.isRead },
   });
