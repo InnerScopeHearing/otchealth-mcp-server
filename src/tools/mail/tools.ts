@@ -65,7 +65,7 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
       annotations: {
         title: 'Mail archive: search a folder (executive ring only, TEMPORARY)',
         description:
-          `Search a named Online Archive folder (e.g. "Archive", "Inbox", "Sent Items", "Drafts") by subject substring and/or a DateTimeReceived range, sorted newest-first. Returns itemId/changeKey (needed for mail_archive_get_message), subject, date, sender, and whether it has attachments. ${TEMP_NOTICE}`,
+          `Search a named Online Archive folder (e.g. "Archive", "Inbox", "Sent Items", "Drafts") by subject substring, body substring, and/or a DateTimeReceived range, sorted newest-first. Returns itemId/changeKey (needed for mail_archive_get_message), subject, dateTimeReceived, sender, and whether it has attachments. There is no attachment-filename search — EWS's restriction language has no indexed field for that; search broadly and filter attachment names client-side against mail_archive_get_message results instead. ${TEMP_NOTICE}`,
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -74,6 +74,7 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
       inputShape: {
         folder: z.string().describe('Folder display name, e.g. "Archive", "Inbox", "Sent Items", "Drafts", "Deleted Items".'),
         subjectContains: z.string().optional().describe('Case-insensitive substring match on Subject.'),
+        bodyContains: z.string().optional().describe('Case-insensitive substring match on the message body — use this for content named generically in the subject (e.g. a dollar amount or counterparty mentioned only in the body).'),
         from: z.string().optional().describe('ISO 8601 date/time — only items received on/after this.'),
         to: z.string().optional().describe('ISO 8601 date/time — only items received on/before this.'),
         maxResults: z.number().int().min(1).max(100).optional().describe('Max results, default 25, hard cap 100.'),
@@ -86,13 +87,14 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
         const results = await ewsSearchItems({
           folderId: folder.folderId,
           subjectContains: input.subjectContains,
+          bodyContains: input.bodyContains,
           from: input.from,
           to: input.to,
           maxResults: input.maxResults,
         });
         return {
           data: { folder: folder.displayName, results },
-          summary: `${results.length} result(s) in "${folder.displayName}"${input.subjectContains ? ` matching "${input.subjectContains}"` : ''}.`,
+          summary: `${results.length} result(s) in "${folder.displayName}"${input.subjectContains ? ` matching subject "${input.subjectContains}"` : ''}${input.bodyContains ? ` matching body "${input.bodyContains}"` : ''}.`,
         };
       },
     },
@@ -106,7 +108,7 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
       category: 'read',
       annotations: {
         title: 'Mail archive: get a message (executive ring only, TEMPORARY)',
-        description: `Fetch a specific message by itemId (from mail_archive_search): subject, sender, recipients, date, plain-text body, and a list of attachments (name/contentType/size/attachmentId — pass attachmentId to mail_archive_download_attachment). ${TEMP_NOTICE}`,
+        description: `Fetch a specific message by itemId (from mail_archive_search): subject, sender, recipients, date, body (bodyText + bodyType — bodyType is "Text" when a real plain-text part existed, or "HTML" when bodyText is the auto-stripped fallback from HTML-only mail; an empty bodyText with bodyType "HTML" means even the stripped HTML was empty, a genuinely contentless message rather than an extraction failure), and a list of attachments (name/contentType/size/attachmentId — pass attachmentId to mail_archive_download_attachment). ${TEMP_NOTICE}`,
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -122,7 +124,7 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
         const message = await ewsGetMessage(input.itemId);
         return {
           data: { message },
-          summary: `"${message.subject ?? '(no subject)'}" from ${message.from ?? '(unknown)'} — ${message.attachments.length} attachment(s).`,
+          summary: `"${message.subject ?? '(no subject)'}" from ${message.from ?? '(unknown)'} — ${message.attachments.length} attachment(s), body type ${message.bodyType ?? '(unknown)'}.`,
         };
       },
     },
@@ -136,7 +138,7 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
       category: 'read',
       annotations: {
         title: 'Mail archive: download an attachment (executive ring only, TEMPORARY)',
-        description: `Download a specific attachment by attachmentId (from mail_archive_get_message) as base64 content, name, and content type. 10MB cap. ${TEMP_NOTICE}`,
+        description: `Download a specific attachment by attachmentId (from mail_archive_get_message). Returns clean base64 in contentBase64 (fixed 2026-07-25 — a prior version leaked raw EWS SOAP fragments into this field; decode it directly, no cleanup needed), plus name, contentType, and the decoded byte count. 10MB cap. ${TEMP_NOTICE}`,
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
