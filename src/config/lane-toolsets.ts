@@ -80,7 +80,7 @@ const CTO_INFRA = [
 // all mailbox-allowlisted server-side (see graph/api-client.ts's allowedMailboxes()). Named
 // explicitly rather than 'graph_*' for the non-CTO/exec lanes below, since those lanes should NOT
 // also see graph_drive_* (OneDrive) or any future graph_* addition without an explicit decision.
-const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_get_message', 'graph_mark_read'] as const;
+const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read'] as const;
 
 export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // The mastermind seat: infra, builds, releases, the full ship cycle, and every read surface it uses
