@@ -14,6 +14,19 @@ export interface AuthContext {
   caller_agent: string;
   /** True when the token was issued to a Dynamic-Client-Registration (Claude Chat) connector client. */
   connector_surface: boolean;
+  /**
+   * True when auth resolved via one of the M365 declarative-agent static per-lane tokens (see
+   * m365StaticAgentTokens below). WHY THIS EXISTS (2026-07-25): M365 Copilot's own tool-calling
+   * orchestrator was confirmed (direct reproduction) NOT to reliably follow the gateway's JIT
+   * result-offload pattern (a large tool result replaced with a stub + a pointer to call
+   * gateway_fetch_result for the full payload) -- Copilot sees the stub and reports "no content
+   * available" rather than chaining into the follow-up tool, even when gateway_fetch_result is a
+   * declared, callable tool on that same agent. Since M365 callers can't reliably use the two-hop
+   * pattern, registry.ts uses this flag to skip offloading entirely for them and return the full
+   * inline payload instead (see registry.ts's shouldOffload call site). Other engines (Claude Code,
+   * Hyperagent) are UNCHANGED -- they reliably chain into gateway_fetch_result today.
+   */
+  m365_static_auth: boolean;
 }
 
 function extractBearer(authHeader: string | undefined): string | null {
@@ -100,6 +113,7 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
   const issued = isValidIssuedAccessToken(token);
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
+  let isM365Static = false;
   if (!issued) {
     // Only worth attempting Descope verification if the token even looks like a JWT (3 dot-
     // separated segments) -- cheap guard that avoids a pointless JWKS-cache lookup for the
@@ -120,6 +134,7 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
         );
         if (m365Hit) {
           staticAgent = m365Hit[0];
+          isM365Static = true;
         } else {
           return null;
         }
@@ -132,7 +147,7 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
   // (occ_ = OTCHealth Connector Client) entered in Claude's Advanced settings to bypass the DCR tool-delivery
   // bug (modelcontextprotocol#1675). Both get the curated, spec-bare connector surface.
   const connector_surface = Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_')));
-  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface };
+  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static };
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {
