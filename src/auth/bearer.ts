@@ -104,8 +104,12 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
   // session JWT for the clo-lane pilot (Phase 2, 2026-07-08 -- inert unless DESCOPE_PROJECT_ID
   // is configured, and gated to DESCOPE_PILOT_LANES regardless; see auth/descope.ts); (3) the
   // static connector token (back-compat, identity=OAUTH_DEFAULT_AGENT); (4) the long-lived
-  // low-priv COPILOT_AGENT_TOKEN (identity='copilot-agent') for the GitHub Copilot coding
-  // agents' MCP header; (5) one of the M365 declarative-agent per-lane static tokens (see
+  // low-priv COPILOT_AGENT_TOKEN (identity='copilot-agent') for the GitHub Copilot autonomous
+  // issue-assignment coding agents' MCP header; (4b) the long-lived COPILOT_DEV_AGENT_TOKEN
+  // (identity='developer') for the 'otchealth-dev' user-invocable GitHub Copilot CUSTOM AGENT's
+  // MCP header -- deliberately a SEPARATE static token from COPILOT_AGENT_TOKEN (2026-07-26,
+  // see env.ts's header on COPILOT_DEV_AGENT_TOKEN for why: different trust profile, independent
+  // rotation); (5) one of the M365 declarative-agent per-lane static tokens (see
   // m365StaticAgentTokens above) for each fleet agent's own MCP runtime (see extractQueryToken's
   // header for why these travel as a query-string value wrapped into a synthetic "Bearer <token>"
   // string by requireConnectorAuth below, rather than a real Authorization header). All
@@ -128,6 +132,14 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
         // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
         // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
         staticAgent = 'copilot-agent';
+      } else if (env.COPILOT_DEV_AGENT_TOKEN && env.COPILOT_DEV_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_DEV_AGENT_TOKEN)) {
+        // 'otchealth-dev' (.github-private/agents/otchealth-dev.agent.md) -- a user-invocable
+        // GitHub Copilot custom agent with a real app-build job, a different trust profile than
+        // the autonomous issue-assignment coding agent above. Maps to caller_agent='developer',
+        // the SAME lane the Hyperagent "OTCHealth Gateway (Developer)" skill and
+        // M365_DEVELOPER_MCP_TOKEN already reach -- this widens WHICH FRONT DOOR can reach that
+        // lane, not what the lane itself can do.
+        staticAgent = 'developer';
       } else {
         const m365Hit = Object.entries(m365StaticAgentTokens()).find(
           ([, v]) => v && v.length >= 32 && safeEqual(token, v),
