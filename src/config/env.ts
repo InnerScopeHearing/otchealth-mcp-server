@@ -19,6 +19,18 @@ const EnvSchema = z.object({
   // NO GitHub writes, NO builds). Inert when unset. Rotate-before-launch.
   COPILOT_AGENT_TOKEN: z.string().optional().default(''),
 
+  // Long-lived token for the 'otchealth-dev' GitHub Copilot CUSTOM AGENT's MCP header
+  // (.github-private/agents/otchealth-dev.agent.md, target: github-copilot, tools: ["*"]).
+  // Maps to caller_agent='developer' -- the SAME lane the Hyperagent "OTCHealth Gateway (Developer)"
+  // skill and the M365 declarative Developer agent (M365_DEVELOPER_MCP_TOKEN below) already reach.
+  // Deliberately a DISTINCT token from COPILOT_AGENT_TOKEN (2026-07-26): otchealth-dev is a
+  // user-invocable custom agent with a real app-build job, a different trust profile than GitHub's
+  // fully-autonomous issue-assignment coding agent, which correctly stays on COPILOT_AGENT_TOKEN's
+  // low-privilege lane. Also distinct from M365_DEVELOPER_MCP_TOKEN so each front door's token can be
+  // rotated independently (this file's existing convention -- see the M365 static tokens below).
+  // Inert when unset. Rotate-before-launch.
+  COPILOT_DEV_AGENT_TOKEN: z.string().optional().default(''),
+
   // Long-lived token for the M365 declarative Developer agent's native MCP runtime
   // (ai-plugin.json "RemoteMCPServer", auth type "None"). See auth/bearer.ts's extractQueryToken
   // for why this travels as a ?m365_dev_token= query-string value baked into the published
@@ -78,8 +90,9 @@ const EnvSchema = z.object({
   // Allowlist of mailboxes the graph_* mail tools (send/list/get/mark-read) are permitted to touch
   // (see graph/api-client.ts's allowedMailboxes() header for why this exists: the app's application
   // permissions -- Mail.ReadWrite, Mail.Send, etc. -- are tenant-wide by default with no Graph-level
-  // way to scope them; this is a code-level stand-in for the Exchange Online ApplicationAccessPolicy
-  // that has not been provisioned yet, added 2026-07-25 for the CRO customer-service-engine handoff).
+  // way to scope them; this is a code-level guard running in front of the real Exchange
+  // ApplicationAccessPolicy, live since 2026-07-26 and confirmed enforcing via
+  // Test-ApplicationAccessPolicy, added 2026-07-25 for the CRO customer-service-engine handoff).
   // CSV, case-insensitive. Defaults to the 5 known CS personas.
   GRAPH_CS_MAILBOXES: z.string().optional().default('care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com'),
 
@@ -360,7 +373,7 @@ const EnvSchema = z.object({
   // the existing Foundry embed() (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY above) — no new credentials.
   //
   // llm_azure FAQ/INTENT DEFLECTION (src/tools/llm/faq-deflect.ts). Also NOT in this schema on
-  // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh per call so it can
+  // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh from process.env per call so it can
   // be flipped without a redeploy:
   //   FAQ_DEFLECT_MODE                  off (default) | on  — deterministic FAQ/intent check before
   //                                     any llm_azure task='complete' model call; a high-confidence
