@@ -321,10 +321,28 @@ function gatedReject(
   return { rejected: false };
 }
 
+/**
+ * M365 PREFIX-STRIP COMPAT SHIM (2026-07-26): per-server registry of every tool name actually
+ * registered (primary names AND generated aliases), used only to detect a naming collision before
+ * generating an alias below. Scoped per McpServer instance (WeakMap) rather than module-global so
+ * multiple server instances in the same process (e.g. tests) never share state.
+ */
+const registeredNamesByServer = new WeakMap<McpServer, Set<string>>();
+
+function registeredNamesFor(server: McpServer): Set<string> {
+  let names = registeredNamesByServer.get(server);
+  if (!names) {
+    names = new Set<string>();
+    registeredNamesByServer.set(server, names);
+  }
+  return names;
+}
+
 export function registerTool<Shape extends ZodRawShape, Output extends ZodRawShape>(
   server: McpServer,
   def: ToolDefinition<Shape, Output>,
   callerHashProvider: () => string,
+  isAlias = false,
 ): void {
   const env = loadEnv();
   const CONNECTOR_TOOLSET = connectorToolset(env, currentCallerAgent());
@@ -836,6 +854,49 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       }
     },
   );
+
+  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26): M365 Copilot's own tool-calling orchestrator has
+  // been observed splitting a registered tool name on its first underscore and calling only the
+  // remainder -- confirmed precedent in memory/recall-alias.ts (2026-07-25: "memory_recall" ->
+  // "recall", reproduced live as `MCP error -32602: Tool recall not found` until that alias
+  // shipped). Reproduced again 2026-07-26 for "github_repo_get" -> "repo_get" and
+  // "depot_run_list" -> "run_list" once the developer lane's M365 catalog was expanded to the full
+  // 70 github_* + 42 depot_* tools. Rather than hand-write a dedicated alias file per tool (112 of
+  // them), this generates the SAME compatibility alias generically, in the one shared path every
+  // github_*/depot_* tool already funnels through, so it can never drift out of sync with the
+  // primary registration (identical def/handler/gating -- the alias is a recursive call to this
+  // same function, so it passes through every governance/gating/audit/catalog-curation check a
+  // second time under its own name, not a bypass of any of them).
+  //
+  // COLLISION HANDLING: two real collisions exist in the current catalog --
+  // github_workflow_get/depot_workflow_get both strip to "workflow_get", and
+  // github_workflow_list/depot_workflow_list both strip to "workflow_list". Whichever tool
+  // registers first (import order in tools/index.ts) claims the bare alias; the other remains
+  // reachable ONLY by its real, full, unambiguous name. This is a deliberate, logged tradeoff for
+  // the alias's own convenience name, not a change to either tool's real identity or a namespace
+  // owned exclusively by one integration -- if M365 mis-calls the loser, the fix is telling the
+  // caller/orchestrator to use the full name (which was always correct), not re-adjudicating the
+  // alias.
+  if (!isAlias) {
+    const stripped = /^(?:github|depot)_(.+)$/.exec(def.name);
+    if (stripped) {
+      const aliasName = stripped[1];
+      const names = registeredNamesFor(server);
+      names.add(def.name);
+      if (names.has(aliasName)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[registry] M365 alias collision: "${aliasName}" (from "${def.name}") is already taken ` +
+            `by an earlier registration -- "${def.name}" remains reachable only by its full name.`,
+        );
+      } else {
+        names.add(aliasName);
+        registerTool(server, { ...def, name: aliasName }, callerHashProvider, true);
+      }
+    } else {
+      registeredNamesFor(server).add(def.name);
+    }
+  }
 }
 
 export type CallerHashProvider = () => string;
