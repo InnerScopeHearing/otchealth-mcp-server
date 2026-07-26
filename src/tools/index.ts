@@ -71,6 +71,8 @@ import { registerMemoryTeam } from './memory/team.js';
 import { registerMemoryPack } from './memory/pack.js';
 import { registerMemoryInbound } from './memory/inbound.js';
 import { registerWake } from './memory/wake.js';
+import { registerDeveloperWakeLite } from './diagnostics/developer-wake-lite.js';
+import { registerCatalogProbe } from './diagnostics/catalog-probe.js';
 import { registerMemoryReconcile } from './memory/reconcile.js';
 import { registerCheckpoint } from './memory/checkpoint.js';
 // Wave 7 item 7.1 (production feedback loop): opt-in reporting on brain_search/kb_search hits.
@@ -1015,6 +1017,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
   registerMemoryInbound(server, callerHash); // read: cross-agent notes on your ledger (wake first-duty)
   registerWake(server, callerHash); // read: ONE federated boot call (pack + cosmos memory + active tasks + inbox peek + inbound)
+  registerDeveloperWakeLite(server, callerHash); // read: diagnostic -- unconditionally tiny wake alternative (2026-07-26, M365 tool-rendering isolation)
+  registerCatalogProbe(server, callerHash); // read: diagnostic -- build/registry/caller-auth probe (2026-07-26, M365 tool-rendering isolation)
   registerMemoryReconcile(server, callerHash); // write_simple: ack inbound (advances marker; deletes nothing)
   registerCheckpoint(server, callerHash); // write_simple: platform-agnostic session-end capture; resets capture-pressure
 
