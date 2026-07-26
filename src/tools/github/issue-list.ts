@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { issueList } from '../../github/full-client.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 
 export function registerGitHubIssueList(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
@@ -27,7 +28,8 @@ export function registerGitHubIssueList(server: McpServer, callerHash: CallerHas
       issues: z.array(z.unknown()),
       count: z.number(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const issues = await issueList(input.owner, input.repo, input.state ?? 'open', input.labels, input.per_page ?? 20, input.page ?? 1);
       // GitHub issues endpoint returns PRs too; filter them out
       const issuesOnly = issues.filter((i: any) => !i.pull_request);

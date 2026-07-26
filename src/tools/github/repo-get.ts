@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { repoGet } from '../../github/full-client.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 
 export function registerGitHubRepoGet(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
@@ -30,7 +31,8 @@ export function registerGitHubRepoGet(server: McpServer, callerHash: CallerHashP
       open_issues_count: z.number().optional(),
       url: z.string().optional(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const r = await repoGet(input.owner, input.repo);
       return {
         data: {

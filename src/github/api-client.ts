@@ -11,6 +11,42 @@ export class GitHubApiError extends Error {
   }
 }
 
+/**
+ * Repo-scoping guard for non-privileged callers (2026-07-26, hardening follow-up to the
+ * otchealth-dev Copilot custom agent wiring / COPILOT_DEV_AGENT_TOKEN). WHY THIS EXISTS: unlike
+ * the medreview PHI carve-outs baked into Sentry/PostHog/Customer.io, github_*/depot_* tools had
+ * NO repo-level scoping at all -- reach was bounded only by whatever the underlying GitHub App
+ * installation could see. The high-risk write_orchestrated default (registry.ts) already makes
+ * every destructive github_*/depot_* tool CTO-only structurally, so this guard only matters for
+ * the READ-category tools, which any non-cto caller (developer, etc.) could otherwise call
+ * against ANY repo the App installation reaches.
+ *
+ * 'cto' and 'exec' always have full, unrestricted reach (matches the existing "CTO is the fleet's
+ * unrestricted GitHub identity" posture -- the same two lanes the write_orchestrated default and
+ * the explicit CTO-only push/build tools already carve out). Every OTHER caller_agent is checked
+ * against DEVELOPER_ALLOWED_REPOS -- a CSV of "owner/repo" pairs, case-insensitive, env-overridable
+ * exactly like GRAPH_CS_MAILBOXES.
+ *
+ * DEFAULT (env unset/empty) IS UNRESTRICTED -- this ships as a zero-risk, inert control point
+ * (Matt's explicit call, 2026-07-26: "unrestricted by default, no behavior change today"), not a
+ * live restriction. Narrowing it later is a config change, not a redeploy.
+ */
+export function assertRepoAllowed(callerAgent: string, owner: string, repo: string): void {
+  if (callerAgent === 'cto' || callerAgent === 'exec') return;
+  const csv = env.DEVELOPER_ALLOWED_REPOS;
+  if (!csv) return; // unrestricted by default -- see header above
+  const allowed = new Set(csv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+  const full = `${owner}/${repo}`.toLowerCase();
+  if (!allowed.has(full)) {
+    throw new GitHubApiError({
+      code: 'repo_not_allowed',
+      status: 0,
+      message: `Repository "${owner}/${repo}" is not on the allowlist for this caller (see DEVELOPER_ALLOWED_REPOS). This env var is unset by default (unrestricted) -- it was deliberately narrowed for this deployment.`,
+      nextStep: 'If this repo should be reachable, add it to DEVELOPER_ALLOWED_REPOS.',
+    });
+  }
+}
+
 function b64url(x: object): string {
   return Buffer.from(JSON.stringify(x)).toString('base64url');
 }

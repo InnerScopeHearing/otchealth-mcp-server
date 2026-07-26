@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { prGet } from '../../github/full-client.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 
 export function registerGitHubPrGet(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
@@ -32,7 +33,8 @@ export function registerGitHubPrGet(server: McpServer, callerHash: CallerHashPro
       url: z.string().optional(),
       user: z.string().optional(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const pr = await prGet(input.owner, input.repo, input.pull_number);
       return {
         data: {
