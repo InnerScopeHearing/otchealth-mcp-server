@@ -52,9 +52,10 @@ function requireGraphConfig(): { tenantId: string; clientId: string; clientSecre
  * ALLOWLIST for mailbox-scoped operations (2026-07-25, CRO customer-service-engine handoff).
  * Mirrors api-client.ts's allowedMailboxes()/assertAllowedMailbox() EXACTLY (duplicated, not
  * imported, to respect this file's own "self-contained" design note above) -- see that file's
- * header for the full rationale: this app's application permissions are tenant-wide with no
- * Graph-level mailbox scoping, so this is the real, live security boundary until an Exchange
- * Online ApplicationAccessPolicy is provisioned (EXO-PowerShell-only, no Graph REST equivalent).
+ * header for the full rationale. UPDATE (2026-07-26): the real Exchange ApplicationAccessPolicy
+ * this allowlist was standing in for is now LIVE and independently confirmed enforcing via
+ * Test-ApplicationAccessPolicy; this allowlist stays in place as a fast defense-in-depth guard
+ * that runs before any Graph call is attempted.
  */
 function allowedMailboxes(): Set<string> {
   const csv = env.GRAPH_CS_MAILBOXES || 'care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com';
@@ -66,8 +67,8 @@ function assertAllowedMailbox(mailbox: string): void {
     throw new GraphFullError({
       code: 'mailbox_not_allowed',
       status: 0,
-      message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a code-level guard standing in for the ApplicationAccessPolicy that has not been provisioned yet.`,
-      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES (and, once provisioned, the real Exchange ApplicationAccessPolicy).',
+      message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a fast code-level guard that runs in front of the real Exchange ApplicationAccessPolicy (live since 2026-07-26, confirmed enforcing via Test-ApplicationAccessPolicy).`,
+      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES and to the CS-Engine-Mailboxes security group the real ApplicationAccessPolicy is scoped to.',
     });
   }
 }
