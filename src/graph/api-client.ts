@@ -46,9 +46,16 @@ function requireGraphConfig(): { tenantId: string; clientId: string; clientSecre
  * including all ~50-60 legacy mailboxes never intended for this integration. Microsoft Graph itself
  * has NO mechanism to scope an application permission to a subset of mailboxes -- that requires an
  * Exchange Online ApplicationAccessPolicy (New-ApplicationAccessPolicy), an Exchange-Online-
- * PowerShell-only operation with no Graph REST equivalent, not yet provisioned as of this commit.
- * Until that policy exists, THIS allowlist is the only defense-in-depth boundary preventing an
- * over-broad `mailbox` argument from touching a legacy mailbox. Env-overridable
+ * PowerShell-only operation with no Graph REST equivalent.
+ *
+ * UPDATE (2026-07-26): that real Exchange ApplicationAccessPolicy is now LIVE -- created against
+ * app SP 1b57c9bf-44e7-4e32-b307-c6b4c343264e, AccessRight RestrictAccess, scoped to the
+ * mail-enabled security group "CS-Engine-Mailboxes" (care@/sarah@/helen@/ray@/coo@ only) -- and
+ * independently confirmed enforcing via Microsoft's own Test-ApplicationAccessPolicy cmdlet
+ * (Granted for care@otchealthmart.com, Denied for matthew@innd.com). THIS allowlist remains in
+ * place too, as defense-in-depth: it is a fast, code-level check that runs before any Graph call is
+ * even attempted, so a bad `mailbox` argument fails immediately instead of round-tripping to
+ * Exchange first to find out the real policy would have refused it anyway. Env-overridable
  * (GRAPH_CS_MAILBOXES, comma-separated) so new personas can be added without a redeploy; defaults
  * to the customer-service engine's 5 known addresses.
  */
@@ -62,8 +69,8 @@ function assertAllowedMailbox(mailbox: string): void {
     throw new GraphApiError({
       code: 'mailbox_not_allowed',
       status: 0,
-      message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a code-level guard standing in for the ApplicationAccessPolicy that has not been provisioned yet -- it deliberately refuses to touch any mailbox outside the customer-service engine's known set.`,
-      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES (and, once provisioned, the real Exchange ApplicationAccessPolicy).',
+      message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a fast code-level guard that runs in front of the real Exchange ApplicationAccessPolicy (live since 2026-07-26, confirmed enforcing via Test-ApplicationAccessPolicy) -- it deliberately refuses to touch any mailbox outside the customer-service engine's known set before a Graph call is even attempted.`,
+      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES and to the CS-Engine-Mailboxes security group the real ApplicationAccessPolicy is scoped to.',
     });
   }
 }
