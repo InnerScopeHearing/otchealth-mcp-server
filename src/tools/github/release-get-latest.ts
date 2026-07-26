@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 import { releaseGetLatest } from '../../github/full-client.js';
 
 export function registerGitHubReleaseGetLatest(server: McpServer, callerHash: CallerHashProvider): void {
@@ -26,7 +27,8 @@ export function registerGitHubReleaseGetLatest(server: McpServer, callerHash: Ca
       published_at: z.string().nullable().optional(),
       url: z.string().optional(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const r = await releaseGetLatest(input.owner, input.repo);
       return {
         data: { id: r.id, tag_name: r.tag_name, name: r.name, published_at: r.published_at, url: r.html_url },
