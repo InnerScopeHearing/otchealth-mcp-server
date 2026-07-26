@@ -9,8 +9,8 @@
  * Matching: exact tool name OR a prefix pattern ending in '*'.
  */
 export interface GovRule {
-  pattern: string;        // exact name or 'prefix*'
-  requiredRole: string;   // agent id that may execute, e.g. 'cto'
+  pattern: string;                 // exact name or 'prefix*'
+  requiredRole: string | string[]; // agent id(s) that may execute, e.g. 'cto' or ['cto', 'developer']
   reason: string;
 }
 
@@ -21,29 +21,41 @@ export const GOVERNANCE: GovRule[] = [
   // azure_containerapp_set_env / azure_search_*_upsert) by the same prefix, so a write tool can never
   // ship un-gated by omission. Visible to all agents; executable only by the cto lane.
   { pattern: 'azure_*', requiredRole: 'cto', reason: 'Azure control-plane (infra) is CTO-owned; read + write both CTO-only.' },
-  // Builds / releases are CTO-only (visible to all, executable by CTO only).
-  { pattern: 'depot_*', requiredRole: 'cto', reason: 'iOS/CI builds + TestFlight uploads are CTO-only (single initiator for consistency).' },
+  // Builds / CI (Depot) -- widened 2026-07-26 (Matt/CEO direct directive): the 'otchealth-dev'
+  // Copilot custom agent (caller_agent='developer') needs full read+write Depot capability to
+  // actually build the apps it's responsible for, not just observe. Previously CTO-only
+  // single-initiator; now cto OR developer. NOTE this prefix covers the ENTIRE depot_* surface,
+  // including destructive ops (project-delete, registry-images-delete, token-delete,
+  // workflow-cancel, job-cancel, run-cancel, project-reset) as well as trigger-build -- deliberately
+  // "full capable" per the directive, not narrowed to trigger-build alone. cto remains the only
+  // role for every OTHER infra surface (azure_*, netlify_*, cloudflare_*, stripe_*) -- those were
+  // not part of this directive and stay single-initiator.
+  { pattern: 'depot_*', requiredRole: ['cto', 'developer'], reason: 'iOS/CI builds + TestFlight uploads are cto/developer-only (developer widened to full Depot read+write 2026-07-26 per Matt/CEO directive; previously CTO-only single-initiator).' },
   { pattern: 'build_*', requiredRole: 'cto', reason: 'Build/release dispatch is CTO-only.' },
   { pattern: 'release_*', requiredRole: 'cto', reason: 'Release cutovers are CTO-only.' },
   // DNS / infra writes are CTO-only (charter: DNS + infra changes are CTO-owned).
   { pattern: 'cloudflare_create_dns_record', requiredRole: 'cto', reason: 'DNS changes are CTO-owned infrastructure.' },
-  // GitHub writes are CTO-only (code pushes / PRs / merges are a single-initiator CTO action,
-  // mirroring the build/release rule). All agents may read GitHub (github_list_*, get_file_contents).
-  { pattern: 'github_push_files', requiredRole: 'cto', reason: 'Code pushes are CTO-only (single initiator).' },
-  { pattern: 'github_create_pull_request', requiredRole: 'cto', reason: 'Opening PRs is CTO-only.' },
-  { pattern: 'github_pr_update', requiredRole: 'cto', reason: 'Updating a PR (title/body/base/state, incl. close/reopen) is a CTO-only PR write. It is category write_simple, so the write_orchestrated default CTO gate does NOT cover it; without this explicit rule any write-enabled lane could execute it. Added when the connector-surface widen exposed it on the DCR surface (2026-07-12).' },
-  { pattern: 'github_merge_pull_request', requiredRole: 'cto', reason: 'Merging PRs is CTO-only.' },
+  // GitHub writes -- widened 2026-07-26 (Matt/CEO direct directive, same as depot_* above): the
+  // 'otchealth-dev' Copilot custom agent needs full read+write GitHub capability (push, PR, merge,
+  // dispatch) to actually ship code, not just read it. Previously CTO-only single-initiator
+  // ("code pushes are a single-initiator CTO action"); now cto OR developer for every GitHub write
+  // in this list. All agents may already read GitHub (github_list_*, get_file_contents) -- unaffected.
+  { pattern: 'github_push_files', requiredRole: ['cto', 'developer'], reason: 'Code pushes: cto/developer-only (developer widened to full write 2026-07-26 per Matt/CEO directive; previously CTO-only single-initiator).' },
+  { pattern: 'github_create_pull_request', requiredRole: ['cto', 'developer'], reason: 'Opening PRs: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_pr_update', requiredRole: ['cto', 'developer'], reason: 'Updating a PR (title/body/base/state, incl. close/reopen) is a write_simple GitHub write, so the write_orchestrated default CTO gate does NOT cover it; explicit rule required. Widened 2026-07-26 per Matt/CEO directive to cto/developer.' },
+  { pattern: 'github_merge_pull_request', requiredRole: ['cto', 'developer'], reason: 'Merging PRs: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   // ===== FULL READ+WRITE WAVE: write-tool role gates (CTO = the operator connector identity) =====
-  // GitHub writes (single-initiator, mirrors existing push/PR/merge rules).
-  { pattern: 'github_create_branch', requiredRole: 'cto', reason: 'Branch creation is CTO-only (single initiator).' },
-  { pattern: 'github_create_or_update_file', requiredRole: 'cto', reason: 'Direct file commits are CTO-only.' },
-  { pattern: 'github_edit_file', requiredRole: 'cto', reason: 'Surgical in-place file edits (old_str/new_str) are a direct code write, same risk class as github_create_or_update_file. It is category write_simple, so the write_orchestrated default CTO gate does NOT cover it; this explicit rule is required or any write-enabled lane could edit files.' },
-  { pattern: 'github_create_issue', requiredRole: 'cto', reason: 'Gateway issue creation is CTO-only.' },
-  { pattern: 'github_comment_on_issue', requiredRole: 'cto', reason: 'Gateway issue/PR comments are CTO-only.' },
-  { pattern: 'github_add_labels', requiredRole: 'cto', reason: 'Label writes are CTO-only.' },
-  { pattern: 'github_create_release', requiredRole: 'cto', reason: 'Releases are CTO-only (single initiator).' },
-  { pattern: 'github_dispatch_workflow', requiredRole: 'cto', reason: 'Workflow dispatch triggers builds/deploys; CTO-only.' },
-  // Netlify deploy + env + hooks are CTO-owned infra.
+  // GitHub writes (single-initiator, mirrors existing push/PR/merge rules) -- widened alongside them.
+  { pattern: 'github_create_branch', requiredRole: ['cto', 'developer'], reason: 'Branch creation: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_create_or_update_file', requiredRole: ['cto', 'developer'], reason: 'Direct file commits: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_edit_file', requiredRole: ['cto', 'developer'], reason: 'Surgical in-place file edits (old_str/new_str) are a direct code write, same risk class as github_create_or_update_file. It is category write_simple, so the write_orchestrated default CTO gate does NOT cover it; this explicit rule is required. Widened 2026-07-26 per Matt/CEO directive to cto/developer.' },
+  { pattern: 'github_create_issue', requiredRole: ['cto', 'developer'], reason: 'Gateway issue creation: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_comment_on_issue', requiredRole: ['cto', 'developer'], reason: 'Gateway issue/PR comments: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_add_labels', requiredRole: ['cto', 'developer'], reason: 'Label writes: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_create_release', requiredRole: ['cto', 'developer'], reason: 'Releases (single initiator): cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_dispatch_workflow', requiredRole: ['cto', 'developer'], reason: 'Workflow dispatch triggers builds/deploys: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  // Netlify deploy + env + hooks are CTO-owned infra. NOT part of the 2026-07-26 directive (which
+  // was scoped to GitHub + Depot specifically) -- stays CTO-only.
   { pattern: 'netlify_trigger_deploy', requiredRole: 'cto', reason: 'Production deploys are CTO-only.' },
   { pattern: 'netlify_set_env_var', requiredRole: 'cto', reason: 'Env-var changes affect all deploys; CTO-only.' },
   { pattern: 'netlify_create_deploy_hook', requiredRole: 'cto', reason: 'Deploy hooks grant unauthenticated build triggers; CTO-only.' },
@@ -57,8 +69,8 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'stripe_create_invoice', requiredRole: 'cto', reason: 'Invoices with auto_advance can trigger collection.' },
 ];
 
-/** Return the required role for a tool name, or null if unrestricted. */
-export function requiredRoleFor(toolName: string): { role: string; reason: string } | null {
+/** Return the required role(s) for a tool name, or null if unrestricted. */
+export function requiredRoleFor(toolName: string): { role: string | string[]; reason: string } | null {
   for (const r of GOVERNANCE) {
     if (r.pattern.endsWith('*')) {
       if (toolName.startsWith(r.pattern.slice(0, -1))) return { role: r.requiredRole, reason: r.reason };
@@ -67,4 +79,9 @@ export function requiredRoleFor(toolName: string): { role: string; reason: strin
     }
   }
   return null;
+}
+
+/** True when callerAgent satisfies a GovRule's requiredRole (single string or a list of roles). */
+export function roleAllows(role: string | string[], callerAgent: string): boolean {
+  return Array.isArray(role) ? role.includes(callerAgent) : role === callerAgent;
 }
