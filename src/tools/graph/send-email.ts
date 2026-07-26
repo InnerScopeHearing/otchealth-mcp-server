@@ -10,7 +10,7 @@ export function registerGraphSendEmail(server: McpServer, callerHash: CallerHash
     category: 'write_orchestrated',
     annotations: {
       title: 'Send email as a customer-service or COO persona mailbox',
-      description: 'Send an email via Microsoft Graph as one of the allowlisted persona mailboxes (see the `from` param; defaults to coo@otchealthmart.com for back-compat). Uses application permissions (Mail.Send). Scoped autonomy: reply to Matt trusted addresses without approval; external/regulated stays gated. MNPI GATE (hard, code-level, not an LLM judgment): subject/body/recipients are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE send; a match to any external recipient is refused outright, a match to all-internal recipients requires an EXEC_RING caller lane. MAILBOX ALLOWLIST (code-level, see graph/api-client.ts): `from` is checked against GRAPH_CS_MAILBOXES -- an address outside that set is refused before any Graph call, standing in for the Exchange ApplicationAccessPolicy not yet provisioned.',
+      description: 'Send an email via Microsoft Graph as one of the allowlisted persona mailboxes (see the `from` param; defaults to coo@otchealthmart.com for back-compat). Uses application permissions (Mail.Send). Scoped autonomy: reply to Matt trusted addresses without approval; external/regulated stays gated. MNPI GATE (hard, code-level, not an LLM judgment): subject/body/recipients are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE send; a match to any external recipient is refused outright, a match to all-internal recipients requires an EXEC_RING caller lane. MAILBOX ALLOWLIST (code-level, see graph/api-client.ts): `from` is checked against GRAPH_CS_MAILBOXES -- an address outside that set is refused before any Graph call, standing in for the Exchange ApplicationAccessPolicy not yet provisioned. Respects dry_run (default true, per DRY_RUN_DEFAULT) -- pass dry_run:false to actually send.',
       readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true,
     },
     inputShape: {
@@ -46,6 +46,22 @@ export function registerGraphSendEmail(server: McpServer, callerHash: CallerHash
           summary: `Refused: ${mnpiGate.reason}`,
         };
       }
+
+      // DRY-RUN GATE (2026-07-26 fix): this handler previously ignored ctx.dryRun entirely and
+      // ALWAYS sent for real regardless of the dry_run flag, while structuredContent.dry_run still
+      // reported the computed value (true by default, per DRY_RUN_DEFAULT) -- a dangerously
+      // misleading signal on a write_orchestrated tool that can email real customers. Found by the
+      // CRO's own acceptance testing (2026-07-26): a call with no explicit dry_run got back
+      // dry_run:true in the response while the email demonstrably delivered (verified by
+      // independent re-read of the recipient's inbox). Fixed by actually checking ctx.dryRun before
+      // calling sendEmail, mirroring the existing pattern in graph/mark-read.ts.
+      if (ctx.dryRun) {
+        return {
+          data: { sent: false, to: input.to, subject: input.subject, from: input.from },
+          summary: `DRY RUN: would send to ${input.to} as ${input.from ?? 'coo@otchealthmart.com'}: "${input.subject}". Pass dry_run=false to actually send.`,
+        };
+      }
+
       const toList = input.to.split(',').map((e: string) => e.trim()).filter(Boolean);
       const ccList = input.cc ? input.cc.split(',').map((e: string) => e.trim()).filter(Boolean) : undefined;
       const bccList = input.bcc ? input.bcc.split(',').map((e: string) => e.trim()).filter(Boolean) : undefined;
