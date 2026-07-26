@@ -19,7 +19,7 @@ import {
 } from '../audit/logger.js';
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
-import { requiredRoleFor } from '../catalog/governance.js';
+import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult } from './result-store.js';
 import {
@@ -121,11 +121,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // seat and never re-scoped when it became a PRIMARY one.
   //
   // NOT a privilege grant on its own: execution-time role gating in catalog/governance.ts still
-  // refuses every non-cto caller for the write tools below. Other exec connectors used to merely SEE
-  // these entries and get refused if they called them -- as of the 2026-07-15 lane split, a non-ship
-  // connector lane no longer even SEES this list at all (it gets EXTERNAL_READONLY_TOOLSET instead),
-  // which is this file's actual security boundary; governance.ts's execution-time gating remains a
-  // second, independent layer under it.
+  // refuses every non-cto/non-developer caller for the write tools below. Other exec connectors used
+  // to merely SEE these entries and get refused if they called them -- as of the 2026-07-15 lane
+  // split, a non-ship connector lane no longer even SEES this list at all (it gets
+  // EXTERNAL_READONLY_TOOLSET instead), which is this file's actual security boundary;
+  // governance.ts's execution-time gating remains a second, independent layer under it.
   // write + branch
   'github_create_branch', 'github_create_or_update_file', 'github_edit_file', 'github_push_files', 'github_create_pull_request',
   'github_pr_update', 'github_pr_update_branch', 'github_ref_delete',
@@ -470,8 +470,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       if (!gov && def.category === 'write_orchestrated') {
         gov = { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
       }
-      if (gov && callerAgent !== gov.role) {
-        const gmsg = `Tool "${def.name}" is restricted to the ${gov.role} agent. ${gov.reason}` +
+      if (gov && !roleAllows(gov.role, callerAgent)) {
+        const roleLabel = Array.isArray(gov.role) ? gov.role.join('/') : gov.role;
+        const gmsg = `Tool "${def.name}" is restricted to the ${roleLabel} agent(s). ${gov.reason}` +
           (callerAgent ? ` Your identity: ${callerAgent}.` : ' No agent identity on your token.');
         logToolEnd({
           correlation_id: correlationId,
