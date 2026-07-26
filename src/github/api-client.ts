@@ -14,10 +14,10 @@ export class GitHubApiError extends Error {
 /**
  * Repo-scoping guard for non-privileged callers (2026-07-26, hardening follow-up to the
  * otchealth-dev Copilot custom agent wiring / COPILOT_DEV_AGENT_TOKEN). WHY THIS EXISTS: unlike
- * the medreview PHI carve-outs baked into Sentry/PostHog/Customer.io, github_*/depot_* tools had
+ * the medreview PHI carve-outs baked into Sentry/PostHog/Customer.io, github_ and depot_ tools had
  * NO repo-level scoping at all -- reach was bounded only by whatever the underlying GitHub App
  * installation could see. The high-risk write_orchestrated default (registry.ts) already makes
- * every destructive github_*/depot_* tool CTO-only structurally, so this guard only matters for
+ * every destructive github_ or depot_ tool CTO-only structurally, so this guard only matters for
  * the READ-category tools, which any non-cto caller (developer, etc.) could otherwise call
  * against ANY repo the App installation reaches.
  *
