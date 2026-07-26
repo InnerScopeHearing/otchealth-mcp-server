@@ -96,6 +96,14 @@ const EnvSchema = z.object({
   // CSV, case-insensitive. Defaults to the 5 known CS personas.
   GRAPH_CS_MAILBOXES: z.string().optional().default('care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com'),
 
+  // Repo-scoping allowlist for github_*/depot_* READ tools, for non-cto/exec callers (2026-07-26,
+  // hardening follow-up to the otchealth-dev Copilot custom agent wiring -- see
+  // github/api-client.ts's assertRepoAllowed() header for the full rationale). CSV of "owner/repo"
+  // pairs, case-insensitive. DEFAULT (unset/empty) IS UNRESTRICTED -- Matt's explicit call,
+  // 2026-07-26: ships as a zero-risk, inert control point, not a live restriction today. cto/exec
+  // are never subject to this check regardless of its value.
+  DEVELOPER_ALLOWED_REPOS: z.string().optional().default(''),
+
   // Stripe (read-only)
   STRIPE_SECRET_KEY: z.string().optional().default(''),
 
