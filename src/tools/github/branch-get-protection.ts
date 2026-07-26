@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 import { branchGetProtection } from '../../github/full-client.js';
 
 export function registerGitHubBranchGetProtection(server: McpServer, callerHash: CallerHashProvider): void {
@@ -23,7 +24,8 @@ export function registerGitHubBranchGetProtection(server: McpServer, callerHash:
     outputShape: {
       protection: z.unknown(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const p = await branchGetProtection(input.owner, input.repo, input.branch);
       return {
         data: { protection: p },

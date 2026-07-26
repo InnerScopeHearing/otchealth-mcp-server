@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 import { commitGet } from '../../github/full-client.js';
 
 export function registerGitHubCommitGet(server: McpServer, callerHash: CallerHashProvider): void {
@@ -29,7 +30,8 @@ export function registerGitHubCommitGet(server: McpServer, callerHash: CallerHas
       stats: z.unknown().optional(),
       files: z.array(z.unknown()).optional(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const c = await commitGet(input.owner, input.repo, input.ref);
       return {
         data: {
