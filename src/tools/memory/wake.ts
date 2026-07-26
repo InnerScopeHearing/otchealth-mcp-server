@@ -15,6 +15,7 @@ import { TASK_STATUSES } from '../../agentstate/agents.js';
 type TaskStatus = (typeof TASK_STATUSES)[number];
 import { isConfigured as cosmosConfigured } from '../../agentstate/cosmos.js';
 import { isConfigured as inboxConfigured, readMessages } from '../../agentstate/queue.js';
+import { isM365StaticAuth } from '../../server/request-context.js';
 
 /**
  * wake — ONE federated boot call for any agent on any platform. Composes, server-side, everything
@@ -130,6 +131,92 @@ export function buildDoctrinePitfalls(
  * where DoD + standing directives are still owed even though there is no agent to scope pitfalls to). */
 function buildDoctrine(pitfalls: DoctrinePitfall[] = []): Doctrine {
   return { definition_of_done: DEFINITION_OF_DONE, pitfalls, standing_directives: STANDING_DIRECTIVES };
+}
+
+// ---- M365 LITE WAKE (2026-07-26) ------------------------------------------------------------------
+// Deep Research Mode (5-subagent fan-out) found Microsoft documents a real, if informal, response-
+// size ceiling for a single RemoteMCPServer plugin tool result (Microsoft Learn declarative-agent-
+// architecture doc: ~25-item plugin response limit, ~4,096-token overall budget) -- exceeding it
+// produces exactly the "NO CONTENT AVAILABLE" symptom Matt hit live on wake(). This is DIFFERENT
+// from, and IN ADDITION TO, the 2026-07-25 fix below (isM365StaticAuth() skips our own JIT-offload
+// stub for M365 callers): that fix addressed Copilot's orchestrator not reliably chaining into a
+// follow-up gateway_fetch_result call when it sees an offload stub. Skipping offload alone still
+// leaves the FULL wake payload (many records at up to 900 chars each, routinely >40KB) well over
+// Copilot's own ceiling for a busy agent -- so the symptom persisted even after that fix.
+//
+// FIX: for M365 static-auth callers specifically, return a condensed object that is SMALL AND
+// USEFUL ON ITS OWN -- not a "fetch more" stub Copilot won't reliably chase (the exact failure mode
+// the 2026-07-25 fix was working around), just every field capped much harder. Field NAMES and
+// SHAPES are kept identical to the full response (pack/memory_records/tasks/inbox/inbound/errors/
+// doctrine all remain objects/arrays of the same kind) so this cannot violate the tool's declared
+// outputSchema -- only the CONTENT inside each field shrinks. Every other engine (Claude Code,
+// Hyperagent, and any non-M365 caller) is completely unchanged and still gets the full object.
+// Target: comfortably under 8KB serialized (well under both the ~25-item and ~4,096-token limits).
+const M365_LITE_TEXT_CAP = 150;
+const M365_LITE_LIST_CAP = 3;
+const M365_LITE_DOCTRINE_PITFALL_CAP = 4;
+
+interface WakePack {
+  configured: boolean;
+  status: Record<string, unknown> | null;
+  corrections: Record<string, unknown>[];
+  decisions: Record<string, unknown>[];
+  recent: Record<string, unknown>[];
+  count: number;
+}
+interface WakeTasks {
+  configured: boolean;
+  active: Record<string, unknown>[];
+  counts: Record<string, number>;
+}
+interface WakeInbox {
+  configured: boolean;
+  count: number;
+  preview: unknown[];
+}
+interface WakeInbound {
+  configured: boolean;
+  count: number;
+  sinceMarker: string;
+  notes: unknown[];
+}
+export interface WakeFullData {
+  agent: string;
+  pack: WakePack;
+  memory_records: Record<string, unknown>[];
+  tasks: WakeTasks;
+  inbox: WakeInbox;
+  inbound: WakeInbound;
+  errors: string[];
+  doctrine: Doctrine;
+}
+
+/** Condense a full wake() response for M365 static-auth callers. Pure + testable -- see the header
+ * comment above for the full rationale. Reuses capText (this file's existing text-capping helper)
+ * with a much smaller cap rather than inventing a new truncation mechanism. */
+export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
+  const capLite = (rec: Record<string, unknown> | null): Record<string, unknown> | null =>
+    rec ? capText(rec, M365_LITE_TEXT_CAP) : rec;
+
+  return {
+    agent: full.agent,
+    pack: {
+      ...full.pack,
+      status: capLite(full.pack.status),
+      corrections: full.pack.corrections.slice(0, M365_LITE_LIST_CAP).map((c) => capLite(c)),
+      decisions: full.pack.decisions.slice(0, M365_LITE_LIST_CAP).map((d) => capLite(d)),
+      recent: [], // dropped for size on the M365-lite path; call memory_recall for the full feed
+    },
+    memory_records: full.memory_records.slice(0, M365_LITE_LIST_CAP).map((r) => capLite(r)),
+    tasks: {
+      ...full.tasks,
+      active: full.tasks.active.slice(0, M365_LITE_LIST_CAP).map((t) => capLite(t)),
+    },
+    inbox: { ...full.inbox, preview: [] },
+    inbound: { ...full.inbound, notes: [] },
+    errors: full.errors,
+    doctrine: { ...full.doctrine, pitfalls: full.doctrine.pitfalls.slice(0, M365_LITE_DOCTRINE_PITFALL_CAP) },
+  };
 }
 
 export function registerWake(server: McpServer, callerHash: CallerHashProvider): void {
@@ -284,9 +371,25 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         );
         const doctrine = buildDoctrine(buildDoctrinePitfalls(doctrinePitfallsSharedV, cosmosPitfalls));
 
+        const fullData: WakeFullData = {
+          agent,
+          pack: packV as WakePack,
+          memory_records: (memV as { records: Record<string, unknown>[] }).records,
+          tasks: tasksV as WakeTasks,
+          inbox: inboxV as WakeInbox,
+          inbound: inboundV as WakeInbound,
+          errors,
+          doctrine,
+        };
+
+        // M365 LITE WAKE: see the header comment on buildM365LiteWake above. Every other caller
+        // (Claude Code, Hyperagent, any non-M365 lane) gets fullData unchanged.
+        const m365Lite = isM365StaticAuth();
+        const data = m365Lite ? buildM365LiteWake(fullData) : fullData;
+
         return {
-          data: { agent, pack: packV, memory_records: (memV as { records: unknown[] }).records, tasks: tasksV, inbox: inboxV, inbound: inboundV, errors, doctrine },
-          summary: `wake(${agent}): ${summaryBits.join(' · ')}${errors.length ? ` · ${errors.length} section error(s)` : ''}.${activeCount ? ` ⚠ ${activeCount} active task(s) awaiting you.` : ''}`,
+          data,
+          summary: `wake(${agent})${m365Lite ? ' [M365-lite]' : ''}: ${summaryBits.join(' · ')}${errors.length ? ` · ${errors.length} section error(s)` : ''}.${activeCount ? ` ⚠ ${activeCount} active task(s) awaiting you.` : ''}`,
         };
       },
     },
