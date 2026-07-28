@@ -1014,9 +1014,11 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // RESTORED (2026-07-28, review finding): briefly retired as "redundant" with the widened M365
   // prefix-strip shim, but that shim is gated to M365 requests only (registry.ts's
   // finalizeM365Aliases) -- deleting this would have silently broken "recall" for every OTHER
-  // caller (Claude Code, Hyperagent, connector clients) that already depends on it. Kept as the
-  // always-on, every-caller alias; see recall-alias.ts's header for how it coexists with the
-  // generic M365 shim without a duplicate-registration crash (primaryNamesFor() tracks this
+  // (non-connector) caller that already depends on it, e.g. Claude Code, Hyperagent. NOTE:
+  // connector-surface (Claude Chat DCR) clients never received "recall" either way -- their
+  // allowlist (CONNECTOR_TOOLSET, registry.ts) only lists "memory_recall". Kept as the always-on
+  // alias for the callers that do reach it; see recall-alias.ts's header for how it coexists with
+  // the generic M365 shim without a duplicate-registration crash (primaryNamesFor() tracks this
   // registration so the generic shim's own "recall" candidate is excluded, not colliding with it).
   registerMemoryRecallAlias(server, callerHash);
   registerMemoryTeam(server, callerHash);
