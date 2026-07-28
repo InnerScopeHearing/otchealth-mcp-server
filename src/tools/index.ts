@@ -66,7 +66,6 @@ import { registerGumroadListSales } from './gumroad/list-sales.js';
 // Phase 4 — kb-memory shared brain (commons feed; the cross-agent / cross-platform memory)
 import { registerMemoryRemember } from './memory/remember.js';
 import { registerMemoryRecall } from './memory/recall.js';
-import { registerMemoryRecallAlias } from './memory/recall-alias.js';
 import { registerMemoryTeam } from './memory/team.js';
 import { registerMemoryPack } from './memory/pack.js';
 import { registerMemoryInbound } from './memory/inbound.js';
@@ -1011,7 +1010,11 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // ===== Phase 4: kb-memory shared brain (cross-agent / cross-platform memory) =====
   registerMemoryRecall(server, callerHash);
-  registerMemoryRecallAlias(server, callerHash); // 2026-07-25: "recall" alias, see recall-alias.ts header
+  // NOTE (2026-07-28): the hand-written "recall" alias (recall-alias.ts, added 2026-07-25) was
+  // retired here -- registry.ts's M365 prefix-strip compat shim was widened the same day to cover
+  // every underscored tool name generically, so it now auto-generates the identical "memory_recall"
+  // -> "recall" alias on its own. Keeping both caused a hard "Tool recall is already registered"
+  // throw from the MCP SDK (registerAllTools failed outright). Single source of truth now.
   registerMemoryTeam(server, callerHash);
   registerMemoryPack(server, callerHash);
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS

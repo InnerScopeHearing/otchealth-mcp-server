@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildM365LiteWake, type WakeFullData } from './wake.js';
+import { buildM365LiteWake, M365_LITE_TEXT_CAP, type WakeFullData } from './wake.js';
 
 // Pins the 2026-07-26 M365-lite wake fix: Deep Research Mode found Copilot enforces a real
 // response-size ceiling (Microsoft Learn: ~25-item plugin response limit, ~4,096-token overall
@@ -18,7 +18,10 @@ function fullData(overrides: Partial<WakeFullData> = {}): WakeFullData {
     pack: {
       configured: true,
       status: { id: 's1', text: longText(300) },
-      corrections: Array.from({ length: 8 }, (_, i) => ({ id: `c${i}`, text: longText(300) })),
+      // 'was' is a REAL field a correction record carries in production (the prior belief being
+      // corrected) -- see buildM365LiteWake's 2026-07-28 header comment. Omitting it here is
+      // exactly what let the original size bug ship invisibly; every correction below carries one.
+      corrections: Array.from({ length: 8 }, (_, i) => ({ id: `c${i}`, text: longText(300), was: longText(300) })),
       decisions: Array.from({ length: 8 }, (_, i) => ({ id: `d${i}`, text: longText(300) })),
       recent: Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, text: longText(300) })),
       count: 40,
@@ -45,6 +48,18 @@ test('buildM365LiteWake produces a payload comfortably under 8KB even for a maxi
   const lite = buildM365LiteWake(fullData());
   const size = Buffer.byteLength(JSON.stringify(lite), 'utf8');
   assert.ok(size < 8192, `expected under 8KB, got ${size} bytes`);
+});
+
+// Pins the 2026-07-28 fix directly: a correction's 'was' field must be capped exactly like 'text' is
+// -- this is the field the original bug left completely uncapped (capText only ever touched 'text'),
+// which is what pushed a real production wake() response to ~12.6KB despite this same "<8KB" test
+// passing throughout, because the OLD fixture above never included a 'was' field at all.
+test('buildM365LiteWake caps the "was" field on corrections/decisions the same way it caps "text"', () => {
+  const lite = buildM365LiteWake(fullData()) as any;
+  for (const c of lite.pack.corrections) {
+    // capField appends a "…[truncated N chars]" suffix, so allow a small margin over the raw cap.
+    assert.ok(c.was.length <= M365_LITE_TEXT_CAP + 40, `expected was field capped, got ${c.was.length} chars: ${c.was}`);
+  }
 });
 
 test('buildM365LiteWake keeps field names/shapes identical to the full response (no outputSchema violation)', () => {

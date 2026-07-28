@@ -329,6 +329,10 @@ function gatedReject(
  */
 const registeredNamesByServer = new WeakMap<McpServer, Set<string>>();
 
+/** Real, standalone tools registered under exactly these bare names (see the RESERVED BARE NAMES
+ * comment at the alias-generation call site below) -- never eligible to be auto-aliased over. */
+const RESERVED_BARE_TOOL_NAMES = new Set(['search', 'fetch']);
+
 function registeredNamesFor(server: McpServer): Set<string> {
   let names = registeredNamesByServer.get(server);
   if (!names) {
@@ -855,35 +859,52 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     },
   );
 
-  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26): M365 Copilot's own tool-calling orchestrator has
-  // been observed splitting a registered tool name on its first underscore and calling only the
-  // remainder -- confirmed precedent in memory/recall-alias.ts (2026-07-25: "memory_recall" ->
-  // "recall", reproduced live as `MCP error -32602: Tool recall not found` until that alias
-  // shipped). Reproduced again 2026-07-26 for "github_repo_get" -> "repo_get" and
-  // "depot_run_list" -> "run_list" once the developer lane's M365 catalog was expanded to the full
-  // 70 github_* + 42 depot_* tools. Rather than hand-write a dedicated alias file per tool (112 of
-  // them), this generates the SAME compatibility alias generically, in the one shared path every
-  // github_*/depot_* tool already funnels through, so it can never drift out of sync with the
-  // primary registration (identical def/handler/gating -- the alias is a recursive call to this
-  // same function, so it passes through every governance/gating/audit/catalog-curation check a
-  // second time under its own name, not a bypass of any of them).
+  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED 2026-07-28): M365 Copilot's own tool-calling
+  // orchestrator has been observed splitting a registered tool name on its first underscore and
+  // calling only the remainder -- confirmed precedent in memory/recall-alias.ts (2026-07-25:
+  // "memory_recall" -> "recall", reproduced live as `MCP error -32602: Tool recall not found` until
+  // that alias shipped), then "github_repo_get" -> "repo_get" and "depot_run_list" -> "run_list"
+  // (2026-07-26). Originally scoped to just the github_/depot_ prefixes since those were the only
+  // reproduced cases at the time. WIDENED 2026-07-28 after a live Developer-agent diagnostic run
+  // (Matt, in production M365 Copilot) hit the SAME failure on two prefixes this shim did not cover:
+  // "catalog_probe" -> called as "probe" and "developer_wake_lite" -> called as "wake_lite", both
+  // returning `MCP error -32602: Tool <stripped> not found`. This proves the underlying Copilot
+  // behavior is generic to ANY underscored tool name, not specific to github_/depot_ -- so the shim
+  // now generates the alias for every tool with at least one underscore, not just those two
+  // prefixes. Rather than hand-write a dedicated alias file per tool, this generates the SAME
+  // compatibility alias generically, in the one shared path every tool already funnels through, so
+  // it can never drift out of sync with the primary registration (identical def/handler/gating --
+  // the alias is a recursive call to this same function, so it passes through every
+  // governance/gating/audit/catalog-curation check a second time under its own name, not a bypass
+  // of any of them).
   //
-  // COLLISION HANDLING: two real collisions exist in the current catalog --
-  // github_workflow_get/depot_workflow_get both strip to "workflow_get", and
-  // github_workflow_list/depot_workflow_list both strip to "workflow_list". Whichever tool
-  // registers first (import order in tools/index.ts) claims the bare alias; the other remains
-  // reachable ONLY by its real, full, unambiguous name. This is a deliberate, logged tradeoff for
-  // the alias's own convenience name, not a change to either tool's real identity or a namespace
-  // owned exclusively by one integration -- if M365 mis-calls the loser, the fix is telling the
-  // caller/orchestrator to use the full name (which was always correct), not re-adjudicating the
-  // alias.
+  // COLLISION HANDLING: several real collisions exist in the current catalog (e.g.
+  // github_workflow_get/depot_workflow_get both strip to "workflow_get"; brain_search/kb_search
+  // both strip to "search"). Whichever tool registers first (import order in tools/index.ts) claims
+  // the bare alias; the other remains reachable ONLY by its real, full, unambiguous name. This is a
+  // deliberate, logged tradeoff for the alias's own convenience name, not a change to either tool's
+  // real identity or a namespace owned exclusively by one integration -- if M365 mis-calls the
+  // loser, the fix is telling the caller/orchestrator to use the full name (which was always
+  // correct), not re-adjudicating the alias.
+  //
+  // RESERVED BARE NAMES (found 2026-07-28, widening this shim): "search" (openai-search.ts) and
+  // "fetch" (openai-fetch.ts) are REAL, standalone tools registered under exactly those bare names
+  // on purpose (the ChatGPT connector's required search/fetch tool-name convention) -- not aliases
+  // of anything. Registration order is not guaranteed, so a naive names.has() check is not enough:
+  // if brain_search/kb_search happened to register (and auto-alias to "search") BEFORE
+  // openai-search.ts ran, the REAL "search" tool's own primary registration would hit the MCP SDK's
+  // hard "Tool search is already registered" throw and take down the whole catalog (reproduced
+  // directly via registerAllTools during this fix). These names are excluded from alias generation
+  // unconditionally, regardless of order, so they can never be shadowed.
   if (!isAlias) {
-    const stripped = /^(?:github|depot)_(.+)$/.exec(def.name);
+    const stripped = /^[^_]+_(.+)$/.exec(def.name);
     if (stripped) {
       const aliasName = stripped[1];
       const names = registeredNamesFor(server);
       names.add(def.name);
-      if (names.has(aliasName)) {
+      if (RESERVED_BARE_TOOL_NAMES.has(aliasName)) {
+        // No warning needed -- this is an expected, permanent exclusion, not an ad hoc collision.
+      } else if (names.has(aliasName)) {
         // eslint-disable-next-line no-console
         console.warn(
           `[registry] M365 alias collision: "${aliasName}" (from "${def.name}") is already taken ` +
