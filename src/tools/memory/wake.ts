@@ -192,33 +192,69 @@ export interface WakeFullData {
 }
 
 /** Truncate an arbitrary string-valued field the same way capText truncates 'text', but for any
- * field name -- used below to also cap 'was' (a correction record's prior-belief text), which
- * capText itself deliberately never touches (it hardcodes the 'text' field only, correct for every
- * OTHER caller that wants 'was' left intact). Pure. */
+ * field name -- used below to also cap 'was'/'description' (long-text fields capText itself
+ * deliberately never touches, since it hardcodes 'text' only -- correct for every OTHER caller
+ * that wants those fields left intact). Pure. */
 function capField<T extends Record<string, unknown>>(rec: T, field: string, cap: number): T {
   const v = rec[field];
   if (typeof v !== 'string' || v.length <= cap) return rec;
   return { ...rec, [field]: `${v.slice(0, cap)} …[truncated ${v.length - cap} chars]` };
 }
 
+/** Every field on a wake() record, OTHER than 'text' (capText already owns that one and additionally
+ * sets a `truncated: true` marker + a richer suffix -- preserved by capping 'text' first, via
+ * capText, before this list runs via the plainer capField), that can carry an unbounded amount of
+ * text. capLite below caps ALL of these -- see buildM365LiteWake's header for why this list grew
+ * past just 'was' (a task record's 'description' was found live, in production, still passing
+ * through completely uncapped after the 'was' fix alone). */
+const EXTRA_LONG_TEXT_FIELDS = ['was', 'description'];
+
+/** Cosmos/CosmosDB internal bookkeeping fields (_rid/_self/_etag/_attachments/_ts) that ride along
+ * on every memory/task record returned from the store. Pure implementation-detail noise with zero
+ * value to an M365 caller -- stripped entirely (not merely capped) on the lite path to reclaim that
+ * space for content. Non-lite (full) callers are unaffected; this function is only ever invoked
+ * from buildM365LiteWake. */
+function stripInternalFields<T extends Record<string, unknown>>(rec: T): T {
+  const out = { ...rec } as Record<string, unknown>;
+  for (const k of ['_rid', '_self', '_etag', '_attachments', '_ts']) delete out[k];
+  return out as T;
+}
+
 /** Condense a full wake() response for M365 static-auth callers. Pure + testable -- see the header
  * comment above for the full rationale. Reuses capText (this file's existing text-capping helper)
  * with a much smaller cap rather than inventing a new truncation mechanism.
  *
- * FIX (2026-07-28, live production bug found via direct reproduction against the deployed gateway
- * using a real M365 static token): capText only ever caps the 'text' field. A real correction
- * record from the shared ledger routinely ALSO carries a 'was' field (the prior belief being
- * corrected, e.g. "NOW: X ... (was: Y)") which is JUST AS LONG as 'text' and was passing through
- * this function completely uncapped. The existing wake.m365-lite.test.ts fixtures never included a
- * 'was' field, so this was invisible to CI: the test's <8KB assertion passed while a real developer-
- * lane wake() measured ~12.6KB for content[0].text alone (~24.5KB total with the duplicated
- * structuredContent.result) -- 50%+ over the file's own stated <8KB target, and squarely in the
- * range Microsoft's documented ~4,096-token plugin-response ceiling would reject, matching Matt's
- * live "NO CONTENT AVAILABLE" report on wake() specifically (while smaller real tool calls in the
- * same session rendered fine). capLite now caps BOTH 'text' and 'was' on every record. */
+ * FIX (2026-07-28, live production bugs found via direct reproduction against the deployed gateway
+ * using a real M365 static token, in TWO passes):
+ *
+ * Pass 1: capText only ever caps the 'text' field. A real correction record from the shared ledger
+ * routinely ALSO carries a 'was' field (the prior belief being corrected) which is just as long and
+ * was passing through completely uncapped. Fixed by also capping 'was'.
+ *
+ * Pass 2 (found by re-measuring the LIVE response after deploying pass 1 -- it barely shrank,
+ * ~24.3KB vs ~24.5KB before, proving pass 1 alone did not actually fix the reported symptom): a
+ * task record's 'description' field carries the SAME kind of unbounded text as a
+ * correction/decision's 'text', but under a different field name capLite never checked -- a real
+ * task (e.g. a compliance sweep description) ran several hundred characters, completely uncapped.
+ * Separately, every memory_records entry carries raw Cosmos bookkeeping fields (_rid/_self/_etag/
+ * _attachments/_ts) that add real bytes for zero value to the caller. Both fixed: capLite now caps
+ * EVERY field in LONG_TEXT_FIELDS (text/was/description), and memory_records + tasks.active entries
+ * are also run through stripInternalFields(). The wake.m365-lite.test.ts fixtures for BOTH bugs
+ * never included the field that was actually broken (no 'was' on the first pass, no 'description'
+ * or Cosmos fields on the second) -- this is now the second time that exact failure mode has bitten
+ * this file, so the test fixtures below are built to mirror a REAL record's full field set, not a
+ * minimal one, specifically to prevent a third recurrence. */
 export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
-  const capLite = (rec: Record<string, unknown> | null): Record<string, unknown> | null =>
-    rec ? capField(capText(rec, M365_LITE_TEXT_CAP), 'was', M365_LITE_TEXT_CAP) : rec;
+  const capLite = (rec: Record<string, unknown> | null): Record<string, unknown> | null => {
+    if (!rec) return rec;
+    let out = capText(rec, M365_LITE_TEXT_CAP); // 'text' first: preserves the truncated:true marker
+    for (const field of EXTRA_LONG_TEXT_FIELDS) out = capField(out, field, M365_LITE_TEXT_CAP);
+    return out;
+  };
+  const capLiteAndStrip = (rec: Record<string, unknown> | null): Record<string, unknown> | null => {
+    const capped = capLite(rec);
+    return capped ? stripInternalFields(capped) : capped;
+  };
 
   return {
     agent: full.agent,
@@ -229,10 +265,10 @@ export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
       decisions: full.pack.decisions.slice(0, M365_LITE_LIST_CAP).map((d) => capLite(d)),
       recent: [], // dropped for size on the M365-lite path; call memory_recall for the full feed
     },
-    memory_records: full.memory_records.slice(0, M365_LITE_LIST_CAP).map((r) => capLite(r)),
+    memory_records: full.memory_records.slice(0, M365_LITE_LIST_CAP).map((r) => capLiteAndStrip(r)),
     tasks: {
       ...full.tasks,
-      active: full.tasks.active.slice(0, M365_LITE_LIST_CAP).map((t) => capLite(t)),
+      active: full.tasks.active.slice(0, M365_LITE_LIST_CAP).map((t) => capLiteAndStrip(t)),
     },
     inbox: { ...full.inbox, preview: [] },
     inbound: { ...full.inbound, notes: [] },

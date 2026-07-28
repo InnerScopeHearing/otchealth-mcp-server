@@ -30,10 +30,36 @@ function fullData(overrides: Partial<WakeFullData> = {}): WakeFullData {
       recent: Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, text: longText(300) })),
       count: 40,
     },
-    memory_records: Array.from({ length: 12 }, (_, i) => ({ id: `m${i}`, text: longText(300) })),
+    // memory_records mirror a real Cosmos document: a 'text' field (capped) PLUS the raw
+    // _rid/_self/_etag/_attachments/_ts bookkeeping fields Cosmos always attaches. Omitting these
+    // (as the pre-2026-07-28-pass-2 fixture did) is exactly what let them ship unstripped in
+    // production -- pure noise bytes with zero value to an M365 caller.
+    memory_records: Array.from({ length: 12 }, (_, i) => ({
+      id: `m${i}`,
+      text: longText(300),
+      _rid: 'NPQiAJSeDs10BAAAAAAAAA==',
+      _self: 'dbs/NPQiAA==/colls/NPQiAJSeDs0=/docs/NPQiAJSeDs10BAAAAAAAAA==/',
+      _etag: '"7c0607e1-0000-0200-0000-6a5a8d020000"',
+      _attachments: 'attachments/',
+      _ts: 1784319234,
+    })),
     tasks: {
       configured: true,
-      active: Array.from({ length: 15 }, (_, i) => ({ id: `t${i}`, text: longText(600) })),
+      // Real task records use 'description', NOT 'text' -- the field name the pre-2026-07-28-pass-2
+      // fixture used here. That mismatch is exactly what let a real task's description ship
+      // completely uncapped in production while this fixture's "text" field (which no real task
+      // record even has) was dutifully capped, masking the bug. Also carries the same Cosmos
+      // bookkeeping fields as memory_records.
+      active: Array.from({ length: 15 }, (_, i) => ({
+        id: `t${i}`,
+        title: `Task ${i}`,
+        description: longText(600),
+        _rid: 'NPQiAPsOhbAVAAAAAAAAAA==',
+        _self: 'dbs/NPQiAA==/colls/NPQiAPsOhbA=/docs/NPQiAPsOhbAVAAAAAAAAAA==/',
+        _etag: '"2f03909b-0000-0200-0000-6a57d9070000"',
+        _attachments: 'attachments/',
+        _ts: 1784142087,
+      })),
       counts: { open: 5, claimed: 3 },
     },
     inbox: { configured: true, count: 8, preview: Array.from({ length: 5 }, (_, i) => ({ id: `i${i}`, text: longText(400) })) },
@@ -67,6 +93,26 @@ test('buildM365LiteWake caps the "was" field on corrections/decisions the same w
     for (const rec of arr) {
       // capField appends a "…[truncated N chars]" suffix, so allow a small margin over the raw cap.
       assert.ok(rec.was.length <= M365_LITE_TEXT_CAP + 40, `expected was field capped, got ${rec.was.length} chars: ${rec.was}`);
+    }
+  }
+});
+
+// Pins the SECOND 2026-07-28 fix, found by re-measuring the LIVE gateway after deploying the first
+// one: it barely shrank the real response (~24.3KB vs ~24.5KB before), proving the "was" fix alone
+// did not actually resolve Matt's reported symptom. A task's "description" field is the same kind
+// of unbounded text as "text"/"was", just under a field name capLite never checked.
+test('buildM365LiteWake caps the "description" field on tasks.active the same way it caps "text"', () => {
+  const lite = buildM365LiteWake(fullData()) as any;
+  for (const t of lite.tasks.active) {
+    assert.ok(t.description.length <= M365_LITE_TEXT_CAP + 40, `expected description capped, got ${t.description.length} chars: ${t.description}`);
+  }
+});
+
+test('buildM365LiteWake strips Cosmos-internal bookkeeping fields (_rid/_self/_etag/_attachments/_ts) from memory_records and tasks.active', () => {
+  const lite = buildM365LiteWake(fullData()) as any;
+  for (const rec of [...lite.memory_records, ...lite.tasks.active]) {
+    for (const internalField of ['_rid', '_self', '_etag', '_attachments', '_ts']) {
+      assert.ok(!(internalField in rec), `expected ${internalField} to be stripped, record still has it: ${JSON.stringify(rec)}`);
     }
   }
 });
