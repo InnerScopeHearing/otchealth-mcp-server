@@ -152,9 +152,15 @@ function buildDoctrine(pitfalls: DoctrinePitfall[] = []): Doctrine {
 // outputSchema -- only the CONTENT inside each field shrinks. Every other engine (Claude Code,
 // Hyperagent, and any non-M365 caller) is completely unchanged and still gets the full object.
 // Target: comfortably under 8KB serialized (well under both the ~25-item and ~4,096-token limits).
-export const M365_LITE_TEXT_CAP = 150;
-const M365_LITE_LIST_CAP = 3;
-const M365_LITE_DOCTRINE_PITFALL_CAP = 4;
+// TIGHTENED (2026-07-28, 3rd/4th review round): the original 150/3-item caps were sized against the
+// text/was fields alone. Once the generic recursive bound (boundValue below) also caps tags/notes/
+// title/artifact_uri on EVERY record, a maximally-adversarial-but-realistic record (every field at
+// its cap simultaneously) still totals more than the old caps left margin for -- measured via the
+// wire-envelope test in wake.m365-lite.test.ts, which mirrors registry.ts's actual pretty-printed +
+// duplicated-in-structuredContent response shape rather than a single minified copy.
+export const M365_LITE_TEXT_CAP = 100;
+const M365_LITE_LIST_CAP = 2;
+const M365_LITE_DOCTRINE_PITFALL_CAP = 3;
 
 interface WakePack {
   configured: boolean;
@@ -191,48 +197,86 @@ export interface WakeFullData {
   doctrine: Doctrine;
 }
 
-/** Truncate an arbitrary string-valued field the same way capText truncates 'text', but for any
- * field name -- used below to also cap 'was' (a correction record's prior-belief text), which
- * capText itself deliberately never touches (it hardcodes the 'text' field only, correct for every
- * OTHER caller that wants 'was' left intact). Pure. */
-function capField<T extends Record<string, unknown>>(rec: T, field: string, cap: number): T {
-  const v = rec[field];
-  if (typeof v !== 'string' || v.length <= cap) return rec;
-  return { ...rec, [field]: `${v.slice(0, cap)} …[truncated ${v.length - cap} chars]` };
+/** Cosmos/CosmosDB internal bookkeeping fields (_rid/_self/_etag/_attachments/_ts) that ride along
+ * on every memory/task record returned from the store. Pure implementation-detail noise with zero
+ * value to an M365 caller -- stripped entirely (not merely capped) on the lite path to reclaim that
+ * space for content. Non-lite (full) callers are unaffected. */
+const COSMOS_INTERNAL_FIELDS = new Set(['_rid', '_self', '_etag', '_attachments', '_ts']);
+
+const M365_LITE_MAX_ARRAY_ITEMS = 2; // bounds any NESTED array (tags, notes, whatever comes next)
+const M365_LITE_MAX_DEPTH = 6; // safety valve against pathological nesting; real records are shallow
+
+/**
+ * Recursively bound an arbitrary JSON value for the M365-lite path: every string longer than
+ * M365_LITE_TEXT_CAP is truncated (wherever it lives, at any depth, under any field name); every
+ * array longer than M365_LITE_MAX_ARRAY_ITEMS is truncated; every Cosmos-internal bookkeeping key is
+ * dropped. Numbers/booleans/null pass through unchanged. Pure, generic, field-name-agnostic.
+ *
+ * WHY THIS EXISTS (2026-07-28, replacing a field-name ALLOWLIST that failed FOUR times in a row on
+ * this exact function): the original approach special-cased one field name at a time as each one
+ * was found live in production -- 'text' (the original design), then 'was' (pass 1, a correction's
+ * prior-belief text), then 'description' (pass 2, a task's long-form content, found by re-measuring
+ * the LIVE gateway after pass 1 barely moved the needle: ~24.3KB vs ~24.5KB before), then 'notes' (a
+ * review finding: an unbounded string[] task_update appends to over a task's lifetime, which no
+ * scalar-field cap could ever touch since it's an array, not a string). A FIFTH review comment named
+ * the actual structural problem directly: "one such record can push wake() back over the ceiling"
+ * because ANY not-yet-listed field -- tags arrays, title, artifact_uri, or a field nobody has hit
+ * yet -- was still completely unbounded. A denylist of field NAMES can never be complete; a
+ * recursive bound on VALUE SHAPE (string, array, object) by construction cannot miss a future field,
+ * because it never looks at field names at all except to strip the known-noise Cosmos ones. */
+function boundValue(value: unknown, depth: number): unknown {
+  if (depth > M365_LITE_MAX_DEPTH) return value;
+  if (typeof value === 'string') {
+    if (value.length <= M365_LITE_TEXT_CAP) return value;
+    return `${value.slice(0, M365_LITE_TEXT_CAP)} …[truncated ${value.length - M365_LITE_TEXT_CAP} chars]`;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, M365_LITE_MAX_ARRAY_ITEMS).map((v) => boundValue(v, depth + 1));
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (COSMOS_INTERNAL_FIELDS.has(k)) continue;
+      out[k] = boundValue(v, depth + 1);
+    }
+    return out;
+  }
+  return value; // number | boolean | null | undefined
+}
+
+/** Bound one wake() record (or null, e.g. pack.status when nothing is set yet) for the lite path.
+ * Thin wrapper over boundValue that also stamps `truncated: true` whenever the record's own
+ * serialized size actually shrank, mirroring the informational marker the rest of the codebase's
+ * capText() convention uses (nothing downstream machine-checks this flag -- it's for a human/LLM
+ * reader glancing at the JSON -- so an approximate whole-record signal is sufficient; exact per-
+ * field parity with capText is not required). */
+function boundRecord(rec: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!rec) return rec;
+  const bounded = boundValue(rec, 0) as Record<string, unknown>;
+  if (JSON.stringify(bounded).length < JSON.stringify(rec).length) bounded.truncated = true;
+  return bounded;
 }
 
 /** Condense a full wake() response for M365 static-auth callers. Pure + testable -- see the header
- * comment above for the full rationale. Reuses capText (this file's existing text-capping helper)
- * with a much smaller cap rather than inventing a new truncation mechanism.
- *
- * FIX (2026-07-28, live production bug found via direct reproduction against the deployed gateway
- * using a real M365 static token): capText only ever caps the 'text' field. A real correction
- * record from the shared ledger routinely ALSO carries a 'was' field (the prior belief being
- * corrected, e.g. "NOW: X ... (was: Y)") which is JUST AS LONG as 'text' and was passing through
- * this function completely uncapped. The existing wake.m365-lite.test.ts fixtures never included a
- * 'was' field, so this was invisible to CI: the test's <8KB assertion passed while a real developer-
- * lane wake() measured ~12.6KB for content[0].text alone (~24.5KB total with the duplicated
- * structuredContent.result) -- 50%+ over the file's own stated <8KB target, and squarely in the
- * range Microsoft's documented ~4,096-token plugin-response ceiling would reject, matching Matt's
- * live "NO CONTENT AVAILABLE" report on wake() specifically (while smaller real tool calls in the
- * same session rendered fine). capLite now caps BOTH 'text' and 'was' on every record. */
+ * comment above for the full rationale, and boundValue's header for why this is now a generic
+ * recursive bound rather than a field-name allowlist (four prior field-specific patches in a row on
+ * this exact function is what forced the rewrite). Field names/top-level SHAPES are kept identical
+ * to the full response so this cannot violate the tool's declared outputSchema -- only the CONTENT
+ * inside each field shrinks. */
 export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
-  const capLite = (rec: Record<string, unknown> | null): Record<string, unknown> | null =>
-    rec ? capField(capText(rec, M365_LITE_TEXT_CAP), 'was', M365_LITE_TEXT_CAP) : rec;
-
   return {
     agent: full.agent,
     pack: {
       ...full.pack,
-      status: capLite(full.pack.status),
-      corrections: full.pack.corrections.slice(0, M365_LITE_LIST_CAP).map((c) => capLite(c)),
-      decisions: full.pack.decisions.slice(0, M365_LITE_LIST_CAP).map((d) => capLite(d)),
+      status: boundRecord(full.pack.status),
+      corrections: full.pack.corrections.slice(0, M365_LITE_LIST_CAP).map((c) => boundRecord(c)),
+      decisions: full.pack.decisions.slice(0, M365_LITE_LIST_CAP).map((d) => boundRecord(d)),
       recent: [], // dropped for size on the M365-lite path; call memory_recall for the full feed
     },
-    memory_records: full.memory_records.slice(0, M365_LITE_LIST_CAP).map((r) => capLite(r)),
+    memory_records: full.memory_records.slice(0, M365_LITE_LIST_CAP).map((r) => boundRecord(r)),
     tasks: {
       ...full.tasks,
-      active: full.tasks.active.slice(0, M365_LITE_LIST_CAP).map((t) => capLite(t)),
+      active: full.tasks.active.slice(0, M365_LITE_LIST_CAP).map((t) => boundRecord(t)),
     },
     inbox: { ...full.inbox, preview: [] },
     inbound: { ...full.inbound, notes: [] },
