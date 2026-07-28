@@ -22,7 +22,11 @@ function fullData(overrides: Partial<WakeFullData> = {}): WakeFullData {
       // corrected) -- see buildM365LiteWake's 2026-07-28 header comment. Omitting it here is
       // exactly what let the original size bug ship invisibly; every correction below carries one.
       corrections: Array.from({ length: 8 }, (_, i) => ({ id: `c${i}`, text: longText(300), was: longText(300) })),
-      decisions: Array.from({ length: 8 }, (_, i) => ({ id: `d${i}`, text: longText(300) })),
+      // Decisions can carry a 'was' field too (a decision that reverses a prior one) -- covered
+      // here so the "was" cap is pinned for BOTH arrays, not just corrections (a 2026-07-28 review
+      // finding: the original version of this fixture/test only covered corrections, so a future
+      // regression that stopped capping 'was' on decisions specifically would still pass).
+      decisions: Array.from({ length: 8 }, (_, i) => ({ id: `d${i}`, text: longText(300), was: longText(300) })),
       recent: Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, text: longText(300) })),
       count: 40,
     },
@@ -56,9 +60,14 @@ test('buildM365LiteWake produces a payload comfortably under 8KB even for a maxi
 // passing throughout, because the OLD fixture above never included a 'was' field at all.
 test('buildM365LiteWake caps the "was" field on corrections/decisions the same way it caps "text"', () => {
   const lite = buildM365LiteWake(fullData()) as any;
-  for (const c of lite.pack.corrections) {
-    // capField appends a "…[truncated N chars]" suffix, so allow a small margin over the raw cap.
-    assert.ok(c.was.length <= M365_LITE_TEXT_CAP + 40, `expected was field capped, got ${c.was.length} chars: ${c.was}`);
+  // Both arrays checked (2026-07-28 review finding: the original version of this test only looped
+  // over corrections, so a future regression that stopped capping "was" on decisions specifically
+  // would still have passed).
+  for (const arr of [lite.pack.corrections, lite.pack.decisions]) {
+    for (const rec of arr) {
+      // capField appends a "…[truncated N chars]" suffix, so allow a small margin over the raw cap.
+      assert.ok(rec.was.length <= M365_LITE_TEXT_CAP + 40, `expected was field capped, got ${rec.was.length} chars: ${rec.was}`);
+    }
   }
 });
 

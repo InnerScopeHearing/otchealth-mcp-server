@@ -5,7 +5,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallerHashProvider } from './registry.js';
+import { finalizeM365Aliases, type CallerHashProvider } from './registry.js';
 
 // Phase 1 — Customer.io
 import { registerListNewsletters } from './cio/list-newsletters.js';
@@ -66,6 +66,7 @@ import { registerGumroadListSales } from './gumroad/list-sales.js';
 // Phase 4 — kb-memory shared brain (commons feed; the cross-agent / cross-platform memory)
 import { registerMemoryRemember } from './memory/remember.js';
 import { registerMemoryRecall } from './memory/recall.js';
+import { registerMemoryRecallAlias } from './memory/recall-alias.js';
 import { registerMemoryTeam } from './memory/team.js';
 import { registerMemoryPack } from './memory/pack.js';
 import { registerMemoryInbound } from './memory/inbound.js';
@@ -1010,11 +1011,14 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // ===== Phase 4: kb-memory shared brain (cross-agent / cross-platform memory) =====
   registerMemoryRecall(server, callerHash);
-  // NOTE (2026-07-28): the hand-written "recall" alias (recall-alias.ts, added 2026-07-25) was
-  // retired here -- registry.ts's M365 prefix-strip compat shim was widened the same day to cover
-  // every underscored tool name generically, so it now auto-generates the identical "memory_recall"
-  // -> "recall" alias on its own. Keeping both caused a hard "Tool recall is already registered"
-  // throw from the MCP SDK (registerAllTools failed outright). Single source of truth now.
+  // RESTORED (2026-07-28, review finding): briefly retired as "redundant" with the widened M365
+  // prefix-strip shim, but that shim is gated to M365 requests only (registry.ts's
+  // finalizeM365Aliases) -- deleting this would have silently broken "recall" for every OTHER
+  // caller (Claude Code, Hyperagent, connector clients) that already depends on it. Kept as the
+  // always-on, every-caller alias; see recall-alias.ts's header for how it coexists with the
+  // generic M365 shim without a duplicate-registration crash (primaryNamesFor() tracks this
+  // registration so the generic shim's own "recall" candidate is excluded, not colliding with it).
+  registerMemoryRecallAlias(server, callerHash);
   registerMemoryTeam(server, callerHash);
   registerMemoryPack(server, callerHash);
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
@@ -1908,4 +1912,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).
   registerMailArchiveTools(server, callerHash);
+
+  // M365 PREFIX-STRIP COMPAT SHIM finalization (2026-07-28): MUST run last, after every real tool
+  // above has registered, so the full alias-candidate set (and the full set of real primary tool
+  // names) is known before any alias is actually registered. See registry.ts's
+  // finalizeM365Aliases()/registerTool() for the full rationale (a no-op for non-M365 requests).
+  finalizeM365Aliases(server, callerHash);
 }
