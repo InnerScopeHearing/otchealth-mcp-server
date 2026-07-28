@@ -268,7 +268,13 @@ export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
     memory_records: full.memory_records.slice(0, M365_LITE_LIST_CAP).map((r) => capLiteAndStrip(r)),
     tasks: {
       ...full.tasks,
-      active: full.tasks.active.slice(0, M365_LITE_LIST_CAP).map((t) => capLiteAndStrip(t)),
+      // 'notes' is a string[] that task_update appends unrestricted, unbounded-length strings to
+      // over a task's lifetime (task-update.ts's `note` input has no length cap) -- a single active
+      // task with long or accumulated notes could still push wake() back over the M365 limit even
+      // with 'description' now capped. capLite only handles scalar string fields (text/was/
+      // description), not arrays, so this is dropped entirely on the lite path, matching the same
+      // convention already used for pack.recent / inbox.preview / inbound.notes below.
+      active: full.tasks.active.slice(0, M365_LITE_LIST_CAP).map((t) => ({ ...capLiteAndStrip(t), notes: [] })),
     },
     inbox: { ...full.inbox, preview: [] },
     inbound: { ...full.inbound, notes: [] },

@@ -54,6 +54,10 @@ function fullData(overrides: Partial<WakeFullData> = {}): WakeFullData {
         id: `t${i}`,
         title: `Task ${i}`,
         description: longText(600),
+        // 'notes' is a string[] that task_update appends unrestricted, unbounded-length strings to
+        // over a task's lifetime (a 2026-07-28 review finding on THIS pr) -- accumulated notes on a
+        // long-lived task are a realistic size contributor this fixture omitted until now.
+        notes: [longText(400), longText(400), longText(400)],
         _rid: 'NPQiAPsOhbAVAAAAAAAAAA==',
         _self: 'dbs/NPQiAA==/colls/NPQiAPsOhbA=/docs/NPQiAPsOhbAVAAAAAAAAAA==/',
         _etag: '"2f03909b-0000-0200-0000-6a57d9070000"',
@@ -114,6 +118,18 @@ test('buildM365LiteWake strips Cosmos-internal bookkeeping fields (_rid/_self/_e
     for (const internalField of ['_rid', '_self', '_etag', '_attachments', '_ts']) {
       assert.ok(!(internalField in rec), `expected ${internalField} to be stripped, record still has it: ${JSON.stringify(rec)}`);
     }
+  }
+});
+
+// Pins a review finding on THIS pr: task_update appends unrestricted, unbounded-length strings to
+// a task's 'notes' array over its lifetime (task-update.ts's `note` input has no length cap), and
+// capLite only handles scalar string fields -- an array was never covered by the text/was/
+// description caps. A single long-lived, heavily-annotated task could still push wake() back over
+// the M365 limit even with description now capped, so notes is dropped entirely on the lite path.
+test('buildM365LiteWake drops tasks.active[].notes entirely (an unbounded string[] the scalar-field caps cannot touch)', () => {
+  const lite = buildM365LiteWake(fullData()) as any;
+  for (const t of lite.tasks.active) {
+    assert.deepEqual(t.notes, [], `expected notes dropped, got: ${JSON.stringify(t.notes)}`);
   }
 });
 
