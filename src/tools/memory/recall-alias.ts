@@ -17,12 +17,30 @@ import { recallHandler, RECALL_INPUT_SHAPE, RECALL_OUTPUT_SHAPE } from './recall
  * calling the SAME recallHandler as memory_recall (see recall.ts), so behavior is byte-identical
  * regardless of which name a caller uses. Not a new capability, not a new privilege -- a pure
  * name-compatibility shim for one specific consumer's (M365 Copilot's) observed quirk.
+ *
+ * DELIBERATELY UNCONDITIONAL (2026-07-28 review finding): the 2026-07-26 M365 prefix-strip compat
+ * shim (registry.ts) was WIDENED and GATED behind isM365StaticAuth() the same day this file was
+ * briefly (incorrectly) retired as "redundant" -- but that gate means the generic shim's own
+ * "memory_recall" -> "recall" alias ONLY exists for M365 callers, whereas THIS registration has
+ * always run unconditionally (Claude Code, Hyperagent, and any other non-connector-surface OAuth
+ * caller). NOTE (2026-07-28, second review correction): "recall" is NOT exposed to Claude Chat (DCR)
+ * connector clients specifically -- CONNECTOR_TOOLSET only lists "memory_recall" (registry.ts's
+ * connector allowlists), so a connector-surface request never reaches this registration at all
+ * (filtered by name at the top of registerTool, same as any tool outside that curated set); an
+ * earlier version of this comment incorrectly claimed connector clients got it too. Deleting this
+ * file would have silently broken "recall" for every OTHER (non-connector) caller that already
+ * depends on it, turning a working call into `Tool recall not found`. Kept as the always-on alias
+ * for those callers;
+ * registry.ts's finalizeM365Aliases() defers to this file for the M365 case too (primaryNamesFor()
+ * tracks this registration, so the generic shim's own "recall" candidate is excluded rather than
+ * colliding with it -- see finalizeM365Aliases()'s doc comment).
  */
 export function registerMemoryRecallAlias(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
     {
       name: 'recall',
+      canonicalName: 'memory_recall',
       category: 'read',
       annotations: {
         title: 'Recall from the shared brain (alias)',

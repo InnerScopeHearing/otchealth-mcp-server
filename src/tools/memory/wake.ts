@@ -152,7 +152,7 @@ function buildDoctrine(pitfalls: DoctrinePitfall[] = []): Doctrine {
 // outputSchema -- only the CONTENT inside each field shrinks. Every other engine (Claude Code,
 // Hyperagent, and any non-M365 caller) is completely unchanged and still gets the full object.
 // Target: comfortably under 8KB serialized (well under both the ~25-item and ~4,096-token limits).
-const M365_LITE_TEXT_CAP = 150;
+export const M365_LITE_TEXT_CAP = 150;
 const M365_LITE_LIST_CAP = 3;
 const M365_LITE_DOCTRINE_PITFALL_CAP = 4;
 
@@ -191,12 +191,34 @@ export interface WakeFullData {
   doctrine: Doctrine;
 }
 
+/** Truncate an arbitrary string-valued field the same way capText truncates 'text', but for any
+ * field name -- used below to also cap 'was' (a correction record's prior-belief text), which
+ * capText itself deliberately never touches (it hardcodes the 'text' field only, correct for every
+ * OTHER caller that wants 'was' left intact). Pure. */
+function capField<T extends Record<string, unknown>>(rec: T, field: string, cap: number): T {
+  const v = rec[field];
+  if (typeof v !== 'string' || v.length <= cap) return rec;
+  return { ...rec, [field]: `${v.slice(0, cap)} …[truncated ${v.length - cap} chars]` };
+}
+
 /** Condense a full wake() response for M365 static-auth callers. Pure + testable -- see the header
  * comment above for the full rationale. Reuses capText (this file's existing text-capping helper)
- * with a much smaller cap rather than inventing a new truncation mechanism. */
+ * with a much smaller cap rather than inventing a new truncation mechanism.
+ *
+ * FIX (2026-07-28, live production bug found via direct reproduction against the deployed gateway
+ * using a real M365 static token): capText only ever caps the 'text' field. A real correction
+ * record from the shared ledger routinely ALSO carries a 'was' field (the prior belief being
+ * corrected, e.g. "NOW: X ... (was: Y)") which is JUST AS LONG as 'text' and was passing through
+ * this function completely uncapped. The existing wake.m365-lite.test.ts fixtures never included a
+ * 'was' field, so this was invisible to CI: the test's <8KB assertion passed while a real developer-
+ * lane wake() measured ~12.6KB for content[0].text alone (~24.5KB total with the duplicated
+ * structuredContent.result) -- 50%+ over the file's own stated <8KB target, and squarely in the
+ * range Microsoft's documented ~4,096-token plugin-response ceiling would reject, matching Matt's
+ * live "NO CONTENT AVAILABLE" report on wake() specifically (while smaller real tool calls in the
+ * same session rendered fine). capLite now caps BOTH 'text' and 'was' on every record. */
 export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
   const capLite = (rec: Record<string, unknown> | null): Record<string, unknown> | null =>
-    rec ? capText(rec, M365_LITE_TEXT_CAP) : rec;
+    rec ? capField(capText(rec, M365_LITE_TEXT_CAP), 'was', M365_LITE_TEXT_CAP) : rec;
 
   return {
     agent: full.agent,

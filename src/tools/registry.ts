@@ -239,6 +239,18 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   inputShape: Shape;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
+  /**
+   * SECURITY (2026-07-28 review fix): set ONLY on a generated M365 prefix-strip alias (see the
+   * alias-generation block at the bottom of registerTool) to the REAL tool's name, e.g.
+   * "azure_containerapp_get" when name="containerapp_get". Every name-PATTERN-based gate
+   * (requiredRoleFor, lane curation, JIT doctrine) MUST evaluate against this canonical identity,
+   * not the alias's bare `name` -- a review finding caught the alias otherwise bypassing role
+   * gating entirely: "containerapp_get" doesn't match the `azure_*` governance pattern that makes
+   * "azure_containerapp_get" CTO-only, so any authenticated lane could call the alias unrestricted.
+   * `name` itself stays the SDK lookup key / what a caller actually invokes; only defaults to
+   * itself for a primary (non-alias) registration.
+   */
+  canonicalName?: string;
 }
 
 function parseUpstreamToolError(err: unknown): { code: string; nextStep: string; status?: number } | null {
@@ -322,20 +334,89 @@ function gatedReject(
 }
 
 /**
- * M365 PREFIX-STRIP COMPAT SHIM (2026-07-26): per-server registry of every tool name actually
- * registered (primary names AND generated aliases), used only to detect a naming collision before
- * generating an alias below. Scoped per McpServer instance (WeakMap) rather than module-global so
- * multiple server instances in the same process (e.g. tests) never share state.
+ * M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, restructured to TWO-PASS 2026-07-28): every PRIMARY
+ * (non-alias) tool name actually registered on a given McpServer instance, tracked UNCONDITIONALLY
+ * (not just for M365 requests) so a candidate alias can be checked against it during finalization.
+ * Scoped per McpServer instance (WeakMap) rather than module-global so multiple server instances in
+ * the same process (e.g. tests, or the stateless per-request servers in server/mcp.ts) never share
+ * state.
  */
-const registeredNamesByServer = new WeakMap<McpServer, Set<string>>();
+const primaryNamesByServer = new WeakMap<McpServer, Set<string>>();
 
-function registeredNamesFor(server: McpServer): Set<string> {
-  let names = registeredNamesByServer.get(server);
+function primaryNamesFor(server: McpServer): Set<string> {
+  let names = primaryNamesByServer.get(server);
   if (!names) {
     names = new Set<string>();
-    registeredNamesByServer.set(server, names);
+    primaryNamesByServer.set(server, names);
   }
   return names;
+}
+
+/**
+ * TWO-PASS REDESIGN (2026-07-28 review fix, "first wins can silently mis-route a call"): the
+ * original single-pass version registered whichever tool's alias arrived FIRST (import order in
+ * tools/index.ts) and left the loser reachable only by its full name. A review finding caught that
+ * this is worse than merely "the loser is unreachable by alias" -- since M365's own behavior is to
+ * strip and call the SHORT name regardless of which tool the caller meant, a THREE-way collision
+ * like n8n_workflow_get / github_workflow_get / depot_workflow_get all stripping to "workflow_get"
+ * means whichever registers first SILENTLY ANSWERS A CALL MEANT FOR ONE OF THE OTHER TWO -- wrong
+ * data, wrong side effects, or a schema mismatch, not just an inconvenience.
+ *
+ * Fix: collect every alias CANDIDATE (aliasName -> every {canonicalName, def} that would strip to
+ * it) during the normal registration pass, but do not register any of them yet. A NEW
+ * finalizeM365Aliases() runs ONCE at the very end of registerAllTools() (after every real tool has
+ * registered, so the full candidate set is finally known) and registers an alias ONLY for a name
+ * that is genuinely unambiguous: exactly one canonical tool wants it, AND no real primary tool is
+ * already registered under that exact name. Any name with 2+ distinct canonical tools competing for
+ * it gets NO alias at all -- callers hitting that ambiguity must use a tool's full, unambiguous
+ * name (which was always correct), not have a coin-flip winner silently answer for all of them.
+ */
+interface AliasCandidate {
+  canonicalName: string;
+  def: ToolDefinition<ZodRawShape, ZodRawShape>;
+}
+const aliasCandidatesByServer = new WeakMap<McpServer, Map<string, AliasCandidate[]>>();
+
+function aliasCandidatesFor(server: McpServer): Map<string, AliasCandidate[]> {
+  let candidates = aliasCandidatesByServer.get(server);
+  if (!candidates) {
+    candidates = new Map<string, AliasCandidate[]>();
+    aliasCandidatesByServer.set(server, candidates);
+  }
+  return candidates;
+}
+
+/**
+ * Registers exactly the UNAMBIGUOUS M365 prefix-strip aliases collected during this server
+ * instance's registration pass -- call ONCE, after every other registerXxx() call in
+ * registerAllTools() has run, so the full candidate set (and the full set of real primary tool
+ * names) is known before any alias decision is made. A no-op if no M365 request ever collected any
+ * candidates (the collection step itself is gated on isM365StaticAuth() at the call site below).
+ */
+export function finalizeM365Aliases(server: McpServer, callerHashProvider: () => string): void {
+  const candidates = aliasCandidatesByServer.get(server);
+  if (!candidates || candidates.size === 0) return;
+  const primaryNames = primaryNamesByServer.get(server) ?? new Set<string>();
+  for (const [aliasName, entries] of candidates) {
+    if (primaryNames.has(aliasName)) {
+      // A REAL tool (e.g. "search"/"fetch"/"recall") already owns this exact name -- never eligible
+      // to be auto-claimed by an alias, regardless of order. No warning: this is an expected,
+      // permanent exclusion, not an ad hoc collision.
+      continue;
+    }
+    const distinctCanonical = new Set(entries.map((e) => e.canonicalName));
+    if (distinctCanonical.size > 1) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[registry] M365 alias AMBIGUOUS: "${aliasName}" would match ${distinctCanonical.size} different ` +
+          `tools (${[...distinctCanonical].join(', ')}) -- registering NONE of them under this name rather ` +
+          `than risk silently routing a mis-stripped call to the wrong handler. Callers must use the full name.`,
+      );
+      continue;
+    }
+    const { canonicalName, def } = entries[0]!;
+    registerTool(server, { ...def, name: aliasName, canonicalName }, callerHashProvider, true);
+  }
 }
 
 export function registerTool<Shape extends ZodRawShape, Output extends ZodRawShape>(
@@ -351,6 +432,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // connectorToolset() above, this file's actual security boundary. All other callers see
   // everything, and the startup catalog-warm runs with no request context (currentCallerAgent() ===
   // '', isConnectorSurface() === false) so /health tool_count (deploy gate) is unaffected.
+  // SECURITY (2026-07-28 review fix): every name-PATTERN gate below evaluates against the
+  // CANONICAL name (see ToolDefinition.canonicalName's doc comment) -- for a primary registration
+  // this is just def.name; for a generated alias it's the real tool the alias stands in for.
+  const canonicalName = def.canonicalName ?? def.name;
   const connectorSurfaceForThisTool = isConnectorSurface();
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
@@ -364,12 +449,15 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const laneForThisTool = currentCallerAgent();
   const catalogCuration = connectorSurfaceForThisTool
     ? null
-    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, def.name);
+    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName);
   if (catalogCuration && !catalogCuration.advertise) return;
-  // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
+  // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
+  // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
+  // fake "service" derived from the alias's stripped bare name (e.g. "containerapp" instead of
+  // "azure" for the "containerapp_get" alias of azure_containerapp_get).
   recordTool({
-    name: def.name,
-    service: deriveService(def.name),
+    name: canonicalName,
+    service: deriveService(canonicalName),
     category: def.category,
     title: def.annotations.title,
     description: def.annotations.description,
@@ -474,15 +562,19 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           evaluateCatalogCuration(
             parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE),
             callerAgent,
-            def.name,
+            canonicalName,
           ),
           callerAgent,
-          def.name,
+          canonicalName,
           callerHash,
         );
       }
 
-      let gov = requiredRoleFor(def.name);
+      // SECURITY (2026-07-28 review fix): canonicalName, not def.name -- see ToolDefinition's doc
+      // comment. Evaluating against an alias's stripped bare name here was a real, live governance
+      // bypass (e.g. "containerapp_get" wouldn't match the azure_* CTO-only pattern that
+      // "azure_containerapp_get" itself is gated by).
+      let gov = requiredRoleFor(canonicalName);
       // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
       // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
       if (!gov && def.category === 'write_orchestrated') {
@@ -590,7 +682,11 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // AUTO-GUARD (inbound): Prompt Shields on the tool-call args, BEFORE the handler runs (no side
       // effect yet, so enforce-blocking here is safe for any category). Fail-open + mode-gated (SHIELD_MODE
       // off|report|enforce, default report) + inert until CONTENT_SAFETY_* is set. report annotates only.
-      const shield = await inboundShield(def.name, handlerInput);
+      // canonicalName, not def.name (2026-07-28 review fix): inboundShield's SELF_TOOLS exemption is
+      // keyed by canonical names (shield_check/groundedness_check/claims_check) so those tools don't
+      // recursively shield-scan their own attack-shaped test input. Passing the alias's stripped
+      // name (e.g. "check") would miss that exemption and block a legitimate self-test call.
+      const shield = await inboundShield(canonicalName, handlerInput);
       if (shield.blocked) {
         const smsg =
           `Tool "${def.name}" blocked by Prompt Shields (SHIELD_MODE=enforce): a prompt-injection / ` +
@@ -736,7 +832,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // on `def.category !== 'read'`. Advisory only in v1 (no enforce mode, never blocks); fail-open
         // by construction and never throws (safety/jit-doctrine.ts). Throttled once per (caller, tool)
         // per process so the same pitfall does not nag on every subsequent call.
-        const jitDoctrine = evaluateJitDoctrine(callerHash, def.name);
+        // canonicalName, not def.name -- a pitfall bound to e.g. "posthog_" or "azure_containerapp_set_env"
+        // should still fire when reached via an M365 alias, not silently go dark under the stripped name.
+        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName);
         if (jitDoctrine.pitfalls.length) {
           structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
           // PHASE 2 SLO TELEMETRY (observe-only): feeds the doctrine-coverage SLO -- how often a
@@ -855,46 +953,53 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     },
   );
 
-  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26): M365 Copilot's own tool-calling orchestrator has
-  // been observed splitting a registered tool name on its first underscore and calling only the
-  // remainder -- confirmed precedent in memory/recall-alias.ts (2026-07-25: "memory_recall" ->
-  // "recall", reproduced live as `MCP error -32602: Tool recall not found` until that alias
-  // shipped). Reproduced again 2026-07-26 for "github_repo_get" -> "repo_get" and
-  // "depot_run_list" -> "run_list" once the developer lane's M365 catalog was expanded to the full
-  // 70 github_* + 42 depot_* tools. Rather than hand-write a dedicated alias file per tool (112 of
-  // them), this generates the SAME compatibility alias generically, in the one shared path every
-  // github_*/depot_* tool already funnels through, so it can never drift out of sync with the
-  // primary registration (identical def/handler/gating -- the alias is a recursive call to this
-  // same function, so it passes through every governance/gating/audit/catalog-curation check a
-  // second time under its own name, not a bypass of any of them).
+  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED + HARDENED 2026-07-28): M365 Copilot's own
+  // tool-calling orchestrator has been observed splitting a registered tool name on its first
+  // underscore and calling only the remainder -- confirmed precedent in memory/recall-alias.ts
+  // (2026-07-25: "memory_recall" -> "recall"), then "github_repo_get" -> "repo_get" and
+  // "depot_run_list" -> "run_list" (2026-07-26). Originally scoped to just the github_/depot_
+  // prefixes. WIDENED 2026-07-28 after a live Developer-agent diagnostic run (Matt, in production
+  // M365 Copilot) hit the SAME failure on "catalog_probe" -> "probe" and "developer_wake_lite" ->
+  // "wake_lite" -- proving the behavior is generic to ANY underscored tool name.
   //
-  // COLLISION HANDLING: two real collisions exist in the current catalog --
-  // github_workflow_get/depot_workflow_get both strip to "workflow_get", and
-  // github_workflow_list/depot_workflow_list both strip to "workflow_list". Whichever tool
-  // registers first (import order in tools/index.ts) claims the bare alias; the other remains
-  // reachable ONLY by its real, full, unambiguous name. This is a deliberate, logged tradeoff for
-  // the alias's own convenience name, not a change to either tool's real identity or a namespace
-  // owned exclusively by one integration -- if M365 mis-calls the loser, the fix is telling the
-  // caller/orchestrator to use the full name (which was always correct), not re-adjudicating the
-  // alias.
+  // THIS BLOCK ONLY COLLECTS CANDIDATES -- it never registers an alias directly. See
+  // finalizeM365Aliases() above for why (a single-pass "first tool through wins" policy was found,
+  // in review, to be able to SILENTLY MIS-ROUTE a call to the wrong tool's handler when 3+ tools
+  // collide on the same stripped name, e.g. n8n_workflow_get / github_workflow_get /
+  // depot_workflow_get all -> "workflow_get" -- not merely leave the loser unreachable). Every
+  // primary (non-alias) registration is also tracked in primaryNamesFor() UNCONDITIONALLY (not just
+  // for M365 requests) so finalizeM365Aliases() can exclude any candidate name a REAL tool already
+  // owns (e.g. "search"/"fetch"/"recall") regardless of registration order.
+  //
+  // SCOPE (review finding): candidate collection itself is gated behind isM365StaticAuth() -- an
+  // unconditional version would collect (and eventually finalize) a compatibility alias for nearly
+  // the whole ~850-tool catalog on EVERY request (Claude Code, Hyperagent, connector clients too),
+  // materially inflating tools/list size and prompt-token cost for callers that never needed M365
+  // compatibility. Each per-request McpServer instance is stateless (server/mcp.ts), so this
+  // correctly scopes the extra registrations to only the M365 static-auth request that needs them.
+  //
+  // GOVERNANCE BYPASS (review finding, the security one): an alias is a recursive registerTool()
+  // call with `{...def, name: aliasName}`, so EVERY name-pattern-based gate inside the handler
+  // (requiredRoleFor, lane curation, JIT doctrine) was evaluating against the STRIPPED name, not the
+  // real tool -- e.g. "containerapp_get" (alias of the CTO-only azure_containerapp_get) doesn't
+  // match the `azure_*` governance pattern, so ANY authenticated lane could call it unrestricted.
+  // Fixed by passing `canonicalName: def.name` into the alias's def (see ToolDefinition's doc
+  // comment) so those gates evaluate the real tool's identity while `name` stays only the SDK
+  // lookup key / what the caller actually invokes.
   if (!isAlias) {
-    const stripped = /^(?:github|depot)_(.+)$/.exec(def.name);
-    if (stripped) {
-      const aliasName = stripped[1];
-      const names = registeredNamesFor(server);
-      names.add(def.name);
-      if (names.has(aliasName)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[registry] M365 alias collision: "${aliasName}" (from "${def.name}") is already taken ` +
-            `by an earlier registration -- "${def.name}" remains reachable only by its full name.`,
-        );
-      } else {
-        names.add(aliasName);
-        registerTool(server, { ...def, name: aliasName }, callerHashProvider, true);
+    primaryNamesFor(server).add(def.name);
+    if (isM365StaticAuth()) {
+      const stripped = /^[^_]+_(.+)$/.exec(def.name);
+      if (stripped) {
+        const aliasName = stripped[1];
+        const bucket = aliasCandidatesFor(server);
+        const list = bucket.get(aliasName) ?? [];
+        // Type erasure to the WeakMap's fixed shape is safe here: def is only ever forwarded
+        // opaquely into a later registerTool() call (finalizeM365Aliases), never inspected by
+        // field-specific generic logic.
+        list.push({ canonicalName: def.name, def: def as unknown as ToolDefinition<ZodRawShape, ZodRawShape> });
+        bucket.set(aliasName, list);
       }
-    } else {
-      registeredNamesFor(server).add(def.name);
     }
   }
 }

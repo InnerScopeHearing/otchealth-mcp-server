@@ -5,7 +5,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallerHashProvider } from './registry.js';
+import { finalizeM365Aliases, type CallerHashProvider } from './registry.js';
 
 // Phase 1 — Customer.io
 import { registerListNewsletters } from './cio/list-newsletters.js';
@@ -1011,7 +1011,16 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // ===== Phase 4: kb-memory shared brain (cross-agent / cross-platform memory) =====
   registerMemoryRecall(server, callerHash);
-  registerMemoryRecallAlias(server, callerHash); // 2026-07-25: "recall" alias, see recall-alias.ts header
+  // RESTORED (2026-07-28, review finding): briefly retired as "redundant" with the widened M365
+  // prefix-strip shim, but that shim is gated to M365 requests only (registry.ts's
+  // finalizeM365Aliases) -- deleting this would have silently broken "recall" for every OTHER
+  // (non-connector) caller that already depends on it, e.g. Claude Code, Hyperagent. NOTE:
+  // connector-surface (Claude Chat DCR) clients never received "recall" either way -- their
+  // allowlist (CONNECTOR_TOOLSET, registry.ts) only lists "memory_recall". Kept as the always-on
+  // alias for the callers that do reach it; see recall-alias.ts's header for how it coexists with
+  // the generic M365 shim without a duplicate-registration crash (primaryNamesFor() tracks this
+  // registration so the generic shim's own "recall" candidate is excluded, not colliding with it).
+  registerMemoryRecallAlias(server, callerHash);
   registerMemoryTeam(server, callerHash);
   registerMemoryPack(server, callerHash);
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
@@ -1905,4 +1914,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).
   registerMailArchiveTools(server, callerHash);
+
+  // M365 PREFIX-STRIP COMPAT SHIM finalization (2026-07-28): MUST run last, after every real tool
+  // above has registered, so the full alias-candidate set (and the full set of real primary tool
+  // names) is known before any alias is actually registered. See registry.ts's
+  // finalizeM365Aliases()/registerTool() for the full rationale (a no-op for non-M365 requests).
+  finalizeM365Aliases(server, callerHash);
 }
