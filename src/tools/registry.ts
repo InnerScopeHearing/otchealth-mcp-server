@@ -239,6 +239,18 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   inputShape: Shape;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
+  /**
+   * SECURITY (2026-07-28 review fix): set ONLY on a generated M365 prefix-strip alias (see the
+   * alias-generation block at the bottom of registerTool) to the REAL tool's name, e.g.
+   * "azure_containerapp_get" when name="containerapp_get". Every name-PATTERN-based gate
+   * (requiredRoleFor, lane curation, JIT doctrine) MUST evaluate against this canonical identity,
+   * not the alias's bare `name` -- a review finding caught the alias otherwise bypassing role
+   * gating entirely: "containerapp_get" doesn't match the `azure_*` governance pattern that makes
+   * "azure_containerapp_get" CTO-only, so any authenticated lane could call the alias unrestricted.
+   * `name` itself stays the SDK lookup key / what a caller actually invokes; only defaults to
+   * itself for a primary (non-alias) registration.
+   */
+  canonicalName?: string;
 }
 
 function parseUpstreamToolError(err: unknown): { code: string; nextStep: string; status?: number } | null {
@@ -355,6 +367,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // connectorToolset() above, this file's actual security boundary. All other callers see
   // everything, and the startup catalog-warm runs with no request context (currentCallerAgent() ===
   // '', isConnectorSurface() === false) so /health tool_count (deploy gate) is unaffected.
+  // SECURITY (2026-07-28 review fix): every name-PATTERN gate below evaluates against the
+  // CANONICAL name (see ToolDefinition.canonicalName's doc comment) -- for a primary registration
+  // this is just def.name; for a generated alias it's the real tool the alias stands in for.
+  const canonicalName = def.canonicalName ?? def.name;
   const connectorSurfaceForThisTool = isConnectorSurface();
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
@@ -368,12 +384,15 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const laneForThisTool = currentCallerAgent();
   const catalogCuration = connectorSurfaceForThisTool
     ? null
-    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, def.name);
+    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName);
   if (catalogCuration && !catalogCuration.advertise) return;
-  // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
+  // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
+  // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
+  // fake "service" derived from the alias's stripped bare name (e.g. "containerapp" instead of
+  // "azure" for the "containerapp_get" alias of azure_containerapp_get).
   recordTool({
-    name: def.name,
-    service: deriveService(def.name),
+    name: canonicalName,
+    service: deriveService(canonicalName),
     category: def.category,
     title: def.annotations.title,
     description: def.annotations.description,
@@ -478,15 +497,19 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           evaluateCatalogCuration(
             parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE),
             callerAgent,
-            def.name,
+            canonicalName,
           ),
           callerAgent,
-          def.name,
+          canonicalName,
           callerHash,
         );
       }
 
-      let gov = requiredRoleFor(def.name);
+      // SECURITY (2026-07-28 review fix): canonicalName, not def.name -- see ToolDefinition's doc
+      // comment. Evaluating against an alias's stripped bare name here was a real, live governance
+      // bypass (e.g. "containerapp_get" wouldn't match the azure_* CTO-only pattern that
+      // "azure_containerapp_get" itself is gated by).
+      let gov = requiredRoleFor(canonicalName);
       // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
       // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
       if (!gov && def.category === 'write_orchestrated') {
@@ -740,7 +763,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // on `def.category !== 'read'`. Advisory only in v1 (no enforce mode, never blocks); fail-open
         // by construction and never throws (safety/jit-doctrine.ts). Throttled once per (caller, tool)
         // per process so the same pitfall does not nag on every subsequent call.
-        const jitDoctrine = evaluateJitDoctrine(callerHash, def.name);
+        // canonicalName, not def.name -- a pitfall bound to e.g. "posthog_" or "azure_containerapp_set_env"
+        // should still fire when reached via an M365 alias, not silently go dark under the stripped name.
+        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName);
         if (jitDoctrine.pitfalls.length) {
           structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
           // PHASE 2 SLO TELEMETRY (observe-only): feeds the doctrine-coverage SLO -- how often a
@@ -859,24 +884,32 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     },
   );
 
-  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED 2026-07-28): M365 Copilot's own tool-calling
-  // orchestrator has been observed splitting a registered tool name on its first underscore and
-  // calling only the remainder -- confirmed precedent in memory/recall-alias.ts (2026-07-25:
-  // "memory_recall" -> "recall", reproduced live as `MCP error -32602: Tool recall not found` until
-  // that alias shipped), then "github_repo_get" -> "repo_get" and "depot_run_list" -> "run_list"
-  // (2026-07-26). Originally scoped to just the github_/depot_ prefixes since those were the only
-  // reproduced cases at the time. WIDENED 2026-07-28 after a live Developer-agent diagnostic run
-  // (Matt, in production M365 Copilot) hit the SAME failure on two prefixes this shim did not cover:
-  // "catalog_probe" -> called as "probe" and "developer_wake_lite" -> called as "wake_lite", both
-  // returning `MCP error -32602: Tool <stripped> not found`. This proves the underlying Copilot
-  // behavior is generic to ANY underscored tool name, not specific to github_/depot_ -- so the shim
-  // now generates the alias for every tool with at least one underscore, not just those two
-  // prefixes. Rather than hand-write a dedicated alias file per tool, this generates the SAME
-  // compatibility alias generically, in the one shared path every tool already funnels through, so
-  // it can never drift out of sync with the primary registration (identical def/handler/gating --
-  // the alias is a recursive call to this same function, so it passes through every
-  // governance/gating/audit/catalog-curation check a second time under its own name, not a bypass
-  // of any of them).
+  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED + HARDENED 2026-07-28): M365 Copilot's own
+  // tool-calling orchestrator has been observed splitting a registered tool name on its first
+  // underscore and calling only the remainder -- confirmed precedent in memory/recall-alias.ts
+  // (2026-07-25: "memory_recall" -> "recall"), then "github_repo_get" -> "repo_get" and
+  // "depot_run_list" -> "run_list" (2026-07-26). Originally scoped to just the github_/depot_
+  // prefixes. WIDENED 2026-07-28 after a live Developer-agent diagnostic run (Matt, in production
+  // M365 Copilot) hit the SAME failure on "catalog_probe" -> "probe" and "developer_wake_lite" ->
+  // "wake_lite" -- proving the behavior is generic to ANY underscored tool name.
+  //
+  // TWO REVIEW FINDINGS on that widening, both fixed here:
+  // (1) SCOPE: gated the ENTIRE block behind isM365StaticAuth() -- a widened, unconditional version
+  //     of this shim would have registered a compatibility alias for nearly the whole ~850-tool
+  //     catalog on EVERY request (Claude Code, Hyperagent, connector clients too), materially
+  //     inflating tools/list size and prompt-token cost for callers that never asked for or need
+  //     M365 compatibility. Each per-request McpServer instance is stateless (server/mcp.ts), so
+  //     this correctly scopes the extra registrations to only the M365 static-auth request that
+  //     actually needs them; the catalog-warm startup call (no request context) and every other
+  //     caller's real requests get the lean, unaliased catalog exactly as before this shim existed.
+  // (2) GOVERNANCE BYPASS: an alias is a recursive registerTool() call with `{...def, name:
+  //     aliasName}`, so EVERY name-pattern-based gate inside the handler (requiredRoleFor, lane
+  //     curation, JIT doctrine) was evaluating against the STRIPPED name, not the real tool --
+  //     e.g. "containerapp_get" (alias of the CTO-only azure_containerapp_get) doesn't match the
+  //     `azure_*` governance pattern, so ANY authenticated lane could call it unrestricted. Fixed
+  //     by passing `canonicalName: def.name` into the alias's def (see ToolDefinition's doc
+  //     comment) so those gates evaluate the real tool's identity while `name` stays only the SDK
+  //     lookup key / what the caller actually invokes.
   //
   // COLLISION HANDLING: several real collisions exist in the current catalog (e.g.
   // github_workflow_get/depot_workflow_get both strip to "workflow_get"; brain_search/kb_search
@@ -896,7 +929,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // hard "Tool search is already registered" throw and take down the whole catalog (reproduced
   // directly via registerAllTools during this fix). These names are excluded from alias generation
   // unconditionally, regardless of order, so they can never be shadowed.
-  if (!isAlias) {
+  if (!isAlias && isM365StaticAuth()) {
     const stripped = /^[^_]+_(.+)$/.exec(def.name);
     if (stripped) {
       const aliasName = stripped[1];
@@ -912,7 +945,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         );
       } else {
         names.add(aliasName);
-        registerTool(server, { ...def, name: aliasName }, callerHashProvider, true);
+        registerTool(server, { ...def, name: aliasName, canonicalName: def.name }, callerHashProvider, true);
       }
     } else {
       registeredNamesFor(server).add(def.name);
