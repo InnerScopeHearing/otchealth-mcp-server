@@ -191,3 +191,46 @@ test('buildBriefPack, in the ACTUAL wire envelope shape (pretty-printed text + d
   assert.ok(briefTotalBytes < fullBytes, `expected brief (${briefTotalBytes}) meaningfully smaller than full (${fullBytes})`);
   assert.ok(fullBytes > 40000, `expected the full fixture to reproduce the oversized-response shape, got ${fullBytes} bytes`);
 });
+
+// ---- round 2 (2026-07-30): status/recent retraction gaps, recent_limit, external retraction set
+
+test('buildBriefPack excludes a status-typed row from recent (rawMine, the real handler feed, includes status alongside facts)', () => {
+  const data = fullData({ corrections: [], decisions: [] });
+  const rawMine = [entry('s1', 'status', { text: 'the latest status row' }), entry('r1', 'fact', { text: 'a real fact' })];
+  const brief = buildBriefPack(data, rawMine) as any;
+  assert.ok(!brief.recent.some((r: any) => r.id === 's1'), 'status must never duplicate into recent');
+  assert.ok(brief.recent.some((r: any) => r.id === 'r1'));
+});
+
+test('buildBriefPack drops status when its id is retracted (a later fact/correction can supersede a status row)', () => {
+  const data = fullData({
+    status: entry('st1', 'status', { text: 'the now-stale status' }),
+    corrections: [entry('c1', 'correction', { text: 'retracts the status', supersedes: 'st1' })],
+    decisions: [],
+  });
+  const brief = buildBriefPack(data) as any;
+  assert.equal(brief.status, null);
+});
+
+test('buildBriefPack respects a caller recent_limit smaller than PACK_BRIEF_RECENT_FACT_CAP', () => {
+  const data = fullData({ corrections: [], decisions: [] });
+  const rawMine = Array.from({ length: 10 }, (_, i) => entry(`r${i}`, 'fact'));
+  const brief = buildBriefPack(data, rawMine, undefined, 1) as any;
+  assert.equal(brief.recent.length, 1);
+});
+
+test('buildBriefPack never exceeds PACK_BRIEF_RECENT_FACT_CAP even when recent_limit is larger', () => {
+  const data = fullData({ corrections: [], decisions: [] });
+  const rawMine = Array.from({ length: 10 }, (_, i) => entry(`r${i}`, 'fact'));
+  const brief = buildBriefPack(data, rawMine, undefined, 40) as any;
+  assert.equal(brief.recent.length, PACK_BRIEF_RECENT_FACT_CAP);
+});
+
+test('buildBriefPack, given an externally-supplied retraction set, drops an id that set marks retracted even though nothing in the payload itself supersedes it (simulates a Cosmos-sourced retraction of a shared-feed entry)', () => {
+  const data = fullData({ corrections: [entry('c1', 'correction', { text: 'looks live from this payload alone' })], decisions: [] });
+  const brief = buildBriefPack(data, undefined, new Set(['c1'])) as any;
+  assert.deepEqual(
+    brief.corrections.map((c: any) => c.id),
+    [],
+  );
+});

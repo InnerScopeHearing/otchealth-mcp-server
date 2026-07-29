@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildBriefWake,
+  computeRetractedIds,
   WAKE_BRIEF_LIST_CAP,
   WAKE_BRIEF_MEMORY_CAP,
   WAKE_BRIEF_TASK_CAP,
@@ -366,4 +367,78 @@ test('buildBriefWake, in the ACTUAL wire envelope shape (pretty-printed text + d
   // the threshold, matching the reported ~94KB symptom once the real wire envelope's overhead is
   // added on top -- pinning that this fixture is a faithful reproduction, not a strawman.
   assert.ok(fullBytes > 20000, `expected the full fixture to reproduce the oversized-response shape, got ${fullBytes} bytes`);
+});
+
+// ---- round 2 (2026-07-30): status/recent/doctrine retraction gaps, recent_limit, external retraction set
+
+test('buildBriefWake excludes a status-typed row from pack.recent (rawMine, the real handler feed, includes status alongside facts)', () => {
+  const data = fullData();
+  data.pack.corrections = [];
+  data.pack.decisions = [];
+  const rawMine = [
+    { id: 's1', type: 'status', text: 'the latest status row, also present as pack.status' },
+    { id: 'r1', type: 'fact', text: 'a real fact' },
+  ];
+  const brief = buildBriefWake(data, rawMine) as any;
+  assert.ok(!brief.pack.recent.some((r: any) => r.id === 's1'), 'status must never duplicate into recent');
+  assert.ok(brief.pack.recent.some((r: any) => r.id === 'r1'));
+});
+
+test('buildBriefWake drops pack.status when its id is retracted (a later fact/correction can supersede a status row)', () => {
+  const data = fullData();
+  data.pack.status = { id: 'st1', type: 'status', text: 'the now-stale status' };
+  data.pack.corrections = [{ id: 'c1', type: 'correction', text: 'retracts the status', supersedes: 'st1' }];
+  data.pack.decisions = [];
+  const brief = buildBriefWake(data) as any;
+  assert.equal(brief.pack.status, null);
+});
+
+test('buildBriefWake filters a retracted id out of doctrine.pitfalls too (retraction promised "across all sections")', () => {
+  const data = fullData();
+  data.doctrine.pitfalls = [
+    { id: 'p1', text: 'a retracted pitfall', source: 'shared_feed' as const },
+    { id: 'p2', text: 'a live pitfall', source: 'shared_feed' as const },
+  ];
+  data.pack.corrections = [{ id: 'c1', type: 'correction', text: 'retracts p1', supersedes: 'p1' }];
+  data.pack.decisions = [];
+  const brief = buildBriefWake(data) as any;
+  assert.deepEqual(
+    brief.doctrine.pitfalls.map((p: any) => p.id),
+    ['p2'],
+  );
+});
+
+test('buildBriefWake respects a caller recent_limit smaller than WAKE_BRIEF_RECENT_FACT_CAP', () => {
+  const data = fullData();
+  data.pack.corrections = [];
+  data.pack.decisions = [];
+  const rawMine = Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, type: 'fact', text: `fact ${i}` }));
+  const brief = buildBriefWake(data, rawMine, undefined, 1) as any;
+  assert.equal(brief.pack.recent.length, 1);
+});
+
+test('buildBriefWake never exceeds WAKE_BRIEF_RECENT_FACT_CAP even when recent_limit is larger', () => {
+  const data = fullData();
+  data.pack.corrections = [];
+  data.pack.decisions = [];
+  const rawMine = Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, type: 'fact', text: `fact ${i}` }));
+  const brief = buildBriefWake(data, rawMine, undefined, 40) as any;
+  assert.equal(brief.pack.recent.length, WAKE_BRIEF_RECENT_FACT_CAP);
+});
+
+test('buildBriefWake, given an externally-supplied retraction set, drops an id that set marks retracted even though nothing in the payload itself supersedes it (simulates a Cosmos-only retraction outside the visible memory_records slice)', () => {
+  const data = fullData();
+  data.pack.corrections = [{ id: 'c1', type: 'correction', text: 'looks live from this payload alone' }];
+  data.pack.decisions = [];
+  const brief = buildBriefWake(data, undefined, new Set(['c1'])) as any;
+  assert.deepEqual(
+    brief.pack.corrections.map((c: any) => c.id),
+    [],
+  );
+});
+
+test('computeRetractedIds trims whitespace around a supersedes value, matching memory/retractions.ts collectRetracted', () => {
+  const ids = computeRetractedIds([{ id: 'a', supersedes: '  c1  ' }]);
+  assert.ok(ids.has('c1'));
+  assert.ok(!ids.has('  c1  '));
 });

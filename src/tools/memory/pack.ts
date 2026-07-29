@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
 import { computeRetractedIds, boundRecord } from './wake.js';
+import { retractedIds as globalRetractedIds } from '../../memory/retractions.js';
 
 /**
  * memory_pack — one-call working-set loader for ANY client/platform. Given an agent lane, returns
@@ -36,7 +37,14 @@ import { computeRetractedIds, boundRecord } from './wake.js';
 //     fact/pitfall, since corrections/decisions above are type-filtered and never carry those types.
 // `id` is never touched, so any brief entry can be resolved to its full record via
 // memory_pack(brief:false) (memory_search does NOT resolve these -- see the tool description).
-export const PACK_BRIEF_TEXT_CAP = 300;
+// PACK_BRIEF_TEXT_CAP was 300 in the first pass but never actually threaded into boundRecord (it
+// silently truncated at wake.ts's M365-lite default cap of 100 chars instead -- a dead, misleading
+// constant; review finding, 2026-07-30, same class of bug as WAKE_BRIEF_TEXT_CAP). Now genuinely
+// threaded through (see boundNonNull below); kept at the value already proven safe under the 40000-
+// char offload budget rather than restoring 300, which would roughly triple per-field cost and risk
+// blowing the budget the same way WAKE_BRIEF_TEXT_CAP's restoration would have (see wake.ts's own
+// WAKE_BRIEF_TEXT_CAP comment for the measured numbers).
+export const PACK_BRIEF_TEXT_CAP = 100;
 export const PACK_BRIEF_LIST_CAP = 8;
 export const PACK_BRIEF_RECENT_FACT_CAP = 5;
 
@@ -50,28 +58,34 @@ export interface PackFullData {
 }
 
 /** boundRecord never returns null for a non-null input; this just narrows the type back for
- * callers mapping over lists that are already known non-null. Pure. */
+ * callers mapping over lists that are already known non-null. Pure. Threads PACK_BRIEF_TEXT_CAP
+ * through explicitly (see that constant's own comment for why the default cap alone is wrong). */
 function boundNonNull(rec: Record<string, unknown>): Record<string, unknown> {
-  return boundRecord(rec) as Record<string, unknown>;
+  return boundRecord(rec, PACK_BRIEF_TEXT_CAP) as Record<string, unknown>;
 }
 
 /**
  * Build the brief-mode replacement for `recent`: instead of dropping it to `[]` (which loses every
  * unsuperseded 'fact'/'pitfall' entry entirely, since corrections/decisions above are type-filtered
  * and never carry those types), keep a small, retraction-filtered, capped subset of the
- * non-correction/non-decision types. `rawMine` is the COMPLETE unsliced per-agent shared feed (not
- * the already-capped `full.recent`), mirroring wake.ts's buildBriefRecentFacts. Pure.
+ * non-correction/non-decision/non-status types (status is excluded too -- review finding,
+ * 2026-07-30: `rawMine` is the complete feed and DOES contain the status row, which would otherwise
+ * duplicate the separately-returned `status` field and consume one of the few recent slots).
+ * `rawMine` is the COMPLETE unsliced per-agent shared feed (not the already-capped `full.recent`),
+ * mirroring wake.ts's buildBriefRecentFacts. `recentCap` lets the caller respect its own
+ * recent_limit input (review finding, 2026-07-30) -- min()'d against PACK_BRIEF_RECENT_FACT_CAP by
+ * the caller before this function sees it. Pure.
  */
-function buildBriefRecentFacts(rawMine: Record<string, unknown>[], retractedIds: Set<string>): Record<string, unknown>[] {
+function buildBriefRecentFacts(rawMine: Record<string, unknown>[], retractedIds: Set<string>, recentCap: number): Record<string, unknown>[] {
   return rawMine
     .filter((r) => {
       const type = r['type'];
       const id = r['id'];
-      if (type === 'correction' || type === 'decision') return false; // already covered above
+      if (type === 'correction' || type === 'decision' || type === 'status') return false; // already covered above
       if (typeof id === 'string' && retractedIds.has(id)) return false;
       return true;
     })
-    .slice(0, PACK_BRIEF_RECENT_FACT_CAP)
+    .slice(0, recentCap)
     .map(boundNonNull);
 }
 
@@ -86,15 +100,31 @@ function buildBriefRecentFacts(rawMine: Record<string, unknown>[], retractedIds:
  * corrections/decisions/recent slices happened to include. Optional + defaults to the union of the
  * already-capped slices for callers (tests) that don't have the raw feed handy -- correctness
  * degrades gracefully, it never throws.
+ *
+ * `externalRetractedIds`, if supplied, is used INSTEAD OF the locally-derived computeRetractedIds
+ * set -- the real handler passes memory/retractions.ts's `retractedIds()`, the canonical, already-
+ * tested, fail-open, TTL-cached global retraction set. memory_pack has only the shared feed (no
+ * separate Cosmos source of its own), but a Cosmos memory_record can still supersede a shared-feed
+ * entry (memory/retractions.ts collects from BOTH stores) -- something `computeRetractedIds(mine)`
+ * alone, seeing only this tool's own feed, could never detect (review finding, 2026-07-30). Omitted
+ * (the default) in tests, which fall back to computeRetractedIds over exactly the synthetic fixture.
+ *
+ * `recentLimit`, if supplied, is min()'d against PACK_BRIEF_RECENT_FACT_CAP so a caller's own
+ * recent_limit input is honored even in brief mode; omitted defaults to the cap.
  */
-export function buildBriefPack(full: PackFullData, rawMine?: Record<string, unknown>[]): Record<string, unknown> {
+export function buildBriefPack(
+  full: PackFullData,
+  rawMine?: Record<string, unknown>[],
+  externalRetractedIds?: Set<string>,
+  recentLimit?: number,
+): Record<string, unknown> {
   const mine = rawMine ?? [...full.corrections, ...full.decisions, ...full.recent];
 
   // ONE global retracted-id set across every entry available, before any type-specific filtering --
   // see wake.ts's computeRetractedIds header for why a per-list collapse alone misses a cross-type
-  // retraction. memory_pack has only the shared feed (no separate Cosmos source), so this is a
-  // single-list call, unlike wake's two-list (shared feed + memory_records) call.
-  const retractedIds = computeRetractedIds(mine);
+  // retraction, and this function's own header for why the fallback (single-list, shared-feed-only)
+  // still misses a Cosmos-sourced retraction that the externally-supplied set would catch.
+  const retractedIds = externalRetractedIds ?? computeRetractedIds(mine);
 
   const notRetracted = (r: Record<string, unknown>) => {
     const id = r['id'];
@@ -103,11 +133,19 @@ export function buildBriefPack(full: PackFullData, rawMine?: Record<string, unkn
 
   const corrections = full.corrections.filter(notRetracted).slice(0, PACK_BRIEF_LIST_CAP).map(boundNonNull);
   const decisions = full.decisions.filter(notRetracted).slice(0, PACK_BRIEF_LIST_CAP).map(boundNonNull);
-  const recent = buildBriefRecentFacts(mine, retractedIds);
+  const recentCap = Math.min(PACK_BRIEF_RECENT_FACT_CAP, recentLimit ?? PACK_BRIEF_RECENT_FACT_CAP);
+  const recent = buildBriefRecentFacts(mine, retractedIds, recentCap);
+
+  // status can itself be retracted (memory_remember allows `supersedes` on every entry type,
+  // including a later fact/correction retracting the latest status row) -- review finding,
+  // 2026-07-30: this previously bypassed notRetracted entirely.
+  const statusId = full.status?.['id'];
+  const statusRetracted = typeof statusId === 'string' && retractedIds.has(statusId);
+  const status = full.status && !statusRetracted ? boundNonNull(full.status) : null;
 
   return {
     agent: full.agent,
-    status: full.status ? boundRecord(full.status) : null,
+    status,
     corrections,
     decisions,
     recent, // a bounded, retraction-filtered fact/pitfall subset -- NOT emptied (see
@@ -178,7 +216,20 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
           recent: recent as unknown as Record<string, unknown>[],
           count: mine.length,
         };
-        const data = brief ? buildBriefPack(fullData, mine as unknown as Record<string, unknown>[]) : fullData;
+        // The canonical, whole-store retraction set (memory/retractions.ts) -- spans the complete
+        // shared feed AND a dedicated Cosmos query for every supersedes-bearing row, catching a
+        // Cosmos-sourced retraction of a shared-feed entry that this tool's own single-store view
+        // could never see (review finding, 2026-07-30). retractedIds() is fail-open internally
+        // (never throws) but still guarded defensively since it is a live-store call.
+        let externalRetractedIds: Set<string> | undefined;
+        if (brief) {
+          try {
+            externalRetractedIds = await globalRetractedIds();
+          } catch {
+            /* fail-open: buildBriefPack falls back to computeRetractedIds over the shared feed alone */
+          }
+        }
+        const data = brief ? buildBriefPack(fullData, mine as unknown as Record<string, unknown>[], externalRetractedIds, recentLimit) : fullData;
 
         return {
           data,
