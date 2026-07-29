@@ -285,6 +285,115 @@ export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
   };
 }
 
+// ---- BRIEF WAKE (P2-3, 2026-07-29) ----------------------------------------------------------------
+// Real bug report (CFO agent, a long-lived session with substantial accumulated memory, NOT the
+// M365 lane the lite path above exists for): wake() and memory_pack() were BOTH routinely landing
+// in the 90-100KB range and JIT-offloading (see result-store.ts, THRESHOLD_CHARS=40000), costing
+// 4+ gateway_fetch_result calls each before any real work starts. wake() was built specifically to
+// REPLACE a 5-call boot sequence (see the tool description above); at that size it had quietly
+// reintroduced most of the cost it exists to remove. Root cause, once measured: with the DEFAULT
+// limits (8 corrections, 8 decisions, 10 recent, 12 memory records, 15 tasks) each capped at
+// TEXT_CAP=900 chars, the section totals alone run past 40KB raw text before the registry's
+// pretty-print + structuredContent duplication (see registry.ts buildTextContent) roughly doubles
+// it again -- and `pack.recent` (mixed-type raw shared-feed entries) substantially DUPLICATES what
+// `pack.corrections`/`pack.decisions` already show, which is exactly the "much of the payload is
+// superseded or duplicated between the two [wake and memory_pack]" complaint in the bug report.
+//
+// FIX: an explicit `brief: true` input (default false -- ADDITIVE, `brief: false` is byte-for-byte
+// today's existing behavior, nothing above this line changes). When true:
+//   - every list is collapseSuperseded()'d first -- the SAME helper this file already uses for
+//     shared-feed corrections/pitfalls, now ALSO applied to pack.decisions and to the Cosmos
+//     memory_records (neither of which collapseSuperseded touched before this fix, even in full
+//     mode -- a real gap, since Cosmos memory records can carry `supersedes` too, see
+//     agentstate/memory.ts's MemoryRecord). No new supersede-detection logic is invented here; this
+//     reuses the existing write-time detector (memory/auto-supersede-runtime.ts) and read-time
+//     retraction contract (memory/retractions.ts) already establish -- collapseSuperseded is simply
+//     the in-process equivalent of that same "a newer entry with `supersedes` retires the older
+//     one" rule, applied to whatever list wake already has in hand.
+//   - `pack.recent` is dropped entirely (the biggest duplicate-noise contributor -- corrections,
+//     decisions, and status above already surface the current-truth entries from the same feed).
+//   - every record's text is capped much harder (WAKE_BRIEF_TEXT_CAP) and list lengths are
+//     tightened (WAKE_BRIEF_LIST_CAP / WAKE_BRIEF_MEMORY_CAP / WAKE_BRIEF_TASK_CAP / *_INBOX_CAP /
+//     *_INBOUND_CAP), reusing the existing capText helper -- no new truncation logic.
+//   - `id` is never touched (capText/collapseSuperseded both preserve it), so every entry in a brief
+//     response can be resolved to its full record via memory_search / task_get (no new drill-down
+//     tool is built here; see the PR description for that as a natural follow-on).
+// Unlike the M365-lite path this is a GENERAL-PURPOSE size lever any caller can opt into (Claude
+// Code, Hyperagent, or a long-lived agent session with a large ledger) -- it is not tied to a
+// specific platform's response-size ceiling, just to "give me the current truth, small."
+export const WAKE_BRIEF_TEXT_CAP = 300;
+export const WAKE_BRIEF_LIST_CAP = 6; // pack.corrections / pack.decisions
+export const WAKE_BRIEF_MEMORY_CAP = 8; // memory_records (Cosmos)
+export const WAKE_BRIEF_TASK_CAP = 10; // tasks.active
+export const WAKE_BRIEF_INBOX_CAP = 3; // inbox.preview
+export const WAKE_BRIEF_INBOUND_CAP = 3; // inbound.notes
+
+/** collapseSuperseded operates on `T extends { id: string }`; wrap it for the loosely-typed
+ * Record<string, unknown>[] shapes wake's sub-sections carry, without losing any fields (the
+ * generic itself only ever reads `id`/`supersedes`, so this cast is safe -- mirrors the "Cosmos
+ * rows" usage already pinned in wake.test.ts). Pure. */
+function collapseSupersededRecords(entries: Record<string, unknown>[]): Record<string, unknown>[] {
+  return collapseSuperseded(entries as unknown as Array<{ id: string }>) as unknown as Record<string, unknown>[];
+}
+
+/** Cap one record's text at the brief cap and, for Cosmos-backed records (memory_records,
+ * tasks.active), also strip the Cosmos internal bookkeeping fields (reusing the same
+ * COSMOS_INTERNAL_FIELDS set the M365-lite path uses) -- pure noise with zero value to a brief
+ * caller. Pure. */
+function briefBoundRecord(rec: Record<string, unknown>, stripCosmos = false): Record<string, unknown> {
+  const capped = capText(rec, WAKE_BRIEF_TEXT_CAP);
+  if (!stripCosmos) return capped;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(capped)) {
+    if (!COSMOS_INTERNAL_FIELDS.has(k)) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Condense a full wake() response into a brief, current-truth-only, small working set. Pure +
+ * testable. Field names/top-level shapes are kept identical to the full response (same reasoning
+ * as buildM365LiteWake above), so this cannot violate the tool's declared outputShape -- only the
+ * CONTENT inside each field shrinks (or, for `pack.recent`, is dropped to an empty array).
+ */
+export function buildBriefWake(full: WakeFullData): Record<string, unknown> {
+  const corrections = collapseSupersededRecords(full.pack.corrections)
+    .slice(0, WAKE_BRIEF_LIST_CAP)
+    .map((c) => briefBoundRecord(c));
+  const decisions = collapseSupersededRecords(full.pack.decisions)
+    .slice(0, WAKE_BRIEF_LIST_CAP)
+    .map((d) => briefBoundRecord(d));
+  const memory_records = collapseSupersededRecords(full.memory_records)
+    .slice(0, WAKE_BRIEF_MEMORY_CAP)
+    .map((r) => briefBoundRecord(r, true));
+  const active = full.tasks.active.slice(0, WAKE_BRIEF_TASK_CAP).map((t) => briefBoundRecord(t, true));
+  const preview = (full.inbox.preview as Record<string, unknown>[])
+    .slice(0, WAKE_BRIEF_INBOX_CAP)
+    .map((m) => briefBoundRecord(m));
+  const notes = (full.inbound.notes as Record<string, unknown>[])
+    .slice(0, WAKE_BRIEF_INBOUND_CAP)
+    .map((n) => briefBoundRecord(n));
+
+  return {
+    agent: full.agent,
+    pack: {
+      ...full.pack,
+      status: full.pack.status ? briefBoundRecord(full.pack.status) : null,
+      corrections,
+      decisions,
+      recent: [], // dropped for size in brief mode -- corrections/decisions/status above already
+      // carry the current-truth entries from this same feed; call wake(brief:false) or
+      // memory_pack/memory_recall for the raw recent feed.
+    },
+    memory_records,
+    tasks: { ...full.tasks, active },
+    inbox: { ...full.inbox, preview },
+    inbound: { ...full.inbound, notes },
+    errors: full.errors,
+    doctrine: full.doctrine,
+  };
+}
+
 export function registerWake(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -294,7 +403,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       annotations: {
         title: 'Federated agent wake (one-call boot)',
         description:
-          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your Cosmos memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Ring-safe: shared feed + your own lane only.',
+          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your Cosmos memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Pass brief:true on a long-lived session (large ledger) to get only current-truth entries, hard-capped for size, so the response stays inline instead of JIT-offloading. Ring-safe: shared feed + your own lane only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -305,6 +414,12 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         recent_limit: z.number().int().min(1).max(40).optional().describe('Max recent shared-feed entries (default 10).'),
         memory_limit: z.number().int().min(1).max(40).optional().describe('Max Cosmos memory-of-record entries (default 12).'),
         task_limit: z.number().int().min(1).max(50).optional().describe('Max active tasks (default 15).'),
+        brief: z
+          .boolean()
+          .optional()
+          .describe(
+            'If true, return only current-truth entries (superseded ones collapsed) with ids for drill-down, hard-capped for size. Defaults to false (unchanged full behavior). Use on a long-lived session whose wake payload is JIT-offloading.',
+          ),
       },
       outputShape: {
         agent: z.string(),
@@ -449,13 +564,17 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         };
 
         // M365 LITE WAKE: see the header comment on buildM365LiteWake above. Every other caller
-        // (Claude Code, Hyperagent, any non-M365 lane) gets fullData unchanged.
+        // (Claude Code, Hyperagent, any non-M365 lane) gets fullData unchanged, UNLESS it opted
+        // into brief:true (see the BRIEF WAKE header comment above). M365-lite takes priority when
+        // both would apply -- it is a hard platform-ceiling requirement, not a size preference.
         const m365Lite = isM365StaticAuth();
-        const data = m365Lite ? buildM365LiteWake(fullData) : fullData;
+        const brief = !m365Lite && (input.brief ?? false);
+        const data = m365Lite ? buildM365LiteWake(fullData) : brief ? buildBriefWake(fullData) : fullData;
+        const modeTag = m365Lite ? ' [M365-lite]' : brief ? ' [brief]' : '';
 
         return {
           data,
-          summary: `wake(${agent})${m365Lite ? ' [M365-lite]' : ''}: ${summaryBits.join(' · ')}${errors.length ? ` · ${errors.length} section error(s)` : ''}.${activeCount ? ` ⚠ ${activeCount} active task(s) awaiting you.` : ''}`,
+          summary: `wake(${agent})${modeTag}: ${summaryBits.join(' · ')}${errors.length ? ` · ${errors.length} section error(s)` : ''}.${activeCount ? ` ⚠ ${activeCount} active task(s) awaiting you.` : ''}`,
         };
       },
     },
