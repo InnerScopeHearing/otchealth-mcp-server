@@ -224,7 +224,7 @@ const M365_LITE_MAX_DEPTH = 6; // safety valve against pathological nesting; rea
  * yet -- was still completely unbounded. A denylist of field NAMES can never be complete; a
  * recursive bound on VALUE SHAPE (string, array, object) by construction cannot miss a future field,
  * because it never looks at field names at all except to strip the known-noise Cosmos ones. */
-function boundValue(value: unknown, depth: number): unknown {
+export function boundValue(value: unknown, depth: number): unknown {
   if (depth > M365_LITE_MAX_DEPTH) return value;
   if (typeof value === 'string') {
     if (value.length <= M365_LITE_TEXT_CAP) return value;
@@ -250,7 +250,7 @@ function boundValue(value: unknown, depth: number): unknown {
  * capText() convention uses (nothing downstream machine-checks this flag -- it's for a human/LLM
  * reader glancing at the JSON -- so an approximate whole-record signal is sufficient; exact per-
  * field parity with capText is not required). */
-function boundRecord(rec: Record<string, unknown> | null): Record<string, unknown> | null {
+export function boundRecord(rec: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!rec) return rec;
   const bounded = boundValue(rec, 0) as Record<string, unknown>;
   if (JSON.stringify(bounded).length < JSON.stringify(rec).length) bounded.truncated = true;
@@ -328,42 +328,112 @@ export const WAKE_BRIEF_TASK_CAP = 8; // tasks.active
 export const WAKE_BRIEF_INBOX_CAP = 3; // inbox.preview
 export const WAKE_BRIEF_INBOUND_CAP = 3; // inbound.notes
 
-/** collapseSuperseded operates on `T extends { id: string }`; wrap it for the loosely-typed
- * Record<string, unknown>[] shapes wake's sub-sections carry, without losing any fields (the
- * generic itself only ever reads `id`/`supersedes`, so this cast is safe -- mirrors the "Cosmos
- * rows" usage already pinned in wake.test.ts). Pure. */
-function collapseSupersededRecords(entries: Record<string, unknown>[]): Record<string, unknown>[] {
-  return collapseSuperseded(entries as unknown as Array<{ id: string }>) as unknown as Record<string, unknown>[];
+/**
+ * Compute the GLOBAL set of retracted ids across every entry passed in, regardless of type or
+ * which list it originally came from. Pure.
+ *
+ * WHY THIS EXISTS (review finding, 2026-07-30): collapseSupersededRecords only ever sees the
+ * SINGLE list it's called on -- calling it separately on corrections, then separately on
+ * decisions, then separately on memory_records means a retraction that crosses one of those
+ * boundaries (a decision superseding a correction, a fact superseding a decision, a Cosmos
+ * memory_record superseding a shared-feed entry or vice versa) is invisible to whichever call
+ * never saw the retracting entry in its own slice. Brief mode compounds this: it also DROPS
+ * `pack.recent` (or did -- see buildBriefRecentFacts below), so a retracting entry that only
+ * exists there was doubly invisible. The fix is structural, not a bigger allowlist: compute one
+ * id-set from EVERY entry available (every type, every source, unsliced) BEFORE any type-specific
+ * filtering/capping happens, then filter every downstream list through that same set. */
+export function computeRetractedIds(...entryLists: Array<Array<{ id?: unknown; supersedes?: unknown }>>): Set<string> {
+  const retracted = new Set<string>();
+  for (const list of entryLists) {
+    for (const e of list) {
+      const s = e.supersedes;
+      if (typeof s === 'string' && s) retracted.add(s);
+    }
+  }
+  return retracted;
 }
 
-/** Cap one record's text at the brief cap and, for Cosmos-backed records (memory_records,
- * tasks.active), also strip the Cosmos internal bookkeeping fields (reusing the same
- * COSMOS_INTERNAL_FIELDS set the M365-lite path uses) -- pure noise with zero value to a brief
- * caller. Pure. */
+/** Cap one record at the brief cap using the SAME generic recursive bound the M365-lite path
+ * uses (boundRecord/boundValue above) -- not the field-specific capText, which only ever touches
+ * a `text` property and was proven insufficient by the M365-lite path's own history (four
+ * field-specific patches in a row before the recursive rewrite; see boundValue's header). Reusing
+ * that already-proven fix here, rather than the older capText, is the actual size guarantee: a
+ * real Task's long `description`/`notes[]` or a real inbox message's `subject`/`body` are bounded
+ * by field SHAPE, not by matching a hardcoded field name. For Cosmos-backed records
+ * (memory_records, tasks.active) also strips the Cosmos internal bookkeeping fields. Pure. */
 function briefBoundRecord(rec: Record<string, unknown>, stripCosmos = false): Record<string, unknown> {
-  const capped = capText(rec, WAKE_BRIEF_TEXT_CAP);
-  if (!stripCosmos) return capped;
+  const bounded = boundValue(rec, 0) as Record<string, unknown>;
+  if (JSON.stringify(bounded).length < JSON.stringify(rec).length) bounded.truncated = true;
+  if (!stripCosmos) return bounded;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(capped)) {
+  for (const [k, v] of Object.entries(bounded)) {
     if (!COSMOS_INTERNAL_FIELDS.has(k)) out[k] = v;
   }
   return out;
+}
+
+export const WAKE_BRIEF_RECENT_FACT_CAP = 3; // pack.recent, brief mode: bounded fact/pitfall subset, not emptied
+
+/**
+ * Build the brief-mode replacement for `pack.recent`: instead of dropping it to `[]` (which loses
+ * every unsuperseded 'fact'/'pitfall' entry entirely, since corrections/decisions above are
+ * type-filtered and never carry those types), keep a small, retraction-filtered, capped subset of
+ * the non-correction/non-decision types. `rawMine` is the COMPLETE unsliced per-agent shared feed
+ * (not the already-capped `full.pack.recent`), so this can find fact/pitfall entries beyond
+ * whatever recent_limit happened to cap the full-mode `recent` slice to. Pure.
+ */
+function buildBriefRecentFacts(rawMine: Record<string, unknown>[], retractedIds: Set<string>): Record<string, unknown>[] {
+  return rawMine
+    .filter((r) => {
+      const type = r['type'];
+      const id = r['id'];
+      if (type === 'correction' || type === 'decision') return false; // already covered above
+      if (typeof id === 'string' && retractedIds.has(id)) return false;
+      return true;
+    })
+    .slice(0, WAKE_BRIEF_RECENT_FACT_CAP)
+    .map((r) => briefBoundRecord(r));
 }
 
 /**
  * Condense a full wake() response into a brief, current-truth-only, small working set. Pure +
  * testable. Field names/top-level shapes are kept identical to the full response (same reasoning
  * as buildM365LiteWake above), so this cannot violate the tool's declared outputShape -- only the
- * CONTENT inside each field shrinks (or, for `pack.recent`, is dropped to an empty array).
+ * CONTENT inside each field shrinks.
+ *
+ * `rawMine` is the COMPLETE, unsliced per-agent shared feed (every type, not capped by
+ * recent_limit) -- passed separately from `full` (never stored inside WakeFullData/WakePack,
+ * which IS the literal full-mode response shape; adding it there would leak an extra field into
+ * every non-brief caller's payload, the opposite of this fix's purpose). It exists so retraction
+ * and the brief recent-facts list can see entries beyond whatever the already-capped
+ * corrections/decisions/recent slices happened to include. Optional + defaults to the union of
+ * the already-capped slices for callers (tests) that don't have the raw feed handy -- correctness
+ * degrades gracefully to "as good as the old per-list behavior," it never throws.
  */
-export function buildBriefWake(full: WakeFullData): Record<string, unknown> {
-  const corrections = collapseSupersededRecords(full.pack.corrections)
+export function buildBriefWake(full: WakeFullData, rawMine?: Record<string, unknown>[]): Record<string, unknown> {
+  const mine = rawMine ?? [...full.pack.corrections, ...full.pack.decisions, ...full.pack.recent];
+
+  // ONE global retracted-id set computed across EVERY entry available -- every type, every
+  // source (shared feed AND Cosmos memory_records) -- before any type-specific filtering. See
+  // computeRetractedIds's header for why a per-list collapse cannot catch a cross-type or
+  // cross-store retraction.
+  const retractedIds = computeRetractedIds(mine, full.memory_records);
+
+  const notRetracted = (r: Record<string, unknown>) => {
+    const id = r['id'];
+    return !(typeof id === 'string' && retractedIds.has(id));
+  };
+
+  const corrections = full.pack.corrections
+    .filter(notRetracted)
     .slice(0, WAKE_BRIEF_LIST_CAP)
     .map((c) => briefBoundRecord(c));
-  const decisions = collapseSupersededRecords(full.pack.decisions)
+  const decisions = full.pack.decisions
+    .filter(notRetracted)
     .slice(0, WAKE_BRIEF_LIST_CAP)
     .map((d) => briefBoundRecord(d));
-  const memory_records = collapseSupersededRecords(full.memory_records)
+  const memory_records = full.memory_records
+    .filter(notRetracted)
     .slice(0, WAKE_BRIEF_MEMORY_CAP)
     .map((r) => briefBoundRecord(r, true));
   const active = full.tasks.active.slice(0, WAKE_BRIEF_TASK_CAP).map((t) => briefBoundRecord(t, true));
@@ -373,6 +443,7 @@ export function buildBriefWake(full: WakeFullData): Record<string, unknown> {
   const notes = (full.inbound.notes as Record<string, unknown>[])
     .slice(0, WAKE_BRIEF_INBOUND_CAP)
     .map((n) => briefBoundRecord(n));
+  const recent = buildBriefRecentFacts(mine, retractedIds);
 
   return {
     agent: full.agent,
@@ -381,9 +452,9 @@ export function buildBriefWake(full: WakeFullData): Record<string, unknown> {
       status: full.pack.status ? briefBoundRecord(full.pack.status) : null,
       corrections,
       decisions,
-      recent: [], // dropped for size in brief mode -- corrections/decisions/status above already
-      // carry the current-truth entries from this same feed; call wake(brief:false) or
-      // memory_pack/memory_recall for the raw recent feed.
+      recent, // a bounded, retraction-filtered fact/pitfall subset -- NOT emptied (see
+      // buildBriefRecentFacts: dropping this entirely used to lose every current fact/pitfall,
+      // since corrections/decisions above are type-filtered and never carry those types).
     },
     memory_records,
     tasks: { ...full.tasks, active },
@@ -403,7 +474,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       annotations: {
         title: 'Federated agent wake (one-call boot)',
         description:
-          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your Cosmos memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Pass brief:true on a long-lived session (large ledger) to get only current-truth entries, hard-capped for size, so the response stays inline instead of JIT-offloading. Ring-safe: shared feed + your own lane only.',
+          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your Cosmos memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Pass brief:true on a long-lived session (large ledger) to get only current-truth entries (retracted/superseded entries filtered out across ALL sections, not just within one), hard-capped for size, so the response stays inline instead of JIT-offloading. DRILL-DOWN CAVEAT: task_get resolves a truncated task by id; memory_search resolves a truncated Cosmos memory_record by id. Neither resolves a truncated shared-feed correction/decision/pack.recent entry, or a truncated inbox/inbound entry -- for those, re-call wake(brief:false) or memory_pack(brief:false) to see the untruncated version. Ring-safe: shared feed + your own lane only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -569,7 +640,11 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         // both would apply -- it is a hard platform-ceiling requirement, not a size preference.
         const m365Lite = isM365StaticAuth();
         const brief = !m365Lite && (input.brief ?? false);
-        const data = m365Lite ? buildM365LiteWake(fullData) : brief ? buildBriefWake(fullData) : fullData;
+        // sharedFeedP is already resolved by this point (awaited inside packP above via
+        // Promise.allSettled); re-awaiting it here is instant, not a second network fetch. Only
+        // done when brief is actually requested, so the non-brief path pays nothing extra.
+        const rawMine = brief && sharedConfigured() ? (await sharedFeedP).filter((r) => r.agent === agent) as unknown as Record<string, unknown>[] : undefined;
+        const data = m365Lite ? buildM365LiteWake(fullData) : brief ? buildBriefWake(fullData, rawMine) : fullData;
         const modeTag = m365Lite ? ' [M365-lite]' : brief ? ' [brief]' : '';
 
         return {
