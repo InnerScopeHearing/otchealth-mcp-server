@@ -18,7 +18,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
       annotations: {
         title: 'Write to the shared brain',
         description:
-          'Append an entry to the cross-agent shared memory (kb-memory commons feed) so every connected AI sees it. Use for a fact, decision, correction, pitfall, or status. Set "agent" to write ON ANOTHER lane\'s feed (a cross-lane note / hand-off): it is APPEND-ONLY and auto-attributed to YOUR token identity (by=<you>), and the target lane sees it via memory_inbound and acks with memory_reconcile on wake. Omit "agent" to write your own feed. Writes ONLY to the shared, non-sensitive commons feed: never put MNPI (INND) or PHI (MedReview) detail here. (2026-07-07: the clo-personal lane wall was lifted per standing CEO directive -- ring-gating between executive agents is suspended fleet-wide until connectivity/stability is fully dialed in.) MNPI GATE (hard, code-level, not just this instruction): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused for every caller, no exception, because the commons feed is always broadly shared and non-privileged.',
+          'Append an entry to the cross-agent shared memory (kb-memory commons feed) so every connected AI sees it. Use for a fact, decision, correction, pitfall, or status. Set "agent" to write ON ANOTHER lane\'s feed (a cross-lane note / hand-off): it is APPEND-ONLY and auto-attributed to YOUR token identity (by=<you>), and the target lane sees it via memory_inbound and acks with memory_reconcile on wake. Omit "agent" to write your own feed. Writes ONLY to the shared, non-sensitive commons feed: never put MNPI (INND) or PHI (MedReview) detail here. CORRECTED 2026-07-29 (a prior version of this description said the 2026-07-07 clo-personal change "suspended ring-gating fleet-wide" -- that was inaccurate and is retracted here: it does not describe the enforcement below, which was never suspended). MNPI GATE (hard, code-level, not just this instruction, enforced for every caller with no exception and no suspension, past or present): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused for every caller, because the commons feed is always broadly shared and non-privileged.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -29,7 +29,9 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
           .string()
           .optional()
           .describe('The agent lane to publish under; defaults to your token identity (lowercase id, e.g. "cto", "commerce").'),
-        type: z.enum(TYPES).describe('Entry kind: fact, decision, correction, pitfall, or status.'),
+        type: z
+          .preprocess((v) => (v === 'finding' ? 'fact' : v), z.enum(TYPES))
+          .describe('Entry kind: fact, decision, correction, pitfall, or status. "finding" is accepted as an alias for "fact".'),
         text: z.string().min(1).describe('The fact/decision/correction/pitfall/status text. Keep it atomic and non-sensitive.'),
         tags: z.array(z.string()).optional().describe('Optional tags for recall, e.g. ["ebay","pricing"].'),
         source: z.string().optional().describe('Optional attribution, e.g. "Matt 2026-06-20".'),

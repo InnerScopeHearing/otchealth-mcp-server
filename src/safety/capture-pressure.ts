@@ -31,8 +31,11 @@
 
 export type CaptureMode = 'off' | 'warn';
 
-/** Default CAPTURE_PRESSURE_THRESHOLD when unset or invalid. */
-export const DEFAULT_CAPTURE_THRESHOLD = 10;
+/** Default CAPTURE_PRESSURE_THRESHOLD when unset or invalid. Raised from 10 to 50 on 2026-07-29
+ *  (FND: a real CFO session observed 49 mutations in one substantive session against a threshold
+ *  of 10, i.e. ~5x over on ordinary work, not an outlier) -- there is no enforce mode (see module
+ *  header), so this only changes how early the advisory nudge fires, never blocks anything. */
+export const DEFAULT_CAPTURE_THRESHOLD = 50;
 
 export interface CapturePressureOutcome {
   /** True ONLY when a nudge should be attached (mutations >= threshold AND mode 'warn'). */
