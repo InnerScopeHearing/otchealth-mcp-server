@@ -74,14 +74,14 @@ export async function handleGraphDriveUpload(input: GraphDriveUploadInput, ctx: 
   const sha256 = createHash('sha256').update(content).digest('hex');
 
   // FAIL LOUD rather than silently mis-upload: Microsoft Graph's simple content-PUT endpoint only
-  // supports files up to MAX_SIMPLE_UPLOAD_BYTES (4 MiB); anything larger needs a resumable
+  // supports files up to MAX_SIMPLE_UPLOAD_BYTES (250 MB); anything larger needs a resumable
   // upload session, which this tool does not implement (see drive-client.ts's doc comment). This
   // is the concrete, documented ceiling behind "large payloads silently truncated" reports,
   // refusing here turns that into a loud, explicit error instead of an unverified write.
   if (content.length > MAX_SIMPLE_UPLOAD_BYTES) {
     return {
       data: { ...base, sha256, error: 'file_too_large_for_simple_upload' },
-      summary: `Refused: "${input.folder}/${input.filename}" is ${content.length} bytes, over the ${MAX_SIMPLE_UPLOAD_BYTES}-byte (4 MiB) limit Microsoft Graph's simple upload endpoint supports. A resumable upload session is required above this size and is not implemented by this tool yet (sha256 of the content you provided: ${sha256}).`,
+      summary: `Refused: "${input.folder}/${input.filename}" is ${content.length} bytes, over the ${MAX_SIMPLE_UPLOAD_BYTES}-byte (250 MB) limit Microsoft Graph's simple upload endpoint supports. A resumable upload session is required above this size and is not implemented by this tool yet (sha256 of the content you provided: ${sha256}).`,
     };
   }
 
@@ -136,7 +136,7 @@ export function registerGraphDriveUpload(server: McpServer, callerHash: CallerHa
       annotations: {
         title: 'Upload a file to a role OneDrive folder (own-role gated, no silent overwrite, hash-verified)',
         description:
-          'Upload a file to a OneDrive folder path (e.g. "CLO Incoming") on the shared drive owner\'s OneDrive. Provide text OR base64 content. Returns a sha256 computed over the exact bytes sent, and NEVER reports success (executed:true) unless Graph confirms the exact same byte count back, a short/incomplete write comes back as error:"incomplete_upload" instead. Files over 4 MiB are refused (error:"file_too_large_for_simple_upload"; Graph\'s simple-upload endpoint has no larger capacity and this tool does not implement a resumable upload session). FAIL-CLOSED SAFETY DEFAULT: if a file already exists at that folder+filename, the upload is REFUSED; pass overwrite=true to intentionally replace it. GATED by folder-name role prefix identically to graph_drive_list: a caller may only write to its OWN role\'s folders. Defaults to dry_run.',
+          'Upload a file to a OneDrive folder path (e.g. "CLO Incoming") on the shared drive owner\'s OneDrive. Provide text OR base64 content. Returns a sha256 computed over the exact bytes sent, and NEVER reports success (executed:true) unless Graph confirms the exact same byte count back, a short/incomplete write comes back as error:"incomplete_upload" instead. Files over 250 MB are refused (error:"file_too_large_for_simple_upload"; Graph\'s simple-upload endpoint has no larger capacity and this tool does not implement a resumable upload session). FAIL-CLOSED SAFETY DEFAULT: if a file already exists at that folder+filename, the upload is REFUSED; pass overwrite=true to intentionally replace it. GATED by folder-name role prefix identically to graph_drive_list: a caller may only write to its OWN role\'s folders. Defaults to dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

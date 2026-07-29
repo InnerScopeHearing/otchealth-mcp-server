@@ -147,15 +147,16 @@ export interface DriveUploadResult {
 
 /**
  * Microsoft Graph's SIMPLE content-upload endpoint (PUT …/content, what `uploadFile` below uses)
- * is documented to only support files up to 4 MiB. Larger files require a resumable upload
- * session (POST createUploadSession + chunked PUTs against the returned uploadUrl), which this
- * client does not implement. `uploadFile` refuses anything over this ceiling before ever making
- * the PUT (see the caller-side check in tools/graph-drive/upload.ts) rather than sending it to an
- * endpoint that was never built to carry it — a real, plausible root cause for "large payloads
- * silently truncated" reports against this tool. A chunked/resumable session is a deferred
- * follow-up, not implemented here.
+ * is documented to support files up to 250 MB (learn.microsoft.com/en-us/graph/api/driveitem-put-content,
+ * "This method only supports files up to 250 MB in size", verified 2026-07-30). Larger files
+ * require a resumable upload session (POST createUploadSession + chunked PUTs against the
+ * returned uploadUrl), which this client does not implement. `uploadFile` refuses anything over
+ * this ceiling before ever making the PUT (see the caller-side check in
+ * tools/graph-drive/upload.ts and the belt-and-suspenders check inside uploadFile itself below)
+ * rather than sending it to an endpoint that can't carry it. A chunked/resumable session is a
+ * deferred follow-up, not implemented here.
  */
-export const MAX_SIMPLE_UPLOAD_BYTES = 4 * 1024 * 1024;
+export const MAX_SIMPLE_UPLOAD_BYTES = 250 * 1024 * 1024;
 
 /** Uploads (writes up to MAX_SIMPLE_UPLOAD_BYTES) get more time than the generic 8s API-call
  *  budget — a multi-megabyte PUT over a slow link can legitimately take longer than that, and an
@@ -176,6 +177,18 @@ const UPLOAD_TIMEOUT_MS = 30_000;
  * exactly the silent-success failure mode being fixed).
  */
 export async function uploadFile(folderPath: string, fileName: string, content: Buffer, contentType?: string): Promise<DriveUploadResult> {
+  // Belt-and-suspenders: tools/graph-drive/upload.ts already refuses an oversized payload before
+  // calling this function, but that guard living only at the one current call site means a future
+  // second caller could bypass it by omission. Enforcing it here too costs nothing and protects
+  // every caller, present or future.
+  if (content.length > MAX_SIMPLE_UPLOAD_BYTES) {
+    throw new GraphDriveError({
+      code: 'file_too_large_for_simple_upload',
+      status: 413,
+      message: `uploadFile: ${content.length} bytes exceeds the ${MAX_SIMPLE_UPLOAD_BYTES}-byte (250 MB) limit Microsoft Graph's simple upload endpoint supports.`,
+      nextStep: 'Split the file or implement a resumable upload session (POST createUploadSession) for files over 250 MB.',
+    });
+  }
   const owner = driveOwner();
   const path = [folderPath.replace(/^\/+|\/+$/g, ''), fileName].filter(Boolean).join('/');
   const r = await graphFetch('PUT', `${itemRef(owner, path)}/content`, {

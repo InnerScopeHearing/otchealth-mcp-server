@@ -19,6 +19,19 @@ process.env.GRAPH_DRIVE_USER ||= 'matthew@innd.com';
 const { handleGraphDriveUpload } = await import('./upload.js');
 const { MAX_SIMPLE_UPLOAD_BYTES } = await import('../../graph/drive-client.js');
 
+// Exact-hostname check, not a substring match (a naive `.includes('login.microsoftonline.com')`
+// would also match an attacker-controlled host like "login.microsoftonline.com.evil.com" or
+// "evil.com/?x=login.microsoftonline.com" -- CodeQL correctly flags that pattern even in a test
+// stub; this is the same fix the fleet already standardized on for MSAL scope-string checks
+// elsewhere, applied here to URL routing).
+function isLoginMicrosoftHost(url: string): boolean {
+  try {
+    return new URL(url).hostname === 'login.microsoftonline.com';
+  } catch {
+    return false;
+  }
+}
+
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
   globalThis.fetch = stub;
@@ -64,7 +77,7 @@ function stubGraph(opts: { existsFirst?: boolean; reportedSize?: number | 'echo'
   const { existsFirst = false, reportedSize = 'echo' } = opts;
   return (async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
-    if (u.includes('login.microsoftonline.com')) {
+    if (isLoginMicrosoftHost(u)) {
       return new Response(JSON.stringify({ access_token: 'test-access-token', expires_in: 3600 }), { status: 200 });
     }
     if (u.includes('/content')) {
@@ -97,7 +110,7 @@ test('a caller writing to a folder outside its own role is refused, with NO netw
   });
 });
 
-// --- SIZE CEILING: files over Microsoft Graph's 4 MiB simple-upload limit are refused loudly -----
+// --- SIZE CEILING: files over Microsoft Graph's 250 MB simple-upload limit are refused loudly ----
 
 test('a payload over MAX_SIMPLE_UPLOAD_BYTES is refused with file_too_large_for_simple_upload, NO network call', async () => {
   await withStubbedFetch(NETWORK_FORBIDDEN, async () => {
@@ -203,7 +216,7 @@ test('dry_run previews the sha256 of what WOULD be written without ever calling 
   let putCalled = false;
   const stub: typeof fetch = (async (url: string | URL) => {
     const u = String(url);
-    if (u.includes('login.microsoftonline.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
+    if (isLoginMicrosoftHost(u)) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
     if (u.includes('/content')) {
       putCalled = true;
       return new Response(JSON.stringify({ id: 'x', size: content.length }), { status: 200 });
