@@ -321,10 +321,10 @@ export function buildM365LiteWake(full: WakeFullData): Record<string, unknown> {
 // Unlike the M365-lite path this is a GENERAL-PURPOSE size lever any caller can opt into (Claude
 // Code, Hyperagent, or a long-lived agent session with a large ledger) -- it is not tied to a
 // specific platform's response-size ceiling, just to "give me the current truth, small."
-export const WAKE_BRIEF_TEXT_CAP = 300;
-export const WAKE_BRIEF_LIST_CAP = 6; // pack.corrections / pack.decisions
-export const WAKE_BRIEF_MEMORY_CAP = 8; // memory_records (Cosmos)
-export const WAKE_BRIEF_TASK_CAP = 10; // tasks.active
+export const WAKE_BRIEF_TEXT_CAP = 220;
+export const WAKE_BRIEF_LIST_CAP = 5; // pack.corrections / pack.decisions
+export const WAKE_BRIEF_MEMORY_CAP = 6; // memory_records (Cosmos)
+export const WAKE_BRIEF_TASK_CAP = 8; // tasks.active
 export const WAKE_BRIEF_INBOX_CAP = 3; // inbox.preview
 export const WAKE_BRIEF_INBOUND_CAP = 3; // inbound.notes
 
