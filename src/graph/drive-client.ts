@@ -73,7 +73,7 @@ function itemRef(owner: string, path: string): string {
   return clean ? `${base}:/${encPath(clean)}:` : base;
 }
 
-async function graphFetch(method: string, path: string, opts?: { body?: Buffer | string; headers?: Record<string, string> }) {
+async function graphFetch(method: string, path: string, opts?: { body?: Buffer | string; headers?: Record<string, string>; timeoutMs?: number }) {
   const token = await getAccessToken();
   const url = path.startsWith('http') ? path : `https://graph.microsoft.com/v1.0${path}`;
   // GET is read-only (safe to retry once); uploads are non-idempotent -> retries:0.
@@ -85,7 +85,7 @@ async function graphFetch(method: string, path: string, opts?: { body?: Buffer |
       headers: { Authorization: `Bearer ${token}`, ...(opts?.headers || {}) },
       body: opts?.body,
     },
-    { retries },
+    { retries, timeoutMs: opts?.timeoutMs },
   );
 }
 
@@ -146,9 +146,34 @@ export interface DriveUploadResult {
 }
 
 /**
+ * Microsoft Graph's SIMPLE content-upload endpoint (PUT …/content, what `uploadFile` below uses)
+ * is documented to only support files up to 4 MiB. Larger files require a resumable upload
+ * session (POST createUploadSession + chunked PUTs against the returned uploadUrl), which this
+ * client does not implement. `uploadFile` refuses anything over this ceiling before ever making
+ * the PUT (see the caller-side check in tools/graph-drive/upload.ts) rather than sending it to an
+ * endpoint that was never built to carry it — a real, plausible root cause for "large payloads
+ * silently truncated" reports against this tool. A chunked/resumable session is a deferred
+ * follow-up, not implemented here.
+ */
+export const MAX_SIMPLE_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+/** Uploads (writes up to MAX_SIMPLE_UPLOAD_BYTES) get more time than the generic 8s API-call
+ *  budget — a multi-megabyte PUT over a slow link can legitimately take longer than that, and an
+ *  overly tight timeout aborting mid-transfer is itself a plausible truncation vector. */
+const UPLOAD_TIMEOUT_MS = 30_000;
+
+/**
  * Upload a file to folder/filename (relative to the drive root). Mirrors the source skill's
  * `upload` (PUT …:/content). Binary-safe (accepts a Buffer). Non-idempotent (retries:0).
- * Uses simple content upload (fine for the small documents the exchange folders carry).
+ * Uses simple content upload (fine for the small documents the exchange folders carry — see
+ * MAX_SIMPLE_UPLOAD_BYTES above for the hard ceiling on that).
+ *
+ * `size` is `null`, NEVER defaulted to `content.length`, when Graph's response omits a numeric
+ * size. Defaulting it here used to mask a short/incomplete write (the caller-side integrity check
+ * in tools/graph-drive/upload.ts compares this `size` against the bytes it sent — if this function
+ * quietly substituted `content.length` whenever Graph's own confirmation was missing, that
+ * comparison would trivially "pass" even on a write Graph never actually confirmed, which is
+ * exactly the silent-success failure mode being fixed).
  */
 export async function uploadFile(folderPath: string, fileName: string, content: Buffer, contentType?: string): Promise<DriveUploadResult> {
   const owner = driveOwner();
@@ -156,10 +181,11 @@ export async function uploadFile(folderPath: string, fileName: string, content: 
   const r = await graphFetch('PUT', `${itemRef(owner, path)}/content`, {
     headers: { 'Content-Type': contentType || 'application/octet-stream' },
     body: content,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
   });
   if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `upload "${path}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the folder exists and the app holds Files.ReadWrite.All.' });
   const j = (await r.json()) as { id?: string; size?: number };
-  return { path, id: j.id ?? '', size: typeof j.size === 'number' ? j.size : content.length };
+  return { path, id: j.id ?? '', size: typeof j.size === 'number' ? j.size : null };
 }
 
 export interface DriveDownloadResult {
