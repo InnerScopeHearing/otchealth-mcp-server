@@ -30,7 +30,8 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
           .optional()
           .describe('The agent lane to publish under; defaults to your token identity (lowercase id, e.g. "cto", "commerce").'),
         type: z
-          .preprocess((v) => (v === 'finding' ? 'fact' : v), z.enum(TYPES))
+          .union([z.enum(TYPES), z.literal('finding')])
+          .transform((v) => (v === 'finding' ? 'fact' : v))
           .describe('Entry kind: fact, decision, correction, pitfall, or status. "finding" is accepted as an alias for "fact".'),
         text: z.string().min(1).describe('The fact/decision/correction/pitfall/status text. Keep it atomic and non-sensitive.'),
         tags: z.array(z.string()).optional().describe('Optional tags for recall, e.g. ["ebay","pricing"].'),
