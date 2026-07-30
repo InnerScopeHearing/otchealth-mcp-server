@@ -128,6 +128,19 @@ test('parseTrialBalanceRows: descends into a nested row NOT typed "Section" (onl
   assert.equal(parsed.rows[0].credit, 7365719);
 });
 
+test('REGRESSION (Copilot, gl-assemble.ts): a container row that ALSO carries its own Cells (a subtotal-with-detail row) is never ALSO parsed as a leaf account -- only its children are', () => {
+  const body = tbReportBody([
+    {
+      RowType: 'Row', // a subtotal row: has BOTH a label+amount pair AND nested detail rows
+      Cells: [{ Value: 'Total Equity' }, { Value: '7365719.00' }, { Value: '0.00' }, { Value: '7365719.00' }, { Value: '0.00' }],
+      Rows: [row5('Retained Earnings', '7365719.00', '0.00', '7365719.00', '0.00', 'acc-3130')],
+    },
+  ]);
+  const parsed = parseTrialBalanceRows(body);
+  assert.equal(parsed.rows.length, 1, 'only the child account is captured -- the container must not ALSO emit a synthetic name:"Total Equity" account for itself');
+  assert.equal(parsed.rows[0].accountId, 'acc-3130');
+});
+
 test('parseTrialBalanceRows: falls back to a name-derived key when no "account" attribute is present', () => {
   const body = tbReportBody([
     { RowType: 'Section', Rows: [row5('Mystery Account', '10.00', '0.00', '10.00', '0.00')] },
@@ -429,4 +442,35 @@ test('self-check: does not run on the FIRST requested month (no prior month\'s Y
   const { deps } = makeGlDeps(tbByDate);
   const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
   assert.ok(!result.caveats.some((c) => c.includes('disagrees with YTD')), 'the first requested month has no prior-month YTD to check against, so it must not fire');
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts): the self-check does NOT fabricate a mismatch caveat for every account when the PRIOR month\'s own TrialBalance snapshot was invalid (0 rows)', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])], // valid
+    ['2026-02-28', tbBody(null)], // invalid -- 0 rows, becomes the PRIOR snapshot for March
+    // March's own YTD (1400) deliberately does NOT equal its period movement (300) minus a
+    // fabricated prior-YTD-of-0 -- the old code's empty-prior-map fallback (`?? 0`) would compute
+    // expectedPeriod = 1400 - 0 = 1400 vs actualPeriod = 300 and wrongly flag a mismatch here.
+    ['2026-03-31', tbBody([tbRow('a1', 'Cash', 300, 0, 1400, 0)])], // valid
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-03-31', deps);
+  assert.equal(result.months.length, 2, 'January and March, February omitted');
+  assert.ok(
+    !result.caveats.some((c) => c.includes('2026-03-31') && c.includes('disagrees with YTD')),
+    'March must NOT get a fabricated self-check caveat just because February (its immediate predecessor) was an invalid snapshot',
+  );
+});
+
+test('assembleGl: periodStart is the first day of ITS OWN month for every entry, not the previous entry\'s periodEnd (no overlapping boundary)', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])],
+    ['2026-02-28', tbBody([tbRow('a1', 'Cash', 300, 0)])],
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-02-28', deps);
+  const jan = result.months.find((m) => m.periodEnd === '2026-01-31')!;
+  const feb = result.months.find((m) => m.periodEnd === '2026-02-28')!;
+  assert.equal(jan.periodStart, '2026-01-01');
+  assert.equal(feb.periodStart, '2026-02-01', 'must be the first day of February, NOT January\'s periodEnd (2026-01-31), which would overlap with January\'s own reported range');
 });

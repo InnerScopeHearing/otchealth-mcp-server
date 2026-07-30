@@ -14,7 +14,7 @@
  *   xero_connections        raw connection metadata (id/tenant/createdDateUtc); does NOT determine journals-scope grandfather eligibility (see tool description)
  *   xero_report             TrialBalance | BalanceSheet | ProfitAndLoss | Aged{Payables,Receivables}ByContact |
  *                           BankSummary | BudgetSummary | ExecutiveSummary | TenNinetyNine (1099); nonZeroOnly/match filter client-side
- *   xero_gl_assemble        server-side GL reconstruction: TrialBalance-diff per account/month, netted against ManualJournals — see gl-assemble.ts
+ *   xero_gl_assemble        server-side GL reconstruction: reads each month's own TrialBalance period movement directly (never diffed against another month), netted against ManualJournals — see gl-assemble.ts
  *   xero_accounts           full chart of accounts
  *   xero_contacts           contacts (customers + suppliers), paged/filterable
  *   xero_invoices           invoices (AR + AP), paged/filterable
@@ -1143,11 +1143,13 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       name: 'xero_gl_assemble',
       category: 'read',
       annotations: {
-        title: 'Xero: assemble the general ledger for a date range (TrialBalance-diff + ManualJournals; executive ring only)',
+        title: 'Xero: assemble the general ledger for a date range (TrialBalance period movement + ManualJournals; executive ring only)',
         description:
           'Reconstructs ledger-level detail for [from, to] WITHOUT the gated Journals endpoint, using only scopes already granted: ' +
-          'diffs Xero\'s own TrialBalance at each month-end into per-account period movements (this is vendor-computed ground truth — ' +
-          'it cannot miss anything), nets ManualJournals against those movements into a per-account `variance`, and separately returns, ' +
+          'reads Xero\'s own TrialBalance period movement DIRECTLY at each month-end, per account (this is vendor-computed ground ' +
+          'truth — it cannot miss anything — and is NEVER diffed against another month; an earlier version of this tool diffed ' +
+          'consecutive snapshots, which was arithmetically wrong, see gl-assemble.ts\'s CORRECTED module doc note), nets ManualJournals ' +
+          'against those movements into a per-account `variance`, and separately returns, ' +
           'INSIDE EACH MONTH, that same month\'s gross (unsigned, NOT netted) Invoices/CreditNotes/BankTransactions line-item activity ' +
           'by account as supporting evidence. IMPORTANT — variance is ONLY a completeness proof for accounts whose movement was manual ' +
           'journals; a nonzero variance on an account that also shows activity in THAT MONTH\'S otherDocuments is EXPECTED ' +

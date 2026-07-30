@@ -192,7 +192,12 @@ function numVal(cell: XeroCell | undefined): number {
  * gated on RowType === 'Section' — a real report may nest a sub-total-with-detail under a row
  * typed something other than "Section"; the prior version's Section-only gate is one of the two
  * plausible mechanisms behind a CFO-observed account going fully invisible on both the TB and
- * journal sides at once, see this file's LIVE-VERIFIED note). A leaf 'Row' that cannot be
+ * journal sides at once, see this file's LIVE-VERIFIED note). A row that carries nested `Rows` is
+ * treated as a CONTAINER ONLY and never also parsed as a leaf account itself, even if it also
+ * carries its own `Cells` (Copilot-caught, 2026-07-30, round 3: a subtotal-with-detail row can have
+ * both a label+amount pair AND child Rows — parsing the parent too would emit a synthetic
+ * `name:<subtotal>` account alongside its own children, or silently overwrite a child that happens
+ * to share the same account GUID, corrupting the financial output). A leaf 'Row' that cannot be
  * attributed to any account (no account-GUID Attribute AND no non-empty display name) is dropped
  * but COUNTED via `unresolvedRowCount` rather than silently disappearing. Defensive: an
  * unrecognized/empty body shape returns `{rows: [], unresolvedRowCount: 0}` rather than throwing,
@@ -208,6 +213,7 @@ export function parseTrialBalanceRows(body: unknown): ParsedTrialBalance {
     for (const r of rs) {
       if (Array.isArray(r.Rows) && r.Rows.length > 0) {
         walk(r.Rows);
+        continue; // container: children are already processed, never ALSO parse the parent as a leaf account
       }
       if (r.RowType !== 'Row' || !Array.isArray(r.Cells) || r.Cells.length === 0) continue;
       const first = r.Cells[0];
@@ -481,31 +487,15 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
     const periodEnd = requestedDates[i];
     const snapshot = monthSnapshots[i];
     if (snapshot.rows.length === 0) continue;
-    const periodStart = i === 0 ? effectiveFrom : requestedDates[i - 1];
+    // firstDayOfMonth(periodEnd) is used for EVERY entry, not just i===0 (Copilot-caught, 2026-07-30,
+    // round 3: using requestedDates[i-1], a prior MONTH-END date, for i>0 made that month's periodStart
+    // equal the PRIOR month's periodEnd — an overlapping, inconsistent boundary. For i===0 this is
+    // exactly equal to effectiveFrom, since effectiveFrom is itself firstDayOfMonth(requestedDates[0]).
+    const periodStart = firstDayOfMonth(periodEnd);
     const [ey, em] = periodEnd.split('-').map(Number);
     const monthKey = `${ey}-${String(em).padStart(2, '0')}`;
     const mjBody = { ManualJournals: mjByMonth.get(monthKey) ?? [] };
     const mjNet = sumManualJournalsByAccount(mjBody);
-
-    // SELF-CHECK (cheap: uses rows already fetched, no extra API call): for every month after the
-    // first requested one, period(this month) should equal YTD(this) - YTD(prior month) for the
-    // SAME account. A mismatch is surfaced as a caveat -- it may be a genuine financial-year
-    // boundary between the two months (YTD legitimately resets there), or a real data issue; this
-    // check does not try to tell those apart, it just makes sure neither passes silently.
-    if (i > 0) {
-      const priorYtdByAccount = new Map(monthSnapshots[i - 1].rows.map((r) => [r.accountId, round2(r.ytdDebit - r.ytdCredit)]));
-      let mismatchCount = 0;
-      for (const r of snapshot.rows) {
-        const thisYtd = round2(r.ytdDebit - r.ytdCredit);
-        const priorYtd = priorYtdByAccount.get(r.accountId) ?? 0;
-        const expectedPeriod = round2(thisYtd - priorYtd);
-        const actualPeriod = round2(r.debit - r.credit);
-        if (Math.abs(expectedPeriod - actualPeriod) > 0.01) mismatchCount++;
-      }
-      if (mismatchCount > 0) {
-        caveats.push(`${periodEnd}: ${mismatchCount} account(s) where period movement disagrees with YTD(this month) - YTD(prior month) by more than a cent. A financial-year boundary between these two months is one legitimate cause (YTD resets there); otherwise treat as a data-integrity flag for this month.`);
-      }
-    }
 
     let nonzeroVarianceCount = 0;
     // Build over the UNION of TB-movement keys and manual-journal keys, not just the TB side
@@ -526,6 +516,43 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
       if (variance !== 0) nonzeroVarianceCount++;
       return { accountId, name: tb?.name ?? accountId, tbMovement, manualJournalNet, variance };
     });
+
+    // SELF-CHECK (cheap: uses rows already fetched, no extra API call): for every month after the
+    // first requested one, period(this month) should equal YTD(this) - YTD(prior month) for the
+    // SAME account. A mismatch is surfaced as a caveat -- it may be a genuine financial-year
+    // boundary between the two months (YTD legitimately resets there), or a real data issue; this
+    // check does not try to tell those apart, it just makes sure neither passes silently.
+    //
+    // Compares against the ACTUAL `tbMovement` value emitted in `accounts` above (via
+    // tbMovementByAccount), not an independently re-derived `r.debit - r.credit` formula
+    // (Copilot-caught, 2026-07-30, round 3: recomputing the same formula in two places means a
+    // future regression in the REAL tbMovement computation -- e.g. reintroducing differencing --
+    // would not trip this check, since both places would need to be changed together for the
+    // check to ever disagree with itself). Reading from tbMovementByAccount means this check
+    // verifies what the tool actually SHIPS, so any future change to how tbMovement is computed
+    // is automatically covered without touching this block.
+    //
+    // Skipped entirely when the PRIOR month's own TrialBalance snapshot was invalid (0 rows, see
+    // step 1's caveat) (Copilot-caught, 2026-07-30, round 3): an empty prior snapshot means
+    // priorYtdByAccount has no entries, so every account would look like it has a prior YTD of 0
+    // and this month would appear to mismatch for EVERY account -- a fabricated caveat storm, not
+    // a real finding, on an otherwise-valid month.
+    if (i > 0 && monthSnapshots[i - 1].rows.length > 0) {
+      const tbMovementByAccount = new Map(accounts.map((a) => [a.accountId, a.tbMovement]));
+      const priorYtdByAccount = new Map(monthSnapshots[i - 1].rows.map((r) => [r.accountId, round2(r.ytdDebit - r.ytdCredit)]));
+      let mismatchCount = 0;
+      for (const r of snapshot.rows) {
+        const priorYtd = priorYtdByAccount.get(r.accountId);
+        if (priorYtd === undefined) continue; // account did not exist in the prior snapshot at all -- a new account, not a self-check mismatch
+        const thisYtd = round2(r.ytdDebit - r.ytdCredit);
+        const expectedPeriod = round2(thisYtd - priorYtd);
+        const actualMovement = tbMovementByAccount.get(r.accountId) ?? round2(r.debit - r.credit);
+        if (Math.abs(expectedPeriod - actualMovement) > 0.01) mismatchCount++;
+      }
+      if (mismatchCount > 0) {
+        caveats.push(`${periodEnd}: ${mismatchCount} account(s) where period movement disagrees with YTD(this month) - YTD(prior month) by more than a cent. A financial-year boundary between these two months is one legitimate cause (YTD resets there); otherwise treat as a data-integrity flag for this month.`);
+      }
+    }
     months.push({
       periodStart,
       periodEnd,
