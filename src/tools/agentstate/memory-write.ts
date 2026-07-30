@@ -58,11 +58,11 @@ export function memoryWriteRefusal(connectorSurface: boolean, lane: string): str
   // surface -- distinct from, and in addition to, the identity-forgery gap memoryWriteIdentityRefusal
   // closes below. Found + fixed together, 2026-07-30.
   if ((lane || '').trim().toLowerCase() === 'clo-personal') {
-    return 'refused: "clo-personal" is a privilege-walled personal-legal lane and may never write to memory_write\'s broadly-shared, brain_search-recallable memory-of-record (use memory_remember\'s ring-gated personal channels instead, if one exists for this content)';
+    return '"clo-personal" is a privilege-walled personal-legal lane and may never write to memory_write\'s broadly-shared, brain_search-recallable memory-of-record (use memory_remember\'s ring-gated personal channels instead, if one exists for this content)';
   }
   if (!connectorSurface) return null;
   if (isShipLane(lane)) return null;
-  return `refused: "${lane || '(none)'}" is not authorized to write fleet memory`;
+  return `"${lane || '(none)'}" is not authorized to write fleet memory over a connector surface`;
 }
 
 /**
@@ -100,10 +100,10 @@ export function memoryWriteIdentityRefusal(callerAgent: string, requestedAgent: 
   const caller = (callerAgent || '').trim().toLowerCase();
   const requested = (requestedAgent || '').trim().toLowerCase();
   if (!caller) {
-    return 'refused: no verifiable agent identity on this token -- memory_write cannot attribute a system-of-record entry to an unidentified caller';
+    return 'no verifiable agent identity on this token -- memory_write cannot attribute a system-of-record entry to an unidentified caller';
   }
   if (requested && requested !== caller) {
-    return `refused: your authenticated identity is "${caller}" but this call requested agent "${requested}" -- memory_write always attributes the record to YOUR OWN authenticated identity, never a caller-supplied value (this is not memory_remember's cross-lane feature; pass agent="${caller}" or omit a mismatched value)`;
+    return `your authenticated identity is "${caller}" but this call requested agent "${requested}" -- memory_write always attributes the record to YOUR OWN authenticated identity, never a caller-supplied value (this is not memory_remember's cross-lane feature; pass agent="${caller}" or omit a mismatched value)`;
   }
   return null;
 }
@@ -134,11 +134,18 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
       outputShape: { written: z.boolean(), record: z.unknown() },
       handler: async (input, ctx) => {
         const callerAgent = currentCallerAgent();
+        // Returns the ACTUAL refusal reason in the summary rather than a hardcoded "connector lane
+        // ... executive ring" sentence -- fixed 2026-07-30 review: that hardcoded text was wrong for
+        // the clo-personal branch (clo-personal IS an executive-ring member, and the block fires
+        // unconditionally, connector surface or not), so the old summary told a refused clo-personal
+        // caller it was refused for being outside a ring it is actually inside, on a surface it may
+        // not have even been using. Every memoryWriteRefusal return value is a complete, correctly-
+        // worded explanation on its own (see that function's two return sites).
         const refusal = memoryWriteRefusal(isConnectorSurface(), callerAgent);
         if (refusal) {
           return {
             data: { written: false, note: refusal },
-            summary: `Refused: connector lane "${callerAgent || '(none)'}" is not authorized to write fleet memory. Only the executive ring plus cto/developer may write memory over a connector surface.`,
+            summary: `Refused: ${refusal}`,
           };
         }
         // IDENTITY-FORGERY GATE (memoryWriteIdentityRefusal's header has the full story): memory_write

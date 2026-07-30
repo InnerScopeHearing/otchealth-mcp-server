@@ -114,3 +114,39 @@ test('SAFETY-CRITICAL: no verifiable caller identity is refused outright, even w
 test('an empty/omitted requested agent is allowed when the caller has a real identity (defaults to self)', () => {
   assert.equal(memoryWriteIdentityRefusal('cto', ''), null);
 });
+
+// REGRESSION (2026-07-30 review): the handler builds every summary as `Refused: ${reason}`. Before
+// this, both memoryWriteRefusal and memoryWriteIdentityRefusal's own return strings ALSO started
+// with a lowercase "refused: ", producing a doubled "Refused: refused: ..." in every rejection
+// summary. Fixed by having these two functions return a bare, self-contained explanation with no
+// "refused"/"Refused" framing of their own -- the ONE "Refused:" prefix lives at the call site.
+// Locked here so neither function can silently regress back to self-prefixing.
+test('REGRESSION: no refusal reason string starts with "refused" (the call site owns that prefix, exactly once)', () => {
+  const refusalReasons = [
+    memoryWriteRefusal(true, 'external-read'),
+    memoryWriteRefusal(true, ''),
+    memoryWriteRefusal(true, 'clo-personal'),
+    memoryWriteRefusal(false, 'clo-personal'),
+    memoryWriteIdentityRefusal('', ''),
+    memoryWriteIdentityRefusal('', 'cto'),
+    memoryWriteIdentityRefusal('commerce', 'cto'),
+  ];
+  for (const reason of refusalReasons) {
+    assert.ok(reason, 'expected a non-null refusal reason for this fixture');
+    assert.doesNotMatch(reason!.trim(), /^refused[:\s]/i, `reason must not self-prefix with "refused": "${reason}"`);
+  }
+});
+
+// REGRESSION (2026-07-30 review): memoryWriteRefusal's clo-personal branch fires UNCONDITIONALLY,
+// including for a NON-connector-surface caller, so the reason string itself must never assume or
+// name "connector surface" -- only the OTHER branch (a non-ship-lane connector caller) is actually
+// about the connector surface specifically.
+test('REGRESSION: the clo-personal refusal reason never mentions "connector" (it fires unconditionally, not just there)', () => {
+  const connectorReason = memoryWriteRefusal(true, 'clo-personal');
+  const directReason = memoryWriteRefusal(false, 'clo-personal');
+  assert.ok(connectorReason);
+  assert.ok(directReason);
+  assert.doesNotMatch(connectorReason!, /connector/i);
+  assert.doesNotMatch(directReason!, /connector/i);
+  assert.equal(connectorReason, directReason, 'the reason is identical regardless of connector surface -- it is an unconditional block');
+});

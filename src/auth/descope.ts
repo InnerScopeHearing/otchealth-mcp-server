@@ -109,7 +109,16 @@ export async function fetchJwks(projectId: string): Promise<Map<string, KeyObjec
   return map;
 }
 
-async function getKey(projectId: string, kid: string): Promise<KeyObject | null> {
+/**
+ * Resolves a signing key, OR reports whether a null result means "Descope infrastructure could not
+ * be reached at all" (infraFailure: true) versus every other case (a successfully-fetched JWKS that
+ * simply doesn't contain this kid, or a served stale cache) -- infraFailure=false either way, since
+ * verification could still proceed against a real, current key set. This distinction is what lets
+ * verifyDescopeToken's telemetry (below) separate genuine Descope-infrastructure unreliability from
+ * ordinary credential rejection (see that function's TELEMETRY doc comment for why conflating the two
+ * would misreport hostile/malformed traffic as Descope downtime).
+ */
+async function getKey(projectId: string, kid: string): Promise<{ key: KeyObject | null; infraFailure: boolean }> {
   const now = Date.now();
   const stale =
     !jwksCache || jwksCache.projectId !== projectId || now - jwksCache.fetchedAt > JWKS_TTL_MS;
@@ -119,11 +128,14 @@ async function getKey(projectId: string, kid: string): Promise<KeyObject | null>
       jwksCache = { keys, fetchedAt: now, projectId };
     } catch (err) {
       logger.warn({ type: 'descope_jwks_fetch_failed', err: String(err) }, 'Descope JWKS refresh failed');
-      if (!jwksCache || jwksCache.projectId !== projectId) return null;
-      // fall through to the stale cache below -- better than hard-failing on a transient blip
+      if (!jwksCache || jwksCache.projectId !== projectId) {
+        return { key: null, infraFailure: true }; // no fetch succeeded, ever, for this project -- a real infra failure
+      }
+      // fall through to the stale cache below -- better than hard-failing on a transient blip; a
+      // served stale key set is a degraded-but-functioning path, not a reportable infra failure
     }
   }
-  return jwksCache?.keys.get(kid) ?? null;
+  return { key: jwksCache?.keys.get(kid) ?? null, infraFailure: false };
 }
 
 /**
@@ -191,11 +203,25 @@ export function verifyDescopeClaims(
  * configured (the feature's own existing "inert unless configured" convention -- an unconfigured
  * pilot emits nothing, so this cannot generate noise before the pilot exists). Fire-and-forget,
  * fail-open, mirrors every other captureGatewayEvent call site in this codebase: telemetry can
- * never affect the auth decision it rides on. `outcome` distinguishes genuine verification failure
- * (bad signature, expired, wrong issuer, JWKS fetch failure, malformed token) from the SEPARATE,
- * expected "verified but lane outside DESCOPE_PILOT_LANES" refusal, which agentFromDescopeToken
- * (the caller one layer up) already logs on its own via descope_lane_rejected -- conflating the two
- * would misreport ordinary pilot-scope refusals as Descope reliability problems.
+ * never affect the auth decision it rides on.
+ *
+ * `outcome` is a 3-way classification, NOT a bare verified/failed boolean (fixed 2026-07-30 review:
+ * a single `failed` bucket cannot measure reliability -- auth/bearer.ts sends every non-issued,
+ * three-segment-shaped bearer token through this function, so `failed` would have conflated a real
+ * Descope-infrastructure outage with ordinary malformed/hostile/expired/wrong-signature client
+ * traffic, making invalid credentials LOOK like provider downtime on the dashboard):
+ *   - 'verified'            -- signature, issuer, and expiry all checked out.
+ *   - 'credential_rejected' -- Descope's infrastructure was reachable and did its job; the TOKEN
+ *                              itself is bad (malformed, expired, wrong issuer/signature, unknown
+ *                              kid in a successfully-fetched key set). Not a reliability signal.
+ *   - 'jwks_unavailable'    -- the JWKS fetch itself failed AND there was no usable cached key set to
+ *                              fall back on (see getKey's infraFailure). THE actual reliability
+ *                              signal Trigger 4 cares about -- compute latency/reliability from this
+ *                              bucket alone, never from credential_rejected.
+ * This is a SEPARATE classification from the "verified but lane outside DESCOPE_PILOT_LANES" refusal,
+ * which agentFromDescopeToken (the caller one layer up) already logs on its own via
+ * descope_lane_rejected -- that is pilot-scope POLICY, decided after a successful 'verified' outcome
+ * here, not a verification failure at all.
  */
 export async function verifyDescopeToken(token: string): Promise<DescopeClaims | null> {
   const env = loadEnv();
@@ -204,35 +230,44 @@ export async function verifyDescopeToken(token: string): Promise<DescopeClaims |
   const result = await verifyDescopeTokenUninstrumented(token, env.DESCOPE_PROJECT_ID);
   try {
     captureGatewayEvent('gw_descope_auth', {
-      outcome: result ? 'verified' : 'failed',
+      outcome: result.outcome,
       latency_ms: Date.now() - startedAt,
     });
   } catch {
     // Fail-open: telemetry must never affect the auth decision it rides on.
   }
-  return result;
+  return result.claims;
+}
+
+export type DescopeVerifyOutcome = 'verified' | 'credential_rejected' | 'jwks_unavailable';
+
+interface DescopeVerifyResult {
+  claims: DescopeClaims | null;
+  outcome: DescopeVerifyOutcome;
 }
 
 /** The actual JWKS-fetch + signature-verification work, extracted so verifyDescopeToken above can
  * wrap it with timing/telemetry without duplicating the logic. Not exported; verifyDescopeToken
  * is the only sanctioned entry point (matches this file's existing single-entry-point convention
- * for agentFromDescopeToken). */
-async function verifyDescopeTokenUninstrumented(token: string, projectId: string): Promise<DescopeClaims | null> {
+ * for agentFromDescopeToken). Returns BOTH the claims (for the public contract) and the 3-way
+ * outcome classification (for telemetry) -- see verifyDescopeToken's TELEMETRY doc comment above. */
+async function verifyDescopeTokenUninstrumented(token: string, projectId: string): Promise<DescopeVerifyResult> {
   const parts = token.split('.');
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3) return { claims: null, outcome: 'credential_rejected' };
   let header: { kid?: string };
   try {
     header = JSON.parse(b64urlDecode(parts[0]).toString('utf8')) as { kid?: string };
   } catch {
-    return null;
+    return { claims: null, outcome: 'credential_rejected' };
   }
-  if (!header.kid) return null;
+  if (!header.kid) return { claims: null, outcome: 'credential_rejected' };
 
-  const key = await getKey(projectId, header.kid);
-  if (!key) return null;
+  const { key, infraFailure } = await getKey(projectId, header.kid);
+  if (!key) return { claims: null, outcome: infraFailure ? 'jwks_unavailable' : 'credential_rejected' };
 
   const expectedIssuer = `https://api.descope.com/v1/apps/${projectId}`;
-  return verifyDescopeClaims(token, new Map([[header.kid, key]]), expectedIssuer);
+  const claims = verifyDescopeClaims(token, new Map([[header.kid, key]]), expectedIssuer);
+  return { claims, outcome: claims ? 'verified' : 'credential_rejected' };
 }
 
 /** The pilot lane allow-list. Defaults to just "clo" -- the one lane approved for this pilot. */

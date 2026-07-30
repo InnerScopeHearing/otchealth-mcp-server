@@ -18,6 +18,14 @@ before(() => {
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+  // Explicit, not merely absent (fixed 2026-07-30 review): the "inert unless configured" test below
+  // relies on DESCOPE_PROJECT_ID being empty at the moment loadEnv() first caches it in THIS file's
+  // process. `??=` above would silently leave an INHERITED, already-set value in place -- in that
+  // scenario the test would take the CONFIGURED path (a real, unstubbed JWKS fetch attempt) and could
+  // still happen to return null (network failure -> fail-closed), passing for the wrong reason while
+  // also making an actual outbound network call from a supposedly hermetic unit test. Force it empty
+  // unconditionally, not with `??=`, so the unconfigured path is genuinely guaranteed, not assumed.
+  process.env.DESCOPE_PROJECT_ID = '';
 });
 
 // Hermetic: generates its own RSA keypair and self-signs test JWTs. No network, no real
