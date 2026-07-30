@@ -25,7 +25,6 @@ const {
   monthEndIso,
   monthEndDates,
   parseTrialBalanceRows,
-  diffTrialBalances,
   sumManualJournalsByAccount,
   sumLineItemsByAccount,
   assembleGl,
@@ -43,20 +42,20 @@ test('monthEndIso: last day of a 31-day, 30-day, and leap-Feb month', () => {
   assert.equal(monthEndIso(2026, 1), '2026-02-28'); // non-leap Feb
 });
 
-test('monthEndDates: one calendar month returns [baseline, monthEnd] — 2 entries', () => {
+test('monthEndDates: one calendar month returns [leading boundary, monthEnd] — 2 entries', () => {
   const dates = monthEndDates('2026-03-05', '2026-03-20');
   assert.deepEqual(dates, ['2026-02-28', '2026-03-31']);
 });
 
-test('monthEndDates: a full year returns baseline + 12 month-ends = 13 entries, in order', () => {
+test('monthEndDates: a full year returns leading boundary + 12 month-ends = 13 entries, in order', () => {
   const dates = monthEndDates('2026-01-01', '2026-12-31');
   assert.equal(dates.length, 13);
-  assert.equal(dates[0], '2025-12-31'); // baseline: the month BEFORE January
+  assert.equal(dates[0], '2025-12-31'); // leading boundary: the month BEFORE January
   assert.equal(dates[1], '2026-01-31');
   assert.equal(dates[12], '2026-12-31');
 });
 
-test('monthEndDates: baseline correctly rolls back across a year boundary (January -> prior December)', () => {
+test('monthEndDates: leading boundary correctly rolls back across a year boundary (January -> prior December)', () => {
   const dates = monthEndDates('2026-01-15', '2026-01-20');
   assert.deepEqual(dates, ['2025-12-31', '2026-01-31']);
 });
@@ -77,91 +76,100 @@ function tbReportBody(rows: unknown[]): unknown {
   return { Reports: [{ ReportID: 'TrialBalance', Rows: rows }] };
 }
 
-test('parseTrialBalanceRows: flattens a Section > Row structure, keeping account id + debit/credit', () => {
+/** A 5-cell TrialBalance row: [Account, Debit(period), Credit(period), YTD Debit, YTD Credit]. */
+function row5(name: string, debit: string, credit: string, ytdDebit: string, ytdCredit: string, accountId?: string) {
+  const cells: Array<{ Value?: string; Attributes?: Array<{ Id: string; Value: string }> }> = [
+    accountId ? { Value: name, Attributes: [{ Id: 'account', Value: accountId }] } : { Value: name },
+    { Value: debit },
+    { Value: credit },
+    { Value: ytdDebit },
+    { Value: ytdCredit },
+  ];
+  return { RowType: 'Row', Cells: cells };
+}
+
+test('parseTrialBalanceRows: flattens a Section > Row structure, keeping account id + period debit/credit + YTD', () => {
   const body = tbReportBody([
     { RowType: 'Header', Cells: [{ Value: 'Account' }, { Value: 'Debit' }, { Value: 'Credit' }] },
     {
       RowType: 'Section',
       Title: 'Revenue',
-      Rows: [
-        {
-          RowType: 'Row',
-          Cells: [
-            { Value: 'Sales', Attributes: [{ Id: 'account', Value: 'acc-guid-1' }] },
-            { Value: '0.00' },
-            { Value: '1234.56' },
-          ],
-        },
-      ],
+      Rows: [row5('Sales', '0.00', '1234.56', '0.00', '9999.00', 'acc-guid-1')],
     },
     {
       RowType: 'Section',
       Title: 'Bank',
       Rows: [
-        {
-          RowType: 'Row',
-          Cells: [
-            { Value: 'Business Checking', Attributes: [{ Id: 'account', Value: 'acc-guid-2' }] },
-            { Value: '5000.00' },
-            { Value: '0.00' },
-          ],
-        },
+        row5('Business Checking', '5000.00', '0.00', '5000.00', '0.00', 'acc-guid-2'),
         { RowType: 'SummaryRow', Cells: [{ Value: 'Total Bank' }, { Value: '5000.00' }, { Value: '0.00' }] },
       ],
     },
   ]);
-  const rows = parseTrialBalanceRows(body);
-  assert.equal(rows.length, 2); // the SummaryRow is skipped
-  assert.deepEqual(rows[0], { accountId: 'acc-guid-1', name: 'Sales', debit: 0, credit: 1234.56 });
-  assert.deepEqual(rows[1], { accountId: 'acc-guid-2', name: 'Business Checking', debit: 5000, credit: 0 });
+  const parsed = parseTrialBalanceRows(body);
+  assert.equal(parsed.rows.length, 2); // the SummaryRow is skipped
+  assert.equal(parsed.unresolvedRowCount, 0);
+  assert.deepEqual(parsed.rows[0], { accountId: 'acc-guid-1', name: 'Sales', debit: 0, credit: 1234.56, ytdDebit: 0, ytdCredit: 9999 });
+  assert.deepEqual(parsed.rows[1], { accountId: 'acc-guid-2', name: 'Business Checking', debit: 5000, credit: 0, ytdDebit: 5000, ytdCredit: 0 });
+});
+
+test('parseTrialBalanceRows: descends into a nested row NOT typed "Section" (only condition is that it carries child Rows)', () => {
+  // Simulates the plausible parser gap flagged by the CFO's live acceptance test: a sub-total-with-
+  // detail row that Xero emits under some RowType other than "Section".
+  const body = tbReportBody([
+    {
+      RowType: 'Row', // deliberately NOT "Section"
+      Title: 'Equity',
+      Rows: [row5('Retained Earnings', '0.00', '7365719.00', '0.00', '7365719.00', 'acc-3130')],
+    },
+  ]);
+  const parsed = parseTrialBalanceRows(body);
+  assert.equal(parsed.rows.length, 1, 'must still descend into and capture a nested row even when the parent is not typed Section');
+  assert.equal(parsed.rows[0].accountId, 'acc-3130');
+  assert.equal(parsed.rows[0].credit, 7365719);
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts): a container row that ALSO carries its own Cells (a subtotal-with-detail row) is never ALSO parsed as a leaf account -- only its children are', () => {
+  const body = tbReportBody([
+    {
+      RowType: 'Row', // a subtotal row: has BOTH a label+amount pair AND nested detail rows
+      Cells: [{ Value: 'Total Equity' }, { Value: '7365719.00' }, { Value: '0.00' }, { Value: '7365719.00' }, { Value: '0.00' }],
+      Rows: [row5('Retained Earnings', '7365719.00', '0.00', '7365719.00', '0.00', 'acc-3130')],
+    },
+  ]);
+  const parsed = parseTrialBalanceRows(body);
+  assert.equal(parsed.rows.length, 1, 'only the child account is captured -- the container must not ALSO emit a synthetic name:"Total Equity" account for itself');
+  assert.equal(parsed.rows[0].accountId, 'acc-3130');
 });
 
 test('parseTrialBalanceRows: falls back to a name-derived key when no "account" attribute is present', () => {
   const body = tbReportBody([
-    { RowType: 'Section', Rows: [{ RowType: 'Row', Cells: [{ Value: 'Mystery Account' }, { Value: '10.00' }, { Value: '0.00' }] }] },
+    { RowType: 'Section', Rows: [row5('Mystery Account', '10.00', '0.00', '10.00', '0.00')] },
   ]);
-  const rows = parseTrialBalanceRows(body);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].accountId, 'name:Mystery Account');
+  const parsed = parseTrialBalanceRows(body);
+  assert.equal(parsed.rows.length, 1);
+  assert.equal(parsed.rows[0].accountId, 'name:Mystery Account');
 });
 
-test('parseTrialBalanceRows: an empty/unrecognized shape returns [] rather than throwing', () => {
-  assert.deepEqual(parseTrialBalanceRows(null), []);
-  assert.deepEqual(parseTrialBalanceRows({}), []);
-  assert.deepEqual(parseTrialBalanceRows({ Reports: [] }), []);
-  assert.deepEqual(parseTrialBalanceRows({ Reports: [{}] }), []);
+test('parseTrialBalanceRows: a row with NEITHER an account GUID NOR a name is dropped but COUNTED, not silently lost', () => {
+  const body = tbReportBody([
+    {
+      RowType: 'Section',
+      Rows: [
+        row5('Cash', '100.00', '0.00', '100.00', '0.00', 'acc-1'),
+        { RowType: 'Row', Cells: [{ Value: '' }, { Value: '50.00' }, { Value: '0.00' }] }, // unresolvable
+      ],
+    },
+  ]);
+  const parsed = parseTrialBalanceRows(body);
+  assert.equal(parsed.rows.length, 1, 'the resolvable row is kept');
+  assert.equal(parsed.unresolvedRowCount, 1, 'the unresolvable row is counted, not silently discarded');
 });
 
-// -------------------------------------------------------------------------------------------
-// diffTrialBalances
-// -------------------------------------------------------------------------------------------
-
-test('diffTrialBalances: net movement = (curr debit-credit) - (prev debit-credit)', () => {
-  const prev = [{ accountId: 'a1', name: 'Cash', debit: 1000, credit: 0 }];
-  const curr = [{ accountId: 'a1', name: 'Cash', debit: 1500, credit: 0 }];
-  const [m] = diffTrialBalances(prev, curr);
-  assert.equal(m.tbMovement, 500);
-});
-
-test('diffTrialBalances: an account that only exists in the CURRENT snapshot (newly opened) treats prior as 0', () => {
-  const prev: ReturnType<typeof parseTrialBalanceRows> = [];
-  const curr = [{ accountId: 'a2', name: 'New Account', debit: 0, credit: 250 }];
-  const [m] = diffTrialBalances(prev, curr);
-  assert.equal(m.accountId, 'a2');
-  assert.equal(m.tbMovement, -250);
-});
-
-test('diffTrialBalances: an account that only existed in the PRIOR snapshot (zeroed out / closed) treats current as 0', () => {
-  const prev = [{ accountId: 'a3', name: 'Closed Account', debit: 100, credit: 0 }];
-  const curr: ReturnType<typeof parseTrialBalanceRows> = [];
-  const [m] = diffTrialBalances(prev, curr);
-  assert.equal(m.tbMovement, -100);
-});
-
-test('diffTrialBalances: no movement across two identical snapshots nets to exactly 0', () => {
-  const snap = [{ accountId: 'a1', name: 'Cash', debit: 1000, credit: 0 }];
-  const [m] = diffTrialBalances(snap, snap);
-  assert.equal(m.tbMovement, 0);
+test('parseTrialBalanceRows: an empty/unrecognized shape returns {rows: [], unresolvedRowCount: 0} rather than throwing', () => {
+  assert.deepEqual(parseTrialBalanceRows(null), { rows: [], unresolvedRowCount: 0 });
+  assert.deepEqual(parseTrialBalanceRows({}), { rows: [], unresolvedRowCount: 0 });
+  assert.deepEqual(parseTrialBalanceRows({ Reports: [] }), { rows: [], unresolvedRowCount: 0 });
+  assert.deepEqual(parseTrialBalanceRows({ Reports: [{}] }), { rows: [], unresolvedRowCount: 0 });
 });
 
 // -------------------------------------------------------------------------------------------
@@ -208,11 +216,7 @@ test('sumLineItemsByAccount: skips a line item with no AccountID/AccountCode', (
 });
 
 // -------------------------------------------------------------------------------------------
-// assembleGl — orchestrator integration tests (Copilot review, 2026-07-30). These are the
-// regression proofs for the two most severe findings on this tool: a fabricated-movement bug
-// (diffing a real TB snapshot against a failed-to-parse one) and a date-range mismatch (TB
-// snapshots widened to whole months while the document fetches stayed on the caller's raw,
-// possibly-partial-month from/to). Deps-injected: no real Cosmos or Xero.
+// assembleGl — orchestrator integration tests. Deps-injected: no real Cosmos or Xero.
 // -------------------------------------------------------------------------------------------
 
 function liveTokenState() {
@@ -228,40 +232,39 @@ function liveTokenState() {
   return { doc, etag: 'etag-1' };
 }
 
-function tbRow(id, name, debit, credit) {
-  return { RowType: 'Row', Cells: [{ Value: name, Attributes: [{ Id: 'account', Value: id }] }, { Value: String(debit) }, { Value: String(credit) }] };
+/** A single account's row for one TrialBalance snapshot. debit/credit are THAT MONTH's period
+ * movement (read directly, never diffed); ytdDebit/ytdCredit default to the SAME as debit/credit
+ * (i.e. "this is the first month of the financial year", the simplest self-consistent case) unless
+ * overridden -- tests that exercise the YTD self-check override them explicitly. */
+function tbRow(id: string, name: string, debit: number, credit: number, ytdDebit = debit, ytdCredit = credit) {
+  return row5(name, String(debit), String(credit), String(ytdDebit), String(ytdCredit), id);
 }
 
 /** A valid TrialBalance report body for the given account rows, or an INVALID (0-row) body when
  * `rows` is null -- simulates a parse failure / unrecognized response shape. */
-function tbBody(rows) {
+function tbBody(rows: ReturnType<typeof tbRow>[] | null) {
   if (rows === null) return { Reports: [{}] }; // no Rows at all -> parses to 0 rows
-  return { Reports: [{ Rows: [{ RowType: 'Section', Rows: rows.map((r) => tbRow(r.id, r.name, r.debit, r.credit)) }] }] };
+  return { Reports: [{ Rows: [{ RowType: 'Section', Rows: rows }] }] };
 }
 
-/** Builds a deps object: `read` returns an already-live token (so getOrgAccess never needs to
- * refresh or hit identity.xero.com/connections), `replace`/`create` throw if called (proving the
- * seeded live token was used directly), and `fetchImpl` routes purely on api.xero.com PATHNAME:
- * TrialBalance reads are answered per-date from `tbByDate` (keyed by the `date` query param);
- * every other list endpoint is captured into `whereByPath` (keyed by pathname) and answered with
- * an empty collection, since these tests are about the TB-diff/date-alignment logic, not the
- * document content itself. */
 /** `seed` optionally pre-fills what each list endpoint returns (e.g. { ManualJournals: [...] }) --
- * defaults to an empty array for every endpoint not explicitly seeded. */
-function makeGlDeps(tbByDate, seed = {}) {
+ * defaults to an empty array for every endpoint not explicitly seeded. Only TrialBalance dates
+ * assembleGl actually requests (the months in [from, to], NOT the monthEndDates leading boundary --
+ * assembleGl no longer fetches or diffs against that boundary) need a `tbByDate` entry. */
+function makeGlDeps(tbByDate: Map<string, unknown>, seed: Record<string, unknown[]> = {}) {
   const state = liveTokenState();
-  const whereByPath = new Map();
+  const whereByPath = new Map<string, string | null>();
   const deps = {
-    fetchImpl: (async (url) => {
+    fetchImpl: (async (url: string | URL) => {
       const u = new URL(String(url));
       if (u.hostname !== 'api.xero.com') throw new Error(`unexpected fetch host ${u.hostname}`);
       if (u.pathname === '/api.xro/2.0/Reports/TrialBalance') {
         const date = u.searchParams.get('date');
-        const body = tbByDate.get(date);
+        const body = date ? tbByDate.get(date) : undefined;
         if (!body) throw new Error(`no TrialBalance stub for date=${date}`);
         return new Response(JSON.stringify(body), { status: 200 });
       }
-      const arrayKeyByPath = {
+      const arrayKeyByPath: Record<string, string> = {
         '/api.xro/2.0/ManualJournals': 'ManualJournals',
         '/api.xro/2.0/Invoices': 'Invoices',
         '/api.xro/2.0/CreditNotes': 'CreditNotes',
@@ -271,23 +274,21 @@ function makeGlDeps(tbByDate, seed = {}) {
       if (!key) throw new Error(`unexpected fetch path ${u.pathname}`);
       whereByPath.set(u.pathname, u.searchParams.get('where'));
       return new Response(JSON.stringify({ [key]: seed[key] ?? [] }), { status: 200 });
-    }),
-    read: (async () => ({ doc: state.doc, etag: state.etag })),
-    replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }),
-    create: (async () => { throw new Error('create should never be called -- the seeded token is already live'); }),
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }) as never,
+    create: (async () => { throw new Error('create should never be called -- the seeded token is already live'); }) as never,
   };
   return { deps, whereByPath };
 }
 
-test('assembleGl: happy path -- one full month, real snapshots, NO manual journals -- the full TB movement surfaces as an UNEXPLAINED variance', async () => {
+test('assembleGl: happy path -- one month, TB movement read DIRECTLY (no diffing), no manual journals -- the full TB movement surfaces as an UNEXPLAINED variance', async () => {
   const tbByDate = new Map([
-    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
-    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])], // January's OWN period movement: 500 debit
   ]);
   const { deps } = makeGlDeps(tbByDate);
   const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
   assert.equal(result.months.length, 1);
-  assert.equal(result.months[0].periodStart, '2025-12-31');
   assert.equal(result.months[0].periodEnd, '2026-01-31');
   const [account] = result.months[0].accounts;
   assert.equal(account.tbMovement, 500);
@@ -296,10 +297,32 @@ test('assembleGl: happy path -- one full month, real snapshots, NO manual journa
   assert.ok(result.months[0].otherDocuments, 'each month carries its own otherDocuments');
 });
 
+// --- THE HEADLINE REGRESSION: the CFO's live acceptance-test finding, 2026-07-30 -----------------
+// A prior version of this tool fetched TrialBalance at consecutive month-ends and DIFFED the period
+// columns against each other, on the wrong assumption that they were a cumulative balance. Xero's
+// period pair at a given `date` is ALREADY that month's movement -- diffing two already-period
+// figures computes period(N) - period(N-1), which is exactly 0 - period(N-1) = -period(N-1) for an
+// account with genuinely NO activity in month N. This is the regression proof that the tool no
+// longer does that: an account with real November activity and ZERO December activity must report
+// December's tbMovement as 0.00, never as -November's figure.
+
+test('REGRESSION (CFO acceptance test, 2026-07-30): a month with NO real activity reports tbMovement 0, NOT the negated prior month figure', async () => {
+  const tbByDate = new Map([
+    ['2026-11-30', tbBody([tbRow('a1', 'Cash', 0, 12640455.18)])], // November: real activity, a big credit movement
+    ['2026-12-31', tbBody([tbRow('a1', 'Cash', 0, 0, 0, 12640455.18)])], // December: NO period activity (debit/credit both 0); YTD carries forward
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-11-01', '2026-12-31', deps);
+  assert.equal(result.months.length, 2);
+  const nov = result.months.find((m) => m.periodEnd === '2026-11-30')!;
+  const dec = result.months.find((m) => m.periodEnd === '2026-12-31')!;
+  assert.equal(nov.accounts[0].tbMovement, -12640455.18, 'November\'s own movement is unaffected');
+  assert.equal(dec.accounts[0].tbMovement, 0, 'December must read as 0 (its own period figure), never as the negated November figure (+12640455.18, the old bug\'s output)');
+});
+
 test('assembleGl: a POSTED manual journal that exactly explains the TB movement zeroes the variance', async () => {
   const tbByDate = new Map([
-    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
-    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])],
   ]);
   const { deps } = makeGlDeps(tbByDate, {
     ManualJournals: [{ Date: '2026-01-15', Status: 'POSTED', JournalLines: [{ AccountID: 'a1', LineAmount: 500 }] }],
@@ -311,10 +334,9 @@ test('assembleGl: a POSTED manual journal that exactly explains the TB movement 
   assert.equal(account.variance, 0);
 });
 
-test('REGRESSION (Copilot, gl-assemble.ts:381): DRAFT and VOIDED manual journals are excluded from manualJournalNet -- only POSTED counts', async () => {
+test('REGRESSION (Copilot, gl-assemble.ts): DRAFT and VOIDED manual journals are excluded from manualJournalNet -- only POSTED counts', async () => {
   const tbByDate = new Map([
-    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
-    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])],
   ]);
   const { deps } = makeGlDeps(tbByDate, {
     ManualJournals: [
@@ -329,10 +351,9 @@ test('REGRESSION (Copilot, gl-assemble.ts:381): DRAFT and VOIDED manual journals
   assert.equal(account.variance, 0);
 });
 
-test('REGRESSION (Copilot, gl-assemble.ts:439): a manual-journal-only account key (absent from TB movements) still surfaces in accounts, not silently dropped', async () => {
+test('REGRESSION (Copilot, gl-assemble.ts): a manual-journal-only account key (absent from TB movements) still surfaces in accounts, not silently dropped', async () => {
   const tbByDate = new Map([
-    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
-    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])], // a1 has NO movement this month
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 0, 0)])], // a1 has NO movement this month
   ]);
   // A journal line references a DIFFERENT key ("code:999") never seen on the TB side at all --
   // simulating the documented name:/code: key-format mismatch fallback case.
@@ -347,39 +368,109 @@ test('REGRESSION (Copilot, gl-assemble.ts:439): a manual-journal-only account ke
   assert.equal(unmatched.variance, -250, 'the full unmatched journal amount surfaces as variance -- the visible "unmatched journal side" signal');
 });
 
-test('REGRESSION (Copilot, gl-assemble.ts:350): a month touching an invalid (0-row) TrialBalance snapshot is OMITTED, never diffed into a fabricated movement', async () => {
-  // Dec (real, 1000) -> Jan (INVALID, parse failure) -> Feb (real, 1000 again). If the bug were
-  // present, Dec->Jan would show a fabricated -1000 movement and Jan->Feb a fabricated +1000
-  // reinstatement. Neither period should appear in `months` at all.
+test('REGRESSION (Copilot, gl-assemble.ts): a month with an invalid (0-row) TrialBalance snapshot is OMITTED on its own -- it no longer takes a neighboring month down with it', async () => {
   const tbByDate = new Map([
-    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
-    ['2026-01-31', tbBody(null)], // invalid
-    ['2026-02-28', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])], // valid
+    ['2026-02-28', tbBody(null)], // invalid
+    ['2026-03-31', tbBody([tbRow('a1', 'Cash', 300, 0)])], // valid
   ]);
   const { deps } = makeGlDeps(tbByDate);
-  const result = await assembleGl('otchealth', '2026-01-01', '2026-02-28', deps);
-  assert.equal(result.months.length, 0, 'both periods touch the invalid January snapshot and must be omitted, not fabricated');
-  assert.ok(result.caveats.some((c) => c.includes('2026-01-31') && c.includes('OMITTED')), 'a caveat must explain the omission');
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-03-31', deps);
+  assert.equal(result.months.length, 2, 'only February is omitted -- January and March each stand on their own snapshot now, unlike the old diff-based model');
+  assert.ok(result.months.some((m) => m.periodEnd === '2026-01-31'));
+  assert.ok(result.months.some((m) => m.periodEnd === '2026-03-31'));
+  assert.ok(result.caveats.some((c) => c.includes('2026-02-28') && c.includes('OMITTED')), 'a caveat must explain the omission');
 });
 
-test('REGRESSION (Copilot, gl-assemble.ts:354): a partial-month request still queries ManualJournals/Invoices/CreditNotes/BankTransactions over the WIDENED whole-month bounds, not the raw from/to', async () => {
+test('assembleGl: an unresolvable TrialBalance row surfaces as a loud caveat, not a silent gap', async () => {
+  const unresolvableRow = { RowType: 'Row', Cells: [{ Value: '' }, { Value: '7365719.00' }, { Value: '0.00' }] };
   const tbByDate = new Map([
-    ['2026-02-28', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
-    ['2026-03-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+    ['2026-01-31', { Reports: [{ Rows: [{ RowType: 'Section', Rows: [tbRow('a1', 'Cash', 500, 0), unresolvableRow] }] }] }],
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
+  assert.equal(result.months[0].accounts.length, 1, 'the resolvable account still comes through');
+  assert.ok(result.caveats.some((c) => c.includes('2026-01-31') && c.includes('no resolvable account')), 'the unresolved row must be a named caveat');
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts): a partial-month request still queries ManualJournals/Invoices/CreditNotes/BankTransactions over the WIDENED whole-month bounds, not the raw from/to', async () => {
+  const tbByDate = new Map([
+    ['2026-03-31', tbBody([tbRow('a1', 'Cash', 500, 0)])],
   ]);
   const { deps, whereByPath } = makeGlDeps(tbByDate);
   // A partial-month request: March 5 - March 20, well short of the full month.
   await assembleGl('otchealth', '2026-03-05', '2026-03-20', deps);
-  const mjWhere = whereByPath.get('/api.xro/2.0/ManualJournals');
+  const mjWhere = whereByPath.get('/api.xro/2.0/ManualJournals')!;
   // Must reflect the WIDENED month (March 1 - March 31), never the raw partial request.
   assert.match(mjWhere, /DateTime\(2026,3,1\)/, 'the effective from must be widened to the 1st of the month, not the 5th');
   assert.match(mjWhere, /DateTime\(2026,3,31\)/, 'the effective to must be widened to month-end, not the 20th');
   assert.match(mjWhere, /Status=="POSTED"/, 'ManualJournals must also be server-side filtered to POSTED only');
   // ManualJournals carries the SAME widened date bounds as the other three, PLUS its own
-  // Status=="POSTED" suffix (see the POSTED-only regression test below) -- so it is a strict
-  // prefix match, not exact equality.
+  // Status=="POSTED" suffix -- so it is a strict prefix match, not exact equality.
   const dateOnlyBounds = mjWhere.replace(' && Status=="POSTED"', '');
   for (const path of ['/api.xro/2.0/Invoices', '/api.xro/2.0/CreditNotes', '/api.xro/2.0/BankTransactions']) {
     assert.equal(whereByPath.get(path), dateOnlyBounds, `${path} must use the SAME widened date bounds as ManualJournals`);
   }
+});
+
+// -- YTD-vs-period self-check (the CFO's requested "cheap and worth it" cross-check) --------------
+
+test('self-check: a consistent YTD/period relationship across two months produces NO mismatch caveat', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0, 500, 0)])], // Jan: period 500, YTD 500 (first month of FY)
+    ['2026-02-28', tbBody([tbRow('a1', 'Cash', 300, 0, 800, 0)])], // Feb: period 300, YTD 800 = 500 + 300 (consistent)
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-02-28', deps);
+  assert.ok(!result.caveats.some((c) => c.includes('disagrees with YTD')), 'no self-check caveat when the numbers are internally consistent');
+});
+
+test('self-check: an inconsistent YTD/period relationship across two months IS flagged as a caveat', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0, 500, 0)])], // Jan: period 500, YTD 500
+    ['2026-02-28', tbBody([tbRow('a1', 'Cash', 300, 0, 999, 0)])], // Feb: period 300, but YTD 999 != 500+300=800 -- inconsistent
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-02-28', deps);
+  assert.ok(result.caveats.some((c) => c.includes('2026-02-28') && c.includes('disagrees with YTD')), 'a real YTD/period disagreement must be surfaced as a caveat');
+});
+
+test('self-check: does not run on the FIRST requested month (no prior month\'s YTD to compare against)', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0, 999999, 0)])], // a YTD figure that would "mismatch" against nothing
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
+  assert.ok(!result.caveats.some((c) => c.includes('disagrees with YTD')), 'the first requested month has no prior-month YTD to check against, so it must not fire');
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts): the self-check does NOT fabricate a mismatch caveat for every account when the PRIOR month\'s own TrialBalance snapshot was invalid (0 rows)', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])], // valid
+    ['2026-02-28', tbBody(null)], // invalid -- 0 rows, becomes the PRIOR snapshot for March
+    // March's own YTD (1400) deliberately does NOT equal its period movement (300) minus a
+    // fabricated prior-YTD-of-0 -- the old code's empty-prior-map fallback (`?? 0`) would compute
+    // expectedPeriod = 1400 - 0 = 1400 vs actualPeriod = 300 and wrongly flag a mismatch here.
+    ['2026-03-31', tbBody([tbRow('a1', 'Cash', 300, 0, 1400, 0)])], // valid
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-03-31', deps);
+  assert.equal(result.months.length, 2, 'January and March, February omitted');
+  assert.ok(
+    !result.caveats.some((c) => c.includes('2026-03-31') && c.includes('disagrees with YTD')),
+    'March must NOT get a fabricated self-check caveat just because February (its immediate predecessor) was an invalid snapshot',
+  );
+});
+
+test('assembleGl: periodStart is the first day of ITS OWN month for every entry, not the previous entry\'s periodEnd (no overlapping boundary)', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])],
+    ['2026-02-28', tbBody([tbRow('a1', 'Cash', 300, 0)])],
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-02-28', deps);
+  const jan = result.months.find((m) => m.periodEnd === '2026-01-31')!;
+  const feb = result.months.find((m) => m.periodEnd === '2026-02-28')!;
+  assert.equal(jan.periodStart, '2026-01-01');
+  assert.equal(feb.periodStart, '2026-02-01', 'must be the first day of February, NOT January\'s periodEnd (2026-01-31), which would overlap with January\'s own reported range');
 });
