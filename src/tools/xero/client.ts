@@ -653,6 +653,63 @@ export async function xeroUploadAttachment(
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Connections metadata (CFO P0-1/P0-4, 2026-07-30): which grant is this, and when was it created?
+// ---------------------------------------------------------------------------------------------
+
+export interface XeroConnection {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  tenantType: string;
+  createdDateUtc: string;
+  updatedDateUtc: string;
+}
+
+/**
+ * The vendor-documented cutoff (CFO P0-1, 2026-07-30, sourced to Xero's own developer docs): a
+ * Custom Connection created BEFORE this date retains accounting.journals.read (grandfathered)
+ * until Sep 2027; one created on/after this date can never obtain that scope at any price. This
+ * constant is the one fact xero_connections exists to let us check per org, cheaply and
+ * repeatedly, without re-deriving the date from memory each time.
+ */
+export const XERO_JOURNALS_GRANDFATHER_CUTOFF = '2026-04-29T00:00:00Z';
+
+/**
+ * Raw GET /connections for whichever org's access token is used — returns the connection grant(s)
+ * reachable by that token (id, tenant identity, and createdDateUtc/updatedDateUtc). This is the
+ * ONLY Xero-API-exposed way to learn a connection's creation date; Xero does NOT expose "which
+ * user authorised this connection" via any API (that is only visible in the Xero UI under
+ * Settings > Connected Apps, to a user who can see the org's app list) — callers needing that fact
+ * must check there, this function cannot supply it.
+ */
+export async function xeroConnections(org: XeroOrg, opts: { deps?: TokenDeps } = {}): Promise<XeroConnection[]> {
+  const deps = opts.deps ?? defaultDeps;
+  const { accessToken } = await getOrgAccess(org, { deps });
+  const r = await deps.fetchImpl(XERO_CONNECTIONS_URL, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!r.ok) throw new Error(`Xero /connections failed for org "${org}": HTTP ${r.status}`);
+  const conns = (await r.json()) as Array<Partial<XeroConnection>>;
+  return conns.map((c) => ({
+    id: c.id ?? '',
+    tenantId: c.tenantId ?? '',
+    tenantName: c.tenantName ?? '',
+    tenantType: c.tenantType ?? '',
+    createdDateUtc: c.createdDateUtc ?? '',
+    updatedDateUtc: c.updatedDateUtc ?? '',
+  }));
+}
+
+/** True when a connection's createdDateUtc is before the journals-scope grandfather cutoff. Pure. */
+export function isGrandfatheredForJournals(createdDateUtc: string): boolean | null {
+  if (!createdDateUtc) return null;
+  const created = Date.parse(createdDateUtc);
+  if (Number.isNaN(created)) return null;
+  return created < Date.parse(XERO_JOURNALS_GRANDFATHER_CUTOFF);
+}
+
 /** The ring-refusal payload shared by every xero_* tool. Pure. */
 export function ringRefusal(toolName: string, caller: string | undefined | null) {
   return {

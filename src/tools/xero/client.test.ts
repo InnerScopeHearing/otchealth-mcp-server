@@ -397,16 +397,20 @@ test('SAFETY-CRITICAL (S2): every registered xero tool has its OWN in-handler ri
   // The handlers each enforce EXEC_RING in-line (tools.ts). This structural lock pins that there is
   // exactly one isXeroAllowed(ctx.callerAgent) guard per registerTool call-site, so a future copy-paste
   // (e.g. adding a xero_* tool) that drops the gate line fails CI instead of exposing MNPI. NOTE: the
-  // count is registerTool CALL-SITES, not tool names — the shared registerPagedAccountingRead helper is
-  // ONE gated site that registers 4 paged reads, so 17 sites == 20 tool names (16 explicit + 1 shared
-  // helper covering contacts/payments/credit_notes/bank_transfers). Bumped 16->17 on 2026-07-24 when
-  // xero_attachment_upload was added (FND-20260724-f6df fix) — every registerTool call-site MUST keep
-  // its own gate; this count is the trip-wire that forces that discipline on the next addition too.
+  // count is registerTool CALL-SITES (literal text occurrences), not tool names — the shared
+  // registerPagedAccountingRead helper contains exactly ONE registerTool( occurrence in its own
+  // definition even though it is invoked multiple times (contacts/payments/credit_notes), so the
+  // text-occurrence count is always <= the number of distinct tool names. Bumped 17->20 on 2026-07-30
+  // (CFO P0-1/P0-2 mega-prompt fixes): +1 xero_connections, +1 xero_gl_assemble, +1 xero_bank_transfers
+  // moved OUT of the shared paged-read helper into its own dedicated call-site (a gateway-side
+  // pagination/date-filter shim — Xero's /BankTransfers endpoint ignores both server-side), which no
+  // longer counts against the helper's shared occurrence. Every registerTool call-site MUST keep its
+  // own gate; this count is the trip-wire that forces that discipline on the next addition too.
   const src = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
   const tools = (src.match(/registerTool\(/g) || []).length;
   const gates = (src.match(/isXeroAllowed\(ctx\.callerAgent\)/g) || []).length;
   const refusals = (src.match(/return ringRefusal\(/g) || []).length;
-  assert.equal(tools, 17, 'expected exactly 17 registerTool call-sites (16 explicit + 1 shared helper)');
+  assert.equal(tools, 20, 'expected exactly 20 registerTool call-sites (19 explicit + 1 shared helper)');
   assert.equal(gates, tools, 'every registerTool call-site MUST call isXeroAllowed(ctx.callerAgent)');
   assert.equal(refusals, tools, 'every gate MUST return ringRefusal on a non-exec caller');
 });

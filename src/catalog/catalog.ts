@@ -43,6 +43,30 @@ export function toolCount(): number {
   return registeredTools.length;
 }
 
+/**
+ * A short, deterministic fingerprint of the CURRENT tool catalog (name+category, sorted). Changes
+ * whenever a tool is added, removed, or recategorized. Exists so a client can detect a STALE cached
+ * tools/list without a human first having to notice a "missing" tool is actually just an unrefreshed
+ * cache (CFO P1-A / P0-1 post-mortem, 2026-07-30: a full connector reconnect did NOT clear a client's
+ * cached MCP tool list, and the resulting "xero_attachment_upload is absent" symptom cost two full
+ * review rounds before the real cause -- a stale cache, not a missing/allowlist bug -- was found by
+ * asking the gateway's own catalog directly). Cheap FNV-1a hash (no crypto import needed for a
+ * non-security fingerprint); collisions are not a security concern here, only a staleness signal.
+ * Pure/testable.
+ */
+export function catalogVersion(): string {
+  const key = allTools()
+    .map((t) => `${t.name}:${t.category}`)
+    .sort()
+    .join('|');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
 export interface ServiceInfo {
   description: string;
   ring: 'non-phi' | 'phi-carved-out';

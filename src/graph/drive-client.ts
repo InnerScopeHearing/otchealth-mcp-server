@@ -210,9 +210,26 @@ export interface DriveDownloadResult {
   base64: string | null;
 }
 
-function looksTextual(contentType: string | null): boolean {
-  if (!contentType) return false;
-  return /^(text\/|application\/(json|xml|x-ndjson|javascript)|application\/.*\+(json|xml))/i.test(contentType);
+/** Extensions Graph/OneDrive is known to mis-report (or not report at all, falling back to
+ * application/octet-stream) on the simple content-upload/download path, even when the upload sent
+ * an explicit, correct Content-Type. Confirmed live (CFO P1-D, 2026-07-30): uploading a .md file
+ * with content_type:"text/markdown" round-tripped as application/octet-stream on download. This is
+ * OneDrive inferring/storing the item's mimeType from the file EXTENSION rather than honoring an
+ * arbitrary Content-Type sent on `PUT :/content` (Graph does not expose a way to force-set
+ * driveItem.file.mimeType directly) -- so relying on the response's Content-Type header alone to
+ * decide text-vs-binary is unreliable for any extension OneDrive does not have a built-in mapping
+ * for. Extend by filename extension as a second signal so a genuinely textual file we KNOW the
+ * extension of still comes back as text even when Graph reports a generic/wrong content-type. */
+const TEXTUAL_EXTENSIONS = /\.(md|markdown|txt|csv|json|jsonl|ndjson|xml|yaml|yml|log|ts|tsx|js|jsx|mjs|cjs|css|html|htm|sh|sql|toml|ini|env)$/i;
+
+function looksTextual(contentType: string | null, fileName?: string): boolean {
+  if (contentType && /^(text\/|application\/(json|xml|x-ndjson|javascript)|application\/.*\+(json|xml))/i.test(contentType)) {
+    return true;
+  }
+  // Fall back to the extension when the reported type is absent/generic (see TEXTUAL_EXTENSIONS
+  // comment above) -- but only ever WIDENS text detection, never narrows a type Graph already
+  // reported correctly as textual.
+  return Boolean(fileName && TEXTUAL_EXTENSIONS.test(fileName));
 }
 
 /**
@@ -227,7 +244,7 @@ export async function downloadFile(folderPath: string, fileName: string, forceBa
   if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `download "${path}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the file path + app permissions.' });
   const contentType = r.headers.get('content-type');
   const buf = Buffer.from(await r.arrayBuffer());
-  if (!forceBase64 && looksTextual(contentType)) {
+  if (!forceBase64 && looksTextual(contentType, fileName)) {
     return { found: true, contentType, size: buf.length, text: buf.toString('utf8'), base64: null };
   }
   return { found: true, contentType, size: buf.length, text: null, base64: buf.toString('base64') };
