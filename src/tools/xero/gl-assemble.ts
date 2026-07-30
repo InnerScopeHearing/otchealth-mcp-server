@@ -5,20 +5,45 @@
  * endpoint (declined — $1,445 AUD/mo behind a security assessment, see xero_connections /
  * XERO_JOURNALS_GRANDFATHER_CUTOFF) or (b) a human clicking through a UI export every time
  * anything changes (rejected by the operator as a recurring dependency). The insight: Xero's own
- * TrialBalance report already computes account balances correctly at any as-at date and cannot
- * miss anything (it is the vendor's own ledger truth, not a reconstruction) — diffing consecutive
- * month-end TrialBalances gives the per-account PERIOD MOVEMENT directly, using only scopes
- * already granted. This module fetches those snapshots + the underlying source documents and
- * assembles them server-side so a caller never has to page through ~295KB TrialBalance reads
- * (~10 JIT pages EACH) client-side, twelve times a year, forever.
+ * TrialBalance report already computes each month's account movement correctly and cannot miss
+ * anything (it is the vendor's own ledger truth, not a reconstruction) — reading that movement
+ * directly at each month-end, using only scopes already granted, gives per-account PERIOD
+ * MOVEMENT with no client-side arithmetic on top of it. This module fetches those figures + the
+ * underlying source documents and assembles them server-side so a caller never has to page
+ * through ~295KB TrialBalance reads (~10 JIT pages EACH) client-side, twelve times a year, forever.
+ *
+ * CORRECTED 2026-07-30 (CFO live acceptance test, real production data): the FIRST version of this
+ * tool fetched TrialBalance at consecutive month-ends and DIFFED them, on the assumption that
+ * Cells[1]/Cells[2] ("Debit"/"Credit") were a CUMULATIVE balance as-at that date. They are not.
+ * Xero's TrialBalance report row is 5 cells wide — [0] Account, [1] Debit (THIS MONTH's movement),
+ * [2] Credit (THIS MONTH's movement), [3] YTD Debit, [4] YTD Credit — and the period pair at a
+ * single `date` query is ALREADY that month's net movement, not a running balance. Diffing two
+ * already-period figures computed `period(N) - period(N-1)`, a second derivative, not a movement:
+ * accidentally correct in the first month of a range (when period(N-1) is the implicit 0 of an
+ * unset baseline) and arithmetically wrong — an exact sign-flipped negation — in every month after
+ * it. Proof: a real December figure of -12,640,455.18 against a real November of +12,640,455.18
+ * on an account with NO December activity is exactly 0 - period(Nov). THE FIX: read the period pair
+ * directly, once per month, and never diff two TrialBalance snapshots against each other again.
+ * This is also cheaper (one TrialBalance call per requested month instead of N+1).
  *
  * HONEST V1 SCOPE (read before trusting `variance` for anything audit-facing):
- *   - `tbMovement` is Xero's own computed balance, diffed. Always correct; this is ground truth.
+ *   - `tbMovement` is Xero's own reported period movement for that month, read directly (not
+ *     diffed). Ground truth, assuming the row resolves to an account at all — see the next bullet.
+ *   - A TrialBalance row with NEITHER a resolvable account GUID NOR a display name cannot be
+ *     attributed to any account and is DROPPED — but never silently: parseTrialBalanceRows reports
+ *     an `unresolvedRowCount`, and assembleGl turns any nonzero count into a loud caveat naming the
+ *     affected date, rather than a clean-looking output with a hole in it (the worse failure mode
+ *     on a public company's ledger, per the CFO's own review of this exact risk).
  *   - `manualJournalNet` sums ManualJournal.JournalLines[].LineAmount (signed: Xero's documented
  *     convention is positive = debit, negative = credit) by AccountID, per month. `variance` =
  *     tbMovement - manualJournalNet, i.e. THIS TOOL ONLY NETS MANUAL JOURNALS AGAINST THE TRIAL
  *     BALANCE. A near-zero variance on an account whose ONLY movement was manual journals is a
  *     real completeness proof for that account in that month.
+ *   - A cheap SELF-CHECK runs on every month after the first requested one, using YTD columns
+ *     already present in the SAME fetched rows (no extra API calls): period(month) should equal
+ *     YTD(month) - YTD(prior month) for a given account. A mismatch beyond a cent is surfaced as a
+ *     caveat (it may simply mean a financial-year boundary fell between the two months, where YTD
+ *     legitimately resets — that is a plausible, named explanation, not silently swallowed).
  *   - Invoices / CreditNotes / BankTransactions line items ARE fetched and summed by account (see
  *     `otherDocuments`), but as GROSS, UNSIGNED activity — NOT netted into `variance`. Getting the
  *     debit/credit sign right for these depends on invoice Type (ACCREC/ACCPAY), transaction Type
@@ -32,21 +57,32 @@
  *   - Payments, BankTransfers, ExpenseClaims, Receipts are NOT pulled by this v1: Payments and
  *     BankTransfers don't carry a per-account LineItems breakdown the way Invoices/CreditNotes/
  *     BankTransactions do (they reference invoices/bank accounts, not a line-item account split);
- *     ExpenseClaims/Receipts are blocked by the P0-3 401s. Add them once P0-3 resolves and once a
- *     signed netting model for AR/AP/bank control accounts is designed and live-verified.
+ *     ExpenseClaims/Receipts are blocked by the P0-3 401s (vendor returns a bare, undiscriminating
+ *     401 on both — confirmed by the CFO against live data; not fixable from this side). Add them
+ *     once P0-3 resolves and once a signed netting model for AR/AP/bank control accounts is
+ *     designed and live-verified.
  *
- * NEEDS A LIVE SMOKE TEST BEFORE FIRST REAL USE: the TrialBalance row parser below assumes Xero's
- * report Cells[0].Attributes carries an entry with Id:"account" whose Value is the AccountID GUID
- * (matching ManualJournal.JournalLines[].AccountID) — this shape is documented but has NOT been
- * live-verified against a real org from this session (Xero tools are EXEC_RING-gated; the CTO seat
- * that wrote this is deliberately excluded from that ring). Run the acceptance test below on one
- * real org/year before treating any variance number as authoritative. If accounts show as
- * "unmatched" on both TB and journal sides, that mismatch is the symptom to look for first.
+ * LIVE-VERIFIED 2026-07-30 (CFO acceptance test, real production data): the AccountID-GUID join
+ * between TrialBalance's Cells[0].Attributes (Id:"account") and ManualJournal.JournalLines[].
+ * AccountID is CONFIRMED correct (same identifier space, no transformation, verified across ~20
+ * rows). The tool is deterministic (two runs, byte-identical output). The mechanism is proven
+ * correct in isolation (a virgin account created same-day nets to the posted figure exactly, to
+ * the cent, variance 0.00). One OPEN issue remains from that same test, not yet root-caused: a
+ * single known real account (a manual-journal debit of 7,365,719.00, independently confirmed on
+ * the live ledger) reported as tbMovement:0, manualJournalNet:0 on BOTH sides simultaneously —
+ * ruled out as the differencing bug (which produces equal-and-opposite figures, not zeros) and
+ * ruled out as a documents-not-netted issue (this is the TB/journal join itself). The parser
+ * hardening in this file (recursing into any row with nested Rows, not only ones typed "Section";
+ * treating a fully unresolvable row as a loud caveat instead of a silent drop) closes the two most
+ * plausible mechanisms without yet confirming which one it was — the CFO is pulling the raw row
+ * shapes for that specific account to pin down the exact cause.
  *
  * ACCEPTANCE TEST (per the CFO spec): call for one org over one full year. Confirm it returns
  * per-account TB movement, summed manual-journal detail, and variance, in one call, without the
  * caller paging anything (JIT offload handles size automatically — see result-store.ts). Re-run it
- * and confirm the numbers are identical (deterministic).
+ * and confirm the numbers are identical (deterministic). Confirm a two-consecutive-month range
+ * shows the CORRECT (non-negated) figure for a month with no real activity — the regression test
+ * for the differencing bug this file no longer has.
  */
 import { type XeroOrg, type TokenDeps, xeroGet } from './client.js';
 
@@ -61,9 +97,13 @@ export function monthEndIso(year: number, month0: number): string {
 
 /**
  * Month-end dates covering the full months containing `from` through `to`, PLUS one extra
- * preceding month-end (the baseline snapshot every diff needs). `from`/`to` are YYYY-MM-DD; the
- * DAY within each is ignored — the range is always widened to whole calendar months, since a
- * period movement is only meaningful between two month-end snapshots. Pure.
+ * preceding month-end at index 0. `from`/`to` are YYYY-MM-DD; the DAY within each is ignored — the
+ * range is always widened to whole calendar months. NOTE: assembleGl no longer diffs consecutive
+ * entries against each other (see this file's CORRECTED note above) — it reads each requested
+ * month's TrialBalance movement directly and uses dates[0] only to derive the widened `from` bound
+ * for the document fetches (ManualJournals/Invoices/CreditNotes/BankTransactions), via
+ * firstDayOfMonth(dates[1]). The leading entry is kept in this function's contract because it is
+ * independently tested and other callers may still want a "one month back" boundary. Pure.
  */
 export function monthEndDates(from: string, to: string): string[] {
   const start = new Date(`${from}T00:00:00Z`);
@@ -106,11 +146,25 @@ function round2(n: number): number {
 // TrialBalance parsing
 // ---------------------------------------------------------------------------------------------
 
+/** One account's figures from a SINGLE TrialBalance snapshot at one `date`. `debit`/`credit` are
+ * THAT MONTH's movement (Xero's period pair, Cells[1]/[2]) — NOT a cumulative balance; never diff
+ * these across two dates (see this file's CORRECTED note). `ytdDebit`/`ytdCredit` (Cells[3]/[4])
+ * ARE cumulative since the financial year start; used only for the same-snapshot-set self-check. */
 export interface TbRow {
   accountId: string;
   name: string;
   debit: number;
   credit: number;
+  ytdDebit: number;
+  ytdCredit: number;
+}
+
+export interface ParsedTrialBalance {
+  rows: TbRow[];
+  /** Rows that had Cells but resolved to NEITHER an account GUID NOR a non-empty display name —
+   * dropped because there is nothing to key them by, but counted so the caller can surface a loud
+   * caveat instead of a silently incomplete result. */
+  unresolvedRowCount: number;
 }
 
 interface XeroCell {
@@ -133,59 +187,49 @@ function numVal(cell: XeroCell | undefined): number {
 }
 
 /**
- * Flattens a Xero TrialBalance report body into one row per account. Skips Header/SummaryRow rows
- * (Xero marks totals distinctly); descends into Section rows (the report groups accounts by
- * class). Defensive: an unrecognized/empty shape returns []  rather than throwing, so one month's
- * parse failure never takes down the whole assembly (the caller flags a zero-row month in
- * caveats). Pure.
+ * Flattens a Xero TrialBalance report body into one row per account, for a SINGLE snapshot date.
+ * Descends into ANY row that carries nested `Rows`, regardless of that row's own RowType (not
+ * gated on RowType === 'Section' — a real report may nest a sub-total-with-detail under a row
+ * typed something other than "Section"; the prior version's Section-only gate is one of the two
+ * plausible mechanisms behind a CFO-observed account going fully invisible on both the TB and
+ * journal sides at once, see this file's LIVE-VERIFIED note). A leaf 'Row' that cannot be
+ * attributed to any account (no account-GUID Attribute AND no non-empty display name) is dropped
+ * but COUNTED via `unresolvedRowCount` rather than silently disappearing. Defensive: an
+ * unrecognized/empty body shape returns `{rows: [], unresolvedRowCount: 0}` rather than throwing,
+ * so one month's parse failure never takes down the whole assembly (the caller flags a zero-row
+ * month in caveats). Pure.
  */
-export function parseTrialBalanceRows(body: unknown): TbRow[] {
+export function parseTrialBalanceRows(body: unknown): ParsedTrialBalance {
   const report = (body as XeroReportBody)?.Reports?.[0];
   const rows: TbRow[] = [];
-  if (!report?.Rows) return rows;
+  let unresolvedRowCount = 0;
+  if (!report?.Rows) return { rows, unresolvedRowCount };
   const walk = (rs: XeroRow[]) => {
     for (const r of rs) {
-      if (r.RowType === 'Section' && Array.isArray(r.Rows)) {
+      if (Array.isArray(r.Rows) && r.Rows.length > 0) {
         walk(r.Rows);
-        continue;
       }
       if (r.RowType !== 'Row' || !Array.isArray(r.Cells) || r.Cells.length === 0) continue;
       const first = r.Cells[0];
       const name = first.Value || '';
-      if (!name) continue;
       const accountAttr = first.Attributes?.find((a) => a.Id === 'account');
-      const accountId = accountAttr?.Value || `name:${name}`;
-      const debit = numVal(r.Cells[1]);
-      const credit = numVal(r.Cells[2]);
-      rows.push({ accountId, name, debit, credit });
+      const accountId = accountAttr?.Value || (name ? `name:${name}` : '');
+      if (!accountId) {
+        unresolvedRowCount++;
+        continue;
+      }
+      rows.push({
+        accountId,
+        name: name || '(unnamed)',
+        debit: numVal(r.Cells[1]),
+        credit: numVal(r.Cells[2]),
+        ytdDebit: numVal(r.Cells[3]),
+        ytdCredit: numVal(r.Cells[4]),
+      });
     }
   };
   walk(report.Rows);
-  return rows;
-}
-
-export interface AccountMovement {
-  accountId: string;
-  name: string;
-  tbMovement: number;
-}
-
-/** Diffs two TrialBalance snapshots into per-account net movement (debit - credit, current minus
- * prior). An account present in only one snapshot is treated as 0 on the side it's absent from
- * (newly opened / fully zeroed-out account). Pure. */
-export function diffTrialBalances(prev: TbRow[], curr: TbRow[]): AccountMovement[] {
-  const prevMap = new Map(prev.map((r) => [r.accountId, r]));
-  const currMap = new Map(curr.map((r) => [r.accountId, r]));
-  const ids = new Set<string>([...prevMap.keys(), ...currMap.keys()]);
-  const out: AccountMovement[] = [];
-  for (const id of ids) {
-    const p = prevMap.get(id);
-    const c = currMap.get(id);
-    const pNet = p ? p.debit - p.credit : 0;
-    const cNet = c ? c.debit - c.credit : 0;
-    out.push({ accountId: id, name: (c ?? p)?.name || '', tbMovement: round2(cNet - pNet) });
-  }
-  return out;
+  return { rows, unresolvedRowCount };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -209,13 +253,12 @@ interface ManualJournalsBody {
 
 /** Sums ManualJournal.JournalLines[].LineAmount by AccountID (Xero's documented sign convention:
  * positive = debit, negative = credit — the same sign sense as TrialBalance's debit-minus-credit
- * net used in diffTrialBalances, so the two are directly comparable). ONLY POSTED journals are
- * summed: DRAFT and VOIDED journals never hit the Trial Balance, so including them would make
- * `variance` disagree with the real TB for reasons that have nothing to do with a genuine gap
- * (reviewer-caught, 2026-07-30). A journal with no Status field at all (should not happen on a
- * real Xero response, but defensive against a stub/fixture) is treated as POSTED rather than
- * silently dropped, so this can never fail closed on a field this function does not strictly
- * require. Pure. */
+ * net). ONLY POSTED journals are summed: DRAFT and VOIDED journals never hit the Trial Balance, so
+ * including them would make `variance` disagree with the real TB for reasons that have nothing to
+ * do with a genuine gap (reviewer-caught, 2026-07-30). A journal with no Status field at all
+ * (should not happen on a real Xero response, but defensive against a stub/fixture) is treated as
+ * POSTED rather than silently dropped, so this can never fail closed on a field this function does
+ * not strictly require. Pure. */
 export function sumManualJournalsByAccount(body: unknown): Map<string, number> {
   const mjs = (body as ManualJournalsBody)?.ManualJournals ?? [];
   const out = new Map<string, number>();
@@ -343,46 +386,47 @@ export interface GlAssembleResult {
 }
 
 const METHODOLOGY_NOTE =
-  'variance = tbMovement - manualJournalNet. tbMovement is Xero\'s own TrialBalance, diffed month-over-month (always correct). ' +
-  'manualJournalNet nets ONLY ManualJournals against it — a near-zero variance is a real completeness proof for accounts whose only ' +
-  'activity was manual journals. Invoices/CreditNotes/BankTransactions line-item activity is returned separately in each month\'s ' +
-  '`otherDocuments` (gross, unsigned, by account, THIS MONTH ONLY) and is NOT netted into variance — a nonzero variance on an account ' +
-  'that also appears in that SAME month\'s otherDocuments is EXPECTED, not a defect. See this file\'s module doc comment for why. ' +
-  'A month is OMITTED from `months` (with a caveat explaining why) rather than computed from an unparseable TrialBalance snapshot — ' +
-  'diffing a real snapshot against a failed-to-parse one would fabricate a full balance reversal/reinstatement, which is worse than a gap.';
+  'variance = tbMovement - manualJournalNet. tbMovement is Xero\'s own reported movement for that month, read directly from the ' +
+  'TrialBalance period columns (NOT diffed against another month — see this file\'s CORRECTED module doc note for why diffing was ' +
+  'wrong). manualJournalNet nets ONLY ManualJournals against it — a near-zero variance is a real completeness proof for accounts ' +
+  'whose only activity was manual journals. Invoices/CreditNotes/BankTransactions line-item activity is returned separately in each ' +
+  'month\'s `otherDocuments` (gross, unsigned, by account, THIS MONTH ONLY) and is NOT netted into variance — a nonzero variance on an ' +
+  'account that also appears in that SAME month\'s otherDocuments is EXPECTED, not a defect. A month is OMITTED from `months` (with a ' +
+  'caveat) when its own TrialBalance snapshot fails to parse. A TrialBalance row with no resolvable account identity is dropped but ' +
+  'always surfaced as a caveat, never silently. A YTD-vs-period self-check runs on every month after the first and is reported as a ' +
+  'caveat on disagreement (a financial-year boundary between two months is one legitimate, named cause).';
 
 /**
- * Assembles the general ledger for one org over [from, to]: per-account TrialBalance movement,
- * netted against ManualJournals, plus supporting Invoices/CreditNotes/BankTransactions detail,
- * bucketed per month. One call replaces what would otherwise be ~12+ separate TrialBalance reads a
- * year, done client-side, every time (see module doc comment). Read-only; makes no writes.
+ * Assembles the general ledger for one org over [from, to]: per-account TrialBalance movement
+ * (read directly from each month's own snapshot, never diffed against another month's), netted
+ * against ManualJournals, plus supporting Invoices/CreditNotes/BankTransactions detail, bucketed
+ * per month. One call replaces what would otherwise be ~12 separate TrialBalance reads a year,
+ * done client-side, every time (see module doc comment). Read-only; makes no writes.
  */
 export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: TokenDeps): Promise<GlAssembleResult> {
   const caveats: string[] = [];
-  const dates = monthEndDates(from, to);
-  // The TrialBalance snapshots are always widened to whole calendar months (dates[0] = the
-  // baseline month-end BEFORE `from`'s month; dates[last] = the month-end of `to`'s month). Every
-  // OTHER source fetch below (ManualJournals/Invoices/CreditNotes/BankTransactions) MUST use these
-  // SAME widened bounds, not the caller's original from/to — otherwise a partial-month request
-  // (e.g. from=2026-03-05) diffs a full-month TB movement against a document window that only
-  // covers March 5-20, producing a false variance for no reason other than the mismatch itself.
-  const effectiveFrom = firstDayOfMonth(dates[1]);
-  const effectiveTo = dates[dates.length - 1];
+  const allDates = monthEndDates(from, to);
+  const requestedDates = allDates.slice(1); // allDates[0] is a leading boundary marker, not a month we report on
+  // The document fetches (ManualJournals/Invoices/CreditNotes/BankTransactions) still widen to
+  // whole calendar months, so a partial-month request (e.g. from=2026-03-05) never scopes its
+  // document window narrower than the month it's reporting on.
+  const effectiveFrom = firstDayOfMonth(requestedDates[0]);
+  const effectiveTo = requestedDates[requestedDates.length - 1];
   const effectiveWhere = dateWhere(effectiveFrom, effectiveTo);
 
-  // 1. TrialBalance at every month-end. A snapshot that parses to 0 rows is flagged INVALID (most
-  // likely a parse failure, not a genuinely brand-new org with a truly empty trial balance — and
-  // treating the ambiguous case as invalid is the fail-closed choice) so step 4 never diffs a real
-  // snapshot against it.
-  const snapshots: TbRow[][] = [];
-  const invalidSnapshot: boolean[] = [];
-  for (const date of dates) {
+  // 1. TrialBalance ONCE per requested month-end. Each month's period Debit/Credit pair IS that
+  // month's movement already (see the module CORRECTED note) -- read directly, never diffed.
+  const monthSnapshots: ParsedTrialBalance[] = [];
+  for (const date of requestedDates) {
     const res = await xeroGet(org, '/Reports/TrialBalance', { date }, { deps });
-    const rows = parseTrialBalanceRows(res.body);
-    const invalid = rows.length === 0;
-    if (invalid) caveats.push(`TrialBalance at ${date} parsed to 0 rows — treated as an invalid/unparseable snapshot, not a real balance. Every period touching this date is OMITTED from months (rather than diffed, which would fabricate a full balance swing).`);
-    invalidSnapshot.push(invalid);
-    snapshots.push(rows);
+    const parsed = parseTrialBalanceRows(res.body);
+    if (parsed.rows.length === 0) {
+      caveats.push(`TrialBalance at ${date} parsed to 0 rows — treated as an invalid/unparseable snapshot, not a real balance. This month is OMITTED from months.`);
+    }
+    if (parsed.unresolvedRowCount > 0) {
+      caveats.push(`TrialBalance at ${date}: ${parsed.unresolvedRowCount} row(s) had no resolvable account name or GUID and were DROPPED — those accounts are MISSING from this month's figures (not zero, just absent). Investigate the raw report rows for this date before treating this month as complete.`);
+    }
+    monthSnapshots.push(parsed);
   }
 
   // 2. ManualJournals across the EFFECTIVE (widened) range, bucketed by month. Server-side filtered
@@ -430,19 +474,39 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
   const btByMonth = byMonth(btRes.items as Array<DocWithLines & { Date?: string }>);
   const toRecord = (m: Map<string, number>): Record<string, number> => Object.fromEntries(m);
 
-  // 4. Per-month: diff TB, net ManualJournals, compute variance. Skip (omit, with a caveat already
-  // logged in step 1) any period whose start OR end snapshot was invalid.
+  // 4. Per-month: read TB movement directly, net ManualJournals, compute variance. Skip (omit,
+  // caveat already logged in step 1) any month whose own snapshot was invalid.
   const months: GlAssembleMonth[] = [];
-  for (let i = 1; i < dates.length; i++) {
-    if (invalidSnapshot[i - 1] || invalidSnapshot[i]) continue;
-    const periodStart = dates[i - 1];
-    const periodEnd = dates[i];
-    const movements = diffTrialBalances(snapshots[i - 1], snapshots[i]);
-    // Month bucket key = the calendar month periodEnd falls in.
+  for (let i = 0; i < requestedDates.length; i++) {
+    const periodEnd = requestedDates[i];
+    const snapshot = monthSnapshots[i];
+    if (snapshot.rows.length === 0) continue;
+    const periodStart = i === 0 ? effectiveFrom : requestedDates[i - 1];
     const [ey, em] = periodEnd.split('-').map(Number);
     const monthKey = `${ey}-${String(em).padStart(2, '0')}`;
     const mjBody = { ManualJournals: mjByMonth.get(monthKey) ?? [] };
     const mjNet = sumManualJournalsByAccount(mjBody);
+
+    // SELF-CHECK (cheap: uses rows already fetched, no extra API call): for every month after the
+    // first requested one, period(this month) should equal YTD(this) - YTD(prior month) for the
+    // SAME account. A mismatch is surfaced as a caveat -- it may be a genuine financial-year
+    // boundary between the two months (YTD legitimately resets there), or a real data issue; this
+    // check does not try to tell those apart, it just makes sure neither passes silently.
+    if (i > 0) {
+      const priorYtdByAccount = new Map(monthSnapshots[i - 1].rows.map((r) => [r.accountId, round2(r.ytdDebit - r.ytdCredit)]));
+      let mismatchCount = 0;
+      for (const r of snapshot.rows) {
+        const thisYtd = round2(r.ytdDebit - r.ytdCredit);
+        const priorYtd = priorYtdByAccount.get(r.accountId) ?? 0;
+        const expectedPeriod = round2(thisYtd - priorYtd);
+        const actualPeriod = round2(r.debit - r.credit);
+        if (Math.abs(expectedPeriod - actualPeriod) > 0.01) mismatchCount++;
+      }
+      if (mismatchCount > 0) {
+        caveats.push(`${periodEnd}: ${mismatchCount} account(s) where period movement disagrees with YTD(this month) - YTD(prior month) by more than a cent. A financial-year boundary between these two months is one legitimate cause (YTD resets there); otherwise treat as a data-integrity flag for this month.`);
+      }
+    }
+
     let nonzeroVarianceCount = 0;
     // Build over the UNION of TB-movement keys and manual-journal keys, not just the TB side
     // (reviewer-caught, 2026-07-30): a key present only in mjNet — e.g. the documented fallback
@@ -452,15 +516,15 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
     // key gets tbMovement:0 (there was no TB movement recorded under that key) so its full
     // manualJournalNet surfaces as the variance, which is the honest signal that something didn't
     // line up rather than the mismatch vanishing from the output entirely.
-    const movementMap = new Map(movements.map((m) => [m.accountId, m]));
-    const allKeys = new Set<string>([...movementMap.keys(), ...mjNet.keys()]);
+    const tbByAccount = new Map(snapshot.rows.map((r) => [r.accountId, r]));
+    const allKeys = new Set<string>([...tbByAccount.keys(), ...mjNet.keys()]);
     const accounts: GlAssembleAccountRow[] = [...allKeys].map((accountId) => {
-      const m = movementMap.get(accountId);
+      const tb = tbByAccount.get(accountId);
       const manualJournalNet = mjNet.get(accountId) ?? 0;
-      const tbMovement = m?.tbMovement ?? 0;
+      const tbMovement = tb ? round2(tb.debit - tb.credit) : 0;
       const variance = round2(tbMovement - manualJournalNet);
       if (variance !== 0) nonzeroVarianceCount++;
-      return { accountId, name: m?.name ?? accountId, tbMovement, manualJournalNet, variance };
+      return { accountId, name: tb?.name ?? accountId, tbMovement, manualJournalNet, variance };
     });
     months.push({
       periodStart,
@@ -474,8 +538,8 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
       },
     });
   }
-  if (months.length === 0 && dates.length > 1) {
-    caveats.push('Every requested period touched an invalid TrialBalance snapshot — months is empty. See the per-date caveats above.');
+  if (months.length === 0 && requestedDates.length > 0) {
+    caveats.push('Every requested month touched an invalid TrialBalance snapshot — months is empty. See the per-date caveats above.');
   }
 
   return { org, from, to, months, caveats, methodology_note: METHODOLOGY_NOTE };
