@@ -32,6 +32,10 @@ import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
  * are UNCHANGED by this gate -- it only narrows the connector surface, which is exactly where an
  * unauthenticated/self-registered external identity can reach this tool.
  *
+ * Also carries an UNCONDITIONAL clo-personal hard block, connector surface or not (see the
+ * clo-personal branch below) -- see memoryWriteIdentityRefusal's header for the companion bug this
+ * closes (identity forgery via the input.agent field), found and fixed in the same pass, 2026-07-30.
+ *
  * MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts), an ORTHOGONAL check
  * applied in the handler below regardless of connector surface: memoryWriteRefusal above gates WHO
  * (which lane, and only over the connector surface) may write at all; the MNPI gate additionally
@@ -43,9 +47,65 @@ import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
  * fails closed and is never mode-switched to report-only, unlike every other check in safety/.
  */
 export function memoryWriteRefusal(connectorSurface: boolean, lane: string): string | null {
+  // UNCONDITIONAL, regardless of connector surface -- matches this tool's own docstring ("non-
+  // privileged, clo-personal rejected"), which was previously aspirational prose only: agents.ts's
+  // shared normalizeAgent() FORBIDDEN_AGENTS set is empty by design (it is used by every read/write
+  // path in the fleet, including clo-personal's own legitimate self-reads, so populating it there
+  // would break clo-personal's normal operation, not just memory_write). The block belongs HERE,
+  // local to the one tool where clo-personal content must never land: memory_write is write-through
+  // indexed into memory-exec, a room every lane's brain_search reaches, so a clo-personal-authenticated
+  // caller writing under its own true identity would still leak privileged content onto the broadcast
+  // surface -- distinct from, and in addition to, the identity-forgery gap memoryWriteIdentityRefusal
+  // closes below. Found + fixed together, 2026-07-30.
+  if ((lane || '').trim().toLowerCase() === 'clo-personal') {
+    return 'refused: "clo-personal" is a privilege-walled personal-legal lane and may never write to memory_write\'s broadly-shared, brain_search-recallable memory-of-record (use memory_remember\'s ring-gated personal channels instead, if one exists for this content)';
+  }
   if (!connectorSurface) return null;
   if (isShipLane(lane)) return null;
   return `refused: "${lane || '(none)'}" is not authorized to write fleet memory`;
+}
+
+/**
+ * IDENTITY-FORGERY GATE (found + fixed 2026-07-30, alongside the clo-personal block above).
+ *
+ * THE BUG: the handler used to pass `input.agent` -- an ordinary, entirely caller-supplied string
+ * field -- straight through to writeMemory() as the record's `agent` attribution, with NO check
+ * against the caller's actual authenticated identity (ctx.callerAgent / currentCallerAgent(), sourced
+ * from the caller's own OAuth/static token, see server/request-context.ts). Any caller with reachable
+ * access to memory_write (every non-connector client_credentials fleet lane; memoryWriteRefusal above
+ * only gates WHO may call, not what identity the write claims) could write a byte-exact, verbatim,
+ * broadly-recallable "system-of-record" entry -- read by every agent's wake()/brain_search as
+ * authoritative ground truth -- and attribute it to ANY OTHER lane, e.g. a low-privilege lane calling
+ * memory_write({agent:"cto", kind:"decision", text:"..."}) to inject a forged decision that every
+ * other agent, including cto/clo/cfo, would treat as genuine. This is meaningfully worse than
+ * memory_remember's cross-lane note feature, which is the same shape of "who does this land under"
+ * question but handles it safely: remember.ts ALWAYS derives the true writer from ctx.callerAgent
+ * into a separate, always-shown `by` field, and only lets input.agent choose the TARGET feed, so a
+ * forged attribution is structurally impossible there. memory_write had no such separation -- its
+ * one identity field was the spoofable one.
+ *
+ * THE FIX: memory_write is not documented anywhere as a cross-lane tool (unlike memory_remember, which
+ * explicitly is), so the correct behavior is self-write-only. Refuse LOUDLY on any mismatch between
+ * the caller's authenticated identity and the requested `agent`, rather than silently substituting one
+ * for the other -- consistent with this file's existing fail-closed conventions (memoryWriteRefusal,
+ * the MNPI gate). Also refuse when no identity resolved at all (callerAgent === ''): a memory-of-record
+ * write attributed to an unidentified caller is exactly the same unverifiable-provenance problem, just
+ * with no requested value to even compare against. The handler additionally writes using callerAgent
+ * directly (never input.agent) as defense in depth, so a future weakening of this gate alone cannot
+ * reopen the hole.
+ *
+ * Pure and exported for hermetic unit testing, mirroring memoryWriteRefusal's shape.
+ */
+export function memoryWriteIdentityRefusal(callerAgent: string, requestedAgent: string): string | null {
+  const caller = (callerAgent || '').trim().toLowerCase();
+  const requested = (requestedAgent || '').trim().toLowerCase();
+  if (!caller) {
+    return 'refused: no verifiable agent identity on this token -- memory_write cannot attribute a system-of-record entry to an unidentified caller';
+  }
+  if (requested && requested !== caller) {
+    return `refused: your authenticated identity is "${caller}" but this call requested agent "${requested}" -- memory_write always attributes the record to YOUR OWN authenticated identity, never a caller-supplied value (this is not memory_remember's cross-lane feature; pass agent="${caller}" or omit a mismatched value)`;
+  }
+  return null;
 }
 
 export function registerMemoryWrite(server: McpServer, callerHash: CallerHashProvider): void {
@@ -57,14 +117,14 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Write a structured memory-of-record',
         description:
-          'Write a durable, byte-exact, queryable memory record (fact/decision/correction/pitfall/status) to the Cosmos memory store. This is the verbatim system-of-record for memory: never lossy, never LLM-rewritten. It is ALSO write-through indexed into the semantic brain, so it is immediately recallable via brain_search/kb_search (before 2026-07-14 it was durable but INVISIBLE to every semantic recall path). Non-PHI, non-MNPI, non-privileged (clo-personal rejected). Over a Claude Chat connector surface, only the cto/developer/executive-ring lanes may write. MNPI GATE (hard, code-level, every caller including client_credentials fleet lanes): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused outright, because this record is broadly recallable via brain_search. Pass dry_run=false to persist.',
+          'Write a durable, byte-exact, queryable memory record (fact/decision/correction/pitfall/status) to the Cosmos memory store. This is the verbatim system-of-record for memory: never lossy, never LLM-rewritten. It is ALSO write-through indexed into the semantic brain, so it is immediately recallable via brain_search/kb_search (before 2026-07-14 it was durable but INVISIBLE to every semantic recall path). Non-PHI, non-MNPI, non-privileged (clo-personal rejected, code-enforced). SELF-WRITE ONLY: unlike memory_remember, this tool has no cross-lane feature -- the record is always attributed to YOUR OWN authenticated token identity; a mismatched `agent` value is refused outright as a forgery attempt, not silently substituted (fixed 2026-07-30). Over a Claude Chat connector surface, only the cto/developer/executive-ring lanes may write. MNPI GATE (hard, code-level, every caller including client_credentials fleet lanes): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused outright, because this record is broadly recallable via brain_search. Pass dry_run=false to persist.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
         openWorldHint: true,
       },
       inputShape: {
-        agent: z.string().describe('Agent lane (lowercase id).'),
+        agent: z.string().describe('Your own agent lane (lowercase id) -- must match your authenticated token identity; memory_write is self-write-only.'),
         kind: z.enum(MEMORY_KINDS).describe('fact, decision, correction, pitfall, or status.'),
         text: z.string().min(1).describe('The atomic, non-sensitive memory text.'),
         tags: z.array(z.string()).optional(),
@@ -73,18 +133,29 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
       },
       outputShape: { written: z.boolean(), record: z.unknown() },
       handler: async (input, ctx) => {
-        const refusal = memoryWriteRefusal(isConnectorSurface(), currentCallerAgent());
+        const callerAgent = currentCallerAgent();
+        const refusal = memoryWriteRefusal(isConnectorSurface(), callerAgent);
         if (refusal) {
           return {
             data: { written: false, note: refusal },
-            summary: `Refused: connector lane "${currentCallerAgent() || '(none)'}" is not authorized to write fleet memory. Only the executive ring plus cto/developer may write memory over a connector surface.`,
+            summary: `Refused: connector lane "${callerAgent || '(none)'}" is not authorized to write fleet memory. Only the executive ring plus cto/developer may write memory over a connector surface.`,
+          };
+        }
+        // IDENTITY-FORGERY GATE (memoryWriteIdentityRefusal's header has the full story): memory_write
+        // is self-write-only, so a requested `agent` that does not match the caller's own authenticated
+        // identity is refused outright rather than silently trusted or silently overridden.
+        const identityRefusal = memoryWriteIdentityRefusal(callerAgent, input.agent);
+        if (identityRefusal) {
+          return {
+            data: { written: false, note: identityRefusal },
+            summary: `Refused: ${identityRefusal}`,
           };
         }
         // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs for EVERY
         // caller, connector or not (see the file-header note above memoryWriteRefusal for why this is
         // an orthogonal, always-on check). The record is write-through indexed into memory-exec, a
         // room every agent's brain_search reaches: a content match is a HARD BLOCK, no exception.
-        const mnpiGate = evaluateBroadcastMnpiGate({ text: input.text, tags: (input.tags ?? []).join(' '), source: input.source, agent: input.agent });
+        const mnpiGate = evaluateBroadcastMnpiGate({ text: input.text, tags: (input.tags ?? []).join(' '), source: input.source, agent: callerAgent });
         if (mnpiGate.blocked) {
           return {
             data: { written: false, note: mnpiGate.reason },
@@ -92,18 +163,23 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
           };
         }
         if (!isConfigured()) return { data: { written: false, note: 'agent-state Cosmos not configured.' }, summary: 'Memory store not configured.' };
-        if (ctx.dryRun) return { data: { written: false, preview: input, note: 'dry_run: pass dry_run=false to persist.' }, summary: `DRY RUN: would write a ${input.kind} for ${input.agent}.` };
+        if (ctx.dryRun) return { data: { written: false, preview: { ...input, agent: callerAgent }, note: 'dry_run: pass dry_run=false to persist.' }, summary: `DRY RUN: would write a ${input.kind} for ${callerAgent}.` };
         // Embed ONCE and reuse for both auto-supersession detection and the index write below.
         let vector: number[] | null = null;
         try { vector = await embed(input.text); } catch { vector = null; }
         // AUTO-SUPERSESSION (W1-2): does this new entry contradict a near-prior same-agent one? Fail-open
         // (never blocks/breaks the write); sets supersedes only under MEMORY_AUTOSUPERSEDE_MODE=auto; and
         // NEVER overrides an explicit caller-provided supersedes (the agent already knows what it retires).
+        // Uses callerAgent, not input.agent -- see memoryWriteIdentityRefusal's header (defense in depth:
+        // the two are guaranteed equal past the gate above, but sourcing from the authenticated value
+        // here too means a future weakening of that gate alone still cannot misattribute a write).
         const sup = input.supersedes
           ? { action: 'none' as const, reason: 'caller set supersedes', supersedeId: undefined as string | undefined }
-          : await detectSupersession({ agent: normalizeAgent(input.agent), kind: input.kind, text: input.text, vector });
+          : await detectSupersession({ agent: normalizeAgent(callerAgent), kind: input.kind, text: input.text, vector });
         const supersedes = input.supersedes ?? (sup.action === 'auto-link' ? sup.supersedeId : undefined);
-        const record = await writeMemory({ ...input, supersedes });
+        // agent: callerAgent (never input.agent) -- the same defense-in-depth reasoning as the
+        // detectSupersession call above; this is the actual persisted attribution.
+        const record = await writeMemory({ ...input, agent: callerAgent, supersedes });
         // WRITE-THROUGH: the Cosmos memory-of-record was previously indexed by NOTHING -- semantic.mjs
         // indexes only the shared blob feed, so every memory_write was durable but UNFINDABLE by
         // brain_search/kb_search. This makes the system-of-record actually recallable. Fail-open:
@@ -131,7 +207,7 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
             ...(idx.reason ? { index_error: idx.reason } : {}),
             ...(sup.action !== 'none' ? { supersede: sup } : {}),
           },
-          summary: `Wrote ${input.kind} ${record.id} to ${input.agent}'s memory-of-record${idx.indexed ? ' and indexed it for semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — it will remain invisible to brain_search)`}.${supNote}`,
+          summary: `Wrote ${input.kind} ${record.id} to ${record.agent}'s memory-of-record${idx.indexed ? ' and indexed it for semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — it will remain invisible to brain_search)`}.${supNote}`,
           audit: { after: record },
         };
       },
