@@ -414,7 +414,7 @@ const EnvSchema = z.object({
   // WITHOUT being awaited, so it can never add latency or fail the response it rides on). 'off'
   // skips the episode write entirely; capture-pressure counting (below) still runs regardless.
   //   CAPTURE_MODE               off | warn (default)
-  //   CAPTURE_PRESSURE_THRESHOLD a positive integer (default 10)
+  //   CAPTURE_PRESSURE_THRESHOLD a positive integer (default 50)
   // Tracks, per bearer identity (a separate in-memory Map from cold-start's, no TTL, no new
   // store), how many mutating tool calls have happened since the caller last called checkpoint().
   // 'warn' attaches a non-fatal CAPTURE_PRESSURE nudge once the threshold is crossed, urging a
