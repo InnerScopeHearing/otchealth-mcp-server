@@ -108,7 +108,7 @@ test('verify_sha256_only on TEXTUAL content still hashes the exact raw bytes, no
   });
 });
 
-test('an upload/download round trip produces IDENTICAL hashes for the same content (the actual acceptance test)', async () => {
+test('a hash-computed-here test (kept for a fast, store-independent sanity check) -- the REAL cross-handler round trip is below', async () => {
   const content = Buffer.from('round trip me', 'utf8');
   const uploadSha256 = sha256Hex(content); // what graph_drive_upload would have returned
 
@@ -116,6 +116,56 @@ test('an upload/download round trip produces IDENTICAL hashes for the same conte
     const result = await handleGraphDriveDownload({ folder: 'CFO Incoming', filename: 'roundtrip.txt', verify_sha256_only: true }, fakeCtx('cfo'));
     const data = result.data as { sha256: string | null };
     assert.equal(data.sha256, uploadSha256, 'download hash must match the upload hash for the same content');
+  });
+});
+
+// --- THE ACTUAL upload/download round trip, calling BOTH real handlers -----------------------------
+// Review finding, 2026-07-30: the prior version of this test only computed a hash LOCALLY and
+// compared it against handleGraphDriveDownload's hash -- it never called handleGraphDriveUpload at
+// all, and at the time upload.ts didn't even export a testable handler or return a sha256. Now that
+// PR #176 (graph_drive_upload's sha256 + fail-loud fix) is merged and handleGraphDriveUpload is a
+// real exported function, this test drives BOTH handlers against one shared, stateful Graph stub
+// (upload PUT writes into an in-memory store; download GET reads back from it) so the round trip is
+// genuinely end to end, not hash-math-consistent-in-theory.
+test('an upload/download round trip through the REAL upload and download handlers produces identical hashes', async () => {
+  const { handleGraphDriveUpload } = await import('./upload.js');
+  const store = new Map<string, { content: Buffer; contentType: string }>();
+
+  const statefulStub: typeof fetch = (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    if (isLoginMicrosoftHost(u)) {
+      return new Response(JSON.stringify({ access_token: 'test-access-token', expires_in: 3600 }), { status: 200 });
+    }
+    if (u.includes('/content')) {
+      if (init?.method === 'PUT') {
+        const body = init.body;
+        const content = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8');
+        store.set(u, { content, contentType: 'text/plain' });
+        return new Response(JSON.stringify({ id: 'driveitem-1', size: content.length }), { status: 200 });
+      }
+      // GET (download)
+      const entry = store.get(u);
+      if (!entry) return new Response('not found', { status: 404 });
+      return new Response(entry.content, { status: 200, headers: { 'content-type': entry.contentType } });
+    }
+    if (u.includes('%24select=id') || u.includes('$select=id')) {
+      return new Response('not found', { status: 404 }); // exists-check: never exists yet
+    }
+    throw new Error(`unexpected fetch to ${u}`);
+  }) as typeof fetch;
+
+  await withStubbedFetch(statefulStub, async () => {
+    const content = 'round trip through both real handlers, not just hash math';
+    const uploadResult = await handleGraphDriveUpload({ folder: 'CFO Incoming', filename: 'e2e.txt', text: content }, fakeCtx('cfo', false));
+    const uploadData = uploadResult.data as { executed: boolean; sha256: string | null; error?: string };
+    assert.equal(uploadData.executed, true, `expected upload to succeed, got error: ${uploadData.error}`);
+    assert.ok(uploadData.sha256, 'expected upload to return a sha256');
+
+    const downloadResult = await handleGraphDriveDownload({ folder: 'CFO Incoming', filename: 'e2e.txt', verify_sha256_only: true }, fakeCtx('cfo'));
+    const downloadData = downloadResult.data as { found: boolean; sha256: string | null };
+    assert.equal(downloadData.found, true);
+    assert.equal(downloadData.sha256, uploadData.sha256, 'the hash graph_drive_upload returned must match what graph_drive_download independently computes for the same file');
+    assert.equal(downloadData.sha256, sha256Hex(Buffer.from(content, 'utf8')), 'and both must match an independently computed hash of the original content');
   });
 });
 
