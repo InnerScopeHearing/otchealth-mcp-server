@@ -1,13 +1,36 @@
-import { test } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import {
+
+// Same preamble as client.test.ts -- satisfies loadEnv()'s required vars before assembleGl's
+// integration tests (below) transitively call it via xeroGet -> getOrgAccess.
+before(() => {
+  const required: Record<string, string> = {
+    CIO_SITE_ID: 'test',
+    CIO_TRACK_KEY: 'test',
+    CIO_APP_API_BEARER: 'test',
+    PERPLEXITY_CONNECTOR_TOKEN: 'x'.repeat(32),
+    ADMIN_REVOKE_TOKEN: 'x'.repeat(32),
+    N8N_WEBHOOK_SECRET: 'x'.repeat(32),
+    XERO_CLIENT_ID: 'test-client-id',
+    XERO_CLIENT_SECRET: 'test-client-secret',
+    XERO_RT_OTCHEALTH: 'bootstrap-rt-otchealth',
+    COSMOS_ENDPOINT: 'https://test.documents.azure.com',
+    COSMOS_DB: 'test',
+    COSMOS_KEY: Buffer.from('test-key').toString('base64'),
+  };
+  for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+});
+
+const {
   monthEndIso,
   monthEndDates,
   parseTrialBalanceRows,
   diffTrialBalances,
   sumManualJournalsByAccount,
   sumLineItemsByAccount,
-} from './gl-assemble.js';
+  assembleGl,
+} = await import('./gl-assemble.js');
+const { buildTokenDoc, bootstrapHash } = await import('./client.js');
 
 // -------------------------------------------------------------------------------------------
 // monthEndIso / monthEndDates
@@ -182,4 +205,123 @@ test('sumLineItemsByAccount: skips a line item with no AccountID/AccountCode', (
   const docs = [{ LineItems: [{ LineAmount: 10 }] }];
   const sums = sumLineItemsByAccount(docs);
   assert.equal(sums.size, 0);
+});
+
+// -------------------------------------------------------------------------------------------
+// assembleGl — orchestrator integration tests (Copilot review, 2026-07-30). These are the
+// regression proofs for the two most severe findings on this tool: a fabricated-movement bug
+// (diffing a real TB snapshot against a failed-to-parse one) and a date-range mismatch (TB
+// snapshots widened to whole months while the document fetches stayed on the caller's raw,
+// possibly-partial-month from/to). Deps-injected: no real Cosmos or Xero.
+// -------------------------------------------------------------------------------------------
+
+function liveTokenState() {
+  const doc = buildTokenDoc({
+    org: 'otchealth',
+    refreshToken: 'rt-live',
+    accessToken: 'at-live',
+    expiresInSeconds: 1800,
+    tenantId: 'tenant-1',
+    tenantName: 'OTCHealth Inc.',
+    bootstrapHash: bootstrapHash(process.env.XERO_RT_OTCHEALTH),
+  });
+  return { doc, etag: 'etag-1' };
+}
+
+function tbRow(id, name, debit, credit) {
+  return { RowType: 'Row', Cells: [{ Value: name, Attributes: [{ Id: 'account', Value: id }] }, { Value: String(debit) }, { Value: String(credit) }] };
+}
+
+/** A valid TrialBalance report body for the given account rows, or an INVALID (0-row) body when
+ * `rows` is null -- simulates a parse failure / unrecognized response shape. */
+function tbBody(rows) {
+  if (rows === null) return { Reports: [{}] }; // no Rows at all -> parses to 0 rows
+  return { Reports: [{ Rows: [{ RowType: 'Section', Rows: rows.map((r) => tbRow(r.id, r.name, r.debit, r.credit)) }] }] };
+}
+
+/** Builds a deps object: `read` returns an already-live token (so getOrgAccess never needs to
+ * refresh or hit identity.xero.com/connections), `replace`/`create` throw if called (proving the
+ * seeded live token was used directly), and `fetchImpl` routes purely on api.xero.com PATHNAME:
+ * TrialBalance reads are answered per-date from `tbByDate` (keyed by the `date` query param);
+ * every other list endpoint is captured into `whereByPath` (keyed by pathname) and answered with
+ * an empty collection, since these tests are about the TB-diff/date-alignment logic, not the
+ * document content itself. */
+function makeGlDeps(tbByDate) {
+  const state = liveTokenState();
+  const whereByPath = new Map();
+  const deps = {
+    fetchImpl: (async (url) => {
+      const u = new URL(String(url));
+      if (u.hostname !== 'api.xero.com') throw new Error(`unexpected fetch host ${u.hostname}`);
+      if (u.pathname === '/api.xro/2.0/Reports/TrialBalance') {
+        const date = u.searchParams.get('date');
+        const body = tbByDate.get(date);
+        if (!body) throw new Error(`no TrialBalance stub for date=${date}`);
+        return new Response(JSON.stringify(body), { status: 200 });
+      }
+      const arrayKeyByPath = {
+        '/api.xro/2.0/ManualJournals': 'ManualJournals',
+        '/api.xro/2.0/Invoices': 'Invoices',
+        '/api.xro/2.0/CreditNotes': 'CreditNotes',
+        '/api.xro/2.0/BankTransactions': 'BankTransactions',
+      };
+      const key = arrayKeyByPath[u.pathname];
+      if (!key) throw new Error(`unexpected fetch path ${u.pathname}`);
+      whereByPath.set(u.pathname, u.searchParams.get('where'));
+      return new Response(JSON.stringify({ [key]: [] }), { status: 200 });
+    }),
+    read: (async () => ({ doc: state.doc, etag: state.etag })),
+    replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }),
+    create: (async () => { throw new Error('create should never be called -- the seeded token is already live'); }),
+  };
+  return { deps, whereByPath };
+}
+
+test('assembleGl: happy path -- one full month, real snapshots, ManualJournals fully explains the movement (variance 0)', async () => {
+  const tbByDate = new Map([
+    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
+  assert.equal(result.months.length, 1);
+  assert.equal(result.months[0].periodStart, '2025-12-31');
+  assert.equal(result.months[0].periodEnd, '2026-01-31');
+  const [account] = result.months[0].accounts;
+  assert.equal(account.tbMovement, 500);
+  assert.equal(account.manualJournalNet, 0); // no ManualJournals stubbed -> net 0
+  assert.equal(account.variance, 500); // unexplained by manual journals -- correctly nonzero here
+  assert.ok(result.months[0].otherDocuments, 'each month carries its own otherDocuments');
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts:350): a month touching an invalid (0-row) TrialBalance snapshot is OMITTED, never diffed into a fabricated movement', async () => {
+  // Dec (real, 1000) -> Jan (INVALID, parse failure) -> Feb (real, 1000 again). If the bug were
+  // present, Dec->Jan would show a fabricated -1000 movement and Jan->Feb a fabricated +1000
+  // reinstatement. Neither period should appear in `months` at all.
+  const tbByDate = new Map([
+    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+    ['2026-01-31', tbBody(null)], // invalid
+    ['2026-02-28', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+  ]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-02-28', deps);
+  assert.equal(result.months.length, 0, 'both periods touch the invalid January snapshot and must be omitted, not fabricated');
+  assert.ok(result.caveats.some((c) => c.includes('2026-01-31') && c.includes('OMITTED')), 'a caveat must explain the omission');
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts:354): a partial-month request still queries ManualJournals/Invoices/CreditNotes/BankTransactions over the WIDENED whole-month bounds, not the raw from/to', async () => {
+  const tbByDate = new Map([
+    ['2026-02-28', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+    ['2026-03-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+  ]);
+  const { deps, whereByPath } = makeGlDeps(tbByDate);
+  // A partial-month request: March 5 - March 20, well short of the full month.
+  await assembleGl('otchealth', '2026-03-05', '2026-03-20', deps);
+  const mjWhere = whereByPath.get('/api.xro/2.0/ManualJournals');
+  // Must reflect the WIDENED month (March 1 - March 31), never the raw partial request.
+  assert.match(mjWhere, /DateTime\(2026,3,1\)/, 'the effective from must be widened to the 1st of the month, not the 5th');
+  assert.match(mjWhere, /DateTime\(2026,3,31\)/, 'the effective to must be widened to month-end, not the 20th');
+  for (const path of ['/api.xro/2.0/Invoices', '/api.xro/2.0/CreditNotes', '/api.xro/2.0/BankTransactions']) {
+    assert.equal(whereByPath.get(path), mjWhere, `${path} must use the SAME widened bounds as ManualJournals`);
+  }
 });

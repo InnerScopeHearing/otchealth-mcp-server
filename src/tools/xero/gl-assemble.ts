@@ -48,7 +48,7 @@
  * caller paging anything (JIT offload handles size automatically — see result-store.ts). Re-run it
  * and confirm the numbers are identical (deterministic).
  */
-import { type XeroOrg, xeroGet } from './client.js';
+import { type XeroOrg, type TokenDeps, xeroGet } from './client.js';
 
 // ---------------------------------------------------------------------------------------------
 // Pure date math
@@ -262,11 +262,12 @@ async function fetchAllPaged(
   path: string,
   arrayKey: string,
   where: string,
+  deps?: TokenDeps,
 ): Promise<{ items: Record<string, unknown>[]; truncated: boolean }> {
   const items: Record<string, unknown>[] = [];
   let truncated = false;
   for (let page = 1; page <= MAX_PAGES_PER_ENDPOINT; page++) {
-    const res = await xeroGet(org, path, { page: String(page), where });
+    const res = await xeroGet(org, path, { page: String(page), where }, { deps });
     const arr = (res.body as Record<string, unknown>)?.[arrayKey];
     if (!Array.isArray(arr) || arr.length === 0) break;
     items.push(...(arr as Record<string, unknown>[]));
@@ -291,6 +292,12 @@ function monthKeyOf(dateStr: string | undefined): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+/** First day of the month a YYYY-MM-DD month-end date falls in, as YYYY-MM-DD. Pure. */
+export function firstDayOfMonth(monthEndDate: string): string {
+  const [y, m] = monthEndDate.split('-').map(Number);
+  return `${y}-${String(m).padStart(2, '0')}-01`;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------------------------
@@ -308,6 +315,14 @@ export interface GlAssembleMonth {
   periodEnd: string;
   accounts: GlAssembleAccountRow[];
   nonzeroVarianceCount: number;
+  /** THIS month's Invoices/CreditNotes/BankTransactions activity only — bucketed per month (not a
+   * whole-range aggregate) precisely so "does this account also show otherDocuments activity in
+   * THIS SAME month" (the check methodology_note tells callers to make) is actually answerable. */
+  otherDocuments: {
+    invoicesLineGrossByAccount: Record<string, number>;
+    creditNotesLineGrossByAccount: Record<string, number>;
+    bankTransactionsLineGrossByAccount: Record<string, number>;
+  };
 }
 
 export interface GlAssembleResult {
@@ -315,11 +330,6 @@ export interface GlAssembleResult {
   from: string;
   to: string;
   months: GlAssembleMonth[];
-  otherDocuments: {
-    invoicesLineGrossByAccount: Record<string, number>;
-    creditNotesLineGrossByAccount: Record<string, number>;
-    bankTransactionsLineGrossByAccount: Record<string, number>;
-  };
   caveats: string[];
   methodology_note: string;
 }
@@ -327,31 +337,48 @@ export interface GlAssembleResult {
 const METHODOLOGY_NOTE =
   'variance = tbMovement - manualJournalNet. tbMovement is Xero\'s own TrialBalance, diffed month-over-month (always correct). ' +
   'manualJournalNet nets ONLY ManualJournals against it — a near-zero variance is a real completeness proof for accounts whose only ' +
-  'activity was manual journals. Invoices/CreditNotes/BankTransactions line-item activity is returned separately in `otherDocuments` ' +
-  '(gross, unsigned, by account) and is NOT netted into variance — a nonzero variance on an account that also appears in ' +
-  '`otherDocuments` for the same month is EXPECTED, not a defect. See this file\'s module doc comment for why.';
+  'activity was manual journals. Invoices/CreditNotes/BankTransactions line-item activity is returned separately in each month\'s ' +
+  '`otherDocuments` (gross, unsigned, by account, THIS MONTH ONLY) and is NOT netted into variance — a nonzero variance on an account ' +
+  'that also appears in that SAME month\'s otherDocuments is EXPECTED, not a defect. See this file\'s module doc comment for why. ' +
+  'A month is OMITTED from `months` (with a caveat explaining why) rather than computed from an unparseable TrialBalance snapshot — ' +
+  'diffing a real snapshot against a failed-to-parse one would fabricate a full balance reversal/reinstatement, which is worse than a gap.';
 
 /**
  * Assembles the general ledger for one org over [from, to]: per-account TrialBalance movement,
- * netted against ManualJournals, plus supporting Invoices/CreditNotes/BankTransactions detail.
- * One call replaces what would otherwise be ~12+ separate TrialBalance reads a year, done
- * client-side, every time (see module doc comment). Read-only; makes no writes.
+ * netted against ManualJournals, plus supporting Invoices/CreditNotes/BankTransactions detail,
+ * bucketed per month. One call replaces what would otherwise be ~12+ separate TrialBalance reads a
+ * year, done client-side, every time (see module doc comment). Read-only; makes no writes.
  */
-export async function assembleGl(org: XeroOrg, from: string, to: string): Promise<GlAssembleResult> {
+export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: TokenDeps): Promise<GlAssembleResult> {
   const caveats: string[] = [];
   const dates = monthEndDates(from, to);
+  // The TrialBalance snapshots are always widened to whole calendar months (dates[0] = the
+  // baseline month-end BEFORE `from`'s month; dates[last] = the month-end of `to`'s month). Every
+  // OTHER source fetch below (ManualJournals/Invoices/CreditNotes/BankTransactions) MUST use these
+  // SAME widened bounds, not the caller's original from/to — otherwise a partial-month request
+  // (e.g. from=2026-03-05) diffs a full-month TB movement against a document window that only
+  // covers March 5-20, producing a false variance for no reason other than the mismatch itself.
+  const effectiveFrom = firstDayOfMonth(dates[1]);
+  const effectiveTo = dates[dates.length - 1];
+  const effectiveWhere = dateWhere(effectiveFrom, effectiveTo);
 
-  // 1. TrialBalance at every month-end (dates[0] is the baseline before `from`).
+  // 1. TrialBalance at every month-end. A snapshot that parses to 0 rows is flagged INVALID (most
+  // likely a parse failure, not a genuinely brand-new org with a truly empty trial balance — and
+  // treating the ambiguous case as invalid is the fail-closed choice) so step 4 never diffs a real
+  // snapshot against it.
   const snapshots: TbRow[][] = [];
+  const invalidSnapshot: boolean[] = [];
   for (const date of dates) {
-    const res = await xeroGet(org, '/Reports/TrialBalance', { date });
+    const res = await xeroGet(org, '/Reports/TrialBalance', { date }, { deps });
     const rows = parseTrialBalanceRows(res.body);
-    if (rows.length === 0) caveats.push(`TrialBalance at ${date} parsed to 0 rows — check the report actually has data, or the parser needs updating for this org's response shape.`);
+    const invalid = rows.length === 0;
+    if (invalid) caveats.push(`TrialBalance at ${date} parsed to 0 rows — treated as an invalid/unparseable snapshot, not a real balance. Every period touching this date is OMITTED from months (rather than diffed, which would fabricate a full balance swing).`);
+    invalidSnapshot.push(invalid);
     snapshots.push(rows);
   }
 
-  // 2. ManualJournals across the whole range, bucketed by month.
-  const mjRes = await fetchAllPaged(org, '/ManualJournals', 'ManualJournals', dateWhere(from, to));
+  // 2. ManualJournals across the EFFECTIVE (widened) range, bucketed by month.
+  const mjRes = await fetchAllPaged(org, '/ManualJournals', 'ManualJournals', effectiveWhere, deps);
   if (mjRes.truncated) caveats.push(`ManualJournals hit the ${MAX_PAGES_PER_ENDPOINT}-page cap (${MAX_PAGES_PER_ENDPOINT * 100}+ records) — some journals in range may be missing from manualJournalNet.`);
   const mjByMonth = new Map<string, ManualJournal[]>();
   for (const raw of mjRes.items) {
@@ -362,21 +389,39 @@ export async function assembleGl(org: XeroOrg, from: string, to: string): Promis
     mjByMonth.get(key)!.push(mj);
   }
 
-  // 3. Invoices / CreditNotes / BankTransactions across the whole range — gross, informational.
-  const [invRes, cnRes, btRes] = await Promise.all([
-    fetchAllPaged(org, '/Invoices', 'Invoices', dateWhere(from, to)),
-    fetchAllPaged(org, '/CreditNotes', 'CreditNotes', dateWhere(from, to)),
-    fetchAllPaged(org, '/BankTransactions', 'BankTransactions', dateWhere(from, to)),
-  ]);
-  if (invRes.truncated) caveats.push(`Invoices hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — otherDocuments.invoicesLineGrossByAccount is incomplete for this range.`);
-  if (cnRes.truncated) caveats.push(`CreditNotes hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — otherDocuments.creditNotesLineGrossByAccount is incomplete for this range.`);
-  if (btRes.truncated) caveats.push(`BankTransactions hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — otherDocuments.bankTransactionsLineGrossByAccount is incomplete for this range.`);
+  // 3. Invoices / CreditNotes / BankTransactions across the EFFECTIVE range, bucketed by month —
+  // gross, informational, per-month (see GlAssembleMonth doc comment for why per-month matters).
+  // SEQUENTIAL, not Promise.all: xeroGet's per-org rate spacing (client.ts) is a read-then-sleep-
+  // then-write on a shared lastCallAt map with no lock — concurrent calls can race past each other
+  // and burst Xero's rate limit instead of respecting the intended spacing. This tool already makes
+  // many calls per invocation; it should not also be the thing that trips a 429.
+  const invRes = await fetchAllPaged(org, '/Invoices', 'Invoices', effectiveWhere, deps);
+  if (invRes.truncated) caveats.push(`Invoices hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — invoicesLineGrossByAccount is incomplete for one or more months.`);
+  const cnRes = await fetchAllPaged(org, '/CreditNotes', 'CreditNotes', effectiveWhere, deps);
+  if (cnRes.truncated) caveats.push(`CreditNotes hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — creditNotesLineGrossByAccount is incomplete for one or more months.`);
+  const btRes = await fetchAllPaged(org, '/BankTransactions', 'BankTransactions', effectiveWhere, deps);
+  if (btRes.truncated) caveats.push(`BankTransactions hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — bankTransactionsLineGrossByAccount is incomplete for one or more months.`);
 
+  const byMonth = <T extends { Date?: string }>(items: T[]): Map<string, T[]> => {
+    const out = new Map<string, T[]>();
+    for (const item of items) {
+      const key = monthKeyOf(item.Date);
+      if (!key) continue;
+      if (!out.has(key)) out.set(key, []);
+      out.get(key)!.push(item);
+    }
+    return out;
+  };
+  const invByMonth = byMonth(invRes.items as Array<DocWithLines & { Date?: string }>);
+  const cnByMonth = byMonth(cnRes.items as Array<DocWithLines & { Date?: string }>);
+  const btByMonth = byMonth(btRes.items as Array<DocWithLines & { Date?: string }>);
   const toRecord = (m: Map<string, number>): Record<string, number> => Object.fromEntries(m);
 
-  // 4. Per-month: diff TB, net ManualJournals, compute variance.
+  // 4. Per-month: diff TB, net ManualJournals, compute variance. Skip (omit, with a caveat already
+  // logged in step 1) any period whose start OR end snapshot was invalid.
   const months: GlAssembleMonth[] = [];
   for (let i = 1; i < dates.length; i++) {
+    if (invalidSnapshot[i - 1] || invalidSnapshot[i]) continue;
     const periodStart = dates[i - 1];
     const periodEnd = dates[i];
     const movements = diffTrialBalances(snapshots[i - 1], snapshots[i]);
@@ -392,20 +437,21 @@ export async function assembleGl(org: XeroOrg, from: string, to: string): Promis
       if (variance !== 0) nonzeroVarianceCount++;
       return { accountId: m.accountId, name: m.name, tbMovement: m.tbMovement, manualJournalNet, variance };
     });
-    months.push({ periodStart, periodEnd, accounts, nonzeroVarianceCount });
+    months.push({
+      periodStart,
+      periodEnd,
+      accounts,
+      nonzeroVarianceCount,
+      otherDocuments: {
+        invoicesLineGrossByAccount: toRecord(sumLineItemsByAccount(invByMonth.get(monthKey) ?? [])),
+        creditNotesLineGrossByAccount: toRecord(sumLineItemsByAccount(cnByMonth.get(monthKey) ?? [])),
+        bankTransactionsLineGrossByAccount: toRecord(sumLineItemsByAccount(btByMonth.get(monthKey) ?? [])),
+      },
+    });
+  }
+  if (months.length === 0 && dates.length > 1) {
+    caveats.push('Every requested period touched an invalid TrialBalance snapshot — months is empty. See the per-date caveats above.');
   }
 
-  return {
-    org,
-    from,
-    to,
-    months,
-    otherDocuments: {
-      invoicesLineGrossByAccount: toRecord(sumLineItemsByAccount(invRes.items as DocWithLines[])),
-      creditNotesLineGrossByAccount: toRecord(sumLineItemsByAccount(cnRes.items as DocWithLines[])),
-      bankTransactionsLineGrossByAccount: toRecord(sumLineItemsByAccount(btRes.items as DocWithLines[])),
-    },
-    caveats,
-    methodology_note: METHODOLOGY_NOTE,
-  };
+  return { org, from, to, months, caveats, methodology_note: METHODOLOGY_NOTE };
 }

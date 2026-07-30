@@ -111,31 +111,45 @@ export async function fetchJwks(projectId: string): Promise<Map<string, KeyObjec
 
 /**
  * Resolves a signing key, OR reports whether a null result means "Descope infrastructure could not
- * be reached at all" (infraFailure: true) versus every other case (a successfully-fetched JWKS that
- * simply doesn't contain this kid, or a served stale cache) -- infraFailure=false either way, since
- * verification could still proceed against a real, current key set. This distinction is what lets
+ * be reached AND that outage is why this specific key could not be resolved" (infraFailure: true)
+ * versus ordinary credential rejection (infraFailure: false). This distinction is what lets
  * verifyDescopeToken's telemetry (below) separate genuine Descope-infrastructure unreliability from
  * ordinary credential rejection (see that function's TELEMETRY doc comment for why conflating the two
  * would misreport hostile/malformed traffic as Descope downtime).
+ *
+ * infraFailure is true in exactly one shape: a refetch was attempted THIS call (because the cache was
+ * stale or missing this kid — e.g. a legitimate token signed just after a key rotation) AND that
+ * refetch failed AND the resulting key still cannot be resolved (not even from a stale cache).
+ * Reviewer-caught correctness fix (2026-07-30): the prior version unconditionally returned
+ * infraFailure:false on the "fall through to the stale cache" path, INCLUDING when the fallback
+ * cache didn't have the requested kid either — so a genuinely valid post-rotation token, arriving
+ * during a real JWKS outage, was misreported as credential_rejected instead of jwks_unavailable,
+ * undercounting the exact reliability failures this telemetry exists to measure. A refetch that
+ * fails but still resolves the key from an already-warm, still-usable stale cache (e.g. TTL-expired
+ * but same key set) correctly stays infraFailure:false — that is a degraded-but-functioning path,
+ * not an outage from the caller's perspective.
  */
 async function getKey(projectId: string, kid: string): Promise<{ key: KeyObject | null; infraFailure: boolean }> {
   const now = Date.now();
   const stale =
     !jwksCache || jwksCache.projectId !== projectId || now - jwksCache.fetchedAt > JWKS_TTL_MS;
+  let refetchFailed = false;
   if (stale || !jwksCache?.keys.has(kid)) {
     try {
       const keys = await fetchJwks(projectId);
       jwksCache = { keys, fetchedAt: now, projectId };
     } catch (err) {
       logger.warn({ type: 'descope_jwks_fetch_failed', err: String(err) }, 'Descope JWKS refresh failed');
+      refetchFailed = true;
       if (!jwksCache || jwksCache.projectId !== projectId) {
         return { key: null, infraFailure: true }; // no fetch succeeded, ever, for this project -- a real infra failure
       }
-      // fall through to the stale cache below -- better than hard-failing on a transient blip; a
-      // served stale key set is a degraded-but-functioning path, not a reportable infra failure
+      // fall through to the stale cache below; infraFailure is now decided by whether that stale
+      // cache actually resolves the key we need, not hardcoded false.
     }
   }
-  return { key: jwksCache?.keys.get(kid) ?? null, infraFailure: false };
+  const key = jwksCache?.keys.get(kid) ?? null;
+  return { key, infraFailure: refetchFailed && key === null };
 }
 
 /**

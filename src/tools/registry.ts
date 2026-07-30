@@ -156,6 +156,13 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // adding it does not widen the security model -- it completes an omission within a model that
   // already accepts EXEC_RING in-handler gating as the real authorization boundary for Xero writes.
   'xero_attachment_upload',
+  // xero_gl_assemble + xero_connections (CFO round-2 mega-prompt, 2026-07-30): a Copilot review on
+  // the PR that added them caught the SAME omission class as xero_attachment_upload above -- both
+  // tools were fully built, registered, and EXEC_RING-gated in-handler, but never added to this
+  // curated allowlist, so the Claude Chat CFO connector could not see or call the new GL-assembly
+  // feature at all. Adding them here is VISIBILITY only (the security boundary is the in-handler
+  // isXeroAllowed(ctx.callerAgent) gate, unchanged); see registry.connector-lanes.test.ts.
+  'xero_gl_assemble', 'xero_connections',
 ] as const;
 
 /**

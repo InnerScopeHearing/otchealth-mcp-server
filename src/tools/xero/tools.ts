@@ -100,9 +100,16 @@ interface ReportBody {
  * Post-fetch, client-side row filter for xero_report (CFO P1-C, 2026-07-30): a single TrialBalance
  * read is ~295KB and JIT-offloads into ~10 pages, and most reads only need a handful of accounts or
  * only the ones with activity. Xero's Reports API has no server-side account/column filter, so this
- * trims the SAME response after the fact rather than paying for a second, narrower call. `Header`
- * and `SummaryRow` rows are always kept (so totals stay legible); `Section` rows are kept only if at
- * least one child row survives. No-op (returns body unchanged) when neither filter is requested.
+ * trims the SAME response after the fact rather than paying for a second, narrower call.
+ * `Header` rows are always kept. `Section` rows are kept only if at least one child row survives.
+ * `SummaryRow` handling differs by filter: `nonZeroOnly` alone never changes a true total (dropping
+ * literal-zero rows cannot change a sum), so SummaryRow is kept. `match` genuinely subsets the
+ * accounts shown, so a kept SummaryRow would display Xero's ORIGINAL total (including every
+ * excluded account) beside a partial account list — internally inconsistent and misleading for a
+ * financial reader. When `match` is active, SummaryRow rows are dropped rather than shown stale;
+ * this function does not attempt to recompute a correct subset total (re-summing formatted decimal
+ * strings client-side is its own source of rounding/formatting bugs). No-op (body unchanged) when
+ * neither filter is requested.
  */
 function filterReportRows(body: unknown, opts: { nonZeroOnly?: boolean; match?: string[] }): unknown {
   if (!opts.nonZeroOnly && !opts.match?.length) return body;
@@ -117,7 +124,8 @@ function filterReportRows(body: unknown, opts: { nonZeroOnly?: boolean; match?: 
           const kept = filterRows(r.Rows);
           return kept.length ? { ...r, Rows: kept } : null;
         }
-        if (r.RowType !== 'Row' || !Array.isArray(r.Cells)) return r; // Header/SummaryRow untouched
+        if (r.RowType === 'SummaryRow') return matchList ? null : r; // stale total once `match` subsets accounts — drop it
+        if (r.RowType !== 'Row' || !Array.isArray(r.Cells)) return r; // Header untouched
         const label = (r.Cells[0]?.Value || '').toLowerCase();
         if (matchList && !matchList.some((m) => label.includes(m))) return null;
         if (opts.nonZeroOnly) {
@@ -128,6 +136,37 @@ function filterReportRows(body: unknown, opts: { nonZeroOnly?: boolean; match?: 
       })
       .filter((r): r is ReportRow => r !== null);
   return { ...b, Reports: [{ ...report, Rows: filterRows(report.Rows) }, ...(b.Reports?.slice(1) ?? [])] };
+}
+
+/**
+ * Pure truncation/corruption guard for xero_attachment_upload (CFO P1-B, 2026-07-30): given the
+ * decoded payload buffer and the sha256 already computed over it, checks the caller-supplied
+ * expected_bytes/expected_sha256 (computed by the CALLER from the ORIGINAL file, before base64-
+ * encoding/pasting) against the actual decoded bytes. Returns null when the payload matches (or
+ * neither check was requested — both are optional), or the exact `{error, reason}` pair the handler
+ * returns to the caller WITHOUT ever calling Xero. Extracted as a standalone pure function (rather
+ * than inline in the registerTool handler) so this safety-critical check is directly unit-testable
+ * without needing to stand up the full registerTool/EXEC_RING/Cosmos gating stack — mirrors the
+ * exported-handler pattern in tools/graph-drive/upload.ts.
+ */
+export function checkAttachmentPayloadIntegrity(
+  buf: Buffer,
+  actualSha256: string,
+  opts: { expected_bytes?: number; expected_sha256?: string },
+): { error: 'truncated_payload'; reason: string } | null {
+  if (opts.expected_bytes !== undefined && buf.length !== opts.expected_bytes) {
+    return {
+      error: 'truncated_payload',
+      reason: `decoded contentBase64 is ${buf.length} bytes but expected_bytes was ${opts.expected_bytes}. This is the exact silent-truncation failure mode this check exists to catch — re-send the full file rather than retrying with the same short payload.`,
+    };
+  }
+  if (opts.expected_sha256 !== undefined && actualSha256 !== opts.expected_sha256.toLowerCase()) {
+    return {
+      error: 'truncated_payload',
+      reason: `decoded contentBase64 hashes to ${actualSha256} but expected_sha256 was ${opts.expected_sha256}. Content does not match the original file — likely truncated or corrupted in transit; re-send the full file rather than retrying with the same payload.`,
+    };
+  }
+  return null;
 }
 
 function unconfigured(tool: string) {
@@ -278,7 +317,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         match: z
           .array(z.string())
           .optional()
-          .describe('Post-fetch filter (client-side): keep only rows whose account/label name contains one of these strings (case-insensitive). Cheap way to pull a handful of accounts instead of paying to review the whole chart every time.'),
+          .describe('Post-fetch filter (client-side): keep only rows whose account/label name contains one of these strings (case-insensitive). Cheap way to pull a handful of accounts instead of paying to review the whole chart every time. NOTE: SummaryRow/total rows are dropped when this is set — Xero\'s original total includes the excluded accounts, so showing it beside a subsetted list would be misleading.'),
       },
       outputShape: {
         org: z.string(),
@@ -577,7 +616,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Xero: bank transfers (executive ring only, gateway-side pagination/date-filter shim)',
         description:
-          "Bank transfers (money moved between the org's own bank accounts). Xero's /BankTransfers endpoint does not support server-side pagination or date filtering (confirmed live) — this tool fetches the org's full transfer history ONCE (per gateway process, cached briefly) and applies page/fromDate/toDate CLIENT-SIDE, so the caller still gets a normal bounded view rather than the entire history every time. MNPI: executive-ring lanes only. Read-only.",
+          "Bank transfers (money moved between the org's own bank accounts). Xero's /BankTransfers endpoint does not support server-side pagination or date filtering (confirmed live) — this tool fetches the org's full transfer history on EVERY call (there is no caching yet — that is a real cost of this shim, not a claimed mitigation) and applies page/fromDate/toDate CLIENT-SIDE, so the caller still gets a normal bounded, date-scoped VIEW rather than the entire raw history in its response, even though the underlying fetch itself is not cheaper. MNPI: executive-ring lanes only. Read-only.",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -792,16 +831,14 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         // TRUNCATION GUARD: check BEFORE dry_run too, so a dry-run preview never reports a plausible
         // "would upload N bytes" for a payload that was already truncated on the way into this call.
         const actualSha256 = createHash('sha256').update(buf).digest('hex');
-        if (input.expected_bytes !== undefined && buf.length !== input.expected_bytes) {
+        const integrityFailure = checkAttachmentPayloadIntegrity(buf, actualSha256, {
+          expected_bytes: input.expected_bytes,
+          expected_sha256: input.expected_sha256,
+        });
+        if (integrityFailure) {
           return {
-            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: null, error: 'truncated_payload' },
-            summary: `REFUSED (not uploaded): decoded contentBase64 is ${buf.length} bytes but expected_bytes was ${input.expected_bytes}. This is the exact silent-truncation failure mode this check exists to catch — re-send the full file rather than retrying with the same short payload.`,
-          };
-        }
-        if (input.expected_sha256 !== undefined && actualSha256 !== input.expected_sha256.toLowerCase()) {
-          return {
-            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: null, error: 'truncated_payload' },
-            summary: `REFUSED (not uploaded): decoded contentBase64 hashes to ${actualSha256} but expected_sha256 was ${input.expected_sha256}. Content does not match the original file — likely truncated or corrupted in transit; re-send the full file rather than retrying with the same payload.`,
+            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: null, error: integrityFailure.error },
+            summary: `REFUSED (not uploaded): ${integrityFailure.reason}`,
           };
         }
 
@@ -1064,16 +1101,21 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         description:
           'Reconstructs ledger-level detail for [from, to] WITHOUT the gated Journals endpoint, using only scopes already granted: ' +
           'diffs Xero\'s own TrialBalance at each month-end into per-account period movements (this is vendor-computed ground truth — ' +
-          'it cannot miss anything), nets ManualJournals against those movements into a per-account `variance`, and separately returns ' +
-          'gross (unsigned, NOT netted) Invoices/CreditNotes/BankTransactions line-item activity by account as supporting evidence. ' +
-          'IMPORTANT — variance is ONLY a completeness proof for accounts whose movement was manual journals; a nonzero variance on an ' +
-          'account that also shows activity in otherDocuments is EXPECTED (Invoices/CreditNotes/BankTransactions post to AR/AP/bank ' +
-          'control accounts that never appear in any LineItems array, so netting them would look precise while silently being wrong — ' +
-          'see the output\'s own methodology_note, and this tool\'s gl-assemble.ts module doc comment, for the full explanation). ' +
-          'Payments/BankTransfers/ExpenseClaims/Receipts are not pulled in this version. from/to are YYYY-MM-DD and are widened to whole ' +
-          'calendar months. One call replaces what would otherwise be a TrialBalance read (~295KB, ~10 JIT pages) per month, every month, ' +
-          'forever — large results here still JIT-offload automatically like any other tool. Deterministic: re-running with the same ' +
-          'org/from/to returns the same numbers. MNPI: executive-ring lanes only. Read-only: makes no changes.',
+          'it cannot miss anything), nets ManualJournals against those movements into a per-account `variance`, and separately returns, ' +
+          'INSIDE EACH MONTH, that same month\'s gross (unsigned, NOT netted) Invoices/CreditNotes/BankTransactions line-item activity ' +
+          'by account as supporting evidence. IMPORTANT — variance is ONLY a completeness proof for accounts whose movement was manual ' +
+          'journals; a nonzero variance on an account that also shows activity in THAT MONTH\'S otherDocuments is EXPECTED ' +
+          '(Invoices/CreditNotes/BankTransactions post to AR/AP/bank control accounts that never appear in any LineItems array, so ' +
+          'netting them would look precise while silently being wrong — see the output\'s own methodology_note, and this tool\'s ' +
+          'gl-assemble.ts module doc comment, for the full explanation). A month whose TrialBalance snapshot failed to parse is OMITTED ' +
+          'from `months` entirely (with a caveat), never diffed — diffing a real snapshot against a failed one would fabricate a full ' +
+          'balance swing that looks like a real movement. Payments/BankTransfers-as-a-source/ExpenseClaims/Receipts are not pulled in ' +
+          'this version. from/to are YYYY-MM-DD and are widened to whole calendar months; EVERY source fetch (TrialBalance, ' +
+          'ManualJournals, Invoices, CreditNotes, BankTransactions) uses those same widened bounds, not the raw from/to, so a ' +
+          'partial-month request never diffs a full-month TB movement against a partial-month document window. One call replaces what ' +
+          'would otherwise be a TrialBalance read (~295KB, ~10 JIT pages) per month, every month, forever — large results here still ' +
+          'JIT-offload automatically like any other tool. Deterministic: re-running with the same org/from/to returns the same numbers. ' +
+          'MNPI: executive-ring lanes only. Read-only: makes no changes.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -1089,7 +1131,6 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         from: z.string(),
         to: z.string(),
         months: z.array(z.unknown()),
-        otherDocuments: z.unknown(),
         caveats: z.array(z.string()),
         methodology_note: z.string(),
         error: z.string().optional(),
@@ -1104,8 +1145,8 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
           data: result,
           summary:
             `Xero GL assembled for ${input.org}, ${result.months.length} month(s) ${input.from}..${input.to}: ` +
-            `${totalVariances} account-month(s) with nonzero manual-journal variance (see methodology_note — this does not include ` +
-            `Invoices/CreditNotes/BankTransactions activity, returned separately in otherDocuments).${caveatNote}`,
+            `${totalVariances} account-month(s) with nonzero manual-journal variance (see methodology_note — each month's ` +
+            `Invoices/CreditNotes/BankTransactions activity is in that month's own otherDocuments).${caveatNote}`,
         };
       },
     },
