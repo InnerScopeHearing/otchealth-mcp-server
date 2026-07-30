@@ -1,6 +1,6 @@
 /**
  * xero_* tools — full READ + WRITE for the executive ring (see client.ts header for the ring +
- * token-rotation design). 20 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
+ * token-rotation design). 22 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
  * OAuth scope surface (accounting + all reports + payroll + files + assets + projects), across all
  * four orgs, rate-governed. The CFO seat is authorized for full read+write on the books (Matt
  * directive 2026-07-16); Xero writes are bookkeeping (they post to the ledger, they do NOT move real
@@ -11,38 +11,43 @@
  *   xero_request            WRITE — POST/PUT/DELETE ANY scoped endpoint (dry_run defaults true)
  * Accounting (api.xro/2.0):
  *   xero_orgs               org registry + connection status (never token values)
+ *   xero_connections        raw connection metadata (id/tenant/createdDateUtc); does NOT determine journals-scope grandfather eligibility (see tool description)
  *   xero_report             TrialBalance | BalanceSheet | ProfitAndLoss | Aged{Payables,Receivables}ByContact |
- *                           BankSummary | BudgetSummary | ExecutiveSummary | TenNinetyNine (1099)
+ *                           BankSummary | BudgetSummary | ExecutiveSummary | TenNinetyNine (1099); nonZeroOnly/match filter client-side
+ *   xero_gl_assemble        server-side GL reconstruction: TrialBalance-diff per account/month, netted against ManualJournals — see gl-assemble.ts
  *   xero_accounts           full chart of accounts
  *   xero_contacts           contacts (customers + suppliers), paged/filterable
  *   xero_invoices           invoices (AR + AP), paged/filterable
  *   xero_credit_notes       credit notes (AR + AP)
  *   xero_payments           payments (cash applied)
  *   xero_bank_transactions  bank transactions, paged
- *   xero_bank_transfers     transfers between own bank accounts
+ *   xero_bank_transfers     transfers between own bank accounts — gateway-side page/date shim (Xero's endpoint ignores both server-side)
  *   xero_manual_journals    manual journals (list or one by id)
  *   xero_budgets            budgets (list or one by id)
  *   xero_settings           Organisation | TaxRates | TrackingCategories | Currencies | Users |
  *                           BrandingThemes | ContactGroups | Items
  *   xero_attachments        source-doc attachments on a record (list/read only — see xero_attachment_upload for writes)
- *   xero_attachment_upload  upload a source-doc attachment (dry-run-first) — see client.ts xeroUploadAttachment
+ *   xero_attachment_upload  upload a source-doc attachment (dry-run-first, truncation-guarded via expected_bytes/expected_sha256) — see client.ts xeroUploadAttachment
  * Other product APIs:
  *   xero_payroll            Employees | PayRuns | PayItems | PayrollCalendars | Timesheets | Settings (payroll.xro/1.0)
  *   xero_assets             Assets | AssetTypes | Settings (assets.xro/1.0)
  *   xero_projects           Projects | Tasks | Time (projects.xro/2.0)
  *   xero_files              Files | Folders | Associations (files.xro/1.0)
  *
- * The four paged accounting reads (contacts/payments/credit_notes/bank_transfers) register via the
- * shared registerPagedAccountingRead helper (one gated call-site each stays EXEC_RING-checked).
+ * The three paged accounting reads (contacts/payments/credit_notes) register via the shared
+ * registerPagedAccountingRead helper (one gated call-site each stays EXEC_RING-checked);
+ * bank_transfers has its own dedicated handler (see the block above xero_request).
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { registerTool, type CallerHashProvider } from '../registry.js';
+import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import {
   XERO_ORGS,
   XERO_API_BASES,
   type XeroApi,
   type XeroOrg,
+  type TokenDeps,
   isXeroAllowed,
   ringRefusal,
   xeroConfigured,
@@ -51,7 +56,11 @@ import {
   xeroGet,
   xeroRequest,
   xeroUploadAttachment,
+  xeroConnections,
+  isGrandfatheredForJournals,
+  XERO_JOURNALS_GRANDFATHER_CUTOFF,
 } from './client.js';
+import { assembleGl } from './gl-assemble.js';
 
 const ORG_ENUM = z.enum(XERO_ORGS).describe('Which org: otchealth | innd | hearingassist | personal.');
 
@@ -78,6 +87,175 @@ const ATTACHMENT_ENDPOINT_ENUM = [
   'Contacts',
   'PurchaseOrders',
 ] as const;
+
+interface ReportRow {
+  RowType?: string;
+  Cells?: Array<{ Value?: string }>;
+  Rows?: ReportRow[];
+}
+interface ReportBody {
+  Reports?: Array<{ Rows?: ReportRow[] }>;
+}
+
+/**
+ * Post-fetch, client-side row filter for xero_report (CFO P1-C, 2026-07-30): a single TrialBalance
+ * read is ~295KB and JIT-offloads into ~10 pages, and most reads only need a handful of accounts or
+ * only the ones with activity. Xero's Reports API has no server-side account/column filter, so this
+ * trims the SAME response after the fact rather than paying for a second, narrower call.
+ * `Header` rows are always kept. `Section` rows are kept only if at least one child row survives.
+ * `SummaryRow` handling differs by filter: `nonZeroOnly` alone never changes a true total (dropping
+ * literal-zero rows cannot change a sum), so SummaryRow is kept. `match` genuinely subsets the
+ * accounts shown, so a kept SummaryRow would display Xero's ORIGINAL total (including every
+ * excluded account) beside a partial account list — internally inconsistent and misleading for a
+ * financial reader. When `match` is active, SummaryRow rows are dropped rather than shown stale;
+ * this function does not attempt to recompute a correct subset total (re-summing formatted decimal
+ * strings client-side is its own source of rounding/formatting bugs). No-op (body unchanged) when
+ * neither filter is requested.
+ */
+export function filterReportRows(body: unknown, opts: { nonZeroOnly?: boolean; match?: string[] }): unknown {
+  if (!opts.nonZeroOnly && !opts.match?.length) return body;
+  const b = body as ReportBody;
+  const report = b?.Reports?.[0];
+  if (!report?.Rows) return body;
+  const matchList = opts.match?.length ? opts.match.map((s) => s.toLowerCase()) : null;
+  const filterRows = (rows: ReportRow[]): ReportRow[] =>
+    rows
+      .map((r) => {
+        if (r.RowType === 'Section' && Array.isArray(r.Rows)) {
+          const kept = filterRows(r.Rows);
+          return kept.length ? { ...r, Rows: kept } : null;
+        }
+        if (r.RowType === 'SummaryRow') return matchList ? null : r; // stale total once `match` subsets accounts — drop it
+        if (r.RowType !== 'Row' || !Array.isArray(r.Cells)) return r; // Header untouched
+        const label = (r.Cells[0]?.Value || '').toLowerCase();
+        if (matchList && !matchList.some((m) => label.includes(m))) return null;
+        if (opts.nonZeroOnly) {
+          const allZero = r.Cells.slice(1).every((c) => !c.Value || Number.parseFloat(c.Value) === 0);
+          if (allZero) return null;
+        }
+        return r;
+      })
+      .filter((r): r is ReportRow => r !== null);
+  return { ...b, Reports: [{ ...report, Rows: filterRows(report.Rows) }, ...(b.Reports?.slice(1) ?? [])] };
+}
+
+/**
+ * Pure truncation/corruption guard for xero_attachment_upload (CFO P1-B, 2026-07-30): given the
+ * decoded payload buffer and the sha256 already computed over it, checks the caller-supplied
+ * expected_bytes/expected_sha256 (computed by the CALLER from the ORIGINAL file, before base64-
+ * encoding/pasting) against the actual decoded bytes. Returns null when the payload matches (or
+ * neither check was requested — both are optional), or the exact `{error, reason}` pair the handler
+ * returns to the caller WITHOUT ever calling Xero. Extracted as a standalone pure function (rather
+ * than inline in the registerTool handler) so this safety-critical check is directly unit-testable
+ * without needing to stand up the full registerTool/EXEC_RING/Cosmos gating stack — mirrors the
+ * exported-handler pattern in tools/graph-drive/upload.ts.
+ */
+export function checkAttachmentPayloadIntegrity(
+  buf: Buffer,
+  actualSha256: string,
+  opts: { expected_bytes?: number; expected_sha256?: string },
+): { error: 'truncated_payload'; reason: string } | null {
+  if (opts.expected_bytes !== undefined && buf.length !== opts.expected_bytes) {
+    return {
+      error: 'truncated_payload',
+      reason: `decoded contentBase64 is ${buf.length} bytes but expected_bytes was ${opts.expected_bytes}. This is the exact silent-truncation failure mode this check exists to catch — re-send the full file rather than retrying with the same short payload.`,
+    };
+  }
+  if (opts.expected_sha256 !== undefined && actualSha256 !== opts.expected_sha256.toLowerCase()) {
+    return {
+      error: 'truncated_payload',
+      reason: `decoded contentBase64 hashes to ${actualSha256} but expected_sha256 was ${opts.expected_sha256}. Content does not match the original file — likely truncated or corrupted in transit; re-send the full file rather than retrying with the same payload.`,
+    };
+  }
+  return null;
+}
+
+export interface XeroAttachmentUploadInput {
+  org: XeroOrg;
+  endpoint: (typeof ATTACHMENT_ENDPOINT_ENUM)[number];
+  guid: string;
+  fileName: string;
+  contentBase64: string;
+  mimeType: string;
+  expected_bytes?: number;
+  expected_sha256?: string;
+}
+
+/**
+ * `xero_attachment_upload` handler. Exported standalone (rather than inline in the registerTool
+ * call) so it is directly unit-testable — mirrors handleGraphDriveUpload's pattern in
+ * tools/graph-drive/upload.ts. Copilot review, 2026-07-30: the prior tests only exercised the
+ * extracted checkAttachmentPayloadIntegrity() pure function, never this handler itself, so nothing
+ * proved a mismatch actually returns BEFORE xeroUploadAttachment (and therefore any network call)
+ * is reached, nor that a genuinely matching payload reaches it. See tools.test.ts's
+ * "handleXeroAttachmentUpload" tests for both proofs (a stubbed globalThis.fetch that throws on ANY
+ * call demonstrates the refusal path makes zero network I/O).
+ */
+export async function handleXeroAttachmentUpload(
+  input: XeroAttachmentUploadInput,
+  ctx: ToolContext,
+  // Test-only seam, mirroring assembleGl's deps parameter in gl-assemble.ts: production
+  // (registerTool always calls handler(input, ctx), exactly 2 args) never supplies this, so it is
+  // always undefined -- and undefined -> xeroUploadAttachment's own defaultDeps, unchanged behavior.
+  deps?: TokenDeps,
+): Promise<ToolResultPayload> {
+  if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_attachment_upload', ctx.callerAgent);
+  if (!xeroConfigured()) return unconfigured('xero_attachment_upload');
+
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(input.contentBase64, 'base64');
+  } catch {
+    return {
+      data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'bad_base64' },
+      summary: 'xero_attachment_upload: contentBase64 did not decode as valid base64.',
+    };
+  }
+  if (buf.length === 0) {
+    return {
+      data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'empty_content' },
+      summary: 'xero_attachment_upload: decoded content is empty.',
+    };
+  }
+
+  // TRUNCATION GUARD: check BEFORE dry_run too, so a dry-run preview never reports a plausible
+  // "would upload N bytes" for a payload that was already truncated on the way into this call.
+  const actualSha256 = createHash('sha256').update(buf).digest('hex');
+  const integrityFailure = checkAttachmentPayloadIntegrity(buf, actualSha256, {
+    expected_bytes: input.expected_bytes,
+    expected_sha256: input.expected_sha256,
+  });
+  if (integrityFailure) {
+    return {
+      data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: null, error: integrityFailure.error },
+      summary: `REFUSED (not uploaded): ${integrityFailure.reason}`,
+    };
+  }
+
+  if (ctx.dryRun) {
+    return {
+      data: {
+        org: input.org,
+        endpoint: input.endpoint,
+        guid: input.guid,
+        fileName: input.fileName,
+        bytes: buf.length,
+        sha256: actualSha256,
+        body: null,
+        error: 'dry_run',
+      },
+      summary: `DRY RUN (nothing uploaded): would PUT ${buf.length} bytes (sha256=${actualSha256}) as "${input.fileName}" (${input.mimeType}) to ${input.endpoint}/${input.guid} for ${input.org}. Re-call with dry_run:false to execute, then verify with xero_attachments.`,
+    };
+  }
+
+  const res = await xeroUploadAttachment(input.org, input.endpoint, input.guid, input.fileName, buf, input.mimeType, { deps });
+  return {
+    data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: res.body },
+    summary:
+      `Xero attachment upload "${input.fileName}" (${buf.length} bytes, sha256=${actualSha256}) to ${input.endpoint}/${input.guid} for ${input.org} — HTTP ${res.status}. ` +
+      `NOT independently verified yet — call xero_attachments(org:"${input.org}", endpoint:"${input.endpoint}", guid:"${input.guid}") before reporting this as successful.`,
+  };
+}
 
 function unconfigured(tool: string) {
   return {
@@ -220,6 +398,14 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         contactId: z.string().optional().describe('Contact GUID — REQUIRED for the Aged* reports.'),
         paymentsOnly: z.boolean().optional().describe('Cash basis (TrialBalance/P&L).'),
         reportYear: z.string().optional().describe('4-digit year — REQUIRED for TenNinetyNine (the 1099 report), e.g. "2021".'),
+        nonZeroOnly: z
+          .boolean()
+          .optional()
+          .describe('Post-fetch filter (client-side; Xero has no server-side equivalent): drop rows where every numeric column is 0.00. Most reads only need the accounts with activity, not the full chart.'),
+        match: z
+          .array(z.string())
+          .optional()
+          .describe('Post-fetch filter (client-side): keep only rows whose account/label name contains one of these strings (case-insensitive). Cheap way to pull a handful of accounts instead of paying to review the whole chart every time. NOTE: SummaryRow/total rows are dropped when this is set — Xero\'s original total includes the excluded accounts, so showing it beside a subsetted list would be misleading.'),
       },
       outputShape: {
         org: z.string(),
@@ -254,9 +440,11 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
           paymentsOnly: input.paymentsOnly !== undefined ? String(input.paymentsOnly) : undefined,
           reportYear: input.reportYear,
         });
+        const filtered = filterReportRows(res.body, { nonZeroOnly: input.nonZeroOnly, match: input.match });
+        const filterNote = input.nonZeroOnly || input.match?.length ? ' (client-side filtered — see nonZeroOnly/match).' : '';
         return {
-          data: { org, report: input.report, body: res.body, day_limit_remaining: res.dayLimitRemaining },
-          summary: `Xero ${input.report} for ${org} retrieved.${res.dayLimitRemaining ? ` Day-limit remaining: ${res.dayLimitRemaining}.` : ''}`,
+          data: { org, report: input.report, body: filtered, day_limit_remaining: res.dayLimitRemaining },
+          summary: `Xero ${input.report} for ${org} retrieved.${filterNote}${res.dayLimitRemaining ? ` Day-limit remaining: ${res.dayLimitRemaining}.` : ''}`,
         };
       },
     },
@@ -501,13 +689,77 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
     path: '/CreditNotes',
     countKey: 'CreditNotes',
   });
-  registerPagedAccountingRead(server, callerHash, {
-    name: 'xero_bank_transfers',
-    title: 'Xero: bank transfers (executive ring only)',
-    description: "Bank transfers (money moved between the org's own bank accounts) — paged. MNPI: executive-ring lanes only. Read-only.",
-    path: '/BankTransfers',
-    countKey: 'BankTransfers',
-  });
+  // --- BankTransfers: dedicated handler, NOT the generic registerPagedAccountingRead helper ---
+  // (CFO P1-E, 2026-07-30, confirmed live): Xero's /BankTransfers endpoint does not honor `page` or
+  // `where`/date filtering server-side — every call returns the org's full transfer history in one
+  // shot regardless of params. This appears to be genuine vendor behavior (not a gateway bug), but a
+  // document type that cannot be sized or scoped server-side is an unquantified edge for anything
+  // that reasons about completeness. Fix: fetch once, then filter/paginate CLIENT-SIDE here so a
+  // caller still gets a normal paged, date-bounded view instead of always eating the entire history.
+  registerTool(
+    server,
+    {
+      name: 'xero_bank_transfers',
+      category: 'read',
+      annotations: {
+        title: 'Xero: bank transfers (executive ring only, gateway-side pagination/date-filter shim)',
+        description:
+          "Bank transfers (money moved between the org's own bank accounts). Xero's /BankTransfers endpoint does not support server-side pagination or date filtering (confirmed live) — this tool fetches the org's full transfer history on EVERY call (there is no caching yet — that is a real cost of this shim, not a claimed mitigation) and applies page/fromDate/toDate CLIENT-SIDE, so the caller still gets a normal bounded, date-scoped VIEW rather than the entire raw history in its response, even though the underlying fetch itself is not cheaper. MNPI: executive-ring lanes only. Read-only.",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: {
+        org: ORG_ENUM,
+        page: z.number().int().min(1).optional().describe('Page number, 100/page, applied CLIENT-SIDE after the full fetch. Default 1.'),
+        fromDate: z.string().optional().describe('YYYY-MM-DD — keep only transfers on/after this date, applied CLIENT-SIDE.'),
+        toDate: z.string().optional().describe('YYYY-MM-DD — keep only transfers on/before this date, applied CLIENT-SIDE.'),
+      },
+      outputShape: { org: z.string(), body: z.unknown(), total_matching: z.number(), page: z.number(), pages: z.number(), error: z.string().optional() },
+      handler: async (input, ctx) => {
+        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_bank_transfers', ctx.callerAgent);
+        if (!xeroConfigured()) return unconfigured('xero_bank_transfers');
+        // VALIDATE BEFORE FETCHING (reviewer-caught, 2026-07-30): Date.parse of a malformed/
+        // impossible date (e.g. "not-a-date", "2026-02-30") returns NaN, and every NaN comparison
+        // below is always false — an unvalidated NaN bound would silently match everything while
+        // the summary still claimed "date-filtered client-side", the exact opposite of the caller's
+        // request. A real, strict YYYY-MM-DD check catches this before any network call.
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+        for (const [label, value] of [['fromDate', input.fromDate], ['toDate', input.toDate]] as const) {
+          if (value === undefined) continue;
+          if (!dateRe.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
+            return {
+              data: { org: input.org, body: null, total_matching: 0, page: 1, pages: 1, error: 'invalid_date' },
+              summary: `xero_bank_transfers: ${label}="${value}" is not a valid YYYY-MM-DD date. Refused before fetching, rather than silently returning the unfiltered history.`,
+            };
+          }
+        }
+        const res = await xeroGet(input.org as XeroOrg, '/BankTransfers', {});
+        const all = ((res.body as Record<string, unknown>)?.BankTransfers as Array<Record<string, unknown>>) ?? [];
+        const fromMs = input.fromDate ? Date.parse(`${input.fromDate}T00:00:00Z`) : undefined;
+        const toMs = input.toDate ? Date.parse(`${input.toDate}T23:59:59Z`) : undefined;
+        const matching = all.filter((t) => {
+          if (fromMs === undefined && toMs === undefined) return true;
+          const raw = String(t.Date ?? '');
+          const m = /\/Date\((\d+)/.exec(raw);
+          const ms = m ? Number(m[1]) : Date.parse(raw);
+          if (Number.isNaN(ms)) return true; // unparseable date: don't silently drop it, keep it
+          if (fromMs !== undefined && ms < fromMs) return false;
+          if (toMs !== undefined && ms > toMs) return false;
+          return true;
+        });
+        const page = Math.max(1, input.page ?? 1);
+        const pages = Math.max(1, Math.ceil(matching.length / 100));
+        const slice = matching.slice((page - 1) * 100, page * 100);
+        return {
+          data: { org: input.org, body: { BankTransfers: slice }, total_matching: matching.length, page, pages },
+          summary: `Xero bank transfers for ${input.org}: ${matching.length} matching${input.fromDate || input.toDate ? ' (date-filtered client-side)' : ''}, page ${page}/${pages}.`,
+        };
+      },
+    },
+    callerHash,
+  );
 
   // --- Budgets ---
   registerTool(
@@ -623,7 +875,8 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
           'This is NOT the same as xero_request — the Xero attachment API requires the raw file bytes with the correct Content-Type header, which this tool sends correctly (xero_request always sends JSON and cannot upload a real file). ' +
           '10MB cap on this gateway (Xero own limit is 25MB); for larger files, host externally and attach a link instead. ' +
           'dry_run defaults TRUE and only validates + previews (decodes and size-checks the payload without calling Xero); pass dry_run:false to actually upload. ' +
-          'IMPORTANT: a 200 response from this tool is NOT sufficient proof the attachment persisted — always follow up with xero_attachments on the same endpoint/guid to independently confirm the file actually appears before reporting success.',
+          'IMPORTANT: a 200 response from this tool is NOT sufficient proof the attachment persisted — always follow up with xero_attachments on the same endpoint/guid to independently confirm the file actually appears before reporting success. ' +
+        'TRUNCATION GUARD (CFO P1-B, 2026-07-30): contentBase64 is inline, so it is emitted as MODEL OUTPUT TOKENS — the real ceiling is whatever output-token budget the calling model/subagent has left, not the 10MB documented cap, and a truncated payload has been observed to return a completely normal-looking HTTP 200 with a byte count. If you computed expected_sha256/expected_bytes from the ORIGINAL file (not from what you are about to paste), pass them: the tool decodes contentBase64 and REFUSES before ever calling Xero if the decoded bytes do not match, instead of silently uploading a truncated file that will look successful.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
@@ -636,6 +889,17 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         fileName: z.string().min(1).describe('File name including extension, e.g. "executed-spa.pdf".'),
         contentBase64: z.string().min(1).describe('The file content, base64-encoded.'),
         mimeType: z.string().min(1).describe('The file\'s actual MIME type, e.g. "application/pdf", "image/png".'),
+        expected_bytes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('The ORIGINAL file size in bytes, computed BEFORE base64-encoding/pasting. If provided and the decoded contentBase64 length differs, the tool refuses with error:"truncated_payload" instead of uploading a short file.'),
+        expected_sha256: z
+          .string()
+          .length(64)
+          .optional()
+          .describe('The ORIGINAL file\'s sha256 hex digest, computed BEFORE base64-encoding/pasting. If provided and it does not match the decoded contentBase64, the tool refuses with error:"truncated_payload" instead of uploading a corrupted file. Stronger than expected_bytes alone (catches a same-length corruption too).'),
       },
       outputShape: {
         org: z.string(),
@@ -643,59 +907,11 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         guid: z.string(),
         fileName: z.string(),
         bytes: z.number().optional(),
+        sha256: z.string().optional(),
         body: z.unknown(),
         error: z.string().optional(),
       },
-      handler: async (input, ctx) => {
-        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_attachment_upload', ctx.callerAgent);
-        if (!xeroConfigured()) return unconfigured('xero_attachment_upload');
-
-        let buf: Buffer;
-        try {
-          buf = Buffer.from(input.contentBase64, 'base64');
-        } catch {
-          return {
-            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'bad_base64' },
-            summary: 'xero_attachment_upload: contentBase64 did not decode as valid base64.',
-          };
-        }
-        if (buf.length === 0) {
-          return {
-            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'empty_content' },
-            summary: 'xero_attachment_upload: decoded content is empty.',
-          };
-        }
-
-        if (ctx.dryRun) {
-          return {
-            data: {
-              org: input.org,
-              endpoint: input.endpoint,
-              guid: input.guid,
-              fileName: input.fileName,
-              bytes: buf.length,
-              body: null,
-              error: 'dry_run',
-            },
-            summary: `DRY RUN (nothing uploaded): would PUT ${buf.length} bytes as "${input.fileName}" (${input.mimeType}) to ${input.endpoint}/${input.guid} for ${input.org}. Re-call with dry_run:false to execute, then verify with xero_attachments.`,
-          };
-        }
-
-        const res = await xeroUploadAttachment(
-          input.org as XeroOrg,
-          input.endpoint,
-          input.guid,
-          input.fileName,
-          buf,
-          input.mimeType,
-        );
-        return {
-          data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, body: res.body },
-          summary:
-            `Xero attachment upload "${input.fileName}" (${buf.length} bytes) to ${input.endpoint}/${input.guid} for ${input.org} — HTTP ${res.status}. ` +
-            `NOT independently verified yet — call xero_attachments(org:"${input.org}", endpoint:"${input.endpoint}", guid:"${input.guid}") before reporting this as successful.`,
-        };
-      },
+      handler: handleXeroAttachmentUpload,
     },
     callerHash,
   );
@@ -851,6 +1067,133 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
           { api: 'files' },
         );
         return { data: { org: input.org, body: res.body }, summary: `Xero files ${input.resource} for ${input.org}.` };
+      },
+    },
+    callerHash,
+  );
+
+  // --- Connections metadata (CFO P0-1/P0-4, 2026-07-30): what IS this connection, and when? ---
+  registerTool(
+    server,
+    {
+      name: 'xero_connections',
+      category: 'read',
+      annotations: {
+        title: 'Xero: raw connection metadata — id/tenant/creation date (executive ring only)',
+        description:
+          'Read-only GET /connections for an org: the connection id, tenant identity, and createdDateUtc/updatedDateUtc. ' +
+          'PARTIAL support for the P0-1 freeze question only — this does NOT determine grandfathered eligibility for ' +
+          'accounting.journals.read (grandfathered_for_journals is always null; kept in the output shape as a documented ' +
+          'non-answer, not deleted). Reviewer-caught, 2026-07-30: Xero\'s documented grandfather rule ' +
+          `(a connection created BEFORE ${XERO_JOURNALS_GRANDFATHER_CUTOFF} keeps journals scope until Sep 2027) applies ` +
+          'specifically to CUSTOM CONNECTIONS (client_credentials grant); this gateway\'s token path uses the refresh_token/' +
+          'authorization_code grant, evidence this integration is a STANDARD OAuth2 app, not a Custom Connection — and ' +
+          '/connections exposes no field that identifies connection TYPE at all, so createdDateUtc alone cannot establish ' +
+          'eligibility either way. Determining the real answer requires checking connection TYPE directly in the Xero ' +
+          'Developer Portal / My Apps page, which no API in this tool can reach. It also CANNOT tell you which human ' +
+          'authorised the connection — Xero does not expose that via any API; that fact is only visible in the Xero UI ' +
+          'under Settings > Connected Apps to a user who can see the org\'s app list. Read-only: makes no changes, safe to ' +
+          'call at any time, including during the P0-1 scope freeze. MNPI: executive-ring lanes only.',
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: { org: ORG_ENUM },
+      outputShape: {
+        org: z.string(),
+        connections: z.array(
+          z.object({
+            id: z.string(),
+            tenantId: z.string(),
+            tenantName: z.string(),
+            tenantType: z.string(),
+            createdDateUtc: z.string(),
+            updatedDateUtc: z.string(),
+            grandfathered_for_journals: z.boolean().nullable(),
+          }),
+        ),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_connections', ctx.callerAgent);
+        if (!xeroConfigured()) return unconfigured('xero_connections');
+        const conns = await xeroConnections(input.org as XeroOrg);
+        const enriched = conns.map((c) => ({ ...c, grandfathered_for_journals: isGrandfatheredForJournals(c.createdDateUtc) }));
+        const summaryBits = enriched.map((c) => `${c.tenantName || c.tenantId}: created ${c.createdDateUtc || '(unknown)'}`);
+        return {
+          data: { org: input.org, connections: enriched },
+          summary:
+            `Xero connections for ${input.org}: ${summaryBits.join('; ') || '(none)'}. grandfathered_for_journals is always null — ` +
+            'createdDateUtc alone cannot establish Custom Connection eligibility (see tool description); confirm connection TYPE in ' +
+            'the Xero Developer Portal before acting on any grandfather assumption. "Authorising user" is also not API-exposed — check ' +
+            'Settings > Connected Apps in the Xero UI for that.',
+        };
+      },
+    },
+    callerHash,
+  );
+
+  // --- xero_gl_assemble: server-side GL reconstruction (CFO P0-2, 2026-07-30) — see gl-assemble.ts
+  // module doc comment for the full methodology, honest v1 scope, and the not-yet-live-verified
+  // TrialBalance parsing assumption that needs a real smoke test before this is trusted blindly. ---
+  registerTool(
+    server,
+    {
+      name: 'xero_gl_assemble',
+      category: 'read',
+      annotations: {
+        title: 'Xero: assemble the general ledger for a date range (TrialBalance-diff + ManualJournals; executive ring only)',
+        description:
+          'Reconstructs ledger-level detail for [from, to] WITHOUT the gated Journals endpoint, using only scopes already granted: ' +
+          'diffs Xero\'s own TrialBalance at each month-end into per-account period movements (this is vendor-computed ground truth — ' +
+          'it cannot miss anything), nets ManualJournals against those movements into a per-account `variance`, and separately returns, ' +
+          'INSIDE EACH MONTH, that same month\'s gross (unsigned, NOT netted) Invoices/CreditNotes/BankTransactions line-item activity ' +
+          'by account as supporting evidence. IMPORTANT — variance is ONLY a completeness proof for accounts whose movement was manual ' +
+          'journals; a nonzero variance on an account that also shows activity in THAT MONTH\'S otherDocuments is EXPECTED ' +
+          '(Invoices/CreditNotes/BankTransactions post to AR/AP/bank control accounts that never appear in any LineItems array, so ' +
+          'netting them would look precise while silently being wrong — see the output\'s own methodology_note, and this tool\'s ' +
+          'gl-assemble.ts module doc comment, for the full explanation). A month whose TrialBalance snapshot failed to parse is OMITTED ' +
+          'from `months` entirely (with a caveat), never diffed — diffing a real snapshot against a failed one would fabricate a full ' +
+          'balance swing that looks like a real movement. Payments/BankTransfers-as-a-source/ExpenseClaims/Receipts are not pulled in ' +
+          'this version. from/to are YYYY-MM-DD and are widened to whole calendar months; EVERY source fetch (TrialBalance, ' +
+          'ManualJournals, Invoices, CreditNotes, BankTransactions) uses those same widened bounds, not the raw from/to, so a ' +
+          'partial-month request never diffs a full-month TB movement against a partial-month document window. One call replaces what ' +
+          'would otherwise be a TrialBalance read (~295KB, ~10 JIT pages) per month, every month, forever — large results here still ' +
+          'JIT-offload automatically like any other tool. Deterministic: re-running with the same org/from/to returns the same numbers. ' +
+          'MNPI: executive-ring lanes only. Read-only: makes no changes.',
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: {
+        org: ORG_ENUM,
+        from: z.string().describe('Start date YYYY-MM-DD (widened to the start of that calendar month).'),
+        to: z.string().describe('End date YYYY-MM-DD (widened to the end of that calendar month).'),
+      },
+      outputShape: {
+        org: z.string(),
+        from: z.string(),
+        to: z.string(),
+        months: z.array(z.unknown()),
+        caveats: z.array(z.string()),
+        methodology_note: z.string(),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_gl_assemble', ctx.callerAgent);
+        if (!xeroConfigured()) return unconfigured('xero_gl_assemble');
+        const result = await assembleGl(input.org as XeroOrg, input.from, input.to);
+        const totalVariances = result.months.reduce((acc, m) => acc + m.nonzeroVarianceCount, 0);
+        const caveatNote = result.caveats.length ? ` CAVEATS: ${result.caveats.join(' | ')}` : '';
+        return {
+          data: result,
+          summary:
+            `Xero GL assembled for ${input.org}, ${result.months.length} month(s) ${input.from}..${input.to}: ` +
+            `${totalVariances} account-month(s) with nonzero manual-journal variance (see methodology_note — each month's ` +
+            `Invoices/CreditNotes/BankTransactions activity is in that month's own otherDocuments).${caveatNote}`,
+        };
       },
     },
     callerHash,

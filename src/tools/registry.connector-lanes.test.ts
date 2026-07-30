@@ -58,6 +58,13 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   for (const xeroTool of ['xero_attachments', 'xero_request', 'xero_accounts', 'xero_get']) {
     assert.ok(set.has(xeroTool), `ship lane must still expose ${xeroTool}`);
   }
+  // Regression guard (2026-07-30, CFO round-2 mega-prompt): a Copilot review caught xero_gl_assemble
+  // and xero_connections repeating the EXACT SAME omission class as xero_attachment_upload above --
+  // both were built, registered, and EXEC_RING-gated, but never added here, so the CFO connector
+  // could not see or call either. Pinned by name so it can't silently regress again.
+  for (const xeroTool of ['xero_gl_assemble', 'xero_connections']) {
+    assert.ok(set.has(xeroTool), `ship lane must expose ${xeroTool} (the CFO GL-assembly gap)`);
+  }
 });
 
 test('(b) developer lane gets the full ship-lane set', () => {

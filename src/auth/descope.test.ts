@@ -1,7 +1,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from 'node:crypto';
-import { verifyDescopeClaims, laneFromScope, type DescopeClaims } from './descope.js';
+import { verifyDescopeClaims, laneFromScope, verifyDescopeToken, type DescopeClaims } from './descope.js';
 
 // loadEnv() (called transitively by laneFromScope -> scopeLaneMap) caches its result for the
 // life of the process, so DESCOPE_SCOPE_LANE_MAP is deliberately left UNSET here -- these tests
@@ -18,6 +18,14 @@ before(() => {
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+  // Explicit, not merely absent (fixed 2026-07-30 review): the "inert unless configured" test below
+  // relies on DESCOPE_PROJECT_ID being empty at the moment loadEnv() first caches it in THIS file's
+  // process. `??=` above would silently leave an INHERITED, already-set value in place -- in that
+  // scenario the test would take the CONFIGURED path (a real, unstubbed JWKS fetch attempt) and could
+  // still happen to return null (network failure -> fail-closed), passing for the wrong reason while
+  // also making an actual outbound network call from a supposedly hermetic unit test. Force it empty
+  // unconditionally, not with `??=`, so the unconfigured path is genuinely guaranteed, not assumed.
+  process.env.DESCOPE_PROJECT_ID = '';
 });
 
 // Hermetic: generates its own RSA keypair and self-signs test JWTs. No network, no real
@@ -103,6 +111,20 @@ test('verifyDescopeClaims rejects a malformed token (wrong number of segments)',
 
 test('verifyDescopeClaims rejects unparseable base64/JSON without throwing', () => {
   assert.equal(verifyDescopeClaims('not-base64!.also-not!.sig', keySet(), ISSUER), null);
+});
+
+// -- verifyDescopeToken's "inert unless configured" fast path (2026-07-30 refactor regression) ---
+// Added when verifyDescopeToken was split into a timing/telemetry wrapper (gw_descope_auth, ADR-002
+// trigger 4 instrumentation) around the pre-existing verification logic (now
+// verifyDescopeTokenUninstrumented). This pins that the wrapper did not change the pre-existing
+// contract: DESCOPE_PROJECT_ID is unset in this test file's before() hook (defaults to '' per
+// config/env.ts), so this must resolve to null immediately -- no network call, no telemetry
+// capture attempted, no throw, regardless of what garbage `token` looks like.
+
+test('verifyDescopeToken: inert (returns null immediately, no throw) when DESCOPE_PROJECT_ID is unset', async () => {
+  assert.equal(await verifyDescopeToken('not-even-a-jwt'), null);
+  assert.equal(await verifyDescopeToken(''), null);
+  assert.equal(await verifyDescopeToken(signRs256(baseClaims())), null);
 });
 
 // -- Scope-based lane resolution (Inbound App Client tokens, 2026-07-08 addition) --------------

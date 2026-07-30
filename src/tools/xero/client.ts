@@ -653,6 +653,78 @@ export async function xeroUploadAttachment(
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Connections metadata (CFO P0-1/P0-4, 2026-07-30): which grant is this, and when was it created?
+// ---------------------------------------------------------------------------------------------
+
+export interface XeroConnection {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  tenantType: string;
+  createdDateUtc: string;
+  updatedDateUtc: string;
+}
+
+/**
+ * The vendor-documented cutoff (CFO P0-1, 2026-07-30, sourced to Xero's own developer docs): a
+ * Custom Connection created BEFORE this date retains accounting.journals.read (grandfathered)
+ * until Sep 2027; one created on/after this date can never obtain that scope at any price. This
+ * constant is the one fact xero_connections exists to let us check per org, cheaply and
+ * repeatedly, without re-deriving the date from memory each time.
+ */
+export const XERO_JOURNALS_GRANDFATHER_CUTOFF = '2026-04-29T00:00:00Z';
+
+/**
+ * Raw GET /connections for whichever org's access token is used — returns the connection grant(s)
+ * reachable by that token (id, tenant identity, and createdDateUtc/updatedDateUtc). This is the
+ * ONLY Xero-API-exposed way to learn a connection's creation date; Xero does NOT expose "which
+ * user authorised this connection" via any API (that is only visible in the Xero UI under
+ * Settings > Connected Apps, to a user who can see the org's app list) — callers needing that fact
+ * must check there, this function cannot supply it.
+ */
+export async function xeroConnections(org: XeroOrg, opts: { deps?: TokenDeps } = {}): Promise<XeroConnection[]> {
+  const deps = opts.deps ?? defaultDeps;
+  const { accessToken } = await getOrgAccess(org, { deps });
+  const r = await deps.fetchImpl(XERO_CONNECTIONS_URL, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!r.ok) throw new Error(`Xero /connections failed for org "${org}": HTTP ${r.status}`);
+  const conns = (await r.json()) as Array<Partial<XeroConnection>>;
+  return conns.map((c) => ({
+    id: c.id ?? '',
+    tenantId: c.tenantId ?? '',
+    tenantName: c.tenantName ?? '',
+    tenantType: c.tenantType ?? '',
+    createdDateUtc: c.createdDateUtc ?? '',
+    updatedDateUtc: c.updatedDateUtc ?? '',
+  }));
+}
+
+/**
+ * ALWAYS returns null. Kept as an explicit function (not deleted) so the "this cannot be
+ * determined" fact has one place to live and cannot silently regress back into a false answer.
+ *
+ * Reviewer-caught correctness bug (2026-07-30): this used to compare createdDateUtc against
+ * XERO_JOURNALS_GRANDFATHER_CUTOFF and return true/false. That is WRONG for two independent
+ * reasons, either one enough to make the answer unsafe to act on for an irreversible P0-1
+ * decision: (1) Xero's documented April-29 grandfather rule applies specifically to CUSTOM
+ * CONNECTIONS (a client_credentials-grant app type) — this gateway's token path
+ * (refreshGrant() above) uses the refresh_token/authorization_code grant, which is evidence this
+ * integration is a STANDARD OAuth2 app, not a Custom Connection, and the rule may not apply to it
+ * at all in the way assumed. (2) /connections exposes NO field that identifies connection TYPE
+ * (Custom Connection vs standard app) — createdDateUtc alone cannot distinguish them, so even a
+ * pre-cutoff standard-app tenant would have been mislabeled "grandfathered" for a scope path it
+ * was never eligible for. A false `true` here is actively dangerous: P0-1's whole point is
+ * avoiding an IRREVERSIBLE loss of journals-scope eligibility, and a wrong "you're safe" is worse
+ * than no answer. Determining the real connection type requires checking the Xero Developer
+ * Portal / My Apps page directly (see xero_connections' tool description) — not this API.
+ */
+export function isGrandfatheredForJournals(_createdDateUtc: string): null {
+  return null;
+}
+
 /** The ring-refusal payload shared by every xero_* tool. Pure. */
 export function ringRefusal(toolName: string, caller: string | undefined | null) {
   return {

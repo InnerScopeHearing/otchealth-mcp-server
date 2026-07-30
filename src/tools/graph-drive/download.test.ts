@@ -75,6 +75,45 @@ test('a caller reading a folder outside its own role is refused, with NO network
   });
 });
 
+// --- textual-content detection by extension (CFO P1-D, 2026-07-30) -------------------------------
+// Confirmed live: uploading a .md file with content_type:"text/markdown" round-tripped as
+// application/octet-stream on download -- OneDrive infers/stores the item's mimeType from the file
+// EXTENSION rather than reliably honoring an arbitrary Content-Type sent on upload, so relying on
+// the download response's Content-Type header ALONE to decide text-vs-binary silently mis-classifies
+// a genuinely textual file as binary whenever Graph's stored/reported type is generic or wrong.
+
+test('a .md file reported as application/octet-stream by Graph is STILL returned as text (extension fallback)', async () => {
+  const text = '# Notes\n\nplain markdown content, no binary bytes here\n';
+  const content = Buffer.from(text, 'utf8');
+  await withStubbedFetch(stubGraph({ content, contentType: 'application/octet-stream' }), async () => {
+    const result = await handleGraphDriveDownload({ folder: 'CFO Incoming', filename: 'notes.md' }, fakeCtx('cfo'));
+    const data = result.data as { text: string | null; base64: string | null; contentType: string | null };
+    assert.equal(data.contentType, 'application/octet-stream', 'the (wrong) reported type is still surfaced as-is, unmodified');
+    assert.equal(data.text, text, 'the extension fallback must still classify this as textual and return it as text');
+    assert.equal(data.base64, null);
+  });
+});
+
+test('a genuinely binary file with an unrecognized extension is NOT misclassified as text (no false positive)', async () => {
+  const content = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]); // PNG-ish bytes
+  await withStubbedFetch(stubGraph({ content, contentType: 'application/octet-stream' }), async () => {
+    const result = await handleGraphDriveDownload({ folder: 'CFO Incoming', filename: 'image.png' }, fakeCtx('cfo'));
+    const data = result.data as { text: string | null; base64: string | null };
+    assert.equal(data.text, null);
+    assert.equal(data.base64, content.toString('base64'));
+  });
+});
+
+test('a Graph-reported textual content-type is still honored even for an unrecognized extension (no regression)', async () => {
+  const text = 'csv-shaped data, but with a made-up extension Graph nonetheless labels correctly';
+  const content = Buffer.from(text, 'utf8');
+  await withStubbedFetch(stubGraph({ content, contentType: 'text/csv' }), async () => {
+    const result = await handleGraphDriveDownload({ folder: 'CFO Incoming', filename: 'report.xyz123' }, fakeCtx('cfo'));
+    const data = result.data as { text: string | null };
+    assert.equal(data.text, text);
+  });
+});
+
 // --- verify_sha256_only: THE round-trip integrity fix (P1-2) -------------------------------------
 
 test('verify_sha256_only returns a matching hash and NEVER the raw content (binary)', async () => {
