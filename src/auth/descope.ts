@@ -46,6 +46,7 @@
 import { createPublicKey, verify as cryptoVerify, type KeyObject } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
 
 interface Jwk {
   kid: string;
@@ -173,10 +174,50 @@ export function verifyDescopeClaims(
  * Full verification path: fetches (or reuses cached) JWKS for the configured project, then
  * verifies the token against it. Returns null (never throws) if Descope isn't configured, the
  * token is malformed, signature is invalid, expired, or issued by a different project.
+ *
+ * TELEMETRY (added 2026-07-30, ADR-002 section 6 trigger 4 -- "the parallel path has run in
+ * production long enough to measure real latency/reliability data, rather than relying on
+ * estimates"): before this, NOTHING in the codebase distinguished "this request authenticated via
+ * Descope" from any other auth path, anywhere downstream -- auth/bearer.ts computes the Descope
+ * branch locally and discards which path resolved the caller once caller_agent is derived, and
+ * every existing PostHog gw_* event (gw_mutation, gw_lane_tool_used, gw_checkpoint) carries
+ * caller/tool data, never auth-provider timing or outcome (confirmed by reading every
+ * captureGatewayEvent call site, AND by querying the live Gateway Ops project 493944 directly:
+ * zero events, zero properties, reference Descope in any form). So trigger 4 could not be fired
+ * from existing data; it needed instrumentation FIRST, exactly as flagged in review. This wraps
+ * the ACTUAL Descope-infrastructure boundary (JWKS fetch + RSA signature verification, i.e. real
+ * network + crypto latency), not the whole bearer-auth function (which is near-instant for every
+ * non-Descope path and would dilute the signal), and fires ONLY when DESCOPE_PROJECT_ID is
+ * configured (the feature's own existing "inert unless configured" convention -- an unconfigured
+ * pilot emits nothing, so this cannot generate noise before the pilot exists). Fire-and-forget,
+ * fail-open, mirrors every other captureGatewayEvent call site in this codebase: telemetry can
+ * never affect the auth decision it rides on. `outcome` distinguishes genuine verification failure
+ * (bad signature, expired, wrong issuer, JWKS fetch failure, malformed token) from the SEPARATE,
+ * expected "verified but lane outside DESCOPE_PILOT_LANES" refusal, which agentFromDescopeToken
+ * (the caller one layer up) already logs on its own via descope_lane_rejected -- conflating the two
+ * would misreport ordinary pilot-scope refusals as Descope reliability problems.
  */
 export async function verifyDescopeToken(token: string): Promise<DescopeClaims | null> {
   const env = loadEnv();
-  if (!env.DESCOPE_PROJECT_ID) return null; // feature inert unless explicitly configured
+  if (!env.DESCOPE_PROJECT_ID) return null; // feature inert unless explicitly configured; no telemetry
+  const startedAt = Date.now();
+  const result = await verifyDescopeTokenUninstrumented(token, env.DESCOPE_PROJECT_ID);
+  try {
+    captureGatewayEvent('gw_descope_auth', {
+      outcome: result ? 'verified' : 'failed',
+      latency_ms: Date.now() - startedAt,
+    });
+  } catch {
+    // Fail-open: telemetry must never affect the auth decision it rides on.
+  }
+  return result;
+}
+
+/** The actual JWKS-fetch + signature-verification work, extracted so verifyDescopeToken above can
+ * wrap it with timing/telemetry without duplicating the logic. Not exported; verifyDescopeToken
+ * is the only sanctioned entry point (matches this file's existing single-entry-point convention
+ * for agentFromDescopeToken). */
+async function verifyDescopeTokenUninstrumented(token: string, projectId: string): Promise<DescopeClaims | null> {
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   let header: { kid?: string };
@@ -187,10 +228,10 @@ export async function verifyDescopeToken(token: string): Promise<DescopeClaims |
   }
   if (!header.kid) return null;
 
-  const key = await getKey(env.DESCOPE_PROJECT_ID, header.kid);
+  const key = await getKey(projectId, header.kid);
   if (!key) return null;
 
-  const expectedIssuer = `https://api.descope.com/v1/apps/${env.DESCOPE_PROJECT_ID}`;
+  const expectedIssuer = `https://api.descope.com/v1/apps/${projectId}`;
   return verifyDescopeClaims(token, new Map([[header.kid, key]]), expectedIssuer);
 }
 
