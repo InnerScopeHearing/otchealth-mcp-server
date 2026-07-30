@@ -28,7 +28,7 @@ import { readSharedAll } from './store.js';
 import { queryDocs } from '../agentstate/cosmos.js';
 
 const TTL_MS = 120_000;
-let cache: { at: number; ids: Set<string> } | null = null;
+let cache: { at: number; ids: Set<string>; byAgent: Map<string, Set<string>> } | null = null;
 
 /** doc ids are `{agent}__{entryId}` (semantic.mjs docId). Recover the entry id. Pure. */
 export function entryIdFromDocId(docId: unknown): string {
@@ -45,6 +45,38 @@ export function collectRetracted(entries: Array<{ supersedes?: unknown }>): Set<
     if (typeof s === 'string' && s.trim()) out.add(s.trim());
   }
   return out;
+}
+
+/**
+ * Collect every id some entry claims to supersede, GROUPED by the SUPERSEDING entry's own `agent`
+ * field. Pure + testable.
+ *
+ * WHY AGENT-SCOPED (review finding, 2026-07-30, from wake.ts/pack.ts's brief-mode PR): shared-feed
+ * entry ids are per-agent day+counter values (memory/store.ts's nextId: `${day}-${N}` where N counts
+ * only within THAT SAME agent's own rows), so two DIFFERENT agents' first entries on the same day
+ * are both literally e.g. "20260730-001" -- a real collision, not a theoretical one. `retractedIds`
+ * below returns a single FLEET-WIDE bare-id Set with no agent information, which is safe for its 3
+ * existing callers (kb/openai-search.ts, kb/brain-search.ts, memory/deep-retrieval.ts x2): each
+ * recovers a bare entry id from a `{agent}__{entryId}` SEARCH-INDEX doc id via entryIdFromDocId,
+ * where the agent half is already known/checked separately by the caller's own room/lane scoping
+ * before filterRetracted ever runs. wake.ts/pack.ts's brief mode is different: it applies retraction
+ * directly against ONE agent's own in-memory entries by bare id, with no separate agent check, so a
+ * bare fleet-wide Set is unsafe there -- an unrelated agent's retraction of "20260730-001" would
+ * silently hide THIS agent's own unrelated live "20260730-001" entry. This function (and
+ * retractedIdsForAgent below) exist to give wake.ts/pack.ts a properly agent-scoped lookup, without
+ * changing retractedIds()'s existing bare-id contract or touching any of its 3 existing callers.
+ */
+export function collectRetractedByAgent(entries: Array<{ agent?: unknown; supersedes?: unknown }>): Map<string, Set<string>> {
+  const byAgent = new Map<string, Set<string>>();
+  for (const e of entries) {
+    const agent = typeof e?.agent === 'string' ? e.agent : '';
+    const s = e?.supersedes;
+    if (!agent || typeof s !== 'string' || !s.trim()) continue;
+    let set = byAgent.get(agent);
+    if (!set) byAgent.set(agent, (set = new Set()));
+    set.add(s.trim());
+  }
+  return byAgent;
 }
 
 /** Drop hits whose underlying entry has been retracted. Returns what survived + what was dropped. Pure. */
@@ -66,15 +98,50 @@ export function filterRetracted<T extends { id?: unknown }>(
 /**
  * The set of entry-ids that have been superseded, from BOTH memory stores.
  * FAIL-OPEN: on any error, returns an empty set (filter nothing) rather than breaking search.
+ *
+ * BARE, FLEET-WIDE ids -- see collectRetractedByAgent's header for why this is unsafe to apply
+ * directly against a single agent's own payload (a cross-agent id collision), and use
+ * retractedIdsForAgent instead for that use case. This function's existing bare-id contract and its
+ * 3 existing callers are unchanged.
  */
 export async function retractedIds(): Promise<Set<string>> {
+  await refreshCache();
+  return cache?.ids ?? new Set();
+}
+
+/**
+ * Agent-scoped retraction lookup: only the ids THIS agent's own entries (shared feed or Cosmos)
+ * declared superseded. Safe to apply directly against a single agent's own payload, unlike
+ * retractedIds()'s bare fleet-wide set (see collectRetractedByAgent's header). Shares
+ * retractedIds()'s cache/fetch -- calling both within the TTL window costs one fetch, not two.
+ * FAIL-OPEN: an unknown agent, or any fetch failure, returns an empty set.
+ */
+export async function retractedIdsForAgent(agent: string): Promise<Set<string>> {
+  await refreshCache();
+  return cache?.byAgent.get(agent) ?? new Set();
+}
+
+/** Shared cache-fill for retractedIds/retractedIdsForAgent -- one fetch of both stores serves both
+ * the bare fleet-wide Set and the per-agent grouping. FAIL-OPEN throughout: a failed fetch leaves
+ * whatever was already collected (possibly nothing) rather than throwing. */
+async function refreshCache(): Promise<void> {
   const now = Date.now();
-  if (cache && now - cache.at < TTL_MS) return cache.ids;
+  if (cache && now - cache.at < TTL_MS) return;
 
   const ids = new Set<string>();
-  // Shared blob feed (where the ledger corrections live).
+  const byAgent = new Map<string, Set<string>>();
+  const merge = (m: Map<string, Set<string>>) => {
+    for (const [agent, set] of m) {
+      let existing = byAgent.get(agent);
+      if (!existing) byAgent.set(agent, (existing = new Set()));
+      for (const id of set) existing.add(id);
+    }
+  };
+  // Shared blob feed (where the ledger corrections live). Each MemoryEntry already carries `agent`.
   try {
-    for (const id of collectRetracted(await readSharedAll())) ids.add(id);
+    const rows = await readSharedAll();
+    for (const id of collectRetracted(rows)) ids.add(id);
+    merge(collectRetractedByAgent(rows));
   } catch {
     /* fail-open */
   }
@@ -82,21 +149,24 @@ export async function retractedIds(): Promise<Set<string>> {
   try {
     const rows = await queryDocs(
       'memory',
-      "SELECT c.supersedes FROM c WHERE c.type = 'memory' AND IS_DEFINED(c.supersedes)",
+      "SELECT c.agent, c.supersedes FROM c WHERE c.type = 'memory' AND IS_DEFINED(c.supersedes)",
       [],
       // Was {max:500}: at fleet scale that silently TRUNCATES the retracted set, re-opening the exact
       // rank-#1-retracted-belief bug this module exists to close (a superseded id past #500 would no
-      // longer be filtered). Lift to 5000 (a projection of one tiny field over the supersedes-bearing
-      // subset only, so it stays cheap). The query already selects just `supersedes`.
+      // longer be filtered). Lift to 5000 (a projection of two tiny fields over the supersedes-bearing
+      // subset only, so it stays cheap). `agent` was added to the projection alongside `supersedes`
+      // (review finding, 2026-07-30) so the by-agent grouping below can be built from the SAME query
+      // rather than a second one.
       { max: 5000 },
     );
-    for (const id of collectRetracted(rows as Array<{ supersedes?: unknown }>)) ids.add(id);
+    const typed = rows as Array<{ agent?: unknown; supersedes?: unknown }>;
+    for (const id of collectRetracted(typed)) ids.add(id);
+    merge(collectRetractedByAgent(typed));
   } catch {
     /* fail-open */
   }
 
-  cache = { at: now, ids };
-  return ids;
+  cache = { at: now, ids, byAgent };
 }
 
 /** Test seam: drop the cache so one test never sees another test's retractions. */

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBriefPack, PACK_BRIEF_LIST_CAP, PACK_BRIEF_RECENT_FACT_CAP, type PackFullData } from './pack.js';
-import { M365_LITE_TEXT_CAP } from './wake.js';
+import { buildBriefPack, PACK_BRIEF_LIST_CAP, PACK_BRIEF_RECENT_FACT_CAP, PACK_BRIEF_TEXT_CAP, type PackFullData } from './pack.js';
 
 // Pins the P2-3 fix: memory_pack was measured at ~99KB and JIT-offloading, with NO text capping
 // and NO superseded-collapsing at all in full mode (unlike wake, which at least capped text).
@@ -115,7 +114,7 @@ test('buildBriefPack keeps a stable id on every returned entry', () => {
 
 test('buildBriefPack caps every long field regardless of its name (text, source, tags[])', () => {
   const brief = buildBriefPack(fullData()) as any;
-  const capSlack = M365_LITE_TEXT_CAP + 60; // truncation marker overhead
+  const capSlack = PACK_BRIEF_TEXT_CAP + 60; // truncation marker overhead
   for (const c of brief.corrections) {
     assert.ok(c.text.length <= capSlack);
     assert.ok(c.source.length <= capSlack, `expected source capped, got ${c.source.length}`);
@@ -233,4 +232,29 @@ test('buildBriefPack, given an externally-supplied retraction set, drops an id t
     brief.corrections.map((c: any) => c.id),
     [],
   );
+});
+
+// ---- round 3 (2026-07-30): union not replace, cap-before-filter backfill
+
+test('buildBriefPack UNIONS an externally-supplied retraction set with the locally-derived one -- a local retraction survives even when the external set is empty/stale', () => {
+  const data = fullData({
+    corrections: [entry('c1', 'correction', { text: 'looks live only if external REPLACED local detection' })],
+    decisions: [entry('d1', 'decision', { text: 'retracts c1', supersedes: 'c1' })],
+  });
+  const brief = buildBriefPack(data, undefined, new Set()) as any;
+  assert.deepEqual(
+    brief.corrections.map((c: any) => c.id),
+    [],
+  );
+});
+
+test('buildBriefPack lets a live correction backfill the slot a retracted one vacated, from beyond the full-mode pre-cap', () => {
+  const corrections = Array.from({ length: PACK_BRIEF_LIST_CAP + 1 }, (_, i) => entry(`c${i}`, 'correction', { text: `live ${i}` }));
+  corrections[0] = entry('c0', 'correction', { text: 'retracted' });
+  const decisions = [entry('r1', 'decision', { text: 'retracts c0', supersedes: 'c0' })];
+  const data = fullData({ corrections, decisions });
+  const rawMine = [...corrections, ...decisions];
+  const brief = buildBriefPack(data, rawMine) as any;
+  assert.equal(brief.corrections.length, PACK_BRIEF_LIST_CAP, 'expected a live entry to backfill the retracted slot');
+  assert.ok(!brief.corrections.some((c: any) => c.id === 'c0'));
 });

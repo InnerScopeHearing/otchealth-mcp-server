@@ -9,7 +9,7 @@ import {
   WAKE_BRIEF_INBOX_CAP,
   WAKE_BRIEF_INBOUND_CAP,
   WAKE_BRIEF_RECENT_FACT_CAP,
-  M365_LITE_TEXT_CAP,
+  WAKE_BRIEF_TEXT_CAP,
   type WakeFullData,
 } from './wake.js';
 
@@ -237,7 +237,7 @@ test('buildBriefWake keeps a stable identifier on every returned entry (correcti
 
 test('buildBriefWake caps every long string field regardless of its name (text, description, notes[], body, source, tags[])', () => {
   const brief = buildBriefWake(fullData()) as any;
-  const capSlack = M365_LITE_TEXT_CAP + 60; // truncation marker overhead
+  const capSlack = WAKE_BRIEF_TEXT_CAP + 60; // truncation marker overhead
   for (const c of brief.pack.corrections) {
     assert.ok(c.text.length <= capSlack);
     assert.ok(c.source.length <= capSlack);
@@ -441,4 +441,38 @@ test('computeRetractedIds trims whitespace around a supersedes value, matching m
   const ids = computeRetractedIds([{ id: 'a', supersedes: '  c1  ' }]);
   assert.ok(ids.has('c1'));
   assert.ok(!ids.has('  c1  '));
+});
+
+// ---- round 3 (2026-07-30): union not replace, cap-before-filter backfill
+
+test('buildBriefWake UNIONS an externally-supplied retraction set with the locally-derived one -- a local retraction survives even when the external set is empty/stale', () => {
+  const data = fullData();
+  data.pack.corrections = [{ id: 'c1', type: 'correction', text: 'looks live only if the external set REPLACED local detection' }];
+  data.pack.decisions = [{ id: 'd1', type: 'decision', text: 'retracts c1', supersedes: 'c1' }];
+  // externalRetractedIds is an EMPTY set (simulates a stale/fail-open cache miss) -- the LOCAL
+  // computeRetractedIds pass over this payload must still catch d1's retraction of c1.
+  const brief = buildBriefWake(data, undefined, new Set()) as any;
+  assert.deepEqual(
+    brief.pack.corrections.map((c: any) => c.id),
+    [],
+  );
+});
+
+test('buildBriefWake lets a live correction backfill the slot a retracted one vacated, from beyond the full-mode pre-cap', () => {
+  const data = fullData();
+  // 6 corrections: the newest is retracted, so a naive "filter the already-capped top WAKE_BRIEF_LIST_CAP" would
+  // return only 4 live ones even though a 6th, older, live correction exists in the complete feed.
+  data.pack.corrections = [
+    { id: 'c6', type: 'correction', text: 'retracted' },
+    { id: 'c5', type: 'correction', text: 'live 5' },
+    { id: 'c4', type: 'correction', text: 'live 4' },
+    { id: 'c3', type: 'correction', text: 'live 3' },
+    { id: 'c2', type: 'correction', text: 'live 2' },
+    { id: 'c1', type: 'correction', text: 'live 1 (would be cut by a naive pre-cap-then-filter)' },
+  ];
+  data.pack.decisions = [{ id: 'r1', type: 'decision', text: 'retracts c6', supersedes: 'c6' }];
+  const rawMine = [...data.pack.corrections, ...data.pack.decisions];
+  const brief = buildBriefWake(data, rawMine) as any;
+  assert.equal(brief.pack.corrections.length, WAKE_BRIEF_LIST_CAP, 'expected a live entry to backfill the retracted slot');
+  assert.ok(!brief.pack.corrections.some((c: any) => c.id === 'c6'));
 });

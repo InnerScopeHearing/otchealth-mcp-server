@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
 import { computeRetractedIds, boundRecord } from './wake.js';
-import { retractedIds as globalRetractedIds } from '../../memory/retractions.js';
+import { retractedIdsForAgent } from '../../memory/retractions.js';
 
 /**
  * memory_pack — one-call working-set loader for ANY client/platform. Given an agent lane, returns
@@ -101,13 +101,17 @@ function buildBriefRecentFacts(rawMine: Record<string, unknown>[], retractedIds:
  * already-capped slices for callers (tests) that don't have the raw feed handy -- correctness
  * degrades gracefully, it never throws.
  *
- * `externalRetractedIds`, if supplied, is used INSTEAD OF the locally-derived computeRetractedIds
- * set -- the real handler passes memory/retractions.ts's `retractedIds()`, the canonical, already-
- * tested, fail-open, TTL-cached global retraction set. memory_pack has only the shared feed (no
- * separate Cosmos source of its own), but a Cosmos memory_record can still supersede a shared-feed
- * entry (memory/retractions.ts collects from BOTH stores) -- something `computeRetractedIds(mine)`
- * alone, seeing only this tool's own feed, could never detect (review finding, 2026-07-30). Omitted
- * (the default) in tests, which fall back to computeRetractedIds over exactly the synthetic fixture.
+ * `externalRetractedIds`, if supplied, is UNIONED WITH (never substituted for) the locally-derived
+ * computeRetractedIds set -- review finding, 2026-07-30: the real handler's retractedIdsForAgent()
+ * call fails open and is TTL-cached, so it can legitimately omit a `supersedes` that `mine` itself
+ * already proves exists (a just-written correction inside the cache window, or a transient store
+ * error). Replacing the local set with the external one would then un-retract something this very
+ * payload shows is stale. memory_pack has only the shared feed (no separate Cosmos source of its
+ * own), but a Cosmos memory_record can still supersede a shared-feed entry (memory/retractions.ts
+ * collects from BOTH stores) -- something `computeRetractedIds(mine)` alone, seeing only this
+ * tool's own feed, could never detect; the union is a pure ADDITION for that case, never a
+ * subtraction. Omitted (the default) in tests, which then rely solely on computeRetractedIds over
+ * exactly the synthetic fixture.
  *
  * `recentLimit`, if supplied, is min()'d against PACK_BRIEF_RECENT_FACT_CAP so a caller's own
  * recent_limit input is honored even in brief mode; omitted defaults to the cap.
@@ -120,19 +124,36 @@ export function buildBriefPack(
 ): Record<string, unknown> {
   const mine = rawMine ?? [...full.corrections, ...full.decisions, ...full.recent];
 
-  // ONE global retracted-id set across every entry available, before any type-specific filtering --
-  // see wake.ts's computeRetractedIds header for why a per-list collapse alone misses a cross-type
-  // retraction, and this function's own header for why the fallback (single-list, shared-feed-only)
-  // still misses a Cosmos-sourced retraction that the externally-supplied set would catch.
-  const retractedIds = externalRetractedIds ?? computeRetractedIds(mine);
+  // ONE global retracted-id set: the locally-derived one (every type available in `mine` -- see
+  // wake.ts's computeRetractedIds header for why a per-list collapse alone misses a cross-type
+  // retraction) UNIONED with the externally-supplied one, if any (see this function's own header
+  // for why union, not replace).
+  const retractedIds = computeRetractedIds(mine);
+  if (externalRetractedIds) for (const id of externalRetractedIds) retractedIds.add(id);
 
   const notRetracted = (r: Record<string, unknown>) => {
     const id = r['id'];
     return !(typeof id === 'string' && retractedIds.has(id));
   };
 
-  const corrections = full.corrections.filter(notRetracted).slice(0, PACK_BRIEF_LIST_CAP).map(boundNonNull);
-  const decisions = full.decisions.filter(notRetracted).slice(0, PACK_BRIEF_LIST_CAP).map(boundNonNull);
+  // corrections/decisions are sourced from `mine` (type-filtered), NOT from full.corrections/
+  // decisions -- review finding, 2026-07-30: full.corrections/decisions are ALREADY capped to 15 by
+  // the handler's own full-mode construction (unrelated to brief mode), so filtering-then-slicing
+  // THAT pre-capped list means a retracted entry among the top 15 shrinks the brief result below
+  // PACK_BRIEF_LIST_CAP even when a 16th, live, correction exists in `mine`. Sourcing from `mine`
+  // (the complete feed when the handler supplies rawMine; degrades to the same pre-capped union
+  // when it doesn't, e.g. in a test with no rawMine) lets a live entry backfill the slot a
+  // retracted one vacated.
+  const corrections = mine
+    .filter((r) => r['type'] === 'correction')
+    .filter(notRetracted)
+    .slice(0, PACK_BRIEF_LIST_CAP)
+    .map(boundNonNull);
+  const decisions = mine
+    .filter((r) => r['type'] === 'decision')
+    .filter(notRetracted)
+    .slice(0, PACK_BRIEF_LIST_CAP)
+    .map(boundNonNull);
   const recentCap = Math.min(PACK_BRIEF_RECENT_FACT_CAP, recentLimit ?? PACK_BRIEF_RECENT_FACT_CAP);
   const recent = buildBriefRecentFacts(mine, retractedIds, recentCap);
 
@@ -216,15 +237,21 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
           recent: recent as unknown as Record<string, unknown>[],
           count: mine.length,
         };
-        // The canonical, whole-store retraction set (memory/retractions.ts) -- spans the complete
-        // shared feed AND a dedicated Cosmos query for every supersedes-bearing row, catching a
-        // Cosmos-sourced retraction of a shared-feed entry that this tool's own single-store view
-        // could never see (review finding, 2026-07-30). retractedIds() is fail-open internally
-        // (never throws) but still guarded defensively since it is a live-store call.
+        // The canonical, AGENT-SCOPED retraction set (memory/retractions.ts's retractedIdsForAgent,
+        // NOT the bare fleet-wide retractedIds() -- review finding, 2026-07-30: shared-feed ids are
+        // per-agent day+counter values, so two different agents' entries can share a bare id; the
+        // fleet-wide set would then risk hiding an unrelated agent's live entry via a coincidental
+        // collision. retractedIdsForAgent groups retractions by the SUPERSEDING entry's own agent
+        // before returning, so this is safe to union directly against `agent`'s own payload). Spans
+        // the complete shared feed AND a dedicated Cosmos query for every supersedes-bearing row,
+        // catching a Cosmos-sourced retraction of a shared-feed entry that this tool's own single-
+        // store view could never see. Fail-open internally (never throws) but still guarded
+        // defensively since it is a live-store call. UNIONED (never substituted) with
+        // buildBriefPack's own local set -- see that function's header for why.
         let externalRetractedIds: Set<string> | undefined;
         if (brief) {
           try {
-            externalRetractedIds = await globalRetractedIds();
+            externalRetractedIds = await retractedIdsForAgent(agent);
           } catch {
             /* fail-open: buildBriefPack falls back to computeRetractedIds over the shared feed alone */
           }
