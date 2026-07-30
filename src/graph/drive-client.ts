@@ -21,6 +21,7 @@
  * can be pointed at. Inert without Graph creds — the tools surface a clear "not configured" result.
  */
 
+import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { getAccessToken } from './api-client.js';
@@ -230,4 +231,43 @@ export async function downloadFile(folderPath: string, fileName: string, forceBa
     return { found: true, contentType, size: buf.length, text: buf.toString('utf8'), base64: null };
   }
   return { found: true, contentType, size: buf.length, text: null, base64: buf.toString('base64') };
+}
+
+export interface DriveDownloadHashResult {
+  found: boolean;
+  contentType: string | null;
+  size: number | null;
+  sha256: string | null;
+}
+
+/**
+ * Download a file's content and return ONLY its sha256/size/contentType -- never the bytes
+ * themselves, in any encoding. A dedicated sibling to downloadFile (not a `verify_sha256_only`
+ * flag added onto it) so this path never allocates a base64 string it would immediately throw
+ * away: downloadFile's own base64 branch already costs one extra full-size string allocation
+ * (`buf.toString('base64')`, ~1.33x the byte length) plus a caller that then had to
+ * `Buffer.from(base64, 'base64')` it BACK to hash it paid for a third allocation on top of that
+ * (review finding, 2026-07-30, PR #175 round 2) -- three copies of the file in memory at once for
+ * a caller that only ever wanted a 64-character hex digest. This function holds exactly one Buffer
+ * (`buf`, the raw response bytes) for the lifetime of the call.
+ *
+ * NOT a fully streaming hash (piping the HTTP response body through the hash incrementally without
+ * ever buffering the whole file) -- `graphFetch`'s Response is still consumed via `arrayBuffer()`
+ * below, so this function's peak memory is still O(file size), just 1x instead of the prior ~3.66x.
+ * A true zero-buffer streaming hash would touch graphFetch itself (a shared low-level helper other
+ * call sites also use) and is a larger, separate change; flagged as a follow-up, not done here
+ * under time pressure to ship the correctness/memory fixes already found. If OneDrive files in the
+ * role folders this serves grow large enough for even 1x file size to matter, a size ceiling ahead
+ * of the fetch (mirroring upload.ts's MAX_SIMPLE_UPLOAD_BYTES refusal) is the next cheap lever.
+ */
+export async function downloadFileHash(folderPath: string, fileName: string): Promise<DriveDownloadHashResult> {
+  const owner = driveOwner();
+  const path = [folderPath.replace(/^\/+|\/+$/g, ''), fileName].filter(Boolean).join('/');
+  const r = await graphFetch('GET', `${itemRef(owner, path)}/content`);
+  if (r.status === 404) return { found: false, contentType: null, size: null, sha256: null };
+  if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `download "${path}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the file path + app permissions.' });
+  const contentType = r.headers.get('content-type');
+  const buf = Buffer.from(await r.arrayBuffer());
+  const sha256 = createHash('sha256').update(buf).digest('hex');
+  return { found: true, contentType, size: buf.length, sha256 };
 }
