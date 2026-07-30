@@ -246,7 +246,9 @@ function tbBody(rows) {
  * every other list endpoint is captured into `whereByPath` (keyed by pathname) and answered with
  * an empty collection, since these tests are about the TB-diff/date-alignment logic, not the
  * document content itself. */
-function makeGlDeps(tbByDate) {
+/** `seed` optionally pre-fills what each list endpoint returns (e.g. { ManualJournals: [...] }) --
+ * defaults to an empty array for every endpoint not explicitly seeded. */
+function makeGlDeps(tbByDate, seed = {}) {
   const state = liveTokenState();
   const whereByPath = new Map();
   const deps = {
@@ -268,7 +270,7 @@ function makeGlDeps(tbByDate) {
       const key = arrayKeyByPath[u.pathname];
       if (!key) throw new Error(`unexpected fetch path ${u.pathname}`);
       whereByPath.set(u.pathname, u.searchParams.get('where'));
-      return new Response(JSON.stringify({ [key]: [] }), { status: 200 });
+      return new Response(JSON.stringify({ [key]: seed[key] ?? [] }), { status: 200 });
     }),
     read: (async () => ({ doc: state.doc, etag: state.etag })),
     replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }),
@@ -277,7 +279,7 @@ function makeGlDeps(tbByDate) {
   return { deps, whereByPath };
 }
 
-test('assembleGl: happy path -- one full month, real snapshots, ManualJournals fully explains the movement (variance 0)', async () => {
+test('assembleGl: happy path -- one full month, real snapshots, NO manual journals -- the full TB movement surfaces as an UNEXPLAINED variance', async () => {
   const tbByDate = new Map([
     ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
     ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
@@ -292,6 +294,57 @@ test('assembleGl: happy path -- one full month, real snapshots, ManualJournals f
   assert.equal(account.manualJournalNet, 0); // no ManualJournals stubbed -> net 0
   assert.equal(account.variance, 500); // unexplained by manual journals -- correctly nonzero here
   assert.ok(result.months[0].otherDocuments, 'each month carries its own otherDocuments');
+});
+
+test('assembleGl: a POSTED manual journal that exactly explains the TB movement zeroes the variance', async () => {
+  const tbByDate = new Map([
+    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+  ]);
+  const { deps } = makeGlDeps(tbByDate, {
+    ManualJournals: [{ Date: '2026-01-15', Status: 'POSTED', JournalLines: [{ AccountID: 'a1', LineAmount: 500 }] }],
+  });
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
+  const [account] = result.months[0].accounts;
+  assert.equal(account.tbMovement, 500);
+  assert.equal(account.manualJournalNet, 500);
+  assert.equal(account.variance, 0);
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts:381): DRAFT and VOIDED manual journals are excluded from manualJournalNet -- only POSTED counts', async () => {
+  const tbByDate = new Map([
+    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1500, credit: 0 }])],
+  ]);
+  const { deps } = makeGlDeps(tbByDate, {
+    ManualJournals: [
+      { Date: '2026-01-10', Status: 'DRAFT', JournalLines: [{ AccountID: 'a1', LineAmount: 9000 }] }, // never hit the TB
+      { Date: '2026-01-12', Status: 'VOIDED', JournalLines: [{ AccountID: 'a1', LineAmount: -9000 }] }, // never hit the TB
+      { Date: '2026-01-15', Status: 'POSTED', JournalLines: [{ AccountID: 'a1', LineAmount: 500 }] }, // the real, posted movement
+    ],
+  });
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
+  const [account] = result.months[0].accounts;
+  assert.equal(account.manualJournalNet, 500, 'DRAFT/VOIDED journals must be excluded -- including them would wrongly disagree with the real TB');
+  assert.equal(account.variance, 0);
+});
+
+test('REGRESSION (Copilot, gl-assemble.ts:439): a manual-journal-only account key (absent from TB movements) still surfaces in accounts, not silently dropped', async () => {
+  const tbByDate = new Map([
+    ['2025-12-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])],
+    ['2026-01-31', tbBody([{ id: 'a1', name: 'Cash', debit: 1000, credit: 0 }])], // a1 has NO movement this month
+  ]);
+  // A journal line references a DIFFERENT key ("code:999") never seen on the TB side at all --
+  // simulating the documented name:/code: key-format mismatch fallback case.
+  const { deps } = makeGlDeps(tbByDate, {
+    ManualJournals: [{ Date: '2026-01-15', Status: 'POSTED', JournalLines: [{ AccountCode: '999', LineAmount: 250 }] }],
+  });
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
+  const unmatched = result.months[0].accounts.find((a) => a.accountId === 'code:999');
+  assert.ok(unmatched, 'the journal-only key must still appear in accounts, not be silently discarded');
+  assert.equal(unmatched.tbMovement, 0, 'there was no TB movement recorded under this key');
+  assert.equal(unmatched.manualJournalNet, 250);
+  assert.equal(unmatched.variance, -250, 'the full unmatched journal amount surfaces as variance -- the visible "unmatched journal side" signal');
 });
 
 test('REGRESSION (Copilot, gl-assemble.ts:350): a month touching an invalid (0-row) TrialBalance snapshot is OMITTED, never diffed into a fabricated movement', async () => {
@@ -321,7 +374,12 @@ test('REGRESSION (Copilot, gl-assemble.ts:354): a partial-month request still qu
   // Must reflect the WIDENED month (March 1 - March 31), never the raw partial request.
   assert.match(mjWhere, /DateTime\(2026,3,1\)/, 'the effective from must be widened to the 1st of the month, not the 5th');
   assert.match(mjWhere, /DateTime\(2026,3,31\)/, 'the effective to must be widened to month-end, not the 20th');
+  assert.match(mjWhere, /Status=="POSTED"/, 'ManualJournals must also be server-side filtered to POSTED only');
+  // ManualJournals carries the SAME widened date bounds as the other three, PLUS its own
+  // Status=="POSTED" suffix (see the POSTED-only regression test below) -- so it is a strict
+  // prefix match, not exact equality.
+  const dateOnlyBounds = mjWhere.replace(' && Status=="POSTED"', '');
   for (const path of ['/api.xro/2.0/Invoices', '/api.xro/2.0/CreditNotes', '/api.xro/2.0/BankTransactions']) {
-    assert.equal(whereByPath.get(path), mjWhere, `${path} must use the SAME widened bounds as ManualJournals`);
+    assert.equal(whereByPath.get(path), dateOnlyBounds, `${path} must use the SAME widened date bounds as ManualJournals`);
   }
 });

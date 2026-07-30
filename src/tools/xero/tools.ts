@@ -11,7 +11,7 @@
  *   xero_request            WRITE — POST/PUT/DELETE ANY scoped endpoint (dry_run defaults true)
  * Accounting (api.xro/2.0):
  *   xero_orgs               org registry + connection status (never token values)
- *   xero_connections        raw connection metadata (id/tenant/createdDateUtc) — is this org grandfathered for accounting.journals.read?
+ *   xero_connections        raw connection metadata (id/tenant/createdDateUtc); does NOT determine journals-scope grandfather eligibility (see tool description)
  *   xero_report             TrialBalance | BalanceSheet | ProfitAndLoss | Aged{Payables,Receivables}ByContact |
  *                           BankSummary | BudgetSummary | ExecutiveSummary | TenNinetyNine (1099); nonZeroOnly/match filter client-side
  *   xero_gl_assemble        server-side GL reconstruction: TrialBalance-diff per account/month, netted against ManualJournals — see gl-assemble.ts
@@ -41,12 +41,13 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { registerTool, type CallerHashProvider } from '../registry.js';
+import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import {
   XERO_ORGS,
   XERO_API_BASES,
   type XeroApi,
   type XeroOrg,
+  type TokenDeps,
   isXeroAllowed,
   ringRefusal,
   xeroConfigured,
@@ -111,7 +112,7 @@ interface ReportBody {
  * strings client-side is its own source of rounding/formatting bugs). No-op (body unchanged) when
  * neither filter is requested.
  */
-function filterReportRows(body: unknown, opts: { nonZeroOnly?: boolean; match?: string[] }): unknown {
+export function filterReportRows(body: unknown, opts: { nonZeroOnly?: boolean; match?: string[] }): unknown {
   if (!opts.nonZeroOnly && !opts.match?.length) return body;
   const b = body as ReportBody;
   const report = b?.Reports?.[0];
@@ -167,6 +168,93 @@ export function checkAttachmentPayloadIntegrity(
     };
   }
   return null;
+}
+
+export interface XeroAttachmentUploadInput {
+  org: XeroOrg;
+  endpoint: (typeof ATTACHMENT_ENDPOINT_ENUM)[number];
+  guid: string;
+  fileName: string;
+  contentBase64: string;
+  mimeType: string;
+  expected_bytes?: number;
+  expected_sha256?: string;
+}
+
+/**
+ * `xero_attachment_upload` handler. Exported standalone (rather than inline in the registerTool
+ * call) so it is directly unit-testable — mirrors handleGraphDriveUpload's pattern in
+ * tools/graph-drive/upload.ts. Copilot review, 2026-07-30: the prior tests only exercised the
+ * extracted checkAttachmentPayloadIntegrity() pure function, never this handler itself, so nothing
+ * proved a mismatch actually returns BEFORE xeroUploadAttachment (and therefore any network call)
+ * is reached, nor that a genuinely matching payload reaches it. See tools.test.ts's
+ * "handleXeroAttachmentUpload" tests for both proofs (a stubbed globalThis.fetch that throws on ANY
+ * call demonstrates the refusal path makes zero network I/O).
+ */
+export async function handleXeroAttachmentUpload(
+  input: XeroAttachmentUploadInput,
+  ctx: ToolContext,
+  // Test-only seam, mirroring assembleGl's deps parameter in gl-assemble.ts: production
+  // (registerTool always calls handler(input, ctx), exactly 2 args) never supplies this, so it is
+  // always undefined -- and undefined -> xeroUploadAttachment's own defaultDeps, unchanged behavior.
+  deps?: TokenDeps,
+): Promise<ToolResultPayload> {
+  if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_attachment_upload', ctx.callerAgent);
+  if (!xeroConfigured()) return unconfigured('xero_attachment_upload');
+
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(input.contentBase64, 'base64');
+  } catch {
+    return {
+      data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'bad_base64' },
+      summary: 'xero_attachment_upload: contentBase64 did not decode as valid base64.',
+    };
+  }
+  if (buf.length === 0) {
+    return {
+      data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'empty_content' },
+      summary: 'xero_attachment_upload: decoded content is empty.',
+    };
+  }
+
+  // TRUNCATION GUARD: check BEFORE dry_run too, so a dry-run preview never reports a plausible
+  // "would upload N bytes" for a payload that was already truncated on the way into this call.
+  const actualSha256 = createHash('sha256').update(buf).digest('hex');
+  const integrityFailure = checkAttachmentPayloadIntegrity(buf, actualSha256, {
+    expected_bytes: input.expected_bytes,
+    expected_sha256: input.expected_sha256,
+  });
+  if (integrityFailure) {
+    return {
+      data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: null, error: integrityFailure.error },
+      summary: `REFUSED (not uploaded): ${integrityFailure.reason}`,
+    };
+  }
+
+  if (ctx.dryRun) {
+    return {
+      data: {
+        org: input.org,
+        endpoint: input.endpoint,
+        guid: input.guid,
+        fileName: input.fileName,
+        bytes: buf.length,
+        sha256: actualSha256,
+        body: null,
+        error: 'dry_run',
+      },
+      summary: `DRY RUN (nothing uploaded): would PUT ${buf.length} bytes (sha256=${actualSha256}) as "${input.fileName}" (${input.mimeType}) to ${input.endpoint}/${input.guid} for ${input.org}. Re-call with dry_run:false to execute, then verify with xero_attachments.`,
+    };
+  }
+
+  const res = await xeroUploadAttachment(input.org, input.endpoint, input.guid, input.fileName, buf, input.mimeType, { deps });
+  return {
+    data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: res.body },
+    summary:
+      `Xero attachment upload "${input.fileName}" (${buf.length} bytes, sha256=${actualSha256}) to ${input.endpoint}/${input.guid} for ${input.org} — HTTP ${res.status}. ` +
+      `NOT independently verified yet — call xero_attachments(org:"${input.org}", endpoint:"${input.endpoint}", guid:"${input.guid}") before reporting this as successful.`,
+  };
 }
 
 function unconfigured(tool: string) {
@@ -632,6 +720,21 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       handler: async (input, ctx) => {
         if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_bank_transfers', ctx.callerAgent);
         if (!xeroConfigured()) return unconfigured('xero_bank_transfers');
+        // VALIDATE BEFORE FETCHING (reviewer-caught, 2026-07-30): Date.parse of a malformed/
+        // impossible date (e.g. "not-a-date", "2026-02-30") returns NaN, and every NaN comparison
+        // below is always false — an unvalidated NaN bound would silently match everything while
+        // the summary still claimed "date-filtered client-side", the exact opposite of the caller's
+        // request. A real, strict YYYY-MM-DD check catches this before any network call.
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+        for (const [label, value] of [['fromDate', input.fromDate], ['toDate', input.toDate]] as const) {
+          if (value === undefined) continue;
+          if (!dateRe.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
+            return {
+              data: { org: input.org, body: null, total_matching: 0, page: 1, pages: 1, error: 'invalid_date' },
+              summary: `xero_bank_transfers: ${label}="${value}" is not a valid YYYY-MM-DD date. Refused before fetching, rather than silently returning the unfiltered history.`,
+            };
+          }
+        }
         const res = await xeroGet(input.org as XeroOrg, '/BankTransfers', {});
         const all = ((res.body as Record<string, unknown>)?.BankTransfers as Array<Record<string, unknown>>) ?? [];
         const fromMs = input.fromDate ? Date.parse(`${input.fromDate}T00:00:00Z`) : undefined;
@@ -808,71 +911,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         body: z.unknown(),
         error: z.string().optional(),
       },
-      handler: async (input, ctx) => {
-        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_attachment_upload', ctx.callerAgent);
-        if (!xeroConfigured()) return unconfigured('xero_attachment_upload');
-
-        let buf: Buffer;
-        try {
-          buf = Buffer.from(input.contentBase64, 'base64');
-        } catch {
-          return {
-            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'bad_base64' },
-            summary: 'xero_attachment_upload: contentBase64 did not decode as valid base64.',
-          };
-        }
-        if (buf.length === 0) {
-          return {
-            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, body: null, error: 'empty_content' },
-            summary: 'xero_attachment_upload: decoded content is empty.',
-          };
-        }
-
-        // TRUNCATION GUARD: check BEFORE dry_run too, so a dry-run preview never reports a plausible
-        // "would upload N bytes" for a payload that was already truncated on the way into this call.
-        const actualSha256 = createHash('sha256').update(buf).digest('hex');
-        const integrityFailure = checkAttachmentPayloadIntegrity(buf, actualSha256, {
-          expected_bytes: input.expected_bytes,
-          expected_sha256: input.expected_sha256,
-        });
-        if (integrityFailure) {
-          return {
-            data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: null, error: integrityFailure.error },
-            summary: `REFUSED (not uploaded): ${integrityFailure.reason}`,
-          };
-        }
-
-        if (ctx.dryRun) {
-          return {
-            data: {
-              org: input.org,
-              endpoint: input.endpoint,
-              guid: input.guid,
-              fileName: input.fileName,
-              bytes: buf.length,
-              sha256: actualSha256,
-              body: null,
-              error: 'dry_run',
-            },
-            summary: `DRY RUN (nothing uploaded): would PUT ${buf.length} bytes (sha256=${actualSha256}) as "${input.fileName}" (${input.mimeType}) to ${input.endpoint}/${input.guid} for ${input.org}. Re-call with dry_run:false to execute, then verify with xero_attachments.`,
-          };
-        }
-
-        const res = await xeroUploadAttachment(
-          input.org as XeroOrg,
-          input.endpoint,
-          input.guid,
-          input.fileName,
-          buf,
-          input.mimeType,
-        );
-        return {
-          data: { org: input.org, endpoint: input.endpoint, guid: input.guid, fileName: input.fileName, bytes: buf.length, sha256: actualSha256, body: res.body },
-          summary:
-            `Xero attachment upload "${input.fileName}" (${buf.length} bytes, sha256=${actualSha256}) to ${input.endpoint}/${input.guid} for ${input.org} — HTTP ${res.status}. ` +
-            `NOT independently verified yet — call xero_attachments(org:"${input.org}", endpoint:"${input.endpoint}", guid:"${input.guid}") before reporting this as successful.`,
-        };
-      },
+      handler: handleXeroAttachmentUpload,
     },
     callerHash,
   );
@@ -1043,13 +1082,18 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         title: 'Xero: raw connection metadata — id/tenant/creation date (executive ring only)',
         description:
           'Read-only GET /connections for an org: the connection id, tenant identity, and createdDateUtc/updatedDateUtc. ' +
-          'Answers the P0-1 freeze question directly: Xero\'s documented rule (vendor docs, confirmed 2026-07-30) is that a Custom ' +
-          `Connection created BEFORE ${XERO_JOURNALS_GRANDFATHER_CUTOFF} keeps accounting.journals.read grandfathered until Sep 2027; ` +
-          'one created on/after that date can never obtain it at any price — this tool tells you which side of that line an org\'s ' +
-          'connection falls on (grandfathered_for_journals in the output). It CANNOT tell you which human authorised the connection — ' +
-          'Xero does not expose that via any API; that fact is only visible in the Xero UI under Settings > Connected Apps to a user ' +
-          'who can see the org\'s app list. Read-only: makes no changes, safe to call at any time, including during the P0-1 scope freeze. ' +
-          'MNPI: executive-ring lanes only.',
+          'PARTIAL support for the P0-1 freeze question only — this does NOT determine grandfathered eligibility for ' +
+          'accounting.journals.read (grandfathered_for_journals is always null; kept in the output shape as a documented ' +
+          'non-answer, not deleted). Reviewer-caught, 2026-07-30: Xero\'s documented grandfather rule ' +
+          `(a connection created BEFORE ${XERO_JOURNALS_GRANDFATHER_CUTOFF} keeps journals scope until Sep 2027) applies ` +
+          'specifically to CUSTOM CONNECTIONS (client_credentials grant); this gateway\'s token path uses the refresh_token/' +
+          'authorization_code grant, evidence this integration is a STANDARD OAuth2 app, not a Custom Connection — and ' +
+          '/connections exposes no field that identifies connection TYPE at all, so createdDateUtc alone cannot establish ' +
+          'eligibility either way. Determining the real answer requires checking connection TYPE directly in the Xero ' +
+          'Developer Portal / My Apps page, which no API in this tool can reach. It also CANNOT tell you which human ' +
+          'authorised the connection — Xero does not expose that via any API; that fact is only visible in the Xero UI ' +
+          'under Settings > Connected Apps to a user who can see the org\'s app list. Read-only: makes no changes, safe to ' +
+          'call at any time, including during the P0-1 scope freeze. MNPI: executive-ring lanes only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -1076,12 +1120,14 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         if (!xeroConfigured()) return unconfigured('xero_connections');
         const conns = await xeroConnections(input.org as XeroOrg);
         const enriched = conns.map((c) => ({ ...c, grandfathered_for_journals: isGrandfatheredForJournals(c.createdDateUtc) }));
-        const summaryBits = enriched.map(
-          (c) => `${c.tenantName || c.tenantId}: created ${c.createdDateUtc || '(unknown)'}, grandfathered=${c.grandfathered_for_journals ?? 'unknown'}`,
-        );
+        const summaryBits = enriched.map((c) => `${c.tenantName || c.tenantId}: created ${c.createdDateUtc || '(unknown)'}`);
         return {
           data: { org: input.org, connections: enriched },
-          summary: `Xero connections for ${input.org}: ${summaryBits.join('; ') || '(none)'}. "Authorising user" is not API-exposed — check Settings > Connected Apps in the Xero UI for that.`,
+          summary:
+            `Xero connections for ${input.org}: ${summaryBits.join('; ') || '(none)'}. grandfathered_for_journals is always null — ` +
+            'createdDateUtc alone cannot establish Custom Connection eligibility (see tool description); confirm connection TYPE in ' +
+            'the Xero Developer Portal before acting on any grandfather assumption. "Authorising user" is also not API-exposed — check ' +
+            'Settings > Connected Apps in the Xero UI for that.',
         };
       },
     },

@@ -103,7 +103,10 @@ export function memoryWriteIdentityRefusal(callerAgent: string, requestedAgent: 
     return 'no verifiable agent identity on this token -- memory_write cannot attribute a system-of-record entry to an unidentified caller';
   }
   if (requested && requested !== caller) {
-    return `your authenticated identity is "${caller}" but this call requested agent "${requested}" -- memory_write always attributes the record to YOUR OWN authenticated identity, never a caller-supplied value (this is not memory_remember's cross-lane feature; pass agent="${caller}" or omit a mismatched value)`;
+    // Reviewer-caught, 2026-07-30: `agent` is a REQUIRED input field (see the zod inputShape below),
+    // so "omit it" was never actually a viable recovery step -- only tell the caller to pass their
+    // own authenticated identity.
+    return `your authenticated identity is "${caller}" but this call requested agent "${requested}" -- memory_write always attributes the record to YOUR OWN authenticated identity, never a caller-supplied value (this is not memory_remember's cross-lane feature; pass agent="${caller}")`;
   }
   return null;
 }

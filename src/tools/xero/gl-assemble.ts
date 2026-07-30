@@ -200,6 +200,7 @@ interface MjLine {
 interface ManualJournal {
   ManualJournalID?: string;
   Date?: string;
+  Status?: string;
   JournalLines?: MjLine[];
 }
 interface ManualJournalsBody {
@@ -208,11 +209,18 @@ interface ManualJournalsBody {
 
 /** Sums ManualJournal.JournalLines[].LineAmount by AccountID (Xero's documented sign convention:
  * positive = debit, negative = credit — the same sign sense as TrialBalance's debit-minus-credit
- * net used in diffTrialBalances, so the two are directly comparable). Pure. */
+ * net used in diffTrialBalances, so the two are directly comparable). ONLY POSTED journals are
+ * summed: DRAFT and VOIDED journals never hit the Trial Balance, so including them would make
+ * `variance` disagree with the real TB for reasons that have nothing to do with a genuine gap
+ * (reviewer-caught, 2026-07-30). A journal with no Status field at all (should not happen on a
+ * real Xero response, but defensive against a stub/fixture) is treated as POSTED rather than
+ * silently dropped, so this can never fail closed on a field this function does not strictly
+ * require. Pure. */
 export function sumManualJournalsByAccount(body: unknown): Map<string, number> {
   const mjs = (body as ManualJournalsBody)?.ManualJournals ?? [];
   const out = new Map<string, number>();
   for (const mj of mjs) {
+    if (mj.Status && mj.Status !== 'POSTED') continue;
     for (const line of mj.JournalLines ?? []) {
       const key = line.AccountID || (line.AccountCode ? `code:${line.AccountCode}` : '');
       if (!key) continue;
@@ -377,8 +385,13 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
     snapshots.push(rows);
   }
 
-  // 2. ManualJournals across the EFFECTIVE (widened) range, bucketed by month.
-  const mjRes = await fetchAllPaged(org, '/ManualJournals', 'ManualJournals', effectiveWhere, deps);
+  // 2. ManualJournals across the EFFECTIVE (widened) range, bucketed by month. Server-side filtered
+  // to POSTED only (reviewer-caught, 2026-07-30): DRAFT and VOIDED journals never hit the Trial
+  // Balance, so summing them into manualJournalNet would disagree with the real TB for reasons that
+  // have nothing to do with a genuine reconciliation gap. sumManualJournalsByAccount also re-checks
+  // Status client-side as a second layer, in case a future caller ever bypasses this where clause.
+  const mjWhere = `${effectiveWhere} && Status=="POSTED"`;
+  const mjRes = await fetchAllPaged(org, '/ManualJournals', 'ManualJournals', mjWhere, deps);
   if (mjRes.truncated) caveats.push(`ManualJournals hit the ${MAX_PAGES_PER_ENDPOINT}-page cap (${MAX_PAGES_PER_ENDPOINT * 100}+ records) — some journals in range may be missing from manualJournalNet.`);
   const mjByMonth = new Map<string, ManualJournal[]>();
   for (const raw of mjRes.items) {
@@ -431,11 +444,23 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
     const mjBody = { ManualJournals: mjByMonth.get(monthKey) ?? [] };
     const mjNet = sumManualJournalsByAccount(mjBody);
     let nonzeroVarianceCount = 0;
-    const accounts: GlAssembleAccountRow[] = movements.map((m) => {
-      const manualJournalNet = mjNet.get(m.accountId) ?? 0;
-      const variance = round2(m.tbMovement - manualJournalNet);
+    // Build over the UNION of TB-movement keys and manual-journal keys, not just the TB side
+    // (reviewer-caught, 2026-07-30): a key present only in mjNet — e.g. the documented fallback
+    // case where the TB parser emits `name:...` but a journal's AccountID resolves to a distinct
+    // `code:...` key for the same real account — was previously silently dropped, hiding exactly
+    // the "unmatched journal side" this tool's own methodology promises to surface. A journal-only
+    // key gets tbMovement:0 (there was no TB movement recorded under that key) so its full
+    // manualJournalNet surfaces as the variance, which is the honest signal that something didn't
+    // line up rather than the mismatch vanishing from the output entirely.
+    const movementMap = new Map(movements.map((m) => [m.accountId, m]));
+    const allKeys = new Set<string>([...movementMap.keys(), ...mjNet.keys()]);
+    const accounts: GlAssembleAccountRow[] = [...allKeys].map((accountId) => {
+      const m = movementMap.get(accountId);
+      const manualJournalNet = mjNet.get(accountId) ?? 0;
+      const tbMovement = m?.tbMovement ?? 0;
+      const variance = round2(tbMovement - manualJournalNet);
       if (variance !== 0) nonzeroVarianceCount++;
-      return { accountId: m.accountId, name: m.name, tbMovement: m.tbMovement, manualJournalNet, variance };
+      return { accountId, name: m?.name ?? accountId, tbMovement, manualJournalNet, variance };
     });
     months.push({
       periodStart,

@@ -24,6 +24,7 @@ const {
   buildTokenDoc,
   getOrgAccess,
   XERO_ORGS,
+  isGrandfatheredForJournals,
 } = await import('./client.js');
 const { EXEC_RING } = await import('../kb/search-privileged.js');
 
@@ -96,6 +97,24 @@ test('bootstrapHash is stable and never echoes the secret', () => {
   assert.equal(h, bootstrapHash('super-secret-refresh-token'));
   assert.equal(h.length, 32);
   assert.ok(!h.includes('super-secret'), 'hash must not contain secret material');
+});
+
+// -- isGrandfatheredForJournals: SAFETY-CRITICAL correctness fix (reviewer-caught, 2026-07-30) ----
+// This used to compare createdDateUtc against XERO_JOURNALS_GRANDFATHER_CUTOFF and return
+// true/false. That is unsafe: the April-29 grandfather rule applies specifically to Custom
+// Connections (a client_credentials-grant app type); this gateway's token path uses the
+// refresh_token/authorization_code grant (evidence of a STANDARD OAuth2 app, not a Custom
+// Connection), and /connections exposes no field that identifies connection TYPE at all -- so
+// createdDateUtc alone can never safely establish eligibility either way. A false `true` here is
+// actively dangerous for an irreversible P0-1 freeze decision. Locked down to always-null so this
+// can never silently regress back into a wrong answer.
+
+test('SAFETY-CRITICAL: isGrandfatheredForJournals ALWAYS returns null, regardless of date -- it must never assert true/false again', () => {
+  assert.equal(isGrandfatheredForJournals('2020-01-01T00:00:00Z'), null, 'well before the cutoff must still be null, not true');
+  assert.equal(isGrandfatheredForJournals('2030-01-01T00:00:00Z'), null, 'well after the cutoff must still be null, not false');
+  assert.equal(isGrandfatheredForJournals('2026-04-29T00:00:00Z'), null, 'exactly on the cutoff must still be null');
+  assert.equal(isGrandfatheredForJournals(''), null);
+  assert.equal(isGrandfatheredForJournals('not-a-date'), null);
 });
 
 // ---------------------------------------------------------------------------------------------

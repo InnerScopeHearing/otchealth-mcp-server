@@ -702,12 +702,27 @@ export async function xeroConnections(org: XeroOrg, opts: { deps?: TokenDeps } =
   }));
 }
 
-/** True when a connection's createdDateUtc is before the journals-scope grandfather cutoff. Pure. */
-export function isGrandfatheredForJournals(createdDateUtc: string): boolean | null {
-  if (!createdDateUtc) return null;
-  const created = Date.parse(createdDateUtc);
-  if (Number.isNaN(created)) return null;
-  return created < Date.parse(XERO_JOURNALS_GRANDFATHER_CUTOFF);
+/**
+ * ALWAYS returns null. Kept as an explicit function (not deleted) so the "this cannot be
+ * determined" fact has one place to live and cannot silently regress back into a false answer.
+ *
+ * Reviewer-caught correctness bug (2026-07-30): this used to compare createdDateUtc against
+ * XERO_JOURNALS_GRANDFATHER_CUTOFF and return true/false. That is WRONG for two independent
+ * reasons, either one enough to make the answer unsafe to act on for an irreversible P0-1
+ * decision: (1) Xero's documented April-29 grandfather rule applies specifically to CUSTOM
+ * CONNECTIONS (a client_credentials-grant app type) — this gateway's token path
+ * (refreshGrant() above) uses the refresh_token/authorization_code grant, which is evidence this
+ * integration is a STANDARD OAuth2 app, not a Custom Connection, and the rule may not apply to it
+ * at all in the way assumed. (2) /connections exposes NO field that identifies connection TYPE
+ * (Custom Connection vs standard app) — createdDateUtc alone cannot distinguish them, so even a
+ * pre-cutoff standard-app tenant would have been mislabeled "grandfathered" for a scope path it
+ * was never eligible for. A false `true` here is actively dangerous: P0-1's whole point is
+ * avoiding an IRREVERSIBLE loss of journals-scope eligibility, and a wrong "you're safe" is worse
+ * than no answer. Determining the real connection type requires checking the Xero Developer
+ * Portal / My Apps page directly (see xero_connections' tool description) — not this API.
+ */
+export function isGrandfatheredForJournals(_createdDateUtc: string): null {
+  return null;
 }
 
 /** The ring-refusal payload shared by every xero_* tool. Pure. */
