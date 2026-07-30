@@ -140,14 +140,22 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // issues (file + close follow-ups without leaving the seat)
   'github_create_issue', 'github_issue_get', 'github_issue_update',
   'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read', 'cio_get_customer', 'shield_check', 'groundedness_check',
-  // Xero (read-only accounting of record). MUST be on the connector surface or the Claude Chat CFO
-  // (the whole reason this service exists — no filesystem/CLI to reach the old skills/xero path)
-  // cannot SEE them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that
-  // sees them is still refused at call time; this list only controls VISIBILITY, not authorization.
+  // Xero (accounting of record). MUST be on the connector surface or the Claude Chat CFO (the whole
+  // reason this service exists — no filesystem/CLI to reach the old skills/xero path) cannot SEE
+  // them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that sees them is
+  // still refused at call time; this list only controls VISIBILITY, not authorization.
   'xero_orgs', 'xero_report', 'xero_accounts', 'xero_manual_journals', 'xero_bank_transactions', 'xero_invoices',
   'xero_get', 'xero_contacts', 'xero_payments', 'xero_credit_notes', 'xero_bank_transfers', 'xero_budgets',
   'xero_settings', 'xero_attachments', 'xero_payroll', 'xero_assets', 'xero_projects', 'xero_files',
   'xero_request', // the write lane (POST/PUT/DELETE); execution stays EXEC_RING-gated in-handler
+  // xero_attachment_upload (P0-1, 2026-07-30): a real production gap found by the CFO agent -- the
+  // tool was fully built, registered, and reachable via a direct minted-token MCP call, but was
+  // simply missing from THIS curated allowlist (its read-side sibling xero_attachments was listed;
+  // the write tool never was), so the Claude Chat CFO connector never advertised it. Narrower than
+  // the already-exposed xero_request (a single attachment upload vs. arbitrary POST/PUT/DELETE), so
+  // adding it does not widen the security model -- it completes an omission within a model that
+  // already accepts EXEC_RING in-handler gating as the real authorization boundary for Xero writes.
+  'xero_attachment_upload',
 ] as const;
 
 /**

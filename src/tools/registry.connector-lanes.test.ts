@@ -49,6 +49,15 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   // Regression guard (2026-07-17): the CFO reported kb_get_document was invisible on its DCR
   // connector because #130 shipped the tool into the catalog but never added it to this ship set.
   assert.ok(set.has('kb_get_document'), 'ship lane must expose whole-doc retrieval (the CFO census gap)');
+  // Regression guard (2026-07-30, P0-1): the CFO reported xero_attachment_upload was invisible on
+  // its connector even though it was fully built, registered, and reachable via a direct minted-
+  // token MCP call -- it was simply never added to this ship set (its read-side sibling
+  // xero_attachments was, since day one). Also assert every OTHER xero_* tool the CFO actually
+  // depends on stays present, so a future edit here can't silently drop one again.
+  assert.ok(set.has('xero_attachment_upload'), 'ship lane must expose xero attachment upload (the CFO round-trip-verification gap)');
+  for (const xeroTool of ['xero_attachments', 'xero_request', 'xero_accounts', 'xero_get']) {
+    assert.ok(set.has(xeroTool), `ship lane must still expose ${xeroTool}`);
+  }
 });
 
 test('(b) developer lane gets the full ship-lane set', () => {
