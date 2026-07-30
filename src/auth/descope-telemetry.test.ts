@@ -43,10 +43,17 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
-    DESCOPE_PROJECT_ID: 'Ptest000000000000000000000000',
-    POSTHOG_GATEWAYOPS_KEY: 'phc_test_gatewayops_key',
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+  // Force-set, NOT `??=` (reviewer-caught, 2026-07-30, same class of bug as descope.test.ts's own
+  // fix): this file's tests are only hermetic if DESCOPE_PROJECT_ID and POSTHOG_GATEWAYOPS_KEY
+  // ACTUALLY equal the hardcoded PROJECT_ID/stub values below -- `??=` would silently keep an
+  // inherited, DIFFERENT value, which could route the JWKS request to a real, unstubbed URL (the
+  // installFetchStub router below throws on any unrecognized URL, so this would likely fail loudly
+  // rather than pass for the wrong reason, but "likely" is not the same guarantee as `descope.test
+  // .ts`'s explicit unconfigured-path assertion gets from its own force-clear).
+  process.env.DESCOPE_PROJECT_ID = 'Ptest000000000000000000000000';
+  process.env.POSTHOG_GATEWAYOPS_KEY = 'phc_test_gatewayops_key';
 });
 
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });

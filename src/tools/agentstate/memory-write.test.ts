@@ -1,7 +1,29 @@
-import { test } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { memoryWriteRefusal, memoryWriteIdentityRefusal } from './memory-write.js';
+import { memoryWriteRefusal, memoryWriteIdentityRefusal, handleMemoryWrite } from './memory-write.js';
 import { EXEC_RING } from '../kb/search-privileged.js';
+import { requestContext } from '../../server/request-context.js';
+
+// Only needed by the handler-level tests below (the pure-function tests above never call
+// loadEnv()): handleMemoryWrite's dry_run/not-configured branches call isConfigured() ->
+// loadEnv(), which throws on missing required vars. Same minimal preamble as the other test files.
+before(() => {
+  const required: Record<string, string> = {
+    CIO_SITE_ID: 'test',
+    CIO_TRACK_KEY: 'test',
+    CIO_APP_API_BEARER: 'test',
+    PERPLEXITY_CONNECTOR_TOKEN: 'x'.repeat(32),
+    ADMIN_REVOKE_TOKEN: 'x'.repeat(32),
+    N8N_WEBHOOK_SECRET: 'x'.repeat(32),
+    // isConfigured() is checked BEFORE ctx.dryRun in handleMemoryWrite -- without these, every
+    // handler-level test below would stop at "Cosmos not configured" rather than exercising the
+    // gate/branch each test actually targets.
+    COSMOS_ENDPOINT: 'https://test.documents.azure.com',
+    COSMOS_DB: 'test',
+    COSMOS_KEY: Buffer.from('test-key').toString('base64'),
+  };
+  for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+});
 
 // Layer 3 (defense-in-depth) of the Phase 5/6 connector-ring closure (2026-07-15): before this,
 // memory_write's handler wrote ANY input.agent namespace with ZERO caller authorization -- a
@@ -149,4 +171,69 @@ test('REGRESSION: the clo-personal refusal reason never mentions "connector" (it
   assert.doesNotMatch(connectorReason!, /connector/i);
   assert.doesNotMatch(directReason!, /connector/i);
   assert.equal(connectorReason, directReason, 'the reason is identical regardless of connector surface -- it is an unconditional block');
+});
+
+// -------------------------------------------------------------------------------------------
+// handleMemoryWrite -- handler-level tests through the ACTUAL registered entry point (Copilot
+// review, 2026-07-30: "the new safety-critical tests exercise only the pure helper, so they still
+// pass if the registered memory_write handler stops calling this gate or accidentally persists
+// input.agent again... That is the actual exploit path this PR is intended to close").
+//
+// currentCallerAgent() reads from requestContext (AsyncLocalStorage), NOT from ctx.callerAgent --
+// exactly how the real server resolves identity (see server/mcp.ts) -- so every test below wraps
+// the call in requestContext.run() to simulate an authenticated caller. All three scenarios here
+// are refusal paths that return BEFORE isConfigured()/writeMemory()/embed() are ever reached (see
+// handleMemoryWrite's own code order), so no Cosmos/Azure OpenAI mocking is needed: the assertion
+// that the returned `note` is SPECIFICALLY the identity-mismatch (or clo-personal, or no-identity)
+// reason -- not e.g. "Cosmos not configured" -- is itself the proof the call stopped at THIS gate,
+// not merely failed for an unrelated downstream reason.
+// -------------------------------------------------------------------------------------------
+
+function fakeCtx(dryRun = false) {
+  return { correlationId: 'test-corr', callerHash: 'test-hash', dryRun, acknowledgeWarning: false, callerAgent: '' };
+}
+
+test('SAFETY-CRITICAL (handler-level): a forged agent is refused BEFORE any storage attempt -- written:false, the identity-mismatch reason, no record', async () => {
+  const result = await requestContext.run(
+    { callerAgent: 'commerce', callerHash: 'h', correlationId: 'c' },
+    () => handleMemoryWrite({ agent: 'cto', kind: 'fact', text: 'a forged decision' }, fakeCtx()),
+  );
+  const data = result.data as { written: boolean; note?: string; record?: unknown };
+  assert.equal(data.written, false);
+  assert.match(data.note ?? '', /authenticated identity is "commerce"/);
+  assert.match(data.note ?? '', /requested agent "cto"/);
+  assert.equal(data.record, undefined, 'no record was ever built or persisted');
+});
+
+test('SAFETY-CRITICAL (handler-level): clo-personal is refused even on a genuine SELF-write (agent matches caller)', async () => {
+  const result = await requestContext.run(
+    { callerAgent: 'clo-personal', callerHash: 'h', correlationId: 'c' },
+    () => handleMemoryWrite({ agent: 'clo-personal', kind: 'fact', text: 'a personal-legal note' }, fakeCtx()),
+  );
+  const data = result.data as { written: boolean; note?: string };
+  assert.equal(data.written, false);
+  assert.match(data.note ?? '', /privilege-walled personal-legal lane/);
+});
+
+test('SAFETY-CRITICAL (handler-level): no authenticated identity at all (empty requestContext) is refused, not defaulted', async () => {
+  const result = await requestContext.run(
+    { callerAgent: '', callerHash: 'h', correlationId: 'c' },
+    () => handleMemoryWrite({ agent: 'cto', kind: 'fact', text: 'attributed to nobody' }, fakeCtx()),
+  );
+  const data = result.data as { written: boolean; note?: string };
+  assert.equal(data.written, false);
+  assert.match(data.note ?? '', /no verifiable agent identity/);
+});
+
+test('handler-level: a matching self-write clears BOTH refusal gates -- reaches the dry_run preview (not a Cosmos "unconfigured" or identity-mismatch note)', async () => {
+  // dry_run:true short-circuits BEFORE isConfigured()/writeMemory() too, so this stays hermetic
+  // while proving the call gets PAST both refusal gates for the one legitimate case (self-write).
+  const result = await requestContext.run(
+    { callerAgent: 'cto', callerHash: 'h', correlationId: 'c' },
+    () => handleMemoryWrite({ agent: 'cto', kind: 'fact', text: 'a genuine self-write' }, fakeCtx(true)),
+  );
+  const data = result.data as { written: boolean; note?: string; preview?: { agent?: string } };
+  assert.equal(data.written, false); // dry_run never persists
+  assert.equal(data.note, 'dry_run: pass dry_run=false to persist.', 'must reach the dry_run branch, not an earlier refusal');
+  assert.equal(data.preview?.agent, 'cto', 'the preview is attributed to the authenticated caller');
 });
