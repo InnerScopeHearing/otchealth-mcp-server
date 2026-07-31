@@ -464,7 +464,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const laneForThisTool = currentCallerAgent();
   const catalogCuration = connectorSurfaceForThisTool
     ? null
-    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName);
+    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth());
   if (catalogCuration && !catalogCuration.advertise) return;
   // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
   // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
@@ -578,6 +578,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE),
             callerAgent,
             canonicalName,
+            isM365StaticAuth(),
           ),
           callerAgent,
           canonicalName,
