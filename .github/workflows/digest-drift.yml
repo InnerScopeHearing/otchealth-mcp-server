@@ -1,10 +1,22 @@
 name: digest-drift
 
 # Guards against out-of-band / hand deploys. The live gateway revision MUST run an immutable
-# @sha256 digest (never a mutable :tag like the :phase5 regression), and its g<sha> revision suffix
-# must be a commit that exists on main. On drift it fails the run and opens a single deduped issue.
+# @sha256 digest (never a mutable :tag like the :phase5 regression), and that digest must carry an
+# ACR tag (the git commit SHA deploy.yml tags every build with) that is an ancestor of main. On
+# drift it fails the run and opens a single deduped issue.
 #
 # Auth is OIDC via the id-gateway-deployer managed identity (environment: production subject).
+#
+# 2026-08-01 fix (found during a live Copilot-fleet cold-start audit): this used to parse the
+# CONTAINER APP REVISION NAME (expecting a "g<sha>" suffix) instead of checking the image itself.
+# A same-day out-of-band `az containerapp update --set-env-vars ...` (no --revision-suffix, e.g.
+# wiring the M365 static agent tokens / TOOL_CATALOG_CURATION_MODE) creates a new revision on
+# Azure's default auto-numbered suffix (e.g. "--0000038") WITHOUT changing the running image --
+# the revision name check then false-drifted on every run even though the correct, verified digest
+# was still live, four days straight, silently desensitizing the one alert built to catch a REAL
+# bad deploy. Fixed to check the thing that actually matters: does the live IMAGE DIGEST carry an
+# ACR tag that is a real commit on main (deploy.yml always tags the image with $GITHUB_SHA before
+# pushing), regardless of what the Container App happened to name that revision.
 
 on:
   schedule:
@@ -55,12 +67,22 @@ jobs:
             *@sha256:*) : ;;
             *) DRIFT="live image is a MUTABLE TAG, not an @sha256 digest: ${IMG} (a hand-deploy bypassed the pipeline)";;
           esac
-          # 2) the g<sha> revision suffix must be a commit on the checked-out main HEAD
+          # 2) the live digest must carry an ACR tag that is a commit on the checked-out main HEAD
+          # (deploy.yml always tags the pushed image with $GITHUB_SHA -- check the IMAGE, not the
+          # Container App's revision NAME, since an env-var-only update creates a new revision with
+          # an unrelated auto-numbered suffix while keeping the same, correct image).
           if [ -z "$DRIFT" ]; then
-            SUFFIX="${NAME##*--}"
-            SHA="${SUFFIX#g}"
-            if ! git merge-base --is-ancestor "$SHA" HEAD 2>/dev/null; then
-              DRIFT="live revision suffix ${SUFFIX} (${SHA}) is not a commit on main (untracked / hand deploy)"
+            DIGEST="${IMG##*@}"
+            TAGS=$(az acr repository show --name acrotc55c84f6bef --image "otchealth-mcp-server@${DIGEST}" --query 'tags' -o tsv 2>/dev/null || echo "")
+            MATCHED=""
+            for TAG in $TAGS; do
+              if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
+                MATCHED="$TAG"
+                break
+              fi
+            done
+            if [ -z "$MATCHED" ]; then
+              DRIFT="live image digest ${DIGEST} (revision ${NAME}) has no ACR tag matching a commit on main (tags found: ${TAGS:-none}) -- untracked / hand-built image"
             fi
           fi
           {
