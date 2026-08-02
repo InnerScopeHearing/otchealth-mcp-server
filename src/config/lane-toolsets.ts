@@ -201,6 +201,17 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   developer: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
     'github_*', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
+    // 2026-08-02: developer_wake_lite (diagnostics/developer-wake-lite.ts) was never covered by
+    // any pattern above -- not catalog_* (CATALOG's wildcard), not github_*/depot_*, no exact
+    // match -- so under curate-m365-only it was silently excluded from what's actually registered
+    // for an M365 developer session, even though catalog_probe's known_tools_present check
+    // (which reads the full unscoped catalog, not this lane's curated view) reported it "true"
+    // and masked the gap. Ironic: this tool exists specifically to diagnose M365 tool-visibility
+    // issues and was itself invisible to the exact lane it was built to diagnose. Confirmed live
+    // 2026-08-02: Copilot calling the M365-truncated form "wake_lite" got "Tool wake_lite not
+    // found" because the primary was never registered for this caller, so no alias was ever
+    // collected either.
+    'developer_wake_lite',
   ],
   // Finance / MNPI: Xero (accounting of record), the finance kb rooms, invoice document intelligence,
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.

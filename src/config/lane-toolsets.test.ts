@@ -54,6 +54,10 @@ test('isToolInLaneAllowlist: cto (2026-08-02 onward) is an explicit curated list
   assert.equal(isToolInLaneAllowlist('cto', 'azure_anything_else_entirely'), false);
 });
 
+test('isToolInLaneAllowlist: developer_wake_lite is reachable for the developer lane (2026-08-02 fix -- was silently excluded, invisible to catalog_probe\'s full-catalog-only check)', () => {
+  assert.equal(isToolInLaneAllowlist('developer', 'developer_wake_lite'), true);
+});
+
 test('isToolInLaneAllowlist: a tool outside the lane list is rejected', () => {
   assert.equal(isToolInLaneAllowlist('developer', 'azure_jobs_list'), false, 'developer has no Azure control-plane access');
   assert.equal(isToolInLaneAllowlist('clo-personal', 'graph_send_email'), false, 'clo-personal excludes fleet comms');
