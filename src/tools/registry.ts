@@ -8,7 +8,7 @@
  *  - Structured-content responses with text + structured payload
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
 import {
@@ -358,6 +358,35 @@ function gatedReject(
  */
 const primaryNamesByServer = new WeakMap<McpServer, Set<string>>();
 
+/**
+ * DEDUP FIX (2026-08-02, "curate-m365-only doesn't shrink the M365 catalog" root cause, part 2 of
+ * 2): the primary (long, canonical-named) `RegisteredTool` handle for every M365 static-auth
+ * request, keyed by canonical name, ONLY populated when isM365StaticAuth() (see the collection
+ * site below) -- so this is a genuine no-op for every other caller. WHY THIS EXISTS: every tool
+ * that gets an unambiguous M365 prefix-strip alias (finalizeM365Aliases below) was ALSO still
+ * advertised under its full canonical name, so the M365-visible tools/list carried BOTH forms of
+ * essentially every tool -- roughly DOUBLING the advertised catalog size for the exact audience
+ * TOOL_CATALOG_CURATION_MODE=curate-m365-only exists to shrink (live-measured 2026-08-02: cto
+ * 905 canonical tools admitted by curation -> 1655 advertised once aliases were added; clo 48 ->
+ * 83). Since M365 Copilot's own tool-calling orchestrator has been repeatedly confirmed (see this
+ * shim's header above) to ALWAYS strip and call the SHORT alias form, never the long canonical
+ * one, the long form is dead weight for an M365 caller whenever an unambiguous alias exists --
+ * finalizeM365Aliases() now `.remove()`s the primary registration in that case (see its body),
+ * using the handle captured here, leaving exactly ONE advertised name per tool. A tool whose alias
+ * is AMBIGUOUS (2+ canonical tools collide on the same stripped name) keeps its primary
+ * registration untouched, exactly as before -- unaffected by this change.
+ */
+const primaryHandlesByServer = new WeakMap<McpServer, Map<string, RegisteredTool>>();
+
+function primaryHandlesFor(server: McpServer): Map<string, RegisteredTool> {
+  let handles = primaryHandlesByServer.get(server);
+  if (!handles) {
+    handles = new Map<string, RegisteredTool>();
+    primaryHandlesByServer.set(server, handles);
+  }
+  return handles;
+}
+
 function primaryNamesFor(server: McpServer): Set<string> {
   let names = primaryNamesByServer.get(server);
   if (!names) {
@@ -431,6 +460,15 @@ export function finalizeM365Aliases(server: McpServer, callerHashProvider: () =>
     }
     const { canonicalName, def } = entries[0]!;
     registerTool(server, { ...def, name: aliasName, canonicalName }, callerHashProvider, true);
+    // DEDUP FIX (2026-08-02): the alias is unambiguous and just got registered under `aliasName` --
+    // M365 Copilot will call it there, never under `canonicalName` (see this shim's header + the
+    // primaryHandlesByServer comment above for the evidence). Drop the now-redundant long-form
+    // primary registration so the tool is advertised to this M365 caller exactly ONCE instead of
+    // twice. `.remove()` is the MCP SDK's own RegisteredTool API (server/mcp.d.ts); it only detaches
+    // the tool from THIS McpServer instance (stateless, one per request -- server/mcp.ts), so it
+    // cannot affect any other in-flight request or caller.
+    const primaryHandle = primaryHandlesByServer.get(server)?.get(canonicalName);
+    primaryHandle?.remove();
   }
 }
 
@@ -515,7 +553,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           openWorldHint: def.annotations.openWorldHint,
         },
       };
-  server.registerTool(
+  const registeredHandle = server.registerTool(
     def.name,
     toolConfig,
     async (rawArgs) => {
@@ -1015,6 +1053,11 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // field-specific generic logic.
         list.push({ canonicalName: def.name, def: def as unknown as ToolDefinition<ZodRawShape, ZodRawShape> });
         bucket.set(aliasName, list);
+        // DEDUP FIX (2026-08-02): remember this primary's RegisteredTool handle so
+        // finalizeM365Aliases() can `.remove()` it once it knows whether `aliasName` actually
+        // ended up unambiguous (only known after every tool in this request has registered). See
+        // primaryHandlesByServer's header comment above for why this matters.
+        primaryHandlesFor(server).set(def.name, registeredHandle);
       }
     }
   }

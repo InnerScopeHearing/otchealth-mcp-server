@@ -42,7 +42,16 @@ before(() => {
 });
 
 /** Minimal fake McpServer: records every registered tool name AND its handler (so governance
- * behavior can actually be exercised, not just presence/absence of a name). */
+ * behavior can actually be exercised, not just presence/absence of a name).
+ *
+ * The returned RegisteredTool-shaped handle's `.remove()` genuinely detaches the registration
+ * (2026-08-02 Copilot review on PR #185): this fake previously returned `void` from
+ * `registerTool`, so `registry.ts`'s captured `primaryHandle` was always `undefined` and
+ * `primaryHandle?.remove()` was a silent no-op -- meaning this entire suite exercised the
+ * "register a candidate" half of the dedup fix but NEVER the "remove the now-redundant long-form
+ * primary" half, the actual load-bearing behavior the fix ships. A real `.remove()` here is what
+ * lets the tests below assert the long-form name is genuinely gone, matching the real MCP SDK's
+ * `RegisteredTool.remove()` contract (server/mcp.d.ts). */
 function fakeServer(): {
   server: McpServer;
   names: string[];
@@ -54,6 +63,13 @@ function fakeServer(): {
     registerTool: (name: string, _config: unknown, handler: (args: unknown) => Promise<{ content?: Array<{ text?: string }> }>) => {
       names.push(name);
       handlers.set(name, handler);
+      return {
+        remove: () => {
+          const idx = names.indexOf(name);
+          if (idx !== -1) names.splice(idx, 1);
+          handlers.delete(name);
+        },
+      };
     },
   } as unknown as McpServer;
   return { server, names, handlers };
@@ -88,24 +104,26 @@ function withM365<T>(callerAgent: string, fn: () => T): T {
   );
 }
 
-test('a github_* tool also registers under its stripped bare-suffix alias, once finalized (inside an M365 request)', () => {
+test('a github_* tool also registers under its stripped bare-suffix alias, once finalized (inside an M365 request) -- and the now-redundant long-form primary is REMOVED (2026-08-02 dedup fix)', () => {
   const { server, names } = fakeServer();
   withM365('cto', () => {
     registerTool(server, fakeDef('github_repo_get'), hashProvider);
     finalizeM365Aliases(server, hashProvider);
   });
-  assert.ok(names.includes('github_repo_get'), 'primary name must still be registered');
-  assert.ok(names.includes('repo_get'), 'stripped alias must also be registered after finalization');
+  assert.ok(names.includes('repo_get'), 'stripped alias must be registered after finalization');
+  assert.ok(!names.includes('github_repo_get'), 'the long-form primary must be REMOVED once its unambiguous alias is confirmed -- not left as a duplicate');
+  assert.deepEqual(names, ['repo_get'], 'exactly one advertised name for this tool, not a long+short pair');
 });
 
-test('a depot_* tool also registers under its stripped bare-suffix alias, once finalized (inside an M365 request)', () => {
+test('a depot_* tool also registers under its stripped bare-suffix alias, once finalized (inside an M365 request) -- and the now-redundant long-form primary is REMOVED (2026-08-02 dedup fix)', () => {
   const { server, names } = fakeServer();
   withM365('cto', () => {
     registerTool(server, fakeDef('depot_run_list'), hashProvider);
     finalizeM365Aliases(server, hashProvider);
   });
-  assert.ok(names.includes('depot_run_list'));
   assert.ok(names.includes('run_list'));
+  assert.ok(!names.includes('depot_run_list'), 'the long-form primary must be REMOVED once its unambiguous alias is confirmed');
+  assert.deepEqual(names, ['run_list']);
 });
 
 test('an alias does NOT exist before finalizeM365Aliases() is called -- collection alone is not enough', () => {
@@ -116,24 +134,26 @@ test('an alias does NOT exist before finalizeM365Aliases() is called -- collecti
 
 // The two REAL production failures this widening fixes (Matt's 2026-07-28 Developer-agent
 // diagnostic run against live M365 Copilot).
-test('catalog_probe also registers under its stripped alias "probe" (the exact call Copilot made in production)', () => {
+test('catalog_probe also registers under its stripped alias "probe" (the exact call Copilot made in production) -- long-form primary REMOVED (2026-08-02 dedup fix)', () => {
   const { server, names } = fakeServer();
   withM365('developer', () => {
     registerTool(server, fakeDef('catalog_probe'), hashProvider);
     finalizeM365Aliases(server, hashProvider);
   });
-  assert.ok(names.includes('catalog_probe'));
   assert.ok(names.includes('probe'));
+  assert.ok(!names.includes('catalog_probe'), 'the long-form primary must be REMOVED once its unambiguous alias is confirmed');
+  assert.deepEqual(names, ['probe']);
 });
 
-test('developer_wake_lite also registers under its stripped alias "wake_lite" (the exact call Copilot made in production)', () => {
+test('developer_wake_lite also registers under its stripped alias "wake_lite" (the exact call Copilot made in production) -- long-form primary REMOVED (2026-08-02 dedup fix)', () => {
   const { server, names } = fakeServer();
   withM365('developer', () => {
     registerTool(server, fakeDef('developer_wake_lite'), hashProvider);
     finalizeM365Aliases(server, hashProvider);
   });
-  assert.ok(names.includes('developer_wake_lite'));
   assert.ok(names.includes('wake_lite'));
+  assert.ok(!names.includes('developer_wake_lite'), 'the long-form primary must be REMOVED once its unambiguous alias is confirmed');
+  assert.deepEqual(names, ['wake_lite']);
 });
 
 test('a tool with no underscore at all (e.g. "wake" or "checkpoint") never gets a stripped alias -- nothing to strip', () => {
@@ -278,8 +298,10 @@ test('alias registration never recurses more than one level deep (isAlias guard)
     registerTool(server, fakeDef('github_push_files'), hashProvider);
     finalizeM365Aliases(server, hashProvider);
   });
-  // Exactly two registrations: the full name and its single stripped alias -- not three or more.
-  assert.deepEqual(names.sort(), ['github_push_files', 'push_files'].sort());
+  // Exactly ONE registration survives (2026-08-02 dedup fix removed the long-form primary): the
+  // single stripped alias, not the alias PLUS a second-level alias of the alias, and not the
+  // long+short pair either.
+  assert.deepEqual(names, ['push_files']);
 });
 
 test('finalizeM365Aliases() is a safe no-op when called with no prior candidates', () => {
