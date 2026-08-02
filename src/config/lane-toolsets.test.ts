@@ -37,9 +37,21 @@ test('isToolInLaneAllowlist: exact-name match', () => {
 });
 
 test('isToolInLaneAllowlist: prefix* match', () => {
-  assert.equal(isToolInLaneAllowlist('cto', 'azure_jobs_list'), true);
-  assert.equal(isToolInLaneAllowlist('cto', 'azure_anything_else_entirely'), true);
   assert.equal(isToolInLaneAllowlist('developer', 'github_create_branch'), true);
+  // exec still carries the broad CTO_INFRA wildcards (unaffected by the 2026-08-02 M365 curation
+  // fix -- see LANE_TOOLSETS's cto/cro doc comments), so it is the right lane to prove a genuine
+  // prefix* match still works.
+  assert.equal(isToolInLaneAllowlist('exec', 'azure_jobs_list'), true);
+  assert.equal(isToolInLaneAllowlist('exec', 'azure_anything_else_entirely'), true);
+});
+
+test('isToolInLaneAllowlist: cto (2026-08-02 onward) is an explicit curated list, not a wildcard -- a literal seed member matches, an arbitrary same-service name does not', () => {
+  // CTO_M365_CURATED replaced the old azure_*/github_*/... wildcards for cto specifically (root cause:
+  // those wildcards admitted 99% of the whole catalog, defeating M365 curation -- see LANE_TOOLSETS's
+  // cto entry doc comment). 'azure_jobs_list' is a real member of the curated list; an unrelated,
+  // made-up azure_* name is correctly NOT admitted anymore.
+  assert.equal(isToolInLaneAllowlist('cto', 'azure_jobs_list'), true);
+  assert.equal(isToolInLaneAllowlist('cto', 'azure_anything_else_entirely'), false);
 });
 
 test('isToolInLaneAllowlist: a tool outside the lane list is rejected', () => {
