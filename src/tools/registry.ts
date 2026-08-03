@@ -100,6 +100,13 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
   'retrieval_feedback',
   'llm_azure', 'catalog_list_tools', 'catalog_master', 'gateway_fetch_result',
+  // catalog_probe (2026-08-03): a diagnostic tool built specifically to answer "what caller_agent/
+  // connector_surface/m365_static_auth did THIS request actually resolve to" -- exactly the question
+  // needed to root-cause a connector showing an unexpectedly narrow toolset -- was itself never added
+  // to this allowlist, so it was invisible to every connector-surface caller including the ones it
+  // exists to diagnose (the same class of omission as developer_wake_lite, 2026-08-02). Read-only, no
+  // role gate (catalog/governance.ts), no secrets in its output; safe on every ship lane.
+  'catalog_probe',
   'task_list', 'task_get', 'task_create', 'task_claim', 'task_update', 'task_complete', 'task_heartbeat', 'inbox_read', 'agent_dispatch',
   'posthog_query_hogql', 'posthog_insight_list',
   'github_get_file_contents', 'github_list_pull_requests', 'github_issue_list', 'sentry_list_issues',
