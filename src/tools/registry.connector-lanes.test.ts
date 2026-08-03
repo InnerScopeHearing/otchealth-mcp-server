@@ -65,6 +65,12 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   for (const xeroTool of ['xero_gl_assemble', 'xero_connections']) {
     assert.ok(set.has(xeroTool), `ship lane must expose ${xeroTool} (the CFO GL-assembly gap)`);
   }
+  // Regression guard (2026-08-03): catalog_probe -- the diagnostic tool that reports THIS request's
+  // caller_agent/is_connector_surface/is_m365_static_auth -- was itself never added to this ship set,
+  // so it was invisible to every connector-surface caller, including the ones a CLO/CPO/CCO connector
+  // showing an unexpectedly narrow toolset most needed it for. Same omission class as
+  // developer_wake_lite (2026-08-02) and xero_attachment_upload (2026-07-30).
+  assert.ok(set.has('catalog_probe'), 'ship lane must expose catalog_probe so a stuck connector can self-diagnose its own auth context');
 });
 
 test('(b) developer lane gets the full ship-lane set', () => {
