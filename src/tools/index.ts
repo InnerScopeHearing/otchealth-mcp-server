@@ -868,6 +868,9 @@ import { registerGraphReplyEmail } from './graph/reply-email.js';
 import { registerLegalBlobList } from './legal/blob-list.js';
 import { registerLegalBlobGet } from './legal/blob-get.js';
 import { registerLegalBlobPut } from './legal/blob-put.js';
+import { registerLegalBlobMove } from './legal/blob-move.js';
+import { registerLegalBlobCopy } from './legal/blob-copy.js';
+import { registerLegalBlobDelete } from './legal/blob-delete.js';
 import { registerGraphDriveList } from './graph-drive/list.js';
 import { registerGraphDriveDownload } from './graph-drive/download.js';
 import { registerGraphDriveUpload } from './graph-drive/upload.js';
@@ -1090,6 +1093,12 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerLegalBlobList(server, callerHash);
   registerLegalBlobGet(server, callerHash);
   registerLegalBlobPut(server, callerHash);
+  // legal_blob_move/copy/delete (2026-08-04, CLO brief §1): the store previously had create +
+  // overwrite only, no way to delete/move/copy/rename. delete is a SOFT delete (move to _TRASH/),
+  // never a hard delete of the only copy -- see blob-delete.ts's header.
+  registerLegalBlobMove(server, callerHash);
+  registerLegalBlobCopy(server, callerHash);
+  registerLegalBlobDelete(server, callerHash);
   registerGraphDriveList(server, callerHash);
   registerGraphDriveDownload(server, callerHash);
   registerGraphDriveUpload(server, callerHash);

@@ -286,6 +286,93 @@ export async function putBlob(
   return { path, container, bytes: buf.length, contentType: ct };
 }
 
+/**
+ * Server-side Copy Blob (2026-08-04, CLO brief §1 — the store had create + overwrite but no way to
+ * move, copy, rename, or delete a blob at all). Azure Blob has no native rename/move op; both are
+ * built from this copy primitive + deleteBlobHard below (copy-verify-then-delete-original).
+ *
+ * Same-account, same-key copy: the destination PUT carries `x-ms-copy-source` (the source blob's
+ * full URL) and Azure reads the source using the SAME SharedKey principal making the request — no
+ * separate source auth needed. Azure Copy Blob can be asynchronous for large blobs; this polls
+ * `x-ms-copy-status` via HEAD on the destination (bounded, since these are legal documents in the
+ * KB range, not multi-GB files) rather than assuming synchronous completion.
+ */
+export async function copyBlob(
+  container: LegalContainer,
+  srcPath: string,
+  dstPath: string,
+  overwrite = false,
+): Promise<{ bytes: number; copyStatus: string }> {
+  const c = creds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
+  const sourceUrl = `https://${c.account}.blob.core.windows.net/${container}/${encPath(srcPath)}`;
+  const xms: Record<string, string> = {
+    'x-ms-copy-source': sourceUrl,
+    'x-ms-date': new Date().toUTCString(),
+    'x-ms-version': AVER,
+  };
+  const ifNoneMatch = overwrite ? '' : '*';
+  const auth = azSig(c.account, c.key, 'PUT', container, encPath(dstPath), xms, null, '', '', ifNoneMatch);
+  const headers: Record<string, string> = { ...xms, Authorization: auth };
+  if (!overwrite) headers['If-None-Match'] = ifNoneMatch;
+  const r = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(dstPath)}`, {
+    method: 'PUT',
+    headers,
+  });
+  if (r.status === 404) {
+    throw new Error(`legal blob copy: source ${container}/${srcPath} not found.`);
+  }
+  if (r.status === 409 || r.status === 412) {
+    throw new Error(
+      `legal blob copy refused: a blob already exists at ${container}/${dstPath} (HTTP ${r.status}). ` +
+        `Pass overwrite=true to intentionally replace it.`,
+    );
+  }
+  if (!r.ok) throw new Error(`legal blob copy ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  let copyStatus = r.headers.get('x-ms-copy-status') || 'success';
+
+  // Bounded poll if Azure started an async copy (rare for small legal documents, but handle it).
+  const deadline = Date.now() + 20_000;
+  while (copyStatus === 'pending' && Date.now() < deadline) {
+    await new Promise((res) => setTimeout(res, 500));
+    const hxms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
+    const hauth = azSig(c.account, c.key, 'HEAD', container, encPath(dstPath), hxms, null, '', '');
+    const hr = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(dstPath)}`, {
+      method: 'HEAD',
+      headers: { ...hxms, Authorization: hauth },
+    });
+    copyStatus = hr.headers.get('x-ms-copy-status') || copyStatus;
+  }
+  if (copyStatus !== 'success') {
+    throw new Error(`legal blob copy did not complete (status=${copyStatus}) within 20s for ${container}/${dstPath}.`);
+  }
+
+  const sizeHeader = r.headers.get('content-length');
+  return { bytes: sizeHeader ? Number.parseInt(sizeHeader, 10) : 0, copyStatus };
+}
+
+/**
+ * Hard DELETE of a blob. LOW-LEVEL primitive only — never call this directly from a tool handler
+ * for a caller-initiated delete. The tool layer (legal-blob-delete.ts) always copies to
+ * `_TRASH/<original-path>` FIRST and verifies the copy landed before calling this to remove the
+ * original, so a caller-facing "delete" is a soft, recoverable move, never a direct hard delete of
+ * the only copy. This primitive exists so that move-to-trash flow (and legal_blob_move, which is
+ * copy-then-remove-original between two arbitrary paths) has something to call once the copy is
+ * verified.
+ */
+export async function deleteBlobHard(container: LegalContainer, path: string): Promise<void> {
+  const c = creds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
+  const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
+  const auth = azSig(c.account, c.key, 'DELETE', container, encPath(path), xms, null, '', '');
+  const r = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(path)}`, {
+    method: 'DELETE',
+    headers: { ...xms, Authorization: auth },
+  });
+  if (r.status === 404) return; // already gone; treat as success (idempotent)
+  if (!r.ok) throw new Error(`legal blob delete ${r.status}: ${(await r.text()).slice(0, 200)}`);
+}
+
 export interface BlobPutRawResult {
   path: string;
   container: string;

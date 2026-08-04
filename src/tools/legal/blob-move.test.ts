@@ -1,0 +1,166 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+// Same env preamble as graph-drive/upload.test.ts, plus the legal-store credentials so
+// isConfigured() is true and the real (non-"unconfigured") code paths run.
+process.env.CIO_SITE_ID ||= 'test';
+process.env.CIO_TRACK_KEY ||= 'test';
+process.env.CIO_APP_API_BEARER ||= 'test';
+process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
+process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
+process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
+process.env.AZURE_LEGAL_STORAGE_ACCOUNT ||= 'otchealthlegalstore';
+process.env.AZURE_LEGAL_STORAGE_KEY ||= Buffer.from('unit-test-key-not-real').toString('base64');
+
+const { handleLegalBlobMove } = await import('./blob-move.js');
+
+function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = stub;
+  return run().finally(() => {
+    globalThis.fetch = original;
+  });
+}
+
+/** Fails loudly if ANY network call happens -- proves a refusal short-circuited before Azure was touched. */
+const NETWORK_FORBIDDEN: typeof fetch = (async (url: string | URL) => {
+  throw new Error(`UNEXPECTED network call to ${String(url)} -- should have refused before Azure was reached`);
+}) as typeof fetch;
+
+function fakeCtx(callerAgent: string, dryRun = false) {
+  return { correlationId: 'test-corr', callerHash: 'test-hash', dryRun, acknowledgeWarning: false, callerAgent };
+}
+
+test('forbidden_ring: a non-clo-personal caller is refused before any network call', async () => {
+  const res = await withStubbedFetch(NETWORK_FORBIDDEN, () =>
+    handleLegalBlobMove({ container: 'personal', src_path: 'a.pdf', dst_path: 'b.pdf' }, fakeCtx('cfo')),
+  );
+  assert.equal((res.data as any).error, 'forbidden_ring');
+});
+
+test('protected_prefix: src_path under filings/ is refused before any network call, even for an allowed lane', async () => {
+  const res = await withStubbedFetch(NETWORK_FORBIDDEN, () =>
+    handleLegalBlobMove({ container: 'personal', src_path: 'filings/2026/petition.pdf', dst_path: 'archive/petition.pdf' }, fakeCtx('clo-personal')),
+  );
+  assert.equal((res.data as any).error, 'protected_prefix');
+});
+
+test('invalid_input: identical src_path and dst_path refused before any network call', async () => {
+  const res = await withStubbedFetch(NETWORK_FORBIDDEN, () =>
+    handleLegalBlobMove({ container: 'personal', src_path: 'same.pdf', dst_path: 'same.pdf' }, fakeCtx('clo-personal')),
+  );
+  assert.equal((res.data as any).error, 'invalid_input');
+});
+
+test('src_not_found: refuses when the source blob does not exist (HEAD 404 on src, HEAD 404 on dst)', async () => {
+  const stub: typeof fetch = (async (url: string | URL, init?: RequestInit) => {
+    if (init?.method === 'HEAD') return new Response(null, { status: 404 });
+    throw new Error(`unexpected call ${init?.method} ${String(url)}`);
+  }) as typeof fetch;
+  const res = await withStubbedFetch(stub, () =>
+    handleLegalBlobMove({ container: 'personal', src_path: 'ghost.pdf', dst_path: 'elsewhere.pdf' }, fakeCtx('clo-personal')),
+  );
+  assert.equal((res.data as any).error, 'src_not_found');
+});
+
+test('dst_exists_no_overwrite: refuses when destination exists and overwrite is not set, WITHOUT ever copying or deleting', async () => {
+  const calls: string[] = [];
+  const stub: typeof fetch = (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    calls.push(`${init?.method} ${u}`);
+    if (init?.method === 'HEAD') {
+      // both src and dst exist
+      return new Response(null, { status: 200 });
+    }
+    throw new Error(`unexpected non-HEAD call: ${init?.method} ${u}`);
+  }) as typeof fetch;
+  const res = await withStubbedFetch(stub, () =>
+    handleLegalBlobMove({ container: 'personal', src_path: 'a.pdf', dst_path: 'b.pdf' }, fakeCtx('clo-personal')),
+  );
+  assert.equal((res.data as any).error, 'dst_exists_no_overwrite');
+  assert.ok(calls.every((c) => c.startsWith('HEAD')), 'only HEAD checks should have run, no PUT/DELETE');
+});
+
+test('dry_run (default): reports the plan without ever calling PUT (copy) or DELETE', async () => {
+  const calls: string[] = [];
+  const stub: typeof fetch = (async (url: string | URL, init?: RequestInit) => {
+    calls.push(init?.method || 'GET');
+    if (init?.method === 'HEAD') return new Response(null, { status: 404 }); // dst doesn't exist; src existence checked separately below
+    throw new Error(`unexpected call in dry_run: ${init?.method}`);
+  }) as typeof fetch;
+  // src exists (first HEAD -> 200), dst doesn't (second HEAD -> 404): simulate via a counter.
+  let n = 0;
+  const stub2: typeof fetch = (async (_url: string | URL, init?: RequestInit) => {
+    n += 1;
+    calls.push(init?.method || 'GET');
+    if (init?.method === 'HEAD') return new Response(null, { status: n === 1 ? 200 : 404 });
+    throw new Error('unexpected non-HEAD call in dry_run');
+  }) as typeof fetch;
+  const res = await withStubbedFetch(stub2, () =>
+    handleLegalBlobMove({ container: 'personal', src_path: 'a.pdf', dst_path: 'b.pdf' }, fakeCtx('clo-personal', true)),
+  );
+  assert.equal((res.data as any).dry_run, true);
+  assert.equal((res.data as any).executed, false);
+  assert.ok(!calls.includes('PUT') && !calls.includes('DELETE'), 'dry_run must never PUT or DELETE');
+});
+
+test('successful move: copies (PUT with x-ms-copy-source) THEN deletes the original, in that order', async () => {
+  const order: string[] = [];
+  let headCount = 0;
+  const stub: typeof fetch = (async (url: string | URL, init?: RequestInit) => {
+    const method = init?.method || 'GET';
+    const u = String(url);
+    if (method === 'HEAD') {
+      headCount += 1;
+      order.push('HEAD');
+      // 1st HEAD = src exists check (200), 2nd HEAD = dst exists check (404)
+      return new Response(null, { status: headCount === 1 ? 200 : 404 });
+    }
+    if (method === 'PUT') {
+      order.push('PUT');
+      assert.ok((init?.headers as Record<string, string>)['x-ms-copy-source'], 'PUT must carry x-ms-copy-source for a server-side copy');
+      return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success', 'content-length': '1234' } });
+    }
+    if (method === 'DELETE') {
+      order.push('DELETE');
+      return new Response(null, { status: 202 });
+    }
+    throw new Error(`unexpected method ${method} to ${u}`);
+  }) as typeof fetch;
+
+  const res = await withStubbedFetch(stub, () =>
+    handleLegalBlobMove({ container: 'personal', src_path: 'a.pdf', dst_path: 'b.pdf' }, fakeCtx('clo-personal', false)),
+  );
+  assert.equal((res.data as any).executed, true);
+  assert.equal((res.data as any).bytes, 1234);
+  const putIdx = order.indexOf('PUT');
+  const delIdx = order.indexOf('DELETE');
+  assert.ok(putIdx >= 0 && delIdx >= 0 && putIdx < delIdx, `PUT (copy) must happen strictly before DELETE (remove original); order was ${order.join(',')}`);
+});
+
+test('a failed copy NEVER deletes the original (DELETE must not be called if PUT fails)', async () => {
+  const order: string[] = [];
+  let headCount = 0;
+  const stub: typeof fetch = (async (_url: string | URL, init?: RequestInit) => {
+    const method = init?.method || 'GET';
+    if (method === 'HEAD') {
+      headCount += 1;
+      order.push('HEAD');
+      return new Response(null, { status: headCount === 1 ? 200 : 404 });
+    }
+    if (method === 'PUT') {
+      order.push('PUT');
+      return new Response('server error', { status: 500 });
+    }
+    if (method === 'DELETE') {
+      order.push('DELETE');
+      throw new Error('DELETE must never be called when the copy failed');
+    }
+    throw new Error(`unexpected method ${method}`);
+  }) as typeof fetch;
+
+  await assert.rejects(() =>
+    withStubbedFetch(stub, () => handleLegalBlobMove({ container: 'personal', src_path: 'a.pdf', dst_path: 'b.pdf' }, fakeCtx('clo-personal', false))),
+  );
+  assert.ok(!order.includes('DELETE'), 'DELETE must not have been called after a failed copy');
+});

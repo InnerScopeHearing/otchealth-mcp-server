@@ -346,6 +346,16 @@ const EnvSchema = z.object({
   // result rather than throwing. The account defaults to otchealthlegalstore (as in the skill).
   AZURE_LEGAL_STORAGE_ACCOUNT: z.string().optional().default('otchealthlegalstore'),
   AZURE_LEGAL_STORAGE_KEY: z.string().optional().default(''),
+  // Protected prefixes for legal_blob_delete/legal_blob_move (2026-08-04, CLO brief §1): a delete
+  // or a move-away-from-here is refused outright, regardless of caller/dry_run, when the SOURCE
+  // path falls under one of these prefixes. The court-download folder and any raw filings tree are
+  // evidence and stay append-only no matter what any agent asks -- this is a second, independent
+  // control from the soft-delete-to-_TRASH mechanism (both must be defeated to lose a document).
+  // Prefix match is case-sensitive (Azure blob names are case-sensitive); CSV, env-overridable.
+  LEGAL_PROTECTED_PREFIXES: z
+    .string()
+    .optional()
+    .default('clo-outgoing/Divorce Case Summary and ALL Filings/,filings/'),
 
   // Finance dataroom store (the CFO source-docs blobs behind the finance-* AI Search rooms, account
   // otchealthcfodata). Powers kb_get_document — ring-gated WHOLE-document retrieval (search returns
