@@ -448,6 +448,29 @@ test('deindexChunkedPathWithAuth: a deadline that has already passed reports tru
   assert.match(result.reason ?? '', /deadline exceeded/);
 });
 
+test('deindexChunkedPathWithAuth: a search response whose HEADERS arrive but whose BODY never finishes streaming is bounded by deadlineAtMs, not fetchWithBudget\'s own separate internal timeout (2026-08-04, Copilot review PR #192 round 10)', async () => {
+  // fetch() resolves once headers arrive, not once the body is fully received -- racing only
+  // doSearch(...) (as earlier rounds already did) leaves a stalled BODY read ungoverned by
+  // deadlineAtMs, bounded instead by fetchWithBudget's own internal DEINDEX_CALL_TIMEOUT_MS (3000ms
+  // per call), a separate clock that ignores however little of the caller's own deadline remains. A
+  // ReadableStream that never enqueues or closes simulates exactly that: a real Response object
+  // (so fetch() itself resolves immediately) whose .json() read hangs forever.
+  const hangingBody = new ReadableStream({ start() {} });
+  const started = Date.now();
+  const result = await withStubbedFetch(
+    fullChainStub(
+      () => new Response(hangingBody, { status: 200, headers: { 'content-type': 'application/json' } }),
+      () => { throw new Error('must never reach delete when the search response body never finished'); },
+    ),
+    () => deindexChunkedPathWithAuth(DIRECT_AUTH, 'legal-personal', 'stalled-body/doc.pdf', Date.now() + 500),
+  );
+  const elapsedMs = Date.now() - started;
+  assert.ok(elapsedMs < 2500, `must be bounded by the short ~500ms deadlineAtMs, not fetchWithBudget's own longer 3000ms internal timeout; took ${elapsedMs}ms`);
+  assert.equal(result.deleted, 0);
+  assert.equal(result.truncated, true);
+  assert.match(result.reason ?? '', /deadline exceeded while reading a search response body/);
+});
+
 test('deindexChunkedPath (one-shot): prepareDeindexAuth\'s own short internal deadline bounds a hung identity mint (fires well before the outer 10s deadline)', async () => {
   const started = Date.now();
   const result = await withStubbedFetch(

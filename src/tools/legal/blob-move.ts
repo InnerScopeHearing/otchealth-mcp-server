@@ -46,6 +46,13 @@ export type LegalBlobMoveInput = z.infer<z.ZodObject<typeof legalBlobMoveInputSh
  * that never reaches copyStatus=success) -- a failed copy always leaves the original intact.
  */
 export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolContext): Promise<ToolResultPayload> {
+  // Captured at the very top, before ANY I/O (2026-08-04, Copilot review PR #192 round 10): this
+  // clock feeds effectiveOneShotDeindexBudgetMs below, and it must reflect the WHOLE handler's
+  // elapsed time, not just the copy+delete steps. The earlier placement (right before copyBlob)
+  // excluded the src/dst preflight (headBlob + blobExists, an unbounded Promise.all) -- if THAT
+  // preflight ran long, moveElapsedMs would still look small and grant deindex the full budget,
+  // right when the least transport-timeout margin actually remained.
+  const moveOpsStartedAt = Date.now();
   const container = input.container;
   const caller = ctx.callerAgent || '';
   const lanes = lanesForContainer(container);
@@ -85,7 +92,6 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   // version just observed above, so a concurrent overwrite of the source between this HEAD and the
   // delete fails the move closed instead of deleting a version that was never actually copied
   // (2026-08-04, PR #190 review).
-  const moveOpsStartedAt = Date.now();
   const copy = await copyBlob(container, input.src_path, input.dst_path, overwrite, src.etag ?? undefined);
   await deleteBlobHard(container, input.src_path, src.etag ?? undefined);
 

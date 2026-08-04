@@ -305,6 +305,18 @@ function DEINDEX_TIMEOUT_RESPONSE(): Response {
   return new Response('deadline exceeded while a request was in flight', { status: 599 });
 }
 
+/** Distinguishes "the response body read itself timed out" from a genuinely empty/parsed body
+ *  (2026-08-04, Copilot review PR #192 round 10): `fetch()` resolves once HEADERS arrive, not once
+ *  the body is fully received, so racing `doSearch(...)` against `deadlineAtMs` only bounds time
+ *  until headers land -- a connection that sends headers and then stalls the body could let the
+ *  later, unguarded `await r.json()` run for up to `fetchWithBudget`'s own internal
+ *  DEINDEX_CALL_TIMEOUT_MS, a SEPARATE clock unrelated to however little of the caller's
+ *  `deadlineAtMs` remains. Racing the json() read too closes that gap. A plain `undefined` fallback
+ *  would be indistinguishable from Azure genuinely returning no `value`/`@odata.count` fields (which
+ *  the exhaustion check would misread as an empty, exhausted page); a unique Symbol cannot collide
+ *  with any real parsed JSON value. */
+const DEINDEX_JSON_TIMEOUT = Symbol('deindex-json-timeout');
+
 /** Delete one page of chunk ids. Never throws -- returns `{deleted, reason}` on any failure. */
 async function deleteChunkPage(auth: DeindexAuth, index: string, chunkIds: string[]): Promise<{ deleted: number; reason?: string }> {
   if (chunkIds.length === 0) return { deleted: 0 };
@@ -427,7 +439,28 @@ async function findAllChunkIds(
     let raw: Array<Record<string, unknown>>;
     let odataCount: number | null = null;
     try {
-      const j = (await r.json()) as { value?: Array<Record<string, unknown>>; '@odata.count'?: number };
+      // Races the BODY read too, not just the headers-only fetch above (2026-08-04, Copilot review
+      // PR #192 round 10): see DEINDEX_JSON_TIMEOUT's own doc comment for why a stalled body would
+      // otherwise escape `deadlineAtMs` entirely.
+      const j = await withDeadline<{ value?: Array<Record<string, unknown>>; '@odata.count'?: number } | typeof DEINDEX_JSON_TIMEOUT>(
+        r.json() as Promise<{ value?: Array<Record<string, unknown>>; '@odata.count'?: number }>,
+        deadlineAtMs,
+        DEINDEX_JSON_TIMEOUT,
+      );
+      if (j === DEINDEX_JSON_TIMEOUT) {
+        // ranAtAll:TRUE here, unlike the sibling early-return branches above (a thrown network
+        // error or a non-ok status at page 0, which DO signal "the primary $filter approach itself
+        // may be unsupported, try the fallback keyword query"). A stalled BODY read follows a
+        // genuine 2xx response -- Azure accepted and is answering the query, the connection is just
+        // slow to finish delivering it. That has nothing to do with whether $filter is supported,
+        // and a body-stall is if anything MORE likely to recur on a differently-shaped fallback
+        // query against the same slow connection, not less -- so falling back here would waste the
+        // caller's remaining deadline on a near-certain repeat rather than reporting incomplete
+        // promptly (caught by this file's own test suite: an earlier `page > 0` version here
+        // triggered exactly that wasted fallback attempt, which then hit the outer per-page deadline
+        // check instead of this reason once real elapsed time had already exceeded deadlineAtMs).
+        return { ranAtAll: true, ids: [...seenIds], exhausted: false, reason: 'deadline exceeded while reading a search response body' };
+      }
       raw = j.value || [];
       odataCount = typeof j['@odata.count'] === 'number' ? j['@odata.count'] : null;
     } catch (e) {
