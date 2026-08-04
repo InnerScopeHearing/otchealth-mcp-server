@@ -41,15 +41,19 @@ test('copy does NOT check protected prefixes -- a copy FROM a protected src is a
     const method = init?.method || 'GET';
     if (method === 'HEAD') {
       headCount += 1;
-      return new Response(null, { status: headCount === 1 ? 200 : 404 });
+      // 1: src exists, 2: dst doesn't, 3: post-copy byte-count HEAD.
+      if (headCount === 1) return new Response(null, { status: 200 });
+      if (headCount === 2) return new Response(null, { status: 404 });
+      return new Response(null, { status: 200, headers: { 'content-length': '99' } });
     }
-    if (method === 'PUT') return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success', 'content-length': '99' } });
+    if (method === 'PUT') return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success' } });
     throw new Error(`unexpected ${method}`);
   }) as typeof fetch;
   const res = await withStubbedFetch(stub, () =>
     handleLegalBlobCopy({ container: 'personal', src_path: 'filings/2026/petition.pdf', dst_path: 'organized/petition.pdf' }, fakeCtx('clo-personal', false)),
   );
   assert.equal((res.data as any).executed, true);
+  assert.equal((res.data as any).bytes, 99);
 });
 
 test('dst_exists_no_overwrite: refuses without ever calling PUT', async () => {
@@ -63,7 +67,7 @@ test('dst_exists_no_overwrite: refuses without ever calling PUT', async () => {
   assert.equal((res.data as any).error, 'dst_exists_no_overwrite');
 });
 
-test('successful copy: original is never touched with DELETE', async () => {
+test('successful copy: original is never touched with DELETE, and the copy PUT is pinned to the source ETag', async () => {
   let headCount = 0;
   const calls: string[] = [];
   const stub: typeof fetch = (async (_url, init?: RequestInit) => {
@@ -71,9 +75,14 @@ test('successful copy: original is never touched with DELETE', async () => {
     calls.push(method);
     if (method === 'HEAD') {
       headCount += 1;
-      return new Response(null, { status: headCount === 1 ? 200 : 404 });
+      if (headCount === 1) return new Response(null, { status: 200, headers: { etag: '"v1"' } });
+      if (headCount === 2) return new Response(null, { status: 404 });
+      return new Response(null, { status: 200, headers: { 'content-length': '42' } });
     }
-    if (method === 'PUT') return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success', 'content-length': '42' } });
+    if (method === 'PUT') {
+      assert.equal((init?.headers as Record<string, string>)['x-ms-source-if-match'], '"v1"');
+      return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success' } });
+    }
     if (method === 'DELETE') throw new Error('legal_blob_copy must NEVER call DELETE');
     throw new Error(`unexpected ${method}`);
   }) as typeof fetch;

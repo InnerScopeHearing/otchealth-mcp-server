@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { isConfigured, blobExists, copyBlob, deleteBlobHard } from '../../legal/blob-store.js';
+import { isConfigured, headBlob, blobExists, copyBlob, deleteBlobHard } from '../../legal/blob-store.js';
 import { isLegalContainerAllowed, lanesForContainer, isProtectedPath } from './ring.js';
 
 export const legalBlobMoveInputShape = {
@@ -52,8 +52,8 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
     return { data: { ...base, error: 'invalid_input' }, summary: 'src_path and dst_path are identical; nothing to move.' };
   }
 
-  const [srcExists, dstExists] = await Promise.all([blobExists(container, input.src_path), blobExists(container, input.dst_path)]);
-  if (!srcExists) {
+  const [src, dstExists] = await Promise.all([headBlob(container, input.src_path), blobExists(container, input.dst_path)]);
+  if (!src.exists) {
     return { data: { ...base, error: 'src_not_found' }, summary: `Refused: no blob at legal/${container}/${input.src_path}.` };
   }
   const overwrite = input.overwrite === true;
@@ -64,13 +64,17 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   if (ctx.dryRun) {
     return {
       data: { ...base, dry_run: true },
-      audit: { before: { srcExists, dstExists }, after: { container, src_path: input.src_path, dst_path: input.dst_path } },
+      audit: { before: { srcExists: src.exists, dstExists }, after: { container, src_path: input.src_path, dst_path: input.dst_path } },
       summary: `DRY RUN: would move legal/${container}/${input.src_path} -> ${input.dst_path}${dstExists ? ' (OVERWRITE)' : ''}. Pass dry_run=false to apply.`,
     };
   }
 
-  const copy = await copyBlob(container, input.src_path, input.dst_path, overwrite);
-  await deleteBlobHard(container, input.src_path);
+  // src.etag pins BOTH the copy (x-ms-source-if-match) and the delete (If-Match) to the exact
+  // version just observed above, so a concurrent overwrite of the source between this HEAD and the
+  // delete fails the move closed instead of deleting a version that was never actually copied
+  // (2026-08-04, PR #190 review).
+  const copy = await copyBlob(container, input.src_path, input.dst_path, overwrite, src.etag ?? undefined);
+  await deleteBlobHard(container, input.src_path, src.etag ?? undefined);
 
   return {
     data: { ...base, executed: true, dry_run: false, bytes: copy.bytes },
@@ -90,7 +94,9 @@ export function registerLegalBlobMove(server: McpServer, callerHash: CallerHashP
         description:
           'Move a blob from src_path to dst_path within the same container (copy-then-remove-original; Azure Blob has no native rename). FAIL-CLOSED: refuses if dst_path already exists unless overwrite=true, and refuses outright if src_path falls under a protected prefix (LEGAL_PROTECTED_PREFIXES -- the court-download folder and raw filings stay append-only regardless of caller). The original is removed ONLY after the copy to dst_path is verified to have landed. RING-GATED identically to legal_blob_put. Defaults to dry_run.',
         readOnlyHint: false,
-        destructiveHint: false,
+        // A move removes src_path (and can overwrite dst_path) -- destructiveHint:false ("additive
+        // only" under MCP annotation semantics) misdescribed this operation (2026-08-04, PR #190 review).
+        destructiveHint: true,
         idempotentHint: false,
         openWorldHint: false,
       },

@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { isConfigured, blobExists, copyBlob, deleteBlobHard, listBlobs } from '../../legal/blob-store.js';
+import { isConfigured, headBlob, blobExists, copyBlob, deleteBlobHard, listBlobs } from '../../legal/blob-store.js';
 import { isLegalContainerAllowed, lanesForContainer, isProtectedPath } from './ring.js';
 
 export const DEFAULT_MAX_ITEMS = 100;
@@ -27,6 +27,8 @@ export const legalBlobDeleteOutputShape = {
   mode: z.enum(['single', 'prefix']).nullable(),
   matched: z.number(),
   moved: z.array(z.object({ from: z.string(), to: z.string() })),
+  /** Items that would (dry_run) or did (a mid-batch stop) collide with an existing _TRASH/ path. */
+  collisions: z.array(z.object({ from: z.string(), to: z.string() })),
   error: z.string().optional(),
 } satisfies ZodRawShape;
 
@@ -40,11 +42,29 @@ export type LegalBlobDeleteInput = z.infer<z.ZodObject<typeof legalBlobDeleteInp
  * bounded+non-silent bulk mode, sequential execution with a clear stop-and-report on any mid-batch
  * collision.
  */
+interface DeleteItem {
+  from: string;
+  to: string;
+  /** Source ETag observed when this item's candidacy was resolved (headBlob for single mode,
+   *  Azure's List Blobs <Etag> for bulk mode) -- pins the copy + the original's delete to this
+   *  exact version so a concurrent overwrite between resolution and execution fails closed rather
+   *  than deleting a version that was never actually copied to _TRASH/ (2026-08-04, PR #190 review). */
+  etag: string | null;
+}
+
 export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: ToolContext): Promise<ToolResultPayload> {
   const container = input.container;
   const caller = ctx.callerAgent || '';
   const lanes = lanesForContainer(container);
-  const base = { executed: false, dry_run: ctx.dryRun, container, mode: null as 'single' | 'prefix' | null, matched: 0, moved: [] as Array<{ from: string; to: string }> };
+  const base = {
+    executed: false,
+    dry_run: ctx.dryRun,
+    container,
+    mode: null as 'single' | 'prefix' | null,
+    matched: 0,
+    moved: [] as Array<{ from: string; to: string }>,
+    collisions: [] as Array<{ from: string; to: string }>,
+  };
 
   if (!isLegalContainerAllowed(container, caller)) {
     return { data: { ...base, error: 'forbidden_ring' }, summary: `Refused: deleting from legal container "${container}" requires one of the ${lanes.join('/')} trusted lanes. Your identity: ${caller || '(none)'}.` };
@@ -69,14 +89,24 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
   }
 
   // Resolve the exact set of (path -> trash path) pairs this call would act on.
-  let items: Array<{ from: string; to: string }>;
+  let items: DeleteItem[];
   if (mode === 'single') {
     const path = input.path as string;
-    const exists = await blobExists(container, path);
-    if (!exists) {
+    // Reject BEFORE checking existence: re-trashing an already-trashed path (_TRASH/x ->
+    // _TRASH/_TRASH/x) breaks the recovery invariant bulk mode already enforces via its
+    // "!b.name.startsWith('_TRASH/')" filter below -- single mode had no equivalent guard
+    // (2026-08-04, PR #190 review).
+    if (path.startsWith('_TRASH/')) {
+      return {
+        data: { ...base, mode, error: 'already_trashed' },
+        summary: `Refused: "${path}" is already under _TRASH/ -- soft-deleting it again would nest it as _TRASH/_TRASH/... and break the recovery path. Use legal_blob_move to relocate it out of _TRASH/ first if that is genuinely the intent.`,
+      };
+    }
+    const head = await headBlob(container, path);
+    if (!head.exists) {
       return { data: { ...base, mode, error: 'not_found' }, summary: `Refused: no blob at legal/${container}/${path}.` };
     }
-    items = [{ from: path, to: trashPathFor(path) }];
+    items = [{ from: path, to: trashPathFor(path), etag: head.etag }];
   } else {
     const prefix = input.prefix as string;
     const maxItems = input.max_items ?? DEFAULT_MAX_ITEMS;
@@ -84,6 +114,17 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     // Never touch anything already in _TRASH/ via a prefix sweep -- a broad top-level prefix could
     // otherwise re-trash an already-trashed item.
     const candidates = found.filter((b) => !b.name.startsWith('_TRASH/'));
+    // A bulk prefix can be an ANCESTOR of a protected prefix (e.g. prefix="clo-outgoing/" is not
+    // itself protected, but its candidates can include the protected court-download subtree). Check
+    // every resolved candidate, not just the prefix string itself, and refuse the WHOLE batch (never
+    // a silent partial skip) if any candidate is protected (2026-08-04, PR #190 review).
+    const protectedHit = candidates.find((b) => isProtectedPath(b.name));
+    if (protectedHit) {
+      return {
+        data: { ...base, mode, matched: candidates.length, error: 'protected_prefix' },
+        summary: `Refused: prefix "${prefix}" matches ${candidates.length} blob(s), at least one of which ("${protectedHit.name}") falls under a protected prefix. Nothing was touched -- narrow the prefix to exclude the protected subtree.`,
+      };
+    }
     if (candidates.length > maxItems) {
       return {
         data: { ...base, mode, matched: candidates.length, error: 'too_many_matches' },
@@ -93,14 +134,26 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     if (candidates.length === 0) {
       return { data: { ...base, mode, matched: 0 }, summary: `No blobs matched prefix "${prefix}" (outside _TRASH/). Nothing to do.` };
     }
-    items = candidates.map((b) => ({ from: b.name, to: trashPathFor(b.name) }));
+    items = candidates.map((b) => ({ from: b.name, to: trashPathFor(b.name), etag: b.etag }));
   }
 
   if (ctx.dryRun) {
+    // Preflight the trash-destination collision check even in dry_run: a dry_run that only ever
+    // says "would move" understates what a live call would actually do if a destination already
+    // exists (the live call stops the batch there) -- report the split so "what would move" is
+    // trustworthy on its own, without ever issuing a PUT/DELETE (2026-08-04, PR #190 review).
+    const moved: Array<{ from: string; to: string }> = [];
+    const collisions: Array<{ from: string; to: string }> = [];
+    for (const item of items) {
+      const wouldCollide = await blobExists(container, item.to);
+      (wouldCollide ? collisions : moved).push({ from: item.from, to: item.to });
+    }
     return {
-      data: { ...base, dry_run: true, mode, matched: items.length, moved: items },
+      data: { ...base, dry_run: true, mode, matched: items.length, moved, collisions },
       audit: { before: { matched: items.length }, after: null },
-      summary: `DRY RUN: would soft-delete ${items.length} blob(s) in legal/${container} (move to _TRASH/). Pass dry_run=false to apply.`,
+      summary: collisions.length
+        ? `DRY RUN: would soft-delete ${moved.length}/${items.length} blob(s) in legal/${container} (move to _TRASH/); ${collisions.length} would COLLIDE with an existing _TRASH/ path and would stop a live run at that point (see collisions). Pass dry_run=false to apply.`
+        : `DRY RUN: would soft-delete ${items.length} blob(s) in legal/${container} (move to _TRASH/). Pass dry_run=false to apply.`,
     };
   }
 
@@ -112,13 +165,16 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     const trashExists = await blobExists(container, item.to);
     if (trashExists) {
       return {
-        data: { ...base, mode, matched: items.length, moved, error: 'trash_collision' },
+        // A mid-batch stop after some items already moved is a PARTIAL execution, not "nothing
+        // happened" -- executed reflects whether at least one mutation occurred, not whether the
+        // whole batch finished (2026-08-04, PR #190 review).
+        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, collisions: [{ from: item.from, to: item.to }], error: 'trash_collision' },
         summary: `Stopped after moving ${moved.length}/${items.length}: a blob already exists at the trash destination "${item.to}" (a previous delete of the same path?). Resolve that manually, then re-run for the remaining items.`,
       };
     }
-    await copyBlob(container, item.from, item.to, false);
-    await deleteBlobHard(container, item.from);
-    moved.push(item);
+    await copyBlob(container, item.from, item.to, false, item.etag ?? undefined);
+    await deleteBlobHard(container, item.from, item.etag ?? undefined);
+    moved.push({ from: item.from, to: item.to });
   }
 
   return {
@@ -139,7 +195,10 @@ export function registerLegalBlobDelete(server: McpServer, callerHash: CallerHas
         description:
           `SOFT delete only -- moves the blob(s) to _TRASH/<original-path> within the same container, never a real hard delete. Provide exactly one of "path" (single blob) or "prefix" (bulk, bounded by max_items, default ${DEFAULT_MAX_ITEMS}, hard cap ${HARD_MAX_ITEMS} -- if more blobs match the prefix than max_items, the call REFUSES entirely rather than silently deleting a partial set; narrow the prefix or raise max_items and re-run). "confirm" MUST exactly echo path (or prefix) -- a mismatch refuses, by design a wrong-path delete needs two independent mistakes to happen. Refuses outright if path/prefix falls under a protected prefix (LEGAL_PROTECTED_PREFIXES) -- the court-download folder and raw filings stay append-only no matter what. RING-GATED identically to legal_blob_put. Defaults to dry_run: run it once with dry_run true (the default) to see exactly what would move before passing dry_run=false.`,
         readOnlyHint: false,
-        destructiveHint: false, // soft delete: nothing is destroyed, everything lands in _TRASH/
+        // Soft delete still REMOVES the blob from its original location (recoverability via
+        // _TRASH/ does not make the invocation additive) -- destructiveHint:false understated the
+        // risk and could suppress a client's confirmation UX (2026-08-04, PR #190 review).
+        destructiveHint: true,
         idempotentHint: false,
         openWorldHint: false,
       },

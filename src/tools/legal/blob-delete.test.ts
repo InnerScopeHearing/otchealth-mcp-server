@@ -85,12 +85,17 @@ test('single mode not_found: refuses when the blob does not exist', async () => 
   assert.equal((res.data as any).error, 'not_found');
 });
 
-test('single mode dry_run: reports the plan (moved: [{from,to}]) without any PUT/DELETE', async () => {
+test('single mode dry_run: reports the plan (moved: [{from,to}]) without any PUT/DELETE, and preflights the trash collision', async () => {
   const calls: string[] = [];
+  let headCount = 0;
   const stub: typeof fetch = (async (_url, init?: RequestInit) => {
     const method = init?.method || 'GET';
     calls.push(method);
-    if (method === 'HEAD') return new Response(null, { status: 200 }); // src exists
+    if (method === 'HEAD') {
+      headCount += 1;
+      // 1st HEAD = src exists check, 2nd HEAD = dry-run trash-collision preflight (404 = no collision).
+      return new Response(null, { status: headCount === 1 ? 200 : 404 });
+    }
     throw new Error(`unexpected ${method} in dry_run`);
   }) as typeof fetch;
   const res = await withStubbedFetch(stub, () =>
@@ -98,10 +103,41 @@ test('single mode dry_run: reports the plan (moved: [{from,to}]) without any PUT
   );
   assert.equal((res.data as any).dry_run, true);
   assert.deepEqual((res.data as any).moved, [{ from: 'dupe.pdf', to: '_TRASH/dupe.pdf' }]);
+  assert.deepEqual((res.data as any).collisions, []);
   assert.ok(!calls.includes('PUT') && !calls.includes('DELETE'));
 });
 
-test('single mode success: copies to _TRASH/<path> THEN deletes the original, in that order', async () => {
+test('single mode dry_run: a trash-destination collision is reported in collisions, not moved, and still issues no PUT/DELETE', async () => {
+  const calls: string[] = [];
+  let headCount = 0;
+  const stub: typeof fetch = (async (_url, init?: RequestInit) => {
+    const method = init?.method || 'GET';
+    calls.push(method);
+    if (method === 'HEAD') {
+      headCount += 1;
+      // 1st HEAD = src exists, 2nd HEAD = trash preflight -- COLLIDES this time (200).
+      return new Response(null, { status: 200 });
+    }
+    throw new Error(`unexpected ${method} in dry_run`);
+  }) as typeof fetch;
+  const res = await withStubbedFetch(stub, () =>
+    handleLegalBlobDelete({ container: 'personal', path: 'dupe.pdf', confirm: 'dupe.pdf' }, fakeCtx('clo-personal', true)),
+  );
+  assert.equal((res.data as any).dry_run, true);
+  assert.deepEqual((res.data as any).moved, []);
+  assert.deepEqual((res.data as any).collisions, [{ from: 'dupe.pdf', to: '_TRASH/dupe.pdf' }]);
+  assert.equal(headCount, 2);
+  assert.ok(!calls.includes('PUT') && !calls.includes('DELETE'));
+});
+
+test('single mode: a path already under _TRASH/ is refused (already_trashed) before any network call, even with a correct confirm', async () => {
+  const res = await withStubbedFetch(NETWORK_FORBIDDEN, () =>
+    handleLegalBlobDelete({ container: 'personal', path: '_TRASH/a.pdf', confirm: '_TRASH/a.pdf' }, fakeCtx('clo-personal')),
+  );
+  assert.equal((res.data as any).error, 'already_trashed');
+});
+
+test('single mode success: copies to _TRASH/<path> (pinned to the source ETag) THEN deletes the original, in that order', async () => {
   const order: string[] = [];
   let headCount = 0;
   const stub: typeof fetch = (async (url, init?: RequestInit) => {
@@ -110,16 +146,22 @@ test('single mode success: copies to _TRASH/<path> THEN deletes the original, in
     if (method === 'HEAD') {
       headCount += 1;
       order.push('HEAD');
-      // 1st HEAD = src exists (200), 2nd HEAD = trash-collision check for the target (404 = no collision)
-      return new Response(null, { status: headCount === 1 ? 200 : 404 });
+      // 1st HEAD = src exists (200, carrying an ETag), 2nd HEAD = live trash-collision check
+      // (404 = no collision), 3rd HEAD = the post-copy byte-count HEAD on the trash destination.
+      if (headCount === 1) return new Response(null, { status: 200, headers: { etag: '"v1"' } });
+      if (headCount === 2) return new Response(null, { status: 404 });
+      return new Response(null, { status: 200, headers: { 'content-length': '10' } });
     }
     if (method === 'PUT') {
       order.push('PUT');
+      const h = init?.headers as Record<string, string>;
       assert.ok(u.includes('_TRASH'), `PUT destination must be under _TRASH/, got ${u}`);
-      return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success', 'content-length': '10' } });
+      assert.equal(h['x-ms-source-if-match'], '"v1"', 'the copy must be pinned to the source ETag observed above');
+      return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success' } });
     }
     if (method === 'DELETE') {
       order.push('DELETE');
+      assert.equal((init?.headers as Record<string, string>)['If-Match'], '"v1"', 'the delete must be pinned to the same source ETag the copy used');
       return new Response(null, { status: 202 });
     }
     throw new Error(`unexpected ${method}`);
@@ -202,8 +244,31 @@ test('bulk mode: stops mid-batch on a trash_collision and reports exactly what m
     handleLegalBlobDelete({ container: 'personal', prefix: 'dupes/', confirm: 'dupes/' }, fakeCtx('clo-personal', false)),
   );
   assert.equal((res.data as any).error, 'trash_collision');
+  assert.equal((res.data as any).executed, true, 'at least one item moved before the stop, so this is a partial execution, not a no-op');
   assert.equal((res.data as any).moved.length, 1, 'exactly the first item should have moved before the stop');
   assert.equal((res.data as any).moved[0].from, 'dupes/a.pdf');
+  assert.deepEqual((res.data as any).collisions, [{ from: 'dupes/b.pdf', to: '_TRASH/dupes/b.pdf' }]);
+});
+
+test('bulk mode: a prefix that is an ANCESTOR of a protected prefix refuses the whole batch (no PUT/DELETE), not just an exact protected match', async () => {
+  // prefix="clo-outgoing/" is not itself in LEGAL_PROTECTED_PREFIXES, but one of its candidates
+  // falls under the protected "clo-outgoing/Divorce Case Summary and ALL Filings/" subtree -- the
+  // whole batch must refuse, not silently skip that one candidate (2026-08-04, PR #190 review).
+  const xml = `<?xml version="1.0"?><EnumerationResults>
+    <Blobs><Blob><Name>clo-outgoing/01-Divorce/note.pdf</Name><Content-Length>10</Content-Length></Blob></Blobs>
+    <Blobs><Blob><Name>clo-outgoing/Divorce Case Summary and ALL Filings/order.pdf</Name><Content-Length>10</Content-Length></Blob></Blobs>
+  </EnumerationResults>`;
+  const stub: typeof fetch = (async (_url, init?: RequestInit) => {
+    const method = init?.method || 'GET';
+    if (method === 'GET') return new Response(xml, { status: 200 });
+    throw new Error(`must not ${method} when a candidate is protected`);
+  }) as typeof fetch;
+  const res = await withStubbedFetch(stub, () =>
+    handleLegalBlobDelete({ container: 'personal', prefix: 'clo-outgoing/', confirm: 'clo-outgoing/' }, fakeCtx('clo-personal', false)),
+  );
+  assert.equal((res.data as any).error, 'protected_prefix');
+  assert.equal((res.data as any).matched, 2);
+  assert.deepEqual((res.data as any).moved, []);
 });
 
 test('max_items respects the hard cap boundary (schema-level, sanity check on the exported constants)', () => {

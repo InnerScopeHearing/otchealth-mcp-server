@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { isConfigured, blobExists, copyBlob } from '../../legal/blob-store.js';
+import { isConfigured, headBlob, blobExists, copyBlob } from '../../legal/blob-store.js';
 import { isLegalContainerAllowed, lanesForContainer } from './ring.js';
 
 export const legalBlobCopyInputShape = {
@@ -45,8 +45,8 @@ export async function handleLegalBlobCopy(input: LegalBlobCopyInput, ctx: ToolCo
     return { data: { ...base, error: 'invalid_input' }, summary: 'src_path and dst_path are identical; nothing to copy.' };
   }
 
-  const [srcExists, dstExists] = await Promise.all([blobExists(container, input.src_path), blobExists(container, input.dst_path)]);
-  if (!srcExists) {
+  const [src, dstExists] = await Promise.all([headBlob(container, input.src_path), blobExists(container, input.dst_path)]);
+  if (!src.exists) {
     return { data: { ...base, error: 'src_not_found' }, summary: `Refused: no blob at legal/${container}/${input.src_path}.` };
   }
   const overwrite = input.overwrite === true;
@@ -57,12 +57,15 @@ export async function handleLegalBlobCopy(input: LegalBlobCopyInput, ctx: ToolCo
   if (ctx.dryRun) {
     return {
       data: { ...base, dry_run: true },
-      audit: { before: { srcExists, dstExists }, after: { container, src_path: input.src_path, dst_path: input.dst_path } },
+      audit: { before: { srcExists: src.exists, dstExists }, after: { container, src_path: input.src_path, dst_path: input.dst_path } },
       summary: `DRY RUN: would copy legal/${container}/${input.src_path} -> ${input.dst_path}${dstExists ? ' (OVERWRITE)' : ''}. Pass dry_run=false to apply.`,
     };
   }
 
-  const copy = await copyBlob(container, input.src_path, input.dst_path, overwrite);
+  // src.etag pins the copy to the exact version just observed (x-ms-source-if-match) -- even
+  // though copy never deletes anything, this still guards against silently copying a version of
+  // the source that changed between the check above and this call (2026-08-04, PR #190 review).
+  const copy = await copyBlob(container, input.src_path, input.dst_path, overwrite, src.etag ?? undefined);
   return {
     data: { ...base, executed: true, dry_run: false, bytes: copy.bytes },
     audit: { before: { srcExists: true, dstExists }, after: { container, dst_path: input.dst_path, bytes: copy.bytes } },
@@ -81,7 +84,10 @@ export function registerLegalBlobCopy(server: McpServer, callerHash: CallerHashP
         description:
           'Copy a blob from src_path to dst_path within the same container (server-side Azure copy; the original at src_path is left untouched). FAIL-CLOSED: refuses if dst_path already exists unless overwrite=true. No protected-prefix restriction on the source -- copying evidence to organize a new tree is additive, not destructive; use legal_blob_move (which IS prefix-guarded) if the intent is to relocate rather than duplicate. RING-GATED identically to legal_blob_put. Defaults to dry_run.',
         readOnlyHint: false,
-        destructiveHint: false,
+        // overwrite=true can replace an existing destination blob -- the static MCP annotation must
+        // reflect the riskiest supported invocation, not just the common additive case (2026-08-04,
+        // PR #190 review).
+        destructiveHint: true,
         idempotentHint: false,
         openWorldHint: false,
       },

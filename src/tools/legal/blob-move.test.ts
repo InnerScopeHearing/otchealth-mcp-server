@@ -108,16 +108,22 @@ test('successful move: copies (PUT with x-ms-copy-source) THEN deletes the origi
     if (method === 'HEAD') {
       headCount += 1;
       order.push('HEAD');
-      // 1st HEAD = src exists check (200), 2nd HEAD = dst exists check (404)
-      return new Response(null, { status: headCount === 1 ? 200 : 404 });
+      // 1st HEAD = src exists check (200, with an ETag to pin the copy+delete), 2nd HEAD = dst
+      // exists check (404), 3rd HEAD = the post-copy byte-count HEAD on the destination.
+      if (headCount === 1) return new Response(null, { status: 200, headers: { etag: '"src-v1"' } });
+      if (headCount === 2) return new Response(null, { status: 404 });
+      return new Response(null, { status: 200, headers: { 'content-length': '1234' } });
     }
     if (method === 'PUT') {
       order.push('PUT');
-      assert.ok((init?.headers as Record<string, string>)['x-ms-copy-source'], 'PUT must carry x-ms-copy-source for a server-side copy');
-      return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success', 'content-length': '1234' } });
+      const h = init?.headers as Record<string, string>;
+      assert.ok(h['x-ms-copy-source'], 'PUT must carry x-ms-copy-source for a server-side copy');
+      assert.equal(h['x-ms-source-if-match'], '"src-v1"', 'PUT must pin the copy to the source ETag observed just before this call');
+      return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success' } });
     }
     if (method === 'DELETE') {
       order.push('DELETE');
+      assert.equal((init?.headers as Record<string, string>)['If-Match'], '"src-v1"', 'DELETE must pin to the same source ETag the copy used');
       return new Response(null, { status: 202 });
     }
     throw new Error(`unexpected method ${method} to ${u}`);
@@ -127,7 +133,7 @@ test('successful move: copies (PUT with x-ms-copy-source) THEN deletes the origi
     handleLegalBlobMove({ container: 'personal', src_path: 'a.pdf', dst_path: 'b.pdf' }, fakeCtx('clo-personal', false)),
   );
   assert.equal((res.data as any).executed, true);
-  assert.equal((res.data as any).bytes, 1234);
+  assert.equal((res.data as any).bytes, 1234, 'bytes must come from the post-copy destination HEAD, not the PUT response Content-Length');
   const putIdx = order.indexOf('PUT');
   const delIdx = order.indexOf('DELETE');
   assert.ok(putIdx >= 0 && delIdx >= 0 && putIdx < delIdx, `PUT (copy) must happen strictly before DELETE (remove original); order was ${order.join(',')}`);
