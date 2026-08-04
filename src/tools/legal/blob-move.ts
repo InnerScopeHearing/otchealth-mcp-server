@@ -4,7 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured, headBlob, blobExists, copyBlob, deleteBlobHard } from '../../legal/blob-store.js';
 import { isLegalContainerAllowed, lanesForContainer, isProtectedPath, searchIndexForContainer } from './ring.js';
 import { deindexChunkedPath, effectiveOneShotDeindexBudgetMs } from '../../azure/search-write.js';
-import { enqueueDeindexResweep } from '../../agentstate/deindex-resweep.js';
+import { enqueueDeindexResweepAwaited } from '../../agentstate/deindex-resweep.js';
 
 export const legalBlobMoveInputShape = {
   container: z.enum(['company', 'personal']).describe('Which legal container. personal is ring-gated to the legal-personal executive ring.'),
@@ -31,6 +31,15 @@ export const legalBlobMoveOutputShape = {
    *  surface a stale search hit (2026-08-04, Copilot review PR #192 round 2). Always false on
    *  dry_run. */
   deindex_truncated: z.boolean(),
+  /** True only once the durable delayed re-verification enqueue (see deindex-resweep.ts) is
+   *  CONFIRMED persisted to Cosmos, not merely "was attempted" (2026-08-04, Copilot review round
+   *  16: the earlier fire-and-forget `void enqueueDeindexResweep(...)` call gave callers no way to
+   *  know whether the durable backstop this tool's description promises actually landed before the
+   *  response returned). False on dry_run, when Cosmos is unconfigured, or when the bounded await
+   *  timed out / the write failed -- `deindex_truncated:true` alongside `deindex_resweep_queued:
+   *  false` means BOTH the immediate and the delayed cleanup mechanisms are currently unconfirmed
+   *  for this path, worth surfacing distinctly from the common case. */
+  deindex_resweep_queued: z.boolean(),
   error: z.string().optional(),
 } satisfies ZodRawShape;
 
@@ -57,7 +66,7 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   const container = input.container;
   const caller = ctx.callerAgent || '';
   const lanes = lanesForContainer(container);
-  const base = { executed: false, dry_run: ctx.dryRun, container, src_path: input.src_path, dst_path: input.dst_path, bytes: null as number | null, deindexed: 0, deindex_truncated: false };
+  const base = { executed: false, dry_run: ctx.dryRun, container, src_path: input.src_path, dst_path: input.dst_path, bytes: null as number | null, deindexed: 0, deindex_truncated: false, deindex_resweep_queued: false };
 
   if (!isLegalContainerAllowed(container, caller)) {
     return { data: { ...base, error: 'forbidden_ring' }, summary: `Refused: moving within legal container "${container}" requires one of the ${lanes.join('/')} trusted lanes. Your identity: ${caller || '(none)'}.` };
@@ -109,7 +118,7 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   // effectiveOneShotDeindexBudgetMs's own doc comment for the full rationale.
   const moveElapsedMs = Date.now() - moveOpsStartedAt;
   const searchIndex = searchIndexForContainer(container);
-  const deindex = await deindexChunkedPath(searchIndex, input.src_path, effectiveOneShotDeindexBudgetMs(moveElapsedMs));
+  const deindex = await deindexChunkedPath(searchIndex, input.src_path, effectiveOneShotDeindexBudgetMs(moveElapsedMs), container);
   const deindexTruncated = !deindex.attempted || Boolean(deindex.truncated);
 
   // THE PERMANENT FIX (2026-08-04, Copilot review PR #192 round 12 + full residual-limitation
@@ -118,9 +127,11 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   // pull-indexer that read this path before the move and writes after it returns, a race no
   // synchronous MCP call can close. deindex-resweep.ts's sweep checks whether a blob has been
   // legitimately RECREATED at src_path before deleting anything there, so a concurrent
-  // legal_blob_put reusing this exact path is safe. Fire-and-forget, fail-open: never throws,
-  // never affects this response.
-  void enqueueDeindexResweep(searchIndex, input.src_path, container);
+  // legal_blob_put reusing this exact path is safe. AWAITED, bounded (2026-08-04, Copilot review
+  // round 16): a bare fire-and-forget call gave no way to know whether the durable backstop
+  // actually persisted before this response returns; still fail-open (never throws, never blocks
+  // the already-completed move) -- only the timing discipline changed.
+  const resweepQueued = await enqueueDeindexResweepAwaited(searchIndex, input.src_path, container);
   // dst_path is DELIBERATELY NOT enqueued here (2026-08-04, Copilot review, corrected after an
   // earlier version of this fix got it wrong): on an overwrite move, dst_path is EXPECTED to
   // exist -- the new content lives there -- so the resweep's existence-check guard (the mechanism
@@ -132,10 +143,10 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   // not re-add a dst_path enqueue here without that generation-aware targeting.
 
   return {
-    data: { ...base, executed: true, dry_run: false, bytes: copy.bytes, deindexed: deindex.deleted, deindex_truncated: deindexTruncated },
+    data: { ...base, executed: true, dry_run: false, bytes: copy.bytes, deindexed: deindex.deleted, deindex_truncated: deindexTruncated, deindex_resweep_queued: resweepQueued },
     audit: { before: { srcExists: true, dstExists }, after: { container, dst_path: input.dst_path, bytes: copy.bytes } },
     summary: deindexTruncated
-      ? `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}). Search-index cleanup at the old path was NOT confirmed complete -- it may still surface a stale hit.`
+      ? `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}). Search-index cleanup at the old path was NOT confirmed complete -- it may still surface a stale hit.${resweepQueued ? '' : ' The delayed re-verification enqueue was also not confirmed persisted.'}`
       : `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}).`,
   };
 }
@@ -149,7 +160,7 @@ export function registerLegalBlobMove(server: McpServer, callerHash: CallerHashP
       annotations: {
         title: 'Move (rename/relocate) a blob within the ring-gated legal document store',
         description:
-          'Move a blob from src_path to dst_path within the same container (copy-then-remove-original; Azure Blob has no native rename). FAIL-CLOSED: refuses if dst_path already exists unless overwrite=true, and refuses outright if src_path falls under a protected prefix (LEGAL_PROTECTED_PREFIXES -- the court-download folder and raw filings stay append-only regardless of caller). The original is removed ONLY after the copy to dst_path is verified to have landed. After a successful move, the stale search-index entry at src_path is also purged immediately (best-effort, deadline-bounded; confirmed count in "deindexed") -- the chunked doc rooms are fed by slow native pull-indexers with no deletion-detection policy, so without this the old path keeps appearing in search results pointing at content that no longer resolves there. "deindex_truncated" is true when that IMMEDIATE cleanup was not confirmed complete; either way, src_path is also enqueued into a durable delayed re-verification sweep that runs safely past one full indexer cadence, so a resurrection race against an in-flight indexer run self-heals within hours even when the immediate cleanup could not confirm clean. NOTE: on an overwrite move, dst_path itself is NOT enqueued -- a path-only sweep there cannot distinguish the new content\'s own valid chunks from any orphaned excess of the prior blob at that path, so that narrower case remains a tracked, undelivered follow-up (see search-write.ts). RING-GATED identically to legal_blob_put. Defaults to dry_run.',
+          'Move a blob from src_path to dst_path within the same container (copy-then-remove-original; Azure Blob has no native rename). FAIL-CLOSED: refuses if dst_path already exists unless overwrite=true, and refuses outright if src_path falls under a protected prefix (LEGAL_PROTECTED_PREFIXES -- the court-download folder and raw filings stay append-only regardless of caller). The original is removed ONLY after the copy to dst_path is verified to have landed. After a successful move, the stale search-index entry at src_path is also purged immediately (best-effort, deadline-bounded; confirmed count in "deindexed") -- the chunked doc rooms are fed by slow native pull-indexers with no deletion-detection policy, so without this the old path keeps appearing in search results pointing at content that no longer resolves there. "deindex_truncated" is true when that IMMEDIATE cleanup at src_path was not confirmed complete. Only src_path (never dst_path) is also enqueued into a durable delayed re-verification sweep that runs safely past one full indexer cadence, so a resurrection race against an in-flight indexer run self-heals within hours even when the immediate cleanup could not confirm clean; "deindex_resweep_queued" is true only once that enqueue is CONFIRMED persisted (a bounded await, not fire-and-forget), false if it timed out or Cosmos is unconfigured. On an overwrite move, dst_path\'s own pre-existing (now-replaced) search chunks are NOT cleaned up by anything in this tool -- a path-only sweep there cannot distinguish the new content\'s own valid chunks from any orphaned excess of the prior blob at that path, so that narrower overwrite-cleanup case remains a tracked, undelivered follow-up (see search-write.ts). RING-GATED identically to legal_blob_put. Defaults to dry_run.',
         readOnlyHint: false,
         // A move removes src_path (and can overwrite dst_path) -- destructiveHint:false ("additive
         // only" under MCP annotation semantics) misdescribed this operation (2026-08-04, PR #190 review).

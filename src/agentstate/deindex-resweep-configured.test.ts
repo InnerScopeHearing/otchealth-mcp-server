@@ -21,7 +21,7 @@ process.env.IDENTITY_HEADER ||= 'fake-identity-header-secret';
 process.env.AZURE_LEGAL_STORAGE_ACCOUNT ||= 'otchealthlegalstore';
 process.env.AZURE_LEGAL_STORAGE_KEY ||= Buffer.from('unit-test-blob-key-not-real').toString('base64');
 
-const { enqueueDeindexResweep, runDeindexResweepOnce, DEINDEX_RESWEEP_BOARD, DEINDEX_RESWEEP_MAX_ATTEMPTS } = await import('./deindex-resweep.js');
+const { enqueueDeindexResweep, runDeindexResweepOnce, DEINDEX_RESWEEP_BOARD, DEINDEX_RESWEEP_MAX_ATTEMPTS, DEINDEX_RESWEEP_BATCH_SIZE } = await import('./deindex-resweep.js');
 
 function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -175,12 +175,37 @@ test('enqueueDeindexResweep is idempotent per (index, path): a second enqueue of
   assert.equal(cosmos.docs.size, 1, 'the same (index, path) must map to the same queue entry');
 });
 
+test('THE COLLISION FIX THIS ROUND ADDED: two distinct paths that collide under a naive 32-bit polynomial hash (the textbook "Aa"/"BB" Java/JS hashCode collision Copilot\'s review cited -- 65*31+97 === 66*31+66 === 2112) get DISTINCT queue entries, not a silent upsert-clobber of one by the other', async () => {
+  const cosmos = makeCosmosDouble();
+  await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), async () => {
+    await enqueueDeindexResweep('legal-personal', 'Aa', 'personal');
+    await enqueueDeindexResweep('legal-personal', 'BB', 'personal');
+  });
+  assert.equal(cosmos.docs.size, 2, 'two genuinely distinct paths must never alias to the same Cosmos document id');
+  const paths = [...cosmos.docs.values()].map((d) => d.path).sort();
+  assert.deepEqual(paths, ['Aa', 'BB'], 'both entries must survive with their own path, neither overwritten by the other');
+});
+
+test('THE BATCH CAP HOLDS even when Cosmos hands back more due entries than DEINDEX_RESWEEP_BATCH_SIZE in one page (2026-08-04, Copilot review round 16: a claim that this could process up to 100 entries per tick, defeating the stated Search/RU bound -- this double\'s query handler returns every match in a single unpaginated page exactly to prove the bound comes from queryDocs\'s own client-side cap, not from any pagination-timing accident)', async () => {
+  const cosmos = makeCosmosDouble();
+  const overBatch = DEINDEX_RESWEEP_BATCH_SIZE + 5;
+  await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), async () => {
+    for (let i = 0; i < overBatch; i++) await enqueueDeindexResweep('legal-personal', `over-batch-${i}.pdf`, 'personal');
+  });
+  assert.equal(cosmos.docs.size, overBatch, 'precondition: genuinely more entries queued than one batch');
+  for (const doc of cosmos.docs.values()) doc.due_at = new Date(Date.now() - 1000).toISOString();
+
+  const result = await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), () => runDeindexResweepOnce());
+  assert.equal(result.processed, DEINDEX_RESWEEP_BATCH_SIZE, 'a single tick must never process more than the documented batch size, regardless of how many entries are due');
+  assert.equal(cosmos.docs.size, overBatch - DEINDEX_RESWEEP_BATCH_SIZE, 'exactly one batch worth of entries must have been cleaned this tick, leaving the rest for the next');
+});
+
 test('runDeindexResweepOnce: an entry that is NOT YET due (enqueued moments ago) is not processed', async () => {
   const cosmos = makeCosmosDouble();
   await withStubbedFetch(fullStub(cosmos, new Set(), () => { throw new Error('must never reach search for a not-yet-due entry'); }), async () => {
     await enqueueDeindexResweep('legal-personal', 'future.pdf', 'personal');
     const result = await runDeindexResweepOnce();
-    assert.deepEqual(result, { processed: 0, cleaned: 0, skipped: 0, requeued: 0, failed: 0, raced: 0 });
+    assert.deepEqual(result, { processed: 0, cleaned: 0, requeued: 0, failed: 0, raced: 0 });
   });
   assert.equal(cosmos.docs.size, 1, 'the entry must remain queued, untouched');
 });
@@ -195,7 +220,6 @@ test('runDeindexResweepOnce: a due entry whose path has NOT been recreated resol
   const result = await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => runDeindexResweepOnce());
   assert.equal(result.processed, 1);
   assert.equal(result.cleaned, 1);
-  assert.equal(result.skipped, 0);
   assert.equal(cosmos.docs.size, 0, 'a confirmed-clean entry must be removed from the queue, not left pending');
 });
 
@@ -214,7 +238,7 @@ test('runDeindexResweepOnce: a due entry that finds and deletes a RESURRECTED st
   assert.equal(cosmos.docs.size, 0);
 });
 
-test('THE GUARD THIS ROUND ADDED: a due entry whose path was RECREATED (a concurrent legal_blob_put) is skipped WITHOUT touching the index -- proves the existence check actually prevents deleting a live replacement blob\'s chunks', async () => {
+test('THE EXISTENCE GUARD: a due entry whose path was RECREATED (a concurrent legal_blob_put) never touches the index -- proves the existence check actually prevents deleting a live replacement blob\'s chunks', async () => {
   const cosmos = makeCosmosDouble();
   const blobPaths = new Set<string>();
   await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'reused-path.pdf', 'personal'));
@@ -228,9 +252,42 @@ test('THE GUARD THIS ROUND ADDED: a due entry whose path was RECREATED (a concur
     fullStub(cosmos, blobPaths, () => { throw new Error('must never call search at all once the path is confirmed live again -- deleting by path would risk the new blob\'s own chunks'); }),
     () => runDeindexResweepOnce(),
   );
-  assert.equal(result.skipped, 1, 'a recreated path must be counted as skipped, not cleaned (nothing was actually verified/deleted in the index)');
-  assert.equal(result.cleaned, 0);
-  assert.equal(cosmos.docs.size, 0, 'the entry is still removed from the queue -- its job (protect against a stale ORPHANED path) no longer applies now that the path is live again');
+  assert.equal(result.cleaned, 0, 'nothing was verified/deleted in the index for a live path');
+  assert.equal(result.requeued, 1);
+});
+
+test('THE GENERATION-UNCERTAINTY FIX THIS ROUND ADDED: a recreated path is NOT silently dropped from the queue as "job done" -- it backs off and stays visible, since the recreated content may have FEWER chunks than the prior generation, leaving orphans nothing else would ever clean up (2026-08-04, Copilot review round 16)', async () => {
+  const cosmos = makeCosmosDouble();
+  const blobPaths = new Set<string>();
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'reused-path-2.pdf', 'personal'));
+  const entry = [...cosmos.docs.values()][0];
+  entry.due_at = new Date(Date.now() - 1000).toISOString();
+  const originalDueAt = entry.due_at;
+
+  blobPaths.add('reused-path-2.pdf');
+  await withStubbedFetch(
+    fullStub(cosmos, blobPaths, () => { throw new Error('must never call search for a live path'); }),
+    () => runDeindexResweepOnce(),
+  );
+
+  assert.equal(cosmos.docs.size, 1, 'the entry must survive in the queue, not vanish the moment the path looks live again');
+  const updated = [...cosmos.docs.values()][0];
+  assert.equal(updated.status, 'pending');
+  assert.equal(updated.attempts, 1);
+  assert.ok((updated.due_at as string) > originalDueAt, 'due_at must be pushed forward for the retry, same backoff as any other not-confirmed-clean outcome');
+  assert.match(String(updated.last_reason), /generation/, 'the reason should explain WHY this is unresolved, not just that it is');
+
+  // A SUBSEQUENT tick, with the path STILL live, keeps backing off (never deletes, never silently
+  // drops) until DEINDEX_RESWEEP_MAX_ATTEMPTS is reached, at which point it becomes a visible
+  // 'failed' entry rather than disappearing without a trace.
+  for (let i = 1; i < DEINDEX_RESWEEP_MAX_ATTEMPTS; i++) {
+    const e = [...cosmos.docs.values()][0];
+    e.due_at = new Date(Date.now() - 1000).toISOString();
+    await withStubbedFetch(fullStub(cosmos, blobPaths, () => { throw new Error('must never call search for a live path'); }), () => runDeindexResweepOnce());
+  }
+  const finalEntry = [...cosmos.docs.values()][0];
+  assert.equal(finalEntry.status, 'failed', 'a persistently-recreated path must end up visible as failed, not disappear');
+  assert.equal(finalEntry.attempts, DEINDEX_RESWEEP_MAX_ATTEMPTS);
 });
 
 test('runDeindexResweepOnce: a due entry that cannot be confirmed clean (search failing) is requeued with incremented attempts and a later due_at, not dropped', async () => {

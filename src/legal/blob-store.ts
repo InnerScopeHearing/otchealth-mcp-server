@@ -289,6 +289,26 @@ export async function blobExists(container: LegalContainer, path: string): Promi
   return (await headBlob(container, path)).exists;
 }
 
+/** Races `blobExists` against `timeoutMs`, resolving to `null` ("could not confirm in time")
+ *  rather than throwing or hanging -- the losing call is not cancelled (JS has no such primitive
+ *  for a bare `fetch()`) and keeps running in the background; its eventual result is simply
+ *  discarded. `headBlob` (which `blobExists` calls) has no timeout of its own, so any caller on a
+ *  time-budgeted path (a deindex sweep, a synchronous MCP tool response) MUST bound it locally or
+ *  a single hung Azure Blob HEAD request can stall the whole caller indefinitely. Shared here
+ *  (2026-08-04, Copilot review PR #192 round 16) rather than duplicated per call site -- originally
+ *  written once inline in agentstate/deindex-resweep.ts for its delayed resweep tick, then reused
+ *  identically by azure/search-write.ts's synchronous immediate-cleanup path once that path grew
+ *  the SAME existence-check guard for the SAME same-path-recreation race, just one layer earlier. */
+export async function blobExistsWithTimeout(container: LegalContainer, path: string, timeoutMs: number): Promise<boolean | null> {
+  return Promise.race([
+    blobExists(container, path) as Promise<boolean | null>,
+    new Promise<boolean | null>((resolve) => {
+      const t = setTimeout(() => resolve(null), timeoutMs);
+      (t as unknown as { unref?: () => void }).unref?.();
+    }),
+  ]);
+}
+
 export interface BlobPutResult {
   path: string;
   container: LegalContainer;

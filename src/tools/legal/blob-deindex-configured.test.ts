@@ -97,8 +97,11 @@ test('legal_blob_move (configured): de-indexes src_path against the CORRECT cont
         if (method === 'HEAD') {
           headCount += 1;
           if (headCount === 1) return new Response(null, { status: 200, headers: { etag: '"src-v1"' } });
-          if (headCount === 2) return new Response(null, { status: 404 });
-          return new Response(null, { status: 200, headers: { 'content-length': '77' } });
+          // headCount 2 = the preflight's dst_path check (not yet created); headCount 3+ = the
+          // NEW existence-check guard in deindexChunkedPathWithAuth re-checking src_path AFTER the
+          // move (2026-08-04, Copilot review round 16) -- src_path is genuinely gone by then (the
+          // blob DELETE above already ran), so this must also be 404, not a generic "exists" 200.
+          return new Response(null, { status: 404 });
         }
         if (method === 'PUT') return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success' } });
         if (method === 'DELETE') return new Response(null, { status: 202 });
@@ -151,8 +154,10 @@ test('legal_blob_move (configured, company container): de-indexes against legal-
         if (method === 'HEAD') {
           headCount += 1;
           if (headCount === 1) return new Response(null, { status: 200, headers: { etag: '"v1"' } });
-          if (headCount === 2) return new Response(null, { status: 404 });
-          return new Response(null, { status: 200, headers: { 'content-length': '5' } });
+          // headCount 2 = the preflight's dst_path check; headCount 3+ = the NEW existence-check
+          // guard re-checking src_path AFTER the move (2026-08-04, Copilot review round 16) --
+          // src_path is genuinely gone by then, so this must be 404 too.
+          return new Response(null, { status: 404 });
         }
         if (method === 'PUT') return new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'success' } });
         if (method === 'DELETE') return new Response(null, { status: 202 });

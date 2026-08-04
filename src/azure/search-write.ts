@@ -34,6 +34,7 @@ import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
 import { searchAdminKey } from './arm-client.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { blobExistsWithTimeout, type LegalContainer } from '../legal/blob-store.js';
 
 const API_VERSION = '2024-07-01';
 const MAX_TEXT = 16000; // mirrors semantic.mjs
@@ -226,31 +227,45 @@ export async function indexMemoryNow(input: {
  * confirmed delete -- the SAME resweep queue closes it the same way: a later, delayed pass is not
  * racing the same mutation the first pass was.
  *
- * TWO narrower edge cases remain genuinely open, NOT closed by the resweep queue (2026-08-04,
- * Copilot review PR #192 round 12):
+ * SAME-PATH-RECREATION RACE, CLOSED ONE LAYER EARLIER TOO (2026-08-04, Copilot review PR #192
+ * round 16): this function itself (not just the delayed resweep) now takes an optional `container`
+ * param; when supplied, it runs a timeout-bounded existence check on `path` BEFORE doing any
+ * search/delete work at all, and skips entirely (`attempted:false, truncated:true`) if a blob
+ * currently exists there or existence could not be confirmed in time. This closes the race Copilot
+ * described directly against this function's SYNCHRONOUS immediate-cleanup callers (blob-delete.ts,
+ * blob-move.ts, both now pass `container`): "After the original blob is removed, legal_blob_put can
+ * recreate the same path and an indexer can publish that replacement before this lookup completes;
+ * this query then collects both old and new chunks and deletes all of them." Previously only
+ * deindex-resweep.ts's DELAYED sweep had this guard; the synchronous fast path had none.
  *
- * 1. This lookup is path-only, not tied to a specific blob generation/ETag. deindex-resweep.ts's
- *    existence-check guard handles the COMMON form of this (a blob recreated at src_path before
- *    the delayed sweep runs is detected and the sweep backs off without touching the index), but a
- *    narrower race remains: if a blob is recreated at the exact path AFTER the existence check ran
- *    but BEFORE the subsequent delete call completes, or if the indexer's own resurrection-write
- *    of stale content interleaves in exactly the wrong order relative to a same-tick recreation,
- *    path-only chunk deletion still cannot distinguish "stale chunks from the content that used to
- *    be here" from "valid chunks for the content that is here now." Closing this fully needs the
- *    chunk schema to carry a source-generation marker this cleanup can correlate against the
- *    pre-delete state, which was not attempted here without first confirming that field exists in
- *    the live schema (this PR does not touch the live Azure Search index/indexer configuration
- *    blind). Practically very narrow: it requires a same-path recreation landing in a specific,
- *    short window inside an already-narrow resweep tick, not merely a concurrent read.
+ * TWO narrower edge cases remain genuinely open, NOT closed by either guard (2026-08-04, Copilot
+ * review PR #192 rounds 12 and 16):
+ *
+ * 1. Both existence checks (this function's own, and deindex-resweep.ts's GUARD 1) are separate
+ *    network round trips from the search/delete call(s) that follow them -- a TOCTOU sliver
+ *    remains between "existence confirmed false" and "the delete actually executes," during which
+ *    a recreation could still land. Beyond that: this lookup is path-only, not tied to a specific
+ *    blob generation/ETag, so even a delete that starts immediately after a clean existence check
+ *    cannot distinguish "stale chunks from the content that used to be here" from "valid chunks for
+ *    content recreated microseconds later." Closing this fully needs the chunk schema to carry a
+ *    source-generation marker this cleanup can correlate against the pre-delete state, which was
+ *    not attempted here without first confirming that field exists in the live schema (this PR does
+ *    not touch the live Azure Search index/indexer configuration blind). Practically very narrow:
+ *    now requires a same-path recreation landing in the specific, short window between an
+ *    already-bounded existence check and the delete that follows it, not merely a concurrent read
+ *    anywhere in a multi-second window. deindex-resweep.ts's own existence-check-true branch (GUARD
+ *    1) no longer silently drops the queue entry when this DOES happen -- it now routes through the
+ *    same backoff/eventual-'failed' bookkeeping as any other not-confirmed-clean outcome, so a
+ *    generation mismatch stays VISIBLE (a discoverable 'failed' entry) instead of vanishing.
  *
  * 2. `legal_blob_move`'s overwrite-destination path (dst_path, when it already held content) is
  *    NOT enqueued into the resweep queue at all, unlike src_path -- see blob-move.ts's own comment
  *    at the call site. dst_path is EXPECTED to exist after an overwrite (the new content lives
- *    there), so the existence-check guard that makes src_path's enqueue safe can never fire for
- *    it; a path-only sweep of dst_path would eventually delete the new content's own valid chunks
- *    alongside any orphaned old ones. Cleaning up dst_path's orphaned excess chunks (from the
- *    content that was just overwritten) remains a genuinely open, tracked follow-up requiring the
- *    same generation-aware chunk targeting as #1 above.
+ *    there), so an existence-check guard can never usefully fire for it; a path-only sweep of
+ *    dst_path would eventually delete the new content's own valid chunks alongside any orphaned old
+ *    ones. Cleaning up dst_path's orphaned excess chunks (from the content that was just
+ *    overwritten) remains a genuinely open, tracked follow-up requiring the same generation-aware
+ *    chunk targeting as #1 above.
  *
  * Both are tracked as follow-ups, same as indexer coordination was tracked against the CLO brief's
  * §7 before this resweep queue existed.
@@ -627,6 +642,17 @@ export async function prepareDeindexAuth(deadlineAtMs: number = Date.now() + DEI
   );
 }
 
+/** How much of the remaining deadline the pre-delete existence check (below) is allowed to spend,
+ *  when `container` is supplied. Small and PROPORTIONAL, not a flat cap (2026-08-04, Copilot review
+ *  round 16): this function's own `deadlineAtMs` can leave as little as
+ *  MIN_ONE_SHOT_DEINDEX_BUDGET_MS (1s) total for a slow legal_blob_move, so a flat multi-second
+ *  existence-check timeout (the resweep tick's own 8s, appropriate for a background job with a much
+ *  larger per-item budget) could consume the ENTIRE remaining budget here and leave nothing for the
+ *  actual search+delete work -- floored so it is never useless, capped so it never dominates. */
+const EXISTENCE_CHECK_MAX_MS = 2000;
+const EXISTENCE_CHECK_MIN_MS = 300;
+const EXISTENCE_CHECK_SHARE = 0.4;
+
 /**
  * Delete every chunk document at `path` from `index` (a chunked doc room), given an ALREADY
  * resolved DeindexAuth (see prepareDeindexAuth). See the section header above for the full
@@ -640,14 +666,42 @@ export async function prepareDeindexAuth(deadlineAtMs: number = Date.now() + DEI
  * batch's own remaining time budget (bounded to a sane per-item cap) here; when there is
  * essentially no time left, the very first deadline check below degrades this to a fast, VISIBLE
  * no-op (`truncated:true`) instead of the caller having to guess-and-skip beforehand.
+ *
+ * `container`, when supplied (2026-08-04, Copilot review PR #192 round 16), runs a timeout-bounded
+ * existence check on `path` before touching search AT ALL: "After the original blob is removed,
+ * legal_blob_put can recreate the same path and an indexer can publish that replacement before this
+ * lookup completes; this query then collects both old and new chunks and deletes all of them" (the
+ * exact race deindex-resweep.ts's GUARD 1 already prevents for the DELAYED sweep, applied here one
+ * layer earlier for the SYNCHRONOUS immediate-cleanup path, which previously had no such guard at
+ * all). If a blob currently exists at `path` -- or existence could not be confirmed in time -- this
+ * skips the path-only cleanup entirely rather than risk deleting live content, deferring safely to
+ * the delayed resweep queue (which itself now treats "path recreated" as unresolved, not done, per
+ * the same round's fix to its own generation-uncertainty gap). Optional: callers that cannot supply
+ * a container (none currently) keep the pre-existing, ungated behavior.
  */
 export async function deindexChunkedPathWithAuth(
   auth: DeindexAuth,
   index: string,
   path: string,
   deadlineAtMs: number = Date.now() + 8000,
+  container?: LegalContainer,
 ): Promise<DeindexResult> {
   try {
+    if (container) {
+      const existMs = Math.max(EXISTENCE_CHECK_MIN_MS, Math.min(EXISTENCE_CHECK_MAX_MS, Math.floor((deadlineAtMs - Date.now()) * EXISTENCE_CHECK_SHARE)));
+      const nowExists = await blobExistsWithTimeout(container, path, existMs);
+      if (nowExists !== false) {
+        return {
+          attempted: false,
+          deleted: 0,
+          truncated: true,
+          reason:
+            nowExists === null
+              ? 'existence check timed out -- skipping path-only cleanup to avoid risking live content; the delayed resweep queue will re-verify safely'
+              : 'a blob currently exists at this path -- skipping path-only cleanup to avoid deleting live content; the delayed resweep queue handles this case with its own generation-uncertainty backoff',
+        };
+      }
+    }
     const escaped = path.replace(/'/g, "''");
     const primary = await findAndDeleteAll(
       auth, index, path, deadlineAtMs,
@@ -719,7 +773,7 @@ export function effectiveOneShotDeindexBudgetMs(moveElapsedMs: number): number {
  *  `budgetMs` defaults to DEINDEX_ONE_SHOT_DEADLINE_MS but callers with their own preceding
  *  transport-timeout exposure (legal_blob_move, via effectiveOneShotDeindexBudgetMs) can pass a
  *  smaller remaining budget instead (2026-08-04, Copilot review PR #192 round 9). */
-export async function deindexChunkedPath(index: string, path: string, budgetMs: number = DEINDEX_ONE_SHOT_DEADLINE_MS): Promise<DeindexResult> {
+export async function deindexChunkedPath(index: string, path: string, budgetMs: number = DEINDEX_ONE_SHOT_DEADLINE_MS, container?: LegalContainer): Promise<DeindexResult> {
   const deadlineAtMs = Date.now() + budgetMs;
   return withDeadline(
     (async (): Promise<DeindexResult> => {
@@ -731,7 +785,7 @@ export async function deindexChunkedPath(index: string, path: string, budgetMs: 
       // layer produced the false (2026-08-04, Copilot review PR #192 round 3, caught by this
       // file's own test suite disagreeing with itself across the two attempted:false paths).
       if (!auth) return { attempted: false, deleted: 0, truncated: true, reason };
-      return deindexChunkedPathWithAuth(auth, index, path, deadlineAtMs);
+      return deindexChunkedPathWithAuth(auth, index, path, deadlineAtMs, container);
     })(),
     deadlineAtMs,
     { attempted: false, deleted: 0, truncated: true, reason: `deindex overall deadline (${budgetMs}ms) exceeded` },

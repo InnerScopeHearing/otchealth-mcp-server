@@ -38,7 +38,7 @@ test('enqueueDeindexResweep is safe (fail-open, no-op, never throws) with no Cos
 
 test('runDeindexResweepOnce reports Cosmos-not-configured rather than throwing or querying anything', async () => {
   const result = await runDeindexResweepOnce();
-  assert.deepEqual(result, { processed: 0, cleaned: 0, skipped: 0, requeued: 0, failed: 0, raced: 0, reason: 'Cosmos not configured' });
+  assert.deepEqual(result, { processed: 0, cleaned: 0, requeued: 0, failed: 0, raced: 0, reason: 'Cosmos not configured' });
 });
 
 test('the reconciler is idempotent and safe with no Cosmos (no-op, no throw, no double-schedule)', () => {
