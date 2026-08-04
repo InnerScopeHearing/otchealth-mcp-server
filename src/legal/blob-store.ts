@@ -289,6 +289,40 @@ export async function blobExists(container: LegalContainer, path: string): Promi
   return (await headBlob(container, path)).exists;
 }
 
+/** Races `blobExists` against `timeoutMs`, resolving to `null` ("could not confirm in time")
+ *  rather than throwing or hanging -- the losing call is not cancelled (JS has no such primitive
+ *  for a bare `fetch()`) and keeps running in the background; its eventual result is simply
+ *  discarded. `headBlob` (which `blobExists` calls) has no timeout of its own, so any caller on a
+ *  time-budgeted path (a deindex sweep, a synchronous MCP tool response) MUST bound it locally or
+ *  a single hung Azure Blob HEAD request can stall the whole caller indefinitely. Shared here
+ *  (2026-08-04, Copilot review PR #192 round 16) rather than duplicated per call site -- originally
+ *  written once inline in agentstate/deindex-resweep.ts for its delayed resweep tick, then reused
+ *  identically by azure/search-write.ts's synchronous immediate-cleanup path once that path grew
+ *  the SAME existence-check guard for the SAME same-path-recreation race, just one layer earlier. */
+export async function blobExistsWithTimeout(container: LegalContainer, path: string, timeoutMs: number): Promise<boolean | null> {
+  // `Promise.race` does NOT convert a rejection into `null` -- it propagates the rejection through
+  // as soon as either promise settles, timer or not (2026-08-04, Copilot review PR #192 round 18):
+  // a Blob HEAD returning 500, or a network error, made `blobExists` REJECT before the timer could
+  // ever win, so this function violated its own "never throws" contract on exactly the kind of
+  // transient Blob Storage hiccup it exists to tolerate. In deindex-resweep.ts that rejection
+  // reached the per-item catch-all, which (as of round 17) treats an unexpected exception as
+  // `nonRetriable` -- so a transient Storage outage could terminally fail the durable cleanup entry
+  // after DEINDEX_RESWEEP_MAX_ATTEMPTS, the exact "permanently stranded" bug round 17 closed for
+  // Search/auth outages but missed here. Fix: swallow a HEAD failure into `null` ("could not
+  // confirm") BEFORE racing, so the raced promise can only ever resolve, never reject.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean | null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  const safeExists = blobExists(container, path).catch(() => null);
+  try {
+    return await Promise.race([safeExists, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface BlobPutResult {
   path: string;
   container: LegalContainer;
