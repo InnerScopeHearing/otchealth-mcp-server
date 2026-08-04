@@ -149,6 +149,14 @@ test('deindexChunkedPathWithAuth: a non-ok $filter (schema does not allow filter
   );
   assert.equal(searchCalls, 2, 'must try $filter first, then fall back exactly once');
   assert.equal(result.deleted, 1, 'only the exact-match chunk must be deleted, not the near-miss');
+  // Round 8 (2026-08-04, Copilot review PR #192): the fallback's queryType:'simple' keyword search
+  // treats path characters like +, -, *, and quotes as query operators, not literal text, so it can
+  // silently MISS a real exact-path document -- a false negative the client-side equality check
+  // cannot rescue (it only narrows candidates the search already returned). The fallback can
+  // therefore never claim confirmed-clean, even when it paginated through every result Azure's text
+  // analyzer chose to return -- truncated must always be true here, unlike the primary $filter path.
+  assert.equal(result.truncated, true, 'the keyword fallback can never prove completeness, so it must always report truncated');
+  assert.match(result.reason ?? '', /cannot prove completeness/);
 });
 
 test('deindexChunkedPathWithAuth: both the primary and fallback failing returns deleted:0, attempted:true, truncated:true (never throws)', async () => {
@@ -308,6 +316,74 @@ test('deindexChunkedPathWithAuth: an unordered result set that DOES eventually s
   );
   assert.equal(result.deleted, TOTAL, 'every distinct chunk across the overlapping/reordered pages must be found and confirmed deleted');
   assert.equal(result.truncated, false, 'once the deduped count reaches the server-reported total, this is a genuine, honest exhaustion');
+});
+
+test('deindexChunkedPathWithAuth: a GROWING @odata.count mid-pagination (the concurrent indexer inserts a new chunk between pages) is tracked, not frozen at page 0 (2026-08-04, Copilot review PR #192 round 8)', async () => {
+  // 400 real chunks exist at page 0. Between page 0 and page 1, the independent pull-indexer inserts
+  // a brand new chunk (cNEW) -- Azure's own count now reports 401. Due to the same unordered-result
+  // instability the round-4 tests already cover, one of the ORIGINAL 400 chunks (c399) gets shifted
+  // behind page 1's offset and is not returned until page 2, while cNEW happens to surface early.
+  // Old code froze `expectedRawCount` at page 0's count (400): by the end of page 1, seenRaw would
+  // already total exactly 400 distinct ids (c0-c199 + c200-c398 + cNEW), satisfying that STALE target
+  // and reporting a false exhausted:true -- while c399, a real pre-existing chunk, was never found or
+  // deleted. The fix tracks the MAXIMUM count observed across all pages (401, from page 1), so
+  // pagination correctly continues to page 2 and finds c399 too.
+  const TOTAL_AFTER_INSERT = 401;
+  let searchCalls = 0;
+  let deleteBody: { value: Array<{ chunk_id: string }> } | undefined;
+  const seenDeleteIds = new Set<string>();
+  const result = await withStubbedFetch(
+    fullChainStub(
+      (_u, init) => {
+        searchCalls++;
+        const body = JSON.parse(String(init?.body)) as { skip: number };
+        if (body.skip === 0) {
+          // Page 0: the original 400-count snapshot, 200 items (c0..c199).
+          return new Response(
+            JSON.stringify({
+              '@odata.count': 400,
+              value: Array.from({ length: 200 }, (_, i) => ({ chunk_id: `c${i}`, path: 'growing/doc.pdf' })),
+            }),
+            { status: 200 },
+          );
+        }
+        if (body.skip === 200) {
+          // Page 1: the indexer's insert is now visible -- count GREW to 401. Returns c200..c398
+          // (199 of the original chunks) plus the brand new cNEW -- but NOT c399, which reordering
+          // has shifted behind this offset.
+          return new Response(
+            JSON.stringify({
+              '@odata.count': TOTAL_AFTER_INSERT,
+              value: [
+                ...Array.from({ length: 199 }, (_, i) => ({ chunk_id: `c${i + 200}`, path: 'growing/doc.pdf' })),
+                { chunk_id: 'cNEW', path: 'growing/doc.pdf' },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (body.skip === 400) {
+          // Page 2: only reachable if the loop correctly kept going past page 1's stale-looking
+          // seenRaw==400 milestone -- this is where the genuinely missing c399 finally surfaces.
+          return new Response(
+            JSON.stringify({ '@odata.count': TOTAL_AFTER_INSERT, value: [{ chunk_id: 'c399', path: 'growing/doc.pdf' }] }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected skip ${body.skip}`);
+      },
+      (_u, init) => {
+        deleteBody = JSON.parse(String(init?.body));
+        for (const v of deleteBody!.value) seenDeleteIds.add(v.chunk_id);
+        return okDelete()(_u, init);
+      },
+    ),
+    () => deindexChunkedPathWithAuth(DIRECT_AUTH, 'legal-personal', 'growing/doc.pdf'),
+  );
+  assert.equal(searchCalls, 3, 'must page all the way to skip=400 to find c399 -- the old frozen-count code would have wrongly stopped after page 1 (2 calls)');
+  assert.equal(result.deleted, TOTAL_AFTER_INSERT, 'all 401 chunks -- including the one shifted behind the offset by the concurrent insert -- must be confirmed deleted');
+  assert.equal(result.truncated, false, 'once the deduped count reaches the GROWN (not stale) authoritative total, this is a genuine, honest exhaustion');
+  assert.ok(seenDeleteIds.has('c399'), 'c399 -- the chunk a frozen count would have silently left stale -- must actually have been deleted');
 });
 
 test('deindexChunkedPathWithAuth: a document exceeding the 10,000-chunk backstop is reported truncated:true, not silently short (2026-08-04 round-2 fix)', async () => {

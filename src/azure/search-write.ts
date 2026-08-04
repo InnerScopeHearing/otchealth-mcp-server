@@ -422,7 +422,15 @@ async function findAllChunkIds(
     } catch (e) {
       return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: `malformed search response: ${(e as Error).message}` };
     }
-    if (page === 0 && odataCount !== null) expectedRawCount = odataCount;
+    // Track the MAXIMUM count ever observed, not just page 0's: this loop explicitly tolerates the
+    // independent pull-indexer writing concurrently (see the module doc comment above), so the
+    // server's own count can legitimately GROW mid-pagination as a new chunk is inserted. Freezing
+    // the target at page 0 let `seenRaw` satisfy a now-stale (too-low) count while a pre-existing
+    // chunk that got shifted behind the offset by the concurrent write was never actually seen,
+    // reporting a fully clean deindex with one old chunk still stale (2026-08-04, Copilot review
+    // PR #192 round 8). A count that only ever grows during a single pass is still a safe target:
+    // it can never go DOWN mid-pagination from something we've already counted as seen.
+    if (odataCount !== null) expectedRawCount = expectedRawCount === null ? odataCount : Math.max(expectedRawCount, odataCount);
     for (const d of raw) {
       const id = String((d as { chunk_id?: unknown }).chunk_id ?? '');
       if (!id) continue;
@@ -576,7 +584,23 @@ export async function deindexChunkedPathWithAuth(
         (skip) => ({ search: path, searchFields: 'path', queryType: 'simple', select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip, count: true }),
         true,
       );
-      return { attempted: true, deleted: fb.deleted, truncated: !fb.exhausted || fb.hadDeleteFailure, reason: fb.reason };
+      // ALWAYS truncated, even when fb.exhausted is true (2026-08-04, Copilot review PR #192 round
+      // 8): `queryType: 'simple'` treats characters that commonly appear in real blob paths (`+`,
+      // `-`, `*`, quotes) as query OPERATORS, not literal text, so a raw path fed straight into
+      // `search` can be parsed in a way that fails to match an exact-path document that is still
+      // genuinely indexed -- a false NEGATIVE the client-side equality check (filterExact) cannot
+      // rescue, since that check only narrows candidates the search already returned; it cannot
+      // invent ones the search silently missed. So `fb.exhausted` proves only "we paginated through
+      // everything Azure's text analyzer decided to return for this query," never "nothing more
+      // exists at this path." Until the room's schema makes `path` filterable (closing this
+      // fallback entirely) or this scans exhaustively instead of via a keyword search, the fallback
+      // can never claim confirmed-clean the way the primary $filter path can.
+      return {
+        attempted: true,
+        deleted: fb.deleted,
+        truncated: true,
+        reason: fb.reason ?? 'keyword-search fallback cannot prove completeness (path field not filterable in this room; query-syntax false negatives are possible)',
+      };
     }
     return { attempted: true, deleted: primary.deleted, truncated: !primary.exhausted || primary.hadDeleteFailure, reason: primary.reason };
   } catch (e) {
