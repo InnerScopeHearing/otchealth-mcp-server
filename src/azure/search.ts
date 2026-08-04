@@ -298,19 +298,25 @@ async function runHybridSearch(
     // document filed under two organizational prefixes (divorce/ vs clo-outgoing/01-Divorce/). Pass 1
     // only merges multiple CHUNKS of the SAME parent; it cannot catch this because the duplicates are
     // genuinely distinct parent_id/path values. Confirmed live as the DOMINANT remaining duplication
-    // once legacy mirror-artifact debris was cleaned up (4 of 10 result slots on one real query,
-    // with scores identical to 16 significant digits -- a strong but not proof-grade signal on its
-    // own, so the actual grouping key is the exact projected chunk TEXT, not the score).
+    // once legacy mirror-artifact debris was cleaned up (4 of 10 result slots on one real query).
     //
-    // Grouping key: the trimmed text, but only above a minimum length -- pickText can legitimately
-    // return '' or a short fragment for some rows, and grouping THOSE together would incorrectly
-    // merge unrelated documents that both happen to have little/no extractable text. Below the
-    // threshold, each hit gets its own unique key (its parent id), so it is never merged with
-    // anything else.
+    // Grouping key: score (to FULL float precision) AND text must BOTH match, not text alone
+    // (2026-08-04, PR #191 review). `h.text` is only the single highest-scoring CHUNK for that
+    // parent (truncated to 1200 chars at construction) -- two genuinely DIFFERENT documents that
+    // happen to share a common boilerplate opening chunk (or that differ only after char 1200) would
+    // have identical `text` but, because relevance score is a function of each PARENT'S full
+    // embedding against this query, essentially never an identical score to full double precision.
+    // Requiring both closes that false-merge risk while still catching the real cross-prefix mirror
+    // duplicates -- which are TRUE full-content copies, so both their best-chunk text AND their score
+    // are identical (this is exactly the CLO's own field-measured signal: two mirror copies scored
+    // identically to 16 significant digits). A hit with no score, or text below a minimum length
+    // (pickText can legitimately return '' or a short fragment), is NEVER eligible to merge with
+    // anything -- it gets its own unique key (its parent id).
     const MIN_DEDUP_TEXT_LEN = 40;
     const contentKey = (h: (typeof collapsed)[number]): string => {
       const t = h.text.trim();
-      return t.length >= MIN_DEDUP_TEXT_LEN ? t : `__unique_${h._parent}`;
+      if (t.length < MIN_DEDUP_TEXT_LEN || h.score === undefined) return `__unique_${h._parent}`;
+      return `${h.score}::${t}`;
     };
     const byContent = new Map<string, typeof collapsed>();
     for (const h of collapsed) {

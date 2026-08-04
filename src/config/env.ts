@@ -360,17 +360,26 @@ const EnvSchema = z.object({
   // field report Finding 1): 147 soft-deletes = 294 Azure ops (copy+remove each) at the CLO's
   // measured ~0.7s/item ran ~100s -- over the 60s MCP transport timeout, with the caller left unable
   // to tell whether the call had done nothing, some, or all of the batch (it HAD completed
-  // server-side; the client just never learned that). The bulk loop now checks elapsed time before
-  // each item and returns {status:'partial', remaining} well inside the transport ceiling rather
-  // than risk an orphaned execution the caller can't observe. A partial result is naturally
+  // server-side; the client just never learned that). The bulk loop checks elapsed time BEFORE
+  // starting each item and returns {status:'partial', remaining} well inside the transport ceiling
+  // rather than risk an orphaned execution the caller can't observe. A partial result is naturally
   // resumable: re-invoking with the SAME prefix only re-matches what has not yet moved (moved items
-  // are gone from the source prefix). Bounded 1s..55s so a misconfiguration cannot either defeat the
-  // guard (too high) or make legitimate small batches falsely report partial (too low).
+  // are gone from the source prefix).
+  //
+  // BOUND TIGHTENED to 1s..35s, default 30s (2026-08-04, PR #191 review; was 1s..55s/45s): the
+  // per-item budget check bounds how many items are STARTED, not how long the item already in
+  // flight when the check last passed can run -- copyBlob's own async-copy poll loop has a hard 20s
+  // ceiling (src/legal/blob-store.ts), so an item that starts just under the budget could still push
+  // total elapsed close to budget+20s. The old 55s ceiling left almost no margin (55+20=75s, well
+  // past the 60s transport timeout); the new ceiling guarantees at least 25s of headroom under 60s
+  // even in that worst case (35+20=55s), while 30s default leaves 30s of headroom in normal
+  // operation. A future fix could thread a real deadline through listing/copy/delete instead of only
+  // checking between items; this bound is the cheap, low-risk mitigation until that lands.
   LEGAL_DELETE_TIME_BUDGET_MS: z
     .string()
-    .default('45000')
+    .default('30000')
     .transform((v) => Number.parseInt(v, 10))
-    .refine((n) => Number.isFinite(n) && n >= 1000 && n <= 55000, 'LEGAL_DELETE_TIME_BUDGET_MS must be 1000..55000'),
+    .refine((n) => Number.isFinite(n) && n >= 1000 && n <= 35000, 'LEGAL_DELETE_TIME_BUDGET_MS must be 1000..35000'),
 
   // Finance dataroom store (the CFO source-docs blobs behind the finance-* AI Search rooms, account
   // otchealthcfodata). Powers kb_get_document — ring-gated WHOLE-document retrieval (search returns

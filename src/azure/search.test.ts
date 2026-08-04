@@ -467,6 +467,34 @@ test('hybridSearch (chunked room): byte-identical content under TWO DIFFERENT pa
   );
 });
 
+test('hybridSearch (chunked room): matching TEXT but a DIFFERENT score does NOT merge -- guards against shared-boilerplate false merges (PR #191 review)', async () => {
+  // Two DIFFERENT real pleadings that happen to share the exact same boilerplate opening chunk as
+  // their highest-scoring chunk (a realistic case: standard caption/header language). If text alone
+  // were the grouping key, one of these would vanish from the results and get silently relabeled a
+  // "variant" of the other -- exactly the false-merge risk the score+text combined key exists to
+  // prevent. Distinct scores here (relevance is a function of each PARENT's full embedding, not just
+  // this one shared chunk) must keep them as two separate hits.
+  const SHARED_BOILERPLATE = 'IN THE SUPERIOR COURT OF THE STATE OF CALIFORNIA, COUNTY OF PLACER, FAMILY DIVISION';
+  const SHARED_CHUNK_DOCS = [
+    { chunk_id: 'f1#0', parent_id: 'f1', path: 'clo-outgoing/02-Civil/motion-to-compel.pdf', chunk: SHARED_BOILERPLATE, '@search.rerankerScore': 3.14159265358979 },
+    { chunk_id: 'f2#0', parent_id: 'f2', path: 'clo-outgoing/01-Divorce/response-to-motion.pdf', chunk: SHARED_BOILERPLATE, '@search.rerankerScore': 2.71828182845904 },
+  ];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: SHARED_CHUNK_DOCS }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-personal', 'court', 10, { includeOps: false });
+      assert.ok(res);
+      assert.equal(res!.matches.length, 2, 'different documents sharing one boilerplate chunk must NEVER collapse into one hit');
+      assert.ok(res!.matches.every((m) => m.variants === undefined), 'neither hit should be mislabeled as a variant of the other');
+    },
+  );
+});
+
 test('hybridSearch (chunked room): short/empty-text hits are NEVER merged with each other just for lacking distinguishing content', async () => {
   const SHORT_TEXT_DOCS = [
     { chunk_id: 'e1#0', parent_id: 'e1', path: 'legal/a.pdf', chunk: 'ok', '@search.rerankerScore': 2.0 },

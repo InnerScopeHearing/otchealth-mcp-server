@@ -67,6 +67,10 @@ test('bulk delete (live): stops at the time budget mid-batch, status:partial, ac
   assert.equal(data.remaining, 2, 'the two un-started items are honestly reported as remaining, not silently lost');
   assert.equal(typeof data.as_of, 'string');
   assert.ok(data.as_of.length > 0 && !Number.isNaN(Date.parse(data.as_of)), 'as_of must be a real parseable timestamp');
+  // PR #191 review: the real move that happened before the budget stop must be audited the same as
+  // a normal completion -- the registry only records before/after when payload.audit is present, so
+  // omitting it here would log a genuine mutation as if nothing happened.
+  assert.deepEqual((res as any).audit, { before: { matched: 3 }, after: { movedToTrash: 1 } });
 });
 
 test('bulk delete dry_run: the collision-preflight loop is ALSO time-budgeted and reports status:partial', async () => {
