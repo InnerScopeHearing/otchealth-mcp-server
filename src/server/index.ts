@@ -9,6 +9,7 @@ import { registerMcpRoutes } from './mcp.js';
 import { registerOAuthRoutes } from './oauth.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { loadRevocations, startRevocationReloader } from '../auth/revocation-store.js';
+import { startDeindexResweepReloader } from '../agentstate/deindex-resweep.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -130,6 +131,13 @@ async function main(): Promise<void> {
   // reconciler re-pulls the durable blocklist from Cosmos on an interval so any revoke reaches every
   // replica within ~30s without a restart. Idempotent; no-op without Cosmos; unref'd (never blocks exit).
   startRevocationReloader();
+  // THE PERMANENT FIX for the concurrent-pull-indexer resurrection race documented throughout PR #192
+  // (search-write.ts's module doc comment, "KNOWN RESIDUAL LIMITATION"): a delayed re-verification
+  // sweep over paths legal_blob_delete/legal_blob_move already enqueued, run safely past one full
+  // indexer cadence so it never races the same in-flight run the synchronous cleanup could. See
+  // agentstate/deindex-resweep.ts's module doc comment for the full design. Idempotent; no-op without
+  // Cosmos; unref'd; safe to run redundantly across replicas (deindexChunkedPath is idempotent).
+  startDeindexResweepReloader();
 
   try {
     const address = await app.listen({ port: env.PORT, host: '0.0.0.0' });

@@ -195,38 +195,46 @@ export async function indexMemoryNow(input: {
  * unfilterable field) must never surface as a failure of the blob operation itself -- it is
  * best-effort cleanup on top of an already-durable change, not a precondition for it.
  *
- * KNOWN RESIDUAL LIMITATION, not fixed by this mechanism (2026-08-04, Copilot review PR #192 round
- * 3): this is a point-in-time DELETE against the index, racing an INDEPENDENT, asynchronous
- * pull-indexer that can be mid-run at the same time. If a pull-indexer run already READ the old
- * path's content before the blob move, and finishes WRITING that read to the index AFTER this
- * delete runs, the stale entry is resurrected -- this code has no way to know that happened, and
- * `deindexed`/`truncated:false` would (correctly, at the time) report success. This is an inherent
- * property of pairing an active-delete with a passive periodic indexer, not a regression introduced
- * here: before this fix there was NO cleanup at all, and -- since these pull-indexers have no
- * deletion-detection policy (see the module doc comment above) -- a stale entry was never
- * self-healing on any cadence; it stayed stale INDEFINITELY until a full reindex. So the exposure
- * window only shrinks (from "stale indefinitely" to "stale only if a resurrection race is lost"),
- * it does not fully close (2026-08-04, Copilot review PR #192 round 7: the earlier "up to ~6h"
- * framing here wrongly implied the pull-indexer's own cadence would eventually self-heal a missed
- * cleanup, contradicting the no-deletion-detection fact documented above). A real fix needs either
- * indexer coordination (a lock/generation
- * check the pull-indexer respects) or a delayed/recurring re-check sweep that re-deindexes any path
- * that reappears after a confirmed delete -- both genuinely new mechanisms, not yet built (tracked
- * against the CLO brief's pending §7 index_status probe work). Not attempted in this PR: the common
- * case (no indexer run in flight at the exact moment of the move) is correctly handled and is the
- * overwhelming majority of real usage, and building indexer coordination is a separate, larger
- * design task.
+ * FORMERLY A KNOWN RESIDUAL LIMITATION, NOW CLOSED (2026-08-04, Copilot review PR #192 rounds 3-12
+ * identified this repeatedly; THE PERMANENT FIX is `agentstate/deindex-resweep.ts`): this function
+ * is a point-in-time DELETE against the index, racing an INDEPENDENT, asynchronous pull-indexer
+ * that can be mid-run at the same time. If a pull-indexer run already READ the old path's content
+ * before the blob move, and finishes WRITING that read to the index AFTER this delete runs, the
+ * stale entry is resurrected -- this function, in isolation, has no way to know that happened, and
+ * `deindexed`/`truncated:false` would (correctly, at the time) report success for what it could see.
+ * No amount of tightening a single SYNCHRONOUS call can close that: an MCP tool call cannot block
+ * for hours waiting out the indexer's own cadence to be certain no run is still in flight.
  *
- * The same limitation also covers a narrower variant flagged separately (2026-08-04, Copilot review
- * PR #192 round 9): `findAllChunkIds`'s authoritative-count check treats `seenRaw` (a UNION of ids
- * across every page fetched during this pass) as proof of exhaustion once it reaches the largest
- * `@odata.count` observed. Against a genuinely mutating index, that union is not a true single
- * snapshot -- e.g. the indexer could remove a chunk this pass already saw and insert an unrelated
- * one elsewhere while the count stays constant, satisfying the numeric target without that specific
- * live chunk ever having been returned. This is the identical "no way to know a concurrent write
- * happened" root cause above, expressed through the count check instead of through resurrection
- * after a confirmed delete -- not a separate bug, and not fixable without the same indexer
- * coordination or re-check sweep already tracked against §7.
+ * THE FIX applied at the CALL SITES (blob-delete.ts, blob-move.ts), not in this function: every
+ * caller ALSO enqueues the path into a durable, delayed re-verification queue
+ * (`enqueueDeindexResweep`), due safely past one full indexer cadence. A periodic in-process
+ * reconciler drains it and re-runs this exact function -- by the time an entry is due, any indexer
+ * run that was in flight when the entry was enqueued has certainly finished, so that second pass is
+ * not racing anything and its result is authoritative. This function's own synchronous best-effort
+ * cleanup stays as the FAST PATH for the common case (no indexer run in flight, the overwhelming
+ * majority of real usage); the resweep queue is the DURABLE BACKSTOP that closes the race the fast
+ * path cannot. See deindex-resweep.ts's module doc comment for the full design and why it needed no
+ * new Azure infrastructure (reuses the already-provisioned Cosmos `tasks` container).
+ *
+ * `findAllChunkIds`'s authoritative-count check (round 9: `seenRaw`, a UNION of ids across every
+ * page fetched in ONE pass, is not a true single snapshot against a genuinely mutating index) is the
+ * identical root cause expressed through the count check instead of through resurrection after a
+ * confirmed delete -- the SAME resweep queue closes it the same way: a later, delayed pass is not
+ * racing the same mutation the first pass was.
+ *
+ * ONE narrower edge case remains genuinely open, NOT closed by the resweep queue (2026-08-04,
+ * Copilot review PR #192 round 12): this lookup is path-only, not tied to a specific blob
+ * generation/ETag. If a blob is deliberately RECREATED at the exact same path (a new
+ * `legal_blob_put` of unrelated content under an identical path string) at any point before a
+ * pending resweep entry for that path fires, the resweep's path-based lookup cannot distinguish
+ * "stale chunks from the content that used to be here" from "valid chunks for the content that is
+ * here now" -- it would delete both. Closing this properly needs the chunk schema to carry a
+ * source-generation marker this cleanup can correlate against the pre-delete state, which was not
+ * attempted here without first confirming that field exists in the live schema (this PR does not
+ * touch the live Azure Search index/indexer configuration blind). Tracked as a follow-up, same as
+ * indexer coordination was tracked against the CLO brief's §7 before this resweep queue existed.
+ * Practically narrow: it requires an exact same-path recreation within the resweep delay window,
+ * not merely a concurrent read.
  */
 
 export interface DeindexResult {
