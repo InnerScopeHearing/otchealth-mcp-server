@@ -22,8 +22,14 @@ export const legalBlobMoveOutputShape = {
   /** Chunk documents removed from the search index at src_path after a successful move (2026-08-04,
    *  CLO field report Finding 3): the chunked doc rooms are fed by slow native pull-indexers with no
    *  deletion-detection policy, so without this a moved blob's OLD path stays indexed indefinitely,
-   *  pointing at content that no longer resolves there. Best-effort/fail-open; 0 on dry_run. */
+   *  pointing at content that no longer resolves there. Best-effort/fail-open, deadline-bounded; 0
+   *  on dry_run. */
   deindexed: z.number(),
+  /** True when cleanup of src_path's search entry was NOT confirmed complete (search unconfigured,
+   *  the overall deindex deadline was hit, or a mid-pagination failure) -- src_path may still
+   *  surface a stale search hit (2026-08-04, Copilot review PR #192 round 2). Always false on
+   *  dry_run. */
+  deindex_truncated: z.boolean(),
   error: z.string().optional(),
 } satisfies ZodRawShape;
 
@@ -43,7 +49,7 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   const container = input.container;
   const caller = ctx.callerAgent || '';
   const lanes = lanesForContainer(container);
-  const base = { executed: false, dry_run: ctx.dryRun, container, src_path: input.src_path, dst_path: input.dst_path, bytes: null as number | null, deindexed: 0 };
+  const base = { executed: false, dry_run: ctx.dryRun, container, src_path: input.src_path, dst_path: input.dst_path, bytes: null as number | null, deindexed: 0, deindex_truncated: false };
 
   if (!isLegalContainerAllowed(container, caller)) {
     return { data: { ...base, error: 'forbidden_ring' }, summary: `Refused: moving within legal container "${container}" requires one of the ${lanes.join('/')} trusted lanes. Your identity: ${caller || '(none)'}.` };
@@ -82,16 +88,20 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   const copy = await copyBlob(container, input.src_path, input.dst_path, overwrite, src.etag ?? undefined);
   await deleteBlobHard(container, input.src_path, src.etag ?? undefined);
 
-  // Best-effort, fail-open: purge the stale search-index entry at src_path now that the blob no
-  // longer lives there (2026-08-04, CLO field report Finding 3 -- same stale-path failure mode as
-  // legal_blob_delete, since move is copy-then-remove-original too). Never throws; a failure here
-  // does not undo, block, or flag the move itself, which has already durably happened.
+  // Best-effort, fail-open, deadline-bounded (see deindexChunkedPath's own doc comment): purge the
+  // stale search-index entry at src_path now that the blob no longer lives there (2026-08-04, CLO
+  // field report Finding 3 -- same stale-path failure mode as legal_blob_delete, since move is
+  // copy-then-remove-original too). Never throws; a failure here does not undo, block, or flag the
+  // move itself, which has already durably happened.
   const deindex = await deindexChunkedPath(searchIndexForContainer(container), input.src_path);
+  const deindexTruncated = !deindex.attempted || Boolean(deindex.truncated);
 
   return {
-    data: { ...base, executed: true, dry_run: false, bytes: copy.bytes, deindexed: deindex.deleted },
+    data: { ...base, executed: true, dry_run: false, bytes: copy.bytes, deindexed: deindex.deleted, deindex_truncated: deindexTruncated },
     audit: { before: { srcExists: true, dstExists }, after: { container, dst_path: input.dst_path, bytes: copy.bytes } },
-    summary: `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}).`,
+    summary: deindexTruncated
+      ? `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}). Search-index cleanup at the old path was NOT confirmed complete -- it may still surface a stale hit.`
+      : `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}).`,
   };
 }
 
@@ -104,7 +114,7 @@ export function registerLegalBlobMove(server: McpServer, callerHash: CallerHashP
       annotations: {
         title: 'Move (rename/relocate) a blob within the ring-gated legal document store',
         description:
-          'Move a blob from src_path to dst_path within the same container (copy-then-remove-original; Azure Blob has no native rename). FAIL-CLOSED: refuses if dst_path already exists unless overwrite=true, and refuses outright if src_path falls under a protected prefix (LEGAL_PROTECTED_PREFIXES -- the court-download folder and raw filings stay append-only regardless of caller). The original is removed ONLY after the copy to dst_path is verified to have landed. After a successful move, the stale search-index entry at src_path is also purged (best-effort; count in "deindexed") -- the chunked doc rooms are fed by slow native pull-indexers with no deletion-detection policy, so without this the old path keeps appearing in search results pointing at content that no longer resolves there. RING-GATED identically to legal_blob_put. Defaults to dry_run.',
+          'Move a blob from src_path to dst_path within the same container (copy-then-remove-original; Azure Blob has no native rename). FAIL-CLOSED: refuses if dst_path already exists unless overwrite=true, and refuses outright if src_path falls under a protected prefix (LEGAL_PROTECTED_PREFIXES -- the court-download folder and raw filings stay append-only regardless of caller). The original is removed ONLY after the copy to dst_path is verified to have landed. After a successful move, the stale search-index entry at src_path is also purged (best-effort, deadline-bounded; confirmed count in "deindexed") -- the chunked doc rooms are fed by slow native pull-indexers with no deletion-detection policy, so without this the old path keeps appearing in search results pointing at content that no longer resolves there. "deindex_truncated" is true when that cleanup was NOT confirmed complete -- src_path may still surface a stale hit. RING-GATED identically to legal_blob_put. Defaults to dry_run.',
         readOnlyHint: false,
         // A move removes src_path (and can overwrite dst_path) -- destructiveHint:false ("additive
         // only" under MCP annotation semantics) misdescribed this operation (2026-08-04, PR #190 review).

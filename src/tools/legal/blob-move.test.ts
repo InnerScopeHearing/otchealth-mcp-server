@@ -139,6 +139,7 @@ test('successful move: copies (PUT with x-ms-copy-source) THEN deletes the origi
   // it must never throw, block the move, or trigger any network call beyond the stub above (which
   // throws on anything unexpected, so reaching this assertion already proves that).
   assert.equal((res.data as any).deindexed, 0, 'deindex is best-effort and fails open when search is unconfigured');
+  assert.equal((res.data as any).deindex_truncated, true, 'an unconfigured/unattempted deindex is honestly reported as truncated, not silently reported as clean');
   const putIdx = order.indexOf('PUT');
   const delIdx = order.indexOf('DELETE');
   assert.ok(putIdx >= 0 && delIdx >= 0 && putIdx < delIdx, `PUT (copy) must happen strictly before DELETE (remove original); order was ${order.join(',')}`);

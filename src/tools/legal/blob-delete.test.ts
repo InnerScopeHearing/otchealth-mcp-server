@@ -182,6 +182,7 @@ test('single mode success: copies to _TRASH/<path> (pinned to the source ETag) T
   // production) -- it must never throw, block the delete, or trigger any network call beyond the
   // stub above (which throws on anything unexpected, so reaching this assertion already proves it).
   assert.equal((res.data as any).deindexed, 0, 'deindex is best-effort and fails open when search is unconfigured');
+  assert.deepEqual((res.data as any).deindex_incomplete, ['dupe.pdf'], 'an unconfigured/unattempted deindex is honestly reported as incomplete, not silently reported as clean');
   const putIdx = order.indexOf('PUT');
   const delIdx = order.indexOf('DELETE');
   assert.ok(putIdx >= 0 && delIdx >= 0 && putIdx < delIdx);

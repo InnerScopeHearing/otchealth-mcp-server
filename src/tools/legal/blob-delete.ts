@@ -8,12 +8,12 @@ import { prepareDeindexAuth, deindexChunkedPathWithAuth, type DeindexAuth } from
 
 export const DEFAULT_MAX_ITEMS = 100;
 export const HARD_MAX_ITEMS = 500;
-/** Skip per-item search de-indexing once fewer than this many ms remain in the batch's own time
- *  budget (2026-08-04, Copilot review PR #192) -- deindexChunkedPathWithAuth's own network calls
- *  are individually bounded (DEINDEX_CALL_TIMEOUT_MS, no retry) but can still add up across a
- *  lookup + delete round trip; skipping when the budget is nearly spent keeps the bulk loop's own
- *  time-budget stop the dominant safety mechanism, never cleanup latency. */
-const DEINDEX_SKIP_THRESHOLD_MS = 5000;
+/** Per-item cleanup deadline never exceeds this many ms, even when the batch's own time budget has
+ *  more room left than that (2026-08-04, Copilot review PR #192 round 2: an earlier "skip cleanup
+ *  when budget is thin" design silently abandoned cleanup with no visible signal -- deadline-bound
+ *  it instead, so every item is at least ATTEMPTED and any incomplete result is reported in
+ *  `deindex_incomplete`, never just dropped). */
+const DEINDEX_PER_ITEM_CAP_MS = 8000;
 
 /** Soft-delete destination for a given original path -- never a real hard delete of the only copy. */
 export function trashPathFor(path: string): string {
@@ -61,6 +61,16 @@ export const legalBlobDeleteOutputShape = {
    *  room may not have indexed this path yet, which is not an error). Always 0 on dry_run.
    */
   deindexed: z.number(),
+  /** ORIGINAL (from) paths of items whose move succeeded but whose search-index cleanup was NOT
+   *  confirmed complete (a deadline, a mid-pagination failure, or search being unconfigured
+   *  entirely) -- these paths may still return a stale search hit (2026-08-04, Copilot review PR
+   *  #192 round 2: reporting cleanup as done-or-silently-abandoned with no signal either way is
+   *  worse than an honest "not confirmed"). Always empty on dry_run. Not currently re-triggerable
+   *  by re-invoking this tool (the blob has already moved, so the same path/prefix will not
+   *  re-match it) -- a future admin sweep tool is the intended remedy; for now this is visibility,
+   *  not automatic recovery.
+   */
+  deindex_incomplete: z.array(z.string()),
   error: z.string().optional(),
 } satisfies ZodRawShape;
 
@@ -100,6 +110,7 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     remaining: 0,
     as_of: null as string | null,
     deindexed: 0,
+    deindex_incomplete: [] as string[],
   };
 
   if (!isLegalContainerAllowed(container, caller)) {
@@ -237,11 +248,12 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
   const deindexAuth: DeindexAuth | null = (await prepareDeindexAuth()).auth;
   const moved: Array<{ from: string; to: string }> = [];
   let deindexedCount = 0;
+  const deindexIncomplete: string[] = [];
   for (const item of items) {
     if (Date.now() - startedAt > budgetMs) {
       const remaining = items.length - moved.length;
       return {
-        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, status: 'partial', remaining, as_of: asOf, deindexed: deindexedCount },
+        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, status: 'partial', remaining, as_of: asOf, deindexed: deindexedCount, deindex_incomplete: deindexIncomplete },
         // Any real moves that happened before the stop must be audited the same as a normal
         // completion -- omitting `audit` here would log a real mutation (copy+delete already ran on
         // `moved.length` blobs) as if nothing happened, since the registry only records before/after
@@ -261,7 +273,7 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
         // situation as the time-budget stop above, just for a different reason -- `error` already
         // distinguishes why (2026-08-04, PR #191 review: status:'complete' with a positive
         // `remaining` was a self-contradictory response).
-        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, collisions: [{ from: item.from, to: item.to }], status: 'partial', remaining, as_of: asOf, deindexed: deindexedCount, error: 'trash_collision' },
+        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, collisions: [{ from: item.from, to: item.to }], status: 'partial', remaining, as_of: asOf, deindexed: deindexedCount, deindex_incomplete: deindexIncomplete, error: 'trash_collision' },
         audit: { before: { matched: items.length }, after: { movedToTrash: moved.length } },
         summary: `Stopped after moving ${moved.length}/${items.length}: a blob already exists at the trash destination "${item.to}" (a previous delete of the same path?). Resolve that manually, then re-run for the remaining items.`,
       };
@@ -269,23 +281,33 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     await copyBlob(container, item.from, item.to, false, item.etag ?? undefined);
     await deleteBlobHard(container, item.from, item.etag ?? undefined);
     moved.push({ from: item.from, to: item.to });
-    // Best-effort, fail-open, TIME-BOUNDED: purge the stale search-index entry at the path this
+    // Best-effort, fail-open, DEADLINE-BOUNDED: purge the stale search-index entry at the path this
     // blob just moved FROM. Never throws (deindexChunkedPathWithAuth's own contract); a failure
     // here does not undo, block, or even flag the blob move itself, which has already durably
-    // happened. SKIPPED once the loop's own time budget is nearly spent, so cleanup latency can
-    // never itself push a bulk batch over the MCP transport timeout after blobs have already moved
-    // (2026-08-04, Copilot review PR #192) -- a skipped item's stale index entry is caught by the
-    // next delete/move that touches the same path, or a future manual sweep.
-    if (deindexAuth && budgetMs - (Date.now() - startedAt) > DEINDEX_SKIP_THRESHOLD_MS) {
-      const deindex = await deindexChunkedPathWithAuth(deindexAuth, searchIndex, item.from);
+    // happened. The deadline is the EARLIER of a per-item cap and the batch's own remaining budget,
+    // so cleanup latency can never itself push a bulk batch over the MCP transport timeout after
+    // blobs have already moved (2026-08-04, Copilot review PR #192). Every item is still ATTEMPTED
+    // (never silently skipped) -- a `truncated`/unattempted result is recorded in
+    // `deindexIncomplete` so the caller can SEE that a path's cleanup was not confirmed, rather
+    // than the earlier design where a thin-budget item's stale index entry just silently vanished
+    // from the response with no trace.
+    if (deindexAuth) {
+      const deadline = Math.min(Date.now() + DEINDEX_PER_ITEM_CAP_MS, startedAt + budgetMs);
+      const deindex = await deindexChunkedPathWithAuth(deindexAuth, searchIndex, item.from, deadline);
       deindexedCount += deindex.deleted;
+      if (!deindex.attempted || deindex.truncated) deindexIncomplete.push(item.from);
+    } else {
+      deindexIncomplete.push(item.from);
     }
   }
 
   return {
-    data: { ...base, executed: true, dry_run: false, mode, matched: items.length, moved, as_of: asOf, deindexed: deindexedCount },
+    data: { ...base, executed: true, dry_run: false, mode, matched: items.length, moved, as_of: asOf, deindexed: deindexedCount, deindex_incomplete: deindexIncomplete },
     audit: { before: { matched: items.length }, after: { movedToTrash: moved.length } },
-    summary: `Soft-deleted ${moved.length} blob(s) in legal/${container} (moved to _TRASH/, lane=${caller}). Recoverable via legal_blob_move back to the original path.`,
+    summary:
+      deindexIncomplete.length > 0
+        ? `Soft-deleted ${moved.length} blob(s) in legal/${container} (moved to _TRASH/, lane=${caller}). Search-index cleanup was NOT confirmed complete for ${deindexIncomplete.length}/${moved.length} of them (see deindex_incomplete) -- those paths may still surface a stale search hit. Recoverable via legal_blob_move back to the original path.`
+        : `Soft-deleted ${moved.length} blob(s) in legal/${container} (moved to _TRASH/, lane=${caller}). Recoverable via legal_blob_move back to the original path.`,
   };
 }
 
@@ -298,7 +320,7 @@ export function registerLegalBlobDelete(server: McpServer, callerHash: CallerHas
       annotations: {
         title: 'Soft-delete a blob (or a prefix of blobs) in the ring-gated legal document store',
         description:
-          `SOFT delete only -- moves the blob(s) to _TRASH/<original-path> within the same container, never a real hard delete. Provide exactly one of "path" (single blob) or "prefix" (bulk, bounded by max_items, default ${DEFAULT_MAX_ITEMS}, hard cap ${HARD_MAX_ITEMS} -- if more blobs match the prefix than max_items, the call REFUSES entirely rather than silently deleting a partial set; narrow the prefix or raise max_items and re-run). "confirm" MUST exactly echo path (or prefix) -- a mismatch refuses, by design a wrong-path delete needs two independent mistakes to happen. Refuses outright if path/prefix falls under a protected prefix (LEGAL_PROTECTED_PREFIXES) -- the court-download folder and raw filings stay append-only no matter what. RING-GATED identically to legal_blob_put. Defaults to dry_run: run it once with dry_run true (the default) to see exactly what would move before passing dry_run=false. A large bulk batch is SELF-BOUNDED to a time budget well under the MCP transport timeout: if the batch does not finish in time, the call returns status:"partial" with a "remaining" count instead of risking a client-side timeout on a call that actually completed server-side -- re-invoke with the SAME path/prefix to continue, already-moved items are never re-matched. "as_of" (null when the call refused before ever reading storage) marks when the underlying listing/existence-check was read (Azure's list-blobs enumeration is not guaranteed strongly consistent the way a single-blob read is); treat a non-null plan more than a few seconds old as possibly stale and re-run before trusting it. After each successful move, the stale search-index entry at the blob's ORIGINAL path is also purged (best-effort; count in "deindexed") -- the chunked doc rooms are fed by slow native pull-indexers with no deletion-detection policy, so without this a soft-deleted document keeps appearing in search results under a path that no longer resolves.`,
+          `SOFT delete only -- moves the blob(s) to _TRASH/<original-path> within the same container, never a real hard delete. Provide exactly one of "path" (single blob) or "prefix" (bulk, bounded by max_items, default ${DEFAULT_MAX_ITEMS}, hard cap ${HARD_MAX_ITEMS} -- if more blobs match the prefix than max_items, the call REFUSES entirely rather than silently deleting a partial set; narrow the prefix or raise max_items and re-run). "confirm" MUST exactly echo path (or prefix) -- a mismatch refuses, by design a wrong-path delete needs two independent mistakes to happen. Refuses outright if path/prefix falls under a protected prefix (LEGAL_PROTECTED_PREFIXES) -- the court-download folder and raw filings stay append-only no matter what. RING-GATED identically to legal_blob_put. Defaults to dry_run: run it once with dry_run true (the default) to see exactly what would move before passing dry_run=false. A large bulk batch is SELF-BOUNDED to a time budget well under the MCP transport timeout: if the batch does not finish in time, the call returns status:"partial" with a "remaining" count instead of risking a client-side timeout on a call that actually completed server-side -- re-invoke with the SAME path/prefix to continue, already-moved items are never re-matched. "as_of" (null when the call refused before ever reading storage) marks when the underlying listing/existence-check was read (Azure's list-blobs enumeration is not guaranteed strongly consistent the way a single-blob read is); treat a non-null plan more than a few seconds old as possibly stale and re-run before trusting it. After each successful move, the stale search-index entry at the blob's ORIGINAL path is also purged (best-effort, deadline-bounded; confirmed count in "deindexed") -- the chunked doc rooms are fed by slow native pull-indexers with no deletion-detection policy, so without this a soft-deleted document keeps appearing in search results under a path that no longer resolves. "deindex_incomplete" lists the original paths where that cleanup was NOT confirmed complete (a deadline or a mid-pagination failure) -- those specific paths may still surface a stale hit; it is visibility, not an automatic retry.`,
         readOnlyHint: false,
         // Soft delete still REMOVES the blob from its original location (recoverability via
         // _TRASH/ does not make the invocation additive) -- destructiveHint:false understated the
