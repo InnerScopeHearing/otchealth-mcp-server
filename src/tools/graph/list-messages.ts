@@ -9,7 +9,7 @@ export function registerGraphListMessages(server: McpServer, callerHash: CallerH
     category: 'read',
     annotations: {
       title: 'List messages in an allowlisted mailbox',
-      description: 'List recent messages in one of the allowlisted customer-service / COO mailboxes (see the `mailbox` param, GRAPH_CS_MAILBOXES). Read-only. Defaults to coo@otchealthmart.com for back-compat.',
+      description: 'List recent messages in one of the allowlisted customer-service / COO mailboxes (see the `mailbox` param, GRAPH_CS_MAILBOXES), OR, for EXEC_RING callers only, one of the executive mailboxes on GRAPH_EXEC_MAILBOXES (e.g. matthew@innd.com, ap@innd.com, accounting@hearingassist.com, cfo@innd.com). Read-only. Defaults to coo@otchealthmart.com for back-compat.',
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true,
     },
     inputShape: {
