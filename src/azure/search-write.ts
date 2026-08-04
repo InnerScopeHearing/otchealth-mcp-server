@@ -298,6 +298,21 @@ export interface DeindexResult {
    *  forces the compiler to catch that at every return site, not just at the two call sites that
    *  happen to read it today. */
   truncated: boolean;
+  /** True when a LATER retry of this exact call could plausibly turn `truncated:true` into
+   *  `truncated:false` (a transient condition: a network blip, a deadline that was simply too
+   *  tight this time, Search being briefly unavailable). False when the incompleteness is a
+   *  DETERMINISTIC property of this call that retrying cannot fix (2026-08-04, Copilot review PR
+   *  #192 round 19): the keyword-search fallback ALWAYS returns `truncated:true` by design, every
+   *  single time it runs, regardless of outages -- `queryType:'simple'` can produce false negatives
+   *  on paths containing search-operator characters no matter how many times it is retried. Callers
+   *  that retry "not confirmed clean" results indefinitely (deindex-resweep.ts, since round 17,
+   *  after transient Search/auth outages were found permanently stranding entries) MUST distinguish
+   *  this case -- retrying a structurally-non-authoritative result forever wastes a queue slot every
+   *  tick for no possible gain, the mirror-image mistake of terminal-ing a genuinely transient one
+   *  too early. REQUIRED, not optional, for the same reason `truncated` is: an accidentally-missing
+   *  field at a new return site must not silently default to "authoritative," which would make a
+   *  genuinely non-retriable result retry forever by omission. */
+  authoritative: boolean;
   reason?: string;
 }
 
@@ -709,15 +724,21 @@ export async function deindexChunkedPathWithAuth(
       // round of this PR tightened elsewhere.
       const remainingMs = deadlineAtMs - Date.now();
       if (remainingMs <= 0) {
-        return { attempted: false, deleted: 0, truncated: true, reason: 'deadline already exceeded before the existence check could start' };
+        // Transient (the caller simply ran out of time this attempt) -- authoritative:true, a
+        // later retry with a fresh deadline could genuinely confirm clean.
+        return { attempted: false, deleted: 0, truncated: true, authoritative: true, reason: 'deadline already exceeded before the existence check could start' };
       }
       const existMs = Math.max(EXISTENCE_CHECK_MIN_MS, Math.min(EXISTENCE_CHECK_MAX_MS, Math.floor(remainingMs * EXISTENCE_CHECK_SHARE)));
       const nowExists = await blobExistsWithTimeout(container, path, existMs);
       if (nowExists !== false) {
+        // Both outcomes here are transient (a timeout can clear next attempt; a live blob today
+        // may be gone or the resweep's own generation-uncertainty handling applies) --
+        // authoritative:true, this is not a structural dead end.
         return {
           attempted: false,
           deleted: 0,
           truncated: true,
+          authoritative: true,
           reason:
             nowExists === null
               ? 'existence check timed out -- skipping path-only cleanup to avoid risking live content; the delayed resweep queue will re-verify safely'
@@ -754,19 +775,33 @@ export async function deindexChunkedPathWithAuth(
       // exists at this path." Until the room's schema makes `path` filterable (closing this
       // fallback entirely) or this scans exhaustively instead of via a keyword search, the fallback
       // can never claim confirmed-clean the way the primary $filter path can.
+      //
+      // authoritative:false (2026-08-04, Copilot review PR #192 round 19): this fallback returns
+      // truncated:true EVERY time it runs, by design, regardless of whether THIS particular attempt
+      // hit an outage -- it is a deterministic property of "this room's schema does not make `path`
+      // filterable," not a transient condition. A caller that retries "not confirmed clean" results
+      // indefinitely (deindex-resweep.ts) must NOT retry this forever: no number of retries will
+      // ever turn it into truncated:false, so doing so would waste a queue slot every tick for no
+      // possible gain -- it needs the SAME visible-terminal treatment as genuine generation
+      // uncertainty, not the "infra will eventually recover" treatment transient failures get.
       return {
         attempted: true,
         deleted: fb.deleted,
         truncated: true,
+        authoritative: false,
         reason: fb.reason ?? 'keyword-search fallback cannot prove completeness (path field not filterable in this room; query-syntax false negatives are possible)',
       };
     }
-    return { attempted: true, deleted: primary.deleted, truncated: !primary.exhausted || primary.hadDeleteFailure, reason: primary.reason };
+    // The primary $filter path's completeness signal IS authoritative -- exhausted:true genuinely
+    // means clean, and any incompleteness here (a deadline, a delete failure) is transient: a later
+    // retry with fresh time/connectivity could confirm clean.
+    return { attempted: true, deleted: primary.deleted, truncated: !primary.exhausted || primary.hadDeleteFailure, authoritative: true, reason: primary.reason };
   } catch (e) {
     // Defense in depth: findAndDeleteAll/findAllChunkIds/deleteChunkPage already catch every
     // network/parse failure they know about, but this outer guard keeps the "never throws"
-    // contract airtight against anything unanticipated (2026-08-04).
-    return { attempted: false, deleted: 0, truncated: true, reason: (e as Error).message };
+    // contract airtight against anything unanticipated (2026-08-04). Transient by nature (an
+    // unexpected exception, not a proven structural limitation) -- authoritative:true.
+    return { attempted: false, deleted: 0, truncated: true, authoritative: true, reason: (e as Error).message };
   }
 }
 
@@ -807,10 +842,10 @@ export async function deindexChunkedPath(index: string, path: string, budgetMs: 
       // sets truncated:true for the same reason: callers should never need to special-case which
       // layer produced the false (2026-08-04, Copilot review PR #192 round 3, caught by this
       // file's own test suite disagreeing with itself across the two attempted:false paths).
-      if (!auth) return { attempted: false, deleted: 0, truncated: true, reason };
+      if (!auth) return { attempted: false, deleted: 0, truncated: true, authoritative: true, reason };
       return deindexChunkedPathWithAuth(auth, index, path, deadlineAtMs, container);
     })(),
     deadlineAtMs,
-    { attempted: false, deleted: 0, truncated: true, reason: `deindex overall deadline (${budgetMs}ms) exceeded` },
+    { attempted: false, deleted: 0, truncated: true, authoritative: true, reason: `deindex overall deadline (${budgetMs}ms) exceeded` },
   );
 }

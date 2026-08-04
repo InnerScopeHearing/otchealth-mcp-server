@@ -145,9 +145,20 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   return {
     data: { ...base, executed: true, dry_run: false, bytes: copy.bytes, deindexed: deindex.deleted, deindex_truncated: deindexTruncated, deindex_resweep_queued: resweepQueued },
     audit: { before: { srcExists: true, dstExists }, after: { container, dst_path: input.dst_path, bytes: copy.bytes } },
-    summary: deindexTruncated
-      ? `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}). Search-index cleanup at the old path was NOT confirmed complete -- it may still surface a stale hit.${resweepQueued ? '' : ' The delayed re-verification enqueue was also not confirmed persisted.'}`
-      : `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}).`,
+    summary: (() => {
+      // 2026-08-04, Copilot review round 19: the resweep-not-confirmed caveat must appear
+      // regardless of deindexTruncated -- the ORIGINAL version only surfaced it as a suffix on the
+      // deindexTruncated branch, so an immediate cleanup that succeeded (deindexTruncated:false)
+      // but whose durable enqueue failed (resweepQueued:false) fell through to an unqualified
+      // success summary, silently hiding the remaining indexer-resurrection risk that
+      // deindex_resweep_queued:false was specifically added to expose.
+      const base_ = `Moved legal/${container}/${input.src_path} -> ${input.dst_path} (${copy.bytes} bytes, lane=${caller}).`;
+      const immediate = deindexTruncated ? ' Search-index cleanup at the old path was NOT confirmed complete -- it may still surface a stale hit.' : '';
+      const durable = resweepQueued ? '' : deindexTruncated
+        ? ' The delayed re-verification enqueue was also not confirmed persisted.'
+        : ' The delayed re-verification enqueue was NOT confirmed persisted -- an indexer resurrection at the old path would have no backstop.';
+      return base_ + immediate + durable;
+    })(),
   };
 }
 

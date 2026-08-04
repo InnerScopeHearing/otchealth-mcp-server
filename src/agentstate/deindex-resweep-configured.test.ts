@@ -347,16 +347,30 @@ test('runDeindexResweepOnce: a due entry that cannot be confirmed clean (search 
   assert.ok((updated.due_at as string) > originalDueAt, 'due_at must be pushed forward for the retry');
 });
 
-test('THE TRANSIENT-VS-TERMINAL SPLIT THIS ROUND ADDED: a search outage that outlasts DEINDEX_RESWEEP_MAX_ATTEMPTS worth of retries NEVER terminal-ates the entry, unlike generation uncertainty -- a fixed attempt cap on a RECOVERABLE outage would silently break the "self-heals within hours" promise, since a failed entry is never automatically revisited (the sweep query only selects status=\'pending\') (2026-08-04, Copilot review round 17)', async () => {
+test('THE TRANSIENT-VS-TERMINAL SPLIT THIS ROUND ADDED: an auth outage (unambiguously transient -- no authoritative/non-authoritative ambiguity at all) that outlasts DEINDEX_RESWEEP_MAX_ATTEMPTS worth of retries NEVER terminal-ates the entry, unlike generation uncertainty -- a fixed attempt cap on a RECOVERABLE outage would silently break the "self-heals within hours" promise, since a failed entry is never automatically revisited (the sweep query only selects status=\'pending\') (2026-08-04, Copilot review round 17)', async () => {
   const cosmos = makeCosmosDouble();
   const blobPaths = new Set<string>();
   await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'long-outage.pdf', 'personal'));
 
-  // Simulate an outage that outlasts DEINDEX_RESWEEP_MAX_ATTEMPTS worth of retries.
+  // Simulate an outage that outlasts DEINDEX_RESWEEP_MAX_ATTEMPTS worth of retries -- identity
+  // (auth) failing, not search failing. Search-query failures are deliberately NOT used here
+  // (2026-08-04, Copilot review round 19): a primary $filter query that fails outright on page 0
+  // makes deindexChunkedPathWithAuth fall back to the keyword-search path, which is ALWAYS
+  // authoritative:false by design (see DeindexResult's own doc comment) regardless of why the
+  // fallback triggered -- so a search-outage stub does not actually exercise the "genuinely
+  // transient, should retry forever" case this test is for. Auth failure has no such ambiguity: it
+  // never reaches deindexChunkedPathWithAuth at all, so it is unconditionally transient.
+  const authFailStub = (): typeof fetch => (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    if (isCosmosCall(u)) return cosmos.handle(u, init);
+    if (isIdentityCall(u)) return new Response('identity unavailable', { status: 503 });
+    throw new Error(`unexpected call during simulated auth outage: ${u}`);
+  }) as typeof fetch;
+
   for (let i = 0; i < DEINDEX_RESWEEP_MAX_ATTEMPTS + 3; i++) {
     const entry = [...cosmos.docs.values()][0];
     entry.due_at = new Date(Date.now() - 1000).toISOString();
-    await withStubbedFetch(fullStub(cosmos, blobPaths, () => new Response('search unavailable', { status: 503 })), () => runDeindexResweepOnce());
+    await withStubbedFetch(authFailStub(), () => runDeindexResweepOnce());
   }
 
   const stillRetrying = [...cosmos.docs.values()][0];
@@ -370,6 +384,23 @@ test('THE TRANSIENT-VS-TERMINAL SPLIT THIS ROUND ADDED: a search outage that out
   const result = await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => runDeindexResweepOnce());
   assert.equal(result.cleaned, 1, 'once infra recovers, the entry resolves normally');
   assert.equal(cosmos.docs.size, 0);
+});
+
+test('THE AUTHORITATIVE/NON-AUTHORITATIVE SPLIT: a room whose primary $filter query fails outright on EVERY attempt (structurally indistinguishable from a permanent "path field not filterable" schema limitation, since deindexChunkedPathWithAuth cannot tell those apart) DOES eventually terminal-ate to a visible \'failed\' -- correct, intended behavior, not a regression, because the keyword-search fallback it falls back to can never prove completeness no matter how many times it is retried (2026-08-04, Copilot review round 19)', async () => {
+  const cosmos = makeCosmosDouble();
+  const blobPaths = new Set<string>();
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'unfilterable-room.pdf', 'personal'));
+
+  for (let i = 0; i < DEINDEX_RESWEEP_MAX_ATTEMPTS; i++) {
+    const entry = [...cosmos.docs.values()][0];
+    entry.due_at = new Date(Date.now() - 1000).toISOString();
+    // Every search call (primary AND the keyword fallback it falls back to) fails outright.
+    await withStubbedFetch(fullStub(cosmos, blobPaths, () => new Response('search unavailable', { status: 503 })), () => runDeindexResweepOnce());
+  }
+
+  const finalEntry = [...cosmos.docs.values()][0];
+  assert.equal(finalEntry.status, 'failed', 'a persistently non-authoritative result must still terminal-ate after the attempt cap, unlike a genuinely transient one');
+  assert.equal(finalEntry.attempts, DEINDEX_RESWEEP_MAX_ATTEMPTS);
 });
 
 test('THE QUEUE-RACE GUARD THIS ROUND ADDED: a fresh re-enqueue that lands WHILE a sweep is mid-flight for the same entry is never clobbered by that sweep\'s stale write-back', async () => {

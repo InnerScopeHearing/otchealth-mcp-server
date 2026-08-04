@@ -405,8 +405,15 @@ export async function runDeindexResweepOnce(
         continue;
       }
 
-      // Not confirmed clean this tick -- retry later, up to the attempt cap.
-      const outcome = await retryOrFail(entry, result.reason ?? 'not confirmed clean', nowMs);
+      // Not confirmed clean this tick. `nonRetriable` follows `result.authoritative` (2026-08-04,
+      // Copilot review round 19): most "not confirmed clean" reasons are transient (a deadline, a
+      // network blip, Search/auth briefly unavailable) and should retry forever, same as the other
+      // transient branches above -- but the keyword-search fallback (used when a room's schema does
+      // not make `path` filterable) returns truncated:true EVERY time it runs, deterministically,
+      // regardless of outages. Retrying THAT forever would waste a queue slot every tick for no
+      // possible gain, so `authoritative:false` routes it to the same bounded-then-visible-'failed'
+      // treatment as genuine generation uncertainty instead of the infinite-retry default.
+      const outcome = await retryOrFail(entry, result.reason ?? 'not confirmed clean', nowMs, result.authoritative === false);
       if (outcome === 'raced') raced++;
       else if (outcome === 'failed') failed++;
       else requeued++;

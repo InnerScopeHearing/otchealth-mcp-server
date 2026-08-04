@@ -365,10 +365,21 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
   return {
     data: { ...base, executed: true, dry_run: false, mode, matched: items.length, moved, as_of: asOf, deindexed: deindexedCount, deindex_incomplete: deindexIncomplete, deindex_resweep_incomplete: deindexResweepIncomplete },
     audit: { before: { matched: items.length }, after: { movedToTrash: moved.length } },
-    summary:
-      deindexIncomplete.length > 0
-        ? `Soft-deleted ${moved.length} blob(s) in legal/${container} (moved to _TRASH/, lane=${caller}). Search-index cleanup was NOT confirmed complete for ${deindexIncomplete.length}/${moved.length} of them (see deindex_incomplete) -- those paths may still surface a stale search hit. Recoverable via legal_blob_move back to the original path.`
-        : `Soft-deleted ${moved.length} blob(s) in legal/${container} (moved to _TRASH/, lane=${caller}). Recoverable via legal_blob_move back to the original path.`,
+    summary: (() => {
+      // 2026-08-04, Copilot review round 19: the resweep-not-confirmed caveat must be independent
+      // of deindexIncomplete -- the ORIGINAL version only checked immediate-cleanup completeness,
+      // so a batch where every immediate delete succeeded but one or more durable resweep enqueues
+      // failed fell through to an unqualified success summary, hiding the documented resurrection
+      // risk deindex_resweep_incomplete was specifically added to expose.
+      const base_ = `Soft-deleted ${moved.length} blob(s) in legal/${container} (moved to _TRASH/, lane=${caller}). Recoverable via legal_blob_move back to the original path.`;
+      const immediate = deindexIncomplete.length > 0
+        ? ` Search-index cleanup was NOT confirmed complete for ${deindexIncomplete.length}/${moved.length} of them (see deindex_incomplete) -- those paths may still surface a stale search hit.`
+        : '';
+      const durable = deindexResweepIncomplete.length > 0
+        ? ` The delayed re-verification enqueue was NOT confirmed persisted for ${deindexResweepIncomplete.length}/${moved.length} of them (see deindex_resweep_incomplete) -- an indexer resurrection at those paths would have no backstop.`
+        : '';
+      return base_ + immediate + durable;
+    })(),
   };
 }
 
