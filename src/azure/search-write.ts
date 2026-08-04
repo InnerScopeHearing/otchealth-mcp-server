@@ -202,9 +202,14 @@ export async function indexMemoryNow(input: {
  * delete runs, the stale entry is resurrected -- this code has no way to know that happened, and
  * `deindexed`/`truncated:false` would (correctly, at the time) report success. This is an inherent
  * property of pairing an active-delete with a passive periodic indexer, not a regression introduced
- * here: before this fix there was NO cleanup at all, so the exposure window only shrinks (from
- * "always stale until the next reindex cycle, up to ~6h" to "stale only if a resurrection race is
- * lost"), it does not fully close. A real fix needs either indexer coordination (a lock/generation
+ * here: before this fix there was NO cleanup at all, and -- since these pull-indexers have no
+ * deletion-detection policy (see the module doc comment above) -- a stale entry was never
+ * self-healing on any cadence; it stayed stale INDEFINITELY until a full reindex. So the exposure
+ * window only shrinks (from "stale indefinitely" to "stale only if a resurrection race is lost"),
+ * it does not fully close (2026-08-04, Copilot review PR #192 round 7: the earlier "up to ~6h"
+ * framing here wrongly implied the pull-indexer's own cadence would eventually self-heal a missed
+ * cleanup, contradicting the no-deletion-detection fact documented above). A real fix needs either
+ * indexer coordination (a lock/generation
  * check the pull-indexer respects) or a delayed/recurring re-check sweep that re-deindexes any path
  * that reappears after a confirmed delete -- both genuinely new mechanisms, not yet built (tracked
  * against the CLO brief's pending §7 index_status probe work). Not attempted in this PR: the common

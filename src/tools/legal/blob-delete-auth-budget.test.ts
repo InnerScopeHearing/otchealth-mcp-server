@@ -25,7 +25,25 @@ process.env.IDENTITY_ENDPOINT ||= 'http://fake-identity.example.invalid/msi/toke
 process.env.IDENTITY_HEADER ||= 'fake-identity-header-secret';
 process.env.LEGAL_DELETE_TIME_BUDGET_MS ||= '1000'; // the configured floor
 
-const { handleLegalBlobDelete } = await import('./blob-delete.js');
+const { handleLegalBlobDelete, effectiveMoveBudgetMs } = await import('./blob-delete.js');
+
+// Regression for Copilot review PR #192 round 7: round 3's fix decoupled the move loop's budget
+// clock from auth resolution time so a slow auth call could never STARVE moves (moveStartedAt
+// begins fresh only after auth resolves) -- but that also meant auth's own latency was silently NOT
+// counted against anything, quietly eroding the margin LEGAL_DELETE_TIME_BUDGET_MS was tuned to
+// leave under the 60s MCP transport timeout (config/env.ts:369-377's 35s+20s=55s worst case assumed
+// auth was free). effectiveMoveBudgetMs is the fix: subtract auth's real elapsed time from the
+// move loop's budget, floored so it can still never be fully starved. Tested directly as a pure
+// function (no timers, no stubbed fetch) since the logic is a one-line Math.max.
+test('effectiveMoveBudgetMs: normal case subtracts auth latency from the configured budget', () => {
+  assert.equal(effectiveMoveBudgetMs(30_000, 500), 29_500);
+  assert.equal(effectiveMoveBudgetMs(30_000, 0), 30_000, 'an instant auth resolution costs nothing');
+});
+
+test('effectiveMoveBudgetMs: floors at 1000ms (the same minimum LEGAL_DELETE_TIME_BUDGET_MS itself enforces) -- never fully starves the move loop, preserving round 3\'s guarantee', () => {
+  assert.equal(effectiveMoveBudgetMs(1000, 3000), 1000, 'auth alone eating the whole configured budget must not zero out the move loop\'s budget');
+  assert.equal(effectiveMoveBudgetMs(1000, 999), 1000, 'right at the boundary still floors correctly');
+});
 
 function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;

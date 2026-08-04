@@ -15,6 +15,17 @@ export const HARD_MAX_ITEMS = 500;
  *  `deindex_incomplete`, never just dropped). */
 const DEINDEX_PER_ITEM_CAP_MS = 8000;
 
+/** How much of the configured move-time budget the live loop actually gets, once pre-mutation auth
+ *  resolution (which is NOT allowed to starve moves, see the call site) has taken its own bite out
+ *  of the transport-timeout margin LEGAL_DELETE_TIME_BUDGET_MS was tuned against (2026-08-04,
+ *  Copilot review PR #192 round 7). Pure and exported so the math is directly unit-testable without
+ *  timing-based coordination against a real setTimeout. Floored at 1000ms -- the same minimum
+ *  LEGAL_DELETE_TIME_BUDGET_MS's own env schema enforces -- so a slow auth call can shrink the move
+ *  budget but never fully starve it (that was round 3's fix; this must not undo it). */
+export function effectiveMoveBudgetMs(configuredBudgetMs: number, authElapsedMs: number): number {
+  return Math.max(1000, configuredBudgetMs - authElapsedMs);
+}
+
 /** Soft-delete destination for a given original path -- never a real hard delete of the only copy. */
 export function trashPathFor(path: string): string {
   return `_TRASH/${path}`;
@@ -246,21 +257,34 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
   // admin-key round trips (2026-08-04, Copilot review PR #192).
   //
   // BOUNDED to DEINDEX_AUTH_DEADLINE_MS (prepareDeindexAuth's own default) and, critically, NOT
-  // counted against the move-time budget below: this call happens BEFORE any blob has moved, so an
-  // unbounded (or budget-shared) auth resolution would let cleanup infrastructure block the tool's
-  // PRIMARY function -- a slow/erroring Azure control plane could consume the whole budget before
-  // the first item even starts, turning a best-effort add-on into an outage of the actual delete
-  // (2026-08-04, Copilot review PR #192 round 3). `moveStartedAt` is a SEPARATE clock, started only
-  // after this resolves, so however long auth actually took (up to its own short cap), the move
-  // loop always gets its full configured budget.
+  // ALLOWED TO STARVE the move-time budget below: this call happens BEFORE any blob has moved, so
+  // an unbounded (or budget-shared) auth resolution would let cleanup infrastructure block the
+  // tool's PRIMARY function -- a slow/erroring Azure control plane could consume the whole budget
+  // before the first item even starts, turning a best-effort add-on into an outage of the actual
+  // delete (2026-08-04, Copilot review PR #192 round 3).
+  //
+  // `moveStartedAt` is a SEPARATE clock, started only after this resolves. But the move loop's
+  // budget is `effectiveBudgetMs`, not the raw configured `budgetMs`: LEGAL_DELETE_TIME_BUDGET_MS's
+  // ceiling (see config/env.ts) was tuned so budgetMs + copyBlob's worst-case 20s poll stays under
+  // the 60s MCP transport timeout with real margin, on the assumption that auth resolution is free.
+  // It is not -- auth can take up to DEINDEX_AUTH_DEADLINE_MS on the pre-mutation critical path, and
+  // silently NOT counting that against anything would erode exactly the margin that bound was
+  // designed to guarantee (2026-08-04, Copilot review PR #192 round 7). So the auth latency IS
+  // subtracted from the move loop's own budget here -- preserving round 3's guarantee that a slow
+  // auth call never fully starves the primary delete (floored at the same 1000ms minimum
+  // LEGAL_DELETE_TIME_BUDGET_MS's own schema enforces) while keeping total wall time close to the
+  // configured budget instead of silently growing by however long auth took.
   const searchIndex = searchIndexForContainer(container);
+  const authStartedAt = Date.now();
   const deindexAuth: DeindexAuth | null = (await prepareDeindexAuth()).auth;
+  const authElapsedMs = Date.now() - authStartedAt;
   const moveStartedAt = Date.now();
+  const effectiveBudgetMs = effectiveMoveBudgetMs(budgetMs, authElapsedMs);
   const moved: Array<{ from: string; to: string }> = [];
   let deindexedCount = 0;
   const deindexIncomplete: string[] = [];
   for (const item of items) {
-    if (Date.now() - moveStartedAt > budgetMs) {
+    if (Date.now() - moveStartedAt > effectiveBudgetMs) {
       const remaining = items.length - moved.length;
       return {
         data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, status: 'partial', remaining, as_of: asOf, deindexed: deindexedCount, deindex_incomplete: deindexIncomplete },
@@ -269,7 +293,7 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
         // `moved.length` blobs) as if nothing happened, since the registry only records before/after
         // when payload.audit is present (2026-08-04, PR #191 review).
         audit: { before: { matched: items.length }, after: { movedToTrash: moved.length } },
-        summary: `Stopped at the time budget (${budgetMs}ms) after moving ${moved.length}/${items.length}; ${remaining} remaining. Re-run the SAME ${mode === 'single' ? 'path' : 'prefix'} to continue -- already-moved items will not be re-matched.`,
+        summary: `Stopped at the time budget (${effectiveBudgetMs}ms) after moving ${moved.length}/${items.length}; ${remaining} remaining. Re-run the SAME ${mode === 'single' ? 'path' : 'prefix'} to continue -- already-moved items will not be re-matched.`,
       };
     }
     const trashExists = await blobExists(container, item.to);
@@ -302,7 +326,7 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     // than the earlier design where a thin-budget item's stale index entry just silently vanished
     // from the response with no trace.
     if (deindexAuth) {
-      const deadline = Math.min(Date.now() + DEINDEX_PER_ITEM_CAP_MS, moveStartedAt + budgetMs);
+      const deadline = Math.min(Date.now() + DEINDEX_PER_ITEM_CAP_MS, moveStartedAt + effectiveBudgetMs);
       const deindex = await deindexChunkedPathWithAuth(deindexAuth, searchIndex, item.from, deadline);
       deindexedCount += deindex.deleted;
       if (!deindex.attempted || deindex.truncated) deindexIncomplete.push(item.from);
