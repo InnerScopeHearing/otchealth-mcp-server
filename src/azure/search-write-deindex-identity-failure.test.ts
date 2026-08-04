@@ -33,7 +33,12 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
   }
 }
 
-const isIdentityCall = (url: string | URL) => String(url).includes('fake-identity.example.invalid');
+// Parse + compare the hostname rather than a bare substring search (CodeQL
+// js/incomplete-url-substring-sanitization; see the identical fix + rationale in
+// blob-deindex-configured.test.ts, 2026-08-04).
+const isIdentityCall = (url: string | URL) => {
+  try { return new URL(url).hostname === 'fake-identity.example.invalid'; } catch { return false; }
+};
 
 test('deindexChunkedPath: a managed-identity token-fetch failure fails open ({attempted:false}), never throws, and never reaches ARM or the search service', async () => {
   let identityCalls = 0;

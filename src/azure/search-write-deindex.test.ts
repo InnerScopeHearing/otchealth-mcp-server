@@ -42,10 +42,17 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
   }
 }
 
-const isIdentityCall = (url: string | URL) => String(url).includes('fake-identity.example.invalid');
-const isAdminKeyCall = (url: string | URL) => String(url).includes('listAdminKeys');
-const isSearchDocsCall = (url: string | URL) => String(url).includes('/docs/search');
-const isIndexDocsCall = (url: string | URL) => String(url).includes('/docs/index');
+// Parse + compare the hostname rather than a bare substring search (CodeQL
+// js/incomplete-url-substring-sanitization -- a raw `.includes('fake-identity.example.invalid')`
+// would also match an attacker-controlled host with that string embedded anywhere). These URLs
+// are entirely internal (stub responses this same test constructs), but the fix is the same
+// either way, and matches the fix applied to blob-deindex-configured.test.ts (2026-08-04).
+const isIdentityCall = (url: string | URL) => {
+  try { return new URL(url).hostname === 'fake-identity.example.invalid'; } catch { return false; }
+};
+const isAdminKeyCall = (url: string | URL) => String(url).includes('listAdminKeys'); // path/query token, not a hostname
+const isSearchDocsCall = (url: string | URL) => String(url).includes('/docs/search'); // path token
+const isIndexDocsCall = (url: string | URL) => String(url).includes('/docs/index'); // path token
 
 const FAKE_TOKEN = 'fake.managed.identity.access.token.abc123';
 const FAKE_ADMIN_KEY = 'fake-admin-key-0123456789';

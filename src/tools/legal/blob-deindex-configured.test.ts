@@ -37,11 +37,22 @@ function fakeCtx(callerAgent: string, dryRun = false) {
   return { correlationId: 'test-corr', callerHash: 'test-hash', dryRun, acknowledgeWarning: false, callerAgent };
 }
 
-const isBlobCall = (u: string) => u.includes('.blob.core.windows.net');
-const isIdentityCall = (u: string) => u.includes('fake-identity.example.invalid');
-const isAdminKeyCall = (u: string) => u.includes('listAdminKeys');
-const isSearchDocsCall = (u: string) => u.includes('/docs/search');
-const isIndexDocsCall = (u: string) => u.includes('/docs/index');
+// A raw substring `.includes('.blob.core.windows.net')` would match an attacker-controlled host
+// with that string embedded anywhere (e.g. "evil.example/.blob.core.windows.net.attacker.com"),
+// which is exactly CodeQL's js/incomplete-url-substring-sanitization pattern -- flagged on this
+// file (2026-08-04). These URLs are entirely internal (stub responses this same test constructs,
+// never attacker input), but the fix is the same either way: parse the URL and check the hostname
+// with a real boundary, not a bare substring search.
+const BLOB_HOSTNAME = `${process.env.AZURE_LEGAL_STORAGE_ACCOUNT}.blob.core.windows.net`;
+const isBlobCall = (u: string) => {
+  try { return new URL(u).hostname === BLOB_HOSTNAME; } catch { return false; }
+};
+const isIdentityCall = (u: string) => {
+  try { return new URL(u).hostname === 'fake-identity.example.invalid'; } catch { return false; }
+};
+const isAdminKeyCall = (u: string) => u.includes('listAdminKeys'); // a path/query token, not a hostname -- not the CodeQL pattern
+const isSearchDocsCall = (u: string) => u.includes('/docs/search'); // path token
+const isIndexDocsCall = (u: string) => u.includes('/docs/index'); // path token
 
 const FAKE_TOKEN = 'fake.managed.identity.access.token.abc123';
 const FAKE_ADMIN_KEY = 'fake-admin-key-0123456789';
