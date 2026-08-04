@@ -96,6 +96,18 @@ const EnvSchema = z.object({
   // CSV, case-insensitive. Defaults to the 5 known CS personas.
   GRAPH_CS_MAILBOXES: z.string().optional().default('care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com'),
 
+  // Executive-lane READ-ONLY mailbox allowlist (2026-08-04, CFO FY2021-close regression fix).
+  // graph_list_messages/graph_message_get resolve mailboxes on THIS list through a SEPARATE app --
+  // the already-deployed otchealth-mail-readonly registration (reusing MAIL_ARCHIVE_EWS_CLIENT_ID/
+  // SECRET/TENANT_ID below, its Graph-permissions grant, distinct from its EWS role) -- instead of
+  // the CS-restricted GRAPH_CLIENT_ID app. Empirically confirmed 2026-08-04 that this app is NOT
+  // subject to the CS-Engine-Mailboxes ApplicationAccessPolicy (live HTTP 200 direct-Graph reads
+  // against every mailbox in the default list below). Gated to EXEC_RING callers only (see
+  // isExecMailboxRequest()); the CS allowlist/app/policy above is completely untouched by this --
+  // customer-service mailboxes and personas keep working exactly as before. READ ONLY: send/write
+  // stay on the CS-only path. CSV, case-insensitive, env-overridable.
+  GRAPH_EXEC_MAILBOXES: z.string().optional().default('matthew@innd.com,ap@innd.com,accounting@hearingassist.com,cfo@innd.com'),
+
   // Repo-scoping allowlist for github_*/depot_* READ tools, for non-cto/exec callers (2026-07-26,
   // hardening follow-up to the otchealth-dev Copilot custom agent wiring -- see
   // github/api-client.ts's assertRepoAllowed() header for the full rationale). CSV of "owner/repo"

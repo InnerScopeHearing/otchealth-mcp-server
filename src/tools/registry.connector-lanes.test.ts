@@ -71,6 +71,16 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   // showing an unexpectedly narrow toolset most needed it for. Same omission class as
   // developer_wake_lite (2026-08-02) and xero_attachment_upload (2026-07-30).
   assert.ok(set.has('catalog_probe'), 'ship lane must expose catalog_probe so a stuck connector can self-diagnose its own auth context');
+  // Regression guard (2026-08-04): mail_archive_* -- built for the CFO's Exchange Online Archive
+  // problem, EXEC_RING-gated in-handler, but never added to this ship set, so it was invisible on
+  // every connector even though it already solves a problem the CFO reported as unsolvable by any
+  // permission fix. Same omission class as catalog_probe/xero_attachment_upload/kb_get_document.
+  for (const mailArchiveTool of [
+    'mail_archive_list_folders', 'mail_archive_search', 'mail_archive_get_message',
+    'mail_archive_download_attachment', 'mail_archive_save_attachment_to_dataroom',
+  ]) {
+    assert.ok(set.has(mailArchiveTool), `ship lane must expose ${mailArchiveTool} (the CFO archive-mailbox gap)`);
+  }
 });
 
 test('(b) developer lane gets the full ship-lane set', () => {

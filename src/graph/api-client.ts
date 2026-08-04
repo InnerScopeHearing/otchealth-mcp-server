@@ -1,5 +1,7 @@
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { currentCallerAgent } from '../server/request-context.js';
+import { EXEC_RING } from '../tools/kb/search-privileged.js';
 
 const env = loadEnv();
 
@@ -70,12 +72,30 @@ function assertAllowedMailbox(mailbox: string): void {
       code: 'mailbox_not_allowed',
       status: 0,
       message: `Mailbox "${mailbox}" is not on the allowlist for Graph mail tools (see GRAPH_CS_MAILBOXES). This is a fast code-level guard that runs in front of the real Exchange ApplicationAccessPolicy (live since 2026-07-26, confirmed enforcing via Test-ApplicationAccessPolicy) -- it deliberately refuses to touch any mailbox outside the customer-service engine's known set before a Graph call is even attempted.`,
-      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES and to the CS-Engine-Mailboxes security group the real ApplicationAccessPolicy is scoped to.',
+      nextStep: 'If this mailbox should be reachable, add it to GRAPH_CS_MAILBOXES and to the CS-Engine-Mailboxes security group the real ApplicationAccessPolicy is scoped to. Executive callers: see GRAPH_EXEC_MAILBOXES instead, a separate read-only allowlist on a different app.',
     });
   }
 }
 
-// ----- Token cache -----
+/**
+ * Exec-lane READ-ONLY mailbox path (2026-08-04). See env.ts's GRAPH_EXEC_MAILBOXES header for the
+ * full why. True only when BOTH the mailbox is on the exec allowlist AND the current caller is an
+ * EXEC_RING lane -- an unrecognized/external/CS caller asking for matthew@innd.com still falls
+ * through to the CS path below and gets the ordinary (and correct) mailbox_not_allowed refusal.
+ */
+// Exported (not just for internal use) so registry.connector-lanes-style tests can pin this
+// allowlist + gating behavior without mocking the network or a live request context.
+export function execAllowedMailboxes(): Set<string> {
+  const csv = env.GRAPH_EXEC_MAILBOXES || 'matthew@innd.com,ap@innd.com,accounting@hearingassist.com,cfo@innd.com';
+  return new Set(csv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+}
+
+export function isExecMailboxRequest(mailbox: string): boolean {
+  const caller = currentCallerAgent();
+  return Boolean(caller) && (EXEC_RING as readonly string[]).includes(caller) && execAllowedMailboxes().has(mailbox.toLowerCase());
+}
+
+// ----- Token cache (CS app: GRAPH_CLIENT_ID) -----
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
 export async function getAccessToken(): Promise<string> {
@@ -120,14 +140,64 @@ export async function getAccessToken(): Promise<string> {
   return tokenCache.token;
 }
 
+// ----- Token cache (exec-read app: reuses the already-deployed otchealth-mail-readonly creds --
+// MAIL_ARCHIVE_EWS_CLIENT_ID/SECRET/TENANT_ID -- for its Graph permissions grant, not its EWS role.
+// Separate cache from the CS app's tokenCache above: different app, different token. Read-only use
+// only; nothing here ever calls sendMail.) -----
+let execTokenCache: { token: string; expiresAt: number } | null = null;
+
+async function getExecReadAccessToken(): Promise<string> {
+  if (execTokenCache && Date.now() < execTokenCache.expiresAt - 60_000) {
+    return execTokenCache.token;
+  }
+  const clientId = env.MAIL_ARCHIVE_EWS_CLIENT_ID;
+  const clientSecret = env.MAIL_ARCHIVE_EWS_CLIENT_SECRET;
+  const tenantId = env.MAIL_ARCHIVE_EWS_TENANT_ID;
+  if (!clientId || !clientSecret || !tenantId) {
+    throw new GraphApiError({
+      code: 'exec_mail_not_configured',
+      status: 0,
+      message: 'Exec-lane mail read is not configured (MAIL_ARCHIVE_EWS_CLIENT_ID/SECRET/TENANT_ID missing).',
+      nextStep: 'These should already be deployed (they back the mail_archive_* tools too); verify the gateway env.',
+    });
+  }
+  const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret,
+    scope: 'https://graph.microsoft.com/.default',
+  });
+  const res = await fetchWithBudget(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  }, { retries: 1 });
+  const statusCode = res.status;
+  const text = await res.text();
+  let data: any;
+  try { data = JSON.parse(text); } catch { data = {}; }
+  if (statusCode !== 200 || !data.access_token) {
+    throw new GraphApiError({
+      code: 'exec_mail_auth_failed',
+      status: statusCode,
+      message: `Failed to obtain exec-read Graph access token: ${data.error_description ?? data.error ?? 'unknown error'}`,
+      nextStep: 'Verify MAIL_ARCHIVE_EWS_CLIENT_ID/SECRET/TENANT_ID.',
+      upstream: data,
+    });
+  }
+  execTokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000 };
+  return execTokenCache.token;
+}
+
 // ----- Graph API request helper -----
 
 async function graphRequest<T = unknown>(
   method: string,
   path: string,
-  opts?: { body?: unknown },
+  opts?: { body?: unknown; tokenOverride?: string },
 ): Promise<T> {
-  const token = await getAccessToken();
+  const token = opts?.tokenOverride ?? (await getAccessToken());
   const url = `https://graph.microsoft.com/v1.0${path}`;
   // GET is read-only (retries:1); this helper is also used for sendMail (POST), a
   // non-idempotent write, so every other method gets retries:0 to avoid a duplicate
@@ -230,7 +300,8 @@ export async function listMessages(opts?: {
 }): Promise<any[]> {
   const config = requireGraphConfig();
   const mailbox = opts?.mailbox ?? config.senderEmail;
-  assertAllowedMailbox(mailbox);
+  const execPath = isExecMailboxRequest(mailbox);
+  if (!execPath) assertAllowedMailbox(mailbox);
   const folder = opts?.folder ?? 'inbox';
   let path = `/users/${mailbox}/mailFolders/${folder}/messages`;
   const params = new URLSearchParams();
@@ -245,20 +316,24 @@ export async function listMessages(opts?: {
   params.set('$orderby', 'receivedDateTime desc');
   const qs = params.toString();
   if (qs) path += `?${qs}`;
-  const resp = await graphRequest<{ value: any[] }>('GET', path);
+  const tokenOverride = execPath ? await getExecReadAccessToken() : undefined;
+  const resp = await graphRequest<{ value: any[] }>('GET', path, { tokenOverride });
   return resp.value ?? [];
 }
 
 // ----- Get a single message (full body + attachment metadata) -----
 
 export async function getMessage(mailbox: string, messageId: string): Promise<any> {
-  assertAllowedMailbox(mailbox);
+  const execPath = isExecMailboxRequest(mailbox);
+  if (!execPath) assertAllowedMailbox(mailbox);
+  const tokenOverride = execPath ? await getExecReadAccessToken() : undefined;
   const path = `/users/${mailbox}/messages/${encodeURIComponent(messageId)}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,body,hasAttachments`;
-  const message = await graphRequest<any>('GET', path);
+  const message = await graphRequest<any>('GET', path, { tokenOverride });
   if (message.hasAttachments) {
     const attResp = await graphRequest<{ value: any[] }>(
       'GET',
       `/users/${mailbox}/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,contentType,size,isInline`,
+      { tokenOverride },
     );
     message._attachments = attResp.value ?? [];
   }
