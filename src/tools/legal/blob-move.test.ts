@@ -134,6 +134,11 @@ test('successful move: copies (PUT with x-ms-copy-source) THEN deletes the origi
   );
   assert.equal((res.data as any).executed, true);
   assert.equal((res.data as any).bytes, 1234, 'bytes must come from the post-copy destination HEAD, not the PUT response Content-Length');
+  // deindexChunkedPath is called after the move but fails open here (this file's env preamble sets
+  // no AZURE_SEARCH_ENDPOINT/IDENTITY_ENDPOINT, mirroring "search unconfigured" in production) --
+  // it must never throw, block the move, or trigger any network call beyond the stub above (which
+  // throws on anything unexpected, so reaching this assertion already proves that).
+  assert.equal((res.data as any).deindexed, 0, 'deindex is best-effort and fails open when search is unconfigured');
   const putIdx = order.indexOf('PUT');
   const delIdx = order.indexOf('DELETE');
   assert.ok(putIdx >= 0 && delIdx >= 0 && putIdx < delIdx, `PUT (copy) must happen strictly before DELETE (remove original); order was ${order.join(',')}`);

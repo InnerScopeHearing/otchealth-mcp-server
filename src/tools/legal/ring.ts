@@ -43,6 +43,15 @@ export function lanesForContainer(container: LegalContainer): string[] {
   return INDEX_LANES[CONTAINER_INDEX[container]] ?? [];
 }
 
+/** The AI-Search index that indexes this container's blobs (2026-08-04, CLO field report Finding
+ *  3): legal_blob_delete/legal_blob_move need this to de-index a stale entry at the OLD path when
+ *  a blob's path changes, since the chunked doc rooms are fed by slow-cadence native pull-indexers
+ *  with no deletion-detection policy -- a moved/soft-deleted blob's index entry otherwise survives
+ *  indefinitely, citing a path that no longer resolves. */
+export function searchIndexForContainer(container: LegalContainer): string {
+  return CONTAINER_INDEX[container];
+}
+
 /**
  * Pure ring-enforcement predicate for the legal blob store, exported for unit testing without
  * spinning up the MCP server. Mirrors isLaneAllowed() in kb/search-privileged.ts: an unknown/absent

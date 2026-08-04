@@ -143,3 +143,108 @@ export async function indexMemoryNow(input: {
     return { indexed: false, reason: (e as Error).message, docId };
   }
 }
+
+/**
+ * ===================== DE-INDEXING A MOVED/DELETED BLOB PATH (2026-08-04) =====================
+ *
+ * THE GAP THIS CLOSES (CLO field report, PR #191 acceptance test, Finding 3): legal_blob_delete's
+ * soft-delete MOVES a blob to `_TRASH/<original-path>`. The CHUNKED doc rooms (legal-personal,
+ * legal-company, ...) are fed by native Azure Blob PULL-indexers on a slow cadence (up to 168h,
+ * see setup/expected-indexes.json in otchealth-claude-tools) with NO deletion-detection policy
+ * configured. A pull-indexer only ADDS/UPDATES on each run; it never removes an index entry just
+ * because the source blob is gone from the path it last saw. So a soft-deleted (or moved) blob's
+ * search-index entry survives INDEFINITELY, still citing the OLD path -- and PR #191's own
+ * `_TRASH/`-prefix filter in search.ts cannot catch this, because the filter checks the INDEXED
+ * path (still the pre-move value), never the blob's CURRENT location. Confirmed live: a search hit
+ * for a path soft-deleted an hour earlier, with `legal_blob_get` on that exact path returning
+ * `found:false` -- a false "document does not exist" on evidence that is one path away.
+ *
+ * THE FIX: legal_blob_delete (and legal_blob_move, which has the identical stale-path problem)
+ * call `deindexChunkedPath` on the ORIGINAL path immediately after a successful blob move, so the
+ * index never carries a dangling reference to a path that no longer resolves. This is a genuine
+ * DELETE from the search index (not a soft-delete convention of its own) -- the index is a
+ * derived, rebuildable view; the blob move to `_TRASH/` remains the durable, recoverable record.
+ *
+ * FAIL-OPEN, ALWAYS (mirrors indexMemoryNow's contract exactly): the blob move has ALREADY
+ * happened by the time this runs. A failure here (auth, network, the room not yet cut over, an
+ * unfilterable field) must never surface as a failure of the blob operation itself -- it is
+ * best-effort cleanup on top of an already-durable change, not a precondition for it.
+ */
+
+export interface DeindexResult {
+  /** False only when this could not even be attempted (search unconfigured). */
+  attempted: boolean;
+  /** Number of chunk documents actually deleted from the index (0 is normal: the room may not
+   *  have indexed this path yet, or already reflects a newer state). */
+  deleted: number;
+  reason?: string;
+}
+
+/** Locate every chunk document in `index` whose `path` field exactly equals `path`. Tries a
+ *  server-side $filter first (cheap, precise); on a 400 (path not filterable on this room's
+ *  schema) falls back ONCE to a keyword search restricted to the `path` field with a client-side
+ *  EXACT-match check -- the identical shape azure/search.ts's getChunkedDocument already uses for
+ *  the same "look up a chunked room by a path-like key" problem, so this is a proven pattern, not
+ *  a new one. Bounded to 200 chunks (a single source document never legitimately has anywhere near
+ *  that many; this is a backstop, not an expected ceiling). Returns [] on any failure -- the caller
+ *  (deindexChunkedPath) treats an empty result as "nothing to delete", which is fail-open by
+ *  construction (a lookup failure and a genuine zero-match look identical, and both correctly do
+ *  nothing rather than guess).
+ */
+export async function findChunkIdsByPath(endpoint: string, key: string, index: string, path: string): Promise<string[]> {
+  const doSearch = (body: Record<string, unknown>) =>
+    fetch(`${endpoint}/indexes/${index}/docs/search?api-version=${API_VERSION}`, {
+      method: 'POST',
+      headers: { 'api-key': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const escaped = path.replace(/'/g, "''");
+  try {
+    const primary = { search: '*', filter: `path eq '${escaped}'`, select: 'chunk_id,path', top: 200 };
+    let r = await doSearch(primary);
+    if (!r.ok) {
+      const fallback = { search: path, searchFields: 'path', queryType: 'simple', select: 'chunk_id,path', top: 200 };
+      r = await doSearch(fallback);
+      if (!r.ok) return [];
+      const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
+      return (j.value || []).filter((d) => d.path === path).map((d) => String(d.chunk_id)).filter(Boolean);
+    }
+    const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
+    return (j.value || []).map((d) => String(d.chunk_id)).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Delete every chunk document at `path` from `index` (a chunked doc room). See the section header
+ * above for the full rationale. FAIL-OPEN: never throws; every failure mode returns
+ * `{attempted, deleted:0, reason}`. Callers (legal_blob_delete, legal_blob_move) should call this
+ * AFTER their own blob mutation has already succeeded, and must not let its outcome affect the
+ * response to the blob operation beyond an informational note.
+ */
+export async function deindexChunkedPath(index: string, path: string): Promise<DeindexResult> {
+  try {
+    const env = loadEnv();
+    const endpoint = (env.AZURE_SEARCH_ENDPOINT || '').replace(/\/+$/, '');
+    if (!endpoint) return { attempted: false, deleted: 0, reason: 'AZURE_SEARCH_ENDPOINT not configured' };
+    const service = serviceFromEndpoint(endpoint);
+    if (!service) return { attempted: false, deleted: 0, reason: 'cannot derive search service from endpoint' };
+    const key = await searchAdminKey(service);
+
+    const chunkIds = await findChunkIdsByPath(endpoint, key, index, path);
+    if (chunkIds.length === 0) return { attempted: true, deleted: 0 };
+
+    const r = await fetch(`${endpoint}/indexes/${index}/docs/index?api-version=${API_VERSION}`, {
+      method: 'POST',
+      headers: { 'api-key': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: chunkIds.map((chunk_id) => ({ '@search.action': 'delete', chunk_id })) }),
+    });
+    if (!r.ok) {
+      return { attempted: true, deleted: 0, reason: `delete ${r.status}: ${(await r.text()).slice(0, 160)}` };
+    }
+    return { attempted: true, deleted: chunkIds.length };
+  } catch (e) {
+    return { attempted: false, deleted: 0, reason: (e as Error).message };
+  }
+}

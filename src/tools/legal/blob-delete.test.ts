@@ -177,6 +177,11 @@ test('single mode success: copies to _TRASH/<path> (pinned to the source ETag) T
   );
   assert.equal((res.data as any).executed, true);
   assert.deepEqual((res.data as any).moved, [{ from: 'dupe.pdf', to: '_TRASH/dupe.pdf' }]);
+  // deindexChunkedPath runs after each successful move but fails open here (this file's env
+  // preamble sets no AZURE_SEARCH_ENDPOINT/IDENTITY_ENDPOINT, mirroring "search unconfigured" in
+  // production) -- it must never throw, block the delete, or trigger any network call beyond the
+  // stub above (which throws on anything unexpected, so reaching this assertion already proves it).
+  assert.equal((res.data as any).deindexed, 0, 'deindex is best-effort and fails open when search is unconfigured');
   const putIdx = order.indexOf('PUT');
   const delIdx = order.indexOf('DELETE');
   assert.ok(putIdx >= 0 && delIdx >= 0 && putIdx < delIdx);
