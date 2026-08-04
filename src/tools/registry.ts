@@ -93,6 +93,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // and re-check the ring per call, they are not widened just because cto/exec can see them here.
   'search', 'fetch',
   'legal_blob_list', 'legal_blob_get', 'legal_blob_put',
+  // legal_blob_move/copy/delete (2026-08-04, CLO brief §1): added in the SAME PR that registers
+  // them, deliberately, to not repeat the catalog_probe/xero_attachment_upload/kb_get_document/
+  // mail_archive_* omission class -- built-but-invisible-on-every-connector has bitten this ship
+  // set five separate times now; a tool is not done until it is visible here too.
+  'legal_blob_move', 'legal_blob_copy', 'legal_blob_delete',
   'graph_drive_list', 'graph_drive_download', 'graph_drive_upload',
   'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
   // Wave 7 item 7.1: opt-in feedback reporting on a brain_search/kb_search hit (see kb/search.ts,
