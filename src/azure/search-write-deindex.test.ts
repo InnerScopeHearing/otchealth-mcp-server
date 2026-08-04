@@ -5,6 +5,14 @@
 // set BEFORE the first call into search-write.js, and config/env.ts's loadEnv() memoizes for the
 // process lifetime, so a DIFFERENT env snapshot (search-write.test.ts's pure-function tests, which
 // carry no env at all) cannot coexist with this one.
+//
+// The managed-identity TOKEN-FETCH-FAILURE case is deliberately NOT tested in this file (Copilot
+// review, PR #192): arm-client.ts's `miToken` caches the ARM token in a module-level Map for the
+// process lifetime, so once any test in THIS file successfully mints a token, every later test
+// silently reuses the cache and never re-hits the identity endpoint at all -- a failure-path test
+// placed after a success-path test would "pass" by accident, via its stub's generic catch-all
+// throw, not because the intended branch actually ran. See search-write-deindex-identity-failure.test.ts,
+// which is isolated in its own process specifically so nothing can prime that cache first.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -19,7 +27,7 @@ process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-s1.search.wind
 process.env.IDENTITY_ENDPOINT ||= 'http://fake-identity.example.invalid/msi/token';
 process.env.IDENTITY_HEADER ||= 'fake-identity-header-secret';
 
-const { deindexChunkedPath, findChunkIdsByPath } = await import('./search-write.js');
+const { deindexChunkedPath, deindexChunkedPathWithAuth, prepareDeindexAuth, findChunkIdsByPath } = await import('./search-write.js');
 
 // Same pattern as cosmos-aad.test.ts / foundry.test.ts: stub the genuine globalThis.fetch (node:test's
 // mock.method() limitation on this repo's ESM build does not apply to a real global).
@@ -177,15 +185,107 @@ test('deindexChunkedPath: the delete POST itself failing is reported, not thrown
   assert.match(result.reason ?? '', /delete 503/);
 });
 
-test('deindexChunkedPath: a managed-identity token-fetch failure fails open ({attempted:false}), never throws', async () => {
-  const result = await withStubbedFetch(
-    (async (url: string | URL) => {
-      if (isIdentityCall(url)) return new Response('{"error":"identity_unavailable"}', { status: 403 });
-      throw new Error('must never reach ARM or the search service when the identity mint failed');
-    }) as typeof fetch,
-    () => deindexChunkedPath('legal-personal', 'filings/moved.pdf'),
+test('findChunkIdsByPath: paginates the $filter path across multiple pages until exhausted', async () => {
+  const seenSkips: number[] = [];
+  const ids = await withStubbedFetch(
+    fullChainStub((u, init) => {
+      const body = JSON.parse(String(init?.body));
+      seenSkips.push(body.skip);
+      // page 0: exactly a full page (200) so pagination must continue; page 1: a partial page (2),
+      // which must stop pagination.
+      if (body.skip === 0) {
+        return new Response(
+          JSON.stringify({ value: Array.from({ length: 200 }, (_, i) => ({ chunk_id: `p0-${i}`, path: 'big/doc.pdf' })) }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({ value: [{ chunk_id: 'p1-0', path: 'big/doc.pdf' }, { chunk_id: 'p1-1', path: 'big/doc.pdf' }] }),
+        { status: 200 },
+      );
+    }),
+    () => findChunkIdsByPath('https://fake.search.windows.net', 'k', 'legal-personal', 'big/doc.pdf'),
   );
-  assert.equal(result.attempted, false);
-  assert.equal(result.deleted, 0);
-  assert.ok(result.reason);
+  assert.deepEqual(seenSkips, [0, 200], 'must request exactly two pages (skip=0 then skip=200), then stop on the short page');
+  assert.equal(ids.length, 202);
+  assert.equal(ids[0], 'p0-0');
+  assert.equal(ids[201], 'p1-1');
+});
+
+test('findChunkIdsByPath: a full-size page every time stops at DEINDEX_MAX_PAGES (safety backstop, not an expected ceiling)', async () => {
+  let calls = 0;
+  const ids = await withStubbedFetch(
+    fullChainStub(() => {
+      calls++;
+      return new Response(
+        JSON.stringify({ value: Array.from({ length: 200 }, (_, i) => ({ chunk_id: `c${calls}-${i}`, path: 'huge/doc.pdf' })) }),
+        { status: 200 },
+      );
+    }),
+    () => findChunkIdsByPath('https://fake.search.windows.net', 'k', 'legal-personal', 'huge/doc.pdf'),
+  );
+  assert.equal(calls, 5, 'must stop at the DEINDEX_MAX_PAGES backstop rather than paginating forever');
+  assert.equal(ids.length, 1000);
+});
+
+test('deindexChunkedPathWithAuth: a 207 Multi-Status (some chunk deletes failed) counts only confirmed successes, and reports the failure', async () => {
+  const auth = { endpoint: 'https://fake.search.windows.net', key: 'k' };
+  const result = await withStubbedFetch(
+    ((url: string | URL) => {
+      const u = String(url);
+      if (isSearchDocsCall(u)) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ value: [{ chunk_id: 'c1', path: 'filings/x.pdf' }, { chunk_id: 'c2', path: 'filings/x.pdf' }] }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (isIndexDocsCall(u)) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              value: [
+                { key: 'c1', status: true, statusCode: 200 },
+                { key: 'c2', status: false, statusCode: 409, errorMessage: 'a concurrent edit' },
+              ],
+            }),
+            { status: 207 },
+          ),
+        );
+      }
+      throw new Error(`unexpected call: ${u}`);
+    }) as typeof fetch,
+    () => deindexChunkedPathWithAuth(auth, 'legal-personal', 'filings/x.pdf'),
+  );
+  assert.equal(result.attempted, true);
+  assert.equal(result.deleted, 1, 'only the confirmed-true chunk counts as deleted, not chunkIds.length');
+  assert.match(result.reason ?? '', /1\/2 chunk delete\(s\) failed/);
+});
+
+test('prepareDeindexAuth + deindexChunkedPathWithAuth: auth resolved ONCE serves multiple deindex calls (no repeat admin-key fetch)', async () => {
+  let adminKeyCalls = 0;
+  let identityCalls = 0;
+  const { auth } = await withStubbedFetch(
+    fullChainStub(() => new Response(JSON.stringify({ value: [] }), { status: 200 })),
+    () => prepareDeindexAuth(),
+  );
+  assert.ok(auth, 'prepareDeindexAuth must resolve real auth given a working identity+ARM chain');
+
+  await withStubbedFetch(
+    ((url: string | URL) => {
+      const u = String(url);
+      if (isIdentityCall(u)) { identityCalls++; throw new Error('identity must not be called again -- auth was already resolved'); }
+      if (isAdminKeyCall(u)) { adminKeyCalls++; throw new Error('admin key must not be re-fetched -- auth was already resolved'); }
+      return Promise.resolve(new Response(JSON.stringify({ value: [] }), { status: 200 }));
+    }) as typeof fetch,
+    async () => {
+      const r1 = await deindexChunkedPathWithAuth(auth!, 'legal-personal', 'a.pdf');
+      const r2 = await deindexChunkedPathWithAuth(auth!, 'legal-personal', 'b.pdf');
+      assert.deepEqual(r1, { attempted: true, deleted: 0 });
+      assert.deepEqual(r2, { attempted: true, deleted: 0 });
+    },
+  );
+  assert.equal(identityCalls, 0);
+  assert.equal(adminKeyCalls, 0);
 });

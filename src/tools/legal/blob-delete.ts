@@ -4,10 +4,16 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured, headBlob, blobExists, copyBlob, deleteBlobHard, listBlobs } from '../../legal/blob-store.js';
 import { isLegalContainerAllowed, lanesForContainer, isProtectedPath, searchIndexForContainer } from './ring.js';
 import { loadEnv } from '../../config/env.js';
-import { deindexChunkedPath } from '../../azure/search-write.js';
+import { prepareDeindexAuth, deindexChunkedPathWithAuth, type DeindexAuth } from '../../azure/search-write.js';
 
 export const DEFAULT_MAX_ITEMS = 100;
 export const HARD_MAX_ITEMS = 500;
+/** Skip per-item search de-indexing once fewer than this many ms remain in the batch's own time
+ *  budget (2026-08-04, Copilot review PR #192) -- deindexChunkedPathWithAuth's own network calls
+ *  are individually bounded (DEINDEX_CALL_TIMEOUT_MS, no retry) but can still add up across a
+ *  lookup + delete round trip; skipping when the budget is nearly spent keeps the bulk loop's own
+ *  time-budget stop the dominant safety mechanism, never cleanup latency. */
+const DEINDEX_SKIP_THRESHOLD_MS = 5000;
 
 /** Soft-delete destination for a given original path -- never a real hard delete of the only copy. */
 export function trashPathFor(path: string): string {
@@ -224,8 +230,11 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
   // moved items are gone from the source prefix by then.
   // The index that indexes this container's blobs -- needed to purge the stale entry at each
   // item's ORIGINAL path once its move succeeds (2026-08-04, CLO field report Finding 3; see
-  // deindexChunkedPath's own doc comment for the full rationale).
+  // deindexChunkedPathWithAuth's own doc comment for the full rationale). Auth is resolved ONCE
+  // here, outside the loop -- not per item -- so a large batch does not mint N identical ARM
+  // admin-key round trips (2026-08-04, Copilot review PR #192).
   const searchIndex = searchIndexForContainer(container);
+  const deindexAuth: DeindexAuth | null = (await prepareDeindexAuth()).auth;
   const moved: Array<{ from: string; to: string }> = [];
   let deindexedCount = 0;
   for (const item of items) {
@@ -260,11 +269,17 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     await copyBlob(container, item.from, item.to, false, item.etag ?? undefined);
     await deleteBlobHard(container, item.from, item.etag ?? undefined);
     moved.push({ from: item.from, to: item.to });
-    // Best-effort, fail-open: purge the stale search-index entry at the path this blob just moved
-    // FROM. Never throws (deindexChunkedPath's own contract); a failure here does not undo, block,
-    // or even flag the blob move itself, which has already durably happened.
-    const deindex = await deindexChunkedPath(searchIndex, item.from);
-    deindexedCount += deindex.deleted;
+    // Best-effort, fail-open, TIME-BOUNDED: purge the stale search-index entry at the path this
+    // blob just moved FROM. Never throws (deindexChunkedPathWithAuth's own contract); a failure
+    // here does not undo, block, or even flag the blob move itself, which has already durably
+    // happened. SKIPPED once the loop's own time budget is nearly spent, so cleanup latency can
+    // never itself push a bulk batch over the MCP transport timeout after blobs have already moved
+    // (2026-08-04, Copilot review PR #192) -- a skipped item's stale index entry is caught by the
+    // next delete/move that touches the same path, or a future manual sweep.
+    if (deindexAuth && budgetMs - (Date.now() - startedAt) > DEINDEX_SKIP_THRESHOLD_MS) {
+      const deindex = await deindexChunkedPathWithAuth(deindexAuth, searchIndex, item.from);
+      deindexedCount += deindex.deleted;
+    }
   }
 
   return {

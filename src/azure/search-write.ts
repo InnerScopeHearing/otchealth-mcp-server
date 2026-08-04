@@ -33,6 +33,7 @@
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
 import { searchAdminKey } from './arm-client.js';
+import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const API_VERSION = '2024-07-01';
 const MAX_TEXT = 16000; // mirrors semantic.mjs
@@ -172,79 +173,165 @@ export async function indexMemoryNow(input: {
  */
 
 export interface DeindexResult {
-  /** False only when this could not even be attempted (search unconfigured). */
+  /** False only when this could not even be attempted (search unconfigured, or a hard failure
+   *  before any chunk lookup completed -- e.g. the admin-key mint itself failed). */
   attempted: boolean;
-  /** Number of chunk documents actually deleted from the index (0 is normal: the room may not
-   *  have indexed this path yet, or already reflects a newer state). */
+  /** Number of chunk documents CONFIRMED deleted (Azure AI Search's per-document `status:true`),
+   *  not merely "found and included in the delete batch" (0 is normal: the room may not have
+   *  indexed this path yet, or already reflects a newer state). */
   deleted: number;
   reason?: string;
 }
 
-/** Locate every chunk document in `index` whose `path` field exactly equals `path`. Tries a
- *  server-side $filter first (cheap, precise); on a 400 (path not filterable on this room's
- *  schema) falls back ONCE to a keyword search restricted to the `path` field with a client-side
+/** Resolved endpoint + an ADMIN key, good for the life of one blob-store call (legal_blob_move) or
+ *  one bulk batch (legal_blob_delete's loop, resolved ONCE and reused -- see prepareDeindexAuth). */
+export interface DeindexAuth {
+  endpoint: string;
+  key: string;
+}
+
+const DEINDEX_PAGE_SIZE = 200;
+/** Safety backstop on pagination, not an expected ceiling: a single source document legitimately
+ *  approaching DEINDEX_MAX_PAGES * DEINDEX_PAGE_SIZE (1000) chunks would be extraordinary. Caps
+ *  worst-case time rather than looping until Azure genuinely runs out of results (2026-08-04,
+ *  Copilot review PR #192: the original 200-result cap silently left stale chunks behind on any
+ *  document with more than one page of chunks). */
+const DEINDEX_MAX_PAGES = 5;
+/** Short per-call timeout with NO retry (fetchWithBudget's `retries:0`): this is best-effort
+ *  cleanup that can run inside legal_blob_delete's bulk hot loop (one call per moved item), so a
+ *  stalled or overloaded search service must fail fast rather than eat the item's share of the
+ *  60s MCP transport budget the way a bare, unbounded `fetch` could (2026-08-04, Copilot review
+ *  PR #192). A retry would double the worst case for no correctness benefit here -- a miss just
+ *  means one stale chunk survives until the next write touches the same path. */
+const DEINDEX_CALL_TIMEOUT_MS = 3000;
+
+/** Locate every chunk document in `index` whose `path` field exactly equals `path`, PAGINATED
+ *  until exhausted or DEINDEX_MAX_PAGES is hit. Tries a server-side $filter first (cheap,
+ *  precise); if the very first $filter call is non-ok (the room's schema does not allow filtering
+ *  on `path`), falls back to a keyword search restricted to the `path` field with a client-side
  *  EXACT-match check -- the identical shape azure/search.ts's getChunkedDocument already uses for
- *  the same "look up a chunked room by a path-like key" problem, so this is a proven pattern, not
- *  a new one. Bounded to 200 chunks (a single source document never legitimately has anywhere near
- *  that many; this is a backstop, not an expected ceiling). Returns [] on any failure -- the caller
- *  (deindexChunkedPath) treats an empty result as "nothing to delete", which is fail-open by
- *  construction (a lookup failure and a genuine zero-match look identical, and both correctly do
- *  nothing rather than guess).
+ *  the same "look up a chunked room by a path-like key" problem. Each network call is bounded by
+ *  DEINDEX_CALL_TIMEOUT_MS with no retry. Returns whatever was accumulated on any failure --
+ *  never throws -- so a later-page failure still yields the earlier pages' ids rather than
+ *  discarding them (fail-open, not fail-empty).
  */
 export async function findChunkIdsByPath(endpoint: string, key: string, index: string, path: string): Promise<string[]> {
   const doSearch = (body: Record<string, unknown>) =>
-    fetch(`${endpoint}/indexes/${index}/docs/search?api-version=${API_VERSION}`, {
-      method: 'POST',
-      headers: { 'api-key': key, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    fetchWithBudget(
+      `${endpoint}/indexes/${index}/docs/search?api-version=${API_VERSION}`,
+      { method: 'POST', headers: { 'api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      { timeoutMs: DEINDEX_CALL_TIMEOUT_MS, retries: 0 },
+    );
   const escaped = path.replace(/'/g, "''");
+  const ids: string[] = [];
   try {
-    const primary = { search: '*', filter: `path eq '${escaped}'`, select: 'chunk_id,path', top: 200 };
-    let r = await doSearch(primary);
-    if (!r.ok) {
-      const fallback = { search: path, searchFields: 'path', queryType: 'simple', select: 'chunk_id,path', top: 200 };
-      r = await doSearch(fallback);
-      if (!r.ok) return [];
+    // Primary: server-side $filter, paginated with `skip`.
+    for (let page = 0; page < DEINDEX_MAX_PAGES; page++) {
+      const r = await doSearch({ search: '*', filter: `path eq '${escaped}'`, select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip: page * DEINDEX_PAGE_SIZE });
+      if (!r.ok) {
+        // Only the FIRST page failing means "this schema likely can't filter on path" -- fall
+        // through to the keyword fallback below. A LATER page failing mid-pagination is a
+        // different (likely transient) failure; keep whatever earlier pages already found rather
+        // than discarding it by attempting a fallback that would re-fetch from the start.
+        if (page > 0) return ids;
+        break;
+      }
       const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
-      return (j.value || []).filter((d) => d.path === path).map((d) => String(d.chunk_id)).filter(Boolean);
+      const items = j.value || [];
+      ids.push(...items.map((d) => String(d.chunk_id)).filter(Boolean));
+      if (items.length < DEINDEX_PAGE_SIZE) return ids; // exhausted (covers the zero-match case too)
     }
-    const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
-    return (j.value || []).map((d) => String(d.chunk_id)).filter(Boolean);
+    if (ids.length > 0) return ids; // the $filter path worked for at least one page; no fallback needed
+    // Fallback: $filter is unsupported on this room's schema (the very first call above was
+    // non-ok). Keyword search restricted to the path field, client-side exact match, paginated.
+    for (let page = 0; page < DEINDEX_MAX_PAGES; page++) {
+      const r = await doSearch({ search: path, searchFields: 'path', queryType: 'simple', select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip: page * DEINDEX_PAGE_SIZE });
+      if (!r.ok) return ids;
+      const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
+      const raw = j.value || [];
+      ids.push(...raw.filter((d) => d.path === path).map((d) => String(d.chunk_id)).filter(Boolean));
+      if (raw.length < DEINDEX_PAGE_SIZE) return ids; // exhausted -- check the RAW page size, not
+      // the post-filter count, since a near-miss-heavy page can filter down below DEINDEX_PAGE_SIZE
+      // while more raw results remain on the next page.
+    }
+    return ids;
   } catch {
-    return [];
+    return ids;
   }
 }
 
 /**
- * Delete every chunk document at `path` from `index` (a chunked doc room). See the section header
- * above for the full rationale. FAIL-OPEN: never throws; every failure mode returns
- * `{attempted, deleted:0, reason}`. Callers (legal_blob_delete, legal_blob_move) should call this
- * AFTER their own blob mutation has already succeeded, and must not let its outcome affect the
- * response to the blob operation beyond an informational note.
+ * Resolve the search endpoint + an ADMIN key ONCE. Call this before a loop of many
+ * deindexChunkedPathWithAuth calls (legal_blob_delete's bulk mode) instead of letting each item
+ * mint its own admin key via a fresh ARM listAdminKeys round trip (2026-08-04, Copilot review PR
+ * #192: N items previously meant N identical ARM calls). FAIL-OPEN: never throws.
  */
-export async function deindexChunkedPath(index: string, path: string): Promise<DeindexResult> {
+export async function prepareDeindexAuth(): Promise<{ auth: DeindexAuth | null; reason?: string }> {
   try {
     const env = loadEnv();
     const endpoint = (env.AZURE_SEARCH_ENDPOINT || '').replace(/\/+$/, '');
-    if (!endpoint) return { attempted: false, deleted: 0, reason: 'AZURE_SEARCH_ENDPOINT not configured' };
+    if (!endpoint) return { auth: null, reason: 'AZURE_SEARCH_ENDPOINT not configured' };
     const service = serviceFromEndpoint(endpoint);
-    if (!service) return { attempted: false, deleted: 0, reason: 'cannot derive search service from endpoint' };
+    if (!service) return { auth: null, reason: 'cannot derive search service from endpoint' };
     const key = await searchAdminKey(service);
+    return { auth: { endpoint, key } };
+  } catch (e) {
+    return { auth: null, reason: (e as Error).message };
+  }
+}
 
-    const chunkIds = await findChunkIdsByPath(endpoint, key, index, path);
+/**
+ * Delete every chunk document at `path` from `index` (a chunked doc room), given an ALREADY
+ * resolved DeindexAuth (see prepareDeindexAuth). See the section header above for the full
+ * rationale. FAIL-OPEN: never throws; every failure mode returns `{attempted, deleted, reason}`.
+ * Callers should call this AFTER their own blob mutation has already succeeded, and must not let
+ * its outcome affect the response to the blob operation beyond an informational note.
+ */
+export async function deindexChunkedPathWithAuth(auth: DeindexAuth, index: string, path: string): Promise<DeindexResult> {
+  try {
+    const chunkIds = await findChunkIdsByPath(auth.endpoint, auth.key, index, path);
     if (chunkIds.length === 0) return { attempted: true, deleted: 0 };
 
-    const r = await fetch(`${endpoint}/indexes/${index}/docs/index?api-version=${API_VERSION}`, {
-      method: 'POST',
-      headers: { 'api-key': key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value: chunkIds.map((chunk_id) => ({ '@search.action': 'delete', chunk_id })) }),
-    });
+    const r = await fetchWithBudget(
+      `${auth.endpoint}/indexes/${index}/docs/index?api-version=${API_VERSION}`,
+      {
+        method: 'POST',
+        headers: { 'api-key': auth.key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: chunkIds.map((chunk_id) => ({ '@search.action': 'delete', chunk_id })) }),
+      },
+      { timeoutMs: DEINDEX_CALL_TIMEOUT_MS, retries: 0 },
+    );
     if (!r.ok) {
       return { attempted: true, deleted: 0, reason: `delete ${r.status}: ${(await r.text()).slice(0, 160)}` };
     }
-    return { attempted: true, deleted: chunkIds.length };
+    // Azure AI Search returns 207 Multi-Status (still `r.ok`, since 200-299) when SOME per-document
+    // actions in the batch failed -- `r.ok` alone cannot distinguish "all N deleted" from "some of
+    // N deleted". Parse the per-document IndexingResult status and count only confirmed successes
+    // (2026-08-04, Copilot review PR #192: the prior code returned chunkIds.length unconditionally
+    // on any 2xx, over-reporting cleanup and hiding chunks that silently survived).
+    const j = (await r.json()) as { value?: Array<{ key?: string; status?: boolean; errorMessage?: string; statusCode?: number }> };
+    const results = j.value || [];
+    const succeeded = results.filter((x) => x.status === true).length;
+    const failed = results.filter((x) => x.status !== true);
+    if (failed.length > 0) {
+      const first = failed[0];
+      return {
+        attempted: true,
+        deleted: succeeded,
+        reason: `${failed.length}/${results.length} chunk delete(s) failed (e.g. key=${first.key ?? '?'} status=${first.statusCode ?? '?'} ${first.errorMessage ?? ''})`.trim(),
+      };
+    }
+    return { attempted: true, deleted: succeeded };
   } catch (e) {
     return { attempted: false, deleted: 0, reason: (e as Error).message };
   }
+}
+
+/** Convenience one-shot wrapper: resolve auth AND delete, for a single-call site (legal_blob_move,
+ *  which de-indexes exactly one path per invocation). legal_blob_delete's bulk loop should instead
+ *  call prepareDeindexAuth() once and reuse it via deindexChunkedPathWithAuth per item. */
+export async function deindexChunkedPath(index: string, path: string): Promise<DeindexResult> {
+  const { auth, reason } = await prepareDeindexAuth();
+  if (!auth) return { attempted: false, deleted: 0, reason };
+  return deindexChunkedPathWithAuth(auth, index, path);
 }
