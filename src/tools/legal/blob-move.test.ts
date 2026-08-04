@@ -83,11 +83,6 @@ test('dst_exists_no_overwrite: refuses when destination exists and overwrite is 
 
 test('dry_run (default): reports the plan without ever calling PUT (copy) or DELETE', async () => {
   const calls: string[] = [];
-  const stub: typeof fetch = (async (url: string | URL, init?: RequestInit) => {
-    calls.push(init?.method || 'GET');
-    if (init?.method === 'HEAD') return new Response(null, { status: 404 }); // dst doesn't exist; src existence checked separately below
-    throw new Error(`unexpected call in dry_run: ${init?.method}`);
-  }) as typeof fetch;
   // src exists (first HEAD -> 200), dst doesn't (second HEAD -> 404): simulate via a counter.
   let n = 0;
   const stub2: typeof fetch = (async (_url: string | URL, init?: RequestInit) => {

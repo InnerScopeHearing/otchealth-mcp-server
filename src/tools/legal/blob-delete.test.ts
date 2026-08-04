@@ -186,9 +186,8 @@ test('bulk mode: stops mid-batch on a trash_collision and reports exactly what m
     <Blobs><Blob><Name>dupes/b.pdf</Name><Content-Length>10</Content-Length></Blob></Blobs>
   </EnumerationResults>`;
   let headCallsForCollision = 0;
-  const stub: typeof fetch = (async (url, init?: RequestInit) => {
+  const stub: typeof fetch = (async (_url, init?: RequestInit) => {
     const method = init?.method || 'GET';
-    const u = String(url);
     if (method === 'GET') return new Response(xml, { status: 200 });
     if (method === 'HEAD') {
       headCallsForCollision += 1;
