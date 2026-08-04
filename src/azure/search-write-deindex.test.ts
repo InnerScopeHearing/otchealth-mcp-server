@@ -342,7 +342,7 @@ test('deindexChunkedPathWithAuth: a 207 Multi-Status (some chunk deletes failed)
   assert.equal(result.attempted, true);
   assert.equal(result.deleted, 1, 'only the confirmed-true chunk counts as deleted, not chunkIds.length');
   assert.equal(result.truncated, true, 'a page-level delete failure means the page is not confirmed clean');
-  assert.match(result.reason ?? '', /1\/2 chunk delete\(s\) failed/);
+  assert.match(result.reason ?? '', /1\/2 chunk delete\(s\) not confirmed/);
 });
 
 test('deindexChunkedPathWithAuth: the delete POST itself failing outright (non-2xx/207) is reported, not thrown', async () => {
@@ -397,26 +397,33 @@ test('deindexChunkedPath (one-shot): prepareDeindexAuth\'s own short internal de
   assert.match(result.reason ?? '', /deadline/);
 });
 
-test('deindexChunkedPath (one-shot): the OUTER 10s deadline is a real backstop even if a later phase hangs past prepareDeindexAuth\'s own return', async () => {
+test('deindexChunkedPath (one-shot): a search call that hangs past prepareDeindexAuth\'s own return is bounded to ~10s, not left hanging indefinitely (2026-08-04, Copilot review PR #192 round 5)', async () => {
+  // identity + admin-key resolve fast (via fullChainStub's default handling); the search lookup
+  // itself then hangs forever, simulating a stuck call that somehow evades fetchWithBudget's own
+  // AbortSignal-based timeout (e.g. a proxy that swallows aborts). TWO independent mechanisms now
+  // bound this, both targeting the SAME deadlineAtMs inherited from the one-shot wrapper: the
+  // OUTER Promise.race in deindexChunkedPath (present since round 2), and the IN-FLIGHT race
+  // findAllChunkIds now wraps its own search call in (added round 5, matching Copilot's ask to
+  // race each lookup, not just gate entry into it). Because both timers target the same absolute
+  // wall-clock instant, WHICH ONE actually wins is a genuine Node timer-ordering race, not a
+  // deterministic outcome -- so this test deliberately does NOT pin `attempted` to a specific
+  // value (true via the inner race resolving findAllChunkIds normally, or false via the outer
+  // wrapper's own timeout value, are BOTH correct depending on microsecond scheduling). What must
+  // always hold regardless of which fires first: bounded elapsed time, an honest truncated:true,
+  // zero confirmed deletes, and a reason that says why.
   const started = Date.now();
   const result = await withStubbedFetch(
     fullChainStub(
-      // identity + admin-key resolve fast (via fullChainStub's default handling); the search
-      // lookup itself then hangs forever, simulating a stuck call that somehow evades
-      // fetchWithBudget's own AbortSignal-based timeout (e.g. a proxy that swallows aborts) --
-      // this proves the OUTER race in deindexChunkedPath is a genuine backstop, not decorative,
-      // independent of whether the inner per-call timeout mechanisms are doing their job.
       () => new Promise<Response>(() => {}),
       () => { throw new Error('must never reach the delete call in this test'); },
     ),
     () => deindexChunkedPath('legal-personal', 'filings/x.pdf'),
   );
   const elapsedMs = Date.now() - started;
-  assert.ok(elapsedMs >= 9_000 && elapsedMs < 15_000, `must be bounded by the outer ~10s deadline (not the shorter auth deadline, since auth succeeded), took ${elapsedMs}ms`);
-  assert.equal(result.attempted, false);
+  assert.ok(elapsedMs >= 9_000 && elapsedMs < 15_000, `must be bounded to ~10s by one of the two deadline mechanisms, not hang indefinitely; took ${elapsedMs}ms`);
   assert.equal(result.deleted, 0);
   assert.equal(result.truncated, true);
-  assert.match(result.reason ?? '', /overall deadline/);
+  assert.match(result.reason ?? '', /deadline/);
 });
 
 test('prepareDeindexAuth + deindexChunkedPathWithAuth: auth resolved ONCE serves multiple deindex calls (no repeat admin-key fetch)', async () => {

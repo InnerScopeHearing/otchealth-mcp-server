@@ -50,9 +50,23 @@ export function memoryDocId(agent: string, id: string): string {
   return `${agent}__${id}`.replace(/[^A-Za-z0-9_\-=]/g, '_');
 }
 
-/** Derive the Search SERVICE name from the endpoint (https://<service>.search.windows.net). Pure. */
+/** Derive the Search SERVICE name from the endpoint (https://<service>.search.windows.net). Pure.
+ *  Parses via `URL` and requires an EXACT (anchored) hostname match, not a prefix match: the
+ *  earlier regex (`^https://([a-z0-9-]+)\.search\.windows\.net`, no `$`/end anchor) would extract
+ *  a service name from a string like `https://real.search.windows.net@attacker.example` too, since
+ *  a regex with no end anchor only validates the START of the string (2026-08-04, Copilot review
+ *  PR #192 round 5). This value gates which ARM service the caller mints an admin key against
+ *  (`searchAdminKey`), so a loose parse here is worth hardening even though `endpoint` in this
+ *  codebase's real call sites is always the deploy-configured `AZURE_SEARCH_ENDPOINT` env var, not
+ *  externally-attacker-reachable input -- defense in depth, and the fix is free. */
 export function serviceFromEndpoint(endpoint: string): string | null {
-  const m = (endpoint || '').match(/^https:\/\/([a-z0-9-]+)\.search\.windows\.net/i);
+  let u: URL;
+  try {
+    u = new URL(endpoint || '');
+  } catch {
+    return null;
+  }
+  const m = u.hostname.match(/^([a-z0-9-]+)\.search\.windows\.net$/i);
   return m ? m[1] : null;
 }
 
@@ -261,6 +275,13 @@ function withDeadline<T>(promise: Promise<T>, deadlineAtMs: number, onTimeout: T
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** A synthetic, clearly-non-Azure Response (status 599) used as the `withDeadline` timeout value
+ *  for an in-flight search call -- lets the existing `!r.ok` handling recognize and report an
+ *  in-flight deadline timeout without a second parallel code path. */
+function DEINDEX_TIMEOUT_RESPONSE(): Response {
+  return new Response('deadline exceeded while a request was in flight', { status: 599 });
+}
+
 /** Delete one page of chunk ids. Never throws -- returns `{deleted, reason}` on any failure. */
 async function deleteChunkPage(auth: DeindexAuth, index: string, chunkIds: string[]): Promise<{ deleted: number; reason?: string }> {
   if (chunkIds.length === 0) return { deleted: 0 };
@@ -282,13 +303,25 @@ async function deleteChunkPage(auth: DeindexAuth, index: string, chunkIds: strin
     // on any 2xx, over-reporting cleanup and hiding chunks that silently survived).
     const j = (await r.json()) as { value?: Array<{ key?: string; status?: boolean; errorMessage?: string; statusCode?: number }> };
     const results = j.value || [];
-    const succeeded = results.filter((x) => x.status === true).length;
-    const failed = results.filter((x) => x.status !== true);
-    if (failed.length > 0) {
-      const first = failed[0];
+    // A 2xx response whose `value` array is missing entries for some (or ALL) requested chunk_ids
+    // must NOT be read as "those chunks are fine" -- an empty `value` on a 2xx previously produced
+    // `failed.length === 0` (nothing to iterate) and reported a clean {deleted:0} with no reason,
+    // masking a batch that confirmed NOTHING (2026-08-04, Copilot review PR #192 round 5). Every
+    // requested id must appear in the response with `status:true` to count as confirmed; anything
+    // else (missing, duplicated, or status!=true) is a failure to report.
+    const byKey = new Map<string, { status?: boolean; errorMessage?: string; statusCode?: number }>();
+    for (const r2 of results) if (r2.key) byKey.set(r2.key, r2);
+    const succeeded = chunkIds.filter((id) => byKey.get(id)?.status === true).length;
+    const missingOrFailed = chunkIds.filter((id) => byKey.get(id)?.status !== true);
+    if (missingOrFailed.length > 0) {
+      const firstId = missingOrFailed[0];
+      const first = byKey.get(firstId);
+      const reasonDetail = first
+        ? `key=${firstId} status=${first.statusCode ?? '?'} ${first.errorMessage ?? ''}`
+        : `key=${firstId} missing from the response entirely (requested ${chunkIds.length}, got ${results.length} results)`;
       return {
         deleted: succeeded,
-        reason: `${failed.length}/${results.length} chunk delete(s) failed (e.g. key=${first.key ?? '?'} status=${first.statusCode ?? '?'} ${first.errorMessage ?? ''})`.trim(),
+        reason: `${missingOrFailed.length}/${chunkIds.length} chunk delete(s) not confirmed (e.g. ${reasonDetail})`.trim(),
       };
     }
     return { deleted: succeeded };
@@ -352,11 +385,22 @@ async function findAllChunkIds(
     if (Date.now() >= deadlineAtMs) return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: 'deadline exceeded before the path was confirmed exhausted' };
     let r: Response;
     try {
-      r = await doSearch(buildBody(page * DEINDEX_PAGE_SIZE));
+      // The deadline check above only gates whether a NEW call STARTS; once fetchWithBudget's own
+      // request is in flight it can still take up to its own DEINDEX_CALL_TIMEOUT_MS regardless of
+      // how little of `deadlineAtMs` remains -- racing the call itself (not just gating entry into
+      // it) is what actually bounds this pass to the caller's promised deadline, matching the same
+      // pattern the one-shot wrapper (deindexChunkedPath) already applies at its own outer layer
+      // (2026-08-04, Copilot review PR #192 round 5). DEINDEX_TIMEOUT_RESPONSE is a synthetic,
+      // clearly-marked non-2xx Response (status 599, never a real Azure status) so the existing
+      // !r.ok handling below need not be duplicated for this path.
+      r = await withDeadline(doSearch(buildBody(page * DEINDEX_PAGE_SIZE)), deadlineAtMs, DEINDEX_TIMEOUT_RESPONSE());
     } catch (e) {
       return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: (e as Error).message };
     }
-    if (!r.ok) return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: page > 0 ? `search ${r.status} mid-pagination` : undefined };
+    if (!r.ok) {
+      const reason = r.status === 599 ? 'deadline exceeded while a search call was in flight' : page > 0 ? `search ${r.status} mid-pagination` : undefined;
+      return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason };
+    }
     let raw: Array<Record<string, unknown>>;
     let odataCount: number | null = null;
     try {
@@ -415,7 +459,14 @@ async function findAndDeleteAll(
         reason: deleteReason ?? 'deadline exceeded before every found chunk could be deleted',
       };
     }
-    const del = await deleteChunkPage(auth, index, found.ids.slice(i, i + DEINDEX_PAGE_SIZE));
+    // Same in-flight-deadline race as the search calls above (2026-08-04, Copilot review PR #192
+    // round 5): the check just above only gates whether this batch STARTS, not how long the
+    // network call itself can run once started.
+    const del = await withDeadline(
+      deleteChunkPage(auth, index, found.ids.slice(i, i + DEINDEX_PAGE_SIZE)),
+      deadlineAtMs,
+      { deleted: 0, reason: 'deadline exceeded while a delete call was in flight' },
+    );
     deleted += del.deleted;
     if (del.reason) {
       // A delete failure means some found chunks were NOT confirmed removed -- keep going through
