@@ -230,8 +230,14 @@ export async function indexMemoryNow(input: {
  */
 
 export interface DeindexResult {
-  /** False only when this could not even be attempted (search unconfigured, or a hard failure
-   *  before any chunk lookup completed -- e.g. the admin-key mint itself failed). */
+  /** False when cleanup could not even be ENTERED (search unconfigured, or the admin-key mint
+   *  itself failed) -- true once authenticated cleanup started, even if the search/delete calls
+   *  inside it then failed outright (2026-08-04, Copilot review PR #192 round 11: the earlier doc
+   *  comment claimed `attempted` was false whenever no chunk lookup COMPLETED, but a search network
+   *  failure or both the primary and fallback queries failing outright both return `attempted:true`
+   *  per the actual implementation and this file's own tests -- `attempted` marks "did we get past
+   *  auth," never "did a lookup complete." `truncated` below is the real completeness signal;
+   *  callers should never infer confirmed-clean from `attempted` alone. */
   attempted: boolean;
   /** Number of chunk documents CONFIRMED deleted (Azure AI Search's per-document `status:true`),
    *  not merely "found and included in the delete batch" (0 is normal: the room may not have
@@ -243,8 +249,13 @@ export interface DeindexResult {
    *  exactly this). ALWAYS true when `attempted` is false (round 3: every attempted:false branch in
    *  this module sets it, so callers never need to special-case which layer produced the false --
    *  "not attempted" is definitionally "not confirmed clean"). False only on a genuine confirmed
-   *  no-op (nothing was indexed at this path) or a fully confirmed delete. */
-  truncated?: boolean;
+   *  no-op (nothing was indexed at this path) or a fully confirmed delete. REQUIRED, not optional
+   *  (2026-08-04, Copilot review PR #192 round 11): every caller treats an omitted `truncated` as
+   *  `Boolean(undefined) === false` -- i.e. "confirmed clean" -- so an accidentally-missing field at
+   *  a new return site would silently misreport an incomplete cleanup as done. Making it required
+   *  forces the compiler to catch that at every return site, not just at the two call sites that
+   *  happen to read it today. */
+  truncated: boolean;
   reason?: string;
 }
 
