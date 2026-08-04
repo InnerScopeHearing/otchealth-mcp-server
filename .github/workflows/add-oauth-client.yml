@@ -1,0 +1,152 @@
+name: add-oauth-client
+
+# One-shot, human-triggered utility to onboard a new connector-surface OAuth client (occ_...) into
+# the gateway's live OAUTH_CLIENTS registry, WITHOUT ever putting the secret value in a workflow
+# file, a commit, or a chat transcript. Never runs automatically (workflow_dispatch only).
+#
+# Mirrors deploy.yml's own blue-green pattern exactly (same OIDC identity, same fresh-suffix +
+# 0%-traffic + per-revision health check + tool_count regression gate before any traffic shift),
+# because that is the proven-safe way to touch this Container App's template. It deliberately does
+# NOT do a raw/blind PATCH: it reads the LIVE array first, appends exactly one entry, and refuses to
+# proceed if the live count doesn't match what the dispatcher expects (guards against acting on a
+# stale assumption of what's already there -- see incident 20260713-019, which is exactly what this
+# workflow exists to never repeat).
+#
+# Before dispatching: store the new client's secret as the repo secret NEW_OAUTH_CLIENT_SECRET
+# (Settings > Secrets and variables > Actions). This workflow reads it from there, never from an input.
+#
+# SECURITY: every workflow_dispatch input and every secret is passed into shell steps via env:
+# and referenced as a quoted $VAR, never interpolated directly into a run: block via ${{ }} --
+# that avoids shell-injection through a crafted input even though this trigger is human-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_client_id:
+        description: 'The new client_id to add (e.g. occ_clopersonal_xxxx). NOT a secret.'
+        required: true
+      new_agent:
+        description: 'The lane/agent this client resolves to (e.g. clo-personal).'
+        required: true
+      expected_current_count:
+        description: 'How many entries OAUTH_CLIENTS should currently have. Aborts if it does not match (stale-assumption guard).'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: add-oauth-client
+  cancel-in-progress: false
+
+env:
+  APP: otchealth-mcp-gateway
+  APP_RG: rg-otchealth-apps-prod
+  MIN_TOOLS: '800'
+  NEW_CLIENT_ID: ${{ inputs.new_client_id }}
+  NEW_AGENT: ${{ inputs.new_agent }}
+  EXPECTED_COUNT: ${{ inputs.expected_current_count }}
+  NEW_CLIENT_SECRET: ${{ secrets.NEW_OAUTH_CLIENT_SECRET }}
+
+jobs:
+  add-client:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: 0918788a-f290-4a25-b4cd-2cf3a6faaf57 # id-gateway-deployer (UAMI), same identity deploy.yml uses
+          tenant-id: 4ab58580-cc9c-49f7-b5c7-a77f84fdc270
+          subscription-id: 55c84f6b-ef90-4259-a58b-50835cc4cab4
+
+      - name: Fetch live OAUTH_CLIENTS and verify the expected count (stale-assumption guard)
+        run: |
+          set -euo pipefail
+          CURRENT=$(az containerapp show -n "$APP" -g "$APP_RG" \
+            --query "properties.template.containers[0].env[?name=='OAUTH_CLIENTS'].value | [0]" -o tsv)
+          COUNT=$(echo "$CURRENT" | jq 'length')
+          echo "Live OAUTH_CLIENTS entries: $COUNT"
+          if [ "$COUNT" != "$EXPECTED_COUNT" ]; then
+            echo "::error::Live count ($COUNT) does not match expected_current_count ($EXPECTED_COUNT). Refusing to act on a stale assumption. Re-check the live state and re-dispatch with the correct value."
+            exit 1
+          fi
+          if echo "$CURRENT" | jq -e --arg cid "$NEW_CLIENT_ID" '.[] | select(.client_id == $cid)' >/dev/null; then
+            echo "::error::$NEW_CLIENT_ID is already present in the live array. Nothing to do."
+            exit 1
+          fi
+          echo "$CURRENT" > /tmp/current.json
+
+      - name: Append the new client (non-destructive)
+        run: |
+          set -euo pipefail
+          jq --arg cid "$NEW_CLIENT_ID" --arg sec "$NEW_CLIENT_SECRET" --arg agent "$NEW_AGENT" \
+            '. + [{"client_id": $cid, "secret": $sec, "agent": $agent}]' /tmp/current.json > /tmp/new.json
+          NEW_COUNT=$(jq 'length' /tmp/new.json)
+          EXPECTED=$(( EXPECTED_COUNT + 1 ))
+          if [ "$NEW_COUNT" != "$EXPECTED" ]; then
+            echo "::error::Append produced $NEW_COUNT entries, expected $EXPECTED. Aborting."
+            exit 1
+          fi
+          echo "New OAUTH_CLIENTS entries: $NEW_COUNT"
+
+      - name: Ensure multiple-revision (blue-green) mode
+        run: az containerapp revision set-mode -n "$APP" -g "$APP_RG" --mode multiple
+
+      - name: Deploy GREEN revision (fresh suffix, starts at 0% traffic)
+        id: green
+        run: |
+          set -euo pipefail
+          SUFFIX="gadd$(date +%s | tail -c 7)"
+          az containerapp update -n "$APP" -g "$APP_RG" \
+            --revision-suffix "$SUFFIX" \
+            --set-env-vars "OAUTH_CLIENTS=$(cat /tmp/new.json)" >/dev/null
+          echo "revision=${APP}--${SUFFIX}" >> "$GITHUB_OUTPUT"
+
+      - name: Assert GREEN health + tool-count regression gate (before any traffic shift)
+        id: health
+        env:
+          REVISION: ${{ steps.green.outputs.revision }}
+        run: |
+          set -euo pipefail
+          FQDN=$(az containerapp revision show -n "$APP" -g "$APP_RG" \
+            --revision "$REVISION" --query properties.fqdn -o tsv)
+          for i in $(seq 1 25); do
+            code=$(curl -fsS -o /tmp/h.json -w '%{http_code}' "https://${FQDN}/health" 2>/dev/null || echo 000)
+            [ "$code" = "200" ] && break
+            sleep 6
+          done
+          cat /tmp/h.json
+          node -e '
+            const h = require("/tmp/h.json");
+            if (h.status !== "ok") { console.error("health not ok"); process.exit(1); }
+            const n = h.tool_count || 0, min = Number(process.env.MIN_TOOLS);
+            if (n < min) { console.error(`REGRESSION: tool_count ${n} < ${min}`); process.exit(1); }
+            console.log(`GREEN healthy: ${n} tools advertised (>= ${min}).`);
+          '
+
+      - name: Shift 100% traffic to GREEN
+        env:
+          REVISION: ${{ steps.green.outputs.revision }}
+        run: |
+          az containerapp ingress traffic set -n "$APP" -g "$APP_RG" \
+            --revision-weight "${REVISION}=100"
+          echo "Live on $REVISION. New client $NEW_CLIENT_ID (agent=$NEW_AGENT) is now active."
+
+      - name: Roll back on failure (deactivate the bad GREEN; traffic stays on the old revision)
+        if: failure() && steps.green.outputs.revision != ''
+        env:
+          REVISION: ${{ steps.green.outputs.revision }}
+        run: |
+          echo "::warning::Failed after GREEN came up. Traffic stayed on the last-good revision; deactivating $REVISION."
+          az containerapp revision deactivate -n "$APP" -g "$APP_RG" --revision "$REVISION" || true
+
+      - name: Prune stale revisions (keep active + one warm rollback)
+        if: success()
+        run: |
+          set -euo pipefail
+          az containerapp revision list -n "$APP" -g "$APP_RG" -o json \
+            | jq -r '[.[] | select(.properties.active and .properties.trafficWeight==0)] | sort_by(.properties.createdTime) | .[:-1] | .[].name' \
+            | while read -r rev; do
+                [ -n "$rev" ] && (az containerapp revision deactivate -n "$APP" -g "$APP_RG" --revision "$rev" || true)
+              done
