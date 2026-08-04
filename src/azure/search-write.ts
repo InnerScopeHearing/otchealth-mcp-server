@@ -150,9 +150,12 @@ export async function indexMemoryNow(input: {
  *
  * THE GAP THIS CLOSES (CLO field report, PR #191 acceptance test, Finding 3): legal_blob_delete's
  * soft-delete MOVES a blob to `_TRASH/<original-path>`. The CHUNKED doc rooms (legal-personal,
- * legal-company, ...) are fed by native Azure Blob PULL-indexers on a slow cadence (up to 168h,
- * see setup/expected-indexes.json in otchealth-claude-tools) with NO deletion-detection policy
- * configured. A pull-indexer only ADDS/UPDATES on each run; it never removes an index entry just
+ * legal-company, ...) are fed by native Azure Blob PULL-indexers with NO deletion-detection policy
+ * configured, running every `cadence_min: 360` (6h) per setup/expected-indexes.json in
+ * otchealth-claude-tools (`max_age_h: 168`/7d there is the CANARY's freshness-alert tolerance, not
+ * the run cadence -- corrected 2026-08-04, Copilot review PR #192 round 4, this comment previously
+ * conflated the two and overstated the real gap by ~28x). A pull-indexer only ADDS/UPDATES on each
+ * run; it never removes an index entry just
  * because the source blob is gone from the path it last saw. So a soft-deleted (or moved) blob's
  * search-index entry survives INDEFINITELY, still citing the OLD path -- and PR #191's own
  * `_TRASH/`-prefix filter in search.ts cannot catch this, because the filter checks the INDEXED
@@ -179,7 +182,7 @@ export async function indexMemoryNow(input: {
  * `deindexed`/`truncated:false` would (correctly, at the time) report success. This is an inherent
  * property of pairing an active-delete with a passive periodic indexer, not a regression introduced
  * here: before this fix there was NO cleanup at all, so the exposure window only shrinks (from
- * "always stale until the next reindex cycle, up to 168h" to "stale only if a resurrection race is
+ * "always stale until the next reindex cycle, up to ~6h" to "stale only if a resurrection race is
  * lost"), it does not fully close. A real fix needs either indexer coordination (a lock/generation
  * check the pull-indexer respects) or a delayed/recurring re-check sweep that re-deindexes any path
  * that reappears after a confirmed delete -- both genuinely new mechanisms, not yet built (tracked
@@ -321,29 +324,70 @@ async function findAllChunkIds(
       { method: 'POST', headers: { 'api-key': auth.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
       { timeoutMs: DEINDEX_CALL_TIMEOUT_MS, retries: 0 },
     );
-  const ids: string[] = [];
+  // Deduped by id, NOT accumulated as a plain array: without an explicit $orderby, Azure AI Search
+  // does not guarantee stable ordering across successive $skip/$top requests (documented Azure
+  // behavior, not an implementation quirk -- and MORE likely here specifically because an
+  // independent pull-indexer can be writing to this same index concurrently). A naive
+  // "raw.length < PAGE_SIZE means exhausted" check can therefore both double-count a chunk that
+  // reappeared on a later page AND, more dangerously, terminate early while chunks that shifted
+  // "behind" the current offset were never seen at all (2026-08-04, Copilot review PR #192 round
+  // 4). Rather than depend on an unverified schema-level sortable field to add $orderby, both
+  // callers set `count: true` on the query body, and `expectedRawCount` (Azure's own authoritative
+  // `@odata.count` for this filter/search AS ISSUED, captured once from the first page) is the
+  // PRIMARY exhaustion signal: pagination is only trusted as complete once every RAW result the
+  // server says exists has been seen, not merely once a page comes back short.
+  //
+  // TWO separate sets, not one: `seenRaw` tracks every raw id returned (matches AND, on the
+  // fallback pass, near-misses) and is what gets compared against `expectedRawCount` -- comparing
+  // the exhaustion check against the SMALLER post-filter set instead would be wrong on the
+  // fallback pass, where `@odata.count` counts raw keyword hits (e.g. "foo/bar.pdf.bak" also
+  // matches a keyword search for "foo/bar.pdf") and the exact-path-filtered subset can legitimately
+  // never reach that raw total, which would make this loop needlessly burn every page every time.
+  // `seenIds` accumulates only the exact matches -- the real deletion candidate set this function
+  // returns.
+  const seenRaw = new Set<string>();
+  const seenIds = new Set<string>();
+  let expectedRawCount: number | null = null;
   for (let page = 0; page < DEINDEX_MAX_PAGES; page++) {
-    if (Date.now() >= deadlineAtMs) return { ranAtAll: page > 0, ids, exhausted: false, reason: 'deadline exceeded before the path was confirmed exhausted' };
+    if (Date.now() >= deadlineAtMs) return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: 'deadline exceeded before the path was confirmed exhausted' };
     let r: Response;
     try {
       r = await doSearch(buildBody(page * DEINDEX_PAGE_SIZE));
     } catch (e) {
-      return { ranAtAll: page > 0, ids, exhausted: false, reason: (e as Error).message };
+      return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: (e as Error).message };
     }
-    if (!r.ok) return { ranAtAll: page > 0, ids, exhausted: false, reason: page > 0 ? `search ${r.status} mid-pagination` : undefined };
+    if (!r.ok) return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: page > 0 ? `search ${r.status} mid-pagination` : undefined };
     let raw: Array<Record<string, unknown>>;
+    let odataCount: number | null = null;
     try {
-      const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
+      const j = (await r.json()) as { value?: Array<Record<string, unknown>>; '@odata.count'?: number };
       raw = j.value || [];
+      odataCount = typeof j['@odata.count'] === 'number' ? j['@odata.count'] : null;
     } catch (e) {
-      return { ranAtAll: page > 0, ids, exhausted: false, reason: `malformed search response: ${(e as Error).message}` };
+      return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: `malformed search response: ${(e as Error).message}` };
     }
-    ids.push(...(filterExact ? raw.filter((d) => d.path === path) : raw).map((d) => String(d.chunk_id)).filter(Boolean));
-    // Check the RAW page size, not the post-filter count -- on the fallback pass a near-miss-heavy
-    // page can filter down below DEINDEX_PAGE_SIZE while more raw results remain on the next page.
-    if (raw.length < DEINDEX_PAGE_SIZE) return { ranAtAll: true, ids, exhausted: true };
+    if (page === 0 && odataCount !== null) expectedRawCount = odataCount;
+    for (const d of raw) {
+      const id = String((d as { chunk_id?: unknown }).chunk_id ?? '');
+      if (!id) continue;
+      seenRaw.add(id);
+      if (!filterExact || (d as { path?: unknown }).path === path) seenIds.add(id);
+    }
+    if (expectedRawCount !== null) {
+      // Authoritative: trust the server's own RAW count over any page-size heuristic. Keep paging
+      // even past a short/empty raw page if the deduped raw total hasn't reached it yet -- exactly
+      // the case an unordered result set can produce (a "missing" result is really just sitting on
+      // an offset we haven't visited due to reordering, not genuinely absent).
+      if (seenRaw.size >= expectedRawCount) return { ranAtAll: true, ids: [...seenIds], exhausted: true };
+    } else if (raw.length < DEINDEX_PAGE_SIZE) {
+      // No count available (should not happen on API_VERSION 2024-07-01, but fail safe rather
+      // than loop forever if some future response shape omits it): fall back to the page-size
+      // heuristic, same as before count-tracking existed.
+      return { ranAtAll: true, ids: [...seenIds], exhausted: true };
+    }
   }
-  return { ranAtAll: true, ids, exhausted: false, reason: `stopped at the ${DEINDEX_MAX_PAGES}-page safety backstop` };
+  const countNote = expectedRawCount !== null ? ` (found ${seenRaw.size}/${expectedRawCount} raw results, ${seenIds.size} exact matches)` : '';
+  return { ranAtAll: true, ids: [...seenIds], exhausted: false, reason: `stopped at the ${DEINDEX_MAX_PAGES}-page safety backstop${countNote}` };
 }
 
 /** Find every matching chunk id (a stable-snapshot pagination pass, see findAllChunkIds), THEN
@@ -454,7 +498,10 @@ export async function deindexChunkedPathWithAuth(
     const escaped = path.replace(/'/g, "''");
     const primary = await findAndDeleteAll(
       auth, index, path, deadlineAtMs,
-      (skip) => ({ search: '*', filter: `path eq '${escaped}'`, select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip }),
+      // `count: true` is required for findAllChunkIds's authoritative-exhaustion check (2026-08-04,
+      // Copilot review PR #192 round 4) -- see its doc comment for why an unordered result set
+      // makes the plain "short page = done" heuristic unsafe.
+      (skip) => ({ search: '*', filter: `path eq '${escaped}'`, select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip, count: true }),
       false,
     );
     if (!primary.ranAtAll) {
@@ -463,7 +510,7 @@ export async function deindexChunkedPathWithAuth(
       // deadline-bounded and still paginated.
       const fb = await findAndDeleteAll(
         auth, index, path, deadlineAtMs,
-        (skip) => ({ search: path, searchFields: 'path', queryType: 'simple', select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip }),
+        (skip) => ({ search: path, searchFields: 'path', queryType: 'simple', select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip, count: true }),
         true,
       );
       return { attempted: true, deleted: fb.deleted, truncated: !fb.exhausted || fb.hadDeleteFailure, reason: fb.reason };

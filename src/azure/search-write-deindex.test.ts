@@ -221,6 +221,95 @@ test('deindexChunkedPathWithAuth: paginates a document with MORE than one page o
   assert.equal(deleteBatches, 2);
 });
 
+test('deindexChunkedPathWithAuth: an UNORDERED result set (no $orderby -- Azure does not guarantee stable pagination) that returns a short page while real matches remain elsewhere is reported truncated:true, NOT falsely exhausted (2026-08-04, Copilot review PR #192 round 4)', async () => {
+  // Simulates the exact failure Copilot flagged: 203 real matches exist. Page 0 (skip=0) returns a
+  // full page of 200. Page 1 (skip=200), due to unstable ordering (or a concurrent write from the
+  // independent pull-indexer), returns only 2 items -- and neither is one of the 3 chunks
+  // (c200/c201/c202) that were never actually returned by ANY page. Under the OLD raw.length<PAGE_SIZE
+  // heuristic, that short page 1 would have set exhausted:true, silently leaving c200-c202 stale
+  // forever. With `count:true` wired through and `@odata.count` reported honestly by this stub,
+  // the deduped-seen count (200) never reaches the server's own total (203), so pagination must
+  // keep going -- and once it exhausts the page backstop without ever finding the missing 3, the
+  // result must be truncated:true, not a false exhausted:true.
+  const TOTAL = 203;
+  let searchCalls = 0;
+  const result = await withStubbedFetch(
+    fullChainStub(
+      (_u, init) => {
+        searchCalls++;
+        const body = JSON.parse(String(init?.body)) as { skip: number };
+        if (body.skip === 0) {
+          return new Response(
+            JSON.stringify({
+              '@odata.count': TOTAL,
+              value: Array.from({ length: 200 }, (_, i) => ({ chunk_id: `c${i}`, path: 'reordered/doc.pdf' })),
+            }),
+            { status: 200 },
+          );
+        }
+        if (body.skip === 200) {
+          // A short page (2 items) that does NOT contain the missing c200/c201/c202 -- simulates
+          // reordering returning already-seen items instead of the genuinely unvisited ones.
+          return new Response(
+            JSON.stringify({ '@odata.count': TOTAL, value: [{ chunk_id: 'c5', path: 'reordered/doc.pdf' }, { chunk_id: 'c10', path: 'reordered/doc.pdf' }] }),
+            { status: 200 },
+          );
+        }
+        // Every later offset keeps returning nothing new -- an exhausted/uncooperative reordering,
+        // forcing the loop to genuinely hit the page backstop rather than ever converging.
+        return new Response(JSON.stringify({ '@odata.count': TOTAL, value: [] }), { status: 200 });
+      },
+      okDelete(),
+    ),
+    () => deindexChunkedPathWithAuth(DIRECT_AUTH, 'legal-personal', 'reordered/doc.pdf'),
+  );
+  assert.ok(searchCalls > 2, 'must keep paging past the short page 1 instead of stopping there (proves the count check, not raw.length, controls exhaustion)');
+  assert.equal(result.truncated, true, 'must NOT falsely report exhausted -- 3 real matches (c200-c202) were never found by any page');
+  assert.equal(result.deleted, 200, 'the 200 chunks that WERE found (deduped: c5/c10 seen twice) must still be confirmedly deleted, even though the batch overall is truncated');
+});
+
+test('deindexChunkedPathWithAuth: an unordered result set that DOES eventually surface every chunk (just not in a naive page-size order) is correctly reported exhausted:true once the authoritative count is satisfied', async () => {
+  const TOTAL = 205;
+  const result = await withStubbedFetch(
+    fullChainStub(
+      (_u, init) => {
+        const body = JSON.parse(String(init?.body)) as { skip: number };
+        if (body.skip === 0) {
+          return new Response(
+            JSON.stringify({ '@odata.count': TOTAL, value: Array.from({ length: 200 }, (_, i) => ({ chunk_id: `c${i}`, path: 'x.pdf' })) }),
+            { status: 200 },
+          );
+        }
+        if (body.skip === 200) {
+          // Heavily overlaps page 0 (reordering) but DOES include 3 genuinely new ids.
+          return new Response(
+            JSON.stringify({
+              '@odata.count': TOTAL,
+              value: [
+                ...Array.from({ length: 197 }, (_, i) => ({ chunk_id: `c${i + 3}`, path: 'x.pdf' })), // c3..c199, all dupes
+                { chunk_id: 'c200', path: 'x.pdf' }, { chunk_id: 'c201', path: 'x.pdf' }, { chunk_id: 'c202', path: 'x.pdf' },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (body.skip === 400) {
+          // The last 2 genuinely missing ids finally surface here.
+          return new Response(
+            JSON.stringify({ '@odata.count': TOTAL, value: [{ chunk_id: 'c203', path: 'x.pdf' }, { chunk_id: 'c204', path: 'x.pdf' }] }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected skip ${body.skip}`);
+      },
+      okDelete(),
+    ),
+    () => deindexChunkedPathWithAuth(DIRECT_AUTH, 'legal-personal', 'x.pdf'),
+  );
+  assert.equal(result.deleted, TOTAL, 'every distinct chunk across the overlapping/reordered pages must be found and confirmed deleted');
+  assert.equal(result.truncated, false, 'once the deduped count reaches the server-reported total, this is a genuine, honest exhaustion');
+});
+
 test('deindexChunkedPathWithAuth: a document exceeding the 10,000-chunk backstop is reported truncated:true, not silently short (2026-08-04 round-2 fix)', async () => {
   let calls = 0;
   const result = await withStubbedFetch(

@@ -89,6 +89,7 @@ test('legal_blob_move (configured): de-indexes src_path against the CORRECT cont
   const order: string[] = [];
   let headCount = 0;
   let searchLookupBody: Record<string, unknown> | undefined;
+  let searchLookupUrl = '';
   const result = await withStubbedFetch(
     buildStub(
       order,
@@ -103,7 +104,8 @@ test('legal_blob_move (configured): de-indexes src_path against the CORRECT cont
         if (method === 'DELETE') return new Response(null, { status: 202 });
         throw new Error(`unexpected blob method ${method}`);
       },
-      (_u, init) => {
+      (u, init) => {
+        searchLookupUrl = u;
         searchLookupBody = JSON.parse(String(init?.body));
         return new Response(JSON.stringify({ value: [{ chunk_id: 'c1', path: 'a.pdf' }] }), { status: 200 });
       },
@@ -119,9 +121,12 @@ test('legal_blob_move (configured): de-indexes src_path against the CORRECT cont
   // The lookup must target `path eq 'a.pdf'` (src_path), never dst_path.
   assert.match(String((searchLookupBody as any)?.filter), /path eq 'a\.pdf'/);
 
-  // 'personal' container maps to the 'legal-personal' index -- confirm the actual URL used it.
-  const searchCallUrl = order.includes('SEARCH_LOOKUP') ? 'ok' : 'missing';
-  assert.equal(searchCallUrl, 'ok');
+  // 'personal' container maps to the 'legal-personal' index -- pin the ACTUAL index name in the
+  // URL, not just "a lookup happened at all" (2026-08-04, Copilot review PR #192 round 4: the
+  // prior assertion here would still pass even if the personal/company mapping regressed and this
+  // move deleted same-path chunks from the WRONG ring's index).
+  assert.match(searchLookupUrl, /\/indexes\/legal-personal\//);
+  assert.doesNotMatch(searchLookupUrl, /\/indexes\/legal-company\//);
 
   // Ordering: the blob DELETE (removing the original from src_path) must happen strictly before
   // the search index delete (cleaning up src_path's stale entry) -- cleanup only makes sense after
