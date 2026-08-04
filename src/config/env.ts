@@ -356,6 +356,21 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .default('clo-outgoing/Divorce Case Summary and ALL Filings/,filings/'),
+  // Soft time budget for legal_blob_delete's bulk (prefix) mode, in milliseconds (2026-08-04, CLO
+  // field report Finding 1): 147 soft-deletes = 294 Azure ops (copy+remove each) at the CLO's
+  // measured ~0.7s/item ran ~100s -- over the 60s MCP transport timeout, with the caller left unable
+  // to tell whether the call had done nothing, some, or all of the batch (it HAD completed
+  // server-side; the client just never learned that). The bulk loop now checks elapsed time before
+  // each item and returns {status:'partial', remaining} well inside the transport ceiling rather
+  // than risk an orphaned execution the caller can't observe. A partial result is naturally
+  // resumable: re-invoking with the SAME prefix only re-matches what has not yet moved (moved items
+  // are gone from the source prefix). Bounded 1s..55s so a misconfiguration cannot either defeat the
+  // guard (too high) or make legitimate small batches falsely report partial (too low).
+  LEGAL_DELETE_TIME_BUDGET_MS: z
+    .string()
+    .default('45000')
+    .transform((v) => Number.parseInt(v, 10))
+    .refine((n) => Number.isFinite(n) && n >= 1000 && n <= 55000, 'LEGAL_DELETE_TIME_BUDGET_MS must be 1000..55000'),
 
   // Finance dataroom store (the CFO source-docs blobs behind the finance-* AI Search rooms, account
   // otchealthcfodata). Powers kb_get_document — ring-gated WHOLE-document retrieval (search returns
