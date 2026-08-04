@@ -3,7 +3,7 @@ import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured, headBlob, blobExists, copyBlob, deleteBlobHard } from '../../legal/blob-store.js';
 import { isLegalContainerAllowed, lanesForContainer, isProtectedPath, searchIndexForContainer } from './ring.js';
-import { deindexChunkedPath } from '../../azure/search-write.js';
+import { deindexChunkedPath, effectiveOneShotDeindexBudgetMs } from '../../azure/search-write.js';
 
 export const legalBlobMoveInputShape = {
   container: z.enum(['company', 'personal']).describe('Which legal container. personal is ring-gated to the legal-personal executive ring.'),
@@ -85,6 +85,7 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   // version just observed above, so a concurrent overwrite of the source between this HEAD and the
   // delete fails the move closed instead of deleting a version that was never actually copied
   // (2026-08-04, PR #190 review).
+  const moveOpsStartedAt = Date.now();
   const copy = await copyBlob(container, input.src_path, input.dst_path, overwrite, src.etag ?? undefined);
   await deleteBlobHard(container, input.src_path, src.etag ?? undefined);
 
@@ -93,7 +94,14 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   // field report Finding 3 -- same stale-path failure mode as legal_blob_delete, since move is
   // copy-then-remove-original too). Never throws; a failure here does not undo, block, or flag the
   // move itself, which has already durably happened.
-  const deindex = await deindexChunkedPath(searchIndexForContainer(container), input.src_path);
+  //
+  // The deindex budget SHRINKS by however long the move steps above already took (2026-08-04,
+  // Copilot review PR #192 round 9): headBlob/copyBlob/deleteBlobHard have no overall deadline of
+  // their own (copyBlob alone can poll up to ~20s), so always giving deindex its full flat 10s cap
+  // on top could erode the margin under the 60s MCP transport timeout on a slow move. See
+  // effectiveOneShotDeindexBudgetMs's own doc comment for the full rationale.
+  const moveElapsedMs = Date.now() - moveOpsStartedAt;
+  const deindex = await deindexChunkedPath(searchIndexForContainer(container), input.src_path, effectiveOneShotDeindexBudgetMs(moveElapsedMs));
   const deindexTruncated = !deindex.attempted || Boolean(deindex.truncated);
 
   return {

@@ -216,6 +216,17 @@ export async function indexMemoryNow(input: {
  * case (no indexer run in flight at the exact moment of the move) is correctly handled and is the
  * overwhelming majority of real usage, and building indexer coordination is a separate, larger
  * design task.
+ *
+ * The same limitation also covers a narrower variant flagged separately (2026-08-04, Copilot review
+ * PR #192 round 9): `findAllChunkIds`'s authoritative-count check treats `seenRaw` (a UNION of ids
+ * across every page fetched during this pass) as proof of exhaustion once it reaches the largest
+ * `@odata.count` observed. Against a genuinely mutating index, that union is not a true single
+ * snapshot -- e.g. the indexer could remove a chunk this pass already saw and insert an unrelated
+ * one elsewhere while the count stays constant, satisfying the numeric target without that specific
+ * live chunk ever having been returned. This is the identical "no way to know a concurrent write
+ * happened" root cause above, expressed through the count check instead of through resurrection
+ * after a confirmed delete -- not a separate bug, and not fixable without the same indexer
+ * coordination or re-check sweep already tracked against §7.
  */
 
 export interface DeindexResult {
@@ -611,12 +622,34 @@ export async function deindexChunkedPathWithAuth(
   }
 }
 
+/** How much of a single-item caller's transport-timeout margin legal_blob_move's deindex cleanup
+ *  gets, once the preceding move steps (headBlob/copyBlob/deleteBlobHard -- none of which are
+ *  currently deadline-bound; copyBlob alone has a documented ~20s async-copy poll ceiling) have
+ *  already taken their own bite out of the 60s MCP transport timeout (2026-08-04, Copilot review
+ *  PR #192 round 9). deindexChunkedPath's own DEINDEX_ONE_SHOT_DEADLINE_MS (10s) was previously a
+ *  flat cap regardless of how long those preceding steps already ran, so a slow move plus an
+ *  unconditional 10s cleanup on top could approach the 60s ceiling with little margin -- the same
+ *  class of issue round 7 fixed for the bulk delete loop's pre-mutation auth call. Never returns
+ *  MORE than the normal one-shot cap (a fast move must not grant deindex extra time it never had),
+ *  and is floored so cleanup is still ATTEMPTED (never silently skipped) even when the move ran
+ *  long -- a thin deadline just makes deindex give up fast and report truncated (a correct, visible
+ *  outcome), rather than never trying at all. Pure and exported for direct unit testing. */
+const MOVE_TRANSPORT_SAFETY_MS = 45000;
+const MIN_ONE_SHOT_DEINDEX_BUDGET_MS = 1000;
+export function effectiveOneShotDeindexBudgetMs(moveElapsedMs: number): number {
+  return Math.max(MIN_ONE_SHOT_DEINDEX_BUDGET_MS, Math.min(DEINDEX_ONE_SHOT_DEADLINE_MS, MOVE_TRANSPORT_SAFETY_MS - moveElapsedMs));
+}
+
 /** Convenience one-shot wrapper: resolve auth AND delete, deadline-bounded end-to-end (see
  *  DEINDEX_ONE_SHOT_DEADLINE_MS), for a single-call site (legal_blob_move, which de-indexes
  *  exactly one path per invocation). legal_blob_delete's bulk loop should instead call
- *  prepareDeindexAuth() once and reuse it via deindexChunkedPathWithAuth per item. */
-export async function deindexChunkedPath(index: string, path: string): Promise<DeindexResult> {
-  const deadlineAtMs = Date.now() + DEINDEX_ONE_SHOT_DEADLINE_MS;
+ *  prepareDeindexAuth() once and reuse it via deindexChunkedPathWithAuth per item.
+ *
+ *  `budgetMs` defaults to DEINDEX_ONE_SHOT_DEADLINE_MS but callers with their own preceding
+ *  transport-timeout exposure (legal_blob_move, via effectiveOneShotDeindexBudgetMs) can pass a
+ *  smaller remaining budget instead (2026-08-04, Copilot review PR #192 round 9). */
+export async function deindexChunkedPath(index: string, path: string, budgetMs: number = DEINDEX_ONE_SHOT_DEADLINE_MS): Promise<DeindexResult> {
+  const deadlineAtMs = Date.now() + budgetMs;
   return withDeadline(
     (async (): Promise<DeindexResult> => {
       const { auth, reason } = await prepareDeindexAuth();
@@ -630,6 +663,6 @@ export async function deindexChunkedPath(index: string, path: string): Promise<D
       return deindexChunkedPathWithAuth(auth, index, path, deadlineAtMs);
     })(),
     deadlineAtMs,
-    { attempted: false, deleted: 0, truncated: true, reason: `deindex overall deadline (${DEINDEX_ONE_SHOT_DEADLINE_MS}ms) exceeded` },
+    { attempted: false, deleted: 0, truncated: true, reason: `deindex overall deadline (${budgetMs}ms) exceeded` },
   );
 }
