@@ -58,7 +58,13 @@ export function memoryDocId(agent: string, id: string): string {
  *  PR #192 round 5). This value gates which ARM service the caller mints an admin key against
  *  (`searchAdminKey`), so a loose parse here is worth hardening even though `endpoint` in this
  *  codebase's real call sites is always the deploy-configured `AZURE_SEARCH_ENDPOINT` env var, not
- *  externally-attacker-reachable input -- defense in depth, and the fix is free. */
+ *  externally-attacker-reachable input -- defense in depth, and the fix is free.
+ *  ALSO requires `https:` (2026-08-04, Copilot review PR #192 round 6): every call site treats a
+ *  null return as fail-closed (`if (!service) return {..., reason: 'cannot derive search service
+ *  from endpoint'}` -- see `indexMemoryNow` and `prepareDeindexAuth` below) BEFORE ever fetching, so
+ *  rejecting a non-https scheme here is the single choke point that stops the freshly-minted ARM
+ *  admin key from ever being sent to `${endpoint}/indexes/.../docs/index` in plaintext, without
+ *  needing a second check duplicated at every fetch call site. */
 export function serviceFromEndpoint(endpoint: string): string | null {
   let u: URL;
   try {
@@ -66,6 +72,7 @@ export function serviceFromEndpoint(endpoint: string): string | null {
   } catch {
     return null;
   }
+  if (u.protocol !== 'https:') return null;
   const m = u.hostname.match(/^([a-z0-9-]+)\.search\.windows\.net$/i);
   return m ? m[1] : null;
 }

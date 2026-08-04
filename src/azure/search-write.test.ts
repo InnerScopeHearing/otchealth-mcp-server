@@ -20,6 +20,19 @@ test('serviceFromEndpoint extracts the service name', () => {
   assert.equal(serviceFromEndpoint(''), null);
 });
 
+test('serviceFromEndpoint rejects a userinfo-spoofed hostname (2026-08-04, Copilot review PR #192 round 5)', () => {
+  // "real.search.windows.net" here is URL *userinfo*, not the hostname -- the real hostname is
+  // "attacker.example". An un-anchored-at-the-end regex match on the raw string would wrongly
+  // extract "real" and mint an admin key that later gets sent to the attacker host.
+  assert.equal(serviceFromEndpoint('https://real.search.windows.net@attacker.example'), null);
+});
+
+test('serviceFromEndpoint rejects a non-https scheme, never exposing the admin key over plaintext (2026-08-04, Copilot review PR #192 round 6)', () => {
+  assert.equal(serviceFromEndpoint('http://otchealth-dataroom-search.search.windows.net'), null);
+  // both call sites (indexMemoryNow, prepareDeindexAuth) treat a null return as fail-closed and
+  // never reach the fetch that would carry the api-key header -- this is the single choke point.
+});
+
 test('buildMemoryDoc mirrors the semantic.mjs shape and upserts (never duplicates)', () => {
   const doc = buildMemoryDoc({ agent: 'cto', id: '20260714-013', type: 'fact', ts: '2026-07-14T05:03:13Z', tags: ['p0', 'recall'], text: 'hello', vector: [0.1, 0.2] });
   assert.equal(doc['@search.action'], 'mergeOrUpload');
