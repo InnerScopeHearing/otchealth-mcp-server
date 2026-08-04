@@ -174,36 +174,54 @@ test('deindexChunkedPathWithAuth: a network throw on the search call returns gra
   assert.equal(result.truncated, true);
 });
 
-test('deindexChunkedPathWithAuth: paginates the $filter path across multiple pages, deleting each page as it is found', async () => {
-  const seenSkips: number[] = [];
-  const deletedIds: string[] = [];
+test('deindexChunkedPathWithAuth: paginates a document with MORE than one page of chunks (400) and deletes every one, backed by a STATEFUL fake index (2026-08-04, Copilot review PR #192 round 3)', async () => {
+  // Backed by a mutable store that actually removes documents on delete and actually shrinks what
+  // search returns -- this is what exposed the real bug in the ORIGINAL (buggy) implementation:
+  // that version deleted each page as it was found, so by the time it queried `skip:200` the store
+  // had already shrunk to 200 remaining docs, `skip:200` returned empty, and pagination stopped
+  // reporting `exhausted:true` with 200 real matches still un-deleted. The fix (findAllChunkIds
+  // paginates to completion BEFORE any delete happens) means every search call in this test sees
+  // the FULL, unshrunk set, and this stateful stub is what proves that -- a stub that just serves a
+  // fixed page 2 response regardless of prior deletes (the original round-2 test) cannot catch this
+  // class of bug, which is exactly what Copilot's review flagged.
+  const TOTAL = 400;
+  const store = new Map<string, { chunk_id: string; path: string }>();
+  for (let i = 0; i < TOTAL; i++) store.set(`c${i}`, { chunk_id: `c${i}`, path: 'big/doc.pdf' });
+  const searchCalls: number[] = [];
+  let deleteBatches = 0;
+
   const result = await withStubbedFetch(
     fullChainStub(
       (_u, init) => {
-        const body = JSON.parse(String(init?.body));
-        seenSkips.push(body.skip);
-        // page 0: exactly a full page (200) so pagination must continue; page 1: a partial page (2), which must stop pagination.
-        if (body.skip === 0) {
-          return new Response(JSON.stringify({ value: Array.from({ length: 200 }, (_, i) => ({ chunk_id: `p0-${i}`, path: 'big/doc.pdf' })) }), { status: 200 });
-        }
-        return new Response(JSON.stringify({ value: [{ chunk_id: 'p1-0', path: 'big/doc.pdf' }, { chunk_id: 'p1-1', path: 'big/doc.pdf' }] }), { status: 200 });
+        const body = JSON.parse(String(init?.body)) as { skip: number; top: number };
+        searchCalls.push(body.skip);
+        const live = [...store.values()]; // reflects any deletes that have ALREADY happened
+        const page = live.slice(body.skip, body.skip + body.top);
+        return new Response(JSON.stringify({ value: page }), { status: 200 });
       },
       (_u, init) => {
+        deleteBatches++;
         const body = JSON.parse(String(init?.body)) as { value: Array<{ chunk_id: string }> };
-        deletedIds.push(...body.value.map((v) => v.chunk_id));
-        return okDelete()(_u, init);
+        const results = body.value.map((v) => {
+          const existed = store.delete(v.chunk_id);
+          return { key: v.chunk_id, status: existed, statusCode: existed ? 200 : 404 };
+        });
+        return new Response(JSON.stringify({ value: results }), { status: 200 });
       },
     ),
     () => deindexChunkedPathWithAuth(DIRECT_AUTH, 'legal-personal', 'big/doc.pdf'),
   );
-  assert.deepEqual(seenSkips, [0, 200], 'must request exactly two pages (skip=0 then skip=200), then stop on the short page');
-  assert.equal(result.deleted, 202);
-  assert.equal(result.truncated, false, 'a normally-exhausted pagination is NOT truncated');
-  assert.equal(deletedIds.length, 202, 'each page must be deleted as it is found, not accumulated then deleted once');
-  assert.ok(deletedIds.includes('p0-0') && deletedIds.includes('p1-1'));
+
+  assert.equal(result.deleted, TOTAL, `every one of the ${TOTAL} chunks must be confirmed deleted, not just the first page`);
+  assert.equal(result.truncated, false);
+  assert.equal(store.size, 0, 'the fake index must end up genuinely empty for this path');
+  // 400 docs at 200/page -> pages at skip=0,200,400(empty, confirms exhaustion) = 3 search calls;
+  // 400 confirmed deletes at 200/batch = 2 delete batches.
+  assert.deepEqual(searchCalls, [0, 200, 400]);
+  assert.equal(deleteBatches, 2);
 });
 
-test('deindexChunkedPathWithAuth: a document exceeding the 1000-chunk backstop is reported truncated:true, not silently short (2026-08-04 round-2 fix)', async () => {
+test('deindexChunkedPathWithAuth: a document exceeding the 10,000-chunk backstop is reported truncated:true, not silently short (2026-08-04 round-2 fix)', async () => {
   let calls = 0;
   const result = await withStubbedFetch(
     fullChainStub(
@@ -265,7 +283,7 @@ test('deindexChunkedPathWithAuth: a deadline that has already passed reports tru
   assert.match(result.reason ?? '', /deadline exceeded/);
 });
 
-test('deindexChunkedPath (one-shot): overall deadline bounds the WHOLE chain (auth + find + delete) -- a hung identity mint still returns within the deadline', async () => {
+test('deindexChunkedPath (one-shot): prepareDeindexAuth\'s own short internal deadline bounds a hung identity mint (fires well before the outer 10s deadline)', async () => {
   const started = Date.now();
   const result = await withStubbedFetch(
     (async (url: string | URL) => {
@@ -280,11 +298,36 @@ test('deindexChunkedPath (one-shot): overall deadline bounds the WHOLE chain (au
     () => deindexChunkedPath('legal-personal', 'filings/x.pdf'),
   );
   const elapsedMs = Date.now() - started;
-  assert.ok(elapsedMs < 15_000, `deindexChunkedPath must return well under its 10s deadline even when auth hangs; took ${elapsedMs}ms`);
+  // prepareDeindexAuth's own default deadline (DEINDEX_AUTH_DEADLINE_MS, 3s) is shorter than the
+  // one-shot wrapper's outer deadline (10s) and resolves the hang first -- proves auth resolution
+  // cannot itself dominate the one-shot budget, distinct from the outer-deadline test below.
+  assert.ok(elapsedMs < 8_000, `a hung identity mint must be caught by prepareDeindexAuth's own ~3s deadline, well before the outer 10s one; took ${elapsedMs}ms`);
   assert.equal(result.attempted, false);
   assert.equal(result.deleted, 0);
   assert.equal(result.truncated, true);
   assert.match(result.reason ?? '', /deadline/);
+});
+
+test('deindexChunkedPath (one-shot): the OUTER 10s deadline is a real backstop even if a later phase hangs past prepareDeindexAuth\'s own return', async () => {
+  const started = Date.now();
+  const result = await withStubbedFetch(
+    fullChainStub(
+      // identity + admin-key resolve fast (via fullChainStub's default handling); the search
+      // lookup itself then hangs forever, simulating a stuck call that somehow evades
+      // fetchWithBudget's own AbortSignal-based timeout (e.g. a proxy that swallows aborts) --
+      // this proves the OUTER race in deindexChunkedPath is a genuine backstop, not decorative,
+      // independent of whether the inner per-call timeout mechanisms are doing their job.
+      () => new Promise<Response>(() => {}),
+      () => { throw new Error('must never reach the delete call in this test'); },
+    ),
+    () => deindexChunkedPath('legal-personal', 'filings/x.pdf'),
+  );
+  const elapsedMs = Date.now() - started;
+  assert.ok(elapsedMs >= 9_000 && elapsedMs < 15_000, `must be bounded by the outer ~10s deadline (not the shorter auth deadline, since auth succeeded), took ${elapsedMs}ms`);
+  assert.equal(result.attempted, false);
+  assert.equal(result.deleted, 0);
+  assert.equal(result.truncated, true);
+  assert.match(result.reason ?? '', /overall deadline/);
 });
 
 test('prepareDeindexAuth + deindexChunkedPathWithAuth: auth resolved ONCE serves multiple deindex calls (no repeat admin-key fetch)', async () => {

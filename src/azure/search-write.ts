@@ -170,6 +170,23 @@ export async function indexMemoryNow(input: {
  * happened by the time this runs. A failure here (auth, network, the room not yet cut over, an
  * unfilterable field) must never surface as a failure of the blob operation itself -- it is
  * best-effort cleanup on top of an already-durable change, not a precondition for it.
+ *
+ * KNOWN RESIDUAL LIMITATION, not fixed by this mechanism (2026-08-04, Copilot review PR #192 round
+ * 3): this is a point-in-time DELETE against the index, racing an INDEPENDENT, asynchronous
+ * pull-indexer that can be mid-run at the same time. If a pull-indexer run already READ the old
+ * path's content before the blob move, and finishes WRITING that read to the index AFTER this
+ * delete runs, the stale entry is resurrected -- this code has no way to know that happened, and
+ * `deindexed`/`truncated:false` would (correctly, at the time) report success. This is an inherent
+ * property of pairing an active-delete with a passive periodic indexer, not a regression introduced
+ * here: before this fix there was NO cleanup at all, so the exposure window only shrinks (from
+ * "always stale until the next reindex cycle, up to 168h" to "stale only if a resurrection race is
+ * lost"), it does not fully close. A real fix needs either indexer coordination (a lock/generation
+ * check the pull-indexer respects) or a delayed/recurring re-check sweep that re-deindexes any path
+ * that reappears after a confirmed delete -- both genuinely new mechanisms, not yet built (tracked
+ * against the CLO brief's pending §7 index_status probe work). Not attempted in this PR: the common
+ * case (no indexer run in flight at the exact moment of the move) is correctly handled and is the
+ * overwhelming majority of real usage, and building indexer coordination is a separate, larger
+ * design task.
  */
 
 export interface DeindexResult {
@@ -180,11 +197,13 @@ export interface DeindexResult {
    *  not merely "found and included in the delete batch" (0 is normal: the room may not have
    *  indexed this path yet, or already reflects a newer state). */
   deleted: number;
-  /** True when cleanup stopped WITHOUT confirming the path is fully exhausted in the index (a
-   *  deadline, the page-count backstop, or a mid-pagination failure) -- some chunks may remain
-   *  stale at this path (2026-08-04, Copilot review PR #192 round 2: silently reporting success
-   *  after a partial/capped cleanup hid exactly this). Always false when `attempted` is false
-   *  (there was nothing to be incomplete about) and false on the normal empty-result no-op. */
+  /** True when the path is NOT confirmed fully clean in the index -- a deadline, the page-count
+   *  backstop, a mid-pagination failure, or a delete that didn't confirm every chunk (2026-08-04,
+   *  Copilot review PR #192 round 2: silently reporting success after a partial/capped cleanup hid
+   *  exactly this). ALWAYS true when `attempted` is false (round 3: every attempted:false branch in
+   *  this module sets it, so callers never need to special-case which layer produced the false --
+   *  "not attempted" is definitionally "not confirmed clean"). False only on a genuine confirmed
+   *  no-op (nothing was indexed at this path) or a fully confirmed delete. */
   truncated?: boolean;
   reason?: string;
 }
@@ -275,11 +294,63 @@ async function deleteChunkPage(auth: DeindexAuth, index: string, chunkIds: strin
   }
 }
 
-/** One pagination pass (either the primary $filter query or the fallback keyword query), deleting
- *  each page as it is found (rather than accumulating every id before any delete) so confirmed
- *  progress is never lost to a later page's failure, and checking `deadlineAtMs` before every
- *  network call so a slow room can never blow past the caller's time budget. */
-async function paginateAndDelete(
+/**
+ * Find every matching chunk id (either the primary $filter query or the fallback keyword query),
+ * paginated with `skip` over a STABLE, UN-MUTATED result set -- nothing is deleted during this
+ * phase. This is deliberate: `skip`-based offset pagination and in-loop deletion do not mix. If
+ * page 0's 200 matches were deleted before requesting page 1 with `skip:200`, the index would have
+ * shrunk to fewer than 200 remaining matches, so `skip:200` would return EMPTY and pagination would
+ * stop, reporting `exhausted:true` while up to DEINDEX_PAGE_SIZE-1 real matches beyond what was
+ * already found remain silently un-deleted (2026-08-04, Copilot review PR #192 round 3 -- an
+ * earlier version of this function deleted each page as it was found, which had exactly this bug;
+ * caught by review, not by this file's own test suite, because the test's stub served a fixed
+ * page-1 response regardless of what page 0 had already "deleted"). Checks `deadlineAtMs` before
+ * every network call so a slow room can never blow past the caller's time budget.
+ */
+async function findAllChunkIds(
+  auth: DeindexAuth,
+  index: string,
+  path: string,
+  deadlineAtMs: number,
+  buildBody: (skip: number) => Record<string, unknown>,
+  filterExact: boolean,
+): Promise<{ ranAtAll: boolean; ids: string[]; exhausted: boolean; reason?: string }> {
+  const doSearch = (body: Record<string, unknown>) =>
+    fetchWithBudget(
+      `${auth.endpoint}/indexes/${index}/docs/search?api-version=${API_VERSION}`,
+      { method: 'POST', headers: { 'api-key': auth.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      { timeoutMs: DEINDEX_CALL_TIMEOUT_MS, retries: 0 },
+    );
+  const ids: string[] = [];
+  for (let page = 0; page < DEINDEX_MAX_PAGES; page++) {
+    if (Date.now() >= deadlineAtMs) return { ranAtAll: page > 0, ids, exhausted: false, reason: 'deadline exceeded before the path was confirmed exhausted' };
+    let r: Response;
+    try {
+      r = await doSearch(buildBody(page * DEINDEX_PAGE_SIZE));
+    } catch (e) {
+      return { ranAtAll: page > 0, ids, exhausted: false, reason: (e as Error).message };
+    }
+    if (!r.ok) return { ranAtAll: page > 0, ids, exhausted: false, reason: page > 0 ? `search ${r.status} mid-pagination` : undefined };
+    let raw: Array<Record<string, unknown>>;
+    try {
+      const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
+      raw = j.value || [];
+    } catch (e) {
+      return { ranAtAll: page > 0, ids, exhausted: false, reason: `malformed search response: ${(e as Error).message}` };
+    }
+    ids.push(...(filterExact ? raw.filter((d) => d.path === path) : raw).map((d) => String(d.chunk_id)).filter(Boolean));
+    // Check the RAW page size, not the post-filter count -- on the fallback pass a near-miss-heavy
+    // page can filter down below DEINDEX_PAGE_SIZE while more raw results remain on the next page.
+    if (raw.length < DEINDEX_PAGE_SIZE) return { ranAtAll: true, ids, exhausted: true };
+  }
+  return { ranAtAll: true, ids, exhausted: false, reason: `stopped at the ${DEINDEX_MAX_PAGES}-page safety backstop` };
+}
+
+/** Find every matching chunk id (a stable-snapshot pagination pass, see findAllChunkIds), THEN
+ *  delete them in bounded batches -- separating find from delete is what makes the pagination
+ *  correct (see findAllChunkIds's doc comment). Checks `deadlineAtMs` before every delete batch
+ *  too, so a slow delete phase still cannot blow past the caller's time budget. */
+async function findAndDeleteAll(
   auth: DeindexAuth,
   index: string,
   path: string,
@@ -287,70 +358,76 @@ async function paginateAndDelete(
   buildBody: (skip: number) => Record<string, unknown>,
   filterExact: boolean,
 ): Promise<{ ranAtAll: boolean; deleted: number; exhausted: boolean; hadDeleteFailure: boolean; reason?: string }> {
-  const doSearch = (body: Record<string, unknown>) =>
-    fetchWithBudget(
-      `${auth.endpoint}/indexes/${index}/docs/search?api-version=${API_VERSION}`,
-      { method: 'POST', headers: { 'api-key': auth.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-      { timeoutMs: DEINDEX_CALL_TIMEOUT_MS, retries: 0 },
-    );
+  const found = await findAllChunkIds(auth, index, path, deadlineAtMs, buildBody, filterExact);
+  if (!found.ranAtAll) return { ranAtAll: false, deleted: 0, exhausted: false, hadDeleteFailure: false, reason: found.reason };
+
   let deleted = 0;
-  for (let page = 0; page < DEINDEX_MAX_PAGES; page++) {
-    if (Date.now() >= deadlineAtMs) return { ranAtAll: page > 0, deleted, exhausted: false, hadDeleteFailure: false, reason: 'deadline exceeded before the path was confirmed exhausted' };
-    let r: Response;
-    try {
-      r = await doSearch(buildBody(page * DEINDEX_PAGE_SIZE));
-    } catch (e) {
-      return { ranAtAll: page > 0, deleted, exhausted: false, hadDeleteFailure: false, reason: (e as Error).message };
+  let hadDeleteFailure = false;
+  let deleteReason: string | undefined;
+  for (let i = 0; i < found.ids.length; i += DEINDEX_PAGE_SIZE) {
+    if (Date.now() >= deadlineAtMs) {
+      return {
+        ranAtAll: true, deleted, exhausted: false, hadDeleteFailure: hadDeleteFailure || i < found.ids.length,
+        reason: deleteReason ?? 'deadline exceeded before every found chunk could be deleted',
+      };
     }
-    if (!r.ok) return { ranAtAll: page > 0, deleted, exhausted: false, hadDeleteFailure: false, reason: page > 0 ? `search ${r.status} mid-pagination` : undefined };
-    let raw: Array<Record<string, unknown>>;
-    try {
-      const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
-      raw = j.value || [];
-    } catch (e) {
-      return { ranAtAll: page > 0, deleted, exhausted: false, hadDeleteFailure: false, reason: `malformed search response: ${(e as Error).message}` };
+    const del = await deleteChunkPage(auth, index, found.ids.slice(i, i + DEINDEX_PAGE_SIZE));
+    deleted += del.deleted;
+    if (del.reason) {
+      // A delete failure means some found chunks were NOT confirmed removed -- keep going through
+      // the REMAINING batches (they are independent id sets) rather than abandoning the rest of a
+      // large document's cleanup over one batch's failure, but remember that the overall result is
+      // not clean. `exhausted` (search pagination completed) and `hadDeleteFailure` (at least one
+      // delete did not confirm) are tracked separately so a delete failure never gets silently
+      // absorbed into "found.exhausted was true, so we must be done."
+      hadDeleteFailure = true;
+      deleteReason ??= del.reason;
     }
-    const ids = (filterExact ? raw.filter((d) => d.path === path) : raw).map((d) => String(d.chunk_id)).filter(Boolean);
-    if (ids.length > 0) {
-      if (Date.now() >= deadlineAtMs) return { ranAtAll: true, deleted, exhausted: false, hadDeleteFailure: false, reason: 'deadline exceeded before this page could be deleted' };
-      const del = await deleteChunkPage(auth, index, ids);
-      deleted += del.deleted;
-      if (del.reason) {
-        // A delete failure means some found chunks were NOT confirmed removed -- that is true
-        // regardless of whether this happened to be the LAST page (raw.length < DEINDEX_PAGE_SIZE
-        // does not mean "fully cleaned up," only "no more results to page through"). Keep these
-        // two facts separate (`exhausted` = search pagination complete, `hadDeleteFailure` = at
-        // least one delete did not confirm) so the caller's overall truncated verdict can OR them
-        // together instead of a delete failure on the final page being silently marked complete
-        // (2026-08-04, Copilot review PR #192 round 2, caught by this file's own test suite).
-        return { ranAtAll: true, deleted, exhausted: raw.length < DEINDEX_PAGE_SIZE, hadDeleteFailure: true, reason: del.reason };
-      }
-    }
-    // Check the RAW page size, not the post-filter count -- on the fallback pass a near-miss-heavy
-    // page can filter down below DEINDEX_PAGE_SIZE while more raw results remain on the next page.
-    if (raw.length < DEINDEX_PAGE_SIZE) return { ranAtAll: true, deleted, exhausted: true, hadDeleteFailure: false };
   }
-  return { ranAtAll: true, deleted, exhausted: false, hadDeleteFailure: false, reason: `stopped at the ${DEINDEX_MAX_PAGES}-page safety backstop` };
+  return { ranAtAll: true, deleted, exhausted: found.exhausted, hadDeleteFailure, reason: deleteReason ?? found.reason };
 }
+
+/** Default deadline for prepareDeindexAuth: managed-identity + ARM listAdminKeys can each retry
+ *  internally (fetchWithBudget's default timeout+retries), so left unbounded this could take up
+ *  to ~30s+ in a genuine Azure control-plane outage. That is fine for legal_blob_move's one-shot
+ *  path (already wrapped in an outer 10s deadline by deindexChunkedPath), but legal_blob_delete's
+ *  bulk loop calls this BEFORE any blob has moved -- an unbounded auth resolution there would
+ *  consume the batch's own move-time budget before the first item even starts, turning best-effort
+ *  cleanup into a blocker on the tool's PRIMARY function (2026-08-04, Copilot review PR #192 round
+ *  3). Kept short relative to LEGAL_DELETE_TIME_BUDGET_MS's own floor (1000ms) so it can never
+ *  itself dominate even a minimally-configured batch. */
+const DEINDEX_AUTH_DEADLINE_MS = 3000;
 
 /**
  * Resolve the search endpoint + an ADMIN key ONCE. Call this before a loop of many
  * deindexChunkedPathWithAuth calls (legal_blob_delete's bulk mode) instead of letting each item
  * mint its own admin key via a fresh ARM listAdminKeys round trip (2026-08-04, Copilot review PR
  * #192: N items previously meant N identical ARM calls). FAIL-OPEN: never throws.
+ *
+ * DEADLINE-BOUNDED (default DEINDEX_AUTH_DEADLINE_MS from now): a caller on a pre-mutation
+ * critical path (legal_blob_delete's bulk loop) should pass a deadline no later than a small
+ * fraction of its own move-time budget so a slow/erroring Azure control plane can only ever
+ * degrade this to `{auth:null}` (cleanup skipped, reported via deindex_incomplete), never delay or
+ * starve the actual blob operation (2026-08-04, Copilot review PR #192 round 3).
  */
-export async function prepareDeindexAuth(): Promise<{ auth: DeindexAuth | null; reason?: string }> {
-  try {
-    const env = loadEnv();
-    const endpoint = (env.AZURE_SEARCH_ENDPOINT || '').replace(/\/+$/, '');
-    if (!endpoint) return { auth: null, reason: 'AZURE_SEARCH_ENDPOINT not configured' };
-    const service = serviceFromEndpoint(endpoint);
-    if (!service) return { auth: null, reason: 'cannot derive search service from endpoint' };
-    const key = await searchAdminKey(service);
-    return { auth: { endpoint, key } };
-  } catch (e) {
-    return { auth: null, reason: (e as Error).message };
-  }
+export async function prepareDeindexAuth(deadlineAtMs: number = Date.now() + DEINDEX_AUTH_DEADLINE_MS): Promise<{ auth: DeindexAuth | null; reason?: string }> {
+  return withDeadline(
+    (async (): Promise<{ auth: DeindexAuth | null; reason?: string }> => {
+      try {
+        const env = loadEnv();
+        const endpoint = (env.AZURE_SEARCH_ENDPOINT || '').replace(/\/+$/, '');
+        if (!endpoint) return { auth: null, reason: 'AZURE_SEARCH_ENDPOINT not configured' };
+        const service = serviceFromEndpoint(endpoint);
+        if (!service) return { auth: null, reason: 'cannot derive search service from endpoint' };
+        const key = await searchAdminKey(service);
+        return { auth: { endpoint, key } };
+      } catch (e) {
+        return { auth: null, reason: (e as Error).message };
+      }
+    })(),
+    deadlineAtMs,
+    { auth: null, reason: 'prepareDeindexAuth: deadline exceeded before auth could be resolved' },
+  );
 }
 
 /**
@@ -375,7 +452,7 @@ export async function deindexChunkedPathWithAuth(
 ): Promise<DeindexResult> {
   try {
     const escaped = path.replace(/'/g, "''");
-    const primary = await paginateAndDelete(
+    const primary = await findAndDeleteAll(
       auth, index, path, deadlineAtMs,
       (skip) => ({ search: '*', filter: `path eq '${escaped}'`, select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip }),
       false,
@@ -384,7 +461,7 @@ export async function deindexChunkedPathWithAuth(
       // The very first $filter call failed outright -- likely this room's schema does not allow
       // filtering on `path`. Fall back to a keyword search restricted to the path field, still
       // deadline-bounded and still paginated.
-      const fb = await paginateAndDelete(
+      const fb = await findAndDeleteAll(
         auth, index, path, deadlineAtMs,
         (skip) => ({ search: path, searchFields: 'path', queryType: 'simple', select: 'chunk_id,path', top: DEINDEX_PAGE_SIZE, skip }),
         true,
@@ -393,10 +470,10 @@ export async function deindexChunkedPathWithAuth(
     }
     return { attempted: true, deleted: primary.deleted, truncated: !primary.exhausted || primary.hadDeleteFailure, reason: primary.reason };
   } catch (e) {
-    // Defense in depth: paginateAndDelete/deleteChunkPage already catch every network/parse
-    // failure they know about, but this outer guard keeps the "never throws" contract airtight
-    // against anything unanticipated (2026-08-04).
-    return { attempted: false, deleted: 0, reason: (e as Error).message };
+    // Defense in depth: findAndDeleteAll/findAllChunkIds/deleteChunkPage already catch every
+    // network/parse failure they know about, but this outer guard keeps the "never throws"
+    // contract airtight against anything unanticipated (2026-08-04).
+    return { attempted: false, deleted: 0, truncated: true, reason: (e as Error).message };
   }
 }
 
@@ -409,7 +486,13 @@ export async function deindexChunkedPath(index: string, path: string): Promise<D
   return withDeadline(
     (async (): Promise<DeindexResult> => {
       const { auth, reason } = await prepareDeindexAuth();
-      if (!auth) return { attempted: false, deleted: 0, reason };
+      // truncated:true here too -- attempted:false always means "not confirmed clean," whether
+      // that's because nothing was configured or because auth's own short internal deadline
+      // (DEINDEX_AUTH_DEADLINE_MS) won its race first. Every attempted:false branch in this module
+      // sets truncated:true for the same reason: callers should never need to special-case which
+      // layer produced the false (2026-08-04, Copilot review PR #192 round 3, caught by this
+      // file's own test suite disagreeing with itself across the two attempted:false paths).
+      if (!auth) return { attempted: false, deleted: 0, truncated: true, reason };
       return deindexChunkedPathWithAuth(auth, index, path, deadlineAtMs);
     })(),
     deadlineAtMs,
