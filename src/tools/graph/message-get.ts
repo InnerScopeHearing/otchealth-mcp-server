@@ -9,7 +9,7 @@ export function registerGraphMessageGet(server: McpServer, callerHash: CallerHas
     category: 'read',
     annotations: {
       title: 'Get a single email message',
-      description: 'Retrieve the full details of a specific message by ID via GET /users/{mailbox}/messages/{id}. Defaults to the COO mailbox; pass `mailbox` to read one of the other allowlisted customer-service personas (care@, sarah@, helen@, ray@ -- see GRAPH_CS_MAILBOXES). Read-only.',
+      description: 'Retrieve the full details of a specific message by ID via GET /users/{mailbox}/messages/{id}. Defaults to the COO mailbox; pass `mailbox` to read one of the other allowlisted customer-service personas (care@, sarah@, helen@, ray@ -- see GRAPH_CS_MAILBOXES), OR, for EXEC_RING callers only, one of the executive mailboxes on GRAPH_EXEC_MAILBOXES (e.g. matthew@innd.com, ap@innd.com). Read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

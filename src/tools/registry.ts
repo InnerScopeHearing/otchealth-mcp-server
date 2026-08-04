@@ -147,6 +147,15 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // issues (file + close follow-ups without leaving the seat)
   'github_create_issue', 'github_issue_get', 'github_issue_update',
   'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read', 'cio_get_customer', 'shield_check', 'groundedness_check',
+  // mail_archive_* (2026-08-04): built for the CFO's Exchange Online Archive problem (Graph cannot
+  // address an in-place archive mailbox at all; this reads it via EWS instead) and EXEC_RING-gated
+  // in-handler, but never added here -- same omission class as xero_attachment_upload/catalog_probe/
+  // kb_get_document, so it was globally registered yet invisible on every connector. The first four
+  // are read-only; mail_archive_save_attachment_to_dataroom is a write_simple tool (writes an
+  // attachment into the finance dataroom), dry_run-defaulted like every write tool here and still
+  // EXEC_RING-gated -- exposing it is a deliberate, not incidental, mutating capability.
+  'mail_archive_list_folders', 'mail_archive_search', 'mail_archive_get_message',
+  'mail_archive_download_attachment', 'mail_archive_save_attachment_to_dataroom',
   // Xero (accounting of record). MUST be on the connector surface or the Claude Chat CFO (the whole
   // reason this service exists — no filesystem/CLI to reach the old skills/xero path) cannot SEE
   // them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that sees them is
