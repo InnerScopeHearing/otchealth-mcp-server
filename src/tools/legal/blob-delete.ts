@@ -3,6 +3,7 @@ import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured, headBlob, blobExists, copyBlob, deleteBlobHard, listBlobs } from '../../legal/blob-store.js';
 import { isLegalContainerAllowed, lanesForContainer, isProtectedPath } from './ring.js';
+import { loadEnv } from '../../config/env.js';
 
 export const DEFAULT_MAX_ITEMS = 100;
 export const HARD_MAX_ITEMS = 500;
@@ -29,6 +30,21 @@ export const legalBlobDeleteOutputShape = {
   moved: z.array(z.object({ from: z.string(), to: z.string() })),
   /** Items that would (dry_run) or did (a mid-batch stop) collide with an existing _TRASH/ path. */
   collisions: z.array(z.object({ from: z.string(), to: z.string() })),
+  /** 'partial' means the call stopped at its time budget with items still unprocessed (see
+   *  `remaining`) -- re-invoke with the SAME path/prefix to continue; already-moved items will not
+   *  be re-matched. 'complete' means every matched item was either moved or the call stopped for a
+   *  reason already reflected in `error` (trash_collision, too_many_matches, ...). */
+  status: z.enum(['complete', 'partial']),
+  /** How many resolved items were neither moved nor definitively refused. 0 outside a 'partial' stop. */
+  remaining: z.number(),
+  /** ISO8601 timestamp of the listing/existence-check this response is based on, or null when the
+   *  call refused BEFORE ever reading storage (2026-08-04, CLO field report Finding 2, tightened
+   *  after PR #191 review: every response that DID observe storage -- including not_found,
+   *  protected_prefix on a resolved candidate set, too_many_matches, and zero-matches, not only
+   *  dry_run/executed -- carries the real timestamp, since Azure's List Blobs enumeration is not
+   *  guaranteed strongly consistent the way a single-blob GET/HEAD is and any of those responses can
+   *  be judged stale). null (not an empty string) precisely marks "no observation happened". */
+  as_of: z.string().nullable(),
   error: z.string().optional(),
 } satisfies ZodRawShape;
 
@@ -64,6 +80,9 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     matched: 0,
     moved: [] as Array<{ from: string; to: string }>,
     collisions: [] as Array<{ from: string; to: string }>,
+    status: 'complete' as 'complete' | 'partial',
+    remaining: 0,
+    as_of: null as string | null,
   };
 
   if (!isLegalContainerAllowed(container, caller)) {
@@ -88,14 +107,20 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     return { data: { ...base, mode, error: 'protected_prefix' }, summary: `Refused: "${target}" falls under a protected prefix and cannot be deleted (evidence stays append-only).` };
   }
 
-  // Resolve the exact set of (path -> trash path) pairs this call would act on.
+  // Resolve the exact set of (path -> trash path) pairs this call would act on. `asOf` is stamped
+  // IMMEDIATELY after the real storage observation (headBlob / listBlobs) that each branch performs
+  // -- not once at the end -- so every return from this point on (not_found, protected_prefix on a
+  // resolved candidate, too_many_matches, zero-matches, dry_run, executed) carries the real
+  // observation time, not the default null (2026-08-04, PR #191 review).
   let items: DeleteItem[];
+  let asOf: string;
   if (mode === 'single') {
     const path = input.path as string;
     // Reject BEFORE checking existence: re-trashing an already-trashed path (_TRASH/x ->
     // _TRASH/_TRASH/x) breaks the recovery invariant bulk mode already enforces via its
     // "!b.name.startsWith('_TRASH/')" filter below -- single mode had no equivalent guard
-    // (2026-08-04, PR #190 review).
+    // (2026-08-04, PR #190 review). No storage read has happened yet, so as_of stays null (base's
+    // default) on this refusal.
     if (path.startsWith('_TRASH/')) {
       return {
         data: { ...base, mode, error: 'already_trashed' },
@@ -103,14 +128,16 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
       };
     }
     const head = await headBlob(container, path);
+    asOf = new Date().toISOString();
     if (!head.exists) {
-      return { data: { ...base, mode, error: 'not_found' }, summary: `Refused: no blob at legal/${container}/${path}.` };
+      return { data: { ...base, mode, as_of: asOf, error: 'not_found' }, summary: `Refused: no blob at legal/${container}/${path}.` };
     }
     items = [{ from: path, to: trashPathFor(path), etag: head.etag }];
   } else {
     const prefix = input.prefix as string;
     const maxItems = input.max_items ?? DEFAULT_MAX_ITEMS;
     const found = await listBlobs(container, prefix);
+    asOf = new Date().toISOString();
     // Never touch anything already in _TRASH/ via a prefix sweep -- a broad top-level prefix could
     // otherwise re-trash an already-trashed item.
     const candidates = found.filter((b) => !b.name.startsWith('_TRASH/'));
@@ -121,54 +148,96 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     const protectedHit = candidates.find((b) => isProtectedPath(b.name));
     if (protectedHit) {
       return {
-        data: { ...base, mode, matched: candidates.length, error: 'protected_prefix' },
+        data: { ...base, mode, matched: candidates.length, as_of: asOf, error: 'protected_prefix' },
         summary: `Refused: prefix "${prefix}" matches ${candidates.length} blob(s), at least one of which ("${protectedHit.name}") falls under a protected prefix. Nothing was touched -- narrow the prefix to exclude the protected subtree.`,
       };
     }
     if (candidates.length > maxItems) {
       return {
-        data: { ...base, mode, matched: candidates.length, error: 'too_many_matches' },
+        data: { ...base, mode, matched: candidates.length, as_of: asOf, error: 'too_many_matches' },
         summary: `Refused: ${candidates.length} blob(s) match prefix "${prefix}", which exceeds max_items=${maxItems}. Narrow the prefix or raise max_items (hard cap ${HARD_MAX_ITEMS}) and re-run. Nothing was touched.`,
       };
     }
     if (candidates.length === 0) {
-      return { data: { ...base, mode, matched: 0 }, summary: `No blobs matched prefix "${prefix}" (outside _TRASH/). Nothing to do.` };
+      return { data: { ...base, mode, matched: 0, as_of: asOf }, summary: `No blobs matched prefix "${prefix}" (outside _TRASH/). Nothing to do.` };
     }
     items = candidates.map((b) => ({ from: b.name, to: trashPathFor(b.name), etag: b.etag }));
   }
+
+  const budgetMs = loadEnv().LEGAL_DELETE_TIME_BUDGET_MS;
+  const startedAt = Date.now();
 
   if (ctx.dryRun) {
     // Preflight the trash-destination collision check even in dry_run: a dry_run that only ever
     // says "would move" understates what a live call would actually do if a destination already
     // exists (the live call stops the batch there) -- report the split so "what would move" is
     // trustworthy on its own, without ever issuing a PUT/DELETE (2026-08-04, PR #190 review).
+    // Time-budgeted the same as live execution below: a large batch's preflight (one blobExists HEAD
+    // per item) can itself approach the transport ceiling.
     const moved: Array<{ from: string; to: string }> = [];
     const collisions: Array<{ from: string; to: string }> = [];
+    let status: 'complete' | 'partial' = 'complete';
     for (const item of items) {
+      if (Date.now() - startedAt > budgetMs) {
+        status = 'partial';
+        break;
+      }
       const wouldCollide = await blobExists(container, item.to);
       (wouldCollide ? collisions : moved).push({ from: item.from, to: item.to });
     }
+    const checked = moved.length + collisions.length;
+    const remaining = items.length - checked;
     return {
-      data: { ...base, dry_run: true, mode, matched: items.length, moved, collisions },
+      data: { ...base, dry_run: true, mode, matched: items.length, moved, collisions, status, remaining, as_of: asOf },
       audit: { before: { matched: items.length }, after: null },
-      summary: collisions.length
-        ? `DRY RUN: would soft-delete ${moved.length}/${items.length} blob(s) in legal/${container} (move to _TRASH/); ${collisions.length} would COLLIDE with an existing _TRASH/ path and would stop a live run at that point (see collisions). Pass dry_run=false to apply.`
-        : `DRY RUN: would soft-delete ${items.length} blob(s) in legal/${container} (move to _TRASH/). Pass dry_run=false to apply.`,
+      summary:
+        status === 'partial'
+          ? `DRY RUN (PARTIAL, time budget): previewed ${checked}/${items.length} before stopping at the time budget; ${remaining} unchecked. Re-run to see the full plan, or just pass dry_run=false -- the live run applies the same budget and is naturally resumable. Plan as of ${asOf}.`
+          : collisions.length
+            ? `DRY RUN: would soft-delete ${moved.length}/${items.length} blob(s) in legal/${container} (move to _TRASH/); ${collisions.length} would COLLIDE with an existing _TRASH/ path and would stop a live run at that point (see collisions). Plan as of ${asOf} -- Azure's blob listing is not guaranteed strongly consistent, re-run if this is more than a few seconds old before trusting it. Pass dry_run=false to apply.`
+            : `DRY RUN: would soft-delete ${items.length} blob(s) in legal/${container} (move to _TRASH/). Plan as of ${asOf} -- Azure's blob listing is not guaranteed strongly consistent, re-run if this is more than a few seconds old before trusting it. Pass dry_run=false to apply.`,
     };
   }
 
   // Execute one at a time, sequentially -- these are legal documents, not a place for
   // concurrent-write surprises, and a partial failure should stop with a clear accounting of what
   // DID move rather than racing ahead.
+  //
+  // SELF-BOUNDED TO THE TIME BUDGET (2026-08-04, CLO field report Finding 1): the CLO's live 147-item
+  // batch measured ~0.7s/item -- ~100s total, over the 60s MCP transport timeout. The delete had
+  // actually completed server-side, but the client had no way to know that: it just saw a transport
+  // timeout with no partial-progress signal. Checking the budget BEFORE each item (not after) means
+  // the response is always sent well inside the transport window, with an honest {status:'partial',
+  // remaining} instead of an orphaned execution the caller can't observe. A partial stop is naturally
+  // resumable: re-invoking with the SAME path/prefix only re-matches what has not yet moved, since
+  // moved items are gone from the source prefix by then.
   const moved: Array<{ from: string; to: string }> = [];
   for (const item of items) {
+    if (Date.now() - startedAt > budgetMs) {
+      const remaining = items.length - moved.length;
+      return {
+        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, status: 'partial', remaining, as_of: asOf },
+        // Any real moves that happened before the stop must be audited the same as a normal
+        // completion -- omitting `audit` here would log a real mutation (copy+delete already ran on
+        // `moved.length` blobs) as if nothing happened, since the registry only records before/after
+        // when payload.audit is present (2026-08-04, PR #191 review).
+        audit: { before: { matched: items.length }, after: { movedToTrash: moved.length } },
+        summary: `Stopped at the time budget (${budgetMs}ms) after moving ${moved.length}/${items.length}; ${remaining} remaining. Re-run the SAME ${mode === 'single' ? 'path' : 'prefix'} to continue -- already-moved items will not be re-matched.`,
+      };
+    }
     const trashExists = await blobExists(container, item.to);
     if (trashExists) {
+      const remaining = items.length - moved.length;
       return {
         // A mid-batch stop after some items already moved is a PARTIAL execution, not "nothing
         // happened" -- executed reflects whether at least one mutation occurred, not whether the
-        // whole batch finished (2026-08-04, PR #190 review).
-        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, collisions: [{ from: item.from, to: item.to }], error: 'trash_collision' },
+        // whole batch finished (2026-08-04, PR #190 review). status is ALSO 'partial' here (not the
+        // base default 'complete'): this is the same "batch stopped with unprocessed items left"
+        // situation as the time-budget stop above, just for a different reason -- `error` already
+        // distinguishes why (2026-08-04, PR #191 review: status:'complete' with a positive
+        // `remaining` was a self-contradictory response).
+        data: { ...base, executed: moved.length > 0, mode, matched: items.length, moved, collisions: [{ from: item.from, to: item.to }], status: 'partial', remaining, as_of: asOf, error: 'trash_collision' },
+        audit: { before: { matched: items.length }, after: { movedToTrash: moved.length } },
         summary: `Stopped after moving ${moved.length}/${items.length}: a blob already exists at the trash destination "${item.to}" (a previous delete of the same path?). Resolve that manually, then re-run for the remaining items.`,
       };
     }
@@ -178,7 +247,7 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
   }
 
   return {
-    data: { ...base, executed: true, dry_run: false, mode, matched: items.length, moved },
+    data: { ...base, executed: true, dry_run: false, mode, matched: items.length, moved, as_of: asOf },
     audit: { before: { matched: items.length }, after: { movedToTrash: moved.length } },
     summary: `Soft-deleted ${moved.length} blob(s) in legal/${container} (moved to _TRASH/, lane=${caller}). Recoverable via legal_blob_move back to the original path.`,
   };
@@ -193,7 +262,7 @@ export function registerLegalBlobDelete(server: McpServer, callerHash: CallerHas
       annotations: {
         title: 'Soft-delete a blob (or a prefix of blobs) in the ring-gated legal document store',
         description:
-          `SOFT delete only -- moves the blob(s) to _TRASH/<original-path> within the same container, never a real hard delete. Provide exactly one of "path" (single blob) or "prefix" (bulk, bounded by max_items, default ${DEFAULT_MAX_ITEMS}, hard cap ${HARD_MAX_ITEMS} -- if more blobs match the prefix than max_items, the call REFUSES entirely rather than silently deleting a partial set; narrow the prefix or raise max_items and re-run). "confirm" MUST exactly echo path (or prefix) -- a mismatch refuses, by design a wrong-path delete needs two independent mistakes to happen. Refuses outright if path/prefix falls under a protected prefix (LEGAL_PROTECTED_PREFIXES) -- the court-download folder and raw filings stay append-only no matter what. RING-GATED identically to legal_blob_put. Defaults to dry_run: run it once with dry_run true (the default) to see exactly what would move before passing dry_run=false.`,
+          `SOFT delete only -- moves the blob(s) to _TRASH/<original-path> within the same container, never a real hard delete. Provide exactly one of "path" (single blob) or "prefix" (bulk, bounded by max_items, default ${DEFAULT_MAX_ITEMS}, hard cap ${HARD_MAX_ITEMS} -- if more blobs match the prefix than max_items, the call REFUSES entirely rather than silently deleting a partial set; narrow the prefix or raise max_items and re-run). "confirm" MUST exactly echo path (or prefix) -- a mismatch refuses, by design a wrong-path delete needs two independent mistakes to happen. Refuses outright if path/prefix falls under a protected prefix (LEGAL_PROTECTED_PREFIXES) -- the court-download folder and raw filings stay append-only no matter what. RING-GATED identically to legal_blob_put. Defaults to dry_run: run it once with dry_run true (the default) to see exactly what would move before passing dry_run=false. A large bulk batch is SELF-BOUNDED to a time budget well under the MCP transport timeout: if the batch does not finish in time, the call returns status:"partial" with a "remaining" count instead of risking a client-side timeout on a call that actually completed server-side -- re-invoke with the SAME path/prefix to continue, already-moved items are never re-matched. "as_of" (null when the call refused before ever reading storage) marks when the underlying listing/existence-check was read (Azure's list-blobs enumeration is not guaranteed strongly consistent the way a single-blob read is); treat a non-null plan more than a few seconds old as possibly stale and re-run before trusting it.`,
         readOnlyHint: false,
         // Soft delete still REMOVES the blob from its original location (recoverability via
         // _TRASH/ does not make the invocation additive) -- destructiveHint:false understated the

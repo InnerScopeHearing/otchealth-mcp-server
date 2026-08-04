@@ -65,6 +65,9 @@ test('protected_prefix (single mode): refused before any network call, even with
     handleLegalBlobDelete({ container: 'personal', path: 'filings/2026/petition.pdf', confirm: 'filings/2026/petition.pdf' }, fakeCtx('clo-personal')),
   );
   assert.equal((res.data as any).error, 'protected_prefix');
+  // PR #191 review: as_of is null (not an empty string) precisely when the call refused BEFORE ever
+  // observing storage -- no listing/HEAD happened here, so there is nothing to timestamp.
+  assert.equal((res.data as any).as_of, null);
 });
 
 test('protected_prefix (prefix/bulk mode): refused before any network call', async () => {
@@ -83,6 +86,9 @@ test('single mode not_found: refuses when the blob does not exist', async () => 
     handleLegalBlobDelete({ container: 'personal', path: 'ghost.pdf', confirm: 'ghost.pdf' }, fakeCtx('clo-personal')),
   );
   assert.equal((res.data as any).error, 'not_found');
+  // PR #191 review: not_found IS based on a real HEAD observation, so as_of must be a real
+  // timestamp here, not the null default that only applies to pre-storage-read refusals.
+  assert.ok(typeof (res.data as any).as_of === 'string' && (res.data as any).as_of.length > 0);
 });
 
 test('single mode dry_run: reports the plan (moved: [{from,to}]) without any PUT/DELETE, and preflights the trash collision', async () => {
@@ -248,6 +254,15 @@ test('bulk mode: stops mid-batch on a trash_collision and reports exactly what m
   assert.equal((res.data as any).moved.length, 1, 'exactly the first item should have moved before the stop');
   assert.equal((res.data as any).moved[0].from, 'dupes/a.pdf');
   assert.deepEqual((res.data as any).collisions, [{ from: 'dupes/b.pdf', to: '_TRASH/dupes/b.pdf' }]);
+  // PR #191 review: a collision stop is the SAME "batch stopped with items unprocessed" situation
+  // as a time-budget stop, just for a different reason -- status must say 'partial' (not the base
+  // default 'complete') and remaining must be accurate, or a caller trusting status alone would
+  // wrongly conclude the operation finished while remaining simultaneously says otherwise. The real
+  // move that already happened must also be audited like any other mutation.
+  assert.equal((res.data as any).status, 'partial');
+  assert.equal((res.data as any).remaining, 1);
+  assert.deepEqual((res as any).audit, { before: { matched: 2 }, after: { movedToTrash: 1 } });
+  assert.ok(typeof (res.data as any).as_of === 'string' && (res.data as any).as_of.length > 0);
 });
 
 test('bulk mode: a prefix that is an ANCESTOR of a protected prefix refuses the whole batch (no PUT/DELETE), not just an exact protected match', async () => {
