@@ -514,7 +514,19 @@ async function findAllChunkIds(
         // check instead of this reason once real elapsed time had already exceeded deadlineAtMs).
         return { ranAtAll: true, ids: [...seenIds], exhausted: false, reason: 'deadline exceeded while reading a search response body' };
       }
-      raw = j.value || [];
+      // A successful HTTP response with a missing or non-array `value` is NOT the same as a
+      // genuinely empty page (2026-08-04, Copilot review PR #192 round 18): `j.value || []`
+      // silently coerced either shape into `[]`, which on the primary $filter path could set
+      // `exhausted:true` and report `truncated:false` -- the delayed resweep would then delete its
+      // queue entry as "confirmed clean" even though Search never actually supplied a valid result
+      // set to confirm anything from. A well-formed Azure AI Search response always carries `value`
+      // as an array (empty `[]` for zero real matches); anything else is malformed and must be
+      // treated the same as the network/parse failures the catch block below already routes to
+      // "not confirmed, retryable."
+      if (!Array.isArray(j.value)) {
+        return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: 'malformed search response: "value" field missing or not an array' };
+      }
+      raw = j.value;
       odataCount = typeof j['@odata.count'] === 'number' ? j['@odata.count'] : null;
     } catch (e) {
       return { ranAtAll: page > 0, ids: [...seenIds], exhausted: false, reason: `malformed search response: ${(e as Error).message}` };

@@ -300,13 +300,27 @@ export async function blobExists(container: LegalContainer, path: string): Promi
  *  identically by azure/search-write.ts's synchronous immediate-cleanup path once that path grew
  *  the SAME existence-check guard for the SAME same-path-recreation race, just one layer earlier. */
 export async function blobExistsWithTimeout(container: LegalContainer, path: string, timeoutMs: number): Promise<boolean | null> {
-  return Promise.race([
-    blobExists(container, path) as Promise<boolean | null>,
-    new Promise<boolean | null>((resolve) => {
-      const t = setTimeout(() => resolve(null), timeoutMs);
-      (t as unknown as { unref?: () => void }).unref?.();
-    }),
-  ]);
+  // `Promise.race` does NOT convert a rejection into `null` -- it propagates the rejection through
+  // as soon as either promise settles, timer or not (2026-08-04, Copilot review PR #192 round 18):
+  // a Blob HEAD returning 500, or a network error, made `blobExists` REJECT before the timer could
+  // ever win, so this function violated its own "never throws" contract on exactly the kind of
+  // transient Blob Storage hiccup it exists to tolerate. In deindex-resweep.ts that rejection
+  // reached the per-item catch-all, which (as of round 17) treats an unexpected exception as
+  // `nonRetriable` -- so a transient Storage outage could terminally fail the durable cleanup entry
+  // after DEINDEX_RESWEEP_MAX_ATTEMPTS, the exact "permanently stranded" bug round 17 closed for
+  // Search/auth outages but missed here. Fix: swallow a HEAD failure into `null` ("could not
+  // confirm") BEFORE racing, so the raced promise can only ever resolve, never reject.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean | null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  const safeExists = blobExists(container, path).catch(() => null);
+  try {
+    return await Promise.race([safeExists, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export interface BlobPutResult {

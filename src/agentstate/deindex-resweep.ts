@@ -81,7 +81,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { deleteDoc, queryDocs, readDoc, replaceDoc, upsertDoc, isConfigured as cosmosConfigured } from './cosmos.js';
+import { createDoc, deleteDoc, queryDocs, readDoc, replaceDoc, isConfigured as cosmosConfigured } from './cosmos.js';
 import { prepareDeindexAuth, deindexChunkedPathWithAuth } from '../azure/search-write.js';
 import { blobExistsWithTimeout, type LegalContainer } from '../legal/blob-store.js';
 
@@ -175,6 +175,12 @@ function resweepId(index: string, path: string): string {
   return `rs_${digest}`;
 }
 
+/** Bounded CAS-retry attempts for enqueueDeindexResweep's monotonic-due_at loop below. Small: real
+ *  contention on the exact SAME (index, path) within milliseconds is rare, and this is a best-
+ *  effort, fail-open backstop write -- exhausting retries degrades to "not confirmed persisted"
+ *  (the existing, already-handled contract), never an unbounded loop. */
+const DEINDEX_RESWEEP_ENQUEUE_CAS_ATTEMPTS = 3;
+
 /** Enqueue a path for delayed re-verification. Fail-open: never throws, so a Cosmos hiccup here
  *  never affects the blob-delete/blob-move response that already durably happened by the time this
  *  is called. Call this in ADDITION to (not instead of) the existing synchronous
@@ -190,48 +196,65 @@ function resweepId(index: string, path: string): string {
  *  underlying Cosmos upsert actually landing silently drops the only backstop for an indexer
  *  resurrection, while the response already claimed the path was durably enqueued).
  *
- *  DUE_AT IS MONOTONIC, NEVER REGRESSED (2026-08-04, Copilot review round 17): the deterministic id
- *  (resweepId) means two enqueues for the SAME path race as a plain upsert, which is last-
- *  COMPLETION-wins, not last-CALLED-wins. If an OLDER enqueue call (started first, e.g. stalled on a
- *  slow Cosmos round trip) finishes AFTER a NEWER enqueue for the same path has already landed, an
- *  unconditional upsert would silently overwrite the newer, correct (later) due_at with the older
- *  call's earlier one -- letting the sweep fire before a full indexer cadence has actually elapsed
- *  for the NEWER mutation, removing the only backstop too early. So this reads the existing entry
- *  (if any) first and never WRITES a due_at earlier than what is already there; a read failure just
- *  falls through to the proposed due_at (best-effort, matching this function's overall fail-open
- *  contract -- a narrower version of this same race can still occur between the read and the write,
- *  but this closes the common case without a full CAS-retry loop). */
+ *  DUE_AT IS MONOTONIC, NEVER REGRESSED, via a real CAS loop (2026-08-04, Copilot review rounds 17
+ *  and 18): the deterministic id (resweepId) means two enqueues for the SAME path race, and a plain
+ *  unconditional upsert is last-COMPLETION-wins, not last-CALLED-wins. Round 17's first fix (read
+ *  the existing entry, then write) was CORRECTLY flagged as still unsafe under genuine concurrency:
+ *  two enqueue calls can both read the same old/missing state BEFORE either writes, so the older
+ *  call's later write can still regress due_at even though it "checked first" -- a plain read-then-
+ *  write is not atomic. The actual fix: optimistically CREATE fresh via `createDoc` (a plain POST
+ *  with no upsert flag, which Cosmos 409s if the id already exists -- exactly the concurrency
+ *  signal this loop needs, no separate existence probe required). On any create failure (409 or
+ *  otherwise -- a non-409 failure would likely also fail the read/replace below, degrading this
+ *  attempt to a harmless no-op rather than a false "success"), read the existing entry and its ETag,
+ *  merge due_at to the MAX of the existing and proposed values, and write back via an ETag-
+ *  conditional `replaceDoc` (GUARD 2's same primitive). A 412 there means a concurrent writer landed
+ *  first; the whole loop retries from the top. Bounded by DEINDEX_RESWEEP_ENQUEUE_CAS_ATTEMPTS,
+ *  never unbounded. A fresh mutation still resets a previously-'failed'/retried entry's `attempts`
+ *  to 0 (new content deserves a full fresh attempt budget), preserved via `nextDoc`'s own field set
+ *  -- only `due_at` is ever merged forward. */
 export async function enqueueDeindexResweep(index: string, path: string, container: LegalContainer, nowMs: number = Date.now()): Promise<boolean> {
   if (!cosmosConfigured()) return false;
-  try {
-    const id = resweepId(index, path);
-    let due_at = new Date(nowMs + DEINDEX_RESWEEP_DELAY_MS).toISOString();
+  const id = resweepId(index, path);
+  const proposedDueAt = new Date(nowMs + DEINDEX_RESWEEP_DELAY_MS).toISOString();
+  const freshDoc: DeindexResweepDoc = {
+    id,
+    board: DEINDEX_RESWEEP_BOARD,
+    type: DOC_TYPE,
+    index,
+    path,
+    container,
+    due_at: proposedDueAt,
+    status: 'pending',
+    attempts: 0,
+    created_at: new Date(nowMs).toISOString(),
+  };
+
+  for (let attempt = 0; attempt < DEINDEX_RESWEEP_ENQUEUE_CAS_ATTEMPTS; attempt++) {
+    try {
+      await createDoc(TASKS, DEINDEX_RESWEEP_BOARD, freshDoc as unknown as Record<string, unknown>);
+      return true; // no prior entry existed -- our proposed due_at is trivially the max.
+    } catch {
+      // Fall through to read-and-conditionally-replace below (see doc comment for why this branch
+      // is taken for ANY create failure, not just a confirmed 409).
+    }
     try {
       const existing = await readDoc(TASKS, DEINDEX_RESWEEP_BOARD, id);
-      const existingDueAt = (existing?.doc as { due_at?: string } | undefined)?.due_at;
-      if (existingDueAt && existingDueAt > due_at) due_at = existingDueAt;
+      if (!existing) continue; // deleted between the create conflict and this read -- retry create.
+      const existingDueAt = (existing.doc as { due_at?: string }).due_at;
+      const due_at = existingDueAt && existingDueAt > proposedDueAt ? existingDueAt : proposedDueAt;
+      const nextDoc = { ...freshDoc, due_at };
+      const rep = await replaceDoc(TASKS, DEINDEX_RESWEEP_BOARD, id, nextDoc as unknown as Record<string, unknown>, existing.etag ?? undefined);
+      if (rep.status === 412) continue; // a concurrent writer landed first -- retry the whole loop.
+      return rep.ok;
     } catch {
-      // Read failed (or the entry does not exist yet) -- proceed with the proposed due_at.
+      return false;
     }
-    const doc: DeindexResweepDoc = {
-      id,
-      board: DEINDEX_RESWEEP_BOARD,
-      type: DOC_TYPE,
-      index,
-      path,
-      container,
-      due_at,
-      status: 'pending',
-      attempts: 0,
-      created_at: new Date(nowMs).toISOString(),
-    };
-    await upsertDoc(TASKS, DEINDEX_RESWEEP_BOARD, doc as unknown as Record<string, unknown>);
-    return true;
-  } catch {
-    // Fail-open by design (see doc comment above) -- a failed enqueue just means this specific
-    // path relies solely on the synchronous best-effort cleanup that already ran.
-    return false;
   }
+  // Fail-open by design (see doc comment above): exhausting CAS attempts under heavy contention
+  // just means this specific path relies solely on the synchronous best-effort cleanup that
+  // already ran, same as any other enqueue failure.
+  return false;
 }
 
 /** How long a caller that wants to AWAIT enqueueDeindexResweep (to know whether it actually

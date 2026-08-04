@@ -94,10 +94,20 @@ function makeCosmosDouble() {
         return new Response(JSON.stringify(existing), { status: 200, headers: { etag: String(existing._etag) } });
       }
       if (method === 'POST') {
-        // upsertDoc always sends x-ms-documentdb-is-upsert: true in this codebase's cosmos.ts.
+        // upsertDoc always sends x-ms-documentdb-is-upsert: true; createDoc (the CAS loop's
+        // optimistic-create step, 2026-08-04, Copilot review round 18) never does, and per real
+        // Cosmos REST semantics a plain create-only POST for an id that already exists in the
+        // partition returns 409 Conflict rather than silently overwriting -- that 409 IS the
+        // concurrency signal the CAS loop relies on, so this double must model it, not just always
+        // upsert.
+        const isUpsert = headers['x-ms-documentdb-is-upsert'] === 'true';
         const doc = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const id = String(doc.id);
+        if (!isUpsert && docs.has(id)) {
+          return new Response(JSON.stringify({ message: 'conflict' }), { status: 409 });
+        }
         const withEtag = { ...doc, _etag: nextEtag() };
-        docs.set(String(doc.id), withEtag);
+        docs.set(id, withEtag);
         return new Response(JSON.stringify(withEtag), { status: 200 });
       }
       if (method === 'PUT') {
@@ -184,16 +194,19 @@ test('enqueueDeindexResweep is idempotent per (index, path): a second enqueue of
   assert.equal(cosmos.docs.size, 1, 'the same (index, path) must map to the same queue entry');
 });
 
-test('THE MONOTONIC DUE_AT FIX THIS ROUND ADDED: an older enqueue call that completes AFTER a newer one for the SAME path never regresses due_at backward (2026-08-04, Copilot review round 17: a plain unconditional upsert is last-COMPLETION-wins, not last-CALLED-wins, so a slow older in-flight call finishing late could silently shorten a newer mutation\'s indexer-cadence wait, letting the sweep fire too early)', async () => {
+test('THE CAS-LOOP MONOTONIC DUE_AT FIX THIS ROUND ADDED: an older enqueue call that completes AFTER a newer one for the SAME path never regresses due_at backward, via a REAL create-conflict-then-replace CAS loop, not a non-atomic read-then-write (2026-08-04, Copilot review rounds 17 and 18: round 17\'s first attempt read the existing entry then wrote, which round 18 correctly flagged as still unsafe under genuine concurrency -- two callers can both read the same old/missing state before either writes. This version never does a plain read-first: it optimistically CREATEs, which Cosmos 409s atomically if the id already exists -- exactly the concurrency signal a CAS loop needs -- and only the loser of that atomic race falls back to read-and-conditionally-replace)', async () => {
   const cosmos = makeCosmosDouble();
   const T1 = Date.now(); // the OLDER mutation's clock
   const T2 = T1 + 60_000; // the NEWER mutation's clock (a minute later)
 
-  // The NEWER call lands FIRST, simulating the older call being slow/in-flight.
+  // The NEWER call's createDoc lands FIRST and wins outright (no prior entry exists yet),
+  // simulating the older call being slow/in-flight and losing the atomic create race.
   await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'race.pdf', 'personal', T2));
   const newerDueAt = ([...cosmos.docs.values()][0].due_at) as string;
 
-  // The OLDER call completes SECOND, computing an EARLIER due_at from its own (earlier) nowMs.
+  // The OLDER call's createDoc now 409s (an entry already exists) -- it must fall back to
+  // read-and-conditionally-replace, computing an EARLIER due_at from its own (earlier) nowMs, and
+  // that merge must preserve the newer, later due_at rather than overwriting it.
   await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'race.pdf', 'personal', T1));
   const afterOlderCompletes = ([...cosmos.docs.values()][0].due_at) as string;
 
