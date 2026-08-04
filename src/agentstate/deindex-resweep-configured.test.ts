@@ -84,6 +84,15 @@ function makeCosmosDouble() {
         return new Response(JSON.stringify({ Documents: matches }), { status: 200 });
       }
       const ifMatch = headers['If-Match'];
+      if (method === 'GET') {
+        // readDoc (2026-08-04, Copilot review round 17's monotonic-due_at fix uses this): a point
+        // read by id. cosmos.ts reads the etag from the response's `etag` HEADER, not the JSON body
+        // (readDoc's `etag: r.headers.get('etag')`), so this must set it there too.
+        const id = url.split('/docs/')[1];
+        const existing = docs.get(id);
+        if (!existing) return new Response(null, { status: 404 });
+        return new Response(JSON.stringify(existing), { status: 200, headers: { etag: String(existing._etag) } });
+      }
       if (method === 'POST') {
         // upsertDoc always sends x-ms-documentdb-is-upsert: true in this codebase's cosmos.ts.
         const doc = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -173,6 +182,23 @@ test('enqueueDeindexResweep is idempotent per (index, path): a second enqueue of
     await enqueueDeindexResweep('legal-company', 'x.pdf', 'company');
   });
   assert.equal(cosmos.docs.size, 1, 'the same (index, path) must map to the same queue entry');
+});
+
+test('THE MONOTONIC DUE_AT FIX THIS ROUND ADDED: an older enqueue call that completes AFTER a newer one for the SAME path never regresses due_at backward (2026-08-04, Copilot review round 17: a plain unconditional upsert is last-COMPLETION-wins, not last-CALLED-wins, so a slow older in-flight call finishing late could silently shorten a newer mutation\'s indexer-cadence wait, letting the sweep fire too early)', async () => {
+  const cosmos = makeCosmosDouble();
+  const T1 = Date.now(); // the OLDER mutation's clock
+  const T2 = T1 + 60_000; // the NEWER mutation's clock (a minute later)
+
+  // The NEWER call lands FIRST, simulating the older call being slow/in-flight.
+  await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'race.pdf', 'personal', T2));
+  const newerDueAt = ([...cosmos.docs.values()][0].due_at) as string;
+
+  // The OLDER call completes SECOND, computing an EARLIER due_at from its own (earlier) nowMs.
+  await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'race.pdf', 'personal', T1));
+  const afterOlderCompletes = ([...cosmos.docs.values()][0].due_at) as string;
+
+  assert.equal(afterOlderCompletes, newerDueAt, 'the later (correct) due_at from the newer mutation must survive, never regressed by the older call landing late');
+  assert.equal(cosmos.docs.size, 1, 'still exactly one entry for this path, not a duplicate');
 });
 
 test('THE COLLISION FIX THIS ROUND ADDED: two distinct paths that collide under a naive 32-bit polynomial hash (the textbook "Aa"/"BB" Java/JS hashCode collision Copilot\'s review cited -- 65*31+97 === 66*31+66 === 2112) get DISTINCT queue entries, not a silent upsert-clobber of one by the other', async () => {
@@ -308,27 +334,29 @@ test('runDeindexResweepOnce: a due entry that cannot be confirmed clean (search 
   assert.ok((updated.due_at as string) > originalDueAt, 'due_at must be pushed forward for the retry');
 });
 
-test('runDeindexResweepOnce: after DEINDEX_RESWEEP_MAX_ATTEMPTS failures the entry is marked failed and stops retrying, instead of retrying forever', async () => {
+test('THE TRANSIENT-VS-TERMINAL SPLIT THIS ROUND ADDED: a search outage that outlasts DEINDEX_RESWEEP_MAX_ATTEMPTS worth of retries NEVER terminal-ates the entry, unlike generation uncertainty -- a fixed attempt cap on a RECOVERABLE outage would silently break the "self-heals within hours" promise, since a failed entry is never automatically revisited (the sweep query only selects status=\'pending\') (2026-08-04, Copilot review round 17)', async () => {
   const cosmos = makeCosmosDouble();
   const blobPaths = new Set<string>();
-  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'permanently-broken.pdf', 'personal'));
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'long-outage.pdf', 'personal'));
 
-  for (let i = 0; i < DEINDEX_RESWEEP_MAX_ATTEMPTS; i++) {
+  // Simulate an outage that outlasts DEINDEX_RESWEEP_MAX_ATTEMPTS worth of retries.
+  for (let i = 0; i < DEINDEX_RESWEEP_MAX_ATTEMPTS + 3; i++) {
     const entry = [...cosmos.docs.values()][0];
     entry.due_at = new Date(Date.now() - 1000).toISOString();
     await withStubbedFetch(fullStub(cosmos, blobPaths, () => new Response('search unavailable', { status: 503 })), () => runDeindexResweepOnce());
   }
 
-  const finalEntry = [...cosmos.docs.values()][0];
-  assert.equal(finalEntry.status, 'failed', `must stop retrying after ${DEINDEX_RESWEEP_MAX_ATTEMPTS} attempts`);
-  assert.equal(finalEntry.attempts, DEINDEX_RESWEEP_MAX_ATTEMPTS);
+  const stillRetrying = [...cosmos.docs.values()][0];
+  assert.equal(stillRetrying.status, 'pending', 'a transient outage must NEVER be terminal-ed to failed, no matter how many attempts have accumulated');
+  assert.equal(stillRetrying.attempts, DEINDEX_RESWEEP_MAX_ATTEMPTS + 3, 'attempts keeps incrementing purely as a diagnostic counter for this failure class, not a hard retry cap');
 
-  // A subsequent tick must NOT pick up a 'failed' entry even if its due_at is in the past --
-  // the query filters on status='pending', so a failed entry is inert, not silently retried forever.
+  // Once the outage clears, the entry resolves normally on the very next tick -- proving it was
+  // never lost or dead-ended, just legitimately waiting on infrastructure.
   const entry = [...cosmos.docs.values()][0];
   entry.due_at = new Date(Date.now() - 1000).toISOString();
-  const result = await withStubbedFetch(fullStub(cosmos, blobPaths, () => { throw new Error('must never reach search for a failed entry'); }), () => runDeindexResweepOnce());
-  assert.equal(result.processed, 0);
+  const result = await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => runDeindexResweepOnce());
+  assert.equal(result.cleaned, 1, 'once infra recovers, the entry resolves normally');
+  assert.equal(cosmos.docs.size, 0);
 });
 
 test('THE QUEUE-RACE GUARD THIS ROUND ADDED: a fresh re-enqueue that lands WHILE a sweep is mid-flight for the same entry is never clobbered by that sweep\'s stale write-back', async () => {

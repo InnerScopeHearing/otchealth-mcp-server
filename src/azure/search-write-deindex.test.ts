@@ -448,6 +448,19 @@ test('deindexChunkedPathWithAuth: a deadline that has already passed reports tru
   assert.match(result.reason ?? '', /deadline exceeded/);
 });
 
+test('deindexChunkedPathWithAuth: THE FIX THIS ROUND ADDED -- an already-passed deadline short-circuits BEFORE the existence check too when a container is supplied, not just before search/delete (2026-08-04, Copilot review round 17: the previous Math.max(EXISTENCE_CHECK_MIN_MS, ...) floor applied its 300ms minimum even to a negative remaining duration, so an already-late call still issued a fresh Blob HEAD and waited up to 300ms for it)', async () => {
+  let calls = 0;
+  const result = await withStubbedFetch(
+    (async () => { calls++; throw new Error('must not call fetch at all past the deadline, not even a blob HEAD'); }) as typeof fetch,
+    () => deindexChunkedPathWithAuth(DIRECT_AUTH, 'legal-personal', 'anything.pdf', Date.now() - 1, 'personal'),
+  );
+  assert.equal(calls, 0, 'zero network calls of any kind, including the existence check');
+  assert.equal(result.attempted, false);
+  assert.equal(result.deleted, 0);
+  assert.equal(result.truncated, true);
+  assert.match(result.reason ?? '', /deadline already exceeded/);
+});
+
 test('deindexChunkedPathWithAuth: a search response whose HEADERS arrive but whose BODY never finishes streaming is bounded by deadlineAtMs, not fetchWithBudget\'s own separate internal timeout (2026-08-04, Copilot review PR #192 round 10)', async () => {
   // fetch() resolves once headers arrive, not once the body is fully received -- racing only
   // doSearch(...) (as earlier rounds already did) leaves a stalled BODY read ungoverned by

@@ -8,13 +8,16 @@
  * returned. No amount of tightening a single synchronous MCP tool call can close that: an MCP call
  * cannot block for hours waiting out the indexer's own cadence.
  *
- * THE FIX: a durable, DELAYED re-verification queue. `enqueueDeindexResweep` is called (fire-and-
- * forget, fail-open) from blob-delete.ts / blob-move.ts right after their existing synchronous
- * cleanup, for every path that lost content (a soft-deleted or moved-from path). Each entry sits
- * with a `due_at` set safely PAST one full pull-indexer cadence (see DEINDEX_RESWEEP_DELAY_MS
- * below). A periodic in-process reconciler (`startDeindexResweepReloader`, wired at server boot
- * exactly like `startRevocationReloader` in revocation-store.ts) drains due entries and re-runs the
- * SAME, heavily-hardened deindex mechanism this whole PR built.
+ * THE FIX: a durable, DELAYED re-verification queue. `enqueueDeindexResweep` is called from
+ * blob-delete.ts / blob-move.ts right after their existing synchronous cleanup, for every path that
+ * lost content (a soft-deleted or moved-from path) -- via `enqueueDeindexResweepAwaited` (a small
+ * BOUNDED await, NOT fire-and-forget: 2026-08-04, Copilot review round 16 -- a bare fire-and-forget
+ * call gave callers no way to know whether the durable obligation actually reached Cosmos before
+ * their response returned; both real callers now await it and surface the confirmed-persisted
+ * result). Each entry sits with a `due_at` set safely PAST one full pull-indexer cadence (see
+ * DEINDEX_RESWEEP_DELAY_MS below). A periodic in-process reconciler (`startDeindexResweepReloader`,
+ * wired at server boot exactly like `startRevocationReloader` in revocation-store.ts) drains due
+ * entries and re-runs the SAME, heavily-hardened deindex mechanism this whole PR built.
  *
  * TWO SAFETY GUARDS a path-only re-verification needs that the first version of this file did NOT
  * have, both added after Copilot's review of the initial commit caught them (2026-08-04):
@@ -24,17 +27,24 @@
  *    legitimately RECREATED at the exact same path (a concurrent legal_blob_put) sometime before
  *    this entry became due, blindly deleting by path would destroy that new content's search
  *    visibility, not just clean up the old one. So every sweep first checks whether a blob now
- *    exists at the queued path (blobExists); if it does, the entry's job is done for a different
- *    reason than "confirmed clean" -- the path is back in active use, out of scope for stale-path
- *    cleanup, and the entry is simply removed without touching the index. THIS IS WHY
- *    `legal_blob_move`'s overwrite-destination case is deliberately NOT enqueued here (see
- *    blob-move.ts): dst_path is EXPECTED to exist after an overwrite (the new content lives there),
- *    so the existence check would never fire for it and a path-only sweep would eventually delete
- *    the new content's own chunks alongside any orphaned old ones -- there is no existence-based
- *    guard that helps that specific case. Cleaning dst_path's orphaned excess chunks on an overwrite
- *    remains a genuinely open, tracked follow-up (needs a chunk-schema generation/ETag marker so
- *    cleanup can target only chunks belonging to the PRIOR blob version, not the current one) -- see
- *    search-write.ts's module doc comment.
+ *    exists at the queued path (blobExists); if it does, the index is never touched -- but
+ *    (2026-08-04, Copilot review round 16, correcting an earlier version of this paragraph that is
+ *    now WRONG) the entry is NOT simply removed as "job done." If the recreated content has
+ *    fewer/different chunks than the version that was here before, the pull-indexer's own re-index
+ *    only adds/updates chunks for the CURRENT content -- it has no reason to remove excess chunk IDs
+ *    left over from the PRIOR generation (the exact deletion-detection gap this whole PR exists to
+ *    work around), so those orphaned prior-generation chunks could persist forever with nothing left
+ *    tracking them if this entry just vanished. So a recreated path instead backs off the same way
+ *    any other not-confirmed-clean outcome does, and after DEINDEX_RESWEEP_MAX_ATTEMPTS becomes a
+ *    visible 'failed' entry (discoverable for a future generation-aware sweep) rather than
+ *    disappearing without a trace. THIS IS WHY `legal_blob_move`'s overwrite-destination case is
+ *    deliberately NOT enqueued here (see blob-move.ts): dst_path is EXPECTED to exist after an
+ *    overwrite (the new content lives there), so the existence check would never usefully fire for
+ *    it and a path-only sweep would eventually delete the new content's own chunks alongside any
+ *    orphaned old ones -- there is no existence-based guard that helps that specific case. Cleaning
+ *    dst_path's orphaned excess chunks on an overwrite remains a genuinely open, tracked follow-up
+ *    (needs a chunk-schema generation/ETag marker so cleanup can target only chunks belonging to the
+ *    PRIOR blob version, not the current one) -- see search-write.ts's module doc comment.
  *
  * 2. ETAG-CONDITIONAL queue writes, closing a queue-STATE race distinct from the index race above:
  *    a worker can query an entry, and WHILE it is off running the (network-bound) re-verification,
@@ -71,7 +81,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { deleteDoc, queryDocs, replaceDoc, upsertDoc, isConfigured as cosmosConfigured } from './cosmos.js';
+import { deleteDoc, queryDocs, readDoc, replaceDoc, upsertDoc, isConfigured as cosmosConfigured } from './cosmos.js';
 import { prepareDeindexAuth, deindexChunkedPathWithAuth } from '../azure/search-write.js';
 import { blobExistsWithTimeout, type LegalContainer } from '../legal/blob-store.js';
 
@@ -94,8 +104,16 @@ export const DEINDEX_RESWEEP_DELAY_MS = 7 * 60 * 60 * 1000; // 7h
  *  infrastructure conditions, not another indexer-cadence wait. */
 export const DEINDEX_RESWEEP_RETRY_DELAY_MS = 30 * 60 * 1000; // 30m
 
-/** After this many failed attempts, stop retrying and mark the entry 'failed' (visible for manual
- *  follow-up) instead of retrying forever against a persistently broken configuration. */
+/** After this many failed attempts, a NON-RETRIABLE entry (generation uncertainty -- a recreated
+ *  path this mechanism cannot safely characterize; see retryOrFail's own doc comment) stops
+ *  retrying and is marked 'failed' (visible for manual/future generation-aware follow-up), instead
+ *  of retrying forever for no gain. Does NOT apply to transient infrastructure conditions (Search/
+ *  auth unavailable, an existence-check timeout, a Cosmos write hiccup) -- those retry INDEFINITELY
+ *  on DEINDEX_RESWEEP_RETRY_DELAY_MS, since a longer-but-eventually-recoverable outage should not
+ *  permanently strand the entry (2026-08-04, Copilot review round 17: the sweep query only selects
+ *  status='pending', so a 'failed' entry is never automatically revisited -- terminal-ing a
+ *  transient outage after a fixed attempt count silently broke the "self-heals within hours" promise
+ *  this queue exists to keep). */
 export const DEINDEX_RESWEEP_MAX_ATTEMPTS = 5;
 
 /** Entries processed per reconciler tick -- bounds Cosmos RU + Azure Search load per tick even if
@@ -170,18 +188,39 @@ function resweepId(index: string, path: string): string {
  *  round 16: a fire-and-forget `void enqueueDeindexResweep(...)` call can still be in flight when
  *  the replica is terminated -- a replica shutdown between blob-delete/move returning and the
  *  underlying Cosmos upsert actually landing silently drops the only backstop for an indexer
- *  resurrection, while the response already claimed the path was durably enqueued). */
+ *  resurrection, while the response already claimed the path was durably enqueued).
+ *
+ *  DUE_AT IS MONOTONIC, NEVER REGRESSED (2026-08-04, Copilot review round 17): the deterministic id
+ *  (resweepId) means two enqueues for the SAME path race as a plain upsert, which is last-
+ *  COMPLETION-wins, not last-CALLED-wins. If an OLDER enqueue call (started first, e.g. stalled on a
+ *  slow Cosmos round trip) finishes AFTER a NEWER enqueue for the same path has already landed, an
+ *  unconditional upsert would silently overwrite the newer, correct (later) due_at with the older
+ *  call's earlier one -- letting the sweep fire before a full indexer cadence has actually elapsed
+ *  for the NEWER mutation, removing the only backstop too early. So this reads the existing entry
+ *  (if any) first and never WRITES a due_at earlier than what is already there; a read failure just
+ *  falls through to the proposed due_at (best-effort, matching this function's overall fail-open
+ *  contract -- a narrower version of this same race can still occur between the read and the write,
+ *  but this closes the common case without a full CAS-retry loop). */
 export async function enqueueDeindexResweep(index: string, path: string, container: LegalContainer, nowMs: number = Date.now()): Promise<boolean> {
   if (!cosmosConfigured()) return false;
   try {
+    const id = resweepId(index, path);
+    let due_at = new Date(nowMs + DEINDEX_RESWEEP_DELAY_MS).toISOString();
+    try {
+      const existing = await readDoc(TASKS, DEINDEX_RESWEEP_BOARD, id);
+      const existingDueAt = (existing?.doc as { due_at?: string } | undefined)?.due_at;
+      if (existingDueAt && existingDueAt > due_at) due_at = existingDueAt;
+    } catch {
+      // Read failed (or the entry does not exist yet) -- proceed with the proposed due_at.
+    }
     const doc: DeindexResweepDoc = {
-      id: resweepId(index, path),
+      id,
       board: DEINDEX_RESWEEP_BOARD,
       type: DOC_TYPE,
       index,
       path,
       container,
-      due_at: new Date(nowMs + DEINDEX_RESWEEP_DELAY_MS).toISOString(),
+      due_at,
       status: 'pending',
       attempts: 0,
       created_at: new Date(nowMs).toISOString(),
@@ -305,6 +344,7 @@ export async function runDeindexResweepOnce(
           entry,
           'path was recreated before this resweep ran -- cannot safely verify or clean any orphaned prior-generation chunks without generation-aware chunk targeting (open follow-up, see search-write.ts)',
           nowMs,
+          true, // nonRetriable: generation uncertainty does not resolve by waiting -- see retryOrFail's doc comment
         );
         if (outcome === 'raced') raced++;
         else if (outcome === 'failed') failed++;
@@ -361,7 +401,13 @@ export async function runDeindexResweepOnce(
       // leaving the entry exactly as queried, counted requeued, rather than risking a retry-of-a-
       // retry loop within a single tick.
       try {
-        const outcome = await retryOrFail(entry, e instanceof Error ? e.message : 'unexpected sweep error', nowMs);
+        // nonRetriable=true (2026-08-04, Copilot review round 17): every KNOWN transient-infra
+        // condition already has its own non-throwing branch above and never reaches this catch, so
+        // an exception landing HERE is far more likely to be a genuinely permanent, structural
+        // problem (a malformed doc, an unanticipated bug) than a recoverable blip -- retrying that
+        // forever would just reintroduce the exact busy-loop-on-a-poison-pill-entry risk this whole
+        // function exists to close. See retryOrFail's own doc comment for the full split.
+        const outcome = await retryOrFail(entry, e instanceof Error ? e.message : 'unexpected sweep error', nowMs, true);
         if (outcome === 'raced') raced++;
         else if (outcome === 'failed') failed++;
         else requeued++;
@@ -374,26 +420,45 @@ export async function runDeindexResweepOnce(
   return { processed: due.length, cleaned, requeued, failed, raced };
 }
 
-/** Shared retry/fail bookkeeping for a sweep attempt that could NOT confirm clean this tick, for
- *  any reason (the existence check timed out, the whole tick's auth failed, or the index cleanup
- *  itself did not confirm exhaustion) -- bumps `attempts`, pushes `due_at` forward (or marks the
- *  entry 'failed' once DEINDEX_RESWEEP_MAX_ATTEMPTS is hit), and writes it back ETag-conditionally
- *  (GUARD 2: a 412 means a fresher writer already governs this entry; leave it alone). Factored out
- *  (2026-08-04, Copilot review round 15) after the existence-check-timeout branch was found NOT
- *  persisting anything at all -- it only incremented the in-memory `requeued` counter, leaving the
- *  entry's `due_at` unchanged (still in the past), so the very same timed-out entry was immediately
- *  eligible again on every subsequent tick forever: an unbounded busy-loop of uncancelled Blob HEAD
- *  requests that could crowd the fixed-size batch ahead of genuinely healthy entries. The `!auth`
- *  branch (the whole tick's auth resolution failed) had the identical defect for the same reason,
- *  so both now route through here alongside the pre-existing "index cleanup not confirmed" path
- *  that already had this exact logic inline. */
+/** Shared retry/fail bookkeeping for a sweep attempt that could NOT confirm clean this tick --
+ *  bumps `attempts`, pushes `due_at` forward, and writes it back ETag-conditionally (GUARD 2: a 412
+ *  means a fresher writer already governs this entry; leave it alone). Factored out (2026-08-04,
+ *  Copilot review round 15) after the existence-check-timeout branch was found NOT persisting
+ *  anything at all -- it only incremented the in-memory `requeued` counter, leaving the entry's
+ *  `due_at` unchanged (still in the past), so the very same timed-out entry was immediately eligible
+ *  again on every subsequent tick forever: an unbounded busy-loop of uncancelled Blob HEAD requests
+ *  that could crowd the fixed-size batch ahead of genuinely healthy entries.
+ *
+ *  `nonRetriable` (2026-08-04, Copilot review round 17) separates TWO genuinely different classes
+ *  of "not confirmed clean," which the original single DEINDEX_RESWEEP_MAX_ATTEMPTS cap conflated:
+ *  - TRANSIENT infrastructure hiccups (Search/auth unavailable, an existence-check timeout, a
+ *    Cosmos write hiccup reaching the outer catch) WILL eventually clear on their own. Terminal-ing
+ *    these to 'failed' after a fixed ~5 attempts x 30 minutes (~2.5h) means a longer-but-recoverable
+ *    outage permanently strands the entry: the sweep query only selects `status='pending'`, so a
+ *    'failed' entry is never automatically revisited, contradicting the durable "self-heals within
+ *    hours" promise this whole queue exists to keep. Default `false` -- these keep retrying on the
+ *    same DEINDEX_RESWEEP_RETRY_DELAY_MS cadence INDEFINITELY, never hard-terminal. The bounded cost
+ *    of a permanently-broken infra path retrying forever (one batch slot every ~20-30 minutes) is
+ *    strictly preferable to silently losing the only backstop against an indexer resurrection.
+ *  - The ONE genuinely NON-retriable case is generation uncertainty (a path was recreated with
+ *    content this mechanism cannot safely characterize as a superset of the prior generation) --
+ *    retrying does not help here; the path will still exist, still be uncharacterizable, every time.
+ *    That case passes `nonRetriable: true` so it keeps the original bounded-attempts-then-'failed'
+ *    behavior, making the unresolvable state visible (discoverable for a future generation-aware
+ *    sweep) instead of retrying forever for no gain. The outer per-item catch-all ALSO passes
+ *    `nonRetriable: true`: an exception reaching that block (a malformed doc, an unanticipated bug)
+ *    is far more likely to be a permanent, structural problem than a transient network blip -- every
+ *    KNOWN transient-infra condition already has its own non-throwing branch above and never reaches
+ *    that catch, so retrying it forever would just be the exact "busy-loop on a poison-pill entry"
+ *    risk this function was built to close. */
 async function retryOrFail(
   entry: DeindexResweepDoc & { _etag?: string },
   reason: string,
   nowMs: number,
+  nonRetriable: boolean = false,
 ): Promise<'raced' | 'requeued' | 'failed'> {
   const attempts = (entry.attempts ?? 0) + 1;
-  const willFail = attempts >= DEINDEX_RESWEEP_MAX_ATTEMPTS;
+  const willFail = nonRetriable && attempts >= DEINDEX_RESWEEP_MAX_ATTEMPTS;
   const nextDoc: Record<string, unknown> = willFail
     ? { ...entry, attempts, status: 'failed', last_reason: reason }
     : { ...entry, attempts, due_at: new Date(nowMs + DEINDEX_RESWEEP_RETRY_DELAY_MS).toISOString(), last_reason: reason };

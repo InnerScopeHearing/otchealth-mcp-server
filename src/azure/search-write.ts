@@ -688,7 +688,18 @@ export async function deindexChunkedPathWithAuth(
 ): Promise<DeindexResult> {
   try {
     if (container) {
-      const existMs = Math.max(EXISTENCE_CHECK_MIN_MS, Math.min(EXISTENCE_CHECK_MAX_MS, Math.floor((deadlineAtMs - Date.now()) * EXISTENCE_CHECK_SHARE)));
+      // An ALREADY-EXPIRED deadline must short-circuit here, before starting anything, not just
+      // before the search/delete work below (2026-08-04, Copilot review round 17): the previous
+      // Math.max(EXISTENCE_CHECK_MIN_MS, ...) floor applied its 300ms minimum even to a NEGATIVE
+      // remaining duration, so a call arriving with zero time left still issued a fresh Blob HEAD
+      // and waited up to 300ms for it -- silently exceeding the caller's whole-pass deadline
+      // contract by that much on every already-late call, eroding exactly the budget round after
+      // round of this PR tightened elsewhere.
+      const remainingMs = deadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        return { attempted: false, deleted: 0, truncated: true, reason: 'deadline already exceeded before the existence check could start' };
+      }
+      const existMs = Math.max(EXISTENCE_CHECK_MIN_MS, Math.min(EXISTENCE_CHECK_MAX_MS, Math.floor(remainingMs * EXISTENCE_CHECK_SHARE)));
       const nowExists = await blobExistsWithTimeout(container, path, existMs);
       if (nowExists !== false) {
         return {
