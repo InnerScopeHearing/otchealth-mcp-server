@@ -116,17 +116,20 @@ export async function handleLegalBlobMove(input: LegalBlobMoveInput, ctx: ToolCo
   // closure): enqueue src_path for delayed re-verification regardless of the synchronous result
   // above -- even a CONFIRMED-clean synchronous pass can still be resurrected by an independent
   // pull-indexer that read this path before the move and writes after it returns, a race no
-  // synchronous MCP call can close. See agentstate/deindex-resweep.ts's module doc comment.
-  // Fire-and-forget, fail-open: never throws, never affects this response.
-  void enqueueDeindexResweep(searchIndex, input.src_path);
-  // Round 12 also flagged: an overwrite move (dst_path already existed) replaces that blob's
-  // content too, but only src_path was ever cleaned -- dst_path's PRE-EXISTING chunks (from the
-  // content that just got overwritten) can leave orphaned excess chunks the indexer's normal
-  // upsert-only cycle would never remove if the new content has fewer chunks than the old. The
-  // resweep queue closes this the same durable way: dst_path gets its own delayed re-verification,
-  // by which point the indexer's next cycle has already re-indexed the new content, so this sweep
-  // cleans up whatever, if anything, that cycle left over.
-  if (dstExists) void enqueueDeindexResweep(searchIndex, input.dst_path);
+  // synchronous MCP call can close. deindex-resweep.ts's sweep checks whether a blob has been
+  // legitimately RECREATED at src_path before deleting anything there, so a concurrent
+  // legal_blob_put reusing this exact path is safe. Fire-and-forget, fail-open: never throws,
+  // never affects this response.
+  void enqueueDeindexResweep(searchIndex, input.src_path, container);
+  // dst_path is DELIBERATELY NOT enqueued here (2026-08-04, Copilot review, corrected after an
+  // earlier version of this fix got it wrong): on an overwrite move, dst_path is EXPECTED to
+  // exist -- the new content lives there -- so the resweep's existence-check guard (the mechanism
+  // that makes src_path's enqueue safe) can never fire for it, and a path-only delete would
+  // eventually remove the NEW content's own valid chunks alongside any orphaned old ones from the
+  // overwritten blob. Cleaning dst_path's orphaned excess chunks on an overwrite remains a
+  // genuinely open, tracked follow-up (needs a chunk-schema generation/ETag marker so cleanup can
+  // target only the PRIOR blob version's chunks) -- see search-write.ts's module doc comment. Do
+  // not re-add a dst_path enqueue here without that generation-aware targeting.
 
   return {
     data: { ...base, executed: true, dry_run: false, bytes: copy.bytes, deindexed: deindex.deleted, deindex_truncated: deindexTruncated },

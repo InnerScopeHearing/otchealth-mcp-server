@@ -277,14 +277,20 @@ export async function replaceDoc(
   return request('PUT', 'docs', link, link, { pk: pkValue, body: doc, ifMatch });
 }
 
-/** Delete a document by id + partition key. Idempotent: treats 404 as success (already gone). */
-export async function deleteDoc(coll: string, pkValue: string, id: string): Promise<CosmosResponse> {
+/** Delete a document by id + partition key. Idempotent: treats 404 as success (already gone).
+ *  Optional `ifMatch` makes this a CONDITIONAL delete (2026-08-04, deindex-resweep.ts's queue-race
+ *  fix): pass the `_etag` a caller read the document with to guarantee it deletes exactly the
+ *  version it inspected, never a version some concurrent writer has since changed underneath it. A
+ *  mismatch returns status 412 (not thrown as an error -- see the two 4xx codes below) so a caller
+ *  that reads `res.status` can treat "someone else changed this first" as a normal, expected
+ *  outcome to react to, not an exceptional one. */
+export async function deleteDoc(coll: string, pkValue: string, id: string, ifMatch?: string): Promise<CosmosResponse> {
   assertColl(coll);
   assertId(pkValue, 'partition key');
   assertId(id);
   const link = `dbs/${db()}/colls/${coll}/docs/${id}`;
-  const res = await request('DELETE', 'docs', link, link, { pk: pkValue });
-  if (!res.ok && res.status !== 404) {
+  const res = await request('DELETE', 'docs', link, link, { pk: pkValue, ifMatch });
+  if (!res.ok && res.status !== 404 && res.status !== 412) {
     throw new Error(`Cosmos deleteDoc ${coll}/${id} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
   }
   return res;

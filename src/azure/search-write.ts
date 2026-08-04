@@ -195,26 +195,30 @@ export async function indexMemoryNow(input: {
  * unfilterable field) must never surface as a failure of the blob operation itself -- it is
  * best-effort cleanup on top of an already-durable change, not a precondition for it.
  *
- * FORMERLY A KNOWN RESIDUAL LIMITATION, NOW CLOSED (2026-08-04, Copilot review PR #192 rounds 3-12
- * identified this repeatedly; THE PERMANENT FIX is `agentstate/deindex-resweep.ts`): this function
- * is a point-in-time DELETE against the index, racing an INDEPENDENT, asynchronous pull-indexer
- * that can be mid-run at the same time. If a pull-indexer run already READ the old path's content
- * before the blob move, and finishes WRITING that read to the index AFTER this delete runs, the
- * stale entry is resurrected -- this function, in isolation, has no way to know that happened, and
- * `deindexed`/`truncated:false` would (correctly, at the time) report success for what it could see.
- * No amount of tightening a single SYNCHRONOUS call can close that: an MCP tool call cannot block
- * for hours waiting out the indexer's own cadence to be certain no run is still in flight.
+ * FORMERLY A KNOWN RESIDUAL LIMITATION, NOW LARGELY CLOSED (2026-08-04, Copilot review PR #192
+ * rounds 3-12 identified this repeatedly; THE PERMANENT FIX is `agentstate/deindex-resweep.ts`):
+ * this function is a point-in-time DELETE against the index, racing an INDEPENDENT, asynchronous
+ * pull-indexer that can be mid-run at the same time. If a pull-indexer run already READ the old
+ * path's content before the blob move, and finishes WRITING that read to the index AFTER this
+ * delete runs, the stale entry is resurrected -- this function, in isolation, has no way to know
+ * that happened, and `deindexed`/`truncated:false` would (correctly, at the time) report success
+ * for what it could see. No amount of tightening a single SYNCHRONOUS call can close that: an MCP
+ * tool call cannot block for hours waiting out the indexer's own cadence to be certain no run is
+ * still in flight.
  *
- * THE FIX applied at the CALL SITES (blob-delete.ts, blob-move.ts), not in this function: every
- * caller ALSO enqueues the path into a durable, delayed re-verification queue
- * (`enqueueDeindexResweep`), due safely past one full indexer cadence. A periodic in-process
- * reconciler drains it and re-runs this exact function -- by the time an entry is due, any indexer
- * run that was in flight when the entry was enqueued has certainly finished, so that second pass is
- * not racing anything and its result is authoritative. This function's own synchronous best-effort
- * cleanup stays as the FAST PATH for the common case (no indexer run in flight, the overwhelming
- * majority of real usage); the resweep queue is the DURABLE BACKSTOP that closes the race the fast
- * path cannot. See deindex-resweep.ts's module doc comment for the full design and why it needed no
- * new Azure infrastructure (reuses the already-provisioned Cosmos `tasks` container).
+ * THE FIX applied at the CALL SITES (blob-delete.ts, blob-move.ts's src_path only -- see below),
+ * not in this function: every caller ALSO enqueues the path into a durable, delayed
+ * re-verification queue (`enqueueDeindexResweep`), due safely past one full indexer cadence. A
+ * periodic in-process reconciler drains it and re-runs this exact function -- by the time an entry
+ * is due, any indexer run that was in flight when the entry was enqueued has certainly finished, so
+ * that second pass is not racing anything and its result is authoritative for THAT run's timing.
+ * This function's own synchronous best-effort cleanup stays as the FAST PATH for the common case
+ * (no indexer run in flight, the overwhelming majority of real usage); the resweep queue is the
+ * DURABLE BACKSTOP that closes the race the fast path cannot. See deindex-resweep.ts's module doc
+ * comment for the full design, including the two additional safety guards it needed once a
+ * DELAYED pass is in play (an existence check before deleting anything, and ETag-conditional queue
+ * writes) and why it needed no new Azure infrastructure (reuses the already-provisioned Cosmos
+ * `tasks` container).
  *
  * `findAllChunkIds`'s authoritative-count check (round 9: `seenRaw`, a UNION of ids across every
  * page fetched in ONE pass, is not a true single snapshot against a genuinely mutating index) is the
@@ -222,19 +226,34 @@ export async function indexMemoryNow(input: {
  * confirmed delete -- the SAME resweep queue closes it the same way: a later, delayed pass is not
  * racing the same mutation the first pass was.
  *
- * ONE narrower edge case remains genuinely open, NOT closed by the resweep queue (2026-08-04,
- * Copilot review PR #192 round 12): this lookup is path-only, not tied to a specific blob
- * generation/ETag. If a blob is deliberately RECREATED at the exact same path (a new
- * `legal_blob_put` of unrelated content under an identical path string) at any point before a
- * pending resweep entry for that path fires, the resweep's path-based lookup cannot distinguish
- * "stale chunks from the content that used to be here" from "valid chunks for the content that is
- * here now" -- it would delete both. Closing this properly needs the chunk schema to carry a
- * source-generation marker this cleanup can correlate against the pre-delete state, which was not
- * attempted here without first confirming that field exists in the live schema (this PR does not
- * touch the live Azure Search index/indexer configuration blind). Tracked as a follow-up, same as
- * indexer coordination was tracked against the CLO brief's §7 before this resweep queue existed.
- * Practically narrow: it requires an exact same-path recreation within the resweep delay window,
- * not merely a concurrent read.
+ * TWO narrower edge cases remain genuinely open, NOT closed by the resweep queue (2026-08-04,
+ * Copilot review PR #192 round 12):
+ *
+ * 1. This lookup is path-only, not tied to a specific blob generation/ETag. deindex-resweep.ts's
+ *    existence-check guard handles the COMMON form of this (a blob recreated at src_path before
+ *    the delayed sweep runs is detected and the sweep backs off without touching the index), but a
+ *    narrower race remains: if a blob is recreated at the exact path AFTER the existence check ran
+ *    but BEFORE the subsequent delete call completes, or if the indexer's own resurrection-write
+ *    of stale content interleaves in exactly the wrong order relative to a same-tick recreation,
+ *    path-only chunk deletion still cannot distinguish "stale chunks from the content that used to
+ *    be here" from "valid chunks for the content that is here now." Closing this fully needs the
+ *    chunk schema to carry a source-generation marker this cleanup can correlate against the
+ *    pre-delete state, which was not attempted here without first confirming that field exists in
+ *    the live schema (this PR does not touch the live Azure Search index/indexer configuration
+ *    blind). Practically very narrow: it requires a same-path recreation landing in a specific,
+ *    short window inside an already-narrow resweep tick, not merely a concurrent read.
+ *
+ * 2. `legal_blob_move`'s overwrite-destination path (dst_path, when it already held content) is
+ *    NOT enqueued into the resweep queue at all, unlike src_path -- see blob-move.ts's own comment
+ *    at the call site. dst_path is EXPECTED to exist after an overwrite (the new content lives
+ *    there), so the existence-check guard that makes src_path's enqueue safe can never fire for
+ *    it; a path-only sweep of dst_path would eventually delete the new content's own valid chunks
+ *    alongside any orphaned old ones. Cleaning up dst_path's orphaned excess chunks (from the
+ *    content that was just overwritten) remains a genuinely open, tracked follow-up requiring the
+ *    same generation-aware chunk targeting as #1 above.
+ *
+ * Both are tracked as follow-ups, same as indexer coordination was tracked against the CLO brief's
+ * §7 before this resweep queue existed.
  */
 
 export interface DeindexResult {

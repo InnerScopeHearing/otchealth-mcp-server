@@ -73,14 +73,16 @@ export const legalBlobDeleteOutputShape = {
    *  room may not have indexed this path yet, which is not an error). Always 0 on dry_run.
    */
   deindexed: z.number(),
-  /** ORIGINAL (from) paths of items whose move succeeded but whose search-index cleanup was NOT
-   *  confirmed complete (a deadline, a mid-pagination failure, or search being unconfigured
-   *  entirely) -- these paths may still return a stale search hit (2026-08-04, Copilot review PR
-   *  #192 round 2: reporting cleanup as done-or-silently-abandoned with no signal either way is
-   *  worse than an honest "not confirmed"). Always empty on dry_run. Not currently re-triggerable
-   *  by re-invoking this tool (the blob has already moved, so the same path/prefix will not
-   *  re-match it) -- a future admin sweep tool is the intended remedy; for now this is visibility,
-   *  not automatic recovery.
+  /** ORIGINAL (from) paths of items whose move succeeded but whose IMMEDIATE search-index cleanup
+   *  was NOT confirmed complete (a deadline, a mid-pagination failure, or search being
+   *  unconfigured entirely) -- these paths may still return a stale search hit right after this
+   *  call returns (2026-08-04, Copilot review PR #192 round 2: reporting cleanup as
+   *  done-or-silently-abandoned with no signal either way is worse than an honest "not
+   *  confirmed"). Always empty on dry_run. Every moved item's original path -- listed here or not
+   *  -- is ALSO enqueued into a durable delayed re-verification sweep (agentstate/deindex-resweep.ts)
+   *  that runs safely past one full indexer cadence, so this list is visibility into the immediate
+   *  result, not the whole recovery story: an entry here should self-heal within hours without
+   *  needing to re-invoke this tool.
    */
   deindex_incomplete: z.array(z.string()),
   error: z.string().optional(),
@@ -338,9 +340,11 @@ export async function handleLegalBlobDelete(input: LegalBlobDeleteInput, ctx: To
     // closure): enqueue a delayed re-verification regardless of the synchronous result above --
     // even a CONFIRMED-clean synchronous pass can still be resurrected by an independent
     // pull-indexer that read this path before the delete and writes after it returns, a race no
-    // synchronous MCP call can close. See agentstate/deindex-resweep.ts's module doc comment.
-    // Fire-and-forget, fail-open: never throws, never affects this response.
-    void enqueueDeindexResweep(searchIndex, item.from);
+    // synchronous MCP call can close. deindex-resweep.ts's sweep checks whether a blob has been
+    // legitimately RECREATED at this path before deleting anything there, so a concurrent
+    // legal_blob_put reusing this exact path is safe. Fire-and-forget, fail-open: never throws,
+    // never affects this response.
+    void enqueueDeindexResweep(searchIndex, item.from, container);
   }
 
   return {

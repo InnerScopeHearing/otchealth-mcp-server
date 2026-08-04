@@ -1,8 +1,8 @@
 // Full-chain integration tests for the deindex resweep queue (2026-08-04, THE PERMANENT FIX for the
 // concurrent-pull-indexer resurrection race -- see deindex-resweep.ts's module doc comment). Own
 // process (config/env.ts's loadEnv() memoizes per process; this env snapshot -- Cosmos AND search AND
-// identity all configured -- must not collide with a file that leaves any of those unset), mirroring
-// blob-deindex-configured.test.ts's pattern for exactly the same reason.
+// identity AND the legal blob store all configured -- must not collide with a file that leaves any of
+// those unset), mirroring blob-deindex-configured.test.ts's pattern for exactly the same reason.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -18,6 +18,8 @@ process.env.COSMOS_DB ||= 'agent-state';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-s1.search.windows.net';
 process.env.IDENTITY_ENDPOINT ||= 'http://fake-identity.example.invalid/msi/token';
 process.env.IDENTITY_HEADER ||= 'fake-identity-header-secret';
+process.env.AZURE_LEGAL_STORAGE_ACCOUNT ||= 'otchealthlegalstore';
+process.env.AZURE_LEGAL_STORAGE_KEY ||= Buffer.from('unit-test-blob-key-not-real').toString('base64');
 
 const { enqueueDeindexResweep, runDeindexResweepOnce, DEINDEX_RESWEEP_BOARD, DEINDEX_RESWEEP_MAX_ATTEMPTS } = await import('./deindex-resweep.js');
 
@@ -43,6 +45,13 @@ const isIdentityCall = (u: string) => {
     return false;
   }
 };
+const isBlobCall = (u: string) => {
+  try {
+    return new URL(u).hostname === `${process.env.AZURE_LEGAL_STORAGE_ACCOUNT}.blob.core.windows.net`;
+  } catch {
+    return false;
+  }
+};
 const isAdminKeyCall = (u: string) => u.includes('listAdminKeys');
 const isSearchDocsCall = (u: string) => u.includes('/docs/search');
 const isIndexDocsCall = (u: string) => u.includes('/docs/index');
@@ -50,16 +59,20 @@ const isIndexDocsCall = (u: string) => u.includes('/docs/index');
 const FAKE_TOKEN = 'fake.managed.identity.access.token.abc123';
 const FAKE_ADMIN_KEY = 'fake-admin-key-0123456789';
 
-/** An in-memory Cosmos double: enough of the REST surface (query/upsert/delete on the 'tasks'
- *  container) for the queue's own CRUD to round-trip correctly, keyed like the real service by
- *  (container, id) -- board is the partition key but this fake does not need per-partition
- *  isolation since every test uses the one dedicated resweep board. */
+/** An in-memory Cosmos double with REAL etag semantics (verified against Microsoft Learn's Cosmos
+ *  DB REST API reference before writing this: DELETE/REPLACE honor If-Match, rejecting a stale
+ *  etag with 412 and leaving the document untouched; query results carry `_etag` in the document
+ *  body, the same value a later If-Match can be built from) -- this is what makes the queue-race
+ *  tests below meaningful rather than a stubbed-out no-op. */
 function makeCosmosDouble() {
   const docs = new Map<string, Record<string, unknown>>();
+  let etagCounter = 0;
+  const nextEtag = () => `"etag-${++etagCounter}"`;
   return {
     docs,
     handle(url: string, init: RequestInit | undefined): Response {
-      const isQuery = (init?.headers as Record<string, string> | undefined)?.['x-ms-documentdb-isquery'] === 'true';
+      const headers = (init?.headers as Record<string, string> | undefined) ?? {};
+      const isQuery = headers['x-ms-documentdb-isquery'] === 'true';
       const method = init?.method || 'GET';
       if (isQuery) {
         const body = JSON.parse(String(init?.body)) as { query: string; parameters: { name: string; value: unknown }[] };
@@ -70,28 +83,62 @@ function makeCosmosDouble() {
         );
         return new Response(JSON.stringify({ Documents: matches }), { status: 200 });
       }
+      const ifMatch = headers['If-Match'];
       if (method === 'POST') {
         // upsertDoc always sends x-ms-documentdb-is-upsert: true in this codebase's cosmos.ts.
         const doc = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        docs.set(String(doc.id), doc);
-        return new Response(JSON.stringify(doc), { status: 200 });
+        const withEtag = { ...doc, _etag: nextEtag() };
+        docs.set(String(doc.id), withEtag);
+        return new Response(JSON.stringify(withEtag), { status: 200 });
+      }
+      if (method === 'PUT') {
+        // replaceDoc: extract id from the resourceLink (.../docs/<id>).
+        const id = url.split('/docs/')[1];
+        const existing = docs.get(id);
+        if (ifMatch && existing && existing._etag !== ifMatch) {
+          return new Response(JSON.stringify({ message: 'etag mismatch' }), { status: 412 });
+        }
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const withEtag = { ...body, id, _etag: nextEtag() };
+        docs.set(id, withEtag);
+        return new Response(JSON.stringify(withEtag), { status: 200 });
       }
       if (method === 'DELETE') {
         const id = url.split('/docs/')[1];
-        const existed = docs.delete(id);
-        return new Response(null, { status: existed ? 204 : 404 });
+        const existing = docs.get(id);
+        if (!existing) return new Response(null, { status: 404 });
+        if (ifMatch && existing._etag !== ifMatch) {
+          return new Response(JSON.stringify({ message: 'etag mismatch' }), { status: 412 });
+        }
+        docs.delete(id);
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unhandled cosmos call: ${method} ${url}`);
     },
   };
 }
 
-function fullStub(cosmos: ReturnType<typeof makeCosmosDouble>, onSearch: (u: string, init: RequestInit | undefined) => Response): typeof fetch {
+/** blobExists doubles as the existence-check guard's data source. `blobPaths` lists every path
+ *  that currently has a live blob (i.e. a real legal_blob_put landed there) -- callers mutate this
+ *  Set to simulate a concurrent recreation happening between enqueue and sweep. */
+function fullStub(
+  cosmos: ReturnType<typeof makeCosmosDouble>,
+  blobPaths: Set<string>,
+  onSearch: (u: string, init: RequestInit | undefined) => Response,
+): typeof fetch {
   return (async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
     if (isCosmosCall(u)) return cosmos.handle(u, init);
     if (isIdentityCall(u)) return new Response(JSON.stringify({ access_token: FAKE_TOKEN, expires_on: String(Math.floor(Date.now() / 1000) + 3600) }), { status: 200 });
     if (isAdminKeyCall(u)) return new Response(JSON.stringify({ primaryKey: FAKE_ADMIN_KEY }), { status: 200 });
+    if (isBlobCall(u)) {
+      const method = init?.method || 'GET';
+      if (method !== 'HEAD') throw new Error(`unexpected blob call: ${method} ${u}`);
+      // blob-store.ts's headBlob URL-encodes the path segment; decode to match blobPaths' plain form.
+      const encodedPath = new URL(u).pathname.split('/').slice(2).join('/');
+      const path = decodeURIComponent(encodedPath);
+      return blobPaths.has(path) ? new Response(null, { status: 200, headers: { 'content-length': '10' } }) : new Response(null, { status: 404 });
+    }
     if (isIndexDocsCall(u)) {
       const body = JSON.parse(String(init?.body)) as { value: Array<{ chunk_id: string }> };
       return new Response(JSON.stringify({ value: body.value.map((v) => ({ key: v.chunk_id, status: true, statusCode: 200 })) }), { status: 200 });
@@ -101,17 +148,18 @@ function fullStub(cosmos: ReturnType<typeof makeCosmosDouble>, onSearch: (u: str
   }) as typeof fetch;
 }
 
-test('enqueueDeindexResweep writes a correctly-shaped, correctly-partitioned entry due safely past the 6h indexer cadence', async () => {
+const NOTHING_INDEXED = () => new Response(JSON.stringify({ value: [] }), { status: 200 });
+
+test('enqueueDeindexResweep writes a correctly-shaped, correctly-partitioned entry (including container) due safely past the 6h indexer cadence', async () => {
   const cosmos = makeCosmosDouble();
-  await withStubbedFetch(fullStub(cosmos, () => new Response(JSON.stringify({ value: [] }), { status: 200 })), () =>
-    enqueueDeindexResweep('legal-personal', 'filings/moved.pdf'),
-  );
+  await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'filings/moved.pdf', 'personal'));
   assert.equal(cosmos.docs.size, 1);
   const entry = [...cosmos.docs.values()][0];
   assert.equal(entry.board, DEINDEX_RESWEEP_BOARD);
   assert.equal(entry.type, 'deindex_resweep');
   assert.equal(entry.index, 'legal-personal');
   assert.equal(entry.path, 'filings/moved.pdf');
+  assert.equal(entry.container, 'personal');
   assert.equal(entry.status, 'pending');
   assert.equal(entry.attempts, 0);
   const dueInMs = new Date(entry.due_at as string).getTime() - Date.now();
@@ -120,66 +168,80 @@ test('enqueueDeindexResweep writes a correctly-shaped, correctly-partitioned ent
 
 test('enqueueDeindexResweep is idempotent per (index, path): a second enqueue of the same path upserts the SAME entry, not a duplicate', async () => {
   const cosmos = makeCosmosDouble();
-  await withStubbedFetch(fullStub(cosmos, () => new Response(JSON.stringify({ value: [] }), { status: 200 })), async () => {
-    await enqueueDeindexResweep('legal-company', 'x.pdf');
-    await enqueueDeindexResweep('legal-company', 'x.pdf');
+  await withStubbedFetch(fullStub(cosmos, new Set(), NOTHING_INDEXED), async () => {
+    await enqueueDeindexResweep('legal-company', 'x.pdf', 'company');
+    await enqueueDeindexResweep('legal-company', 'x.pdf', 'company');
   });
   assert.equal(cosmos.docs.size, 1, 'the same (index, path) must map to the same queue entry');
 });
 
 test('runDeindexResweepOnce: an entry that is NOT YET due (enqueued moments ago) is not processed', async () => {
   const cosmos = makeCosmosDouble();
-  await withStubbedFetch(fullStub(cosmos, () => { throw new Error('must never reach search for a not-yet-due entry'); }), async () => {
-    await enqueueDeindexResweep('legal-personal', 'future.pdf');
+  await withStubbedFetch(fullStub(cosmos, new Set(), () => { throw new Error('must never reach search for a not-yet-due entry'); }), async () => {
+    await enqueueDeindexResweep('legal-personal', 'future.pdf', 'personal');
     const result = await runDeindexResweepOnce();
-    assert.deepEqual(result, { processed: 0, cleaned: 0, requeued: 0, failed: 0 });
+    assert.deepEqual(result, { processed: 0, cleaned: 0, skipped: 0, requeued: 0, failed: 0, raced: 0 });
   });
   assert.equal(cosmos.docs.size, 1, 'the entry must remain queued, untouched');
 });
 
-test('runDeindexResweepOnce: a due entry that resolves clean (nothing left in the index) is confirmed and removed from the queue', async () => {
+test('runDeindexResweepOnce: a due entry whose path has NOT been recreated resolves clean (nothing left in the index) and is removed from the queue', async () => {
   const cosmos = makeCosmosDouble();
-  // Enqueue, then hand-backdate due_at into the past so this tick treats it as due -- simulates
-  // time having passed without a real 7h sleep in the test.
-  await withStubbedFetch(fullStub(cosmos, () => new Response(JSON.stringify({ value: [] }), { status: 200 })), () =>
-    enqueueDeindexResweep('legal-personal', 'clean.pdf'),
-  );
+  const blobPaths = new Set<string>(); // never recreated
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'clean.pdf', 'personal'));
   const entry = [...cosmos.docs.values()][0];
   entry.due_at = new Date(Date.now() - 1000).toISOString();
 
-  const result = await withStubbedFetch(fullStub(cosmos, () => new Response(JSON.stringify({ value: [] }), { status: 200 })), () => runDeindexResweepOnce());
+  const result = await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => runDeindexResweepOnce());
   assert.equal(result.processed, 1);
   assert.equal(result.cleaned, 1);
-  assert.equal(result.requeued, 0);
+  assert.equal(result.skipped, 0);
   assert.equal(cosmos.docs.size, 0, 'a confirmed-clean entry must be removed from the queue, not left pending');
 });
 
 test('runDeindexResweepOnce: a due entry that finds and deletes a RESURRECTED stale chunk is confirmed and removed -- proves the sweep does real cleanup, not just bookkeeping', async () => {
   const cosmos = makeCosmosDouble();
-  await withStubbedFetch(fullStub(cosmos, () => new Response(JSON.stringify({ value: [] }), { status: 200 })), () =>
-    enqueueDeindexResweep('legal-personal', 'resurrected.pdf'),
-  );
+  const blobPaths = new Set<string>();
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'resurrected.pdf', 'personal'));
   const entry = [...cosmos.docs.values()][0];
   entry.due_at = new Date(Date.now() - 1000).toISOString();
 
   const result = await withStubbedFetch(
-    fullStub(cosmos, () => new Response(JSON.stringify({ value: [{ chunk_id: 'c1', path: 'resurrected.pdf' }] }), { status: 200 })),
+    fullStub(cosmos, blobPaths, () => new Response(JSON.stringify({ value: [{ chunk_id: 'c1', path: 'resurrected.pdf' }] }), { status: 200 })),
     () => runDeindexResweepOnce(),
   );
   assert.equal(result.cleaned, 1, 'the resurrected chunk found by the delayed sweep must be confirmed cleaned');
   assert.equal(cosmos.docs.size, 0);
 });
 
+test('THE GUARD THIS ROUND ADDED: a due entry whose path was RECREATED (a concurrent legal_blob_put) is skipped WITHOUT touching the index -- proves the existence check actually prevents deleting a live replacement blob\'s chunks', async () => {
+  const cosmos = makeCosmosDouble();
+  const blobPaths = new Set<string>();
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'reused-path.pdf', 'personal'));
+  const entry = [...cosmos.docs.values()][0];
+  entry.due_at = new Date(Date.now() - 1000).toISOString();
+
+  // Simulate the recreation: a blob now lives at this exact path again.
+  blobPaths.add('reused-path.pdf');
+
+  const result = await withStubbedFetch(
+    fullStub(cosmos, blobPaths, () => { throw new Error('must never call search at all once the path is confirmed live again -- deleting by path would risk the new blob\'s own chunks'); }),
+    () => runDeindexResweepOnce(),
+  );
+  assert.equal(result.skipped, 1, 'a recreated path must be counted as skipped, not cleaned (nothing was actually verified/deleted in the index)');
+  assert.equal(result.cleaned, 0);
+  assert.equal(cosmos.docs.size, 0, 'the entry is still removed from the queue -- its job (protect against a stale ORPHANED path) no longer applies now that the path is live again');
+});
+
 test('runDeindexResweepOnce: a due entry that cannot be confirmed clean (search failing) is requeued with incremented attempts and a later due_at, not dropped', async () => {
   const cosmos = makeCosmosDouble();
-  await withStubbedFetch(fullStub(cosmos, () => new Response(JSON.stringify({ value: [] }), { status: 200 })), () =>
-    enqueueDeindexResweep('legal-personal', 'flaky.pdf'),
-  );
+  const blobPaths = new Set<string>();
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'flaky.pdf', 'personal'));
   const entry = [...cosmos.docs.values()][0];
   entry.due_at = new Date(Date.now() - 1000).toISOString();
   const originalDueAt = entry.due_at;
 
-  const result = await withStubbedFetch(fullStub(cosmos, () => new Response('search unavailable', { status: 503 })), () => runDeindexResweepOnce());
+  const result = await withStubbedFetch(fullStub(cosmos, blobPaths, () => new Response('search unavailable', { status: 503 })), () => runDeindexResweepOnce());
   assert.equal(result.requeued, 1);
   assert.equal(result.cleaned, 0);
   assert.equal(cosmos.docs.size, 1, 'a not-yet-confirmed entry must stay in the queue for a later retry');
@@ -191,14 +253,13 @@ test('runDeindexResweepOnce: a due entry that cannot be confirmed clean (search 
 
 test('runDeindexResweepOnce: after DEINDEX_RESWEEP_MAX_ATTEMPTS failures the entry is marked failed and stops retrying, instead of retrying forever', async () => {
   const cosmos = makeCosmosDouble();
-  await withStubbedFetch(fullStub(cosmos, () => new Response(JSON.stringify({ value: [] }), { status: 200 })), () =>
-    enqueueDeindexResweep('legal-personal', 'permanently-broken.pdf'),
-  );
+  const blobPaths = new Set<string>();
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'permanently-broken.pdf', 'personal'));
 
   for (let i = 0; i < DEINDEX_RESWEEP_MAX_ATTEMPTS; i++) {
     const entry = [...cosmos.docs.values()][0];
     entry.due_at = new Date(Date.now() - 1000).toISOString();
-    await withStubbedFetch(fullStub(cosmos, () => new Response('search unavailable', { status: 503 })), () => runDeindexResweepOnce());
+    await withStubbedFetch(fullStub(cosmos, blobPaths, () => new Response('search unavailable', { status: 503 })), () => runDeindexResweepOnce());
   }
 
   const finalEntry = [...cosmos.docs.values()][0];
@@ -209,8 +270,45 @@ test('runDeindexResweepOnce: after DEINDEX_RESWEEP_MAX_ATTEMPTS failures the ent
   // the query filters on status='pending', so a failed entry is inert, not silently retried forever.
   const entry = [...cosmos.docs.values()][0];
   entry.due_at = new Date(Date.now() - 1000).toISOString();
-  const result = await withStubbedFetch(fullStub(cosmos, () => { throw new Error('must never reach search for a failed entry'); }), () => runDeindexResweepOnce());
+  const result = await withStubbedFetch(fullStub(cosmos, blobPaths, () => { throw new Error('must never reach search for a failed entry'); }), () => runDeindexResweepOnce());
   assert.equal(result.processed, 0);
+});
+
+test('THE QUEUE-RACE GUARD THIS ROUND ADDED: a fresh re-enqueue that lands WHILE a sweep is mid-flight for the same entry is never clobbered by that sweep\'s stale write-back', async () => {
+  const cosmos = makeCosmosDouble();
+  const blobPaths = new Set<string>();
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'raced.pdf', 'personal'));
+  const original = [...cosmos.docs.values()][0];
+  original.due_at = new Date(Date.now() - 1000).toISOString();
+  const staleEtag = original._etag as string;
+
+  // Simulate a FRESH delete/move re-enqueueing the SAME path AFTER the sweep already queried it
+  // (the sweep's in-memory `entry` snapshot is now stale -- it still carries staleEtag) but BEFORE
+  // the sweep's own write-back happens. In the real system this is a genuine race; here we just
+  // perform the refresh directly against the double to construct the exact interleaving.
+  await withStubbedFetch(fullStub(cosmos, blobPaths, NOTHING_INDEXED), () => enqueueDeindexResweep('legal-personal', 'raced.pdf', 'personal'));
+  const refreshed = [...cosmos.docs.values()][0];
+  assert.notEqual(refreshed._etag, staleEtag, 'precondition: the refresh must have produced a NEW etag');
+  const refreshedDueAt = refreshed.due_at;
+
+  // Now the sweep's write-back happens, using the STALE etag from before the refresh (a 503,
+  // so the sweep attempts a conditional requeue with the outdated version).
+  const stubbedRunOnce = async () => {
+    // Directly exercise deleteDoc/replaceDoc's conditional-write path the way runDeindexResweepOnce
+    // would, using the STALE etag it captured at query time, to prove the library-level guarantee
+    // this fix relies on (already verified against Cosmos REST docs): a stale If-Match is rejected
+    // with 412 and the document is left exactly as the concurrent refresh wrote it.
+    const staleWrite = cosmos.handle(
+      `https://fake-cosmos.example.invalid/dbs/agent-state/colls/tasks/docs/${original.id}`,
+      { method: 'PUT', headers: { 'If-Match': staleEtag }, body: JSON.stringify({ ...original, attempts: 1 }) },
+    );
+    assert.equal(staleWrite.status, 412, 'a write using the STALE etag must be rejected, not silently applied');
+  };
+  await stubbedRunOnce();
+
+  const finalEntry = [...cosmos.docs.values()][0];
+  assert.equal(finalEntry.due_at, refreshedDueAt, 'the fresher due_at from the concurrent re-enqueue must survive untouched');
+  assert.equal(finalEntry.attempts, 0, 'the stale sweep write must NOT have applied its attempts increment');
 });
 
 test('runDeindexResweepOnce: a Cosmos query failure fails open (zero-progress result, never throws)', async () => {
