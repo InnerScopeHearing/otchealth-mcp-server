@@ -1,5 +1,5 @@
 /**
- * Durable, read-only HeyGen OAuth token broker.
+ * Durable, least-privilege HeyGen OAuth token broker.
  *
  * Credential material is accepted only by POST /heygen/pair, encrypted with AES-256-GCM, and
  * persisted in the Cosmos `cache` container with ttl:-1. The access/refresh chain never appears in
@@ -38,6 +38,8 @@ const CACHE_CONTAINER = 'cache';
 const FETCH_TIMEOUT_MS = 15_000;
 const TOKEN_CIPHER_VERSION = 1 as const;
 const MAX_CREDENTIAL_HEADER_CHARS = 64 * 1024;
+export const HEYGEN_SAFE_ID_RE = /^[A-Za-z0-9_-]{1,255}$/;
+export const HEYGEN_LOCALE_RE = /^[A-Za-z]{2,3}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|\d{3}))?(?:-(?:[A-Za-z0-9]{5,8}|\d[A-Za-z0-9]{3}))*$/;
 
 export type CosmosRead = typeof readDoc;
 export type CosmosCreate = typeof createDoc;
@@ -569,7 +571,12 @@ interface HeyGenRawResponse {
 }
 
 async function readResponseJson(response: Response): Promise<unknown> {
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    throw brokerError('heygen_response_invalid', 'HeyGen returned an invalid response.');
+  }
   if (!text) return null;
   try {
     return JSON.parse(text) as unknown;
@@ -609,6 +616,37 @@ async function heyGenApiGet(
     else throw error;
   }
   return { status: response.status, ok: response.ok, body };
+}
+
+async function heyGenApiPost(
+  path: string,
+  accessToken: string,
+  body: Record<string, unknown>,
+  deps: HeyGenBrokerDeps,
+): Promise<HeyGenRawResponse> {
+  let response: Response;
+  try {
+    response = await deps.fetchImpl(new URL(path, HEYGEN_API_BASE), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    throw brokerError('heygen_unavailable', 'HeyGen is temporarily unavailable.');
+  }
+  let responseBody: unknown = null;
+  try {
+    responseBody = await readResponseJson(response);
+  } catch (error) {
+    if (!response.ok) responseBody = null;
+    else throw error;
+  }
+  return { status: response.status, ok: response.ok, body: responseBody };
 }
 
 /** Verify that the bearer resolves to a populated subscription account. */
@@ -911,22 +949,84 @@ export async function getHeyGenAccessToken(
 }
 
 // -------------------------------------------------------------------------------------------------
-// Read-only data operations
+// Fixed v3 data operations and the bounded prompt-avatar creation
 // -------------------------------------------------------------------------------------------------
 
 export type HeyGenReadOperation =
   | { kind: 'account' }
   | { kind: 'videos'; limit?: number; token?: string; folderId?: string; title?: string }
   | { kind: 'video'; videoId: string }
-  | { kind: 'styles'; tag?: string; limit?: number; token?: string };
+  | { kind: 'styles'; tag?: string; limit?: number; token?: string }
+  | { kind: 'avatarGroups'; ownership?: 'public' | 'private'; limit?: number; token?: string }
+  | { kind: 'avatarGroup'; groupId: string }
+  | {
+      kind: 'avatarLooks';
+      groupId?: string;
+      avatarType?: 'studio_avatar' | 'digital_twin' | 'photo_avatar';
+      ownership?: 'public' | 'private';
+      limit?: number;
+      token?: string;
+    }
+  | { kind: 'avatarLook'; lookId: string }
+  | {
+      kind: 'voices';
+      type?: 'public' | 'private';
+      engine?: string;
+      language?: string;
+      gender?: string;
+      limit?: number;
+      token?: string;
+    }
+  | {
+      kind: 'voiceDesign';
+      prompt: string;
+      gender?: 'male' | 'female';
+      locale?: string;
+      seed?: number;
+    };
 
-function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'account' }>): {
+interface HeyGenGetTarget {
+  method: 'GET';
   path: string;
   query: Record<string, string | undefined>;
-} {
+}
+
+interface HeyGenPostTarget {
+  method: 'POST';
+  path: string;
+  body: Record<string, unknown>;
+}
+
+type HeyGenTarget = HeyGenGetTarget | HeyGenPostTarget;
+
+function assertSafeHeyGenId(value: string, field: string): void {
+  if (!HEYGEN_SAFE_ID_RE.test(value)) {
+    throw brokerError(`heygen_${field}_invalid`, `HeyGen ${field} contains unsupported characters.`, 400);
+  }
+}
+
+function assertPaginationToken(token: string | undefined): void {
+  if (token !== undefined && token.length > 4096) {
+    throw brokerError('heygen_token_invalid', 'HeyGen pagination token exceeds 4096 characters.', 400);
+  }
+}
+
+function assertIntegerRange(value: number | undefined, min: number, max: number, field: string): void {
+  if (value !== undefined && (!Number.isInteger(value) || value < min || value > max)) {
+    throw brokerError(
+      `heygen_${field}_invalid`,
+      `HeyGen ${field} must be an integer from ${min} to ${max}.`,
+      400,
+    );
+  }
+}
+
+function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'account' }>): HeyGenTarget {
   switch (operation.kind) {
     case 'videos':
+      assertPaginationToken(operation.token);
       return {
+        method: 'GET',
         path: '/v3/videos',
         query: {
           limit: operation.limit === undefined ? undefined : String(operation.limit),
@@ -936,15 +1036,16 @@ function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'acc
         },
       };
     case 'video':
-      if (!/^[A-Za-z0-9_-]{1,255}$/.test(operation.videoId)) {
-        throw brokerError('heygen_video_id_invalid', 'HeyGen video_id contains unsupported characters.', 400);
-      }
+      assertSafeHeyGenId(operation.videoId, 'video_id');
       return {
+        method: 'GET',
         path: `/v3/videos/${operation.videoId}`,
         query: {},
       };
     case 'styles':
+      assertPaginationToken(operation.token);
       return {
+        method: 'GET',
         path: '/v3/video-agents/styles',
         query: {
           tag: operation.tag,
@@ -952,14 +1053,120 @@ function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'acc
           token: operation.token,
         },
       };
+    case 'avatarGroups':
+      if (operation.ownership !== undefined && operation.ownership !== 'public' && operation.ownership !== 'private') {
+        throw brokerError('heygen_ownership_invalid', 'HeyGen ownership must be public or private.', 400);
+      }
+      assertIntegerRange(operation.limit, 1, 50, 'limit');
+      assertPaginationToken(operation.token);
+      return {
+        method: 'GET',
+        path: '/v3/avatars',
+        query: {
+          ownership: operation.ownership,
+          limit: operation.limit === undefined ? undefined : String(operation.limit),
+          token: operation.token,
+        },
+      };
+    case 'avatarGroup':
+      assertSafeHeyGenId(operation.groupId, 'group_id');
+      return {
+        method: 'GET',
+        path: `/v3/avatars/${operation.groupId}`,
+        query: {},
+      };
+    case 'avatarLooks':
+      if (operation.groupId !== undefined) assertSafeHeyGenId(operation.groupId, 'group_id');
+      if (
+        operation.avatarType !== undefined &&
+        operation.avatarType !== 'studio_avatar' &&
+        operation.avatarType !== 'digital_twin' &&
+        operation.avatarType !== 'photo_avatar'
+      ) {
+        throw brokerError('heygen_avatar_type_invalid', 'HeyGen avatar_type is unsupported.', 400);
+      }
+      if (operation.ownership !== undefined && operation.ownership !== 'public' && operation.ownership !== 'private') {
+        throw brokerError('heygen_ownership_invalid', 'HeyGen ownership must be public or private.', 400);
+      }
+      assertIntegerRange(operation.limit, 1, 50, 'limit');
+      assertPaginationToken(operation.token);
+      return {
+        method: 'GET',
+        path: '/v3/avatars/looks',
+        query: {
+          group_id: operation.groupId,
+          avatar_type: operation.avatarType,
+          ownership: operation.ownership,
+          limit: operation.limit === undefined ? undefined : String(operation.limit),
+          token: operation.token,
+        },
+      };
+    case 'avatarLook':
+      assertSafeHeyGenId(operation.lookId, 'look_id');
+      return {
+        method: 'GET',
+        path: `/v3/avatars/looks/${operation.lookId}`,
+        query: {},
+      };
+    case 'voices':
+      if (operation.type !== undefined && operation.type !== 'public' && operation.type !== 'private') {
+        throw brokerError('heygen_voice_type_invalid', 'HeyGen voice type must be public or private.', 400);
+      }
+      if (operation.engine !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(operation.engine)) {
+        throw brokerError('heygen_voice_engine_invalid', 'HeyGen voice engine contains unsupported characters.', 400);
+      }
+      if (operation.language !== undefined && (operation.language.trim().length < 1 || operation.language.length > 64)) {
+        throw brokerError('heygen_voice_language_invalid', 'HeyGen voice language must be 1-64 characters.', 400);
+      }
+      if (operation.gender !== undefined && operation.gender !== 'male' && operation.gender !== 'female') {
+        throw brokerError('heygen_voice_gender_invalid', 'HeyGen voice gender must be male or female.', 400);
+      }
+      assertIntegerRange(operation.limit, 1, 100, 'limit');
+      assertPaginationToken(operation.token);
+      return {
+        method: 'GET',
+        path: '/v3/voices',
+        query: {
+          type: operation.type,
+          engine: operation.engine,
+          language: operation.language?.trim(),
+          gender: operation.gender,
+          limit: operation.limit === undefined ? undefined : String(operation.limit),
+          token: operation.token,
+        },
+      };
+    case 'voiceDesign': {
+      if (
+        typeof operation.prompt !== 'string' ||
+        operation.prompt.trim().length < 1 ||
+        operation.prompt.length > 1000
+      ) {
+        throw brokerError('heygen_voice_prompt_invalid', 'HeyGen voice-design prompt must be 1-1000 characters.', 400);
+      }
+      if (operation.gender !== undefined && operation.gender !== 'male' && operation.gender !== 'female') {
+        throw brokerError('heygen_voice_gender_invalid', 'HeyGen voice-design gender must be male or female.', 400);
+      }
+      if (operation.locale !== undefined && !HEYGEN_LOCALE_RE.test(operation.locale)) {
+        throw brokerError('heygen_voice_locale_invalid', 'HeyGen voice-design locale must be a BCP-47-like tag.', 400);
+      }
+      if (operation.seed !== undefined && (!Number.isInteger(operation.seed) || operation.seed < 0)) {
+        throw brokerError('heygen_voice_seed_invalid', 'HeyGen voice-design seed must be a non-negative integer.', 400);
+      }
+      const body: Record<string, unknown> = { prompt: operation.prompt.trim() };
+      if (operation.gender !== undefined) body.gender = operation.gender;
+      if (operation.locale !== undefined) body.locale = operation.locale;
+      if (operation.seed !== undefined) body.seed = operation.seed;
+      return { method: 'POST', path: '/v3/voices', body };
+    }
   }
-  throw brokerError('heygen_operation_invalid', 'Unsupported HeyGen read operation.', 400);
+  throw brokerError('heygen_operation_invalid', 'Unsupported HeyGen data operation.', 400);
 }
 
 /**
- * Run one of the four fixed read operations. Every attempt performs GET /v3/users/me immediately
- * before its target and refuses non-subscription accounts before the target request can be sent.
- * A 401 from either the guard or target triggers exactly one forced refresh and one full retry.
+ * Run one of the fixed read/semantic-search operations. Every attempt performs GET /v3/users/me
+ * immediately before its target and refuses non-subscription accounts before the target request can
+ * be sent. A 401 from either the guard or target triggers exactly one forced refresh and one full
+ * retry; no other failure is retried.
  */
 export async function executeHeyGenRead(
   operation: HeyGenReadOperation,
@@ -990,19 +1197,177 @@ export async function executeHeyGenRead(
     // Keep this call immediately adjacent to the successful subscription check above. No other
     // network request is permitted between /v3/users/me and the fixed target route.
     const target = targetForOperation(operation);
-    const response = await heyGenApiGet(target.path, accessToken, target.query, deps);
+    const response = target.method === 'GET'
+      ? await heyGenApiGet(target.path, accessToken, target.query, deps)
+      : await heyGenApiPost(target.path, accessToken, target.body, deps);
     if (response.status === 401 && attempt === 0) {
       rejectedAccessToken = accessToken;
       continue;
     }
     if (!response.ok) {
       throw brokerError(
-        'heygen_read_failed',
-        `HeyGen read failed (HTTP ${response.status}).`,
+        'heygen_operation_failed',
+        `HeyGen operation failed (HTTP ${response.status}).`,
         response.status === 401 ? 401 : 502,
       );
     }
     return response.body;
+  }
+  throw brokerError('heygen_auth_failed', 'HeyGen OAuth authorization failed after one refresh retry.', 401);
+}
+
+export interface HeyGenPromptAvatarCreateInput {
+  name: string;
+  prompt: string;
+  avatarGroupId?: string;
+  confirmCreditUse: boolean;
+  confirmedPremiumCreditsBefore: number;
+}
+
+export interface HeyGenPromptAvatarCreateResult {
+  body: unknown;
+  plan: string;
+  premiumCreditsBefore: number;
+}
+
+function validatePromptAvatarCreateInput(input: HeyGenPromptAvatarCreateInput): void {
+  if (input.confirmCreditUse !== true) {
+    throw brokerError(
+      'heygen_credit_confirmation_required',
+      'HeyGen prompt-avatar creation requires confirm_credit_use=true.',
+      400,
+    );
+  }
+  if (!Number.isInteger(input.confirmedPremiumCreditsBefore) || input.confirmedPremiumCreditsBefore < 0) {
+    throw brokerError(
+      'heygen_credit_snapshot_invalid',
+      'confirmed_premium_credits_before must be a non-negative integer from a recent HeyGen account check.',
+      400,
+    );
+  }
+  if (
+    typeof input.name !== 'string' ||
+    input.name.trim().length < 1 ||
+    input.name.length > 100
+  ) {
+    throw brokerError('heygen_avatar_name_invalid', 'HeyGen avatar name must be 1-100 characters.', 400);
+  }
+  if (
+    typeof input.prompt !== 'string' ||
+    input.prompt.trim().length < 1 ||
+    input.prompt.length > 1000
+  ) {
+    throw brokerError('heygen_avatar_prompt_invalid', 'HeyGen avatar prompt must be 1-1000 characters.', 400);
+  }
+  if (input.avatarGroupId !== undefined) assertSafeHeyGenId(input.avatarGroupId, 'avatar_group_id');
+}
+
+function premiumCreditSnapshot(account: unknown): { plan: string; remaining: number } {
+  assertSubscriptionAccount(account);
+  const data = (account as { data: Record<string, unknown> }).data;
+  const subscription = data.subscription as Record<string, unknown>;
+  const credits = subscription.credits;
+  const premiumCredits =
+    credits && typeof credits === 'object' && !Array.isArray(credits)
+      ? (credits as Record<string, unknown>).premium_credits
+      : undefined;
+  const remaining =
+    premiumCredits && typeof premiumCredits === 'object' && !Array.isArray(premiumCredits)
+      ? (premiumCredits as Record<string, unknown>).remaining
+      : undefined;
+  const plan = subscription.plan;
+  if (typeof plan !== 'string' || plan.length === 0 || typeof remaining !== 'number' || !Number.isInteger(remaining)) {
+    throw brokerError(
+      'heygen_premium_credit_balance_unavailable',
+      'HeyGen did not return an integer premium-credit balance. Recheck the subscription account before creating an avatar.',
+      409,
+    );
+  }
+  return { plan, remaining: remaining as number };
+}
+
+/**
+ * Create exactly one prompt avatar after binding explicit user approval to the live premium-credit
+ * balance returned immediately before POST /v3/avatars. Only an authentication rejection (401) may
+ * trigger one forced refresh and one complete retry; ambiguous/network/429/5xx responses are final.
+ */
+export async function executeHeyGenPromptAvatarCreate(
+  input: HeyGenPromptAvatarCreateInput,
+  deps: HeyGenBrokerDeps = defaultHeyGenBrokerDeps,
+): Promise<HeyGenPromptAvatarCreateResult> {
+  validatePromptAvatarCreateInput(input);
+  const body: Record<string, unknown> = {
+    type: 'prompt',
+    name: input.name.trim(),
+    prompt: input.prompt.trim(),
+  };
+  if (input.avatarGroupId !== undefined) body.avatar_group_id = input.avatarGroupId;
+
+  let rejectedAccessToken: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const accessToken = await getHeyGenAccessToken({
+      forceRefresh: attempt === 1,
+      rejectedAccessToken,
+      deps,
+    });
+    const guard = await heyGenApiGet('/v3/users/me', accessToken, {}, deps);
+    if (guard.status === 401 && attempt === 0) {
+      rejectedAccessToken = accessToken;
+      continue;
+    }
+    if (!guard.ok) {
+      throw brokerError(
+        'heygen_account_guard_failed',
+        `HeyGen subscription guard failed (HTTP ${guard.status}).`,
+        guard.status === 401 ? 401 : 502,
+      );
+    }
+    const snapshot = premiumCreditSnapshot(guard.body);
+    if (snapshot.remaining < 1) {
+      throw brokerError(
+        'heygen_premium_credits_insufficient',
+        'HeyGen prompt-avatar creation requires at least 1 remaining premium credit. No avatar was created.',
+        409,
+      );
+    }
+    if (snapshot.remaining !== input.confirmedPremiumCreditsBefore) {
+      throw brokerError(
+        'heygen_credit_snapshot_mismatch',
+        `HeyGen premium-credit balance changed: confirmed ${input.confirmedPremiumCreditsBefore}, current ${snapshot.remaining}. Reconfirm the current balance and retry. No avatar was created.`,
+        409,
+      );
+    }
+
+    // The successful subscription/credit snapshot above is the final network operation before POST.
+    // A timeout/network failure or malformed success response is AMBIGUOUS for a non-idempotent
+    // create: the upstream may have accepted the avatar even though the response never reached us.
+    // Surface that distinction so callers inspect private avatars before ever considering a retry.
+    let response: HeyGenRawResponse;
+    try {
+      response = await heyGenApiPost('/v3/avatars', accessToken, body, deps);
+    } catch {
+      throw brokerError(
+        'heygen_avatar_create_outcome_unknown',
+        'HeyGen avatar creation returned no trustworthy response. The avatar may have been accepted. List private avatar groups before retrying; no automatic retry was attempted.',
+        502,
+      );
+    }
+    if (response.status === 401 && attempt === 0) {
+      rejectedAccessToken = accessToken;
+      continue;
+    }
+    if (!response.ok) {
+      throw brokerError(
+        'heygen_avatar_create_failed',
+        `HeyGen prompt-avatar creation failed (HTTP ${response.status}). The request was not retried; check HeyGen before trying again.`,
+        response.status === 401 ? 401 : 502,
+      );
+    }
+    return {
+      body: response.body,
+      plan: snapshot.plan,
+      premiumCreditsBefore: snapshot.remaining,
+    };
   }
   throw brokerError('heygen_auth_failed', 'HeyGen OAuth authorization failed after one refresh retry.', 401);
 }

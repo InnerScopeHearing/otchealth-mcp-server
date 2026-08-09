@@ -5,15 +5,28 @@ export const HEYGEN_DATA_TOOLS = [
   'heygen_videos_list',
   'heygen_video_get',
   'heygen_video_agent_styles_list',
+  'heygen_avatar_groups_list',
+  'heygen_avatar_group_get',
+  'heygen_avatar_looks_list',
+  'heygen_avatar_look_get',
+  'heygen_voices_list',
+  'heygen_voice_design',
 ] as const;
+export const HEYGEN_CREATION_TOOLS = ['heygen_prompt_avatar_create'] as const;
 
 export type HeyGenToolName =
   | (typeof HEYGEN_PAIRING_TOOLS)[number]
-  | (typeof HEYGEN_DATA_TOOLS)[number];
+  | (typeof HEYGEN_DATA_TOOLS)[number]
+  | (typeof HEYGEN_CREATION_TOOLS)[number];
 
 /** Exact in-handler authorization model. Unknown/external lanes always fail closed. */
 export function isHeyGenToolAllowed(toolName: HeyGenToolName, caller: string | undefined | null): boolean {
   if (!caller) return false;
-  if ((HEYGEN_PAIRING_TOOLS as readonly string[]).includes(toolName)) return caller === 'cto';
+  if (
+    (HEYGEN_PAIRING_TOOLS as readonly string[]).includes(toolName) ||
+    (HEYGEN_CREATION_TOOLS as readonly string[]).includes(toolName)
+  ) {
+    return caller === 'cto';
+  }
   return (HEYGEN_DATA_LANES as readonly string[]).includes(caller);
 }

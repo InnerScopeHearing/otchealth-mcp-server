@@ -82,10 +82,13 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
     assert.ok(set.has(mailArchiveTool), `ship lane must expose ${mailArchiveTool} (the CFO archive-mailbox gap)`);
   }
   // HeyGen OAuth broker: ship connectors need visibility, but authorization remains the explicit
-  // in-handler six-lane/data + CTO-only/pair checks. The external set below must never receive them.
+  // in-handler six-lane/data + CTO-only pairing/create checks. The external set below must never receive them.
   for (const heygenTool of [
     'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get',
     'heygen_videos_list', 'heygen_video_get', 'heygen_video_agent_styles_list',
+    'heygen_avatar_groups_list', 'heygen_avatar_group_get', 'heygen_avatar_looks_list',
+    'heygen_avatar_look_get', 'heygen_voices_list', 'heygen_voice_design',
+    'heygen_prompt_avatar_create',
   ]) {
     assert.ok(set.has(heygenTool), `ship lane must expose ${heygenTool}`);
   }
@@ -118,6 +121,9 @@ test("(d) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 s
     'azure_job_execute', 'azure_containerapp_set_env',
     'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get',
     'heygen_videos_list', 'heygen_video_get', 'heygen_video_agent_styles_list',
+    'heygen_avatar_groups_list', 'heygen_avatar_group_get', 'heygen_avatar_looks_list',
+    'heygen_avatar_look_get', 'heygen_voices_list', 'heygen_voice_design',
+    'heygen_prompt_avatar_create',
   ]) {
     assert.equal(set.has(forbidden), false, `external-read must never see ${forbidden}`);
   }

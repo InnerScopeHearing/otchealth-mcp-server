@@ -70,7 +70,7 @@ const RAG_PRIVILEGED = ['kb_search_privileged', 'kb_get_document'] as const;
 const LLM = ['llm_azure'] as const;
 const SAFETY_CHECKS = ['shield_check', 'groundedness_check', 'claims_check'] as const;
 // HeyGen visibility for the six approved internal lanes. Execution remains independently constrained:
-// data handlers re-check the exact six-lane allowlist, and pairing is CTO-only in-handler + governance.
+// data/semantic handlers re-check the exact six lanes; pairing and prompt creation are CTO-only in-handler + governance.
 const HEYGEN = ['heygen_*'] as const;
 // The CTO's full infra/build/observability surface, reused verbatim by 'exec' (the unified chief
 // wears the CTO hat too, per the "solo operator" note in kb/search-privileged.ts).

@@ -184,12 +184,15 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // feature at all. Adding them here is VISIBILITY only (the security boundary is the in-handler
   // isXeroAllowed(ctx.callerAgent) gate, unchanged); see registry.connector-lanes.test.ts.
   'xero_gl_assemble', 'xero_connections',
-  // HeyGen durable OAuth broker: fixed read-only API surface plus the CTO-only pairing controls.
-  // Visibility here is not authorization: every handler re-checks the exact internal lane, and the
-  // two pairing tools also carry exact CTO-only governance rules. Deliberately absent from the
-  // external-readonly set below.
+  // HeyGen durable OAuth broker: fixed v3 discovery/semantic-search surface plus CTO-only pairing and
+  // one bounded, balance-confirmed prompt-avatar creation. Visibility here is not authorization:
+  // every handler re-checks the exact lane, and pairing/creation carry exact CTO governance rules.
+  // Deliberately absent from the external-readonly set below.
   'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get',
   'heygen_videos_list', 'heygen_video_get', 'heygen_video_agent_styles_list',
+  'heygen_avatar_groups_list', 'heygen_avatar_group_get', 'heygen_avatar_looks_list',
+  'heygen_avatar_look_get', 'heygen_voices_list', 'heygen_voice_design',
+  'heygen_prompt_avatar_create',
 ] as const;
 
 /**
@@ -281,6 +284,8 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   inputShape: Shape;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
+  /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
+  redactInputForLog?: (input: Record<string, unknown>) => unknown;
   /**
    * SECURITY (2026-07-28 review fix): set ONLY on a generated M365 prefix-strip alias (see the
    * alias-generation block at the bottom of registerTool) to the REAL tool's name, e.g.
@@ -750,7 +755,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         correlation_id: correlationId,
         tool: def.name,
         caller_hash: callerHash,
-        input: args,
+        input: def.redactInputForLog
+          ? def.redactInputForLog(args as Record<string, unknown>)
+          : args,
         dry_run: dryRun,
         read_only_mode: env.READ_ONLY_MODE,
       });
@@ -875,7 +882,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
               tool: def.name,
               actor: callerAgent,
               correlationId,
-              args: handlerInput,
+              args: def.redactInputForLog
+                ? def.redactInputForLog(handlerInput)
+                : handlerInput,
               result,
             }).catch(() => undefined);
           }
