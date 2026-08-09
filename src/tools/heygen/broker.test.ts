@@ -17,7 +17,7 @@ import {
   newHeyGenPairId,
   parseOfficialCredentialsHeader,
   persistPairedHeyGenToken,
-  tokenFamilyFingerprint,
+  newHeyGenTokenFamilyFingerprint,
   type HeyGenBrokerDeps,
   type HeyGenTokenDoc,
   type HeyGenTokenState,
@@ -526,9 +526,10 @@ test('upstream token and read error bodies are never included in sanitized error
   assert.deepEqual(paths, ['/v3/users/me', '/v3/videos/v1']);
 });
 
-test('token family fingerprint is stable but contains no refresh-token substring', () => {
-  const fp = tokenFamilyFingerprint(BASE_STATE.refreshToken);
-  assert.equal(fp, tokenFamilyFingerprint(BASE_STATE.refreshToken));
+test('token family fingerprint is random metadata, not derived from OAuth material', () => {
+  const fp = newHeyGenTokenFamilyFingerprint(fixedRandom(4));
+  assert.equal(fp, '04'.repeat(16));
   assert.equal(fp.length, 32);
   assert.ok(!fp.includes(BASE_STATE.refreshToken));
+  assert.notEqual(fp, newHeyGenTokenFamilyFingerprint(fixedRandom(5)));
 });

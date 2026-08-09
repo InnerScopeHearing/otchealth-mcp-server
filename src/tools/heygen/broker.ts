@@ -10,7 +10,6 @@
 import {
   createCipheriv,
   createDecipheriv,
-  createHash,
   hkdfSync,
   randomBytes,
 } from 'node:crypto';
@@ -332,8 +331,16 @@ export function buildHeyGenPairingDoc(pairId: string, nowMs = Date.now()): HeyGe
   };
 }
 
-export function tokenFamilyFingerprint(refreshToken: string): string {
-  return createHash('sha256').update(`heygen-token-family\0${refreshToken}`, 'utf8').digest('hex').slice(0, 32);
+export function newHeyGenTokenFamilyFingerprint(
+  randomBytesImpl: (size: number) => Buffer = randomBytes,
+): string {
+  // A random family id is enough to correlate concurrent refreshes from the SAME pairing. It does
+  // not need to be derived from OAuth material at all; avoiding a token hash removes an unnecessary
+  // secret-derived value from plaintext metadata and prevents this identifier from being mistaken
+  // for password hashing by security scanners.
+  const bytes = randomBytesImpl(16);
+  if (bytes.length !== 16) throw brokerError('pairing_entropy_failed', 'Could not create a HeyGen token family id.');
+  return bytes.toString('hex');
 }
 
 function assertSubscriptionAccount(userResponse: unknown): void {
@@ -377,7 +384,7 @@ export function buildHeyGenTokenDoc(input: {
     ttl: -1,
     kind: 'heygen_oauth_token',
     status: 'live',
-    familyFingerprint: input.familyFingerprint ?? tokenFamilyFingerprint(input.state.refreshToken),
+    familyFingerprint: input.familyFingerprint ?? newHeyGenTokenFamilyFingerprint(input.randomBytesImpl ?? randomBytes),
     pairedAt: input.pairedAt ?? new Date(nowMs).toISOString(),
     updatedAt: new Date(nowMs).toISOString(),
     ...encrypted,
