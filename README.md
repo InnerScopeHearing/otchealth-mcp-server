@@ -93,6 +93,10 @@ Contracts were checked against the live HeyGen External API OpenAPI document on 
 and official HeyGen Skills v3.2.0 at
 [commit `1bd5e4d33a028dfed3abf504c5e3dd644fb9ea8a`](https://github.com/heygen-com/skills/tree/1bd5e4d33a028dfed3abf504c5e3dd644fb9ea8a).
 
+Live receipt: source `555e5fd567d146bfb970616af8a1d90d3bbf9461`, deploy `31299016759`, 29
+HeyGen tools, catalog version `c5392855`, gateway tool count 943, and zero credits consumed in the
+post-cutover no-render verification. Full operating detail: `docs/HEYGEN-PRODUCTION-CONTROL.md`.
+
 ---
 
 ## Phase 1 tool catalog (13 tools)
