@@ -11,8 +11,26 @@ export const HEYGEN_DATA_TOOLS = [
   'heygen_avatar_look_get',
   'heygen_voices_list',
   'heygen_voice_design',
+  'heygen_video_statuses_get',
+  'heygen_video_agent_sessions_list',
+  'heygen_video_agent_session_get',
+  'heygen_video_agent_session_videos_list',
+  'heygen_brand_kits_list',
+  'heygen_brand_glossaries_list',
+  'heygen_brand_glossary_get',
+  'heygen_voice_get',
+  'heygen_translation_languages_list',
+  'heygen_translations_list',
+  'heygen_translation_get',
+  'heygen_translation_statuses_get',
+  'heygen_proofread_get',
+  'heygen_avatar_video_operation_get',
 ] as const;
-export const HEYGEN_CREATION_TOOLS = ['heygen_prompt_avatar_create'] as const;
+export const HEYGEN_CREATION_TOOLS = [
+  'heygen_prompt_avatar_create',
+  'heygen_avatar_video_create',
+  'heygen_video_wait_ingest_qa',
+] as const;
 
 export type HeyGenToolName =
   | (typeof HEYGEN_PAIRING_TOOLS)[number]

@@ -1921,7 +1921,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAzureSearchIndexerUpsert(server, callerHash);
   // Xero (read-only, executive-ring gated in-handler; MNPI — see tools/xero/client.ts).
   registerXeroTools(server, callerHash);
-  // HeyGen (durable OAuth broker + fixed v3 discovery/voice design + one CTO prompt create; every handler lane-gated).
+  // HeyGen (durable subscription OAuth + Phase 0 discovery/reconciliation + bounded idempotent direct video/ingestion writes; every handler lane-gated).
   registerHeyGenTools(server, callerHash);
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).

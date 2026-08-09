@@ -184,15 +184,20 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // feature at all. Adding them here is VISIBILITY only (the security boundary is the in-handler
   // isXeroAllowed(ctx.callerAgent) gate, unchanged); see registry.connector-lanes.test.ts.
   'xero_gl_assemble', 'xero_connections',
-  // HeyGen durable OAuth broker: fixed v3 discovery/semantic-search surface plus CTO-only pairing and
-  // one bounded, balance-confirmed prompt-avatar creation. Visibility here is not authorization:
-  // every handler re-checks the exact lane, and pairing/creation carry exact CTO governance rules.
+  // HeyGen durable subscription-OAuth broker: Phase 0 discovery/reconciliation plus bounded CTO-only
+  // prompt-avatar, idempotent direct-video, and private artifact-ingestion writes. Visibility here is not
+  // authorization: every handler re-checks the exact lane and every write has an exact governance rule.
   // Deliberately absent from the external-readonly set below.
   'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get',
   'heygen_videos_list', 'heygen_video_get', 'heygen_video_agent_styles_list',
   'heygen_avatar_groups_list', 'heygen_avatar_group_get', 'heygen_avatar_looks_list',
-  'heygen_avatar_look_get', 'heygen_voices_list', 'heygen_voice_design',
-  'heygen_prompt_avatar_create',
+  'heygen_avatar_look_get', 'heygen_voices_list', 'heygen_voice_design', 'heygen_voice_get',
+  'heygen_video_statuses_get', 'heygen_video_agent_sessions_list', 'heygen_video_agent_session_get',
+  'heygen_video_agent_session_videos_list', 'heygen_brand_kits_list', 'heygen_brand_glossaries_list',
+  'heygen_brand_glossary_get', 'heygen_translation_languages_list', 'heygen_translations_list',
+  'heygen_translation_get', 'heygen_translation_statuses_get', 'heygen_proofread_get',
+  'heygen_avatar_video_operation_get', 'heygen_prompt_avatar_create', 'heygen_avatar_video_create',
+  'heygen_video_wait_ingest_qa',
 ] as const;
 
 /**

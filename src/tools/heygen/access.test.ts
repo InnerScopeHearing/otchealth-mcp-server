@@ -11,6 +11,7 @@ import {
 import { LANE_TOOLSETS, isToolInLaneAllowlist } from '../../config/lane-toolsets.js';
 import { requiredRoleFor, roleAllows } from '../../catalog/governance.js';
 import {
+  redactHeyGenAvatarVideoInputForLog,
   redactHeyGenPromptAvatarInputForLog,
   redactHeyGenVoiceDesignInputForLog,
 } from './redaction.js';
@@ -75,16 +76,19 @@ test('governance duplicates the exact in-handler lane model: pairing/create CTO-
 });
 
 test('SAFETY-CRITICAL: every registered HeyGen tool call-site has its own explicit in-handler lane gate', () => {
-  const source = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
+  const base = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
+  const production = readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8');
+  const source = `${base}\n${production}`;
   const registrations = (source.match(/registerTool\(/g) ?? []).length;
   const gates = (source.match(/if \(!isHeyGenToolAllowed\(/g) ?? []).length;
-  const refusals = (source.match(/return heyGenLaneRefusal\(/g) ?? []).length;
-  assert.equal(registrations, 13, 'public HeyGen surface must remain exactly 2 pairing + 10 data + 1 bounded creation tool');
+  const refusals = (base.match(/return heyGenLaneRefusal\(/g) ?? []).length;
+  const productionRefusals = (production.match(/return laneRefusal\(/g) ?? []).length;
+  assert.equal(registrations, 29, 'public HeyGen surface must remain exactly 2 pairing + 24 data + 3 bounded write tools');
   assert.equal(gates, registrations, 'every registerTool call-site must explicitly check its caller lane');
-  assert.equal(refusals, registrations, 'every explicit gate must return a lane refusal');
+  assert.equal(refusals + productionRefusals, registrations, 'every explicit gate must return a lane refusal');
 });
 
-test('public HeyGen surface is fixed and excludes generic/destructive/media-generation capabilities', () => {
+test('public HeyGen surface is fixed and exposes only bounded direct video while excluding generic/destructive capabilities', () => {
   assert.deepEqual([...HEYGEN_DATA_TOOLS], [
     'heygen_account_get',
     'heygen_videos_list',
@@ -96,8 +100,26 @@ test('public HeyGen surface is fixed and excludes generic/destructive/media-gene
     'heygen_avatar_look_get',
     'heygen_voices_list',
     'heygen_voice_design',
+    'heygen_video_statuses_get',
+    'heygen_video_agent_sessions_list',
+    'heygen_video_agent_session_get',
+    'heygen_video_agent_session_videos_list',
+    'heygen_brand_kits_list',
+    'heygen_brand_glossaries_list',
+    'heygen_brand_glossary_get',
+    'heygen_voice_get',
+    'heygen_translation_languages_list',
+    'heygen_translations_list',
+    'heygen_translation_get',
+    'heygen_translation_statuses_get',
+    'heygen_proofread_get',
+    'heygen_avatar_video_operation_get',
   ]);
-  assert.deepEqual([...HEYGEN_CREATION_TOOLS], ['heygen_prompt_avatar_create']);
+  assert.deepEqual([...HEYGEN_CREATION_TOOLS], [
+    'heygen_prompt_avatar_create',
+    'heygen_avatar_video_create',
+    'heygen_video_wait_ingest_qa',
+  ]);
   const exposed = [...HEYGEN_PAIRING_TOOLS, ...HEYGEN_DATA_TOOLS, ...HEYGEN_CREATION_TOOLS];
   for (const forbidden of [
     'heygen_request',
@@ -116,10 +138,12 @@ test('public HeyGen surface is fixed and excludes generic/destructive/media-gene
     assert.equal(exposed.includes(forbidden), false, `must not expose ${forbidden}`);
   }
 
-  const source = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
-  assert.equal(source.includes('reference_images'), false, 'prompt-avatar input must never expose reference_images');
+  const source = `${readFileSync(new URL('./tools.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8')}`;
+  assert.equal(source.includes('reference_images'), false, 'HeyGen inputs must never expose arbitrary reference_images');
   assert.match(source, /name: 'heygen_prompt_avatar_create',[\s\S]*?category: 'write_simple'/);
   assert.doesNotMatch(source, /name: 'heygen_prompt_avatar_create',[\s\S]*?category: 'write_orchestrated'/);
+  assert.match(source, /name: 'heygen_avatar_video_create',[\s\S]*?category: 'write_orchestrated'/);
+  assert.match(source, /name: 'heygen_video_wait_ingest_qa',[\s\S]*?category: 'write_orchestrated'/);
 });
 
 test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prompts', () => {
@@ -132,9 +156,27 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
     confirmed_premium_credits_before: 7,
   });
   const voiceLog = redactHeyGenVoiceDesignInputForLog({ prompt, gender: 'female', locale: 'en-US' });
-  for (const payload of [createLog, voiceLog]) {
+  const videoLog = redactHeyGenAvatarVideoInputForLog({
+    operation_id: 'video_op_01',
+    idempotency_key: 'SENSITIVE-IDEMPOTENCY-KEY',
+    manifest_sha256: 'a'.repeat(64),
+    title: 'SENSITIVE TITLE',
+    avatar_id: 'look_1',
+    voice_id: 'voice_1',
+    script: prompt,
+    engine: 'avatar_v',
+    resolution: '1080p',
+    aspect_ratio: '16:9',
+    confirm_credit_use: true,
+    confirmed_premium_credits_before: 981,
+    max_approved_credits: 20,
+    reserve_premium_credits: 300,
+  });
+  for (const payload of [createLog, voiceLog, videoLog]) {
     const serialized = JSON.stringify(payload);
     assert.equal(serialized.includes(prompt), false);
+    assert.equal(serialized.includes('SENSITIVE-IDEMPOTENCY-KEY'), false);
+    assert.equal(serialized.includes('SENSITIVE TITLE'), false);
     assert.match(serialized, /[a-f0-9]{64}/);
   }
   assert.deepEqual(Object.keys(createLog as Record<string, unknown>).sort(), [
@@ -149,6 +191,22 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
     'locale',
     'prompt_sha256',
     'seed',
+  ]);
+  assert.deepEqual(Object.keys(videoLog as Record<string, unknown>).sort(), [
+    'aspect_ratio',
+    'avatar_id',
+    'confirm_credit_use',
+    'confirmed_premium_credits_before',
+    'engine',
+    'idempotency_key_sha256',
+    'manifest_sha256',
+    'max_approved_credits',
+    'operation_id',
+    'reserve_premium_credits',
+    'resolution',
+    'script_sha256',
+    'title_sha256',
+    'voice_id',
   ]);
   assert.equal((createLog as Record<string, unknown>).confirm_credit_use, true);
   assert.equal((createLog as Record<string, unknown>).confirmed_premium_credits_before, 7);

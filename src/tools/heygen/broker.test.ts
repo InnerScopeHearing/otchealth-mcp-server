@@ -11,9 +11,11 @@ import {
   containsApiKey,
   decryptHeyGenTokenState,
   encryptHeyGenTokenState,
+  executeHeyGenAvatarVideoCreate,
   executeHeyGenPromptAvatarCreate,
   executeHeyGenRead,
   getHeyGenAccessToken,
+  getHeyGenVideoOperation,
   getHeyGenPairingStatus,
   newHeyGenPairId,
   parseOfficialCredentialsHeader,
@@ -1059,4 +1061,253 @@ test('token family fingerprint is random metadata, not derived from OAuth materi
   assert.equal(fp.length, 32);
   assert.ok(!fp.includes(BASE_STATE.refreshToken));
   assert.notEqual(fp, newHeyGenTokenFamilyFingerprint(fixedRandom(5)));
+});
+
+function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<typeof executeHeyGenAvatarVideoCreate>[0] {
+  return {
+    operationId: 'video_op_01',
+    idempotencyKey: 'video-op:01',
+    manifestSha256: 'a'.repeat(64),
+    title: 'Executive update',
+    avatarId: 'look_1',
+    voiceId: 'voice_1',
+    script: 'Exact approved script.',
+    engine: 'avatar_v',
+    resolution: '720p',
+    aspectRatio: 'auto',
+    confirmCreditUse: true,
+    confirmedPremiumCreditsBefore: 7,
+    maxApprovedCredits: 2,
+    reservePremiumCredits: 5,
+    ...overrides,
+  } as Parameters<typeof executeHeyGenAvatarVideoCreate>[0];
+}
+
+function avatarVideoHarness(options: {
+  post?: (call: number) => Response | Promise<Response>;
+  account?: unknown;
+  look?: unknown;
+  group?: unknown;
+  voice?: unknown;
+} = {}) {
+  type Stored = { doc: Record<string, unknown>; etag: string };
+  const store = new Map<string, Stored>();
+  store.set(HEYGEN_TOKEN_DOC_ID, { doc: tokenDoc({ ...BASE_STATE, expiresAt: 0 }), etag: 'T1' });
+  let etag = 1;
+  let postCalls = 0;
+  const requests: Array<{ path: string; method: string; headers: Record<string, string>; body?: unknown }> = [];
+  const deps = baseDeps({
+    now: () => 1_000_000,
+    sleep: async () => undefined,
+    read: (async (_coll, pk, id) => {
+      assert.equal(pk, id);
+      const row = store.get(id);
+      return row ? { doc: row.doc, etag: row.etag } : null;
+    }) as HeyGenBrokerDeps['read'],
+    create: (async (_coll, pk, doc) => {
+      const id = String(doc.id);
+      assert.equal(pk, id);
+      if (store.has(id)) throw new Error('conflict');
+      const nextEtag = `E${++etag}`;
+      store.set(id, { doc, etag: nextEtag });
+      return { ok: true, status: 201, body: doc, etag: nextEtag };
+    }) as HeyGenBrokerDeps['create'],
+    replace: (async (_coll, pk, id, doc, ifMatch) => {
+      assert.equal(pk, id);
+      const current = store.get(id);
+      if (!current || current.etag !== ifMatch) return { ok: false, status: 412, body: null, etag: null };
+      const nextEtag = `E${++etag}`;
+      store.set(id, { doc, etag: nextEtag });
+      return { ok: true, status: 200, body: doc, etag: nextEtag };
+    }) as HeyGenBrokerDeps['replace'],
+    fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+      const parsed = new URL(String(url));
+      const headers = init?.headers as Record<string, string> | undefined;
+      requests.push({
+        path: parsed.pathname + parsed.search,
+        method: init?.method ?? 'GET',
+        headers: headers ?? {},
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      if (parsed.pathname === '/v3/users/me') return jsonResponse(options.account ?? USER_RESPONSE);
+      if (parsed.pathname === '/v3/avatars/looks/look_1') return jsonResponse(options.look ?? {
+        data: {
+          id: 'look_1', avatar_type: 'digital_twin', group_id: 'group_1', default_voice_id: 'voice_1',
+          supported_api_engines: ['avatar_iii', 'avatar_iv', 'avatar_v'], status: 'completed',
+        },
+      });
+      if (parsed.pathname === '/v3/avatars/group_1') return jsonResponse(options.group ?? {
+        data: { id: 'group_1', status: 'completed', consent_status: 'approved' },
+      });
+      if (parsed.pathname === '/v3/voices/voice_1') return jsonResponse(options.voice ?? {
+        data: { voice_id: 'voice_1', status: 'complete', support_pause: true },
+      });
+      if (parsed.pathname === '/v3/videos') {
+        postCalls += 1;
+        return options.post ? options.post(postCalls) : jsonResponse({ data: { video_id: 'v_1', status: 'pending' } });
+      }
+      throw new Error(`unexpected ${parsed.pathname}`);
+    }) as typeof fetch,
+  });
+  return { deps, store, requests, postCalls: () => postCalls };
+}
+
+test('direct Avatar Video create runs guarded live preflight, sends one exact idempotent POST, and persists accepted state', async () => {
+  const harness = avatarVideoHarness();
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(result.state, 'accepted');
+  assert.equal(result.videoId, 'v_1');
+  assert.equal(result.replayed, false);
+  assert.deepEqual(harness.requests.map((entry) => [entry.method, entry.path]), [
+    ['GET', '/v3/users/me'],
+    ['GET', '/v3/avatars/looks/look_1'],
+    ['GET', '/v3/avatars/group_1'],
+    ['GET', '/v3/voices/voice_1'],
+    ['POST', '/v3/videos'],
+  ]);
+  const post = harness.requests.at(-1)!;
+  assert.equal(post.headers['Idempotency-Key'], 'video-op:01');
+  assert.deepEqual(post.body, {
+    type: 'avatar',
+    title: 'Executive update',
+    avatar_id: 'look_1',
+    voice_id: 'voice_1',
+    script: 'Exact approved script.',
+    engine: { type: 'avatar_v' },
+    resolution: '720p',
+    aspect_ratio: 'auto',
+    output_format: 'mp4',
+    callback_id: 'video_op_01',
+  });
+  assert.equal(JSON.stringify(post.body).includes('confirm_credit_use'), false);
+  assert.equal(JSON.stringify(post.body).includes('max_approved_credits'), false);
+  assert.equal(JSON.stringify([...harness.store.values()]).includes('video-op:01'), false, 'raw key must not be persisted');
+  assert.equal(JSON.stringify([...harness.store.values()]).includes('Exact approved script'), false, 'raw script must not be persisted');
+  const stored = await getHeyGenVideoOperation('video_op_01', harness.deps);
+  assert.equal(stored?.state, 'accepted');
+  assert.equal(stored?.videoId, 'v_1');
+});
+
+test('accepted operation replays without network and changed payload is refused locally', async () => {
+  const harness = avatarVideoHarness();
+  const input = avatarVideoInput();
+  await executeHeyGenAvatarVideoCreate(input, harness.deps);
+  const calls = harness.requests.length;
+  const replay = await executeHeyGenAvatarVideoCreate(input, harness.deps);
+  assert.equal(replay.state, 'accepted');
+  assert.equal(replay.replayed, true);
+  assert.equal(harness.requests.length, calls, 'accepted replay must not call HeyGen');
+  await assert.rejects(
+    () => executeHeyGenAvatarVideoCreate(avatarVideoInput({ script: 'Changed script.' }), harness.deps),
+    /already bound to a different request/,
+  );
+  assert.equal(harness.requests.length, calls, 'conflicting replay must not call HeyGen');
+});
+
+test('credit snapshot and reserve violations block before POST', async () => {
+  for (const input of [
+    avatarVideoInput({ confirmedPremiumCreditsBefore: 6 }),
+    avatarVideoInput({ maxApprovedCredits: 3, reservePremiumCredits: 5 }),
+  ]) {
+    const harness = avatarVideoHarness();
+    await assert.rejects(() => executeHeyGenAvatarVideoCreate(input, harness.deps), /balance changed|reserve floor/);
+    assert.equal(harness.postCalls(), 0);
+    assert.deepEqual(harness.requests.map((entry) => entry.path), [
+      '/v3/users/me', '/v3/avatars/looks/look_1', '/v3/avatars/group_1', '/v3/voices/voice_1',
+    ]);
+  }
+});
+
+test('look, group, voice, and Avatar V reference incompatibilities block before POST', async () => {
+  const cases = [
+    {
+      options: { look: { data: { id: 'look_1', avatar_type: 'digital_twin', group_id: 'group_1', supported_api_engines: ['avatar_iv'], status: 'completed' } } },
+      input: avatarVideoInput(),
+      error: /does not support avatar_v/,
+    },
+    {
+      options: { group: { data: { id: 'group_1', status: 'pending_consent', consent_status: 'pending' } } },
+      input: avatarVideoInput(),
+      error: /not completed/,
+    },
+    {
+      options: { voice: { data: { voice_id: 'voice_1', status: 'failed', support_pause: true } } },
+      input: avatarVideoInput(),
+      error: /voice is not ready/,
+    },
+    {
+      options: { look: { data: { id: 'look_1', avatar_type: 'photo_avatar', group_id: 'group_1', supported_api_engines: ['avatar_v'], status: 'completed' } } },
+      input: avatarVideoInput(),
+      error: /explicit completed Digital Twin reference/,
+    },
+  ];
+  for (const entry of cases) {
+    const harness = avatarVideoHarness(entry.options);
+    await assert.rejects(() => executeHeyGenAvatarVideoCreate(entry.input, harness.deps), entry.error);
+    assert.equal(harness.postCalls(), 0);
+  }
+});
+
+test('429 and 5xx retry exactly once with the same provider key; repeated ambiguity becomes outcome_unknown', async () => {
+  const harness = avatarVideoHarness({
+    post: (call) => call === 1
+      ? new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {
+          status: 429, headers: { 'content-type': 'application/json', 'retry-after': '0' },
+        })
+      : jsonResponse({ data: { video_id: 'v_retry', status: 'pending' } }),
+  });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(result.state, 'accepted');
+  assert.equal(result.videoId, 'v_retry');
+  const posts = harness.requests.filter((entry) => entry.method === 'POST');
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts.map((entry) => entry.headers['Idempotency-Key']), ['video-op:01', 'video-op:01']);
+  assert.deepEqual(posts[0].body, posts[1].body);
+
+  const unknownHarness = avatarVideoHarness({ post: () => new Response('unavailable', { status: 503 }) });
+  const unknown = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), unknownHarness.deps);
+  assert.equal(unknown.state, 'outcome_unknown');
+  assert.equal(unknownHarness.postCalls(), 2);
+});
+
+test('provider 409 request_in_progress returns durable in_progress without minting a new operation', async () => {
+  const harness = avatarVideoHarness({
+    post: () => jsonResponse({ error: { code: 'request_in_progress', message: 'retry' } }, 409),
+  });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(result.state, 'in_progress');
+  assert.equal(result.errorCode, 'request_in_progress');
+  assert.equal(harness.postCalls(), 1);
+});
+
+test('Phase 0 read operations map to exact v3 paths and query names', async () => {
+  const operations = [
+    [{ kind: 'videoStatuses', videoIds: ['v1'], batchIds: ['b1'] } as const, '/v3/videos/statuses?video_ids=v1&batch_ids=b1'],
+    [{ kind: 'videoAgentSessions', limit: 20, token: 'next' } as const, '/v3/video-agents?limit=20&token=next'],
+    [{ kind: 'videoAgentSession', sessionId: 's1' } as const, '/v3/video-agents/s1'],
+    [{ kind: 'videoAgentSessionVideos', sessionId: 's1' } as const, '/v3/video-agents/s1/videos'],
+    [{ kind: 'brandKits', limit: 10 } as const, '/v3/brand-kits?limit=10'],
+    [{ kind: 'brandGlossaries', limit: 10 } as const, '/v3/brand-glossaries?limit=10'],
+    [{ kind: 'brandGlossary', brandGlossaryId: 'g1' } as const, '/v3/brand-glossaries/g1'],
+    [{ kind: 'voice', voiceId: 'voice1' } as const, '/v3/voices/voice1'],
+    [{ kind: 'translationLanguages' } as const, '/v3/video-translations/languages'],
+    [{ kind: 'translations', limit: 10 } as const, '/v3/video-translations?limit=10'],
+    [{ kind: 'translation', translationId: 't1' } as const, '/v3/video-translations/t1'],
+    [{ kind: 'translationStatuses', translationIds: ['t1'], batchIds: ['b1'] } as const, '/v3/video-translations/statuses?video_translation_ids=t1&batch_ids=b1'],
+    [{ kind: 'proofread', proofreadId: 'p1' } as const, '/v3/video-translations/proofreads/p1'],
+  ] as const;
+  for (const [operation, expected] of operations) {
+    const paths: string[] = [];
+    const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+    const deps = baseDeps({
+      read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+      fetchImpl: (async (url: string | URL) => {
+        const parsed = new URL(String(url));
+        paths.push(parsed.pathname + parsed.search);
+        return parsed.pathname === '/v3/users/me' ? jsonResponse(USER_RESPONSE) : jsonResponse({ data: [] });
+      }) as typeof fetch,
+    });
+    await executeHeyGenRead(operation, deps);
+    assert.deepEqual(paths, ['/v3/users/me', expected]);
+  }
 });
