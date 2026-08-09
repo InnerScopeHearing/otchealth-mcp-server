@@ -184,6 +184,12 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // feature at all. Adding them here is VISIBILITY only (the security boundary is the in-handler
   // isXeroAllowed(ctx.callerAgent) gate, unchanged); see registry.connector-lanes.test.ts.
   'xero_gl_assemble', 'xero_connections',
+  // HeyGen durable OAuth broker: fixed read-only API surface plus the CTO-only pairing controls.
+  // Visibility here is not authorization: every handler re-checks the exact internal lane, and the
+  // two pairing tools also carry exact CTO-only governance rules. Deliberately absent from the
+  // external-readonly set below.
+  'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get',
+  'heygen_videos_list', 'heygen_video_get', 'heygen_video_agent_styles_list',
 ] as const;
 
 /**

@@ -30,6 +30,8 @@ const redactPaths = [
   'authorization',
   'req.headers.authorization',
   'request.headers.authorization',
+  'req.headers["x-heygen-oauth-credentials"]',
+  'request.headers["x-heygen-oauth-credentials"]',
   '*.password',
   '*.token',
   '*.api_key',

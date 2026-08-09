@@ -7,6 +7,7 @@ import { registerHealth } from './health.js';
 import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
 import { registerOAuthRoutes } from './oauth.js';
+import { registerHeyGenPairingRoute } from './heygen-pairing.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { loadRevocations, startRevocationReloader } from '../auth/revocation-store.js';
 import { startDeindexResweepReloader } from '../agentstate/deindex-resweep.js';
@@ -91,6 +92,7 @@ async function main(): Promise<void> {
   registerHealth(app);
   registerAdmin(app);
   registerOAuthRoutes(app);
+  registerHeyGenPairingRoute(app);
   registerMcpRoutes(app);
   registerWebhookRoutes(app);
 
@@ -98,7 +100,7 @@ async function main(): Promise<void> {
     return reply.code(404).send({
       error: 'not_found',
       message:
-        'Route not found. Known routes: GET /health, POST /mcp, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
+        'Route not found. Known routes: GET /health, POST /mcp, POST /heygen/pair, GET /oauth/authorize, POST /oauth/token, GET /.well-known/oauth-authorization-server, POST /admin/revoke.',
     });
   });
 
