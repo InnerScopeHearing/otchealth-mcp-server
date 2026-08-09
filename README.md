@@ -27,14 +27,34 @@ Endpoints:
 
 ---
 
-## HeyGen read-only OAuth broker
+## HeyGen OAuth broker and fixed v3 surface
 
-The HeyGen integration exposes only four fixed reads: `heygen_account_get`, `heygen_videos_list`,
-`heygen_video_get`, and `heygen_video_agent_styles_list`. Each operation calls `GET /v3/users/me`
-immediately before its target and refuses the target unless the account reports
-`billing_type=subscription` with a populated `subscription`. The data tools are limited in-handler to
-`cto`, `exec`, `coo`, `cro`, `cpo`, and `developer`; no generic request or generation/mutation/download
-path exists.
+The durable broker exposes a closed HeyGen surface:
+
+- Existing account/video reads: `heygen_account_get`, `heygen_videos_list`, `heygen_video_get`,
+  `heygen_video_agent_styles_list`.
+- Official v3 avatar/voice discovery: `heygen_avatar_groups_list`, `heygen_avatar_group_get`,
+  `heygen_avatar_looks_list`, `heygen_avatar_look_get`, `heygen_voices_list`.
+- `heygen_voice_design`: `POST /v3/voices` semantic search over existing voices (up to three results;
+  no voice generation and no generation quota consumed).
+- `heygen_prompt_avatar_create`: the sole creation tool, limited to exact body
+  `{"type":"prompt","name":"…","prompt":"…","avatar_group_id":"…"}` (group id optional). It
+  exposes no photo/digital-twin/reference-image path.
+
+Every target-capable operation calls `GET /v3/users/me` immediately before its target and refuses
+unless `billing_type=subscription` has a non-empty `subscription`. Reads and semantic voice search are
+allowed only to exact internal lanes `cto`, `exec`, `coo`, `cro`, `cpo`, and `developer`, duplicated in
+central governance and in each handler. Prompt-avatar creation and pairing are CTO-only. The surface has
+no generic request, delete/update/upload, video generation, translation, voice clone, speech, or TTS tool.
+
+Prompt-avatar approval is balance-bound: the `write_simple` call requires `confirm_credit_use=true` and
+integer `confirmed_premium_credits_before`. Immediately before `POST /v3/avatars`, the broker parses
+`subscription.credits.premium_credits.remaining`, requires an exact positive match, and otherwise refuses
+without posting. Success returns the upstream v3 JSON plus the plan and pre-request premium-credit value.
+Only a 401 authentication rejection may force one refresh and one full retry; timeout/network/429/5xx or
+an ambiguous response is never retried. This tool uses normal write enablement/dry-run controls but does
+not require the gateway-wide `ENABLE_HIGH_RISK_TOOLS` toggle. Prompt logs contain only the avatar name and
+a SHA-256 fingerprint, never the full prompt.
 
 Pairing is CTO-only:
 
@@ -51,6 +71,12 @@ AES-256-GCM encrypted before durable storage (`ttl:-1`); only ciphertext/IV/tag 
 metadata are stored. OAuth refresh rotation uses an in-process mutex plus Cosmos ETags and persists a
 new encrypted chain before returning its access token. Rotating `OAUTH_TOKEN_SIGNING_SECRET` makes the
 old HeyGen ciphertext intentionally undecryptable, so run a fresh pairing after that rotation.
+
+Official contracts are pinned to
+[`heygen-cli` v0.6.0 commit `7a698ba72e828a233df87bd9526f343fa1b3ee29`](https://github.com/heygen-com/heygen-cli/tree/7a698ba72e828a233df87bd9526f343fa1b3ee29)
+(`gen/avatar.go`, `gen/voice.go`, `gen/user.go`) and official HeyGen Skills v3.2.0 at
+[commit `1bd5e4d33a028dfed3abf504c5e3dd644fb9ea8a`](https://github.com/heygen-com/skills/tree/1bd5e4d33a028dfed3abf504c5e3dd644fb9ea8a)
+(`heygen-avatar/references/avatar-creation.md`).
 
 ---
 

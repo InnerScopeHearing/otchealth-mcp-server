@@ -11,6 +11,7 @@ import {
   containsApiKey,
   decryptHeyGenTokenState,
   encryptHeyGenTokenState,
+  executeHeyGenPromptAvatarCreate,
   executeHeyGenRead,
   getHeyGenAccessToken,
   getHeyGenPairingStatus,
@@ -28,7 +29,7 @@ const USER_RESPONSE = {
   data: {
     username: 'test-user',
     billing_type: 'subscription',
-    subscription: { plan: 'team', credits: {} },
+    subscription: { plan: 'team', credits: { premium_credits: { remaining: 7 } } },
   },
 };
 
@@ -192,23 +193,30 @@ test('pair id uses exactly 32 random bytes and pairing doc expires in 15 minutes
   assert.equal(status.status, 'expired');
 });
 
-test('subscription guard prevents the target request for wallet, null subscription, and empty subscription accounts', async () => {
+test('subscription guard prevents the target for wallet/usage_based/null/empty subscription accounts', async () => {
   for (const guardedUser of [
     { data: { billing_type: 'wallet', wallet: { remaining_balance: 5 } } },
+    { data: { billing_type: 'usage_based', usage_based: { remaining_credits: 5 } } },
     { data: { billing_type: 'subscription', subscription: null } },
     { data: { billing_type: 'subscription', subscription: {} } },
   ]) {
-    const calls: string[] = [];
-    const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
-    const deps = baseDeps({
-      read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
-      fetchImpl: (async (url: string | URL) => {
-        calls.push(new URL(String(url)).pathname);
-        return jsonResponse(guardedUser);
-      }) as typeof fetch,
-    });
-    await assert.rejects(() => executeHeyGenRead({ kind: 'videos' }, deps), /active subscription/);
-    assert.deepEqual(calls, ['/v3/users/me'], 'target must not be called after guard refusal');
+    for (const operation of [
+      { kind: 'videos' } as const,
+      { kind: 'avatarGroups' } as const,
+      { kind: 'voiceDesign', prompt: 'existing voice search' } as const,
+    ]) {
+      const calls: string[] = [];
+      const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+      const deps = baseDeps({
+        read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+        fetchImpl: (async (url: string | URL) => {
+          calls.push(new URL(String(url)).pathname);
+          return jsonResponse(guardedUser);
+        }) as typeof fetch,
+      });
+      await assert.rejects(() => executeHeyGenRead(operation, deps), /active subscription/);
+      assert.deepEqual(calls, ['/v3/users/me'], 'target must not be called after guard refusal');
+    }
   }
 });
 
@@ -241,6 +249,45 @@ test('each fixed data operation calls /v3/users/me immediately before its exact 
       operation: { kind: 'styles', tag: 'cinematic', limit: 20, token: 'next' } as const,
       target: '/v3/video-agents/styles?tag=cinematic&limit=20&token=next',
     },
+    {
+      operation: { kind: 'avatarGroups', ownership: 'private', limit: 9, token: 'avatar-next' } as const,
+      target: '/v3/avatars?ownership=private&limit=9&token=avatar-next',
+    },
+    {
+      operation: { kind: 'avatarGroup', groupId: 'group_id-123' } as const,
+      target: '/v3/avatars/group_id-123',
+    },
+    {
+      operation: {
+        kind: 'avatarLooks',
+        groupId: 'group-1',
+        avatarType: 'photo_avatar',
+        ownership: 'public',
+        limit: 11,
+        token: 'look-next',
+      } as const,
+      target: '/v3/avatars/looks?group_id=group-1&avatar_type=photo_avatar&ownership=public&limit=11&token=look-next',
+    },
+    {
+      operation: { kind: 'avatarLook', lookId: 'look_id-123' } as const,
+      target: '/v3/avatars/looks/look_id-123',
+    },
+    {
+      operation: { kind: 'voices' } as const,
+      target: '/v3/voices',
+    },
+    {
+      operation: {
+        kind: 'voices',
+        type: 'private',
+        engine: 'starfish',
+        language: 'English',
+        gender: 'female',
+        limit: 13,
+        token: 'voice-next',
+      } as const,
+      target: '/v3/voices?type=private&engine=starfish&language=English&gender=female&limit=13&token=voice-next',
+    },
   ];
   for (const { operation, target } of cases) {
     const calls: string[] = [];
@@ -258,23 +305,135 @@ test('each fixed data operation calls /v3/users/me immediately before its exact 
   }
 });
 
-test('video path input rejects slash and dot-segment ids before any target request', async () => {
-  for (const videoId of ['../users/me', '..', '.', 'video/id', 'video%2Fid']) {
-    const calls: string[] = [];
-    const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+test('voice design maps to exact POST /v3/voices JSON and never forwards extra fields', async () => {
+  const events: Array<{ path: string; method: string; body?: unknown }> = [];
+  const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+  const deps = baseDeps({
+    read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+    fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      const method = init?.method ?? 'GET';
+      events.push({ path, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return path === '/v3/users/me' ? jsonResponse(USER_RESPONSE) : jsonResponse({ data: { voices: [], seed: 4 } });
+    }) as typeof fetch,
+  });
+  const result = await executeHeyGenRead(
+    { kind: 'voiceDesign', prompt: 'warm narrator', gender: 'female', locale: 'en-US', seed: 4 },
+    deps,
+  );
+  assert.deepEqual(result, { data: { voices: [], seed: 4 } });
+  assert.deepEqual(events, [
+    { path: '/v3/users/me', method: 'GET', body: undefined },
+    {
+      path: '/v3/voices',
+      method: 'POST',
+      body: { prompt: 'warm narrator', gender: 'female', locale: 'en-US', seed: 4 },
+    },
+  ]);
+
+  events.length = 0;
+  await executeHeyGenRead({ kind: 'voiceDesign', prompt: 'second prompt' }, deps);
+  assert.deepEqual(events[1]?.body, { prompt: 'second prompt' }, 'optional fields must be omitted, not synthesized');
+});
+
+test('video/avatar path inputs reject slash and dot-segment ids before any target request', async () => {
+  const cases = [
+    { operation: (id: string) => ({ kind: 'video', videoId: id } as const), error: /video_id contains unsupported characters/ },
+    { operation: (id: string) => ({ kind: 'avatarGroup', groupId: id } as const), error: /group_id contains unsupported characters/ },
+    { operation: (id: string) => ({ kind: 'avatarLook', lookId: id } as const), error: /look_id contains unsupported characters/ },
+    { operation: (id: string) => ({ kind: 'avatarLooks', groupId: id } as const), error: /group_id contains unsupported characters/ },
+  ];
+  for (const id of ['../users/me', '..', '.', 'avatar/id', 'avatar%2Fid']) {
+    for (const entry of cases) {
+      const calls: string[] = [];
+      const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+      const deps = baseDeps({
+        read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+        fetchImpl: (async (url: string | URL) => {
+          const path = new URL(String(url)).pathname;
+          calls.push(path);
+          return jsonResponse(USER_RESPONSE);
+        }) as typeof fetch,
+      });
+      await assert.rejects(() => executeHeyGenRead(entry.operation(id), deps), entry.error);
+      assert.deepEqual(calls, ['/v3/users/me'], 'subscription guard may run, but the invalid target must not');
+    }
+
+    let createCalls = 0;
+    await assert.rejects(
+      () => executeHeyGenPromptAvatarCreate(
+        {
+          name: 'Safe name',
+          prompt: 'Safe prompt',
+          avatarGroupId: id,
+          confirmCreditUse: true,
+          confirmedPremiumCreditsBefore: 7,
+        },
+        baseDeps({
+          fetchImpl: (async () => {
+            createCalls += 1;
+            return jsonResponse(USER_RESPONSE);
+          }) as typeof fetch,
+        }),
+      ),
+      /avatar_group_id contains unsupported characters/,
+    );
+    assert.equal(createCalls, 0, 'invalid create path input must be rejected before any network call');
+  }
+});
+
+test('new v3 inputs enforce locale, pagination, range, and prompt-avatar length bounds', async () => {
+  const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+  for (const operation of [
+    { kind: 'avatarGroups', limit: 0 } as const,
+    { kind: 'avatarLooks', limit: 51 } as const,
+    { kind: 'voices', limit: 101 } as const,
+    { kind: 'voices', token: 'x'.repeat(4097) } as const,
+    { kind: 'voices', engine: '../starfish' } as const,
+    { kind: 'voices', language: ' '.repeat(2) } as const,
+    { kind: 'voices', gender: 'unknown' } as const,
+    { kind: 'voiceDesign', prompt: 'voice', locale: 'English_US' } as const,
+    { kind: 'voiceDesign', prompt: 'voice', seed: -1 } as const,
+    { kind: 'voiceDesign', prompt: ' '.repeat(2) } as const,
+    { kind: 'voiceDesign', prompt: 'v'.repeat(1001) } as const,
+  ]) {
+    const paths: string[] = [];
     const deps = baseDeps({
       read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
       fetchImpl: (async (url: string | URL) => {
-        const path = new URL(String(url)).pathname;
-        calls.push(path);
+        paths.push(new URL(String(url)).pathname);
         return jsonResponse(USER_RESPONSE);
       }) as typeof fetch,
     });
+    await assert.rejects(() => executeHeyGenRead(operation, deps));
+    assert.deepEqual(paths, ['/v3/users/me'], 'invalid broker-direct data input must never reach its target');
+  }
+
+  for (const input of [
+    { name: '', prompt: 'valid' },
+    { name: ' '.repeat(2), prompt: 'valid' },
+    { name: 'n'.repeat(101), prompt: 'valid' },
+    { name: 'valid', prompt: '' },
+    { name: 'valid', prompt: ' '.repeat(2) },
+    { name: 'valid', prompt: 'p'.repeat(1001) },
+  ]) {
+    let calls = 0;
     await assert.rejects(
-      () => executeHeyGenRead({ kind: 'video', videoId }, deps),
-      /video_id contains unsupported characters/,
+      () => executeHeyGenPromptAvatarCreate(
+        {
+          ...input,
+          confirmCreditUse: true,
+          confirmedPremiumCreditsBefore: 7,
+        },
+        baseDeps({
+          fetchImpl: (async () => {
+            calls += 1;
+            return jsonResponse(USER_RESPONSE);
+          }) as typeof fetch,
+        }),
+      ),
     );
-    assert.deepEqual(calls, ['/v3/users/me'], 'subscription guard may run, but the invalid target must not');
+    assert.equal(calls, 0, 'invalid create length must be rejected before any network call');
   }
 });
 
@@ -492,7 +651,375 @@ test('one target 401 forces exactly one refresh and retries the complete /users/
   assert.deepEqual(events, ['me', 'target', 'refresh', 'persist', 'me', 'target']);
 });
 
-test('upstream token and read error bodies are never included in sanitized errors', async () => {
+test('voice design retries only one authentication rejection and never retries 429/5xx', async () => {
+  for (const status of [429, 500]) {
+    const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+    let targetCalls = 0;
+    const deps = baseDeps({
+      read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+      fetchImpl: (async (url: string | URL) => {
+        const path = new URL(String(url)).pathname;
+        if (path === '/v3/users/me') return jsonResponse(USER_RESPONSE);
+        targetCalls += 1;
+        return jsonResponse({ leaked: 'VOICE-DESIGN-BODY' }, status);
+      }) as typeof fetch,
+    });
+    await assert.rejects(
+      () => executeHeyGenRead({ kind: 'voiceDesign', prompt: 'warm voice' }, deps),
+      (error: Error) => error.message.includes(`HTTP ${status}`) && !error.message.includes('VOICE-DESIGN-BODY'),
+    );
+    assert.equal(targetCalls, 1, `HTTP ${status} must not be retried`);
+  }
+
+  let doc = tokenDoc({ ...BASE_STATE, accessToken: 'voice-access-OLD', expiresAt: 0 });
+  let etag = 'E1';
+  let targetCalls = 0;
+  let refreshCalls = 0;
+  const deps = baseDeps({
+    read: (async () => ({ doc, etag })) as HeyGenBrokerDeps['read'],
+    replace: (async (_c, _pk, _id, next) => {
+      doc = next as HeyGenTokenDoc;
+      etag = 'E2';
+      return { ok: true, status: 200, body: next, etag };
+    }) as HeyGenBrokerDeps['replace'],
+    fetchImpl: (async (url: string | URL) => {
+      if (String(url) === HEYGEN_TOKEN_URL) {
+        refreshCalls += 1;
+        return jsonResponse({ access_token: 'voice-access-NEW', refresh_token: 'voice-refresh-NEW', expires_in: 3600 });
+      }
+      const path = new URL(String(url)).pathname;
+      if (path === '/v3/users/me') return jsonResponse(USER_RESPONSE);
+      targetCalls += 1;
+      return jsonResponse({ leaked: 'VOICE-401-BODY' }, 401);
+    }) as typeof fetch,
+  });
+  await assert.rejects(
+    () => executeHeyGenRead({ kind: 'voiceDesign', prompt: 'warm voice' }, deps),
+    (error: Error) => /HTTP 401/.test(error.message) && !error.message.includes('VOICE-401-BODY'),
+  );
+  assert.equal(refreshCalls, 1);
+  assert.equal(targetCalls, 2, 'one rejected POST plus one retry, never a third POST');
+});
+
+test('prompt-avatar create requires explicit confirmation before any account or target request', async () => {
+  const baseInput = {
+    name: 'Presenter',
+    prompt: 'A professional presenter in a bright studio',
+    confirmedPremiumCreditsBefore: 7,
+  };
+  for (const confirmCreditUse of [false, undefined]) {
+    let calls = 0;
+    await assert.rejects(
+      () => executeHeyGenPromptAvatarCreate(
+        { ...baseInput, confirmCreditUse } as Parameters<typeof executeHeyGenPromptAvatarCreate>[0],
+        baseDeps({
+          fetchImpl: (async () => {
+            calls += 1;
+            return jsonResponse(USER_RESPONSE);
+          }) as typeof fetch,
+        }),
+      ),
+      /confirm_credit_use=true/,
+    );
+    assert.equal(calls, 0);
+  }
+});
+
+test('prompt-avatar create subscription guard blocks POST for wallet/usage_based/null/empty subscription', async () => {
+  const guardedUsers = [
+    { data: { billing_type: 'wallet', wallet: { remaining_balance: 5 } } },
+    { data: { billing_type: 'usage_based', usage_based: { remaining_credits: 5 } } },
+    { data: { billing_type: 'subscription', subscription: null } },
+    { data: { billing_type: 'subscription', subscription: {} } },
+  ];
+  for (const guardedUser of guardedUsers) {
+    const paths: string[] = [];
+    const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+    const deps = baseDeps({
+      read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+      fetchImpl: (async (url: string | URL) => {
+        paths.push(new URL(String(url)).pathname);
+        return jsonResponse(guardedUser);
+      }) as typeof fetch,
+    });
+    await assert.rejects(
+      () => executeHeyGenPromptAvatarCreate(
+        {
+          name: 'Presenter',
+          prompt: 'A professional presenter',
+          confirmCreditUse: true,
+          confirmedPremiumCreditsBefore: 7,
+        },
+        deps,
+      ),
+      /active subscription/,
+    );
+    assert.deepEqual(paths, ['/v3/users/me']);
+  }
+});
+
+test('prompt-avatar create refuses missing/non-integer/zero or mismatched premium-credit snapshots before POST', async () => {
+  const cases = [
+    {
+      account: { data: { billing_type: 'subscription', subscription: { plan: 'team', credits: {} } } },
+      confirmed: 7,
+      error: /integer premium-credit balance/,
+    },
+    {
+      account: {
+        data: {
+          billing_type: 'subscription',
+          subscription: { plan: 'team', credits: { premium_credits: { remaining: 1.5 } } },
+        },
+      },
+      confirmed: 1,
+      error: /integer premium-credit balance/,
+    },
+    {
+      account: {
+        data: {
+          billing_type: 'subscription',
+          subscription: { plan: 'team', credits: { premium_credits: { remaining: 0 } } },
+        },
+      },
+      confirmed: 0,
+      error: /at least 1 remaining premium credit/,
+    },
+    {
+      account: USER_RESPONSE,
+      confirmed: 6,
+      error: /confirmed 6, current 7/,
+    },
+  ];
+  for (const entry of cases) {
+    const paths: string[] = [];
+    const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+    const deps = baseDeps({
+      read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+      fetchImpl: (async (url: string | URL) => {
+        paths.push(new URL(String(url)).pathname);
+        return jsonResponse(entry.account);
+      }) as typeof fetch,
+    });
+    await assert.rejects(
+      () => executeHeyGenPromptAvatarCreate(
+        {
+          name: 'Presenter',
+          prompt: 'A professional presenter',
+          confirmCreditUse: true,
+          confirmedPremiumCreditsBefore: entry.confirmed,
+        },
+        deps,
+      ),
+      entry.error,
+    );
+    assert.deepEqual(paths, ['/v3/users/me'], 'credit refusal must happen before POST /v3/avatars');
+  }
+
+  for (const confirmed of [undefined, 1.5, -1]) {
+    let calls = 0;
+    await assert.rejects(
+      () => executeHeyGenPromptAvatarCreate(
+        {
+          name: 'Presenter',
+          prompt: 'A professional presenter',
+          confirmCreditUse: true,
+          confirmedPremiumCreditsBefore: confirmed,
+        } as Parameters<typeof executeHeyGenPromptAvatarCreate>[0],
+        baseDeps({
+          fetchImpl: (async () => {
+            calls += 1;
+            return jsonResponse(USER_RESPONSE);
+          }) as typeof fetch,
+        }),
+      ),
+      /confirmed_premium_credits_before must be a non-negative integer/,
+    );
+    assert.equal(calls, 0);
+  }
+});
+
+test('prompt-avatar create accepts only an exact positive snapshot and emits one exact POST body', async () => {
+  const events: Array<{ path: string; method: string; body?: unknown; authorization?: string }> = [];
+  const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+  const deps = baseDeps({
+    read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+    fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      const headers = init?.headers as Record<string, string> | undefined;
+      events.push({
+        path,
+        method: init?.method ?? 'GET',
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        authorization: headers?.Authorization,
+      });
+      return path === '/v3/users/me'
+        ? jsonResponse(USER_RESPONSE)
+        : jsonResponse({ data: { avatar_item: { id: 'look-1', group_id: 'group-1' } } });
+    }) as typeof fetch,
+  });
+  const result = await executeHeyGenPromptAvatarCreate(
+    {
+      name: ' Presenter ',
+      prompt: ' A professional presenter in a bright studio ',
+      avatarGroupId: 'existing_group-1',
+      confirmCreditUse: true,
+      confirmedPremiumCreditsBefore: 7,
+    },
+    deps,
+  );
+  assert.deepEqual(result, {
+    body: { data: { avatar_item: { id: 'look-1', group_id: 'group-1' } } },
+    plan: 'team',
+    premiumCreditsBefore: 7,
+  });
+  assert.deepEqual(events.map(({ path, method }) => ({ path, method })), [
+    { path: '/v3/users/me', method: 'GET' },
+    { path: '/v3/avatars', method: 'POST' },
+  ]);
+  assert.deepEqual(events[1]?.body, {
+    type: 'prompt',
+    name: 'Presenter',
+    prompt: 'A professional presenter in a bright studio',
+    avatar_group_id: 'existing_group-1',
+  });
+  assert.equal((events[1]?.body as Record<string, unknown>).confirm_credit_use, undefined);
+  assert.equal((events[1]?.body as Record<string, unknown>).confirmed_premium_credits_before, undefined);
+  assert.equal((events[1]?.body as Record<string, unknown>).reference_images, undefined);
+  assert.equal(events[1]?.authorization, `Bearer ${BASE_STATE.accessToken}`);
+});
+
+test('prompt-avatar create never retries network/429/5xx or ambiguous success-response failures', async () => {
+  for (const mode of ['network', '429', '500', 'invalid-success'] as const) {
+    const doc = tokenDoc({ ...BASE_STATE, expiresAt: 0 });
+    let targetCalls = 0;
+    const deps = baseDeps({
+      read: (async () => ({ doc, etag: 'E1' })) as HeyGenBrokerDeps['read'],
+      fetchImpl: (async (url: string | URL) => {
+        const path = new URL(String(url)).pathname;
+        if (path === '/v3/users/me') return jsonResponse(USER_RESPONSE);
+        targetCalls += 1;
+        if (mode === 'network') throw new Error('NETWORK-TOKEN-SHOULD-NOT-LEAK');
+        if (mode === 'invalid-success') return new Response('not-json', { status: 200 });
+        return jsonResponse({ leaked: 'CREATE-UPSTREAM-BODY' }, Number(mode));
+      }) as typeof fetch,
+    });
+    await assert.rejects(
+      () => executeHeyGenPromptAvatarCreate(
+        {
+          name: 'Presenter',
+          prompt: 'A professional presenter',
+          confirmCreditUse: true,
+          confirmedPremiumCreditsBefore: 7,
+        },
+        deps,
+      ),
+      (error: Error) => {
+        const sanitized =
+          !error.message.includes('CREATE-UPSTREAM-BODY') &&
+          !error.message.includes('NETWORK-TOKEN-SHOULD-NOT-LEAK') &&
+          !error.message.includes(BASE_STATE.accessToken);
+        if (!sanitized) return false;
+        return mode === 'network' || mode === 'invalid-success'
+          ? /may have been accepted/.test(error.message)
+          : /request was not retried; check HeyGen/.test(error.message);
+      },
+    );
+    assert.equal(targetCalls, 1, `${mode} must never retry POST /v3/avatars`);
+  }
+});
+
+test('prompt-avatar create permits at most one forced refresh and one full retry after target 401', async () => {
+  let doc = tokenDoc({ ...BASE_STATE, accessToken: 'create-access-OLD', expiresAt: 0 });
+  let etag = 'E1';
+  let refreshCalls = 0;
+  let targetCalls = 0;
+  const events: string[] = [];
+  const postBodies: unknown[] = [];
+  const deps = baseDeps({
+    read: (async () => ({ doc, etag })) as HeyGenBrokerDeps['read'],
+    replace: (async (_c, _pk, _id, next) => {
+      events.push('persist');
+      doc = next as HeyGenTokenDoc;
+      etag = 'E2';
+      return { ok: true, status: 200, body: next, etag };
+    }) as HeyGenBrokerDeps['replace'],
+    fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+      if (String(url) === HEYGEN_TOKEN_URL) {
+        refreshCalls += 1;
+        events.push('refresh');
+        return jsonResponse({ access_token: 'create-access-NEW', refresh_token: 'create-refresh-NEW', expires_in: 3600 });
+      }
+      const path = new URL(String(url)).pathname;
+      if (path === '/v3/users/me') {
+        events.push('me');
+        return jsonResponse(USER_RESPONSE);
+      }
+      targetCalls += 1;
+      events.push('target');
+      postBodies.push(JSON.parse(String(init?.body)));
+      return targetCalls === 1
+        ? jsonResponse({ leaked: 'CREATE-401-BODY' }, 401)
+        : jsonResponse({ data: { avatar_item: { id: 'created-look' } } });
+    }) as typeof fetch,
+  });
+  const result = await executeHeyGenPromptAvatarCreate(
+    {
+      name: 'Presenter',
+      prompt: 'A professional presenter',
+      confirmCreditUse: true,
+      confirmedPremiumCreditsBefore: 7,
+    },
+    deps,
+  );
+  assert.deepEqual(result.body, { data: { avatar_item: { id: 'created-look' } } });
+  assert.equal(refreshCalls, 1);
+  assert.equal(targetCalls, 2);
+  assert.deepEqual(events, ['me', 'target', 'refresh', 'persist', 'me', 'target']);
+  assert.deepEqual(postBodies, [
+    { type: 'prompt', name: 'Presenter', prompt: 'A professional presenter' },
+    { type: 'prompt', name: 'Presenter', prompt: 'A professional presenter' },
+  ]);
+
+  let deniedDoc = tokenDoc({ ...BASE_STATE, accessToken: 'denied-access-OLD', expiresAt: 0 });
+  let deniedEtag = 'D1';
+  let deniedRefreshes = 0;
+  let deniedTargets = 0;
+  const deniedDeps = baseDeps({
+    read: (async () => ({ doc: deniedDoc, etag: deniedEtag })) as HeyGenBrokerDeps['read'],
+    replace: (async (_c, _pk, _id, next) => {
+      deniedDoc = next as HeyGenTokenDoc;
+      deniedEtag = 'D2';
+      return { ok: true, status: 200, body: next, etag: deniedEtag };
+    }) as HeyGenBrokerDeps['replace'],
+    fetchImpl: (async (url: string | URL) => {
+      if (String(url) === HEYGEN_TOKEN_URL) {
+        deniedRefreshes += 1;
+        return jsonResponse({ access_token: 'denied-access-NEW', refresh_token: 'denied-refresh-NEW', expires_in: 3600 });
+      }
+      const path = new URL(String(url)).pathname;
+      if (path === '/v3/users/me') return jsonResponse(USER_RESPONSE);
+      deniedTargets += 1;
+      return jsonResponse({ leaked: 'SECOND-CREATE-401-BODY' }, 401);
+    }) as typeof fetch,
+  });
+  await assert.rejects(
+    () => executeHeyGenPromptAvatarCreate(
+      {
+        name: 'Presenter',
+        prompt: 'A professional presenter',
+        confirmCreditUse: true,
+        confirmedPremiumCreditsBefore: 7,
+      },
+      deniedDeps,
+    ),
+    (error: Error) => /HTTP 401/.test(error.message) && !error.message.includes('SECOND-CREATE-401-BODY'),
+  );
+  assert.equal(deniedRefreshes, 1);
+  assert.equal(deniedTargets, 2, 'two 401 responses must stop after one refresh and one retry');
+});
+
+test('upstream token and operation error bodies are never included in sanitized errors', async () => {
   const leaked = 'CREDENTIAL-JSON-AND-TOKEN-MUST-NOT-LEAK';
   const expired = tokenDoc({ ...BASE_STATE, expiresAt: 1 });
   await assert.rejects(
