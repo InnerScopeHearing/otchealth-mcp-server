@@ -14,6 +14,21 @@ import {
   randomBytes,
 } from 'node:crypto';
 import { z } from 'zod';
+import {
+  buildHeyGenAvatarVideoPlan,
+  parseHeyGenAvatarGroup,
+  parseHeyGenAvatarLook,
+  parseHeyGenCreateVideo,
+  parseHeyGenVideoDetail,
+  parseHeyGenVoice,
+  validateHeyGenAvatarVideoCompatibility,
+  type HeyGenAvatarGroup,
+  type HeyGenAvatarLook,
+  type HeyGenAvatarVideoCreateInput,
+  type HeyGenAvatarVideoPlan,
+  type HeyGenVideoDetail,
+  type HeyGenVoice,
+} from './video-contracts.js';
 import { loadEnv } from '../../config/env.js';
 import {
   createDoc,
@@ -53,6 +68,7 @@ export interface HeyGenBrokerDeps {
   now: () => number;
   randomBytes: (size: number) => Buffer;
   signingSecret: () => string;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 export const defaultHeyGenBrokerDeps: HeyGenBrokerDeps = {
@@ -568,6 +584,7 @@ interface HeyGenRawResponse {
   status: number;
   ok: boolean;
   body: unknown;
+  retryAfterMs?: number;
 }
 
 async function readResponseJson(response: Response): Promise<unknown> {
@@ -583,6 +600,14 @@ async function readResponseJson(response: Response): Promise<unknown> {
   } catch {
     throw brokerError('heygen_response_invalid', 'HeyGen returned an invalid response.');
   }
+}
+
+function retryAfterMilliseconds(value: string | null, nowMs: number): number | undefined {
+  if (!value) return undefined;
+  if (/^\d+$/.test(value)) return Math.min(30_000, Number(value) * 1000);
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.min(30_000, Math.max(0, parsed - nowMs));
 }
 
 async function heyGenApiGet(
@@ -615,7 +640,12 @@ async function heyGenApiGet(
     if (!response.ok) body = null;
     else throw error;
   }
-  return { status: response.status, ok: response.ok, body };
+  return {
+    status: response.status,
+    ok: response.ok,
+    body,
+    retryAfterMs: retryAfterMilliseconds(response.headers.get('retry-after'), deps.now()),
+  };
 }
 
 async function heyGenApiPost(
@@ -623,6 +653,7 @@ async function heyGenApiPost(
   accessToken: string,
   body: Record<string, unknown>,
   deps: HeyGenBrokerDeps,
+  extraHeaders: Record<string, string> = {},
 ): Promise<HeyGenRawResponse> {
   let response: Response;
   try {
@@ -632,6 +663,7 @@ async function heyGenApiPost(
         Authorization: `Bearer ${accessToken}`,
         Accept: 'application/json',
         'Content-Type': 'application/json',
+        ...extraHeaders,
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -646,7 +678,12 @@ async function heyGenApiPost(
     if (!response.ok) responseBody = null;
     else throw error;
   }
-  return { status: response.status, ok: response.ok, body: responseBody };
+  return {
+    status: response.status,
+    ok: response.ok,
+    body: responseBody,
+    retryAfterMs: retryAfterMilliseconds(response.headers.get('retry-after'), deps.now()),
+  };
 }
 
 /** Verify that the bearer resolves to a populated subscription account. */
@@ -957,6 +994,13 @@ export type HeyGenReadOperation =
   | { kind: 'videos'; limit?: number; token?: string; folderId?: string; title?: string }
   | { kind: 'video'; videoId: string }
   | { kind: 'styles'; tag?: string; limit?: number; token?: string }
+  | { kind: 'videoStatuses'; videoIds?: string[]; batchIds?: string[] }
+  | { kind: 'videoAgentSessions'; limit?: number; token?: string }
+  | { kind: 'videoAgentSession'; sessionId: string }
+  | { kind: 'videoAgentSessionVideos'; sessionId: string }
+  | { kind: 'brandKits'; limit?: number; token?: string }
+  | { kind: 'brandGlossaries'; limit?: number; token?: string }
+  | { kind: 'brandGlossary'; brandGlossaryId: string }
   | { kind: 'avatarGroups'; ownership?: 'public' | 'private'; limit?: number; token?: string }
   | { kind: 'avatarGroup'; groupId: string }
   | {
@@ -968,6 +1012,7 @@ export type HeyGenReadOperation =
       token?: string;
     }
   | { kind: 'avatarLook'; lookId: string }
+  | { kind: 'voice'; voiceId: string }
   | {
       kind: 'voices';
       type?: 'public' | 'private';
@@ -977,6 +1022,11 @@ export type HeyGenReadOperation =
       limit?: number;
       token?: string;
     }
+  | { kind: 'translationLanguages' }
+  | { kind: 'translations'; limit?: number; token?: string }
+  | { kind: 'translation'; translationId: string }
+  | { kind: 'translationStatuses'; translationIds?: string[]; batchIds?: string[] }
+  | { kind: 'proofread'; proofreadId: string }
   | {
       kind: 'voiceDesign';
       prompt: string;
@@ -1021,6 +1071,24 @@ function assertIntegerRange(value: number | undefined, min: number, max: number,
   }
 }
 
+function commaSeparatedIds(values: string[] | undefined, field: string): string | undefined {
+  if (values === undefined) return undefined;
+  if (values.length < 1 || values.length > 100) {
+    throw brokerError(`heygen_${field}_invalid`, `HeyGen ${field} must contain 1-100 ids.`, 400);
+  }
+  for (const value of values) assertSafeHeyGenId(value, field);
+  return values.join(',');
+}
+
+function assertAtLeastOneIdSet(first: string[] | undefined, second: string[] | undefined, label: string): void {
+  if ((!first || first.length === 0) && (!second || second.length === 0)) {
+    throw brokerError(`heygen_${label}_required`, `HeyGen ${label} requires at least one id.`, 400);
+  }
+  if ((first?.length ?? 0) + (second?.length ?? 0) > 100) {
+    throw brokerError(`heygen_${label}_invalid`, `HeyGen ${label} accepts at most 100 ids total.`, 400);
+  }
+}
+
 function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'account' }>): HeyGenTarget {
   switch (operation.kind) {
     case 'videos':
@@ -1053,6 +1121,58 @@ function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'acc
           token: operation.token,
         },
       };
+    case 'videoStatuses':
+      assertAtLeastOneIdSet(operation.videoIds, operation.batchIds, 'video_status_ids');
+      return {
+        method: 'GET',
+        path: '/v3/videos/statuses',
+        query: {
+          video_ids: commaSeparatedIds(operation.videoIds, 'video_ids'),
+          batch_ids: commaSeparatedIds(operation.batchIds, 'batch_ids'),
+        },
+      };
+    case 'videoAgentSessions':
+      assertIntegerRange(operation.limit, 1, 100, 'limit');
+      assertPaginationToken(operation.token);
+      return {
+        method: 'GET',
+        path: '/v3/video-agents',
+        query: {
+          limit: operation.limit === undefined ? undefined : String(operation.limit),
+          token: operation.token,
+        },
+      };
+    case 'videoAgentSession':
+      assertSafeHeyGenId(operation.sessionId, 'session_id');
+      return { method: 'GET', path: `/v3/video-agents/${operation.sessionId}`, query: {} };
+    case 'videoAgentSessionVideos':
+      assertSafeHeyGenId(operation.sessionId, 'session_id');
+      return { method: 'GET', path: `/v3/video-agents/${operation.sessionId}/videos`, query: {} };
+    case 'brandKits':
+      assertIntegerRange(operation.limit, 1, 100, 'limit');
+      assertPaginationToken(operation.token);
+      return {
+        method: 'GET',
+        path: '/v3/brand-kits',
+        query: {
+          limit: operation.limit === undefined ? undefined : String(operation.limit),
+          token: operation.token,
+        },
+      };
+    case 'brandGlossaries':
+      assertIntegerRange(operation.limit, 1, 100, 'limit');
+      assertPaginationToken(operation.token);
+      return {
+        method: 'GET',
+        path: '/v3/brand-glossaries',
+        query: {
+          limit: operation.limit === undefined ? undefined : String(operation.limit),
+          token: operation.token,
+        },
+      };
+    case 'brandGlossary':
+      assertSafeHeyGenId(operation.brandGlossaryId, 'brand_glossary_id');
+      return { method: 'GET', path: `/v3/brand-glossaries/${operation.brandGlossaryId}`, query: {} };
     case 'avatarGroups':
       if (operation.ownership !== undefined && operation.ownership !== 'public' && operation.ownership !== 'private') {
         throw brokerError('heygen_ownership_invalid', 'HeyGen ownership must be public or private.', 400);
@@ -1108,6 +1228,9 @@ function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'acc
         path: `/v3/avatars/looks/${operation.lookId}`,
         query: {},
       };
+    case 'voice':
+      assertSafeHeyGenId(operation.voiceId, 'voice_id');
+      return { method: 'GET', path: `/v3/voices/${operation.voiceId}`, query: {} };
     case 'voices':
       if (operation.type !== undefined && operation.type !== 'public' && operation.type !== 'private') {
         throw brokerError('heygen_voice_type_invalid', 'HeyGen voice type must be public or private.', 400);
@@ -1135,6 +1258,35 @@ function targetForOperation(operation: Exclude<HeyGenReadOperation, { kind: 'acc
           token: operation.token,
         },
       };
+    case 'translationLanguages':
+      return { method: 'GET', path: '/v3/video-translations/languages', query: {} };
+    case 'translations':
+      assertIntegerRange(operation.limit, 1, 100, 'limit');
+      assertPaginationToken(operation.token);
+      return {
+        method: 'GET',
+        path: '/v3/video-translations',
+        query: {
+          limit: operation.limit === undefined ? undefined : String(operation.limit),
+          token: operation.token,
+        },
+      };
+    case 'translation':
+      assertSafeHeyGenId(operation.translationId, 'video_translation_id');
+      return { method: 'GET', path: `/v3/video-translations/${operation.translationId}`, query: {} };
+    case 'translationStatuses':
+      assertAtLeastOneIdSet(operation.translationIds, operation.batchIds, 'translation_status_ids');
+      return {
+        method: 'GET',
+        path: '/v3/video-translations/statuses',
+        query: {
+          video_translation_ids: commaSeparatedIds(operation.translationIds, 'video_translation_ids'),
+          batch_ids: commaSeparatedIds(operation.batchIds, 'batch_ids'),
+        },
+      };
+    case 'proofread':
+      assertSafeHeyGenId(operation.proofreadId, 'proofread_id');
+      return { method: 'GET', path: `/v3/video-translations/proofreads/${operation.proofreadId}`, query: {} };
     case 'voiceDesign': {
       if (
         typeof operation.prompt !== 'string' ||
@@ -1370,4 +1522,594 @@ export async function executeHeyGenPromptAvatarCreate(
     };
   }
   throw brokerError('heygen_auth_failed', 'HeyGen OAuth authorization failed after one refresh retry.', 401);
+}
+
+// -------------------------------------------------------------------------------------------------
+// Idempotent direct Avatar Video operation
+// -------------------------------------------------------------------------------------------------
+
+const HEYGEN_VIDEO_OPERATION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const HEYGEN_VIDEO_SUBMIT_LEASE_MS = 60_000;
+const HEYGEN_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export type HeyGenVideoOperationState =
+  | 'ready'
+  | 'submitting'
+  | 'accepted'
+  | 'rejected'
+  | 'outcome_unknown';
+
+export interface HeyGenVideoOperationDoc extends Record<string, unknown> {
+  id: string;
+  cacheScope: string;
+  ttl: number;
+  kind: 'heygen_avatar_video_operation';
+  version: 1;
+  operationId: string;
+  idempotencyKeySha256: string;
+  manifestSha256: string;
+  requestSha256: string;
+  scriptSha256: string;
+  state: HeyGenVideoOperationState;
+  attemptCount: number;
+  createdAt: string;
+  updatedAt: string;
+  plan: string;
+  premiumCreditsConfirmed: number;
+  premiumCreditsBefore?: number;
+  maxApprovedCredits: number;
+  reservePremiumCredits: number;
+  estimatedCredits: number;
+  estimatedDurationSeconds: number;
+  avatarId: string;
+  voiceId: string;
+  engine: string;
+  firstSubmittedAt?: string;
+  providerWindowExpiresAt?: string;
+  leaseExpiresAt?: string;
+  videoId?: string;
+  providerStatus?: string;
+  upstreamStatus?: number;
+  lastErrorCode?: string;
+}
+
+export interface HeyGenAvatarVideoCreateResult {
+  operationId: string;
+  state: HeyGenVideoOperationState | 'dry_run' | 'in_progress';
+  replayed: boolean;
+  requestSha256: string;
+  videoId?: string;
+  providerStatus?: string;
+  plan: string;
+  premiumCreditsBefore?: number;
+  maxApprovedCredits: number;
+  reservePremiumCredits: number;
+  estimatedCredits: number;
+  estimatedDurationSeconds: number;
+  providerIdempotencyExpiresAt?: string;
+  errorCode?: string;
+}
+
+function videoOperationDocId(operationId: string): string {
+  return `heygen.video.${operationId}`;
+}
+
+function isVideoOperationDoc(value: unknown): value is HeyGenVideoOperationDoc {
+  if (!value || typeof value !== 'object') return false;
+  const doc = value as Partial<HeyGenVideoOperationDoc>;
+  return (
+    typeof doc.id === 'string' &&
+    doc.cacheScope === doc.id &&
+    doc.kind === 'heygen_avatar_video_operation' &&
+    doc.version === 1 &&
+    doc.ttl === HEYGEN_VIDEO_OPERATION_TTL_SECONDS &&
+    typeof doc.operationId === 'string' &&
+    typeof doc.requestSha256 === 'string' &&
+    typeof doc.manifestSha256 === 'string' &&
+    typeof doc.idempotencyKeySha256 === 'string' &&
+    ['ready', 'submitting', 'accepted', 'rejected', 'outcome_unknown'].includes(String(doc.state))
+  );
+}
+
+function operationView(
+  doc: HeyGenVideoOperationDoc,
+  replayed: boolean,
+  nowMs = Date.now(),
+): HeyGenAvatarVideoCreateResult {
+  const leaseActive =
+    doc.state === 'submitting' && Boolean(doc.leaseExpiresAt) && Date.parse(doc.leaseExpiresAt!) > nowMs;
+  return {
+    operationId: doc.operationId,
+    state: leaseActive ? 'in_progress' : doc.state,
+    replayed,
+    requestSha256: doc.requestSha256,
+    videoId: doc.videoId,
+    providerStatus: doc.providerStatus,
+    plan: doc.plan,
+    premiumCreditsBefore: doc.premiumCreditsBefore,
+    maxApprovedCredits: doc.maxApprovedCredits,
+    reservePremiumCredits: doc.reservePremiumCredits,
+    estimatedCredits: doc.estimatedCredits,
+    estimatedDurationSeconds: doc.estimatedDurationSeconds,
+    providerIdempotencyExpiresAt: doc.providerWindowExpiresAt,
+    errorCode: doc.lastErrorCode,
+  };
+}
+
+function assertSameVideoOperation(
+  doc: HeyGenVideoOperationDoc,
+  input: HeyGenAvatarVideoCreateInput,
+  plan: HeyGenAvatarVideoPlan,
+): void {
+  const same =
+    doc.idempotencyKeySha256 === plan.idempotencyKeySha256 &&
+    doc.manifestSha256 === input.manifestSha256 &&
+    doc.requestSha256 === plan.requestSha256 &&
+    doc.scriptSha256 === plan.scriptSha256 &&
+    doc.premiumCreditsConfirmed === input.confirmedPremiumCreditsBefore &&
+    doc.maxApprovedCredits === input.maxApprovedCredits &&
+    doc.reservePremiumCredits === input.reservePremiumCredits;
+  if (!same) {
+    throw brokerError(
+      'heygen_video_idempotency_conflict',
+      'This operation_id was already bound to a different request, manifest, idempotency key, or approval envelope.',
+      409,
+    );
+  }
+}
+
+async function readVideoOperation(
+  operationId: string,
+  deps: HeyGenBrokerDeps,
+): Promise<{ doc: HeyGenVideoOperationDoc; etag: string } | null> {
+  const id = videoOperationDocId(operationId);
+  let row: Awaited<ReturnType<CosmosRead>>;
+  try {
+    row = await deps.read(CACHE_CONTAINER, id, id);
+  } catch {
+    throw brokerError('heygen_video_operation_store_unavailable', 'Could not read the HeyGen video operation.');
+  }
+  if (!row) return null;
+  if (!row.etag || !isVideoOperationDoc(row.doc)) {
+    throw brokerError('heygen_video_operation_invalid', 'Stored HeyGen video operation is invalid.', 409);
+  }
+  return { doc: row.doc, etag: row.etag };
+}
+
+async function ensureVideoOperation(
+  input: HeyGenAvatarVideoCreateInput,
+  plan: HeyGenAvatarVideoPlan,
+  deps: HeyGenBrokerDeps,
+): Promise<{ doc: HeyGenVideoOperationDoc; etag: string; created: boolean }> {
+  const existing = await readVideoOperation(input.operationId, deps);
+  if (existing) {
+    assertSameVideoOperation(existing.doc, input, plan);
+    return { ...existing, created: false };
+  }
+  const id = videoOperationDocId(input.operationId);
+  const now = new Date(deps.now()).toISOString();
+  const doc: HeyGenVideoOperationDoc = {
+    id,
+    cacheScope: id,
+    ttl: HEYGEN_VIDEO_OPERATION_TTL_SECONDS,
+    kind: 'heygen_avatar_video_operation',
+    version: 1,
+    operationId: input.operationId,
+    idempotencyKeySha256: plan.idempotencyKeySha256,
+    manifestSha256: input.manifestSha256,
+    requestSha256: plan.requestSha256,
+    scriptSha256: plan.scriptSha256,
+    state: 'ready',
+    attemptCount: 0,
+    createdAt: now,
+    updatedAt: now,
+    plan: '',
+    premiumCreditsConfirmed: input.confirmedPremiumCreditsBefore,
+    maxApprovedCredits: input.maxApprovedCredits,
+    reservePremiumCredits: input.reservePremiumCredits,
+    estimatedCredits: plan.estimatedCredits,
+    estimatedDurationSeconds: plan.estimatedDurationSeconds,
+    avatarId: input.avatarId,
+    voiceId: input.voiceId,
+    engine: input.engine,
+  };
+  try {
+    const created = await deps.create(CACHE_CONTAINER, id, doc);
+    if (!created.etag) throw new Error('missing etag');
+    return { doc, etag: created.etag, created: true };
+  } catch {
+    const winner = await readVideoOperation(input.operationId, deps);
+    if (!winner) {
+      throw brokerError('heygen_video_operation_store_unavailable', 'Could not create the HeyGen video operation.');
+    }
+    assertSameVideoOperation(winner.doc, input, plan);
+    return { ...winner, created: false };
+  }
+}
+
+async function replaceVideoOperation(
+  current: { doc: HeyGenVideoOperationDoc; etag: string },
+  changes: Partial<HeyGenVideoOperationDoc>,
+  deps: HeyGenBrokerDeps,
+): Promise<{ doc: HeyGenVideoOperationDoc; etag: string } | null> {
+  const next: HeyGenVideoOperationDoc = {
+    ...current.doc,
+    ...changes,
+    id: current.doc.id,
+    cacheScope: current.doc.cacheScope,
+    updatedAt: new Date(deps.now()).toISOString(),
+  };
+  let result: Awaited<ReturnType<CosmosReplace>>;
+  try {
+    result = await deps.replace(CACHE_CONTAINER, next.cacheScope, next.id, next, current.etag);
+  } catch {
+    throw brokerError('heygen_video_operation_store_unavailable', 'Could not persist the HeyGen video operation.');
+  }
+  if (result.status === 412) return null;
+  if (!result.ok || !result.etag) {
+    throw brokerError('heygen_video_operation_store_unavailable', 'Could not persist the HeyGen video operation.');
+  }
+  return { doc: next, etag: result.etag };
+}
+
+function providerErrorCode(body: unknown): string | undefined {
+  const candidate = body as { error?: { code?: unknown } } | null;
+  return typeof candidate?.error?.code === 'string' ? candidate.error.code.slice(0, 128) : undefined;
+}
+
+async function requiredGet(
+  path: string,
+  accessToken: string,
+  deps: HeyGenBrokerDeps,
+): Promise<HeyGenRawResponse> {
+  return heyGenApiGet(path, accessToken, {}, deps);
+}
+
+async function runVideoPreflight(
+  input: HeyGenAvatarVideoCreateInput,
+  accessToken: string,
+  deps: HeyGenBrokerDeps,
+): Promise<{
+  account: unknown;
+  plan: string;
+  credits: number;
+  look: HeyGenAvatarLook;
+  group: HeyGenAvatarGroup;
+  voice: HeyGenVoice;
+  referenceLook?: HeyGenAvatarLook;
+}> {
+  const accountResponse = await requiredGet('/v3/users/me', accessToken, deps);
+  if (!accountResponse.ok) throw accountResponse;
+  const snapshot = premiumCreditSnapshot(accountResponse.body);
+
+  const lookResponse = await requiredGet(`/v3/avatars/looks/${input.avatarId}`, accessToken, deps);
+  if (!lookResponse.ok) throw lookResponse;
+  const look = parseHeyGenAvatarLook(lookResponse.body);
+  if (look.id !== input.avatarId) {
+    throw brokerError('heygen_avatar_lookup_mismatch', 'HeyGen returned the wrong avatar look.', 502);
+  }
+  validateHeyGenAvatarVideoCompatibility(input, look);
+
+  const groupResponse = await requiredGet(`/v3/avatars/${look.groupId}`, accessToken, deps);
+  if (!groupResponse.ok) throw groupResponse;
+  const group = parseHeyGenAvatarGroup(groupResponse.body);
+  if (group.id !== look.groupId) {
+    throw brokerError('heygen_avatar_group_lookup_mismatch', 'HeyGen returned the wrong avatar group.', 502);
+  }
+  if (group.status && group.status !== 'completed') {
+    throw brokerError('heygen_avatar_group_not_ready', `HeyGen avatar group is not completed (${group.status}).`, 409);
+  }
+  if (group.consentStatus && !['approved', 'complete', 'completed'].includes(group.consentStatus.toLowerCase())) {
+    throw brokerError('heygen_avatar_consent_required', 'HeyGen avatar group consent is not approved.', 409);
+  }
+
+  const voiceResponse = await requiredGet(`/v3/voices/${input.voiceId}`, accessToken, deps);
+  if (!voiceResponse.ok) throw voiceResponse;
+  const voice = parseHeyGenVoice(voiceResponse.body);
+  if (voice.voiceId !== input.voiceId) {
+    throw brokerError('heygen_voice_lookup_mismatch', 'HeyGen returned the wrong voice.', 502);
+  }
+  if (voice.status === 'processing' || voice.status === 'failed') {
+    throw brokerError('heygen_voice_not_ready', `HeyGen voice is not ready (${voice.status}).`, 409);
+  }
+
+  let referenceLook: HeyGenAvatarLook | undefined;
+  if (input.referenceLookId) {
+    const referenceResponse = await requiredGet(`/v3/avatars/looks/${input.referenceLookId}`, accessToken, deps);
+    if (!referenceResponse.ok) throw referenceResponse;
+    referenceLook = parseHeyGenAvatarLook(referenceResponse.body);
+    if (
+      referenceLook.id !== input.referenceLookId ||
+      referenceLook.avatarType !== 'digital_twin' ||
+      referenceLook.groupId !== look.groupId ||
+      (referenceLook.status && referenceLook.status !== 'completed')
+    ) {
+      throw brokerError(
+        'heygen_reference_look_incompatible',
+        'Avatar V reference_look_id must be a completed Digital Twin look in the same avatar group.',
+        409,
+      );
+    }
+  }
+  if (input.engine === 'avatar_v' && look.avatarType === 'photo_avatar' && !referenceLook) {
+    throw brokerError(
+      'heygen_avatar_v_reference_required',
+      'Avatar V on a photo avatar requires an explicit completed Digital Twin reference look in the same group.',
+      409,
+    );
+  }
+
+  return {
+    account: accountResponse.body,
+    plan: snapshot.plan,
+    credits: snapshot.remaining,
+    look,
+    group,
+    voice,
+    referenceLook,
+  };
+}
+
+function isRawResponse(value: unknown): value is HeyGenRawResponse {
+  return Boolean(value && typeof value === 'object' && typeof (value as HeyGenRawResponse).status === 'number');
+}
+
+async function delay(milliseconds: number, deps: HeyGenBrokerDeps): Promise<void> {
+  if (milliseconds <= 0) return;
+  if (deps.sleep) return deps.sleep(milliseconds);
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function claimVideoSubmission(
+  operation: { doc: HeyGenVideoOperationDoc; etag: string },
+  planName: string,
+  creditsBefore: number,
+  deps: HeyGenBrokerDeps,
+): Promise<{
+  claimed: { doc: HeyGenVideoOperationDoc; etag: string } | null;
+  view?: HeyGenAvatarVideoCreateResult;
+}> {
+  if (operation.doc.state === 'accepted' || operation.doc.state === 'rejected') {
+    return { claimed: null, view: operationView(operation.doc, true, deps.now()) };
+  }
+  if (
+    operation.doc.state === 'submitting' &&
+    operation.doc.leaseExpiresAt &&
+    Date.parse(operation.doc.leaseExpiresAt) > deps.now()
+  ) {
+    return { claimed: null, view: operationView(operation.doc, true, deps.now()) };
+  }
+  if (
+    operation.doc.providerWindowExpiresAt &&
+    Date.parse(operation.doc.providerWindowExpiresAt) <= deps.now() &&
+    !operation.doc.videoId
+  ) {
+    throw brokerError(
+      'heygen_video_idempotency_window_expired',
+      'The provider idempotency window expired before a video_id was recovered. Use a new operation only after manual reconciliation and approval.',
+      409,
+    );
+  }
+  const firstSubmittedAt = operation.doc.firstSubmittedAt ?? new Date(deps.now()).toISOString();
+  const claimed = await replaceVideoOperation(
+    operation,
+    {
+      state: 'submitting',
+      attemptCount: operation.doc.attemptCount + 1,
+      plan: planName,
+      premiumCreditsBefore: creditsBefore,
+      firstSubmittedAt,
+      providerWindowExpiresAt:
+        operation.doc.providerWindowExpiresAt ?? new Date(deps.now() + HEYGEN_IDEMPOTENCY_WINDOW_MS).toISOString(),
+      leaseExpiresAt: new Date(deps.now() + HEYGEN_VIDEO_SUBMIT_LEASE_MS).toISOString(),
+      lastErrorCode: undefined,
+    },
+    deps,
+  );
+  if (claimed) return { claimed };
+  const winner = await readVideoOperation(operation.doc.operationId, deps);
+  if (!winner) {
+    throw brokerError('heygen_video_operation_store_unavailable', 'Could not reconcile the HeyGen video operation.');
+  }
+  return { claimed: null, view: operationView(winner.doc, true, deps.now()) };
+}
+
+export async function getHeyGenVideoOperation(
+  operationId: string,
+  deps: HeyGenBrokerDeps = defaultHeyGenBrokerDeps,
+): Promise<HeyGenAvatarVideoCreateResult | null> {
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(operationId)) {
+    throw brokerError('heygen_operation_id_invalid', 'operation_id is invalid.', 400);
+  }
+  const row = await readVideoOperation(operationId, deps);
+  return row ? operationView(row.doc, true, deps.now()) : null;
+}
+
+export async function executeHeyGenAvatarVideoCreate(
+  input: HeyGenAvatarVideoCreateInput,
+  deps: HeyGenBrokerDeps = defaultHeyGenBrokerDeps,
+): Promise<HeyGenAvatarVideoCreateResult> {
+  let plan: HeyGenAvatarVideoPlan;
+  try {
+    plan = buildHeyGenAvatarVideoPlan(input);
+  } catch (error) {
+    throw brokerError('heygen_video_input_invalid', (error as Error).message, 400);
+  }
+  const operation = await ensureVideoOperation(input, plan, deps);
+  if (operation.doc.state === 'accepted' || operation.doc.state === 'rejected') {
+    return operationView(operation.doc, true, deps.now());
+  }
+
+  let rejectedAccessToken: string | undefined;
+  let claimed: { doc: HeyGenVideoOperationDoc; etag: string } | null = null;
+  for (let authAttempt = 0; authAttempt < 2; authAttempt += 1) {
+    const accessToken = await getHeyGenAccessToken({
+      forceRefresh: authAttempt === 1,
+      rejectedAccessToken,
+      deps,
+    });
+    let preflight: Awaited<ReturnType<typeof runVideoPreflight>>;
+    try {
+      preflight = await runVideoPreflight(input, accessToken, deps);
+    } catch (error) {
+      if (isRawResponse(error) && error.status === 401 && authAttempt === 0) {
+        rejectedAccessToken = accessToken;
+        continue;
+      }
+      if (isRawResponse(error)) {
+        throw brokerError(
+          'heygen_video_preflight_failed',
+          `HeyGen video preflight failed (HTTP ${error.status}). No video was submitted.`,
+          error.status === 401 ? 401 : 409,
+        );
+      }
+      throw error;
+    }
+
+    const firstSubmission = !operation.doc.firstSubmittedAt;
+    if (firstSubmission && preflight.credits !== input.confirmedPremiumCreditsBefore) {
+      throw brokerError(
+        'heygen_credit_snapshot_mismatch',
+        `HeyGen premium-credit balance changed: confirmed ${input.confirmedPremiumCreditsBefore}, current ${preflight.credits}. Reconfirm before submission.`,
+        409,
+      );
+    }
+    if (preflight.credits - input.maxApprovedCredits < input.reservePremiumCredits) {
+      throw brokerError(
+        'heygen_video_credit_reserve_violation',
+        'The approved credit ceiling would reduce the live balance below the reserve floor. No video was submitted.',
+        409,
+      );
+    }
+
+    if (!claimed) {
+      const claim = await claimVideoSubmission(operation, preflight.plan, preflight.credits, deps);
+      if (claim.view) return claim.view;
+      claimed = claim.claimed!;
+    }
+
+    for (let postAttempt = 0; postAttempt < 2; postAttempt += 1) {
+      let response: HeyGenRawResponse | null = null;
+      try {
+        response = await heyGenApiPost(
+          '/v3/videos',
+          accessToken,
+          plan.body,
+          deps,
+          { 'Idempotency-Key': input.idempotencyKey },
+        );
+      } catch {
+        response = null;
+      }
+
+      if (response?.status === 401 && authAttempt === 0) {
+        rejectedAccessToken = accessToken;
+        break;
+      }
+      const code = response ? providerErrorCode(response.body) : undefined;
+      if (response?.status === 409 && code === 'request_in_progress') {
+        const updated = await replaceVideoOperation(
+          claimed,
+          { state: 'submitting', upstreamStatus: 409, lastErrorCode: code },
+          deps,
+        );
+        return operationView((updated ?? claimed).doc, true, deps.now());
+      }
+
+      const retryable = !response || response.status === 429 || response.status >= 500;
+      if (retryable && postAttempt === 0) {
+        await delay(response?.retryAfterMs ?? 250, deps);
+        continue;
+      }
+
+      if (!response || retryable) {
+        const updated = await replaceVideoOperation(
+          claimed,
+          {
+            state: 'outcome_unknown',
+            upstreamStatus: response?.status,
+            lastErrorCode: code ?? 'outcome_unknown',
+            leaseExpiresAt: undefined,
+          },
+          deps,
+        );
+        return operationView((updated ?? claimed).doc, true, deps.now());
+      }
+
+      if (!response.ok) {
+        const updated = await replaceVideoOperation(
+          claimed,
+          {
+            state: 'rejected',
+            upstreamStatus: response.status,
+            lastErrorCode: code ?? `http_${response.status}`,
+            leaseExpiresAt: undefined,
+          },
+          deps,
+        );
+        return operationView((updated ?? claimed).doc, false, deps.now());
+      }
+
+      let accepted: { videoId: string; status: string };
+      try {
+        accepted = parseHeyGenCreateVideo(response.body);
+      } catch {
+        if (postAttempt === 0) {
+          await delay(250, deps);
+          continue;
+        }
+        const updated = await replaceVideoOperation(
+          claimed,
+          {
+            state: 'outcome_unknown',
+            upstreamStatus: response.status,
+            lastErrorCode: 'invalid_success',
+            leaseExpiresAt: undefined,
+          },
+          deps,
+        );
+        return operationView((updated ?? claimed).doc, true, deps.now());
+      }
+
+      const updated = await replaceVideoOperation(
+        claimed,
+        {
+          state: 'accepted',
+          videoId: accepted.videoId,
+          providerStatus: accepted.status,
+          upstreamStatus: response.status,
+          lastErrorCode: undefined,
+          leaseExpiresAt: undefined,
+        },
+        deps,
+      );
+      if (updated) return operationView(updated.doc, false, deps.now());
+      const winner = await readVideoOperation(input.operationId, deps);
+      if (winner?.doc.state === 'accepted') return operationView(winner.doc, true, deps.now());
+      return operationView(
+        {
+          ...claimed.doc,
+          state: 'outcome_unknown',
+          lastErrorCode: 'accepted_response_persist_race',
+          leaseExpiresAt: undefined,
+        },
+        true,
+        deps.now(),
+      );
+    }
+    if (rejectedAccessToken) continue;
+  }
+  throw brokerError('heygen_auth_failed', 'HeyGen OAuth authorization failed after one refresh retry.', 401);
+}
+
+export async function getHeyGenVideoDetail(
+  videoId: string,
+  deps: HeyGenBrokerDeps = defaultHeyGenBrokerDeps,
+): Promise<HeyGenVideoDetail> {
+  const raw = await executeHeyGenRead({ kind: 'video', videoId }, deps);
+  try {
+    return parseHeyGenVideoDetail(raw);
+  } catch {
+    throw brokerError('heygen_video_response_invalid', 'HeyGen returned an invalid video record.', 502);
+  }
 }

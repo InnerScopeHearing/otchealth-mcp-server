@@ -15,6 +15,30 @@ export function redactHeyGenVoiceDesignInputForLog(input: Record<string, unknown
 }
 
 /** Safe structured-log/journal projection for credit-consuming prompt-avatar creation. */
+export function redactHeyGenAvatarVideoInputForLog(input: Record<string, unknown>): unknown {
+  return {
+    operation_id: typeof input.operation_id === 'string' ? input.operation_id : '(invalid)',
+    idempotency_key_sha256: sha256(String(input.idempotency_key ?? '')),
+    manifest_sha256: typeof input.manifest_sha256 === 'string' ? input.manifest_sha256 : undefined,
+    title_sha256: sha256(String(input.title ?? '')),
+    avatar_id: typeof input.avatar_id === 'string' ? input.avatar_id : undefined,
+    voice_id: typeof input.voice_id === 'string' ? input.voice_id : undefined,
+    script_sha256: sha256(String(input.script ?? '')),
+    engine: typeof input.engine === 'string' ? input.engine : undefined,
+    resolution: typeof input.resolution === 'string' ? input.resolution : undefined,
+    aspect_ratio: typeof input.aspect_ratio === 'string' ? input.aspect_ratio : undefined,
+    confirm_credit_use: input.confirm_credit_use === true,
+    confirmed_premium_credits_before:
+      typeof input.confirmed_premium_credits_before === 'number'
+        ? input.confirmed_premium_credits_before
+        : undefined,
+    max_approved_credits:
+      typeof input.max_approved_credits === 'number' ? input.max_approved_credits : undefined,
+    reserve_premium_credits:
+      typeof input.reserve_premium_credits === 'number' ? input.reserve_premium_credits : undefined,
+  };
+}
+
 export function redactHeyGenPromptAvatarInputForLog(input: Record<string, unknown>): unknown {
   return {
     name: typeof input.name === 'string' ? input.name : '(invalid)',

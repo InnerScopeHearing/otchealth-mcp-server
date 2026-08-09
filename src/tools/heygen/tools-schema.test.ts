@@ -10,6 +10,23 @@ import {
   HEYGEN_VOICES_LIST_INPUT,
   HEYGEN_VOICE_DESIGN_INPUT,
 } from './tools.js';
+import {
+  HEYGEN_AVATAR_VIDEO_CREATE_INPUT,
+  HEYGEN_AVATAR_VIDEO_OPERATION_GET_INPUT,
+  HEYGEN_BRAND_GLOSSARIES_LIST_INPUT,
+  HEYGEN_BRAND_GLOSSARY_GET_INPUT,
+  HEYGEN_BRAND_KITS_LIST_INPUT,
+  HEYGEN_PROOFREAD_GET_INPUT,
+  HEYGEN_TRANSLATION_GET_INPUT,
+  HEYGEN_TRANSLATION_STATUSES_INPUT,
+  HEYGEN_TRANSLATIONS_LIST_INPUT,
+  HEYGEN_VIDEO_AGENT_SESSION_GET_INPUT,
+  HEYGEN_VIDEO_AGENT_SESSION_VIDEOS_LIST_INPUT,
+  HEYGEN_VIDEO_AGENT_SESSIONS_LIST_INPUT,
+  HEYGEN_VIDEO_STATUSES_INPUT,
+  HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT,
+  HEYGEN_VOICE_GET_INPUT,
+} from './production-tools.js';
 
 function parse(shape: ZodRawShape, value: unknown): unknown {
   return z.object(shape).strict().parse(value);
@@ -90,4 +107,86 @@ test('prompt-avatar schema requires confirmation and excludes every other avatar
   ]) {
     assert.throws(() => parse(HEYGEN_PROMPT_AVATAR_CREATE_INPUT, invalid));
   }
+});
+
+test('Phase 0 read schemas are strict, bounded, and path-safe', () => {
+  assert.deepEqual(parse(HEYGEN_VIDEO_STATUSES_INPUT, { video_ids: ['v_1'], batch_ids: ['b-1'] }), {
+    video_ids: ['v_1'], batch_ids: ['b-1'],
+  });
+  assert.throws(() => parse(HEYGEN_VIDEO_STATUSES_INPUT, { video_ids: ['../escape'] }));
+  assert.throws(() => parse(HEYGEN_VIDEO_STATUSES_INPUT, { video_ids: Array(101).fill('v') }));
+  for (const shape of [
+    HEYGEN_VIDEO_AGENT_SESSIONS_LIST_INPUT,
+    HEYGEN_BRAND_KITS_LIST_INPUT,
+    HEYGEN_BRAND_GLOSSARIES_LIST_INPUT,
+    HEYGEN_TRANSLATIONS_LIST_INPUT,
+  ]) {
+    assert.deepEqual(parse(shape, { limit: 100, token: 'next' }), { limit: 100, token: 'next' });
+    assert.throws(() => parse(shape, { limit: 101 }));
+    assert.throws(() => parse(shape, { token: 'x'.repeat(4097) }));
+  }
+  for (const [shape, key] of [
+    [HEYGEN_VIDEO_AGENT_SESSION_GET_INPUT, 'session_id'],
+    [HEYGEN_VIDEO_AGENT_SESSION_VIDEOS_LIST_INPUT, 'session_id'],
+    [HEYGEN_BRAND_GLOSSARY_GET_INPUT, 'brand_glossary_id'],
+    [HEYGEN_VOICE_GET_INPUT, 'voice_id'],
+    [HEYGEN_TRANSLATION_GET_INPUT, 'video_translation_id'],
+    [HEYGEN_PROOFREAD_GET_INPUT, 'proofread_id'],
+    [HEYGEN_AVATAR_VIDEO_OPERATION_GET_INPUT, 'operation_id'],
+  ] as const) {
+    const value = key === 'operation_id' ? 'operation_01' : 'safe_id-1';
+    assert.deepEqual(parse(shape, { [key]: value }), { [key]: value });
+    assert.throws(() => parse(shape, { [key]: '../escape' }));
+  }
+  assert.deepEqual(parse(HEYGEN_TRANSLATION_STATUSES_INPUT, { video_translation_ids: ['t1'] }), {
+    video_translation_ids: ['t1'],
+  });
+});
+
+test('direct Avatar Video schema accepts only the bounded deterministic surface', () => {
+  const valid = {
+    operation_id: 'video_op_01',
+    idempotency_key: 'video-op:01',
+    manifest_sha256: 'a'.repeat(64),
+    title: 'Executive update',
+    avatar_id: 'look_1',
+    voice_id: 'voice_1',
+    script: 'Exact approved script.',
+    engine: 'avatar_v',
+    reference_look_id: 'look_ref',
+    resolution: '1080p',
+    aspect_ratio: '16:9',
+    fit: 'contain',
+    motion_prompt: 'Hands still, calm and confident.',
+    background: { type: 'color', value: '#0A1628' },
+    caption: { file_format: 'srt', style: 'default' },
+    voice_settings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
+    brand_glossary_id: 'glossary_1',
+    confirm_credit_use: true,
+    confirmed_premium_credits_before: 981,
+    max_approved_credits: 20,
+    reserve_premium_credits: 300,
+  } as const;
+  assert.deepEqual(parse(HEYGEN_AVATAR_VIDEO_CREATE_INPUT, valid), valid);
+  for (const invalid of [
+    { ...valid, operation_id: 'short' },
+    { ...valid, idempotency_key: 'bad key' },
+    { ...valid, manifest_sha256: 'A'.repeat(64) },
+    { ...valid, resolution: '4k' },
+    { ...valid, engine: 'avatar_vi' },
+    { ...valid, voice_settings: { speed: 2 } },
+    { ...valid, background: { type: 'image', url: 'https://example.test/image.png' } },
+    { ...valid, callback_url: 'https://example.test/callback' },
+    { ...valid, audio_url: 'https://example.test/audio.mp3' },
+    { ...valid, output_format: 'webm' },
+    { ...valid, watermark: {} },
+  ]) {
+    assert.throws(() => parse(HEYGEN_AVATAR_VIDEO_CREATE_INPUT, invalid));
+  }
+  assert.deepEqual(parse(HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT, {
+    operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 90, max_asset_bytes: 52_428_800,
+  }), { operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 90, max_asset_bytes: 52_428_800 });
+  assert.throws(() => parse(HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT, {
+    operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 91,
+  }));
 });

@@ -1,4 +1,4 @@
-/** Fixed HeyGen v3 discovery/voice-design surface plus CTO-only pairing and prompt creation. */
+/** HeyGen OAuth pairing and core discovery; production reads and bounded video controls register last. */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
@@ -27,6 +27,7 @@ import {
   redactHeyGenPromptAvatarInputForLog,
   redactHeyGenVoiceDesignInputForLog,
 } from './redaction.js';
+import { registerHeyGenProductionTools } from './production-tools.js';
 
 export { isHeyGenToolAllowed } from './access.js';
 
@@ -536,4 +537,6 @@ export function registerHeyGenTools(
     },
     callerHash,
   );
+
+  registerHeyGenProductionTools(server, callerHash, deps);
 }
