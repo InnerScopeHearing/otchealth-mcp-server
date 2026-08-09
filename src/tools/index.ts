@@ -948,6 +948,7 @@ import { registerAzureContainerappSetEnv } from './azure/containerapp-set-env.js
 import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
 import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
 import { registerXeroTools } from './xero/tools.js';
+import { registerHeyGenTools } from './heygen/index.js';
 import { registerMailArchiveTools } from './mail/tools.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
@@ -1920,6 +1921,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAzureSearchIndexerUpsert(server, callerHash);
   // Xero (read-only, executive-ring gated in-handler; MNPI — see tools/xero/client.ts).
   registerXeroTools(server, callerHash);
+  // HeyGen (durable OAuth token broker + fixed read-only data surface; every handler lane-gated).
+  registerHeyGenTools(server, callerHash);
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).
   registerMailArchiveTools(server, callerHash);

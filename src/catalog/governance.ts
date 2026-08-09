@@ -15,6 +15,16 @@ export interface GovRule {
 }
 
 export const GOVERNANCE: GovRule[] = [
+  // HeyGen credential pairing changes the durable OAuth token chain. Keep BOTH controls CTO-only by
+  // exact name; a broad heygen_* rule would incorrectly block the approved internal read lanes.
+  { pattern: 'heygen_pairing_start', requiredRole: 'cto', reason: 'Creating a HeyGen OAuth pairing session is CTO-owned credential administration.' },
+  { pattern: 'heygen_pairing_status', requiredRole: 'cto', reason: 'HeyGen OAuth pairing state is CTO-only credential-administration metadata.' },
+  // Data reads are centrally constrained to the same exact internal lanes every handler re-checks.
+  // Exact names (rather than a broad heygen_* rule) keep pairing strictly narrower than reads.
+  { pattern: 'heygen_account_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
+  { pattern: 'heygen_videos_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
+  { pattern: 'heygen_video_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
+  { pattern: 'heygen_video_agent_styles_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
   // Azure control-plane tools (ITEM #2) are CTO-only: infra is CTO-owned. Covers the Phase A read
   // tools (azure_jobs_list / azure_job_executions / azure_logs_query / azure_search_index_stats /
   // azure_containerapp_get / azure_resource_list) AND every future Phase B write tool (azure_job_* /

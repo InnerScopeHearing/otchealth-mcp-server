@@ -21,8 +21,36 @@ Endpoints:
 - `GET /health` — public, returns operational flags
 - `GET /version` — public, returns service version/build metadata
 - `POST /mcp` — Streamable HTTP, JSON-RPC 2.0, bearer-auth required
+- `POST /heygen/pair` — one-time HeyGen OAuth credential handoff (pair-id capability)
 - `POST /admin/revoke` — kill-switch (separate admin token)
 - `GET /admin/revoke`, `POST /admin/clear-revoke` — inspect / clear revocation
+
+---
+
+## HeyGen read-only OAuth broker
+
+The HeyGen integration exposes only four fixed reads: `heygen_account_get`, `heygen_videos_list`,
+`heygen_video_get`, and `heygen_video_agent_styles_list`. Each operation calls `GET /v3/users/me`
+immediately before its target and refuses the target unless the account reports
+`billing_type=subscription` with a populated `subscription`. The data tools are limited in-handler to
+`cto`, `exec`, `coo`, `cro`, `cpo`, and `developer`; no generic request or generation/mutation/download
+path exists.
+
+Pairing is CTO-only:
+
+1. Call `heygen_pairing_start` with `dry_run:false`. Its random 32-byte id expires after 15 minutes.
+2. Build base64 from the official HeyGen credentials shape, exactly
+   `{"oauth":{"access_token":"…","refresh_token":"…","expires_at":"…","scope":"…","token_type":"…"}}`.
+   Any `api_key` field, including a nested one, is refused.
+3. `POST /heygen/pair` with JSON `{"pair_id":"…"}` and the base64 value in
+   `x-heygen-oauth-credentials`. The pair id is one-time and is consumed before the header is parsed.
+4. Check `heygen_pairing_status`.
+
+The broker requires Cosmos plus the existing `OAUTH_TOKEN_SIGNING_SECRET`. Tokens are derived-key
+AES-256-GCM encrypted before durable storage (`ttl:-1`); only ciphertext/IV/tag and non-secret status
+metadata are stored. OAuth refresh rotation uses an in-process mutex plus Cosmos ETags and persists a
+new encrypted chain before returning its access token. Rotating `OAUTH_TOKEN_SIGNING_SECRET` makes the
+old HeyGen ciphertext intentionally undecryptable, so run a fresh pairing after that rotation.
 
 ---
 

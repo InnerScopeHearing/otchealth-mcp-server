@@ -69,12 +69,16 @@ const RAG_OPEN = ['brain_search', 'web_search', 'kb_search', 'search', 'fetch', 
 const RAG_PRIVILEGED = ['kb_search_privileged', 'kb_get_document'] as const;
 const LLM = ['llm_azure'] as const;
 const SAFETY_CHECKS = ['shield_check', 'groundedness_check', 'claims_check'] as const;
+// HeyGen visibility for the six approved internal lanes. Execution remains independently constrained:
+// data handlers re-check the exact six-lane allowlist, and pairing is CTO-only in-handler + governance.
+const HEYGEN = ['heygen_*'] as const;
 // The CTO's full infra/build/observability surface, reused verbatim by 'exec' (the unified chief
 // wears the CTO hat too, per the "solo operator" note in kb/search-privileged.ts).
 const CTO_INFRA = [
   'azure_*', 'github_*', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
   'posthog_*', 'sentry_*', 'gumroad_*', 'docintel_*', 'graph_*', 'cio_*', 'stripe_*', 'twilio_*',
   'elevenlabs_*', 'xero_*', 'legal_blob_*', 'shopify_*', 'intercom_*', 'revenuecat_*',
+  ...HEYGEN,
 ] as const;
 // The customer-service-engine Graph mail tools (2026-07-25, CRO handoff): send/list/get/mark-read,
 // all mailbox-allowlisted server-side (see graph/api-client.ts's allowedMailboxes()). Named
@@ -193,7 +197,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // auth caller); a Claude Code/Hyperagent cto session is unaffected either way today. If universal
   // 'curate' mode is ever armed for the cto lane specifically, this same narrower list would then also
   // apply there -- a deliberate call to make at that time, not implied by this change.
-  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, 'agent_persona'],
+  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...HEYGEN, 'agent_persona'],
   // Engineering IC: its OWN app-repo ship cycle (branch/commit/PR/CI/dispatch) plus the shared
   // read/memory/task surface. No Azure control plane, no finance, no legal -- infra and the two
   // genuinely sensitive corpora (MNPI finance, privileged legal) are CTO/EXEC_RING-owned, not
@@ -201,6 +205,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   developer: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
     'github_*', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
+    ...HEYGEN,
     // 2026-08-02: developer_wake_lite (diagnostics/developer-wake-lite.ts) was never covered by
     // any pattern above -- not catalog_* (CATALOG's wildcard), not github_*/depot_*, no exact
     // match -- so under curate-m365-only it was silently excluded from what's actually registered
@@ -237,7 +242,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // in-handler, this list keeps the advertised set honest with that reality.
   coo: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    ...GRAPH_MAIL, 'cio_*',
+    ...GRAPH_MAIL, 'cio_*', ...HEYGEN,
   ],
   // Revenue / commerce: storefront, lifecycle CRM, help center, digital-products cash lane, revenue
   // analytics. Also removed from EXEC_RING 2026-07-21 (securities firewall: revenue never touches
@@ -249,14 +254,14 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // cto's CTO_M365_CURATED note above: only matters under curate-m365-only today.
   cro: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    ...CRO_M365_CURATED, ...GRAPH_MAIL,
+    ...CRO_M365_CURATED, ...GRAPH_MAIL, ...HEYGEN,
   ],
   // Product: app analytics, crash/error tracking, subscription entitlements, the privileged RAG rooms
   // (a dormant EXEC_RING member per search-privileged.ts -- no live client yet, seeded here for
   // parity, not because usage has proven it).
   cpo: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'posthog_*', 'sentry_*', 'revenuecat_*',
+    'posthog_*', 'sentry_*', 'revenuecat_*', ...HEYGEN,
   ],
   // Compliance / controls: the safety-check tools, the privileged RAG rooms (dormant EXEC_RING
   // member, same caveat as cpo above), legal + document-intelligence visibility for review.
