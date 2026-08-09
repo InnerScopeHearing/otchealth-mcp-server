@@ -138,12 +138,17 @@ test('public HeyGen surface is fixed and exposes only bounded direct video while
     assert.equal(exposed.includes(forbidden), false, `must not expose ${forbidden}`);
   }
 
-  const source = `${readFileSync(new URL('./tools.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8')}`;
+  const baseSource = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
+  const productionSource = readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8');
+  const source = `${baseSource}\n${productionSource}`;
   assert.equal(source.includes('reference_images'), false, 'HeyGen inputs must never expose arbitrary reference_images');
-  assert.match(source, /name: 'heygen_prompt_avatar_create',[\s\S]*?category: 'write_simple'/);
-  assert.doesNotMatch(source, /name: 'heygen_prompt_avatar_create',[\s\S]*?category: 'write_orchestrated'/);
-  assert.match(source, /name: 'heygen_avatar_video_create',[\s\S]*?category: 'write_orchestrated'/);
-  assert.match(source, /name: 'heygen_video_wait_ingest_qa',[\s\S]*?category: 'write_orchestrated'/);
+  const promptStart = baseSource.indexOf("name: 'heygen_prompt_avatar_create'");
+  const promptEnd = baseSource.indexOf('registerHeyGenProductionTools', promptStart);
+  const promptBlock = baseSource.slice(promptStart, promptEnd);
+  assert.match(promptBlock, /category: 'write_simple'/);
+  assert.doesNotMatch(promptBlock, /category: 'write_orchestrated'/);
+  assert.match(productionSource, /name: 'heygen_avatar_video_create',[\s\S]*?category: 'write_orchestrated'/);
+  assert.match(productionSource, /name: 'heygen_video_wait_ingest_qa',[\s\S]*?category: 'write_orchestrated'/);
 });
 
 test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prompts', () => {
