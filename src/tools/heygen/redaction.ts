@@ -47,7 +47,6 @@ export function redactHeyGenAvatarVideoInputForLog(input: Record<string, unknown
       typeof input.confirmed_billing_observed_at === 'string'
         ? input.confirmed_billing_observed_at
         : undefined,
-    owner_approval_jws_present: typeof input.owner_approval_jws === 'string',
     max_approved_credits:
       typeof input.max_approved_credits === 'number' ? input.max_approved_credits : undefined,
     reserve_premium_credits:

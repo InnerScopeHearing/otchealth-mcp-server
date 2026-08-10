@@ -1662,6 +1662,14 @@ test('look, group, voice, and Avatar V reference incompatibilities block before 
   }
 });
 
+test('a missing owner grant fails closed before the Avatar Video provider POST', async () => {
+  const harness = avatarVideoHarness();
+  const input = avatarVideoInput();
+  input.ownerApprovalJws = undefined;
+  await assert.rejects(() => executeHeyGenAvatarVideoCreate(input, harness.deps), /short-lived owner approval/);
+  assert.equal(harness.postCalls(), 0);
+});
+
 test('429 and 5xx are never automatically retried after owner-grant consumption', async () => {
   const limited = avatarVideoHarness({
     post: () => new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {

@@ -92,7 +92,7 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
     'heygen_video_agent_session_videos_list', 'heygen_brand_kits_list', 'heygen_brand_glossaries_list',
     'heygen_brand_glossary_get', 'heygen_translation_languages_list', 'heygen_translations_list',
     'heygen_translation_get', 'heygen_translation_statuses_get', 'heygen_proofread_get',
-    'heygen_avatar_video_operation_get', 'heygen_prompt_avatar_create', 'heygen_avatar_video_create',
+    'heygen_avatar_video_operation_get', 'heygen_owner_approval_status_get', 'heygen_prompt_avatar_create', 'heygen_avatar_video_create',
     'heygen_video_wait_ingest_qa',
   ]) {
     assert.ok(set.has(heygenTool), `ship lane must expose ${heygenTool}`);
@@ -132,7 +132,7 @@ test("(d) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 s
     'heygen_video_agent_session_videos_list', 'heygen_brand_kits_list', 'heygen_brand_glossaries_list',
     'heygen_brand_glossary_get', 'heygen_translation_languages_list', 'heygen_translations_list',
     'heygen_translation_get', 'heygen_translation_statuses_get', 'heygen_proofread_get',
-    'heygen_avatar_video_operation_get', 'heygen_prompt_avatar_create', 'heygen_avatar_video_create',
+    'heygen_avatar_video_operation_get', 'heygen_owner_approval_status_get', 'heygen_prompt_avatar_create', 'heygen_avatar_video_create',
     'heygen_video_wait_ingest_qa',
   ]) {
     assert.equal(set.has(forbidden), false, `external-read must never see ${forbidden}`);

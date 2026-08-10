@@ -71,6 +71,7 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'heygen_translation_statuses_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen translation metadata is limited to approved internal lanes.' },
   { pattern: 'heygen_proofread_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen proofread metadata is limited to approved internal lanes.' },
   { pattern: 'heygen_avatar_video_operation_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen operation state is limited to approved internal lanes.' },
+  { pattern: 'heygen_owner_approval_status_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen owner-approval availability is limited to approved internal lanes and exposes no grant material.' },
   { pattern: 'heygen_reference_look_operation_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen reference-Look operation state is limited to approved internal lanes.' },
   // Azure control-plane tools (ITEM #2) are CTO-only: infra is CTO-owned. Covers the Phase A read
   // tools (azure_jobs_list / azure_job_executions / azure_logs_query / azure_search_index_stats /

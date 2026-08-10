@@ -218,7 +218,6 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
     confirmed_billing_snapshot_sha256: 'b'.repeat(64),
     confirmed_billing_state_sha256: 'c'.repeat(64),
     confirmed_billing_observed_at: '2026-08-10T00:00:00.000Z',
-    owner_approval_jws: 'x'.repeat(64),
     max_approved_credits: 20,
     reserve_premium_credits: 300,
   } as const;
@@ -239,7 +238,8 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
     { ...valid, confirmed_billing_snapshot_sha256: 'A'.repeat(64) },
     { ...valid, confirmed_billing_state_sha256: 'A'.repeat(64) },
     { ...valid, confirmed_billing_observed_at: 'not-a-date' },
-    { ...valid, owner_approval_jws: 'short' },
+    { ...valid, owner_approval_handle: 'short' },
+    { ...valid, owner_approval_jws: 'x'.repeat(64) },
     { ...valid, resolution: '4k' },
     { ...valid, engine: 'avatar_vi' },
     { ...valid, production_profile: 'family_story_best' },

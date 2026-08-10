@@ -107,9 +107,9 @@ test('SAFETY-CRITICAL: every registered HeyGen tool call-site has its own explic
   const refusals = (base.match(/return heyGenLaneRefusal\(/g) ?? []).length;
   const productionRefusals = (production.match(/return laneRefusal\(/g) ?? []).length;
   const lookRefusals = (look.match(/return refusal\(/g) ?? []).length;
-  assert.equal(directRegistrations, 36, 'direct public HeyGen registrations must remain fixed');
+  assert.equal(directRegistrations, 37, 'direct public HeyGen registrations must remain fixed');
   assert.equal(futureDefinitions, 10, 'future surface must remain exactly nine preflight-only contracts plus one bounded metadata update');
-  assert.equal(directRegistrations + futureDefinitions, 46, 'complete HeyGen surface count must be exact');
+  assert.equal(directRegistrations + futureDefinitions, 47, 'complete HeyGen surface count must be exact');
   assert.equal(gates + lookRefusals, directRegistrations, 'every direct registerTool call-site must explicitly check its caller lane');
   assert.equal(refusals + productionRefusals + lookRefusals, directRegistrations, 'every direct explicit gate must return a lane refusal');
   assert.match(future, /if \(!\(HEYGEN_DATA_LANES as readonly string\[\]\)\.includes\(ctx\.callerAgent\)\)/);
@@ -145,6 +145,7 @@ test('public HeyGen surface is fixed and exposes only bounded direct video while
     'heygen_translation_statuses_get',
     'heygen_proofread_get',
     'heygen_avatar_video_operation_get',
+    'heygen_owner_approval_status_get',
     'heygen_reference_look_operation_get',
   ]);
   assert.deepEqual([...HEYGEN_CREATION_TOOLS], [
@@ -231,7 +232,6 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
     confirmed_billing_snapshot_sha256: 'c'.repeat(64),
     confirmed_billing_state_sha256: 'd'.repeat(64),
     confirmed_billing_observed_at: '2026-08-10T00:00:00Z',
-    owner_approval_jws: 'SENSITIVE-JWS',
     max_approved_credits: 20,
     reserve_premium_credits: 300,
   });
@@ -242,6 +242,7 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
     assert.equal(serialized.includes('SENSITIVE TITLE'), false);
     assert.equal(serialized.includes('SENSITIVE LOOK NAME'), false);
     assert.equal(serialized.includes('SENSITIVE-JWS'), false);
+    assert.equal(serialized.includes('SENSITIVE-APPROVAL-HANDLE'), false);
     assert.match(serialized, /[a-f0-9]{64}/);
   }
   assert.deepEqual(Object.keys(createLog as Record<string, unknown>).sort(), [
@@ -287,7 +288,6 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
     'manifest_sha256',
     'max_approved_credits',
     'operation_id',
-    'owner_approval_jws_present',
     'production_profile',
     'reference_look_id_present',
     'reserve_premium_credits',

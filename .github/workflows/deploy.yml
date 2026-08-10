@@ -40,9 +40,10 @@ concurrency:
 env:
   ACR: acrotc55c84f6bef
   APP: otchealth-mcp-gateway
+  APPROVAL_APP: otchealth-approval-broker
   APP_RG: rg-otchealth-apps-prod
   IMAGE_REPO: otchealth-mcp-server
-  MIN_TOOLS: '1002' # exact post-HeyGen-expansion regression floor (current 985 + 17 fixed tools)
+  MIN_TOOLS: '1003' # fixed gateway catalog floor after adding owner-approval status read
 
 jobs:
   deploy:
@@ -73,6 +74,29 @@ jobs:
           echo "ref=${ACR}.azurecr.io/${IMAGE_REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Deploying digest ${DIGEST}"
 
+      - name: Deploy and verify approval broker before opening the provider lane
+        id: broker
+        run: |
+          set -euo pipefail
+          az containerapp revision set-mode -n "$APPROVAL_APP" -g "$APP_RG" --mode multiple
+          OLD=$(az containerapp revision list -n "$APPROVAL_APP" -g "$APP_RG" --query '[?properties.trafficWeight>`0`].name | [0]' -o tsv)
+          SUFFIX="b$(echo "$GITHUB_SHA" | cut -c1-8)a${GITHUB_RUN_ATTEMPT}"
+          REV="${APPROVAL_APP}--${SUFFIX}"
+          echo "previous=${OLD}" >> "$GITHUB_OUTPUT"
+          echo "revision=${REV}" >> "$GITHUB_OUTPUT"
+          az containerapp update -n "$APPROVAL_APP" -g "$APP_RG" \
+            --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" \
+            --command node dist/server/approval-broker-index.js \
+            --min-replicas 1 --max-replicas 1 >/dev/null
+          FQDN=$(az containerapp revision show -n "$APPROVAL_APP" -g "$APP_RG" --revision "$REV" --query properties.fqdn -o tsv)
+          for i in $(seq 1 25); do
+            code=$(curl -fsS -o /tmp/approval-health.json -w '%{http_code}' "https://${FQDN}/health" 2>/dev/null || echo 000)
+            [ "$code" = "200" ] && break
+            sleep 6
+          done
+          node -e 'const h=require("/tmp/approval-health.json"); if(h.status!=="ok"||!h.key_id||!h.public_jwk_fingerprint_sha256) process.exit(1)'
+          az containerapp ingress traffic set -n "$APPROVAL_APP" -g "$APP_RG" --revision-weight "${REV}=100"
+
       - name: Ensure multiple-revision mode (blue-green)
         run: az containerapp revision set-mode -n "$APP" -g "$APP_RG" --mode multiple
 
@@ -80,10 +104,12 @@ jobs:
         id: green
         run: |
           set -euo pipefail
-          SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)"
+          OLD=$(az containerapp revision list -n "$APP" -g "$APP_RG" --query '[?properties.trafficWeight>`0`].name | [0]' -o tsv)
+          SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)a${GITHUB_RUN_ATTEMPT}"
+          echo "previous=${OLD}" >> "$GITHUB_OUTPUT"
           az containerapp update -n "$APP" -g "$APP_RG" \
             --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" \
-            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=off COMPLIANCE_MODE=off DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com DD_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_ENV=production DD_SERVICE=gateway-mcp DD_VERSION="$SUFFIX" DD_AZURE_SUBSCRIPTION_ID=55c84f6b-ef90-4259-a58b-50835cc4cab4 DD_AZURE_RESOURCE_GROUP="$APP_RG" CONTENT_SAFETY_ENDPOINT="${{ secrets.CONTENT_SAFETY_ENDPOINT }}" CONTENT_SAFETY_KEY="${{ secrets.CONTENT_SAFETY_KEY }}" SHIELD_MODE=report GROUNDEDNESS_MODE=report RETRIEVAL_SHIELD_MODE=report LLM_CACHE_MODE=on FAQ_DEFLECT_MODE=on WEBSEARCH_PROJECT_ENDPOINT=https://otchealth-foundry.services.ai.azure.com/api/projects/otchealth-os WEBSEARCH_SP_CLIENT_ID=34a7326b-5ed0-4f6c-b5b4-483772a15a69 WEBSEARCH_SP_TENANT_ID=4ab58580-cc9c-49f7-b5c7-a77f84fdc270 WEBSEARCH_MODEL=gpt-5.4 WEBSEARCH_SP_SECRET=secretref:websearch-sp-secret AZURE_CFO_STORAGE_ACCOUNT=secretref:azure-cfo-storage-account AZURE_CFO_STORAGE_KEY=secretref:azure-cfo-storage-key MEMORY_AUTOSUPERSEDE_MODE=suggest ENABLE_HEYGEN_AVATAR_VIDEO_WRITES=false ENABLE_HEYGEN_REFERENCE_LOOK_WRITES=false ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES=false ENABLE_HEYGEN_VIDEO_AGENT_GENERATION=false ENABLE_HEYGEN_ASSET_WRITES=false ENABLE_HEYGEN_TRANSLATION_WRITES=false ENABLE_HEYGEN_TTS_WRITES=false ENABLE_HEYGEN_METADATA_WRITES=true \
+            --set-env-vars POSTHOG_GATEWAYOPS_KEY="${{ secrets.POSTHOG_GATEWAYOPS_KEY }}" GOVERNANCE_MODE=off COMPLIANCE_MODE=off DD_METRICS_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_SITE=us3.datadoghq.com DD_API_KEY="${{ secrets.DD_METRICS_API_KEY }}" DD_ENV=production DD_SERVICE=gateway-mcp DD_VERSION="$SUFFIX" DD_AZURE_SUBSCRIPTION_ID=55c84f6b-ef90-4259-a58b-50835cc4cab4 DD_AZURE_RESOURCE_GROUP="$APP_RG" CONTENT_SAFETY_ENDPOINT="${{ secrets.CONTENT_SAFETY_ENDPOINT }}" CONTENT_SAFETY_KEY="${{ secrets.CONTENT_SAFETY_KEY }}" SHIELD_MODE=report GROUNDEDNESS_MODE=report RETRIEVAL_SHIELD_MODE=report LLM_CACHE_MODE=on FAQ_DEFLECT_MODE=on WEBSEARCH_PROJECT_ENDPOINT=https://otchealth-foundry.services.ai.azure.com/api/projects/otchealth-os WEBSEARCH_SP_CLIENT_ID=34a7326b-5ed0-4f6c-b5b4-483772a15a69 WEBSEARCH_SP_TENANT_ID=4ab58580-cc9c-49f7-b5c7-a77f84fdc270 WEBSEARCH_MODEL=gpt-5.4 WEBSEARCH_SP_SECRET=secretref:websearch-sp-secret AZURE_CFO_STORAGE_ACCOUNT=secretref:azure-cfo-storage-account AZURE_CFO_STORAGE_KEY=secretref:azure-cfo-storage-key MEMORY_AUTOSUPERSEDE_MODE=suggest ENABLE_HEYGEN_PROVIDER_WRITES=true ENABLE_HEYGEN_AVATAR_VIDEO_WRITES=true ENABLE_HEYGEN_REFERENCE_LOOK_WRITES=false ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES=false ENABLE_HEYGEN_VIDEO_AGENT_GENERATION=false ENABLE_HEYGEN_ASSET_WRITES=false ENABLE_HEYGEN_TRANSLATION_WRITES=false ENABLE_HEYGEN_TTS_WRITES=false ENABLE_HEYGEN_METADATA_WRITES=false \
             --remove-env-vars BRAIN_SEARCH_ENDPOINT BRAIN_SEARCH_KEY \
             --min-replicas 2 --max-replicas 10 \
             --scale-rule-name http-concurrency --scale-rule-type http --scale-rule-http-concurrency 30 >/dev/null
@@ -103,8 +129,7 @@ jobs:
           # CONTENT_SAFETY_ENDPOINT/KEY (2026-07-02): activate the already-wired Azure AI Content Safety
           # tools (shield_check / groundedness_check / claims_check, src/safety/content-safety.ts). The
           # code graceful-skips when these are unset, so the tools were registered but INERT in prod. The
-          # values live in the vault (GCP SM azure-contentsafety-endpoint/key) and were mirrored into the
-          # repo Actions secrets CONTENT_SAFETY_ENDPOINT/KEY (never committed as values). endpoint =
+          # values are supplied through the production Actions secret boundary (never committed). endpoint =
           # https://cs-otchealth.cognitiveservices.azure.com (resource cs-otchealth).
           echo "revision=${APP}--${SUFFIX}" >> "$GITHUB_OUTPUT"
 
@@ -123,14 +148,26 @@ jobs:
           node -e '
             const h = require("/tmp/h.json");
             if (h.status !== "ok") { console.error("health not ok"); process.exit(1); }
+            if (h.read_only_mode !== false || h.enable_write_tools !== true || h.enable_high_risk_tools !== true) {
+              console.error("REGRESSION: global write/high-risk gates do not permit the guarded Avatar Video lane"); process.exit(1);
+            }
             const n = h.tool_count || 0, min = Number(process.env.MIN_TOOLS);
             if (n < min) { console.error(`REGRESSION: tool_count ${n} < ${min}`); process.exit(1); }
             const hg = h.heygen || {};
-            const dark = ["provider_writes", "prompt_avatar_writes", "avatar_video_writes", "reference_look_writes", "video_agent_chat_writes", "video_agent_generation", "asset_writes", "translation_writes", "tts_writes"];
+            const dark = ["prompt_avatar_writes", "reference_look_writes", "video_agent_chat_writes", "video_agent_generation", "asset_writes", "translation_writes", "tts_writes", "metadata_writes"];
             const unexpectedlyOn = dark.filter((key) => hg[key] !== false);
-            if (unexpectedlyOn.length) { console.error(`REGRESSION: HeyGen write lanes not dark: ${unexpectedlyOn.join(",")}`); process.exit(1); }
-            if (hg.metadata_writes !== true) { console.error("REGRESSION: bounded HeyGen metadata writes are not enabled"); process.exit(1); }
-            console.log(`GREEN healthy: ${n} tools advertised (>= ${min}); HeyGen credit lanes dark, metadata lane on.`);
+            if (unexpectedlyOn.length) { console.error(`REGRESSION: unapproved HeyGen write lanes are not dark: ${unexpectedlyOn.join(",")}`); process.exit(1); }
+            const required = ["provider_writes", "avatar_video_writes", "owner_approval_verifier_configured", "owner_approval_context_configured", "owner_approval_handle_configured", "owner_approval_callback_configured", "owner_approval_broker_configured"];
+            const missing = required.filter((key) => hg[key] !== true);
+            if (missing.length) { console.error(`REGRESSION: guarded HeyGen lane not ready: ${missing.join(",")}`); process.exit(1); }
+            const broker = require("/tmp/approval-health.json");
+            const bc = broker.approval_compatibility || {}, gc = hg.owner_approval_compatibility || {};
+            const compatibilityKeys = ["public_jwk_sha256", "context_secret_sha256", "handle_secret_sha256", "callback_secret_sha256"];
+            const mismatch = compatibilityKeys.filter((key) => !/^[a-f0-9]{64}$/.test(bc[key] || "") || bc[key] !== gc[key]);
+            if (mismatch.length || broker.issuer !== hg.owner_approval_issuer || broker.audience !== hg.owner_approval_audience || broker.subject_sha256 !== hg.owner_approval_subject_sha256) {
+              console.error(`REGRESSION: broker/gateway approval configuration mismatch: ${mismatch.join(",") || "principal claims"}`); process.exit(1);
+            }
+            console.log(`GREEN healthy: ${n} tools advertised (>= ${min}); guarded Avatar Video lane on, unrelated generation lanes dark, broker/gateway fingerprints match.`);
           '
         id: health
 
@@ -177,16 +214,34 @@ jobs:
             --revision-weight "${{ steps.green.outputs.revision }}=100"
           echo "Live on ${{ steps.green.outputs.revision }} (digest ${{ steps.digest.outputs.ref }})."
 
-      # Self-healing: if anything after the GREEN revision came up failed (health gate, cutover),
-      # traffic never left the last-good (blue) revision. Deactivate the bad GREEN so it does not
-      # linger as an idle warm replica burning the shared free grant. Rollback is automatic: blue
-      # still holds 100% traffic.
+      - name: Restore previous approval broker on failure
+        if: failure() && steps.broker.outputs.revision != ''
+        run: |
+          set -euo pipefail
+          OLD="${{ steps.broker.outputs.previous }}"
+          NEW="${{ steps.broker.outputs.revision }}"
+          if [ -n "$OLD" ]; then
+            az containerapp ingress traffic set -n "$APPROVAL_APP" -g "$APP_RG" --revision-weight "${OLD}=100"
+            az containerapp revision deactivate -n "$APPROVAL_APP" -g "$APP_RG" --revision "$NEW" || true
+            echo "Restored approval broker ${OLD}; deactivated ${NEW}."
+          else
+            echo "::warning::No prior approval-broker revision existed; leaving ${NEW} active."
+          fi
+
+      # Self-healing: any failure after GREEN exists explicitly restores the captured last-good
+      # revision before deactivating GREEN. This also covers a partially successful traffic cutover.
       - name: Roll back on failure (deactivate the bad GREEN; traffic stays on blue)
         if: failure() && steps.green.outputs.revision != ''
         run: |
-          echo "::warning::Deploy failed after GREEN came up. Traffic stayed on the last-good revision; deactivating ${{ steps.green.outputs.revision }}."
-          az containerapp revision deactivate -n "$APP" -g "$APP_RG" \
-            --revision "${{ steps.green.outputs.revision }}" || true
+          NEW="${{ steps.green.outputs.revision }}"
+          OLD="${{ steps.green.outputs.previous }}"
+          echo "::warning::Deploy failed after GREEN came up; restoring the last-good gateway revision before deactivating ${NEW}."
+          if [ -n "$OLD" ]; then
+            az containerapp ingress traffic set -n "$APP" -g "$APP_RG" --revision-weight "${OLD}=100"
+            az containerapp revision deactivate -n "$APP" -g "$APP_RG" --revision "$NEW" || true
+          else
+            echo "::warning::No prior gateway revision was captured; leaving ${NEW} active for manual recovery."
+          fi
 
       # Release hygiene: keep the now-active GREEN + the single most-recent inactive (instant
       # rollback target); deactivate older inactive revisions so idle replicas stop burning the grant.
@@ -198,6 +253,16 @@ jobs:
             | jq -r '[.[] | select(.properties.active and .properties.trafficWeight==0)] | sort_by(.properties.createdTime) | .[:-1] | .[].name' \
             | while read -r rev; do
                 [ -n "$rev" ] && (az containerapp revision deactivate -n "$APP" -g "$APP_RG" --revision "$rev" || true)
+              done
+
+      - name: Prune zero-traffic approval-broker revisions
+        if: success()
+        run: |
+          set -euo pipefail
+          az containerapp revision list -n "$APPROVAL_APP" -g "$APP_RG" -o json \
+            | jq -r '.[] | select(.properties.active and .properties.trafficWeight==0) | .name' \
+            | while read -r rev; do
+                [ -n "$rev" ] && (az containerapp revision deactivate -n "$APPROVAL_APP" -g "$APP_RG" --revision "$rev" || true)
               done
 
       # P0-EVAL-CI (report-only phase, 2026-07-05): golden-case gateway eval, REPORT-ONLY. Placed as

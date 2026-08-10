@@ -146,19 +146,21 @@ The extra one credit is a safety allowance derived from the live canary, not a c
 ### Enforcement
 
 - Fleet-wide `ENABLE_HEYGEN_PROVIDER_WRITES=false` is a mandatory first-key interlock. A credit-consuming provider call is reachable only when this global switch and the exact family switch are both true.
-- Every family switch deploys `false`, including prompt-avatar, direct Avatar Video, reference Look, Video Agent, asset, translation, and TTS.
-- Dry-run remains live and returns the exact account/plan/two-pool/reset/time snapshot, request hash, conservative upper bound, reserve, and owner-grant claims.
-- Owner grants bind request hash, complete billing snapshot/state/time, confirmed balance, reserve, and maximum.
+- Production deliberately enables only direct Avatar Video; prompt-avatar, reference Look, Video Agent, asset, translation, and TTS remain `false`.
+- Dry-run remains live and returns the exact account/plan/two-pool/reset/time snapshot, request hash, conservative upper bound, reserve, owner-grant claims, and a short-lived approval URL.
+- Descope-authenticated owner grants bind request hash, idempotency-key hash, manifest hash, complete billing snapshot/state/time, confirmed balance, reserve, and maximum.
 - A single account-scoped Cosmos spend controller serializes Look and direct-video mutations.
 - No provider POST is automatically retried after grant consumption.
 - Missing post-call balance evidence or an actual debit above the signed maximum leaves the account spend controller in `reconciling`; all later live HeyGen spending fails closed.
-- Terminal accepted/rejected operation replay remains readable while writes are disabled.
+- Terminal accepted/rejected operation replay remains readable without any new approval or provider call.
 
 There is no honest way to make the provider itself enforce a subscription-credit cap through the current API. The working safety path is a conservative approved bound plus a default-off write switch, exact owner grant, account reservation, and post-call reconciliation lock.
 
-## Next action
+## Owner-approval re-enable architecture
 
-The hard-stop release is deployed. Do not run another founder test. Any re-enable proposal must first configure the owner approval issuer, deliberately set the global provider-write interlock plus one exact family flag, and separately approve one canary under the revised bound. Kimberly and Mark remain blocked on consent regardless.
+The direct Avatar Video lane is re-enabled only through a separate `otchealth-approval-broker` Container App. A dry run returns a 10-minute HMAC-bound context for one exact conservative packet. The owner opens its approval URL, Descope sends a six-digit email OTP to the configured verified owner, and the broker issues one five-minute ES256 JWS for that exact packet. The raw JWS never enters an MCP input or response: the broker encrypts it into an opaque handle and posts it to the authenticated gateway callback, which stores only the encrypted handle and bounded hashes in Cosmos. Live create loads and decrypts that handle internally, verifies every grant claim, consumes the JTI once, reserves the account cap, and performs one provider POST with zero automatic retries.
+
+The broker signing identity has Key Vault Secrets User only on the five approval secrets and AcrPull only on the production registry. The gateway verifier identity can read only the public JWK plus context/handle/callback secrets; it cannot read the private signing key. Production turns on only `ENABLE_HEYGEN_PROVIDER_WRITES` and `ENABLE_HEYGEN_AVATAR_VIDEO_WRITES`; prompt-avatar, reference Look, Video Agent, asset, translation, and TTS writes remain dark. Kimberly and Mark remain blocked on consent regardless.
 
 ## Family Story final-quality profile — Avatar V only
 
@@ -210,7 +212,7 @@ Historical zero-credit Avatar V receipts are permanent named regressions:
 | Mark | 7s / old estimate 3 | 4 | selected Look supports Avatar V, but live group remains pending consent and has zero same-group Digital Twins |
 | Matthew | 6s / old estimate 2 | 3 | selected Look + exact voice + completed same-group Digital Twin passed current live gateway dry-run |
 
-These old requests proved only local request construction and zero mutation. Current live read-only provider evidence proves Kim/Mark's selected photo Looks advertise `avatar_v`, their groups remain `pending_consent/pending`, and group-scoped Digital Twin lists are empty. It does not prove provider render behavior or quality. Only a separately approved live canary after consent/reference readiness could provide that evidence; writes remain disabled.
+These old requests proved only local request construction and zero mutation. Current live read-only provider evidence proves Kim/Mark's selected photo Looks advertise `avatar_v`, their groups remain `pending_consent/pending`, and group-scoped Digital Twin lists are empty. It does not prove provider render behavior or quality. Only a separately approved live canary after consent/reference readiness can provide that evidence. Matthew is the first allowed canary under the new owner-approval broker; Kimberly and Mark remain blocked until their own consent/reference gates pass and each receives a separate exact-packet grant.
 
 Official sources:
 

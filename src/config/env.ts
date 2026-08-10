@@ -347,6 +347,19 @@ const EnvSchema = z.object({
   HEYGEN_OWNER_APPROVAL_AUDIENCE: z.string().optional().default('otchealth-heygen'),
   HEYGEN_OWNER_APPROVAL_SUBJECT: z.string().optional().default(''),
   HEYGEN_OWNER_APPROVAL_PUBLIC_JWK: z.string().optional().default(''),
+  HEYGEN_OWNER_APPROVAL_PRIVATE_JWK: z.string().optional().default(''),
+  HEYGEN_OWNER_APPROVAL_EMAIL: z.string().optional().default('').refine(
+    (value) => value === '' || z.string().email().safeParse(value).success,
+    'HEYGEN_OWNER_APPROVAL_EMAIL must be a valid email when configured',
+  ),
+  HEYGEN_APPROVAL_CONTEXT_SECRET: z.string().optional().default(''),
+  HEYGEN_APPROVAL_HANDLE_SECRET: z.string().optional().default(''),
+  HEYGEN_APPROVAL_CALLBACK_SECRET: z.string().optional().default(''),
+  HEYGEN_APPROVAL_BROKER_URL: z.string().optional().default('').refine(
+    (value) => value === '' || z.string().url().safeParse(value).success,
+    'HEYGEN_APPROVAL_BROKER_URL must be a valid URL when configured',
+  ),
+  HEYGEN_APPROVAL_CALLBACK_URL: z.string().url().optional().default('https://mcp.otchealth.app/heygen/approval/callback'),
 
   // Agent State Plane - Cosmos DB for NoSQL work-ledger + structured memory-of-record.
   // Inert without COSMOS_ENDPOINT/COSMOS_KEY. Non-PHI, non-MNPI, non-privileged by construction
