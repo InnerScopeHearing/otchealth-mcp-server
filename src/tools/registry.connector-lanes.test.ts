@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, EXTERNAL_READONLY_TOOLSET } from './registry.js';
+import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET } from './registry.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
 
@@ -112,7 +112,22 @@ test('(c) every EXEC_RING lane gets the full ship-lane set', () => {
   }
 });
 
-test("(d) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 search/fetch) and excludes every privileged/write tool", () => {
+test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus external reads', () => {
+  const set = connectorToolset(testEnv(), 'cro');
+  assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET].sort());
+  for (const required of [
+    'heygen_account_get', 'heygen_avatar_groups_list', 'heygen_avatar_look_get',
+    'heygen_avatar_video_create', 'heygen_owner_approval_status_get',
+    'heygen_existing_video_ingest_qa', 'heygen_video_wait_ingest_qa',
+    'heygen_reference_look_create', 'heygen_video_agent_session_create_preflight',
+  ]) assert.ok(set.has(required), `cro connector must expose ${required}`);
+  for (const forbidden of [
+    'heygen_pairing_start', 'heygen_pairing_status', 'heygen_prompt_avatar_create',
+    'heygen_avatar_look_name_update', 'github_push_files', 'kb_search_privileged',
+  ]) assert.equal(set.has(forbidden), false, `cro connector must not expose ${forbidden}`);
+});
+
+test("(e) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 search/fetch) and excludes every privileged/write tool", () => {
   const set = connectorToolset(testEnv(), 'external-read');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
   assert.equal(set.size, 11);
@@ -139,12 +154,12 @@ test("(d) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 s
   }
 });
 
-test("(e) '' (empty/unknown caller) lane gets EXACTLY the external read set", () => {
+test("(f) '' (empty/unknown caller) lane gets EXACTLY the external read set", () => {
   const set = connectorToolset(testEnv(), '');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
 });
 
-test("(f) an unrecognized lane string gets EXACTLY the external read set (regression guard for THE HOLE this closes)", () => {
+test("(g) an unrecognized lane string gets EXACTLY the external read set (regression guard for THE HOLE this closes)", () => {
   const set = connectorToolset(testEnv(), 'randostring');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
 });

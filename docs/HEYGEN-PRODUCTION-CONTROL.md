@@ -221,3 +221,13 @@ Official sources:
 - https://developers.heygen.com/reference/create-video
 - https://developers.heygen.com/changelog
 - https://help.heygen.com/en/articles/15126059-how-to-use-credits-on-heygen
+
+## CRO direct bridge and rejected Matthew canary — 2026-08-10
+
+Matt rejected completed Matthew video `1efa4108feb147cdae35c9ba78399d9a` for production use. It remains a technical/billing receipt only and must not be published, reused, localized or treated as an approved aesthetic baseline. Operation `family_matt_v5_owner_20260810_01` used one provider POST with zero retries; Avatar V completed in 3.99673s at 1080p/16:9; premium balance moved 588 to 586, debit 2 within signed maximum 3 and reserve 500; private technical ingestion passed.
+
+The saved CRO connector is intentionally not widened to the full ship catalog. Its fixed connector set contains the external-read baseline plus bounded HeyGen data reads, non-executing preflights, direct Avatar Video and private operation-bound QA. It excludes pairing, prompt-avatar, Look/metadata mutation, Video Agent writes, asset writes, translation writes, TTS, arbitrary provider requests, deletes, public sharing, GitHub writes and privileged finance/legal search.
+
+Direct video and private QA allow only `cto` or `cro` in-handler and in governance. Pairing and prompt-avatar remain CTO-only. Reference-Look execution remains CTO-only even though the six internal lanes can dry-run the exact preflight. Every CRO live video still requires the same fresh Descope owner grant, unchanged request/idempotency/manifest/billing packet, conservative cap, reserve floor, consent/casting checks, single-use JTI, account spend fence and no-retry rule. Production keeps every unrelated HeyGen write flag dark.
+
+The CRO acceptance test is account read plus exact Matthew dry run only. It must prove provider mutation false and balance 586 unchanged. It must not create another video.

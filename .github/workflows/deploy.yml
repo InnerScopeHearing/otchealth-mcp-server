@@ -160,6 +160,10 @@ jobs:
             const required = ["provider_writes", "avatar_video_writes", "owner_approval_verifier_configured", "owner_approval_context_configured", "owner_approval_handle_configured", "owner_approval_callback_configured", "owner_approval_broker_configured"];
             const missing = required.filter((key) => hg[key] !== true);
             if (missing.length) { console.error(`REGRESSION: guarded HeyGen lane not ready: ${missing.join(",")}`); process.exit(1); }
+            const expectedCroDirect = ["heygen_avatar_video_create", "heygen_existing_video_ingest_qa", "heygen_video_wait_ingest_qa"];
+            if (hg.cro_direct_enabled !== true || JSON.stringify(hg.cro_direct_tools) !== JSON.stringify(expectedCroDirect)) {
+              console.error("REGRESSION: exact CRO direct-video/QA surface is not enabled"); process.exit(1);
+            }
             const broker = require("/tmp/approval-health.json");
             const bc = broker.approval_compatibility || {}, gc = hg.owner_approval_compatibility || {};
             const compatibilityKeys = ["public_jwk_sha256", "context_secret_sha256", "handle_secret_sha256", "callback_secret_sha256"];

@@ -37,6 +37,12 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
     translation_writes: false,
     tts_writes: false,
     metadata_writes: false,
+    cro_direct_enabled: true,
+    cro_direct_tools: [
+      'heygen_avatar_video_create',
+      'heygen_existing_video_ingest_qa',
+      'heygen_video_wait_ingest_qa',
+    ],
     owner_approval_verifier_configured: false,
     owner_approval_context_configured: false,
     owner_approval_handle_configured: false,

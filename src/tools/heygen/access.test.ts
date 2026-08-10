@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   HEYGEN_CREATION_TOOLS,
+  HEYGEN_CRO_DIRECT_TOOLS,
   HEYGEN_DATA_LANES,
   HEYGEN_DATA_TOOLS,
   HEYGEN_METADATA_TOOLS,
@@ -19,7 +20,7 @@ import {
   redactHeyGenVoiceDesignInputForLog,
 } from './redaction.js';
 
-test('data tools allow exactly cto/exec/coo/cro/cpo/developer; pairing/create tools allow only cto', () => {
+test('data/preflight tools allow six lanes; pairing/prompt-avatar are CTO-only; direct video/QA are CTO/CRO', () => {
   const allKnownAndExternal = [
     'cto', 'exec', 'coo', 'cro', 'cpo', 'developer',
     'cfo', 'clo', 'clo-personal', 'cco', 'external-read', 'unknown', '',
@@ -44,9 +45,14 @@ test('data tools allow exactly cto/exec/coo/cro/cpo/developer; pairing/create to
       );
     }
   }
-  for (const tool of [...HEYGEN_PAIRING_TOOLS, ...HEYGEN_CREATION_TOOLS]) {
+  for (const tool of [...HEYGEN_PAIRING_TOOLS, 'heygen_prompt_avatar_create'] as const) {
     for (const lane of allKnownAndExternal) {
       assert.equal(isHeyGenToolAllowed(tool, lane), lane === 'cto', `${tool} / ${lane || '(empty)'}`);
+    }
+  }
+  for (const tool of HEYGEN_CRO_DIRECT_TOOLS) {
+    for (const lane of allKnownAndExternal) {
+      assert.equal(isHeyGenToolAllowed(tool, lane), lane === 'cto' || lane === 'cro', `${tool} / ${lane || '(empty)'}`);
     }
   }
 });
@@ -66,12 +72,20 @@ test('internal catalog lane seeds include every HeyGen tool only for the six app
   }
 });
 
-test('governance duplicates the exact in-handler lane model: pairing/create CTO-only, data six-lane only', () => {
-  for (const tool of [...HEYGEN_PAIRING_TOOLS, ...HEYGEN_CREATION_TOOLS]) {
+test('governance duplicates exact pairing, direct-video, metadata, and data lane models', () => {
+  for (const tool of [...HEYGEN_PAIRING_TOOLS, 'heygen_prompt_avatar_create'] as const) {
     const rule = requiredRoleFor(tool);
     assert.ok(rule, `${tool} needs an exact governance rule`);
     assert.equal(roleAllows(rule!.role, 'cto'), true);
     for (const lane of ['exec', 'coo', 'cro', 'cpo', 'developer', 'external-read']) {
+      assert.equal(roleAllows(rule!.role, lane), false, `${tool} must reject ${lane}`);
+    }
+  }
+  for (const tool of HEYGEN_CRO_DIRECT_TOOLS) {
+    const rule = requiredRoleFor(tool);
+    assert.ok(rule, `${tool} needs an exact cto/cro governance rule`);
+    for (const lane of ['cto', 'cro']) assert.equal(roleAllows(rule!.role, lane), true, `${tool} must allow ${lane}`);
+    for (const lane of ['exec', 'coo', 'cpo', 'developer', 'external-read']) {
       assert.equal(roleAllows(rule!.role, lane), false, `${tool} must reject ${lane}`);
     }
   }
@@ -150,6 +164,11 @@ test('public HeyGen surface is fixed and exposes only bounded direct video while
   ]);
   assert.deepEqual([...HEYGEN_CREATION_TOOLS], [
     'heygen_prompt_avatar_create',
+    'heygen_avatar_video_create',
+    'heygen_existing_video_ingest_qa',
+    'heygen_video_wait_ingest_qa',
+  ]);
+  assert.deepEqual([...HEYGEN_CRO_DIRECT_TOOLS], [
     'heygen_avatar_video_create',
     'heygen_existing_video_ingest_qa',
     'heygen_video_wait_ingest_qa',
@@ -306,17 +325,25 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
   assert.match(registrySource, /z\.union\(\[strictResultSchema, jitStubSchema\]\)/);
 });
 
-test('connector curation includes every exact HeyGen tool only in the CTO ship set', () => {
+test('connector curation gives CRO only fixed HeyGen direct/QA while external remains HeyGen-free', () => {
   const source = readFileSync(new URL('../registry.ts', import.meta.url), 'utf8');
   const shipStart = source.indexOf('export const CTO_SHIP_LANE_TOOLSET');
   const externalStart = source.indexOf('export const EXTERNAL_READONLY_TOOLSET');
-  const externalEnd = source.indexOf('export function isShipLane', externalStart);
-  assert.ok(shipStart >= 0 && externalStart > shipStart && externalEnd > externalStart);
+  const croStart = source.indexOf('export const CRO_CONNECTOR_TOOLSET');
+  const croEnd = source.indexOf('export function isShipLane', croStart);
+  assert.ok(shipStart >= 0 && externalStart > shipStart && croStart > externalStart && croEnd > croStart);
   const ship = source.slice(shipStart, externalStart);
-  const external = source.slice(externalStart, externalEnd);
+  const external = source.slice(externalStart, croStart);
+  const cro = source.slice(croStart, croEnd);
   for (const tool of [...HEYGEN_PAIRING_TOOLS, ...HEYGEN_DATA_TOOLS, ...HEYGEN_METADATA_TOOLS, ...HEYGEN_PREFLIGHT_TOOLS, ...HEYGEN_CREATION_TOOLS]) {
     assert.ok(ship.includes(`'${tool}'`), `CTO ship set must include ${tool}`);
     assert.equal(external.includes(`'${tool}'`), false, `external-readonly set must exclude ${tool}`);
+  }
+  assert.ok(cro.includes('...HEYGEN_DATA_TOOLS'), 'CRO set must include every bounded HeyGen data tool');
+  assert.ok(cro.includes('...HEYGEN_PREFLIGHT_TOOLS'), 'CRO set must include every non-executing HeyGen preflight');
+  for (const tool of HEYGEN_CRO_DIRECT_TOOLS) assert.ok(cro.includes(`'${tool}'`), `CRO set must include ${tool}`);
+  for (const tool of [...HEYGEN_PAIRING_TOOLS, ...HEYGEN_METADATA_TOOLS, 'heygen_prompt_avatar_create']) {
+    assert.equal(cro.includes(`'${tool}'`), false, `CRO set must exclude ${tool}`);
   }
 });
 

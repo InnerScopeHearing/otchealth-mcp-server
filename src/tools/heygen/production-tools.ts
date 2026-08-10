@@ -25,6 +25,7 @@ import { defaultHeyGenArtifactStore } from './artifact-store.js';
 import { safeHeyGenAssetMetadata, safeHeyGenSessionResource } from './metadata.js';
 import {
   HEYGEN_CREATION_TOOLS,
+  HEYGEN_CRO_DIRECT_TOOLS,
   HEYGEN_DATA_LANES,
   HEYGEN_DATA_TOOLS,
   HEYGEN_METADATA_TOOLS,
@@ -190,13 +191,15 @@ const VIDEO_OPERATION_OUTPUT = {
 
 function laneRefusal(toolName: HeyGenToolName, caller: string | undefined | null): ToolResultPayload {
   const ctoOnly =
-    (HEYGEN_PAIRING_TOOLS as readonly string[]).includes(toolName) ||
-    (HEYGEN_CREATION_TOOLS as readonly string[]).includes(toolName);
+    (HEYGEN_PAIRING_TOOLS as readonly string[]).includes(toolName) || toolName === 'heygen_prompt_avatar_create';
+  const croDirect = (HEYGEN_CRO_DIRECT_TOOLS as readonly string[]).includes(toolName);
   return {
     data: { error: 'forbidden_lane' },
     summary: ctoOnly
       ? `Refused: ${toolName} is CTO-only. Your identity: ${caller || '(none)'}.`
-      : `Refused: ${toolName} is available only to internal lanes ${HEYGEN_DATA_LANES.join('/')}. Your identity: ${caller || '(none)'}.`,
+      : croDirect
+        ? `Refused: ${toolName} is available only to CTO/CRO under the exact owner-approval and credit-control contract. Your identity: ${caller || '(none)'}.`
+        : `Refused: ${toolName} is available only to internal lanes ${HEYGEN_DATA_LANES.join('/')}. Your identity: ${caller || '(none)'}.`,
   };
 }
 
@@ -625,7 +628,7 @@ export function registerHeyGenProductionTools(
     name: 'heygen_avatar_video_create',
     category: 'write_orchestrated',
     annotations: {
-      title: 'HeyGen: create idempotent Avatar Video (CTO only)',
+      title: 'HeyGen: create idempotent Avatar Video (CTO/CRO, owner-approved)',
       description: 'Creates exactly one direct Avatar Video through POST /v3/videos with a mandatory 24-hour provider Idempotency-Key, durable cross-replica operation record, exact live subscription balance, conservative credit ceiling/reserve, look/group/voice/engine validation, and no API-key billing path. Family Story profiles require Avatar V, 1080p/16:9, owner-locked Look/voice, exact conservative cap, an eligible same-group Digital Twin reference for final personalized motion, and a fresh Descope-authenticated owner approval bound to the exact dry-run packet.',
       readOnlyHint: false,
       destructiveHint: false,
@@ -765,7 +768,7 @@ export function registerHeyGenProductionTools(
     name: 'heygen_existing_video_ingest_qa',
     category: 'write_orchestrated',
     annotations: {
-      title: 'HeyGen: securely ingest an existing completed account video (CTO only)',
+      title: 'HeyGen: securely ingest an existing completed account video (CTO/CRO)',
       description: 'Reads one owner-designated existing account video, verifies its title hash and completed state, downloads only allowlisted HeyGen assets without exposing signed URLs, validates/hashes them, and stores a private Azure artifact manifest. It never creates or alters provider media.',
       readOnlyHint: false,
       destructiveHint: false,
@@ -862,7 +865,7 @@ export function registerHeyGenProductionTools(
     name: 'heygen_video_wait_ingest_qa',
     category: 'write_orchestrated',
     annotations: {
-      title: 'HeyGen: wait, ingest, and technically QA video (CTO only)',
+      title: 'HeyGen: wait, ingest, and technically QA video (CTO/CRO)',
       description: 'Polls a video tied to a durable operation for up to 90 seconds; on completion downloads only allowlisted HeyGen signed assets without logging their URLs, validates size/content magic/SRT cues, hashes them, writes private non-PHI artifacts plus a manifest to Azure Blob, and leaves visual/likeness approval explicitly manual.',
       readOnlyHint: false,
       destructiveHint: false,
