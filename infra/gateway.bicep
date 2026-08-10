@@ -7,8 +7,7 @@
 // It models the TARGET posture (Layer E of the Azure AI OS design), which is a
 // hardening over the current live app:
 //   - system-assigned managed identity + AcrPull  (no ACR admin password secret)
-//   - secrets as Key Vault references              (GCP Secret Manager stays store-of-record;
-//                                                    Key Vault is the CI/CD-readable Azure mirror)
+//   - secrets as Azure Key Vault references        (GCP is permanently retired)
 //   - immutable @sha256 image digest, never a tag
 //   - blue-green: multiple-revision mode + git-sha revision suffix
 //
@@ -52,15 +51,20 @@ param plainEnv array = []
 @description('Secret-backed env: [{ name, secretRef }] where secretRef names an entry in secretRefs.')
 param secretEnv array = []
 
-@description('Secrets as Key Vault references: [{ name, keyVaultUrl }]. Resolved by the managed identity.')
+@description('Secrets as Key Vault references: [{ name, keyVaultUrl, identity? }]. identity defaults to system.')
 param secretRefs array = []
+
+@description('User-assigned identities keyed by resource id, e.g. { "<resource-id>": {} }.')
+param userAssignedIdentities object = {}
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
   location: location
   identity: {
-    // System-assigned identity: used for AcrPull (image pulls) + Key Vault secret resolution.
-    type: 'SystemAssigned'
+    // System identity remains the default pull/runtime identity; scoped user identities can resolve
+    // dedicated Key Vault references without granting the gateway access to unrelated secrets.
+    type: empty(userAssignedIdentities) ? 'SystemAssigned' : 'SystemAssigned, UserAssigned'
+    userAssignedIdentities: userAssignedIdentities
   }
   properties: {
     managedEnvironmentId: managedEnvironmentId
@@ -83,7 +87,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
         for s in secretRefs: {
           name: s.name
           keyVaultUrl: s.keyVaultUrl
-          identity: 'system'
+          identity: s.?identity ?? 'system'
         }
       ]
     }

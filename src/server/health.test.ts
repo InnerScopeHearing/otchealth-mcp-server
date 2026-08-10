@@ -38,5 +38,18 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
     tts_writes: false,
     metadata_writes: false,
     owner_approval_verifier_configured: false,
+    owner_approval_context_configured: false,
+    owner_approval_handle_configured: false,
+    owner_approval_callback_configured: false,
+    owner_approval_broker_configured: false,
+    owner_approval_issuer: 'https://approval.otchealth.app',
+    owner_approval_audience: 'otchealth-heygen',
+    owner_approval_subject_sha256: undefined,
+    owner_approval_compatibility: {
+      public_jwk_sha256: undefined,
+      context_secret_sha256: undefined,
+      handle_secret_sha256: undefined,
+      callback_secret_sha256: undefined,
+    },
   });
 });

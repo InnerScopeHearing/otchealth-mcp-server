@@ -29,6 +29,7 @@ export const HEYGEN_DATA_TOOLS = [
   'heygen_translation_statuses_get',
   'heygen_proofread_get',
   'heygen_avatar_video_operation_get',
+  'heygen_owner_approval_status_get',
   'heygen_reference_look_operation_get',
 ] as const;
 export const HEYGEN_CREATION_TOOLS = [

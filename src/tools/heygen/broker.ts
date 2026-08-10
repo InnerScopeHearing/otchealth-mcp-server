@@ -2185,7 +2185,7 @@ export async function executeHeyGenAvatarVideoCreate(
   ) {
     throw brokerError(
       'heygen_video_owner_approval_required',
-      'Real Avatar Video creation requires the exact dry-run billing snapshot/state/time plus a server-issued owner_approval_jws.',
+      'Real Avatar Video creation requires the exact dry-run billing snapshot/state/time plus a short-lived owner approval captured through the configured approval broker.',
       400,
     );
   }

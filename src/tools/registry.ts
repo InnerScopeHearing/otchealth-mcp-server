@@ -224,7 +224,7 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'heygen_asset_statuses_get', 'heygen_brand_kits_list', 'heygen_brand_glossaries_list',
   'heygen_brand_glossary_get', 'heygen_translation_languages_list', 'heygen_translations_list',
   'heygen_translation_get', 'heygen_translation_statuses_get', 'heygen_proofread_get',
-  'heygen_avatar_video_operation_get', 'heygen_reference_look_operation_get',
+  'heygen_avatar_video_operation_get', 'heygen_owner_approval_status_get', 'heygen_reference_look_operation_get',
   'heygen_prompt_avatar_create', 'heygen_avatar_look_name_update', 'heygen_reference_look_create',
   'heygen_video_agent_session_create_preflight', 'heygen_video_agent_feedback_send_preflight',
   'heygen_video_agent_generation_approve_preflight', 'heygen_video_agent_session_stop_preflight',

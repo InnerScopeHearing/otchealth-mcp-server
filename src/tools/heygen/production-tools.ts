@@ -35,6 +35,9 @@ import {
 } from './access.js';
 import { redactHeyGenAvatarVideoInputForLog } from './redaction.js';
 import { isHeyGenProviderWriteEnabled } from './write-gate.js';
+import { createHeyGenApprovalContextToken } from './approval-context.js';
+import { readHeyGenOwnerApprovalHandle } from './approval-store.js';
+import { decryptHeyGenOwnerApprovalHandle } from './approval-handle.js';
 import {
   registerTool,
   type CallerHashProvider,
@@ -83,6 +86,9 @@ export const HEYGEN_PROOFREAD_GET_INPUT = { proofread_id: SAFE_ID } as const;
 export const HEYGEN_AVATAR_VIDEO_OPERATION_GET_INPUT = {
   operation_id: z.string().regex(HEYGEN_OPERATION_ID_RE),
 } as const;
+export const HEYGEN_OWNER_APPROVAL_STATUS_INPUT = {
+  operation_id: z.string().regex(HEYGEN_OPERATION_ID_RE),
+} as const;
 
 const VOICE_SETTINGS = z.object({
   speed: z.number().min(0.5).max(1.5).optional(),
@@ -125,7 +131,6 @@ export const HEYGEN_AVATAR_VIDEO_CREATE_INPUT = {
   confirmed_billing_snapshot_sha256: z.string().regex(HEYGEN_SHA256_RE).optional(),
   confirmed_billing_state_sha256: z.string().regex(HEYGEN_SHA256_RE).optional(),
   confirmed_billing_observed_at: z.string().datetime().optional(),
-  owner_approval_jws: z.string().min(64).max(8192).optional(),
   max_approved_credits: z.number().int().min(1),
   reserve_premium_credits: z.number().int().min(0),
 } as const;
@@ -234,7 +239,7 @@ function avatarVideoInput(input: Record<string, unknown>, dryRun: boolean): HeyG
     confirmedBillingObservedAt: typeof input.confirmed_billing_observed_at === 'string'
       ? input.confirmed_billing_observed_at
       : undefined,
-    ownerApprovalJws: typeof input.owner_approval_jws === 'string' ? input.owner_approval_jws : undefined,
+    ownerApprovalJws: undefined,
     maxApprovedCredits: Number(input.max_approved_credits),
     reservePremiumCredits: Number(input.reserve_premium_credits),
   };
@@ -326,6 +331,10 @@ export function registerHeyGenProductionTools(
             owner_approval_verifier_configured: Boolean(
               env.HEYGEN_OWNER_APPROVAL_SUBJECT && env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK,
             ),
+            owner_approval_context_configured: env.HEYGEN_APPROVAL_CONTEXT_SECRET.length >= 32,
+            owner_approval_handle_configured: env.HEYGEN_APPROVAL_HANDLE_SECRET.length >= 32,
+            owner_approval_callback_configured: env.HEYGEN_APPROVAL_CALLBACK_SECRET.length >= 32,
+            owner_approval_broker_configured: Boolean(env.HEYGEN_APPROVAL_BROKER_URL),
           },
         },
         summary: `HeyGen diagnostics: ${tools.length} fixed actions, OAuth Bearer only, credit-consuming provider writes ${env.ENABLE_HEYGEN_PROVIDER_WRITES ? 'armed' : 'dark'}.`,
@@ -573,11 +582,51 @@ export function registerHeyGenProductionTools(
   }, callerHash);
 
   registerTool(server, {
+    name: 'heygen_owner_approval_status_get',
+    category: 'read',
+    annotations: {
+      title: 'HeyGen: get owner approval status',
+      description: 'Returns whether a short-lived owner approval handle is available for one operation. Never returns the grant, handle, OTP, email, or signing material.',
+      ...READ_ANNOTATIONS,
+      openWorldHint: false,
+    },
+    inputShape: HEYGEN_OWNER_APPROVAL_STATUS_INPUT,
+    outputShape: {
+      approved: z.boolean(),
+      operation_id: z.string(),
+      packet_sha256: z.string().optional(),
+      expires_at: z.string().optional(),
+      error: z.string().optional(),
+    },
+    handler: async (input, ctx) => {
+      if (!isHeyGenToolAllowed('heygen_owner_approval_status_get', ctx.callerAgent)) {
+        return laneRefusal('heygen_owner_approval_status_get', ctx.callerAgent);
+      }
+      const approval = await readHeyGenOwnerApprovalHandle(input.operation_id, {
+        read: deps.read,
+        create: deps.create,
+        now: deps.now,
+      });
+      return {
+        data: {
+          approved: approval !== null,
+          operation_id: input.operation_id,
+          packet_sha256: approval?.packetSha256,
+          expires_at: approval?.expiresAt,
+        },
+        summary: approval
+          ? `Owner approval is available for ${input.operation_id} until ${approval.expiresAt}.`
+          : `Owner approval is not available for ${input.operation_id}.`,
+      };
+    },
+  }, callerHash);
+
+  registerTool(server, {
     name: 'heygen_avatar_video_create',
     category: 'write_orchestrated',
     annotations: {
       title: 'HeyGen: create idempotent Avatar Video (CTO only)',
-      description: 'Creates exactly one direct Avatar Video through POST /v3/videos with a mandatory 24-hour provider Idempotency-Key, durable cross-replica operation record, exact live subscription balance, conservative credit ceiling/reserve, look/group/voice/engine validation, and no API-key billing path. Family Story profiles require Avatar V, 1080p/16:9, owner-locked Look/voice, exact conservative cap, and an eligible same-group Digital Twin reference for final personalized motion.',
+      description: 'Creates exactly one direct Avatar Video through POST /v3/videos with a mandatory 24-hour provider Idempotency-Key, durable cross-replica operation record, exact live subscription balance, conservative credit ceiling/reserve, look/group/voice/engine validation, and no API-key billing path. Family Story profiles require Avatar V, 1080p/16:9, owner-locked Look/voice, exact conservative cap, an eligible same-group Digital Twin reference for final personalized motion, and a fresh Descope-authenticated owner approval bound to the exact dry-run packet.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
@@ -614,6 +663,31 @@ export function registerHeyGenProductionTools(
           personalizedMotion: prepared.plan.personalizedMotion,
           photoFallback: prepared.plan.productionProfile === 'family_story_photo_fallback',
         };
+        const approvalPacket = {
+          grant_type: 'heygen_avatar_video_create' as const,
+          tool: 'heygen_avatar_video_create' as const,
+          operation_id: mapped.operationId,
+          request_sha256: prepared.plan.requestSha256,
+          idempotency_key_sha256: prepared.plan.idempotencyKeySha256,
+          manifest_sha256: mapped.manifestSha256,
+          billing_snapshot_sha256: prepared.billing.snapshot_sha256,
+          billing_state_sha256: prepared.billing.state_sha256,
+          billing_observed_at: prepared.billing.observed_at,
+          confirmed_premium_credits_before: prepared.billing.premium.remaining,
+          reserve_credits: mapped.reservePremiumCredits,
+          max_credits: mapped.maxApprovedCredits,
+          conservative_credit_cap: prepared.plan.conservativeCreditCap,
+          provider_credit_cap_available: false as const,
+          gateway_pre_submission_cap_enforced: true as const,
+          post_call_overage_locks_account: true as const,
+          family_story_exact_cap_required: prepared.plan.productionProfile !== 'standard',
+          owner_grant_required: true as const,
+          zero_automatic_retries: true as const,
+        };
+        const approvalEnv = loadEnv();
+        const approvalContext = approvalEnv.HEYGEN_APPROVAL_CONTEXT_SECRET.length >= 32
+          ? createHeyGenApprovalContextToken(approvalPacket, approvalEnv.HEYGEN_APPROVAL_CONTEXT_SECRET, deps.now())
+          : null;
         return {
           data: {
             ...operationData(dry),
@@ -638,25 +712,15 @@ export function registerHeyGenProductionTools(
               photo_fallback: prepared.plan.productionProfile === 'family_story_photo_fallback',
             },
             approval_packet: {
-              grant_type: 'heygen_avatar_video_create',
-              tool: 'heygen_avatar_video_create',
-              operation_id: mapped.operationId,
-              request_sha256: prepared.plan.requestSha256,
-              idempotency_key_sha256: prepared.plan.idempotencyKeySha256,
-              manifest_sha256: mapped.manifestSha256,
-              billing_snapshot_sha256: prepared.billing.snapshot_sha256,
-              billing_state_sha256: prepared.billing.state_sha256,
-              billing_observed_at: prepared.billing.observed_at,
-              confirmed_premium_credits_before: prepared.billing.premium.remaining,
-              reserve_credits: mapped.reservePremiumCredits,
-              max_credits: mapped.maxApprovedCredits,
-              conservative_credit_cap: prepared.plan.conservativeCreditCap,
-              provider_credit_cap_available: prepared.plan.providerCreditCapAvailable,
-              gateway_pre_submission_cap_enforced: true,
-              post_call_overage_locks_account: true,
-              family_story_exact_cap_required: prepared.plan.productionProfile !== 'standard',
-              owner_grant_required: true,
-              zero_automatic_retries: true,
+              ...approvalPacket,
+              packet_sha256: approvalContext?.packetSha256,
+              context_token: approvalContext?.token,
+              context_expires_at: approvalContext?.expiresAt,
+              approval_broker_url: approvalEnv.HEYGEN_APPROVAL_BROKER_URL || undefined,
+              approval_url: approvalContext && approvalEnv.HEYGEN_APPROVAL_BROKER_URL
+                ? `${approvalEnv.HEYGEN_APPROVAL_BROKER_URL.replace(/\/$/, '')}/approve#context_token=${encodeURIComponent(approvalContext.token)}`
+                : undefined,
+              owner_approval_subject: approvalEnv.HEYGEN_OWNER_APPROVAL_SUBJECT || undefined,
             },
           },
           summary: `DRY RUN: live Avatar Video preflight passed; estimated ${prepared.plan.estimatedCredits} credit(s), no provider or operation-record mutation.`,
@@ -666,12 +730,28 @@ export function registerHeyGenProductionTools(
       if (existing) {
         return {
           data: operationData(existing),
-          summary: `HeyGen Avatar Video operation ${existing.operationId}: ${existing.state} (request-validated terminal replay; writes remain disabled).`,
+          summary: `HeyGen Avatar Video operation ${existing.operationId}: ${existing.state} (request-validated terminal replay; no provider call).`,
         };
       }
       if (!isHeyGenProviderWriteEnabled('ENABLE_HEYGEN_AVATAR_VIDEO_WRITES')) {
         throw new Error('HeyGen Avatar Video writes are disabled. Dry-run preflight and terminal operation replay remain available.');
       }
+      const approvalEnv = loadEnv();
+      const storedApproval = await readHeyGenOwnerApprovalHandle(mapped.operationId, {
+        read: deps.read,
+        create: deps.create,
+        now: deps.now,
+      });
+      const encryptedHandle = storedApproval?.encryptedHandle;
+      if (!encryptedHandle) {
+        throw new Error('Owner approval is not available for this operation. Complete the approval URL from a fresh dry run.');
+      }
+      mapped.ownerApprovalJws = decryptHeyGenOwnerApprovalHandle(
+        encryptedHandle,
+        mapped.operationId,
+        approvalEnv.HEYGEN_APPROVAL_HANDLE_SECRET,
+        deps.now(),
+      );
       const result = await executeHeyGenAvatarVideoCreate(mapped, deps);
       return {
         data: operationData(result),

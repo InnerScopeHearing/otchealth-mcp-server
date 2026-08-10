@@ -8,6 +8,7 @@ import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
 import { registerOAuthRoutes } from './oauth.js';
 import { registerHeyGenPairingRoute } from './heygen-pairing.js';
+import { registerHeyGenApprovalCallback } from './heygen-approval-callback.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { loadRevocations, startRevocationReloader } from '../auth/revocation-store.js';
 import { startDeindexResweepReloader } from '../agentstate/deindex-resweep.js';
@@ -93,6 +94,7 @@ async function main(): Promise<void> {
   registerAdmin(app);
   registerOAuthRoutes(app);
   registerHeyGenPairingRoute(app);
+  registerHeyGenApprovalCallback(app);
   registerMcpRoutes(app);
   registerWebhookRoutes(app);
 

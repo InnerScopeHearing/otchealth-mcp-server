@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 // before the first session the capability catalog is empty and toolCount() (exposed on /health)
 // reads 0, which trips the deploy pipeline's tool_count regression guard on a perfectly good image.
 // registerMcpRoutes now warms the catalog at startup; this proves registerAllTools populates it to
-// the full tool surface (>= the pipeline's post-HeyGen-expansion MIN_TOOLS floor of 1002).
+// the full tool surface (>= the pipeline's post-HeyGen-expansion MIN_TOOLS floor of 1003).
 before(() => {
   const required: Record<string, string> = {
     CIO_SITE_ID: 'test',
@@ -35,5 +35,5 @@ test('registerAllTools warms the capability catalog to the full tool surface (de
   );
 
   const n = toolCount();
-  assert.ok(n >= 1002, `expected the warmed catalog to expose >= 1002 tools (the deploy MIN_TOOLS floor), got ${n}`);
+  assert.ok(n >= 1003, `expected the warmed catalog to expose >= 1003 tools (the deploy MIN_TOOLS floor), got ${n}`);
 });

@@ -11,12 +11,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server/index.js",
+    "start:approval-broker": "node dist/server/approval-broker-index.js",
     "dev": "tsx watch src/server/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx 'src/**/*.test.ts'",
     "evals": "tsx scripts/run-evals.ts"
   },
   "dependencies": {
+    "@descope/node-sdk": "^2.14.0",
     "@fastify/rate-limit": "10.3.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "dd-trace": "^5.109.0",
