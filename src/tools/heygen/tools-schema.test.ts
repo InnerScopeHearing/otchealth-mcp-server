@@ -223,6 +223,15 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
     reserve_premium_credits: 300,
   } as const;
   assert.deepEqual(parse(HEYGEN_AVATAR_VIDEO_CREATE_INPUT, valid), valid);
+  assert.deepEqual(parse(HEYGEN_AVATAR_VIDEO_CREATE_INPUT, {
+    ...valid,
+    production_profile: 'family_story_final',
+    family_story_founder: 'matthew',
+  }), {
+    ...valid,
+    production_profile: 'family_story_final',
+    family_story_founder: 'matthew',
+  });
   for (const invalid of [
     { ...valid, operation_id: 'short' },
     { ...valid, idempotency_key: 'bad key' },
@@ -233,6 +242,8 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
     { ...valid, owner_approval_jws: 'short' },
     { ...valid, resolution: '4k' },
     { ...valid, engine: 'avatar_vi' },
+    { ...valid, production_profile: 'family_story_best' },
+    { ...valid, family_story_founder: 'other' },
     { ...valid, voice_settings: { speed: 2 } },
     { ...valid, background: { type: 'image', url: 'https://example.test/image.png' } },
     { ...valid, callback_url: 'https://example.test/callback' },

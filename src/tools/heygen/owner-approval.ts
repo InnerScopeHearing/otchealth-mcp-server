@@ -40,6 +40,8 @@ const AvatarVideoClaimsSchema = z.object({
   ...BaseClaims,
   grant_type: z.literal('heygen_avatar_video_create'),
   tool: z.literal('heygen_avatar_video_create'),
+  idempotency_key_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  manifest_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   max_credits: z.number().int().min(1),
 }).strict();
 
@@ -98,6 +100,8 @@ function verifyApproval(
     grantType: HeyGenOwnerApprovalClaims['grant_type'];
     operationId: string;
     requestSha256: string;
+    idempotencyKeySha256?: string;
+    manifestSha256?: string;
     billingSnapshotSha256: string;
     billingStateSha256: string;
     billingObservedAt: string;
@@ -139,7 +143,15 @@ function verifyApproval(
   if (claims.exp - claims.iat > MAX_GRANT_AGE_SECONDS || claims.exp <= claims.iat) {
     throw new Error('owner approval lifetime is invalid.');
   }
+  const avatarBindingMismatch =
+    expected.grantType === 'heygen_avatar_video_create' &&
+    (
+      claims.grant_type !== 'heygen_avatar_video_create' ||
+      claims.idempotency_key_sha256 !== expected.idempotencyKeySha256 ||
+      claims.manifest_sha256 !== expected.manifestSha256
+    );
   if (
+    avatarBindingMismatch ||
     claims.grant_type !== expected.grantType ||
     claims.tool !== expected.grantType ||
     claims.operation_id !== expected.operationId ||
@@ -151,7 +163,7 @@ function verifyApproval(
     claims.reserve_credits !== expected.reserveCredits ||
     claims.max_credits !== expected.maxCredits
   ) {
-    throw new Error('owner approval is bound to a different operation, request, billing snapshot, or credit ceiling.');
+    throw new Error('owner approval is bound to a different operation, request, idempotency key, manifest, billing snapshot, or credit ceiling.');
   }
   return claims;
 }
@@ -188,6 +200,8 @@ export function verifyHeyGenAvatarVideoApproval(
   expected: {
     operationId: string;
     requestSha256: string;
+    idempotencyKeySha256: string;
+    manifestSha256: string;
     billingSnapshotSha256: string;
     billingStateSha256: string;
     billingObservedAt: string;
@@ -202,6 +216,8 @@ export function verifyHeyGenAvatarVideoApproval(
     grantType: 'heygen_avatar_video_create',
     operationId: expected.operationId,
     requestSha256: expected.requestSha256,
+    idempotencyKeySha256: expected.idempotencyKeySha256,
+    manifestSha256: expected.manifestSha256,
     billingSnapshotSha256: expected.billingSnapshotSha256,
     billingStateSha256: expected.billingStateSha256,
     billingObservedAt: expected.billingObservedAt,
@@ -233,6 +249,10 @@ export async function consumeHeyGenOwnerApproval(
     tool: claims.tool,
     operationId: claims.operation_id,
     requestSha256: claims.request_sha256,
+    idempotencyKeySha256:
+      claims.grant_type === 'heygen_avatar_video_create' ? claims.idempotency_key_sha256 : undefined,
+    manifestSha256:
+      claims.grant_type === 'heygen_avatar_video_create' ? claims.manifest_sha256 : undefined,
     billingSnapshotSha256: claims.billing_snapshot_sha256,
     billingStateSha256: claims.billing_state_sha256,
     billingObservedAt: claims.billing_observed_at,

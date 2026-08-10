@@ -10,6 +10,61 @@ export type HeyGenAvatarEngine = 'avatar_iii' | 'avatar_iv' | 'avatar_v';
 export type HeyGenAvatarType = 'studio_avatar' | 'digital_twin' | 'photo_avatar';
 export type HeyGenVideoResolution = '720p' | '1080p';
 export type HeyGenVideoAspectRatio = '16:9' | '9:16' | '4:5' | '5:4' | '1:1' | 'auto';
+export type HeyGenProductionProfile = 'standard' | 'family_story_final' | 'family_story_photo_fallback';
+export type HeyGenFamilyStoryFounder = 'matthew' | 'kimberly' | 'mark';
+
+export interface HeyGenFamilyStoryProfile {
+  founder: HeyGenFamilyStoryFounder;
+  groupId: string;
+  selectedPhotoLookId: string;
+  privateVoiceId: string;
+  personalizedMotionReferenceLookId: string | null;
+}
+
+/** Owner-locked Family Story casting manifest. IDs are verified live again before every dry run. */
+export const HEYGEN_FAMILY_STORY_PROFILES: Readonly<Record<HeyGenFamilyStoryFounder, HeyGenFamilyStoryProfile>> = {
+  matthew: {
+    founder: 'matthew',
+    groupId: '81ae4b7368b444d4847ce6f0d3d42674',
+    selectedPhotoLookId: '1916ba1b808d49e8829908e29c659469',
+    privateVoiceId: '7092904ddda348049fb0eeecf3fdfbb6',
+    personalizedMotionReferenceLookId: 'f18ef8e05e564f998b87af7a951fe05a',
+  },
+  kimberly: {
+    founder: 'kimberly',
+    groupId: 'ad43b5258baf4328a641a59cfebc15c9',
+    selectedPhotoLookId: '3c3f4eabdcac4b70baea8ea3299cdc6b',
+    privateVoiceId: '551fec783f294caa97696574d7f6d85e',
+    personalizedMotionReferenceLookId: null,
+  },
+  mark: {
+    founder: 'mark',
+    groupId: '319e339d9e3949038f0b7c17c4521f00',
+    selectedPhotoLookId: '2a75cc08b7a74baba1ed2a468f796436',
+    privateVoiceId: '7a301178c14a49ee9a7deb508d36a1ec',
+    personalizedMotionReferenceLookId: null,
+  },
+};
+
+export function findHeyGenFamilyStoryFounderByGroupId(groupId: string | null | undefined): HeyGenFamilyStoryFounder | null {
+  if (!groupId) return null;
+  return (Object.values(HEYGEN_FAMILY_STORY_PROFILES).find((profile) => profile.groupId === groupId)?.founder) ?? null;
+}
+
+export function identifyHeyGenFamilyStoryFounder(input: Pick<
+  HeyGenAvatarVideoCreateInput,
+  'avatarId' | 'voiceId' | 'referenceLookId'
+>): HeyGenFamilyStoryFounder | null {
+  const matched = Object.values(HEYGEN_FAMILY_STORY_PROFILES).filter((profile) =>
+    input.avatarId === profile.selectedPhotoLookId ||
+    input.voiceId === profile.privateVoiceId ||
+    (Boolean(input.referenceLookId) && input.referenceLookId === profile.personalizedMotionReferenceLookId),
+  );
+  if (matched.length === 0) return null;
+  const founders = new Set(matched.map((profile) => profile.founder));
+  if (founders.size !== 1) throw new Error('Family Story request mixes locked founder identities.');
+  return matched[0]!.founder;
+}
 
 const ACCEPTED_CONSENT_STATUSES = new Set(['accepted', 'approved', 'complete', 'completed']);
 
@@ -53,6 +108,8 @@ export interface HeyGenAvatarVideoCreateInput {
   voiceId: string;
   script: string;
   engine: HeyGenAvatarEngine;
+  productionProfile?: HeyGenProductionProfile;
+  familyStoryFounder?: HeyGenFamilyStoryFounder;
   referenceLookId?: string;
   resolution: HeyGenVideoResolution;
   aspectRatio: HeyGenVideoAspectRatio;
@@ -117,6 +174,7 @@ export interface HeyGenVoice {
   voiceId: string;
   status: 'processing' | 'complete' | 'failed' | null;
   failureMessage: string | null;
+  supportPause: boolean | null;
 }
 
 export interface HeyGenAvatarVideoPlan {
@@ -125,7 +183,13 @@ export interface HeyGenAvatarVideoPlan {
   scriptSha256: string;
   idempotencyKeySha256: string;
   estimatedDurationSeconds: number;
+  pauseSeconds: number;
   estimatedCredits: number;
+  conservativeCreditCap: number;
+  providerCreditCapAvailable: false;
+  productionProfile: HeyGenProductionProfile;
+  familyStoryFounder?: HeyGenFamilyStoryFounder;
+  personalizedMotion: boolean;
 }
 
 const AvatarLookEnvelopeSchema = z.object({
@@ -152,6 +216,7 @@ const VoiceEnvelopeSchema = z.object({
     voice_id: z.string().min(1),
     status: z.enum(['processing', 'complete', 'failed']).nullable().optional(),
     failure_message: z.string().nullable().optional(),
+    support_pause: z.boolean().nullable().optional(),
   }).passthrough(),
 }).passthrough();
 
@@ -223,29 +288,108 @@ function assertString(value: string, field: string, min: number, max: number, pr
   return preserve ? value : value.trim();
 }
 
-export function estimateAvatarVideoCredits(
-  script: string,
+export function conservativeAvatarVideoCreditCap(
+  durationSeconds: number,
   engine: HeyGenAvatarEngine,
-  speed = 1,
   hasCustomMotion = false,
-): { durationSeconds: number; credits: number } {
-  const words = script.trim().split(/\s+/).filter(Boolean).length;
-  const normalizedSpeed = Number.isFinite(speed) && speed >= 0.5 && speed <= 1.5 ? speed : 1;
-  const durationSeconds = Math.max(3, Math.ceil((words / 2.5 / normalizedSpeed) * 1.15));
+): number {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    throw new Error('durationSeconds must be positive and finite.');
+  }
   const avatarCredits = engine === 'avatar_iii'
     ? Math.max(1, Math.ceil((durationSeconds / 60) * 3))
     : Math.max(1, Math.ceil(durationSeconds / 3));
   const motionAdjusted = engine === 'avatar_iv' && hasCustomMotion ? avatarCredits * 2 : avatarCredits;
   // Conservative subscription bound: the 2026-08-09 owner-approved direct Avatar IV canary had a
-  // six-second local duration estimate and an actual three-credit debit despite the published
-  // one-credit-per-three-seconds rate. The extra fixed credit is treated as provider/TTS rounding
-  // overhead until HeyGen exposes a quote or hard cap. Overestimation is intentional; undershooting
-  // the signed maximum is a hard safety defect.
-  const credits = motionAdjusted + 1;
-  return { durationSeconds, credits };
+  // six-second local estimate but an actual 4.62367-second output and a three-credit debit despite
+  // the published one-credit-per-three-seconds rate. A fixed one-credit safety allowance captures
+  // the observed provider/TTS/rounding overhead. The API exposes no provider-enforced credit cap.
+  return motionAdjusted + 1;
 }
 
-export function buildHeyGenAvatarVideoPlan(input: HeyGenAvatarVideoCreateInput): HeyGenAvatarVideoPlan {
+export function parseHeyGenBreakSeconds(script: string): number {
+  let seconds = 0;
+  const breakTag = /<break\s+time=["']([0-9]+(?:\.[0-9]+)?)s["']\s*\/>/gi;
+  for (const match of script.matchAll(breakTag)) seconds += Number(match[1]);
+  return seconds;
+}
+
+export function estimateAvatarVideoCredits(
+  script: string,
+  engine: HeyGenAvatarEngine,
+  speed = 1,
+  hasCustomMotion = false,
+): { durationSeconds: number; pauseSeconds: number; credits: number } {
+  const pauseSeconds = parseHeyGenBreakSeconds(script);
+  const spokenText = script.replace(/<break\s+time=["'][0-9]+(?:\.[0-9]+)?s["']\s*\/>/gi, ' ');
+  const words = spokenText.trim().split(/\s+/).filter(Boolean).length;
+  const normalizedSpeed = Number.isFinite(speed) && speed >= 0.5 && speed <= 1.5 ? speed : 1;
+  const spokenSeconds = Math.max(3, Math.ceil((words / 2.5 / normalizedSpeed) * 1.15));
+  const durationSeconds = Math.ceil(spokenSeconds + pauseSeconds);
+  const credits = conservativeAvatarVideoCreditCap(durationSeconds, engine, hasCustomMotion);
+  return { durationSeconds, pauseSeconds, credits };
+}
+
+export function validateHeyGenFamilyStoryProductionContract(
+  input: HeyGenAvatarVideoCreateInput,
+  options: { legacyTerminalReplay?: boolean } = {},
+): void {
+  const productionProfile = input.productionProfile ?? 'standard';
+  const lockedFounder = identifyHeyGenFamilyStoryFounder(input);
+  if (productionProfile === 'standard') {
+    if (input.familyStoryFounder) throw new Error('family_story_founder requires a Family Story production profile.');
+    if (lockedFounder && !options.legacyTerminalReplay) {
+      throw new Error(`Locked Family Story ${lockedFounder} assets require an explicit Family Story production profile.`);
+    }
+    return;
+  }
+  if (!input.familyStoryFounder) throw new Error('family_story_founder is required for a Family Story production profile.');
+  if (lockedFounder && lockedFounder !== input.familyStoryFounder) {
+    throw new Error('Family Story profile does not match the locked founder assets.');
+  }
+  const profile = HEYGEN_FAMILY_STORY_PROFILES[input.familyStoryFounder];
+  if (input.engine !== 'avatar_v') throw new Error('Final Family Story founder renders require Avatar V.');
+  if (input.resolution !== '1080p') throw new Error('Family Story founder renders require 1080p; Avatar IV/V 4K is unavailable.');
+  if (input.aspectRatio !== '16:9') throw new Error('Family Story founder renders require 16:9.');
+  if (input.avatarId !== profile.selectedPhotoLookId) {
+    throw new Error(`Family Story ${profile.founder} requires the owner-selected photo Look.`);
+  }
+  if (input.voiceId !== profile.privateVoiceId) {
+    throw new Error(`Family Story ${profile.founder} requires the exact matched private voice.`);
+  }
+  if (input.expressiveness) throw new Error('Avatar V Family Story renders must not include expressiveness.');
+  const voice = input.voiceSettings;
+  if (
+    (voice?.speed !== undefined && voice.speed !== 1) ||
+    (voice?.pitch !== undefined && voice.pitch !== 0) ||
+    (voice?.volume !== undefined && voice.volume !== 1)
+  ) {
+    throw new Error('Family Story founder audio must use natural voice tuning (speed 1, pitch 0, volume 1 or omitted).');
+  }
+
+  if (productionProfile === 'family_story_final') {
+    if (!profile.personalizedMotionReferenceLookId) {
+      throw new Error(
+        `Family Story ${profile.founder} final-quality personalized motion is blocked until consent is completed and an eligible same-group Digital Twin reference is verified.`,
+      );
+    }
+    if (input.referenceLookId !== profile.personalizedMotionReferenceLookId) {
+      throw new Error(`Family Story ${profile.founder} final-quality render requires the owner-approved same-group Digital Twin reference.`);
+    }
+    return;
+  }
+
+  if (input.familyStoryFounder === 'matthew') {
+    throw new Error('Matthew has an eligible personalized-motion reference; do not downgrade him to photo fallback.');
+  }
+  if (input.referenceLookId) throw new Error('Family Story photo fallback must omit reference_look_id.');
+  if (input.motionPrompt) throw new Error('Family Story photo fallback must omit motion_prompt because no eligible reference exists.');
+}
+
+export function buildHeyGenAvatarVideoPlan(
+  input: HeyGenAvatarVideoCreateInput,
+  options: { legacyTerminalReplay?: boolean } = {},
+): HeyGenAvatarVideoPlan {
   if (!HEYGEN_OPERATION_ID_RE.test(input.operationId)) throw new Error('operation_id is invalid.');
   if (!HEYGEN_IDEMPOTENCY_KEY_RE.test(input.idempotencyKey)) throw new Error('idempotency_key is invalid.');
   if (!HEYGEN_SHA256_RE.test(input.manifestSha256)) throw new Error('manifest_sha256 must be lowercase SHA-256.');
@@ -268,9 +412,16 @@ export function buildHeyGenAvatarVideoPlan(input: HeyGenAvatarVideoCreateInput):
       throw new Error(`${name} is invalid.`);
     }
   }
+  validateHeyGenFamilyStoryProductionContract(input, options);
 
   const title = assertString(input.title, 'title', 1, 200);
   const script = assertString(input.script, 'script', 1, 10_000, true);
+  if ((input.productionProfile ?? 'standard') !== 'standard') {
+    const withoutBreakTags = script.replace(/<break\s+time=["'][0-9]+(?:\.[0-9]+)?s["']\s*\/>/gi, '');
+    if (/[<>]/.test(withoutBreakTags)) {
+      throw new Error('Family Story scripts allow plain text plus <break time="Ns"/> pause tags only.');
+    }
+  }
   assertString(input.avatarId, 'avatar_id', 1, 255);
   assertString(input.voiceId, 'voice_id', 1, 255);
   if (input.referenceLookId) assertString(input.referenceLookId, 'reference_look_id', 1, 255);
@@ -333,19 +484,39 @@ export function buildHeyGenAvatarVideoPlan(input: HeyGenAvatarVideoCreateInput):
     input.voiceSettings?.speed,
     Boolean(input.motionPrompt),
   );
-  if (estimate.credits > input.maxApprovedCredits) {
+  if (!options.legacyTerminalReplay && estimate.credits > input.maxApprovedCredits) {
     throw new Error(
       `Estimated credit use ${estimate.credits} exceeds max_approved_credits ${input.maxApprovedCredits}.`,
     );
   }
+  const productionProfile = input.productionProfile ?? 'standard';
+  if (!options.legacyTerminalReplay && productionProfile !== 'standard' && input.maxApprovedCredits !== estimate.credits) {
+    throw new Error(
+      `Family Story max_approved_credits must equal the conservative cap ${estimate.credits}; received ${input.maxApprovedCredits}.`,
+    );
+  }
+
+  const requestSha256 = productionProfile === 'standard'
+    ? canonicalRequestSha256(body)
+    : canonicalJsonSha256({
+        provider_body: body,
+        production_profile: productionProfile,
+        family_story_founder: input.familyStoryFounder,
+      });
 
   return {
     body,
-    requestSha256: canonicalRequestSha256(body),
+    requestSha256,
     scriptSha256: sha256(script),
     idempotencyKeySha256: sha256(input.idempotencyKey),
     estimatedDurationSeconds: estimate.durationSeconds,
+    pauseSeconds: estimate.pauseSeconds,
     estimatedCredits: estimate.credits,
+    conservativeCreditCap: estimate.credits,
+    providerCreditCapAvailable: false,
+    productionProfile,
+    familyStoryFounder: input.familyStoryFounder,
+    personalizedMotion: Boolean(input.referenceLookId),
   };
 }
 
@@ -381,7 +552,12 @@ export function parseHeyGenAvatarGroup(value: unknown): HeyGenAvatarGroup {
 
 export function parseHeyGenVoice(value: unknown): HeyGenVoice {
   const data = VoiceEnvelopeSchema.parse(value).data;
-  return { voiceId: data.voice_id, status: data.status ?? null, failureMessage: data.failure_message ?? null };
+  return {
+    voiceId: data.voice_id,
+    status: data.status ?? null,
+    failureMessage: data.failure_message ?? null,
+    supportPause: data.support_pause ?? null,
+  };
 }
 
 export function parseHeyGenCreateVideo(value: unknown): { videoId: string; status: string } {
@@ -408,7 +584,7 @@ export function parseHeyGenVideoDetail(value: unknown): HeyGenVideoDetail {
 }
 
 export function validateHeyGenAvatarVideoCompatibility(input: HeyGenAvatarVideoCreateInput, look: HeyGenAvatarLook): void {
-  if (look.status && look.status !== 'completed') throw new Error(`Avatar look is not completed (${look.status}).`);
+  if (look.status !== 'completed') throw new Error(`Avatar look is not completed (${look.status ?? 'missing'}).`);
   if (!look.groupId) throw new Error('Avatar look has no group_id.');
   if (!look.supportedApiEngines.includes(input.engine)) {
     throw new Error(`Avatar look does not support ${input.engine}.`);
@@ -426,8 +602,11 @@ export function validateHeyGenAvatarVideoCompatibility(input: HeyGenAvatarVideoC
       throw new Error('Avatar IV expressiveness is supported only for photo avatars.');
     }
   }
-  if (input.engine === 'avatar_v' && input.expressiveness) {
-    throw new Error('Avatar V does not support expressiveness.');
+  if (input.engine === 'avatar_v') {
+    if (input.expressiveness) throw new Error('Avatar V does not support expressiveness.');
+    if (input.motionPrompt && !input.referenceLookId) {
+      throw new Error('Avatar V motion_prompt requires an eligible same-group Digital Twin animation reference.');
+    }
   }
   if (input.referenceLookId && input.engine !== 'avatar_v') {
     throw new Error('reference_look_id is supported only for Avatar V.');
