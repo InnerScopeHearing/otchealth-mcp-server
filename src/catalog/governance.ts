@@ -38,9 +38,9 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'heygen_proofread_create_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate proofread-first localization; live creation remains CTO-only and feature-gated.' },
   { pattern: 'heygen_proofread_generate_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate final proofread generation; live generation remains CTO-only and owner-grant gated.' },
   { pattern: 'heygen_speech_preview_create_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate bounded TTS preview; live synthesis remains CTO-only and owner-grant gated.' },
-  { pattern: 'heygen_avatar_video_create', requiredRole: 'cto', reason: 'Credit-consuming direct HeyGen video creation is CTO-only, idempotent, and bound to live balance, ceiling, and reserve checks.' },
-  { pattern: 'heygen_existing_video_ingest_qa', requiredRole: 'cto', reason: 'Existing-video secure ingestion writes private Blob artifacts and is CTO-owned.' },
-  { pattern: 'heygen_video_wait_ingest_qa', requiredRole: 'cto', reason: 'HeyGen artifact ingestion writes private Blob artifacts and is CTO-owned.' },
+  { pattern: 'heygen_avatar_video_create', requiredRole: ['cto', 'cro'], reason: 'Owner-delegated direct HeyGen video creation is CTO/CRO only, idempotent, and bound to exact owner grant, live billing, conservative cap, reserve, consent, and no-retry checks.' },
+  { pattern: 'heygen_existing_video_ingest_qa', requiredRole: ['cto', 'cro'], reason: 'Existing-video secure ingestion writes only private bounded QA artifacts and is available to CTO/CRO.' },
+  { pattern: 'heygen_video_wait_ingest_qa', requiredRole: ['cto', 'cro'], reason: 'Operation-bound HeyGen polling/private artifact ingestion is available to CTO/CRO and leaves visual approval manual.' },
   // Data reads and semantic voice search are centrally constrained to the same exact internal lanes
   // every handler re-checks. Exact names keep pairing/creation strictly narrower than this surface.
   { pattern: 'heygen_account_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },

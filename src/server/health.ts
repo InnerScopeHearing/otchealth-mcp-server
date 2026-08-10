@@ -6,6 +6,7 @@ import { toolCount } from '../catalog/catalog.js';
 import { validateAdminToken } from '../auth/bearer.js';
 import { probeDependencies } from './deep-health.js';
 import { heyGenApprovalCompatibilityFingerprints } from '../tools/heygen/approval-fingerprint.js';
+import { HEYGEN_CRO_DIRECT_TOOLS } from '../tools/heygen/access.js';
 
 const env = loadEnv();
 
@@ -32,6 +33,8 @@ export function buildHealthPayload() {
       translation_writes: env.ENABLE_HEYGEN_TRANSLATION_WRITES,
       tts_writes: env.ENABLE_HEYGEN_TTS_WRITES,
       metadata_writes: env.ENABLE_HEYGEN_METADATA_WRITES,
+      cro_direct_enabled: true,
+      cro_direct_tools: [...HEYGEN_CRO_DIRECT_TOOLS],
       owner_approval_verifier_configured: Boolean(
         env.HEYGEN_OWNER_APPROVAL_SUBJECT && env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK,
       ),

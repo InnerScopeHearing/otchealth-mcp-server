@@ -22,6 +22,7 @@ import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult } from './result-store.js';
+import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
 import {
   inboundShield,
   outboundGroundedness,
@@ -250,6 +251,23 @@ export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
 ] as const;
 
 /**
+ * Fixed owner-delegated CRO connector surface. The saved CRO Hyperagent skill still carries the
+ * occ_cro connector credential, so this lane must be useful without widening it to the full ship
+ * catalog. It exposes all bounded HeyGen reads and non-executing preflights plus only the guarded
+ * direct Avatar Video and private QA actions. Pairing, prompt-avatar, Look mutation, metadata,
+ * Video Agent writes, assets, translation, TTS, arbitrary provider access, deletes, and public share
+ * remain absent. Every listed action still has its own in-handler lane/feature/owner/cost checks.
+ */
+export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
+  ...EXTERNAL_READONLY_TOOLSET,
+  ...HEYGEN_DATA_TOOLS,
+  ...HEYGEN_PREFLIGHT_TOOLS,
+  'heygen_avatar_video_create',
+  'heygen_existing_video_ingest_qa',
+  'heygen_video_wait_ingest_qa',
+] as const;
+
+/**
  * True when `lane` is entitled to the full CTO_SHIP_LANE_TOOLSET: the cto/developer engineering
  * identities, or any executive-ring lane. EXEC_RING is IMPORTED (never re-declared) from
  * kb/search-privileged.ts -- the single source of truth for the executive ring, so this can never
@@ -271,7 +289,9 @@ export function isShipLane(lane: string): boolean {
 export function connectorToolset(env: Env, lane: string): Set<string> {
   const csv = isShipLane(lane)
     ? env.CONNECTOR_TOOLSET || CTO_SHIP_LANE_TOOLSET.join(',')
-    : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
+    : lane === 'cro'
+      ? CRO_CONNECTOR_TOOLSET.join(',')
+      : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   return new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
 }
 

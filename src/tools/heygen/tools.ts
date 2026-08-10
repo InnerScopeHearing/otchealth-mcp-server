@@ -17,7 +17,7 @@ import {
   type ToolResultPayload,
 } from '../registry.js';
 import {
-  HEYGEN_CREATION_TOOLS,
+  HEYGEN_CRO_DIRECT_TOOLS,
   HEYGEN_DATA_LANES,
   HEYGEN_PAIRING_TOOLS,
   isHeyGenToolAllowed,
@@ -36,13 +36,15 @@ export { isHeyGenToolAllowed } from './access.js';
 
 export function heyGenLaneRefusal(toolName: HeyGenToolName, caller: string | undefined | null): ToolResultPayload {
   const ctoOnly =
-    (HEYGEN_PAIRING_TOOLS as readonly string[]).includes(toolName) ||
-    (HEYGEN_CREATION_TOOLS as readonly string[]).includes(toolName);
+    (HEYGEN_PAIRING_TOOLS as readonly string[]).includes(toolName) || toolName === 'heygen_prompt_avatar_create';
+  const croDirect = (HEYGEN_CRO_DIRECT_TOOLS as readonly string[]).includes(toolName);
   return {
     data: { error: 'forbidden_lane' },
     summary: ctoOnly
       ? `Refused: ${toolName} is CTO-only. Your identity: ${caller || '(none)'}.`
-      : `Refused: ${toolName} is available only to internal lanes ${HEYGEN_DATA_LANES.join('/')}. Your identity: ${caller || '(none)'}.`,
+      : croDirect
+        ? `Refused: ${toolName} is available only to CTO/CRO under the exact owner-approval and credit-control contract. Your identity: ${caller || '(none)'}.`
+        : `Refused: ${toolName} is available only to internal lanes ${HEYGEN_DATA_LANES.join('/')}. Your identity: ${caller || '(none)'}.`,
   };
 }
 

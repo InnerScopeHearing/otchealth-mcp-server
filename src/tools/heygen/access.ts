@@ -38,6 +38,13 @@ export const HEYGEN_CREATION_TOOLS = [
   'heygen_existing_video_ingest_qa',
   'heygen_video_wait_ingest_qa',
 ] as const;
+
+/** Owner-delegated fixed CRO lane: direct video + private QA only; pairing/prompt-avatar stay CTO-only. */
+export const HEYGEN_CRO_DIRECT_TOOLS = [
+  'heygen_avatar_video_create',
+  'heygen_existing_video_ingest_qa',
+  'heygen_video_wait_ingest_qa',
+] as const;
 export const HEYGEN_METADATA_TOOLS = [
   'heygen_avatar_look_name_update',
 ] as const;
@@ -66,9 +73,12 @@ export function isHeyGenToolAllowed(toolName: HeyGenToolName, caller: string | u
   if (!caller) return false;
   if (
     (HEYGEN_PAIRING_TOOLS as readonly string[]).includes(toolName) ||
-    (HEYGEN_CREATION_TOOLS as readonly string[]).includes(toolName)
+    toolName === 'heygen_prompt_avatar_create'
   ) {
     return caller === 'cto';
+  }
+  if ((HEYGEN_CRO_DIRECT_TOOLS as readonly string[]).includes(toolName)) {
+    return caller === 'cto' || caller === 'cro';
   }
   return (HEYGEN_DATA_LANES as readonly string[]).includes(caller);
 }
