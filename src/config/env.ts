@@ -330,8 +330,11 @@ const EnvSchema = z.object({
   AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
 
   // HeyGen production-control feature gates. Every provider mutation family is independently dark by
-  // default; read/status tools and dry-run preflight remain available. The owner approval public key is
-  // verification-only and may be empty while all credit-consuming switches remain false.
+  // default; read/status tools and dry-run preflight remain available. The fleet-wide provider-write
+  // interlock AND the exact family flag must both be true before any credit-consuming provider call.
+  // The owner approval public key is verification-only and may be empty while writes remain false.
+  ENABLE_HEYGEN_PROVIDER_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_PROMPT_AVATAR_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   ENABLE_HEYGEN_AVATAR_VIDEO_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   ENABLE_HEYGEN_REFERENCE_LOOK_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),

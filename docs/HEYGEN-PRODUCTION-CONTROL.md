@@ -145,7 +145,8 @@ The extra one credit is a safety allowance derived from the live canary, not a c
 
 ### Enforcement
 
-- Every credit-consuming HeyGen switch deploys `false`, including direct Avatar Video.
+- Fleet-wide `ENABLE_HEYGEN_PROVIDER_WRITES=false` is a mandatory first-key interlock. A credit-consuming provider call is reachable only when this global switch and the exact family switch are both true.
+- Every family switch deploys `false`, including prompt-avatar, direct Avatar Video, reference Look, Video Agent, asset, translation, and TTS.
 - Dry-run remains live and returns the exact account/plan/two-pool/reset/time snapshot, request hash, conservative upper bound, reserve, and owner-grant claims.
 - Owner grants bind request hash, complete billing snapshot/state/time, confirmed balance, reserve, and maximum.
 - A single account-scoped Cosmos spend controller serializes Look and direct-video mutations.
@@ -157,4 +158,4 @@ There is no honest way to make the provider itself enforce a subscription-credit
 
 ## Next action
 
-Do not run another founder test. Merge, deploy, and verify the hard-stop release first. Then configure the owner approval issuer and separately decide whether to re-enable one exact direct-video canary using the revised bound. Kimberly and Mark remain blocked on consent regardless.
+The hard-stop release is deployed. Do not run another founder test. Any re-enable proposal must first configure the owner approval issuer, deliberately set the global provider-write interlock plus one exact family flag, and separately approve one canary under the revised bound. Kimberly and Mark remain blocked on consent regardless.

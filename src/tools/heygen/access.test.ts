@@ -181,7 +181,10 @@ test('public HeyGen surface is fixed and exposes only bounded direct video while
   const promptBlock = baseSource.slice(promptStart, promptEnd);
   assert.match(promptBlock, /category: 'write_simple'/);
   assert.doesNotMatch(promptBlock, /category: 'write_orchestrated'/);
+  assert.match(promptBlock, /isHeyGenProviderWriteEnabled\('ENABLE_HEYGEN_PROMPT_AVATAR_WRITES'\)/);
   assert.match(productionSource, /name: 'heygen_avatar_video_create',[\s\S]*?category: 'write_orchestrated'/);
+  assert.match(productionSource, /isHeyGenProviderWriteEnabled\('ENABLE_HEYGEN_AVATAR_VIDEO_WRITES'\)/);
+  assert.match(lookSource, /isHeyGenProviderWriteEnabled\('ENABLE_HEYGEN_REFERENCE_LOOK_WRITES'\)/);
   assert.match(productionSource, /name: 'heygen_existing_video_ingest_qa',[\s\S]*?category: 'write_orchestrated'/);
   assert.match(productionSource, /name: 'heygen_video_wait_ingest_qa',[\s\S]*?category: 'write_orchestrated'/);
 });

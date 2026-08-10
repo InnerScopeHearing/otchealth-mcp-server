@@ -28,6 +28,7 @@ import {
   redactHeyGenVoiceDesignInputForLog,
 } from './redaction.js';
 import { registerHeyGenProductionTools } from './production-tools.js';
+import { isHeyGenProviderWriteEnabled } from './write-gate.js';
 import { registerHeyGenLookTools } from './look-tools.js';
 import { registerHeyGenFutureTools } from './future-tools.js';
 
@@ -515,6 +516,9 @@ export function registerHeyGenTools(
             summary:
               `DRY RUN: no HeyGen avatar was created for ${input.name}. Re-call with dry_run:false only after confirming the exact current premium-credit balance.`,
           };
+        }
+        if (!isHeyGenProviderWriteEnabled('ENABLE_HEYGEN_PROMPT_AVATAR_WRITES')) {
+          throw new Error('HeyGen prompt-avatar writes are disabled. Dry-run remains available.');
         }
         const result = await executeHeyGenPromptAvatarCreate(
           {
