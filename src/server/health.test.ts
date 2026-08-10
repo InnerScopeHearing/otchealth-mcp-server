@@ -27,6 +27,8 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
   assert.ok('read_only_mode' in payload);
   assert.ok('connector_token_revoked' in payload);
   assert.deepEqual(payload.heygen, {
+    provider_writes: false,
+    prompt_avatar_writes: false,
     avatar_video_writes: false,
     reference_look_writes: false,
     video_agent_chat_writes: false,

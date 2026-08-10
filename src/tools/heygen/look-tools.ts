@@ -1,6 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { loadEnv } from '../../config/env.js';
 import { registerTool, type CallerHashProvider, type ToolResultPayload } from '../registry.js';
 import {
   executeHeyGenRead,
@@ -17,6 +16,7 @@ import {
 import { safeHeyGenAssetMetadata } from './metadata.js';
 import { parseHeyGenAvatarGroup, parseHeyGenAvatarLook } from './video-contracts.js';
 import { redactHeyGenReferenceLookInputForLog } from './redaction.js';
+import { isHeyGenProviderWriteEnabled } from './write-gate.js';
 import {
   executeHeyGenReferenceLookCreate,
   getHeyGenReferenceLookOperation,
@@ -240,7 +240,7 @@ export function registerHeyGenLookTools(
         const preflight = await prepareHeyGenReferenceLook(mapped, deps);
         return { data: preflight, summary: 'DRY RUN: live reference-Look preflight passed; no HeyGen or Cosmos mutation occurred.' };
       }
-      if (!loadEnv().ENABLE_HEYGEN_REFERENCE_LOOK_WRITES) {
+      if (!isHeyGenProviderWriteEnabled('ENABLE_HEYGEN_REFERENCE_LOOK_WRITES')) {
         throw new Error('HeyGen reference-Look writes are disabled. Dry-run preflight remains available.');
       }
       const result = await executeHeyGenReferenceLookCreate(mapped, deps);

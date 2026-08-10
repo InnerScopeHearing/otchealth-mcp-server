@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
-import { loadEnv, type Env } from '../../config/env.js';
+import { loadEnv } from '../../config/env.js';
 import { registerTool, type CallerHashProvider, type ToolResultPayload } from '../registry.js';
 import { HEYGEN_DATA_LANES } from './access.js';
 import {
@@ -14,6 +14,10 @@ import {
 } from './broker.js';
 import { parseHeyGenBillingSnapshot } from './look-contracts.js';
 import { canonicalJsonSha256 } from './video-contracts.js';
+import {
+  isHeyGenProviderWriteEnabled,
+  type HeyGenCreditWriteFlag,
+} from './write-gate.js';
 
 const SAFE_ID = z.string().regex(HEYGEN_SAFE_ID_RE);
 const ACTION_ID = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
@@ -195,7 +199,7 @@ function refusal(toolName: string, caller: string, dryRun: boolean): ToolResultP
   };
 }
 
-function dryPlan(tool: string, endpoint: string, body: Record<string, unknown>, flag: keyof Env): ToolResultPayload {
+function dryPlan(tool: string, endpoint: string, body: Record<string, unknown>, flag: HeyGenCreditWriteFlag): ToolResultPayload {
   return {
     data: {
       mode: 'preflight',
@@ -204,7 +208,7 @@ function dryPlan(tool: string, endpoint: string, body: Record<string, unknown>, 
       provider_mutation: false,
       operation_record_mutation: false,
       request_sha256: canonicalJsonSha256(body),
-      feature_enabled: Boolean(loadEnv()[flag]),
+      feature_enabled: isHeyGenProviderWriteEnabled(flag),
       implemented: false,
       notice: 'Preflight contract validated. The provider-write action is not implemented or enabled; no provider or operation-record mutation occurred.',
     },
@@ -220,7 +224,7 @@ function registerDarkTool(
     description: string;
     inputShape: ZodRawShape;
     endpoint: string;
-    flag: keyof Env;
+    flag: HeyGenCreditWriteFlag;
     body: (input: Record<string, unknown>) => Record<string, unknown>;
   },
 ): void {

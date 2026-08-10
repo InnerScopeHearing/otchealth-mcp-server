@@ -20,6 +20,8 @@ export function buildHealthPayload() {
     enable_high_risk_tools: env.ENABLE_HIGH_RISK_TOOLS,
     dry_run_default: env.DRY_RUN_DEFAULT,
     heygen: {
+      provider_writes: env.ENABLE_HEYGEN_PROVIDER_WRITES,
+      prompt_avatar_writes: env.ENABLE_HEYGEN_PROMPT_AVATAR_WRITES,
       avatar_video_writes: env.ENABLE_HEYGEN_AVATAR_VIDEO_WRITES,
       reference_look_writes: env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES,
       video_agent_chat_writes: env.ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES,

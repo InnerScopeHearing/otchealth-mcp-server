@@ -33,6 +33,7 @@ import {
   type HeyGenToolName,
 } from './access.js';
 import { redactHeyGenAvatarVideoInputForLog } from './redaction.js';
+import { isHeyGenProviderWriteEnabled } from './write-gate.js';
 import {
   registerTool,
   type CallerHashProvider,
@@ -296,6 +297,8 @@ export function registerHeyGenProductionTools(
             actions: tools,
             artifact_store_configured: defaultHeyGenArtifactStore.configured(),
             feature_flags: {
+              provider_writes: env.ENABLE_HEYGEN_PROVIDER_WRITES,
+              prompt_avatar_writes: env.ENABLE_HEYGEN_PROMPT_AVATAR_WRITES,
               avatar_video_writes: env.ENABLE_HEYGEN_AVATAR_VIDEO_WRITES,
               reference_look_writes: env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES,
               video_agent_chat_writes: env.ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES,
@@ -310,7 +313,7 @@ export function registerHeyGenProductionTools(
             ),
           },
         },
-        summary: `HeyGen diagnostics: ${tools.length} fixed actions, OAuth Bearer only, credit-consuming feature lanes ${env.ENABLE_HEYGEN_AVATAR_VIDEO_WRITES || env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES || env.ENABLE_HEYGEN_VIDEO_AGENT_GENERATION || env.ENABLE_HEYGEN_TRANSLATION_WRITES || env.ENABLE_HEYGEN_TTS_WRITES ? 'partially enabled' : 'dark'}.`,
+        summary: `HeyGen diagnostics: ${tools.length} fixed actions, OAuth Bearer only, credit-consuming provider writes ${env.ENABLE_HEYGEN_PROVIDER_WRITES ? 'armed' : 'dark'}.`,
       };
     },
   }, callerHash);
@@ -632,7 +635,7 @@ export function registerHeyGenProductionTools(
           summary: `HeyGen Avatar Video operation ${existing.operationId}: ${existing.state} (terminal replay; writes remain disabled).`,
         };
       }
-      if (!loadEnv().ENABLE_HEYGEN_AVATAR_VIDEO_WRITES) {
+      if (!isHeyGenProviderWriteEnabled('ENABLE_HEYGEN_AVATAR_VIDEO_WRITES')) {
         throw new Error('HeyGen Avatar Video writes are disabled. Dry-run preflight and terminal operation replay remain available.');
       }
       const result = await executeHeyGenAvatarVideoCreate(mapped, deps);

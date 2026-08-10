@@ -126,7 +126,7 @@ jobs:
             const n = h.tool_count || 0, min = Number(process.env.MIN_TOOLS);
             if (n < min) { console.error(`REGRESSION: tool_count ${n} < ${min}`); process.exit(1); }
             const hg = h.heygen || {};
-            const dark = ["avatar_video_writes", "reference_look_writes", "video_agent_chat_writes", "video_agent_generation", "asset_writes", "translation_writes", "tts_writes"];
+            const dark = ["provider_writes", "prompt_avatar_writes", "avatar_video_writes", "reference_look_writes", "video_agent_chat_writes", "video_agent_generation", "asset_writes", "translation_writes", "tts_writes"];
             const unexpectedlyOn = dark.filter((key) => hg[key] !== false);
             if (unexpectedlyOn.length) { console.error(`REGRESSION: HeyGen write lanes not dark: ${unexpectedlyOn.join(",")}`); process.exit(1); }
             if (hg.metadata_writes !== true) { console.error("REGRESSION: bounded HeyGen metadata writes are not enabled"); process.exit(1); }
