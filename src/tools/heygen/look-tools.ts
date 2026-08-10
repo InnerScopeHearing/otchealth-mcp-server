@@ -39,6 +39,7 @@ export const HEYGEN_REFERENCE_LOOK_CREATE_INPUT = {
   confirmed_billing_snapshot_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   confirmed_billing_state_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   confirmed_billing_observed_at: z.string().datetime().optional(),
+  confirmed_premium_credits_before: z.number().int().min(0).optional(),
   reserve_premium_credits: z.number().int().min(0),
   owner_approval_jws: z.string().min(64).max(8192).optional(),
   confirm_credit_use: z.boolean().optional(),
@@ -73,6 +74,9 @@ function mappedInput(input: Record<string, unknown>, dryRun: boolean): HeyGenRef
     confirmedBillingObservedAt: typeof input.confirmed_billing_observed_at === 'string'
       ? input.confirmed_billing_observed_at
       : undefined,
+    confirmedPremiumCreditsBefore: typeof input.confirmed_premium_credits_before === 'number'
+      ? input.confirmed_premium_credits_before
+      : undefined,
     reservePremiumCredits: Number(input.reserve_premium_credits),
     ownerApprovalJws: typeof input.owner_approval_jws === 'string' ? input.owner_approval_jws : undefined,
     confirmCreditUse: dryRun || input.confirm_credit_use === true,
@@ -91,6 +95,7 @@ export async function prepareHeyGenReferenceLook(
     confirmedBillingSnapshotSha256: billing.snapshot_sha256,
     confirmedBillingStateSha256: billing.state_sha256,
     confirmedBillingObservedAt: billing.observed_at,
+    confirmedPremiumCreditsBefore: billing.premium.remaining ?? undefined,
   });
   const sourceRaw = await executeHeyGenRead({ kind: 'avatarLook', lookId: input.sourceAvatarId }, deps);
   const source = parseHeyGenAvatarLook(sourceRaw);
@@ -101,6 +106,7 @@ export async function prepareHeyGenReferenceLook(
     const assetRaw = await executeHeyGenRead({ kind: 'asset', assetId }, deps);
     const asset = safeHeyGenAssetMetadata(assetRaw);
     if (asset.id !== assetId) throw new Error('HeyGen returned the wrong reference asset.');
+    if (asset.type !== 'image') throw new Error('HeyGen reference_asset_ids must resolve to image assets.');
     assets.push(asset);
   }
   const evidence = buildReferenceLookPreflightEvidence({
@@ -224,7 +230,7 @@ export function registerHeyGenLookTools(
       error: z.string().optional(),
     },
     redactInputForLog: redactHeyGenReferenceLookInputForLog,
-    shieldInputForScan: (input) => ({ prompt: input.prompt }),
+    shieldInputForScan: (input) => ({ name: input.name, prompt: input.prompt }),
     handler: async (input, ctx) => {
       const internalDryRun = ctx.dryRun && (HEYGEN_DATA_LANES as readonly string[]).includes(ctx.callerAgent);
       const liveCto = !ctx.dryRun && ctx.callerAgent === 'cto';

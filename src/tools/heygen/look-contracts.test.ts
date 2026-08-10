@@ -19,6 +19,7 @@ function valid(overrides: Partial<HeyGenReferenceLookCreateInput> = {}): HeyGenR
     confirmedBillingSnapshotSha256: 'a'.repeat(64),
     confirmedBillingStateSha256: 'b'.repeat(64),
     confirmedBillingObservedAt: '2026-08-10T00:00:00Z',
+    confirmedPremiumCreditsBefore: 591,
     reservePremiumCredits: 100,
     ownerApprovalJws: 'not-used-by-contract-builder',
     confirmCreditUse: true,

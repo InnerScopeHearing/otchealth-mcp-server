@@ -21,6 +21,11 @@ import {
   verifyHeyGenReferenceLookApproval,
 } from './owner-approval.js';
 import { parseHeyGenAvatarGroup, parseHeyGenAvatarLook } from './video-contracts.js';
+import {
+  reserveHeyGenSpend,
+  settleHeyGenSpend,
+  type HeyGenSpendReservation,
+} from './spend-controller.js';
 
 const CACHE_CONTAINER = 'cache';
 const OPERATION_TTL = -1;
@@ -50,6 +55,7 @@ export interface HeyGenReferenceLookOperationDoc extends Record<string, unknown>
   confirmedBillingSnapshotSha256: string;
   confirmedBillingStateSha256: string;
   confirmedBillingObservedAt: string;
+  confirmedPremiumCreditsBefore: number;
   reservePremiumCredits: number;
   expectedCredits: 1;
   state: HeyGenReferenceLookOperationState;
@@ -138,12 +144,14 @@ function assertApprovalInputs(input: HeyGenReferenceLookCreateInput): asserts in
   confirmedBillingSnapshotSha256: string;
   confirmedBillingStateSha256: string;
   confirmedBillingObservedAt: string;
+  confirmedPremiumCreditsBefore: number;
   ownerApprovalJws: string;
 } {
   if (input.confirmCreditUse !== true) throw error('heygen_credit_confirmation_required', 'confirm_credit_use=true is required.', 400);
   if (!input.ownerApprovalJws) throw error('heygen_owner_approval_required', 'A server-issued owner_approval_jws is required.', 400);
-  if (!input.confirmedBillingSnapshotSha256 || !input.confirmedBillingStateSha256 || !input.confirmedBillingObservedAt) {
-    throw error('heygen_billing_snapshot_required', 'The exact dry-run billing snapshot, state hash, and observation time are required.', 400);
+  if (!input.confirmedBillingSnapshotSha256 || !input.confirmedBillingStateSha256 || !input.confirmedBillingObservedAt ||
+      input.confirmedPremiumCreditsBefore === undefined) {
+    throw error('heygen_billing_snapshot_required', 'The exact dry-run billing snapshot, state hash, observation time, and premium balance are required.', 400);
   }
 }
 
@@ -157,6 +165,7 @@ function assertSame(doc: HeyGenReferenceLookOperationDoc, input: HeyGenReference
     doc.confirmedBillingSnapshotSha256 === input.confirmedBillingSnapshotSha256 &&
     doc.confirmedBillingStateSha256 === input.confirmedBillingStateSha256 &&
     doc.confirmedBillingObservedAt === input.confirmedBillingObservedAt &&
+    doc.confirmedPremiumCreditsBefore === input.confirmedPremiumCreditsBefore &&
     doc.reservePremiumCredits === input.reservePremiumCredits;
   if (!same) throw error('heygen_reference_look_idempotency_conflict', 'operation_id is already bound to a different Look request, billing snapshot, or provider key.');
 }
@@ -174,6 +183,7 @@ async function ensureOperation(
     confirmedBillingSnapshotSha256: string;
     confirmedBillingStateSha256: string;
     confirmedBillingObservedAt: string;
+    confirmedPremiumCreditsBefore: number;
   },
   plan: HeyGenReferenceLookPlan,
   deps: HeyGenBrokerDeps,
@@ -201,6 +211,7 @@ async function ensureOperation(
     confirmedBillingSnapshotSha256: input.confirmedBillingSnapshotSha256,
     confirmedBillingStateSha256: input.confirmedBillingStateSha256,
     confirmedBillingObservedAt: input.confirmedBillingObservedAt,
+    confirmedPremiumCreditsBefore: input.confirmedPremiumCreditsBefore,
     reservePremiumCredits: input.reservePremiumCredits,
     expectedCredits: 1,
     state: 'prepared',
@@ -277,6 +288,15 @@ export async function executeHeyGenReferenceLookCreate(
   assertApprovalInputs(input);
   const plan = buildHeyGenReferenceLookPlan(input);
   const prepared = await ensureOperation(input, plan, deps);
+  if (prepared.doc.state === 'submitting' &&
+      (!prepared.doc.leaseExpiresAt || Date.parse(prepared.doc.leaseExpiresAt) <= deps.now())) {
+    const unknown = await replaceOperation(prepared, {
+      state: 'outcome_unknown',
+      lastErrorCode: 'submission_lease_expired',
+      leaseExpiresAt: undefined,
+    }, deps);
+    return view((unknown ?? prepared).doc, true, deps.now());
+  }
   if (prepared.doc.state !== 'prepared') return view(prepared.doc, true, deps.now());
 
   const observedAtMs = Date.parse(input.confirmedBillingObservedAt);
@@ -297,6 +317,8 @@ export async function executeHeyGenReferenceLookCreate(
   }
 
   let current = claimed;
+  let spendReservation: HeyGenSpendReservation | null = null;
+  let providerMayHaveAccepted = false;
   try {
     const accessToken = await getHeyGenAccessToken({ deps });
     const sourceResponse = requireOk(
@@ -320,26 +342,48 @@ export async function executeHeyGenReferenceLookCreate(
       );
       const asset = safeHeyGenAssetMetadata(assetResponse.body);
       if (asset.id !== assetId) throw error('heygen_reference_look_asset_mismatch', 'HeyGen returned the wrong reference asset.', 502);
+      if (asset.type !== 'image') throw error('heygen_reference_look_asset_type_invalid', 'HeyGen reference assets must be images.', 409);
       assetIds.push(asset.id);
     }
-    buildReferenceLookPreflightEvidence({
+    const identityEvidence = buildReferenceLookPreflightEvidence({
       source: { id: source.id, groupId: source.groupId, status: source.status },
       group: { id: group.id, status: group.status, consentStatus: group.consentStatus },
       destinationGroupId: input.destinationGroupId,
       referenceAssetIds: assetIds,
     });
+    if (group.status !== 'completed' || !identityEvidence.consent_accepted) {
+      throw error(
+        'heygen_reference_look_consent_required',
+        'Real reference-Look creation requires a completed group with accepted consent. Dry-run preflight remains available.',
+        409,
+      );
+    }
 
     const before = await finalBilling(accessToken, deps);
-    if (before.state_sha256 !== input.confirmedBillingStateSha256) {
+    if (before.state_sha256 !== input.confirmedBillingStateSha256 ||
+        before.premium.remaining !== input.confirmedPremiumCreditsBefore) {
       throw error('heygen_reference_look_billing_drift', 'HeyGen billing state changed after approval. Run a new dry-run.', 409);
     }
     if ((before.premium.remaining ?? 0) - 1 < input.reservePremiumCredits) {
       throw error('heygen_reference_look_reserve_violation', 'The one-credit Look would reduce the live premium balance below the reserve floor.', 409);
     }
+    spendReservation = await reserveHeyGenSpend({
+      accountId: before.account_id,
+      operationId: input.operationId,
+      kind: 'reference_look',
+      maxCredits: 1,
+      reserveCredits: input.reservePremiumCredits,
+      premiumCreditsBefore: before.premium.remaining ?? 0,
+      billingStateSha256: before.state_sha256,
+    }, deps);
     const claims = verifyHeyGenReferenceLookApproval(input.ownerApprovalJws, {
       operationId: input.operationId,
       requestSha256: plan.requestSha256,
       billingSnapshotSha256: input.confirmedBillingSnapshotSha256,
+      billingStateSha256: input.confirmedBillingStateSha256,
+      billingObservedAt: input.confirmedBillingObservedAt,
+      confirmedPremiumCreditsBefore: input.confirmedPremiumCreditsBefore,
+      reserveCredits: input.reservePremiumCredits,
     }, deps.now());
     const consumed = await consumeHeyGenOwnerApproval(claims, deps);
     const withGrant = await replaceOperation(current, {
@@ -352,6 +396,7 @@ export async function executeHeyGenReferenceLookCreate(
 
     let response: HeyGenRawResponse;
     try {
+      providerMayHaveAccepted = true;
       response = await heyGenApiPost('/v3/avatars', accessToken, plan.body, deps, {
         'Idempotency-Key': input.idempotencyKey,
       });
@@ -361,15 +406,18 @@ export async function executeHeyGenReferenceLookCreate(
         lastErrorCode: 'transport_ambiguous',
         leaseExpiresAt: undefined,
       }, deps);
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'outcome_unknown', deps);
       return view((unknown ?? current).doc, false, deps.now());
     }
     if (!response.ok) {
+      const outcome = response.status >= 500 ? 'outcome_unknown' : 'rejected';
       const rejected = await replaceOperation(current, {
-        state: response.status >= 500 ? 'outcome_unknown' : 'rejected',
+        state: outcome,
         upstreamStatus: response.status,
         lastErrorCode: `http_${response.status}`,
         leaseExpiresAt: undefined,
       }, deps);
+      if (spendReservation) await settleHeyGenSpend(spendReservation, outcome, deps);
       return view((rejected ?? current).doc, false, deps.now());
     }
 
@@ -383,6 +431,7 @@ export async function executeHeyGenReferenceLookCreate(
         lastErrorCode: 'invalid_success',
         leaseExpiresAt: undefined,
       }, deps);
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'outcome_unknown', deps);
       return view((unknown ?? current).doc, false, deps.now());
     }
 
@@ -420,9 +469,22 @@ export async function executeHeyGenReferenceLookCreate(
       lastErrorCode: delta !== null && delta !== 1 ? 'unexpected_credit_delta' : undefined,
       leaseExpiresAt: undefined,
     }, deps);
-    if (accepted) return view(accepted.doc, false, deps.now());
+    if (accepted) {
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'accepted', deps);
+      return view(accepted.doc, false, deps.now());
+    }
     const winner = await readOperation(input.operationId, deps);
-    if (winner) return view(winner.doc, true, deps.now());
+    if (winner) {
+      if (spendReservation) {
+        await settleHeyGenSpend(
+          spendReservation,
+          winner.doc.state === 'accepted' ? 'accepted' : 'outcome_unknown',
+          deps,
+        );
+      }
+      return view(winner.doc, true, deps.now());
+    }
+    if (spendReservation) await settleHeyGenSpend(spendReservation, 'outcome_unknown', deps);
     return view({
       ...current.doc,
       state: 'outcome_unknown',
@@ -431,20 +493,22 @@ export async function executeHeyGenReferenceLookCreate(
       leaseExpiresAt: undefined,
     }, true, deps.now());
   } catch (caught) {
-    if (caught instanceof HeyGenBrokerError) {
-      const rejected = await replaceOperation(current, {
-        state: 'rejected',
-        lastErrorCode: caught.code,
-        leaseExpiresAt: undefined,
-      }, deps).catch(() => null);
-      if (rejected) return view(rejected.doc, false, deps.now());
-    }
-    const rejected = await replaceOperation(current, {
-      state: 'rejected',
-      lastErrorCode: 'preflight_or_approval_failed',
+    const terminalState: HeyGenReferenceLookOperationState = providerMayHaveAccepted
+      ? 'outcome_unknown'
+      : 'rejected';
+    const terminal = await replaceOperation(current, {
+      state: terminalState,
+      lastErrorCode: caught instanceof HeyGenBrokerError
+        ? caught.code
+        : providerMayHaveAccepted
+          ? 'post_submission_failure'
+          : 'preflight_or_approval_failed',
       leaseExpiresAt: undefined,
     }, deps).catch(() => null);
-    if (rejected) return view(rejected.doc, false, deps.now());
+    if (spendReservation) {
+      await settleHeyGenSpend(spendReservation, terminalState, deps).catch(() => undefined);
+    }
+    if (terminal) return view(terminal.doc, false, deps.now());
     throw caught;
   }
 }

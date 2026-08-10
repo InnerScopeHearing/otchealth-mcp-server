@@ -108,11 +108,11 @@ test('SAFETY-CRITICAL: every registered HeyGen tool call-site has its own explic
   const productionRefusals = (production.match(/return laneRefusal\(/g) ?? []).length;
   const lookRefusals = (look.match(/return refusal\(/g) ?? []).length;
   assert.equal(directRegistrations, 36, 'direct public HeyGen registrations must remain fixed');
-  assert.equal(futureDefinitions, 10, 'future surface must remain exactly nine dark actions plus one bounded metadata update');
+  assert.equal(futureDefinitions, 10, 'future surface must remain exactly nine preflight-only contracts plus one bounded metadata update');
   assert.equal(directRegistrations + futureDefinitions, 46, 'complete HeyGen surface count must be exact');
   assert.equal(gates + lookRefusals, directRegistrations, 'every direct registerTool call-site must explicitly check its caller lane');
   assert.equal(refusals + productionRefusals + lookRefusals, directRegistrations, 'every direct explicit gate must return a lane refusal');
-  assert.match(future, /if \(!internalDryRunOrCto\(ctx\.callerAgent, ctx\.dryRun\)\) return refusal/);
+  assert.match(future, /if \(!\(HEYGEN_DATA_LANES as readonly string\[\]\)\.includes\(ctx\.callerAgent\)\)/);
 });
 
 test('public HeyGen surface is fixed and exposes only bounded direct video while excluding generic/destructive capabilities', () => {
@@ -208,6 +208,7 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
     confirmed_billing_snapshot_sha256: 'a'.repeat(64),
     confirmed_billing_state_sha256: 'b'.repeat(64),
     confirmed_billing_observed_at: '2026-08-10T00:00:00Z',
+    confirmed_premium_credits_before: 591,
     reserve_premium_credits: 100,
     owner_approval_jws: 'SENSITIVE-JWS',
     confirm_credit_use: true,
@@ -259,6 +260,7 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
     'confirmed_billing_observed_at',
     'confirmed_billing_snapshot_sha256',
     'confirmed_billing_state_sha256',
+    'confirmed_premium_credits_before',
     'destination_group_id',
     'idempotency_key_sha256',
     'name_sha256',

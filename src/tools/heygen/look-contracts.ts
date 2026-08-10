@@ -85,6 +85,7 @@ export interface HeyGenReferenceLookCreateInput {
   confirmedBillingSnapshotSha256?: string;
   confirmedBillingStateSha256?: string;
   confirmedBillingObservedAt?: string;
+  confirmedPremiumCreditsBefore?: number;
   reservePremiumCredits: number;
   ownerApprovalJws?: string;
   confirmCreditUse: boolean;
@@ -110,6 +111,10 @@ export interface HeyGenReferenceLookPlan {
     operation_id: string;
     request_sha256: string;
     billing_snapshot_sha256: string | null;
+    billing_state_sha256: string | null;
+    billing_observed_at: string | null;
+    confirmed_premium_credits_before: number | null;
+    reserve_credits: number;
     max_credits: 1;
   };
 }
@@ -138,6 +143,10 @@ export function buildHeyGenReferenceLookPlan(input: HeyGenReferenceLookCreateInp
   }
   if (input.confirmedBillingObservedAt && !Number.isFinite(Date.parse(input.confirmedBillingObservedAt))) {
     throw new Error('confirmed_billing_observed_at must be an ISO timestamp.');
+  }
+  if (input.confirmedPremiumCreditsBefore !== undefined &&
+      (!Number.isInteger(input.confirmedPremiumCreditsBefore) || input.confirmedPremiumCreditsBefore < 0)) {
+    throw new Error('confirmed_premium_credits_before is invalid.');
   }
   if (!Number.isInteger(input.reservePremiumCredits) || input.reservePremiumCredits < 0) {
     throw new Error('reserve_premium_credits is invalid.');
@@ -175,6 +184,10 @@ export function buildHeyGenReferenceLookPlan(input: HeyGenReferenceLookCreateInp
       operation_id: input.operationId,
       request_sha256: requestSha256,
       billing_snapshot_sha256: input.confirmedBillingSnapshotSha256 ?? null,
+      billing_state_sha256: input.confirmedBillingStateSha256 ?? null,
+      billing_observed_at: input.confirmedBillingObservedAt ?? null,
+      confirmed_premium_credits_before: input.confirmedPremiumCreditsBefore ?? null,
+      reserve_credits: input.reservePremiumCredits,
       max_credits: HEYGEN_REFERENCE_LOOK_COST_CREDITS,
     },
   };

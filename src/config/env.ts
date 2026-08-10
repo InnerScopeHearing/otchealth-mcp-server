@@ -332,6 +332,7 @@ const EnvSchema = z.object({
   // HeyGen production-control feature gates. Every provider mutation family is independently dark by
   // default; read/status tools and dry-run preflight remain available. The owner approval public key is
   // verification-only and may be empty while all credit-consuming switches remain false.
+  ENABLE_HEYGEN_AVATAR_VIDEO_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   ENABLE_HEYGEN_REFERENCE_LOOK_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   ENABLE_HEYGEN_VIDEO_AGENT_GENERATION: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),

@@ -23,6 +23,10 @@ const BaseClaims = {
   operation_id: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/),
   request_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   billing_snapshot_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  billing_state_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  billing_observed_at: z.string().min(1),
+  confirmed_premium_credits_before: z.number().int().nonnegative(),
+  reserve_credits: z.number().int().nonnegative(),
 } as const;
 
 const ReferenceLookClaimsSchema = z.object({
@@ -95,6 +99,10 @@ function verifyApproval(
     operationId: string;
     requestSha256: string;
     billingSnapshotSha256: string;
+    billingStateSha256: string;
+    billingObservedAt: string;
+    confirmedPremiumCreditsBefore: number;
+    reserveCredits: number;
     maxCredits: number;
   },
   nowMs: number,
@@ -137,6 +145,10 @@ function verifyApproval(
     claims.operation_id !== expected.operationId ||
     claims.request_sha256 !== expected.requestSha256 ||
     claims.billing_snapshot_sha256 !== expected.billingSnapshotSha256 ||
+    claims.billing_state_sha256 !== expected.billingStateSha256 ||
+    claims.billing_observed_at !== expected.billingObservedAt ||
+    claims.confirmed_premium_credits_before !== expected.confirmedPremiumCreditsBefore ||
+    claims.reserve_credits !== expected.reserveCredits ||
     claims.max_credits !== expected.maxCredits
   ) {
     throw new Error('owner approval is bound to a different operation, request, billing snapshot, or credit ceiling.');
@@ -146,7 +158,15 @@ function verifyApproval(
 
 export function verifyHeyGenReferenceLookApproval(
   compactJws: string,
-  expected: { operationId: string; requestSha256: string; billingSnapshotSha256: string },
+  expected: {
+    operationId: string;
+    requestSha256: string;
+    billingSnapshotSha256: string;
+    billingStateSha256: string;
+    billingObservedAt: string;
+    confirmedPremiumCreditsBefore: number;
+    reserveCredits: number;
+  },
   nowMs = Date.now(),
   configOverride?: HeyGenApprovalVerificationConfig,
 ): HeyGenOwnerApprovalClaims {
@@ -155,6 +175,10 @@ export function verifyHeyGenReferenceLookApproval(
     operationId: expected.operationId,
     requestSha256: expected.requestSha256,
     billingSnapshotSha256: expected.billingSnapshotSha256,
+    billingStateSha256: expected.billingStateSha256,
+    billingObservedAt: expected.billingObservedAt,
+    confirmedPremiumCreditsBefore: expected.confirmedPremiumCreditsBefore,
+    reserveCredits: expected.reserveCredits,
     maxCredits: 1,
   }, nowMs, configOverride);
 }
@@ -165,6 +189,10 @@ export function verifyHeyGenAvatarVideoApproval(
     operationId: string;
     requestSha256: string;
     billingSnapshotSha256: string;
+    billingStateSha256: string;
+    billingObservedAt: string;
+    confirmedPremiumCreditsBefore: number;
+    reserveCredits: number;
     maxCredits: number;
   },
   nowMs = Date.now(),
@@ -175,6 +203,10 @@ export function verifyHeyGenAvatarVideoApproval(
     operationId: expected.operationId,
     requestSha256: expected.requestSha256,
     billingSnapshotSha256: expected.billingSnapshotSha256,
+    billingStateSha256: expected.billingStateSha256,
+    billingObservedAt: expected.billingObservedAt,
+    confirmedPremiumCreditsBefore: expected.confirmedPremiumCreditsBefore,
+    reserveCredits: expected.reserveCredits,
     maxCredits: expected.maxCredits,
   }, nowMs, configOverride);
 }
@@ -202,6 +234,10 @@ export async function consumeHeyGenOwnerApproval(
     operationId: claims.operation_id,
     requestSha256: claims.request_sha256,
     billingSnapshotSha256: claims.billing_snapshot_sha256,
+    billingStateSha256: claims.billing_state_sha256,
+    billingObservedAt: claims.billing_observed_at,
+    confirmedPremiumCreditsBefore: claims.confirmed_premium_credits_before,
+    reserveCredits: claims.reserve_credits,
     maxCredits: claims.max_credits,
     consumedAt: new Date(deps.now()).toISOString(),
   };

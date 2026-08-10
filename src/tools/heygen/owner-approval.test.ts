@@ -40,6 +40,10 @@ function grant(overrides: Record<string, unknown> = {}, headerOverrides: Record<
     operation_id: 'look_op_01',
     request_sha256: 'a'.repeat(64),
     billing_snapshot_sha256: 'b'.repeat(64),
+    billing_state_sha256: 'e'.repeat(64),
+    billing_observed_at: '2026-08-10T00:00:00Z',
+    confirmed_premium_credits_before: 591,
+    reserve_credits: 100,
     max_credits: 1,
     ...overrides,
   });
@@ -65,6 +69,10 @@ function videoGrant(maxCredits = 5): string {
     operation_id: 'video_op_01',
     request_sha256: 'c'.repeat(64),
     billing_snapshot_sha256: 'd'.repeat(64),
+    billing_state_sha256: 'f'.repeat(64),
+    billing_observed_at: '2026-08-10T00:00:00Z',
+    confirmed_premium_credits_before: 591,
+    reserve_credits: 100,
     max_credits: maxCredits,
   });
   const signature = sign('sha256', Buffer.from(`${header}.${payload}`, 'ascii'), {
@@ -78,6 +86,10 @@ const expected = {
   operationId: 'look_op_01',
   requestSha256: 'a'.repeat(64),
   billingSnapshotSha256: 'b'.repeat(64),
+  billingStateSha256: 'e'.repeat(64),
+  billingObservedAt: '2026-08-10T00:00:00Z',
+  confirmedPremiumCreditsBefore: 591,
+  reserveCredits: 100,
 };
 
 test('owner grant verifier accepts one exact ES256 grant bound to operation, request, billing, and one credit', () => {
@@ -93,6 +105,10 @@ test('Avatar Video owner grant binds the exact request, billing snapshot, and cr
     operationId: 'video_op_01',
     requestSha256: 'c'.repeat(64),
     billingSnapshotSha256: 'd'.repeat(64),
+    billingStateSha256: 'f'.repeat(64),
+    billingObservedAt: '2026-08-10T00:00:00Z',
+    confirmedPremiumCreditsBefore: 591,
+    reserveCredits: 100,
     maxCredits: 5,
   }, NOW_MS, config);
   assert.equal(claims.grant_type, 'heygen_avatar_video_create');
@@ -101,6 +117,10 @@ test('Avatar Video owner grant binds the exact request, billing snapshot, and cr
     operationId: 'video_op_01',
     requestSha256: 'c'.repeat(64),
     billingSnapshotSha256: 'd'.repeat(64),
+    billingStateSha256: 'f'.repeat(64),
+    billingObservedAt: '2026-08-10T00:00:00Z',
+    confirmedPremiumCreditsBefore: 591,
+    reserveCredits: 100,
     maxCredits: 6,
   }, NOW_MS, config));
 });
@@ -117,6 +137,9 @@ test('owner grant verifier rejects algorithm, key, principal, time, and binding 
     grant({ operation_id: 'look_op_02' }),
     grant({ request_sha256: 'c'.repeat(64) }),
     grant({ billing_snapshot_sha256: 'd'.repeat(64) }),
+    grant({ billing_state_sha256: 'd'.repeat(64) }),
+    grant({ confirmed_premium_credits_before: 590 }),
+    grant({ reserve_credits: 0 }),
   ]) {
     assert.throws(() => verifyHeyGenReferenceLookApproval(token, expected, NOW_MS, config));
   }

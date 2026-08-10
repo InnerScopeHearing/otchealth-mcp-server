@@ -226,10 +226,10 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'heygen_translation_get', 'heygen_translation_statuses_get', 'heygen_proofread_get',
   'heygen_avatar_video_operation_get', 'heygen_reference_look_operation_get',
   'heygen_prompt_avatar_create', 'heygen_avatar_look_name_update', 'heygen_reference_look_create',
-  'heygen_video_agent_session_create', 'heygen_video_agent_feedback_send',
-  'heygen_video_agent_generation_approve', 'heygen_video_agent_session_stop',
-  'heygen_asset_upload', 'heygen_translation_create', 'heygen_proofread_create',
-  'heygen_proofread_generate', 'heygen_speech_preview_create',
+  'heygen_video_agent_session_create_preflight', 'heygen_video_agent_feedback_send_preflight',
+  'heygen_video_agent_generation_approve_preflight', 'heygen_video_agent_session_stop_preflight',
+  'heygen_asset_upload_preflight', 'heygen_translation_create_preflight', 'heygen_proofread_create_preflight',
+  'heygen_proofread_generate_preflight', 'heygen_speech_preview_create_preflight',
   'heygen_avatar_video_create', 'heygen_existing_video_ingest_qa', 'heygen_video_wait_ingest_qa',
 ] as const;
 
@@ -593,9 +593,12 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     readOnly: def.annotations.readOnlyHint,
   });
   const inputShape: ZodRawShape = { ...def.inputShape, ...COMMON_INPUT };
-  // outputSchema is wrapped: every tool reports compliance_warning + result.
+  // outputSchema is wrapped: every tool reports compliance_warning + result. HeyGen's production
+  // control surface opts into strict result schemas so provider-shape drift cannot bypass redaction.
+  const enforceStrictOutput = canonicalName.startsWith('heygen_');
+  const strictResultSchema = z.object(def.outputShape).strict();
   const outputShape: ZodRawShape = {
-    result: z.unknown(),
+    result: enforceStrictOutput ? strictResultSchema : z.unknown(),
     compliance_warning: z
       .object({
         triggers: z.array(z.string()),
@@ -860,7 +863,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (def.name === 'wake') {
           markWoken(callerHash);
         }
-        const { result, warning } = applyGuardrail(payload.data, acknowledged);
+        const validatedData = enforceStrictOutput
+          ? strictResultSchema.parse(payload.data)
+          : payload.data;
+        const { result, warning } = applyGuardrail(validatedData, acknowledged);
 
         // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
         // (query + text + sources). enforce-blocking is limited to READ tools — a write already ran, so

@@ -180,14 +180,10 @@ function redact(input: Record<string, unknown>): unknown {
 
 function shieldProjection(input: Record<string, unknown>): unknown {
   const projected: Record<string, unknown> = {};
-  for (const key of ['planning_prompt', 'message', 'text']) {
+  for (const key of ['planning_prompt', 'message', 'text', 'name', 'title', 'filename']) {
     if (typeof input[key] === 'string') projected[key] = input[key];
   }
   return projected;
-}
-
-function internalDryRunOrCto(caller: string, dryRun: boolean): boolean {
-  return (dryRun && (HEYGEN_DATA_LANES as readonly string[]).includes(caller)) || (!dryRun && caller === 'cto');
 }
 
 function refusal(toolName: string, caller: string, dryRun: boolean): ToolResultPayload {
@@ -202,16 +198,17 @@ function refusal(toolName: string, caller: string, dryRun: boolean): ToolResultP
 function dryPlan(tool: string, endpoint: string, body: Record<string, unknown>, flag: keyof Env): ToolResultPayload {
   return {
     data: {
-      mode: 'dry_run',
+      mode: 'preflight',
       tool,
       endpoint,
       provider_mutation: false,
       operation_record_mutation: false,
       request_sha256: canonicalJsonSha256(body),
       feature_enabled: Boolean(loadEnv()[flag]),
-      notice: 'Contract validated. No provider or operation-record mutation occurred.',
+      implemented: false,
+      notice: 'Preflight contract validated. The provider-write action is not implemented or enabled; no provider or operation-record mutation occurred.',
     },
-    summary: `DRY RUN: ${tool} contract validated; no provider mutation occurred.`,
+    summary: `PREFLIGHT: ${tool} contract validated; provider execution is not implemented and no mutation occurred.`,
   };
 }
 
@@ -229,13 +226,13 @@ function registerDarkTool(
 ): void {
   registerTool(server, {
     name: definition.name,
-    category: 'write_orchestrated',
+    category: 'read',
     annotations: {
       title: `HeyGen: ${definition.name.replace(/^heygen_/, '').replaceAll('_', ' ')}`,
-      description: definition.description,
-      readOnlyHint: false,
-      destructiveHint: definition.name.endsWith('_stop'),
-      idempotentHint: !definition.name.includes('video_agent'),
+      description: `Preflight-only contract; no provider execution is implemented. ${definition.description}`,
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     },
     inputShape: definition.inputShape,
@@ -247,17 +244,18 @@ function registerDarkTool(
       operation_record_mutation: z.boolean(),
       request_sha256: z.string(),
       feature_enabled: z.boolean(),
+      implemented: z.boolean(),
       notice: z.string(),
       error: z.string().optional(),
     },
     redactInputForLog: redact,
     shieldInputForScan: shieldProjection,
     handler: async (input, ctx) => {
-      if (!internalDryRunOrCto(ctx.callerAgent, ctx.dryRun)) return refusal(definition.name, ctx.callerAgent, ctx.dryRun);
+      if (!(HEYGEN_DATA_LANES as readonly string[]).includes(ctx.callerAgent)) {
+        return refusal(definition.name, ctx.callerAgent, true);
+      }
       const body = definition.body(input as unknown as Record<string, unknown>);
-      if (ctx.dryRun) return dryPlan(definition.name, definition.endpoint, body, definition.flag);
-      if (!loadEnv()[definition.flag]) throw new Error(`${definition.name} is disabled by ${String(definition.flag)}=false.`);
-      throw new Error(`${definition.name} execution remains disabled until its durable operation controller and owner-grant path are configured. No provider request was sent.`);
+      return dryPlan(definition.name, definition.endpoint, body, definition.flag);
     },
   }, callerHash);
 }
@@ -268,7 +266,7 @@ export function registerHeyGenFutureTools(
   deps: HeyGenBrokerDeps,
 ): void {
   registerDarkTool(server, callerHash, {
-    name: 'heygen_video_agent_session_create',
+    name: 'heygen_video_agent_session_create_preflight',
     description: 'Creates only a chat-mode, incognito Video Agent planning session. The provider body forces mode=chat and planning-only instructions; generation has a separate approval action.',
     inputShape: HEYGEN_VIDEO_AGENT_SESSION_CREATE_INPUT,
     endpoint: 'POST /v3/video-agents',
@@ -286,7 +284,7 @@ export function registerHeyGenFutureTools(
     }),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_video_agent_feedback_send',
+    name: 'heygen_video_agent_feedback_send_preflight',
     description: 'Sends planning feedback only. Confirmation, approval, proceed, or spend intent is not represented by this schema and cannot trigger generation.',
     inputShape: HEYGEN_VIDEO_AGENT_FEEDBACK_SEND_INPUT,
     endpoint: 'POST /v3/video-agents/{session_id}',
@@ -296,7 +294,7 @@ export function registerHeyGenFutureTools(
     }),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_video_agent_generation_approve',
+    name: 'heygen_video_agent_generation_approve_preflight',
     description: 'Separate fixed generation approval action. It accepts no arbitrary confirmation text and remains disabled until the owner-grant, account spend fence, and hash-pinned complete plan are live.',
     inputShape: HEYGEN_VIDEO_AGENT_GENERATION_APPROVE_INPUT,
     endpoint: 'POST /v3/video-agents/{session_id}',
@@ -304,7 +302,7 @@ export function registerHeyGenFutureTools(
     body: () => ({ message: 'Generate exactly the reviewed hash-pinned plan without substitutions or model escalation.' }),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_video_agent_session_stop',
+    name: 'heygen_video_agent_session_stop_preflight',
     description: 'Stops only a locally owned Video Agent session through an exact empty provider body. Ambiguous stop results are never automatically replayed.',
     inputShape: HEYGEN_VIDEO_AGENT_SESSION_STOP_INPUT,
     endpoint: 'POST /v3/video-agents/{session_id}/stop',
@@ -312,10 +310,10 @@ export function registerHeyGenFutureTools(
     body: () => ({}),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_asset_upload',
+    name: 'heygen_asset_upload_preflight',
     description: 'Uploads one hash-pinned file from approved private Azure storage. The fixed contract forbids public URLs, raw bytes/base64, redirects, unsupported MIME types, and files over 32 MiB.',
     inputShape: HEYGEN_ASSET_UPLOAD_INPUT,
-    endpoint: 'POST /v3/assets',
+    endpoint: 'internal Azure artifact resolver -> multipart POST /v3/assets',
     flag: 'ENABLE_HEYGEN_ASSET_WRITES',
     body: (input) => ({
       source_artifact_uri: input.source_artifact_uri,
@@ -326,7 +324,7 @@ export function registerHeyGenFutureTools(
     }),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_translation_create',
+    name: 'heygen_translation_create_preflight',
     description: 'Creates one or more translations from a locked master asset using only live supported language labels, an explicit speed/precision choice, exact billing approval, and provider idempotency.',
     inputShape: HEYGEN_TRANSLATION_CREATE_INPUT,
     endpoint: 'POST /v3/video-translations',
@@ -343,7 +341,7 @@ export function registerHeyGenFutureTools(
     }),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_proofread_create',
+    name: 'heygen_proofread_create_preflight',
     description: 'Creates an idempotent proofread session for a locked English master before localization. Direct final translation remains separate and owner-approved.',
     inputShape: HEYGEN_PROOFREAD_CREATE_INPUT,
     endpoint: 'POST /v3/video-translations/proofreads',
@@ -358,7 +356,7 @@ export function registerHeyGenFutureTools(
     }),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_proofread_generate',
+    name: 'heygen_proofread_generate_preflight',
     description: 'Starts final generation only from an approved proofread digest with exact owner/billing approval and provider idempotency.',
     inputShape: HEYGEN_PROOFREAD_GENERATE_INPUT,
     endpoint: 'POST /v3/video-translations/proofreads/{proofread_id}/generate',
@@ -366,7 +364,7 @@ export function registerHeyGenFutureTools(
     body: () => ({ captions: false, translate_audio_only: false }),
   });
   registerDarkTool(server, callerHash, {
-    name: 'heygen_speech_preview_create',
+    name: 'heygen_speech_preview_create_preflight',
     description: 'Generates a bounded Starfish-compatible voice preview from text/SSML. This action cannot clone, train, delete, or mutate a voice and requires separate owner/billing approval.',
     inputShape: HEYGEN_SPEECH_PREVIEW_CREATE_INPUT,
     endpoint: 'POST /v3/voices/speech',

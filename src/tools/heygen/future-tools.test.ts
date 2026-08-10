@@ -107,7 +107,7 @@ test('asset, translation, proofread, and speech schemas are fixed and bounded', 
   }));
 });
 
-test('dark mutation registrations use independent switches and never expose generic provider input', () => {
+test('preflight-only registrations are explicitly non-implemented and never expose generic provider input', () => {
   const source = readFileSync(new URL('./future-tools.ts', import.meta.url), 'utf8');
   for (const flag of [
     'ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES',
@@ -118,10 +118,12 @@ test('dark mutation registrations use independent switches and never expose gene
     'ENABLE_HEYGEN_METADATA_WRITES',
   ]) assert.match(source, new RegExp(flag));
   assert.doesNotMatch(source, /api_key|x-api-key|raw_headers|arbitrary_path/);
+  assert.match(source, /implemented: false/);
+  assert.equal((source.match(/name: 'heygen_[a-z0-9_]+_preflight'/g) ?? []).length, 9);
   assert.match(source, /mode: 'chat'/);
   assert.match(source, /incognito_mode: true/);
   assert.match(source, /body: \(\) => \(\{\}\)/);
   assert.match(source, /owner_approval_jws/);
-  assert.match(source, /for \(const key of \['planning_prompt', 'message', 'text'\]\)/);
+  assert.match(source, /for \(const key of \['planning_prompt', 'message', 'text', 'name', 'title', 'filename'\]\)/);
   assert.doesNotMatch(source, /projected\[.*owner_approval_jws/);
 });

@@ -21,6 +21,7 @@ import {
   newHeyGenPairId,
   parseOfficialCredentialsHeader,
   persistPairedHeyGenToken,
+  prepareHeyGenAvatarVideoCreate,
   newHeyGenTokenFamilyFingerprint,
   type HeyGenBrokerDeps,
   type HeyGenTokenDoc,
@@ -1115,6 +1116,10 @@ function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<t
     grant_type: 'heygen_avatar_video_create', tool: 'heygen_avatar_video_create',
     operation_id: base.operationId, request_sha256: plan.requestSha256,
     billing_snapshot_sha256: base.confirmedBillingSnapshotSha256,
+    billing_state_sha256: base.confirmedBillingStateSha256,
+    billing_observed_at: base.confirmedBillingObservedAt,
+    confirmed_premium_credits_before: base.confirmedPremiumCreditsBefore,
+    reserve_credits: base.reservePremiumCredits,
     max_credits: base.maxApprovedCredits,
   });
   const signature = sign('sha256', Buffer.from(`${header}.${payload}`, 'ascii'), {
@@ -1193,6 +1198,18 @@ function avatarVideoHarness(options: {
   });
   return { deps, store, requests, postCalls: () => postCalls };
 }
+
+test('Avatar Video dry-run helper performs live read-only preflight and returns a billing packet without POST or operation writes', async () => {
+  const harness = avatarVideoHarness();
+  const beforeDocs = harness.store.size;
+  const prepared = await prepareHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(prepared.billing.premium.remaining, 7);
+  assert.equal(prepared.group.consentStatus, 'accepted');
+  assert.equal(prepared.look.id, 'look_1');
+  assert.match(prepared.billing.snapshot_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(harness.requests.some((entry) => entry.method === 'POST'), false);
+  assert.equal(harness.store.size, beforeDocs);
+});
 
 test('direct Avatar Video create runs guarded live preflight, sends one exact idempotent POST, and persists accepted state', async () => {
   const harness = avatarVideoHarness();
@@ -1295,6 +1312,17 @@ test('credit snapshot and reserve violations block before POST', async () => {
       '/v3/users/me', '/v3/avatars/looks/look_1', '/v3/avatars/group_1', '/v3/voices/voice_1',
     ]);
   }
+});
+
+test('account spend controller allows only one concurrent Avatar Video submission', async () => {
+  const harness = avatarVideoHarness();
+  const results = await Promise.allSettled([
+    executeHeyGenAvatarVideoCreate(avatarVideoInput({ operationId: 'video_op_01', idempotencyKey: 'video-op:01' }), harness.deps),
+    executeHeyGenAvatarVideoCreate(avatarVideoInput({ operationId: 'video_op_02', idempotencyKey: 'video-op:02' }), harness.deps),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.equal(harness.postCalls(), 1);
 });
 
 test('current provider completed plus accepted consent passes direct-video preflight', async () => {

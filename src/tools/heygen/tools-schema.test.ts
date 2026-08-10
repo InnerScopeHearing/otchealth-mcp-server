@@ -129,6 +129,7 @@ test('reference-conditioned Look schema is exact, bounded, and owner-grant ready
     confirmed_billing_snapshot_sha256: 'a'.repeat(64),
     confirmed_billing_state_sha256: 'b'.repeat(64),
     confirmed_billing_observed_at: '2026-08-10T00:00:00.000Z',
+    confirmed_premium_credits_before: 591,
     reserve_premium_credits: 100,
     owner_approval_jws: 'x'.repeat(64),
     confirm_credit_use: true,

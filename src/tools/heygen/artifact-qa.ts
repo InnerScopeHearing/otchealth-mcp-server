@@ -242,8 +242,17 @@ export async function ingestHeyGenVideoArtifacts(
   if (!store.configured()) throw new Error('HeyGen artifact storage is not configured.');
 
   const downloads: DownloadedAsset[] = [];
+  const aggregateLimit = Math.min(104_857_600, options.maxAssetBytes * 2);
+  let aggregateBytes = 0;
+  const deadline = Date.now() + 120_000;
   for (const [kind, url] of requestedAssets(detail, options)) {
-    downloads.push(await fetchAsset(kind, url, options.maxAssetBytes, fetchImpl));
+    if (Date.now() >= deadline) throw new Error('HeyGen artifact ingestion exceeded its overall deadline.');
+    const downloaded = await fetchAsset(kind, url, options.maxAssetBytes, fetchImpl);
+    aggregateBytes += downloaded.bytes.length;
+    if (aggregateBytes > aggregateLimit) {
+      throw new Error('HeyGen artifact bundle exceeds the aggregate byte limit.');
+    }
+    downloads.push(downloaded);
   }
 
   const assets: HeyGenArtifactQaResult[] = [];

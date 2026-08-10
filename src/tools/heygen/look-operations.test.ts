@@ -89,6 +89,10 @@ function ownerGrant(input: HeyGenReferenceLookCreateInput, billingSnapshotSha256
     operation_id: input.operationId,
     request_sha256: plan.requestSha256,
     billing_snapshot_sha256: billingSnapshotSha256,
+    billing_state_sha256: input.confirmedBillingStateSha256,
+    billing_observed_at: input.confirmedBillingObservedAt,
+    confirmed_premium_credits_before: input.confirmedPremiumCreditsBefore,
+    reserve_credits: input.reservePremiumCredits,
     max_credits: 1,
   });
   const signature = sign('sha256', Buffer.from(`${header}.${payload}`, 'ascii'), {
@@ -111,6 +115,7 @@ function input(overrides: Partial<HeyGenReferenceLookCreateInput> = {}): HeyGenR
     confirmedBillingSnapshotSha256: snapshot.snapshot_sha256,
     confirmedBillingStateSha256: snapshot.state_sha256,
     confirmedBillingObservedAt: snapshot.observed_at,
+    confirmedPremiumCreditsBefore: snapshot.premium.remaining ?? undefined,
     reservePremiumCredits: 100,
     confirmCreditUse: true,
   };
@@ -119,7 +124,7 @@ function input(overrides: Partial<HeyGenReferenceLookCreateInput> = {}): HeyGenR
   return merged;
 }
 
-function harness(options: { postStatus?: number; after?: unknown } = {}) {
+function harness(options: { postStatus?: number; after?: unknown; group?: unknown; asset?: unknown } = {}) {
   type Row = { doc: Record<string, unknown>; etag: string };
   const store = new Map<string, Row>();
   const tokenDoc = buildHeyGenTokenDoc({
@@ -170,10 +175,10 @@ function harness(options: { postStatus?: number; after?: unknown } = {}) {
       if (parsed.pathname === '/v3/avatars/looks/look_source') return json({
         data: { id: 'look_source', avatar_type: 'photo_avatar', group_id: 'group_1', supported_api_engines: ['avatar_iv'], status: 'completed' },
       });
-      if (parsed.pathname === '/v3/avatars/group_1') return json({
-        data: { id: 'group_1', status: 'pending_consent', consent_status: 'pending' },
+      if (parsed.pathname === '/v3/avatars/group_1') return json(options.group ?? {
+        data: { id: 'group_1', status: 'completed', consent_status: 'accepted' },
       });
-      if (parsed.pathname === '/v3/assets/asset_1') return json({
+      if (parsed.pathname === '/v3/assets/asset_1') return json(options.asset ?? {
         data: { id: 'asset_1', name: 'wardrobe.png', type: 'image', owner: 'owner', space_id: 'space_1', uploaded_at: 1, url: 'https://files.heygen.ai/a.png?sig=SECRET' },
       });
       if (parsed.pathname === '/v3/avatars' && method === 'POST') return json({
@@ -248,10 +253,28 @@ test('billing drift and provider ambiguity fail closed without automatic retry',
   assert.equal(ambiguous.requests.filter((request) => request.method === 'POST').length, 1);
 });
 
+test('pending consent and non-image reference assets block before provider POST', async () => {
+  const pending = harness({
+    group: { data: { id: 'group_1', status: 'pending_consent', consent_status: 'pending' } },
+  });
+  const pendingResult = await executeHeyGenReferenceLookCreate(input(), pending.deps);
+  assert.equal(pendingResult.state, 'rejected');
+  assert.equal(pending.requests.filter((request) => request.method === 'POST').length, 0);
+
+  const audio = harness({
+    asset: { data: { id: 'asset_1', name: 'voice.mp3', type: 'audio', owner: 'owner', space_id: 'space_1', uploaded_at: 1, url: null } },
+  });
+  const audioResult = await executeHeyGenReferenceLookCreate(input(), audio.deps);
+  assert.equal(audioResult.state, 'rejected');
+  assert.equal(audio.requests.filter((request) => request.method === 'POST').length, 0);
+});
+
 test('tampered owner grant blocks before provider POST and is durably rejected', async () => {
   const h = harness();
   const bad = input();
-  bad.ownerApprovalJws = `${bad.ownerApprovalJws!.slice(0, -1)}x`;
+  const parts = bad.ownerApprovalJws!.split('.');
+  parts[2] = `${parts[2]![0] === 'A' ? 'B' : 'A'}${parts[2]!.slice(1)}`;
+  bad.ownerApprovalJws = parts.join('.');
   const result = await executeHeyGenReferenceLookCreate(bad, h.deps);
   assert.equal(result.state, 'rejected');
   assert.equal(h.requests.filter((request) => request.method === 'POST').length, 0);

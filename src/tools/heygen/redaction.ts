@@ -73,6 +73,10 @@ export function redactHeyGenReferenceLookInputForLog(input: Record<string, unkno
       typeof input.confirmed_billing_observed_at === 'string'
         ? input.confirmed_billing_observed_at
         : undefined,
+    confirmed_premium_credits_before:
+      typeof input.confirmed_premium_credits_before === 'number'
+        ? input.confirmed_premium_credits_before
+        : undefined,
     reserve_premium_credits:
       typeof input.reserve_premium_credits === 'number' ? input.reserve_premium_credits : undefined,
     owner_approval_jws_present: typeof input.owner_approval_jws === 'string',

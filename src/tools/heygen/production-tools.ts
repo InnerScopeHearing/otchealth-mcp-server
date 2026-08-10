@@ -7,13 +7,13 @@ import {
   executeHeyGenRead,
   getHeyGenVideoDetail,
   getHeyGenVideoOperation,
+  prepareHeyGenAvatarVideoCreate,
   HEYGEN_LOCALE_RE,
   HEYGEN_SAFE_ID_RE,
   type HeyGenAvatarVideoCreateResult,
   type HeyGenBrokerDeps,
 } from './broker.js';
 import {
-  buildHeyGenAvatarVideoPlan,
   HEYGEN_IDEMPOTENCY_KEY_RE,
   HEYGEN_OPERATION_ID_RE,
   HEYGEN_SHA256_RE,
@@ -152,6 +152,10 @@ export const HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT = {
 const VIDEO_OPERATION_OUTPUT = {
   operation_id: z.string(),
   state: z.string(),
+  provider_mutation: z.boolean().optional(),
+  billing: z.unknown().optional(),
+  preflight: z.unknown().optional(),
+  approval_packet: z.unknown().optional(),
   replayed: z.boolean(),
   request_sha256: z.string(),
   video_id: z.string().optional(),
@@ -292,6 +296,7 @@ export function registerHeyGenProductionTools(
             actions: tools,
             artifact_store_configured: defaultHeyGenArtifactStore.configured(),
             feature_flags: {
+              avatar_video_writes: env.ENABLE_HEYGEN_AVATAR_VIDEO_WRITES,
               reference_look_writes: env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES,
               video_agent_chat_writes: env.ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES,
               video_agent_generation: env.ENABLE_HEYGEN_VIDEO_AGENT_GENERATION,
@@ -305,7 +310,7 @@ export function registerHeyGenProductionTools(
             ),
           },
         },
-        summary: `HeyGen diagnostics: ${tools.length} fixed actions, OAuth Bearer only, credit-consuming feature lanes ${env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES || env.ENABLE_HEYGEN_VIDEO_AGENT_GENERATION || env.ENABLE_HEYGEN_TRANSLATION_WRITES || env.ENABLE_HEYGEN_TTS_WRITES ? 'partially enabled' : 'dark'}.`,
+        summary: `HeyGen diagnostics: ${tools.length} fixed actions, OAuth Bearer only, credit-consuming feature lanes ${env.ENABLE_HEYGEN_AVATAR_VIDEO_WRITES || env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES || env.ENABLE_HEYGEN_VIDEO_AGENT_GENERATION || env.ENABLE_HEYGEN_TRANSLATION_WRITES || env.ENABLE_HEYGEN_TTS_WRITES ? 'partially enabled' : 'dark'}.`,
       };
     },
   }, callerHash);
@@ -563,24 +568,65 @@ export function registerHeyGenProductionTools(
     inputShape: HEYGEN_AVATAR_VIDEO_CREATE_INPUT,
     outputShape: VIDEO_OPERATION_OUTPUT,
     redactInputForLog: redactHeyGenAvatarVideoInputForLog,
-    shieldInputForScan: (input) => ({ script: input.script, motion_prompt: input.motion_prompt }),
+    shieldInputForScan: (input) => ({ title: input.title, script: input.script, motion_prompt: input.motion_prompt }),
     handler: async (input, ctx) => {
       if (!isHeyGenToolAllowed('heygen_avatar_video_create', ctx.callerAgent)) return laneRefusal('heygen_avatar_video_create', ctx.callerAgent);
       const mapped = avatarVideoInput(input as unknown as Record<string, unknown>, ctx.dryRun);
       if (ctx.dryRun) {
-        const plan = buildHeyGenAvatarVideoPlan(mapped);
+        const prepared = await prepareHeyGenAvatarVideoCreate(mapped, deps);
+        const premiumBefore = prepared.billing.premium.remaining ?? 0;
+        if (premiumBefore - mapped.maxApprovedCredits < mapped.reservePremiumCredits) {
+          throw new Error('The approved Avatar Video ceiling would cross the live reserve floor.');
+        }
         const dry: HeyGenAvatarVideoCreateResult = {
           operationId: mapped.operationId,
           state: 'dry_run',
           replayed: false,
-          requestSha256: plan.requestSha256,
-          plan: 'dry_run',
+          requestSha256: prepared.plan.requestSha256,
+          plan: prepared.billing.plan,
+          premiumCreditsBefore: prepared.billing.premium.remaining ?? undefined,
+          billingSnapshotBeforeSha256: prepared.billing.snapshot_sha256,
           maxApprovedCredits: mapped.maxApprovedCredits,
           reservePremiumCredits: mapped.reservePremiumCredits,
-          estimatedCredits: plan.estimatedCredits,
-          estimatedDurationSeconds: plan.estimatedDurationSeconds,
+          estimatedCredits: prepared.plan.estimatedCredits,
+          estimatedDurationSeconds: prepared.plan.estimatedDurationSeconds,
         };
-        return { data: operationData(dry), summary: `DRY RUN: request validated; estimated ${plan.estimatedCredits} credit(s), no HeyGen or Cosmos mutation.` };
+        return {
+          data: {
+            ...operationData(dry),
+            provider_mutation: false,
+            billing: prepared.billing,
+            preflight: {
+              avatar_id: prepared.look.id,
+              avatar_type: prepared.look.avatarType,
+              group_id: prepared.group.id,
+              group_status: prepared.group.status,
+              consent_status: prepared.group.consentStatus,
+              voice_id: prepared.voice.voiceId,
+              voice_status: prepared.voice.status,
+              engine: mapped.engine,
+              reference_look_id: prepared.referenceLook?.id,
+            },
+            approval_packet: {
+              grant_type: 'heygen_avatar_video_create',
+              tool: 'heygen_avatar_video_create',
+              operation_id: mapped.operationId,
+              request_sha256: prepared.plan.requestSha256,
+              billing_snapshot_sha256: prepared.billing.snapshot_sha256,
+              billing_state_sha256: prepared.billing.state_sha256,
+              billing_observed_at: prepared.billing.observed_at,
+              confirmed_premium_credits_before: prepared.billing.premium.remaining,
+              reserve_credits: mapped.reservePremiumCredits,
+              max_credits: mapped.maxApprovedCredits,
+              owner_grant_required: true,
+              zero_automatic_retries: true,
+            },
+          },
+          summary: `DRY RUN: live Avatar Video preflight passed; estimated ${prepared.plan.estimatedCredits} credit(s), no provider or operation-record mutation.`,
+        };
+      }
+      if (!loadEnv().ENABLE_HEYGEN_AVATAR_VIDEO_WRITES) {
+        throw new Error('HeyGen Avatar Video writes are disabled. Dry-run preflight remains available.');
       }
       const result = await executeHeyGenAvatarVideoCreate(mapped, deps);
       return {

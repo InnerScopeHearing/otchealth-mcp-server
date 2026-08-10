@@ -37,6 +37,11 @@ import {
   verifyHeyGenAvatarVideoApproval,
 } from './owner-approval.js';
 import {
+  reserveHeyGenSpend,
+  settleHeyGenSpend,
+  type HeyGenSpendReservation,
+} from './spend-controller.js';
+import {
   createDoc,
   isConfigured as cosmosConfigured,
   readDoc,
@@ -1945,6 +1950,51 @@ async function runVideoPreflight(
   };
 }
 
+export async function prepareHeyGenAvatarVideoCreate(
+  input: HeyGenAvatarVideoCreateInput,
+  deps: HeyGenBrokerDeps = defaultHeyGenBrokerDeps,
+): Promise<{
+  plan: HeyGenAvatarVideoPlan;
+  billing: ReturnType<typeof parseHeyGenBillingSnapshot>;
+  look: HeyGenAvatarLook;
+  group: HeyGenAvatarGroup;
+  voice: HeyGenVoice;
+  referenceLook?: HeyGenAvatarLook;
+}> {
+  let plan: HeyGenAvatarVideoPlan;
+  try {
+    plan = buildHeyGenAvatarVideoPlan(input);
+  } catch (error) {
+    throw brokerError('heygen_video_input_invalid', (error as Error).message, 400);
+  }
+  let rejectedAccessToken: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const accessToken = await getHeyGenAccessToken({
+      forceRefresh: attempt === 1,
+      rejectedAccessToken,
+      deps,
+    });
+    try {
+      const preflight = await runVideoPreflight(input, accessToken, deps);
+      return {
+        plan,
+        billing: preflight.billing,
+        look: preflight.look,
+        group: preflight.group,
+        voice: preflight.voice,
+        referenceLook: preflight.referenceLook,
+      };
+    } catch (error) {
+      if (isRawResponse(error) && error.status === 401 && attempt === 0) {
+        rejectedAccessToken = accessToken;
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw brokerError('heygen_auth_failed', 'HeyGen OAuth authorization failed after one refresh retry.', 401);
+}
+
 function isRawResponse(value: unknown): value is HeyGenRawResponse {
   return Boolean(value && typeof value === 'object' && typeof (value as HeyGenRawResponse).status === 'number');
 }
@@ -2024,6 +2074,18 @@ export async function executeHeyGenAvatarVideoCreate(
   } catch (error) {
     throw brokerError('heygen_video_input_invalid', (error as Error).message, 400);
   }
+  const legacyTerminal = await readVideoOperation(input.operationId, deps);
+  if (legacyTerminal && (legacyTerminal.doc.state === 'accepted' || legacyTerminal.doc.state === 'rejected')) {
+    const sameLegacyRequest =
+      legacyTerminal.doc.idempotencyKeySha256 === plan.idempotencyKeySha256 &&
+      legacyTerminal.doc.manifestSha256 === input.manifestSha256 &&
+      legacyTerminal.doc.requestSha256 === plan.requestSha256 &&
+      legacyTerminal.doc.scriptSha256 === plan.scriptSha256;
+    if (!sameLegacyRequest) {
+      throw brokerError('heygen_video_idempotency_conflict', 'This operation_id was already bound to a different request (legacy operation record).', 409);
+    }
+    return operationView(legacyTerminal.doc, true, deps.now());
+  }
   if (
     !input.confirmedBillingSnapshotSha256 ||
     !input.confirmedBillingStateSha256 ||
@@ -2047,6 +2109,7 @@ export async function executeHeyGenAvatarVideoCreate(
 
   let rejectedAccessToken: string | undefined;
   let claimed: { doc: HeyGenVideoOperationDoc; etag: string } | null = null;
+  let spendReservation: HeyGenSpendReservation | null = null;
   for (let authAttempt = 0; authAttempt < 2; authAttempt += 1) {
     const accessToken = await getHeyGenAccessToken({
       forceRefresh: authAttempt === 1,
@@ -2097,13 +2160,31 @@ export async function executeHeyGenAvatarVideoCreate(
       operationId: input.operationId,
       requestSha256: plan.requestSha256,
       billingSnapshotSha256: input.confirmedBillingSnapshotSha256,
+      billingStateSha256: input.confirmedBillingStateSha256,
+      billingObservedAt: input.confirmedBillingObservedAt,
+      confirmedPremiumCreditsBefore: input.confirmedPremiumCreditsBefore,
+      reserveCredits: input.reservePremiumCredits,
       maxCredits: input.maxApprovedCredits,
     }, deps.now());
+    spendReservation = await reserveHeyGenSpend({
+      accountId: preflight.billing.account_id,
+      operationId: input.operationId,
+      kind: 'avatar_video',
+      maxCredits: input.maxApprovedCredits,
+      reserveCredits: input.reservePremiumCredits,
+      premiumCreditsBefore: preflight.credits,
+      billingStateSha256: preflight.billing.state_sha256,
+    }, deps);
 
     if (!claimed) {
-      const claim = await claimVideoSubmission(operation, preflight.plan, preflight.credits, deps);
-      if (claim.view) return claim.view;
-      claimed = claim.claimed!;
+      try {
+        const claim = await claimVideoSubmission(operation, preflight.plan, preflight.credits, deps);
+        if (claim.view) return claim.view;
+        claimed = claim.claimed!;
+      } catch (error) {
+        if (spendReservation) await settleHeyGenSpend(spendReservation, 'rejected', deps).catch(() => undefined);
+        throw error;
+      }
     }
 
     let consumed;
@@ -2115,6 +2196,7 @@ export async function executeHeyGenAvatarVideoCreate(
         lastErrorCode: 'owner_approval_replay_or_fence_failure',
         leaseExpiresAt: undefined,
       }, deps);
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'rejected', deps);
       return operationView((rejected ?? claimed).doc, false, deps.now());
     }
     const granted = await replaceVideoOperation(claimed, {
@@ -2122,6 +2204,7 @@ export async function executeHeyGenAvatarVideoCreate(
       billingBeforeSha256: preflight.billing.snapshot_sha256,
     }, deps);
     if (!granted) {
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'rejected', deps);
       const winner = await readVideoOperation(input.operationId, deps);
       if (winner) return operationView(winner.doc, true, deps.now());
       throw brokerError('heygen_video_operation_store_unavailable', 'Could not persist the consumed owner grant. No video request was sent.');
@@ -2160,6 +2243,7 @@ export async function executeHeyGenAvatarVideoCreate(
         },
         deps,
       );
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'outcome_unknown', deps);
       return operationView((updated ?? claimed).doc, false, deps.now());
     }
     if (!response.ok) {
@@ -2173,6 +2257,7 @@ export async function executeHeyGenAvatarVideoCreate(
         },
         deps,
       );
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'rejected', deps);
       return operationView((updated ?? claimed).doc, false, deps.now());
     }
 
@@ -2190,6 +2275,7 @@ export async function executeHeyGenAvatarVideoCreate(
         },
         deps,
       );
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'outcome_unknown', deps);
       return operationView((updated ?? claimed).doc, false, deps.now());
     }
 
@@ -2220,9 +2306,16 @@ export async function executeHeyGenAvatarVideoCreate(
       },
       deps,
     );
-    if (updated) return operationView(updated.doc, false, deps.now());
+    if (updated) {
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'accepted', deps);
+      return operationView(updated.doc, false, deps.now());
+    }
     const winner = await readVideoOperation(input.operationId, deps);
-    if (winner?.doc.state === 'accepted') return operationView(winner.doc, true, deps.now());
+    if (winner?.doc.state === 'accepted') {
+      if (spendReservation) await settleHeyGenSpend(spendReservation, 'accepted', deps);
+      return operationView(winner.doc, true, deps.now());
+    }
+    if (spendReservation) await settleHeyGenSpend(spendReservation, 'outcome_unknown', deps);
     return operationView(
       {
         ...claimed.doc,

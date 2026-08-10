@@ -100,6 +100,32 @@ test('completed video ingestion validates all bytes before writing, hashes asset
   assert.equal(JSON.stringify(manifest).includes('SECRET'), false, 'signed URL query must never enter manifest');
 });
 
+test('ingestion enforces an aggregate bundle cap before any Blob write', async () => {
+  let writes = 0;
+  const store: HeyGenArtifactStore = {
+    configured: () => true,
+    put: async () => {
+      writes += 1;
+      return { artifactUri: 'azure://test/x', blobPath: 'x' };
+    },
+  };
+  const largeMp4 = new Uint8Array(800_000);
+  largeMp4.set(MP4);
+  const largeJpeg = new Uint8Array(800_000);
+  largeJpeg.set(JPEG);
+  const fetchImpl = (async (url: string | URL) => {
+    const path = new URL(String(url)).pathname;
+    return response(path.endsWith('.jpg') ? largeJpeg : largeMp4, path.endsWith('.jpg') ? 'image/jpeg' : 'video/mp4');
+  }) as typeof fetch;
+  await assert.rejects(() => ingestHeyGenVideoArtifacts(
+    completed({ captionedVideoUrl: 'https://files2.heygen.ai/captioned.mp4?sig=SECRET' }),
+    { operationId: 'video_op_01', includeCaptionedVideo: true, includeSubtitle: false, includeThumbnail: true, includeGif: false, maxAssetBytes: 1_048_576 },
+    store,
+    fetchImpl,
+  ), /aggregate byte limit/);
+  assert.equal(writes, 0);
+});
+
 test('ingestion rejects non-HeyGen URLs, oversized assets, bad magic, and non-completed videos before Blob writes', async () => {
   let writes = 0;
   const store: HeyGenArtifactStore = {

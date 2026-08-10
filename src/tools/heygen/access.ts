@@ -42,15 +42,15 @@ export const HEYGEN_METADATA_TOOLS = [
 ] as const;
 export const HEYGEN_PREFLIGHT_TOOLS = [
   'heygen_reference_look_create',
-  'heygen_video_agent_session_create',
-  'heygen_video_agent_feedback_send',
-  'heygen_video_agent_generation_approve',
-  'heygen_video_agent_session_stop',
-  'heygen_asset_upload',
-  'heygen_translation_create',
-  'heygen_proofread_create',
-  'heygen_proofread_generate',
-  'heygen_speech_preview_create',
+  'heygen_video_agent_session_create_preflight',
+  'heygen_video_agent_feedback_send_preflight',
+  'heygen_video_agent_generation_approve_preflight',
+  'heygen_video_agent_session_stop_preflight',
+  'heygen_asset_upload_preflight',
+  'heygen_translation_create_preflight',
+  'heygen_proofread_create_preflight',
+  'heygen_proofread_generate_preflight',
+  'heygen_speech_preview_create_preflight',
 ] as const;
 
 export type HeyGenToolName =
