@@ -202,6 +202,16 @@ Avatar V cap = ceil(estimated_seconds / 3) + 1
 
 Examples: up to 3.000s -> 2; 3.001-6.000s -> 3; 6.001-9.000s -> 4. The observed 4.62367-second canary maps to 3. Family Story requests must set `max_approved_credits` equal to this cap; lower and higher values both fail locally. HeyGen still exposes no provider-enforced cap, so the owner grant, global/family switches, reservation, no-retry rule, and post-call reconciliation lock remain mandatory.
 
+Historical zero-credit Avatar V receipts are permanent named regressions:
+
+| Founder | Historical local result | Corrected cap | Interpretation |
+|---|---:|---:|---|
+| Kimberly | 6s / old estimate 2 | 3 | selected Look supports Avatar V, but live group remains pending consent and has zero same-group Digital Twins |
+| Mark | 7s / old estimate 3 | 4 | selected Look supports Avatar V, but live group remains pending consent and has zero same-group Digital Twins |
+| Matthew | 6s / old estimate 2 | 3 | selected Look + exact voice + completed same-group Digital Twin passed current live gateway dry-run |
+
+These old requests proved only local request construction and zero mutation. Current live read-only provider evidence proves Kim/Mark's selected photo Looks advertise `avatar_v`, their groups remain `pending_consent/pending`, and group-scoped Digital Twin lists are empty. It does not prove provider render behavior or quality. Only a separately approved live canary after consent/reference readiness could provide that evidence; writes remain disabled.
+
 Official sources:
 
 - https://developers.heygen.com/avatar-v
