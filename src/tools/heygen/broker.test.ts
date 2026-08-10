@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign, type JsonWebKey } from 'node:crypto';
 import {
   HEYGEN_API_BASE,
   HEYGEN_OAUTH_CLIENT_ID,
@@ -20,11 +21,14 @@ import {
   newHeyGenPairId,
   parseOfficialCredentialsHeader,
   persistPairedHeyGenToken,
+  prepareHeyGenAvatarVideoCreate,
   newHeyGenTokenFamilyFingerprint,
   type HeyGenBrokerDeps,
   type HeyGenTokenDoc,
   type HeyGenTokenState,
 } from './broker.js';
+import { buildHeyGenAvatarVideoPlan } from './video-contracts.js';
+import { parseHeyGenBillingSnapshot } from './look-contracts.js';
 
 const SECRET = 'test-signing-secret-with-enough-entropy-for-hkdf';
 const USER_RESPONSE = {
@@ -34,6 +38,20 @@ const USER_RESPONSE = {
     subscription: { plan: 'team', credits: { premium_credits: { remaining: 7 } } },
   },
 };
+
+process.env.CIO_SITE_ID ||= 'test';
+process.env.CIO_TRACK_KEY ||= 'test';
+process.env.CIO_APP_API_BEARER ||= 'test';
+process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
+process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
+process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
+process.env.HEYGEN_OWNER_APPROVAL_ISSUER = 'https://approval.test';
+process.env.HEYGEN_OWNER_APPROVAL_AUDIENCE = 'otchealth-heygen';
+process.env.HEYGEN_OWNER_APPROVAL_SUBJECT = 'matt-owner-id';
+const { privateKey: approvalPrivateKey, publicKey: approvalPublicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const approvalJwk = approvalPublicKey.export({ format: 'jwk' }) as JsonWebKey;
+approvalJwk.kid = 'key-1';
+process.env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK = JSON.stringify(approvalJwk);
 
 const BASE_STATE: HeyGenTokenState = {
   accessToken: 'access-token-SENSITIVE',
@@ -1063,8 +1081,13 @@ test('token family fingerprint is random metadata, not derived from OAuth materi
   assert.notEqual(fp, newHeyGenTokenFamilyFingerprint(fixedRandom(5)));
 });
 
+function enc(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
 function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<typeof executeHeyGenAvatarVideoCreate>[0] {
-  return {
+  const billing = parseHeyGenBillingSnapshot(USER_RESPONSE, new Date(1_000_000).toISOString());
+  const base = {
     operationId: 'video_op_01',
     idempotencyKey: 'video-op:01',
     manifestSha256: 'a'.repeat(64),
@@ -1077,15 +1100,40 @@ function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<t
     aspectRatio: 'auto',
     confirmCreditUse: true,
     confirmedPremiumCreditsBefore: 7,
-    maxApprovedCredits: 2,
-    reservePremiumCredits: 5,
+    confirmedBillingSnapshotSha256: billing.snapshot_sha256,
+    confirmedBillingStateSha256: billing.state_sha256,
+    confirmedBillingObservedAt: billing.observed_at,
+    maxApprovedCredits: 3,
+    reservePremiumCredits: 4,
     ...overrides,
   } as Parameters<typeof executeHeyGenAvatarVideoCreate>[0];
+  const plan = buildHeyGenAvatarVideoPlan(base);
+  const header = enc({ alg: 'ES256', typ: 'OTC-HeyGen-Approval+jwt', kid: 'key-1' });
+  const now = Math.floor(1_000_000 / 1000);
+  const payload = enc({
+    iss: 'https://approval.test', aud: 'otchealth-heygen', sub: 'matt-owner-id',
+    iat: now, nbf: now, exp: now + 300, jti: `grant-${base.operationId}`,
+    grant_type: 'heygen_avatar_video_create', tool: 'heygen_avatar_video_create',
+    operation_id: base.operationId, request_sha256: plan.requestSha256,
+    billing_snapshot_sha256: base.confirmedBillingSnapshotSha256,
+    billing_state_sha256: base.confirmedBillingStateSha256,
+    billing_observed_at: base.confirmedBillingObservedAt,
+    confirmed_premium_credits_before: base.confirmedPremiumCreditsBefore,
+    reserve_credits: base.reservePremiumCredits,
+    max_credits: base.maxApprovedCredits,
+  });
+  const signature = sign('sha256', Buffer.from(`${header}.${payload}`, 'ascii'), {
+    key: approvalPrivateKey,
+    dsaEncoding: 'ieee-p1363',
+  }).toString('base64url');
+  base.ownerApprovalJws = `${header}.${payload}.${signature}`;
+  return base;
 }
 
 function avatarVideoHarness(options: {
   post?: (call: number) => Response | Promise<Response>;
   account?: unknown;
+  accountAfter?: unknown;
   look?: unknown;
   group?: unknown;
   voice?: unknown;
@@ -1095,6 +1143,7 @@ function avatarVideoHarness(options: {
   store.set(HEYGEN_TOKEN_DOC_ID, { doc: tokenDoc({ ...BASE_STATE, expiresAt: 0 }), etag: 'T1' });
   let etag = 1;
   let postCalls = 0;
+  let accountReads = 0;
   const requests: Array<{ path: string; method: string; headers: Record<string, string>; body?: unknown }> = [];
   const deps = baseDeps({
     now: () => 1_000_000,
@@ -1129,7 +1178,10 @@ function avatarVideoHarness(options: {
         headers: headers ?? {},
         body: init?.body ? JSON.parse(String(init.body)) : undefined,
       });
-      if (parsed.pathname === '/v3/users/me') return jsonResponse(options.account ?? USER_RESPONSE);
+      if (parsed.pathname === '/v3/users/me') {
+        accountReads += 1;
+        return jsonResponse(accountReads > 1 && options.accountAfter ? options.accountAfter : (options.account ?? USER_RESPONSE));
+      }
       if (parsed.pathname === '/v3/avatars/looks/look_1') return jsonResponse(options.look ?? {
         data: {
           id: 'look_1', avatar_type: 'digital_twin', group_id: 'group_1', default_voice_id: 'voice_1',
@@ -1152,6 +1204,18 @@ function avatarVideoHarness(options: {
   return { deps, store, requests, postCalls: () => postCalls };
 }
 
+test('Avatar Video dry-run helper performs live read-only preflight and returns a billing packet without POST or operation writes', async () => {
+  const harness = avatarVideoHarness();
+  const beforeDocs = harness.store.size;
+  const prepared = await prepareHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(prepared.billing.premium.remaining, 7);
+  assert.equal(prepared.group.consentStatus, 'accepted');
+  assert.equal(prepared.look.id, 'look_1');
+  assert.match(prepared.billing.snapshot_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(harness.requests.some((entry) => entry.method === 'POST'), false);
+  assert.equal(harness.store.size, beforeDocs);
+});
+
 test('direct Avatar Video create runs guarded live preflight, sends one exact idempotent POST, and persists accepted state', async () => {
   const harness = avatarVideoHarness();
   const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
@@ -1164,8 +1228,9 @@ test('direct Avatar Video create runs guarded live preflight, sends one exact id
     ['GET', '/v3/avatars/group_1'],
     ['GET', '/v3/voices/voice_1'],
     ['POST', '/v3/videos'],
+    ['GET', '/v3/users/me'],
   ]);
-  const post = harness.requests.at(-1)!;
+  const post = harness.requests.find((entry) => entry.method === 'POST')!;
   assert.equal(post.headers['Idempotency-Key'], 'video-op:01');
   assert.deepEqual(post.body, {
     type: 'avatar',
@@ -1183,6 +1248,7 @@ test('direct Avatar Video create runs guarded live preflight, sends one exact id
   assert.equal(JSON.stringify(post.body).includes('max_approved_credits'), false);
   assert.equal(JSON.stringify([...harness.store.values()]).includes('video-op:01'), false, 'raw key must not be persisted');
   assert.equal(JSON.stringify([...harness.store.values()]).includes('Exact approved script'), false, 'raw script must not be persisted');
+  assert.equal(JSON.stringify([...harness.store.values()]).includes('eyJ'), false, 'raw owner grant must not be persisted');
   const stored = await getHeyGenVideoOperation('video_op_01', harness.deps);
   assert.equal(stored?.state, 'accepted');
   assert.equal(stored?.videoId, 'v_1');
@@ -1253,6 +1319,55 @@ test('credit snapshot and reserve violations block before POST', async () => {
   }
 });
 
+test('post-call credit delta above the approved maximum locks account spending for reconciliation', async () => {
+  const accountAfter = {
+    data: {
+      username: 'test-user',
+      billing_type: 'subscription',
+      subscription: { plan: 'team', credits: { premium_credits: { remaining: 3 } } },
+    },
+  };
+  const harness = avatarVideoHarness({ accountAfter });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(result.state, 'accepted');
+  assert.equal(result.actualCreditDelta, 4);
+  assert.equal(result.errorCode, 'unexpected_credit_delta');
+  const afterSnapshot = parseHeyGenBillingSnapshot(accountAfter, new Date(1_000_000).toISOString());
+  await assert.rejects(
+    () => executeHeyGenAvatarVideoCreate(avatarVideoInput({
+      operationId: 'video_op_02',
+      idempotencyKey: 'video-op:02',
+      confirmedPremiumCreditsBefore: 3,
+      confirmedBillingSnapshotSha256: afterSnapshot.snapshot_sha256,
+      confirmedBillingStateSha256: afterSnapshot.state_sha256,
+      confirmedBillingObservedAt: afterSnapshot.observed_at,
+      reservePremiumCredits: 0,
+    }), harness.deps),
+    /pending reconciliation/,
+  );
+  assert.equal(harness.postCalls(), 1);
+});
+
+test('account spend controller allows only one concurrent Avatar Video submission', async () => {
+  const harness = avatarVideoHarness();
+  const results = await Promise.allSettled([
+    executeHeyGenAvatarVideoCreate(avatarVideoInput({ operationId: 'video_op_01', idempotencyKey: 'video-op:01' }), harness.deps),
+    executeHeyGenAvatarVideoCreate(avatarVideoInput({ operationId: 'video_op_02', idempotencyKey: 'video-op:02' }), harness.deps),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.equal(harness.postCalls(), 1);
+});
+
+test('current provider completed plus accepted consent passes direct-video preflight', async () => {
+  const harness = avatarVideoHarness({
+    group: { data: { id: 'group_1', status: 'completed', consent_status: 'accepted' } },
+  });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(result.state, 'accepted');
+  assert.equal(harness.postCalls(), 1);
+});
+
 test('look, group, voice, and Avatar V reference incompatibilities block before POST', async () => {
   const cases = [
     {
@@ -1283,26 +1398,20 @@ test('look, group, voice, and Avatar V reference incompatibilities block before 
   }
 });
 
-test('429 and 5xx retry exactly once with the same provider key; repeated ambiguity becomes outcome_unknown', async () => {
-  const harness = avatarVideoHarness({
-    post: (call) => call === 1
-      ? new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {
-          status: 429, headers: { 'content-type': 'application/json', 'retry-after': '0' },
-        })
-      : jsonResponse({ data: { video_id: 'v_retry', status: 'pending' } }),
+test('429 and 5xx are never automatically retried after owner-grant consumption', async () => {
+  const limited = avatarVideoHarness({
+    post: () => new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {
+      status: 429, headers: { 'content-type': 'application/json', 'retry-after': '0' },
+    }),
   });
-  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
-  assert.equal(result.state, 'accepted');
-  assert.equal(result.videoId, 'v_retry');
-  const posts = harness.requests.filter((entry) => entry.method === 'POST');
-  assert.equal(posts.length, 2);
-  assert.deepEqual(posts.map((entry) => entry.headers['Idempotency-Key']), ['video-op:01', 'video-op:01']);
-  assert.deepEqual(posts[0].body, posts[1].body);
+  const rejected = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), limited.deps);
+  assert.equal(rejected.state, 'rejected');
+  assert.equal(limited.postCalls(), 1);
 
   const unknownHarness = avatarVideoHarness({ post: () => new Response('unavailable', { status: 503 }) });
   const unknown = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), unknownHarness.deps);
   assert.equal(unknown.state, 'outcome_unknown');
-  assert.equal(unknownHarness.postCalls(), 2);
+  assert.equal(unknownHarness.postCalls(), 1);
 });
 
 test('provider 409 request_in_progress returns durable in_progress without minting a new operation', async () => {
@@ -1321,6 +1430,9 @@ test('Phase 0 read operations map to exact v3 paths and query names', async () =
     [{ kind: 'videoAgentSessions', limit: 20, token: 'next' } as const, '/v3/video-agents?limit=20&token=next'],
     [{ kind: 'videoAgentSession', sessionId: 's1' } as const, '/v3/video-agents/s1'],
     [{ kind: 'videoAgentSessionVideos', sessionId: 's1' } as const, '/v3/video-agents/s1/videos'],
+    [{ kind: 'videoAgentResource', sessionId: 's1', resourceId: 'r1' } as const, '/v3/video-agents/s1/resources/r1'],
+    [{ kind: 'asset', assetId: 'a1' } as const, '/v3/assets/a1'],
+    [{ kind: 'assetStatuses', assetIds: ['a1'], batchIds: ['b1'] } as const, '/v3/assets/statuses?asset_ids=a1&batch_ids=b1'],
     [{ kind: 'brandKits', limit: 10 } as const, '/v3/brand-kits?limit=10'],
     [{ kind: 'brandGlossaries', limit: 10 } as const, '/v3/brand-glossaries?limit=10'],
     [{ kind: 'brandGlossary', brandGlossaryId: 'g1' } as const, '/v3/brand-glossaries/g1'],

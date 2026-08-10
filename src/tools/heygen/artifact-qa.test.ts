@@ -43,6 +43,7 @@ test('SRT validation requires positive monotonic cues', () => {
   assert.throws(() => validateSrt('1\n00:00:02,000 --> 00:00:01,000\nBad\n'));
   assert.throws(() => validateSrt('No timestamps'));
   assert.throws(() => validateSrt('1\n00:00:02,000 --> 00:00:03,000\nOne\n\n2\n00:00:01,000 --> 00:00:02,000\nTwo\n'));
+  assert.throws(() => validateSrt('1\n00:00:00,000 --> 00:00:02,000\nOne\n\n2\n00:00:01,500 --> 00:00:03,000\nOverlap\n'), /overlap/);
 });
 
 test('artifact paths are traversal-safe and private URIs contain no SAS material', () => {
@@ -88,13 +89,41 @@ test('completed video ingestion validates all bytes before writing, hashes asset
   assert.equal(result.assets.length, 3);
   assert.equal(result.qa.technicalPass, true);
   assert.equal(result.qa.manualVisualReviewRequired, true);
-  assert.ok(result.qa.checks.includes('subtitle_cues_monotonic'));
+  assert.ok(result.qa.checks.includes('subtitle_cues_monotonic_nonoverlapping'));
   assert.match(result.assets[0].sha256, /^[a-f0-9]{64}$/);
   assert.equal(result.assets.find((asset) => asset.kind === 'subtitle')?.srtCueCount, 2);
   assert.ok(writes.at(-1)?.path.endsWith('/manifest.json'), 'manifest must be the final commit marker');
   const manifest = JSON.parse(new TextDecoder().decode(writes.at(-1)!.body));
   assert.equal(manifest.qa.technical_pass, true);
+  assert.match(manifest.title_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(Object.hasOwn(manifest, 'title'), false, 'raw provider title must not enter the manifest');
   assert.equal(JSON.stringify(manifest).includes('SECRET'), false, 'signed URL query must never enter manifest');
+});
+
+test('ingestion enforces an aggregate bundle cap before any Blob write', async () => {
+  let writes = 0;
+  const store: HeyGenArtifactStore = {
+    configured: () => true,
+    put: async () => {
+      writes += 1;
+      return { artifactUri: 'azure://test/x', blobPath: 'x' };
+    },
+  };
+  const largeMp4 = new Uint8Array(800_000);
+  largeMp4.set(MP4);
+  const largeJpeg = new Uint8Array(800_000);
+  largeJpeg.set(JPEG);
+  const fetchImpl = (async (url: string | URL) => {
+    const path = new URL(String(url)).pathname;
+    return response(path.endsWith('.jpg') ? largeJpeg : largeMp4, path.endsWith('.jpg') ? 'image/jpeg' : 'video/mp4');
+  }) as typeof fetch;
+  await assert.rejects(() => ingestHeyGenVideoArtifacts(
+    completed({ captionedVideoUrl: 'https://files2.heygen.ai/captioned.mp4?sig=SECRET' }),
+    { operationId: 'video_op_01', includeCaptionedVideo: true, includeSubtitle: false, includeThumbnail: true, includeGif: false, maxAssetBytes: 1_048_576 },
+    store,
+    fetchImpl,
+  ), /aggregate byte limit/);
+  assert.equal(writes, 0);
 });
 
 test('ingestion rejects non-HeyGen URLs, oversized assets, bad magic, and non-completed videos before Blob writes', async () => {
@@ -135,6 +164,23 @@ test('ingestion rejects non-HeyGen URLs, oversized assets, bad magic, and non-co
     { operationId: 'video_op_01', includeCaptionedVideo: false, includeSubtitle: false, includeThumbnail: false, includeGif: false, maxAssetBytes: 1_048_576 },
     store,
     announcedOversize,
+  ), /exceeds max_asset_bytes/);
+  const chunkedOversize = (async () => {
+    const chunks = [new Uint8Array(700_000), new Uint8Array(700_000)];
+    chunks[0].set(MP4);
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = chunks.shift();
+        if (next) controller.enqueue(next);
+        else controller.close();
+      },
+    }), { status: 200, headers: { 'content-type': 'video/mp4' } });
+  }) as typeof fetch;
+  await assert.rejects(() => ingestHeyGenVideoArtifacts(
+    completed(),
+    { operationId: 'video_op_01', includeCaptionedVideo: false, includeSubtitle: false, includeThumbnail: false, includeGif: false, maxAssetBytes: 1_048_576 },
+    store,
+    chunkedOversize,
   ), /exceeds max_asset_bytes/);
   assert.equal(writes, 0);
 });

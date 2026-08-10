@@ -27,11 +27,24 @@ export const GOVERNANCE: GovRule[] = [
   // Prompt-avatar creation is the sole bounded credit-consuming HeyGen write. Exact CTO governance
   // is duplicated by an in-handler gate and a live premium-credit snapshot confirmation.
   { pattern: 'heygen_prompt_avatar_create', requiredRole: 'cto', reason: 'Credit-consuming HeyGen prompt-avatar creation is CTO-only and requires a live balance-bound confirmation.' },
+  { pattern: 'heygen_avatar_look_name_update', requiredRole: ['cto', 'cro'], reason: 'Avatar Look renaming is a bounded, audited, non-credit metadata update for the CTO and CRO only.' },
+  { pattern: 'heygen_reference_look_create', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may run dry-run reference-Look preflight; the handler independently restricts real creation to CTO plus owner grant.' },
+  { pattern: 'heygen_video_agent_session_create_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate the fixed Video Agent chat-session contract; live execution remains CTO-only and feature-gated in-handler.' },
+  { pattern: 'heygen_video_agent_feedback_send_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate the fixed planning-feedback contract; live execution remains CTO-only and feature-gated in-handler.' },
+  { pattern: 'heygen_video_agent_generation_approve_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate the separate generation-approval contract; live execution remains CTO-only, owner-grant gated, and dark by default.' },
+  { pattern: 'heygen_video_agent_session_stop_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate the fixed stop contract; live execution remains CTO-only and locally-owned-session gated.' },
+  { pattern: 'heygen_asset_upload_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate the private-Azure fixed asset contract; live upload remains CTO-only and feature-gated.' },
+  { pattern: 'heygen_translation_create_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate locked-master translation; live generation remains CTO-only and owner-grant gated.' },
+  { pattern: 'heygen_proofread_create_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate proofread-first localization; live creation remains CTO-only and feature-gated.' },
+  { pattern: 'heygen_proofread_generate_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate final proofread generation; live generation remains CTO-only and owner-grant gated.' },
+  { pattern: 'heygen_speech_preview_create_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate bounded TTS preview; live synthesis remains CTO-only and owner-grant gated.' },
   { pattern: 'heygen_avatar_video_create', requiredRole: 'cto', reason: 'Credit-consuming direct HeyGen video creation is CTO-only, idempotent, and bound to live balance, ceiling, and reserve checks.' },
+  { pattern: 'heygen_existing_video_ingest_qa', requiredRole: 'cto', reason: 'Existing-video secure ingestion writes private Blob artifacts and is CTO-owned.' },
   { pattern: 'heygen_video_wait_ingest_qa', requiredRole: 'cto', reason: 'HeyGen artifact ingestion writes private Blob artifacts and is CTO-owned.' },
   // Data reads and semantic voice search are centrally constrained to the same exact internal lanes
   // every handler re-checks. Exact names keep pairing/creation strictly narrower than this surface.
   { pattern: 'heygen_account_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
+  { pattern: 'heygen_diagnostics_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Non-secret HeyGen deployment and feature diagnostics are limited to approved internal lanes.' },
   { pattern: 'heygen_videos_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
   { pattern: 'heygen_video_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
   { pattern: 'heygen_video_agent_styles_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen subscription data is limited to approved internal product/operations/engineering lanes.' },
@@ -45,6 +58,9 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'heygen_video_agent_sessions_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen session reads are limited to approved internal lanes.' },
   { pattern: 'heygen_video_agent_session_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen session reads are limited to approved internal lanes.' },
   { pattern: 'heygen_video_agent_session_videos_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen session video reads are limited to approved internal lanes.' },
+  { pattern: 'heygen_video_agent_resource_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Sanitized HeyGen session-resource metadata is limited to approved internal lanes.' },
+  { pattern: 'heygen_asset_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Sanitized HeyGen asset metadata is limited to approved internal lanes.' },
+  { pattern: 'heygen_asset_statuses_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen asset status reads are limited to approved internal lanes.' },
   { pattern: 'heygen_brand_kits_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen brand metadata is limited to approved internal lanes.' },
   { pattern: 'heygen_brand_glossaries_list', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen brand glossary metadata is limited to approved internal lanes.' },
   { pattern: 'heygen_brand_glossary_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen brand glossary metadata is limited to approved internal lanes.' },
@@ -55,6 +71,7 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'heygen_translation_statuses_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen translation metadata is limited to approved internal lanes.' },
   { pattern: 'heygen_proofread_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen proofread metadata is limited to approved internal lanes.' },
   { pattern: 'heygen_avatar_video_operation_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen operation state is limited to approved internal lanes.' },
+  { pattern: 'heygen_reference_look_operation_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen reference-Look operation state is limited to approved internal lanes.' },
   // Azure control-plane tools (ITEM #2) are CTO-only: infra is CTO-owned. Covers the Phase A read
   // tools (azure_jobs_list / azure_job_executions / azure_logs_query / azure_search_index_stats /
   // azure_containerapp_get / azure_resource_list) AND every future Phase B write tool (azure_job_* /

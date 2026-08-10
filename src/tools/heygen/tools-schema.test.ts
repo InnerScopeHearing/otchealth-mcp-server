@@ -11,7 +11,14 @@ import {
   HEYGEN_VOICE_DESIGN_INPUT,
 } from './tools.js';
 import {
+  HEYGEN_REFERENCE_LOOK_CREATE_INPUT,
+  HEYGEN_REFERENCE_LOOK_OPERATION_GET_INPUT,
+} from './look-tools.js';
+import {
+  HEYGEN_ASSET_GET_INPUT,
+  HEYGEN_ASSET_STATUSES_INPUT,
   HEYGEN_AVATAR_VIDEO_CREATE_INPUT,
+  HEYGEN_EXISTING_VIDEO_INGEST_QA_INPUT,
   HEYGEN_AVATAR_VIDEO_OPERATION_GET_INPUT,
   HEYGEN_BRAND_GLOSSARIES_LIST_INPUT,
   HEYGEN_BRAND_GLOSSARY_GET_INPUT,
@@ -20,6 +27,7 @@ import {
   HEYGEN_TRANSLATION_GET_INPUT,
   HEYGEN_TRANSLATION_STATUSES_INPUT,
   HEYGEN_TRANSLATIONS_LIST_INPUT,
+  HEYGEN_VIDEO_AGENT_RESOURCE_GET_INPUT,
   HEYGEN_VIDEO_AGENT_SESSION_GET_INPUT,
   HEYGEN_VIDEO_AGENT_SESSION_VIDEOS_LIST_INPUT,
   HEYGEN_VIDEO_AGENT_SESSIONS_LIST_INPUT,
@@ -109,6 +117,38 @@ test('prompt-avatar schema requires confirmation and excludes every other avatar
   }
 });
 
+test('reference-conditioned Look schema is exact, bounded, and owner-grant ready', () => {
+  const valid = {
+    operation_id: 'look_op_01',
+    idempotency_key: 'look-op:01',
+    source_avatar_id: 'look_source',
+    destination_group_id: 'group_1',
+    name: 'OTCH Founder Look',
+    prompt: 'Photorealistic horizontal documentary portrait.',
+    reference_asset_ids: ['asset_1', 'asset_2', 'asset_3'],
+    confirmed_billing_snapshot_sha256: 'a'.repeat(64),
+    confirmed_billing_state_sha256: 'b'.repeat(64),
+    confirmed_billing_observed_at: '2026-08-10T00:00:00.000Z',
+    confirmed_premium_credits_before: 591,
+    reserve_premium_credits: 100,
+    owner_approval_jws: 'x'.repeat(64),
+    confirm_credit_use: true,
+  } as const;
+  assert.deepEqual(parse(HEYGEN_REFERENCE_LOOK_CREATE_INPUT, valid), valid);
+  for (const invalid of [
+    { ...valid, operation_id: 'short' },
+    { ...valid, idempotency_key: 'bad key' },
+    { ...valid, source_avatar_id: '../escape' },
+    { ...valid, prompt: 'x'.repeat(1001) },
+    { ...valid, reference_asset_ids: ['a', 'b', 'c', 'd'] },
+    { ...valid, confirmed_billing_snapshot_sha256: 'A'.repeat(64) },
+    { ...valid, confirmed_billing_state_sha256: 'A'.repeat(64) },
+    { ...valid, confirmed_billing_observed_at: 'not-a-date' },
+    { ...valid, api_key: 'forbidden' },
+    { ...valid, callback_url: 'https://example.test' },
+  ]) assert.throws(() => parse(HEYGEN_REFERENCE_LOOK_CREATE_INPUT, invalid));
+});
+
 test('Phase 0 read schemas are strict, bounded, and path-safe', () => {
   assert.deepEqual(parse(HEYGEN_VIDEO_STATUSES_INPUT, { video_ids: ['v_1'], batch_ids: ['b-1'] }), {
     video_ids: ['v_1'], batch_ids: ['b-1'],
@@ -128,16 +168,27 @@ test('Phase 0 read schemas are strict, bounded, and path-safe', () => {
   for (const [shape, key] of [
     [HEYGEN_VIDEO_AGENT_SESSION_GET_INPUT, 'session_id'],
     [HEYGEN_VIDEO_AGENT_SESSION_VIDEOS_LIST_INPUT, 'session_id'],
+    [HEYGEN_ASSET_GET_INPUT, 'asset_id'],
     [HEYGEN_BRAND_GLOSSARY_GET_INPUT, 'brand_glossary_id'],
     [HEYGEN_VOICE_GET_INPUT, 'voice_id'],
     [HEYGEN_TRANSLATION_GET_INPUT, 'video_translation_id'],
     [HEYGEN_PROOFREAD_GET_INPUT, 'proofread_id'],
     [HEYGEN_AVATAR_VIDEO_OPERATION_GET_INPUT, 'operation_id'],
+    [HEYGEN_REFERENCE_LOOK_OPERATION_GET_INPUT, 'operation_id'],
   ] as const) {
     const value = key === 'operation_id' ? 'operation_01' : 'safe_id-1';
     assert.deepEqual(parse(shape, { [key]: value }), { [key]: value });
     assert.throws(() => parse(shape, { [key]: '../escape' }));
   }
+  assert.deepEqual(parse(HEYGEN_VIDEO_AGENT_RESOURCE_GET_INPUT, {
+    session_id: 'session_1', resource_id: 'resource_1',
+  }), { session_id: 'session_1', resource_id: 'resource_1' });
+  assert.throws(() => parse(HEYGEN_VIDEO_AGENT_RESOURCE_GET_INPUT, {
+    session_id: 'session_1', resource_id: '../escape',
+  }));
+  assert.deepEqual(parse(HEYGEN_ASSET_STATUSES_INPUT, { asset_ids: ['asset_1'] }), {
+    asset_ids: ['asset_1'],
+  });
   assert.deepEqual(parse(HEYGEN_TRANSLATION_STATUSES_INPUT, { video_translation_ids: ['t1'] }), {
     video_translation_ids: ['t1'],
   });
@@ -164,6 +215,10 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
     brand_glossary_id: 'glossary_1',
     confirm_credit_use: true,
     confirmed_premium_credits_before: 981,
+    confirmed_billing_snapshot_sha256: 'b'.repeat(64),
+    confirmed_billing_state_sha256: 'c'.repeat(64),
+    confirmed_billing_observed_at: '2026-08-10T00:00:00.000Z',
+    owner_approval_jws: 'x'.repeat(64),
     max_approved_credits: 20,
     reserve_premium_credits: 300,
   } as const;
@@ -172,6 +227,10 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
     { ...valid, operation_id: 'short' },
     { ...valid, idempotency_key: 'bad key' },
     { ...valid, manifest_sha256: 'A'.repeat(64) },
+    { ...valid, confirmed_billing_snapshot_sha256: 'A'.repeat(64) },
+    { ...valid, confirmed_billing_state_sha256: 'A'.repeat(64) },
+    { ...valid, confirmed_billing_observed_at: 'not-a-date' },
+    { ...valid, owner_approval_jws: 'short' },
     { ...valid, resolution: '4k' },
     { ...valid, engine: 'avatar_vi' },
     { ...valid, voice_settings: { speed: 2 } },
@@ -183,6 +242,12 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
   ]) {
     assert.throws(() => parse(HEYGEN_AVATAR_VIDEO_CREATE_INPUT, invalid));
   }
+  assert.deepEqual(parse(HEYGEN_EXISTING_VIDEO_INGEST_QA_INPUT, {
+    ingest_id: 'existing_01', video_id: 'v_1', expected_title_sha256: 'a'.repeat(64),
+  }), { ingest_id: 'existing_01', video_id: 'v_1', expected_title_sha256: 'a'.repeat(64) });
+  assert.throws(() => parse(HEYGEN_EXISTING_VIDEO_INGEST_QA_INPUT, {
+    ingest_id: 'short', video_id: 'v_1', expected_title_sha256: 'A'.repeat(64),
+  }));
   assert.deepEqual(parse(HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT, {
     operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 90, max_asset_bytes: 52_428_800,
   }), { operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 90, max_asset_bytes: 52_428_800 });

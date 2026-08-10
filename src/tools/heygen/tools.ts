@@ -28,6 +28,8 @@ import {
   redactHeyGenVoiceDesignInputForLog,
 } from './redaction.js';
 import { registerHeyGenProductionTools } from './production-tools.js';
+import { registerHeyGenLookTools } from './look-tools.js';
+import { registerHeyGenFutureTools } from './future-tools.js';
 
 export { isHeyGenToolAllowed } from './access.js';
 
@@ -539,4 +541,6 @@ export function registerHeyGenTools(
   );
 
   registerHeyGenProductionTools(server, callerHash, deps);
+  registerHeyGenLookTools(server, callerHash, deps);
+  registerHeyGenFutureTools(server, callerHash, deps);
 }

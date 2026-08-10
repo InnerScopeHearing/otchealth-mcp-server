@@ -215,16 +215,22 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // prompt-avatar, idempotent direct-video, and private artifact-ingestion writes. Visibility here is not
   // authorization: every handler re-checks the exact lane and every write has an exact governance rule.
   // Deliberately absent from the external-readonly set below.
-  'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get',
+  'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get', 'heygen_diagnostics_get',
   'heygen_videos_list', 'heygen_video_get', 'heygen_video_agent_styles_list',
   'heygen_avatar_groups_list', 'heygen_avatar_group_get', 'heygen_avatar_looks_list',
   'heygen_avatar_look_get', 'heygen_voices_list', 'heygen_voice_design', 'heygen_voice_get',
   'heygen_video_statuses_get', 'heygen_video_agent_sessions_list', 'heygen_video_agent_session_get',
-  'heygen_video_agent_session_videos_list', 'heygen_brand_kits_list', 'heygen_brand_glossaries_list',
+  'heygen_video_agent_session_videos_list', 'heygen_video_agent_resource_get', 'heygen_asset_get',
+  'heygen_asset_statuses_get', 'heygen_brand_kits_list', 'heygen_brand_glossaries_list',
   'heygen_brand_glossary_get', 'heygen_translation_languages_list', 'heygen_translations_list',
   'heygen_translation_get', 'heygen_translation_statuses_get', 'heygen_proofread_get',
-  'heygen_avatar_video_operation_get', 'heygen_prompt_avatar_create', 'heygen_avatar_video_create',
-  'heygen_video_wait_ingest_qa',
+  'heygen_avatar_video_operation_get', 'heygen_reference_look_operation_get',
+  'heygen_prompt_avatar_create', 'heygen_avatar_look_name_update', 'heygen_reference_look_create',
+  'heygen_video_agent_session_create_preflight', 'heygen_video_agent_feedback_send_preflight',
+  'heygen_video_agent_generation_approve_preflight', 'heygen_video_agent_session_stop_preflight',
+  'heygen_asset_upload_preflight', 'heygen_translation_create_preflight', 'heygen_proofread_create_preflight',
+  'heygen_proofread_generate_preflight', 'heygen_speech_preview_create_preflight',
+  'heygen_avatar_video_create', 'heygen_existing_video_ingest_qa', 'heygen_video_wait_ingest_qa',
 ] as const;
 
 /**
@@ -318,6 +324,12 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
   redactInputForLog?: (input: Record<string, unknown>) => unknown;
+  /**
+   * Optional projection for the company Prompt Shield scan. Use when an input mixes scan-worthy prose
+   * with credentials/capability grants/signed URLs that must never be sent to the safety service.
+   * Omit to preserve the existing behavior of scanning all handler arguments.
+   */
+  shieldInputForScan?: (input: Record<string, unknown>) => unknown;
   /**
    * SECURITY (2026-07-28 review fix): set ONLY on a generated M365 prefix-strip alias (see the
    * alias-generation block at the bottom of registerTool) to the REAL tool's name, e.g.
@@ -581,9 +593,18 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     readOnly: def.annotations.readOnlyHint,
   });
   const inputShape: ZodRawShape = { ...def.inputShape, ...COMMON_INPUT };
-  // outputSchema is wrapped: every tool reports compliance_warning + result.
+  // outputSchema is wrapped: every tool reports compliance_warning + result. HeyGen's production
+  // control surface opts into strict result schemas so provider-shape drift cannot bypass redaction.
+  const enforceStrictOutput = canonicalName.startsWith('heygen_');
+  const strictResultSchema = z.object(def.outputShape).strict();
+  const jitStubSchema = z.object({
+    _jit_offloaded: z.literal(true),
+    result_id: z.string(),
+    total_bytes: z.number().int().nonnegative(),
+    note: z.string(),
+  }).strict();
   const outputShape: ZodRawShape = {
-    result: z.unknown(),
+    result: enforceStrictOutput ? z.union([strictResultSchema, jitStubSchema]) : z.unknown(),
     compliance_warning: z
       .object({
         triggers: z.array(z.string()),
@@ -806,7 +827,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // keyed by canonical names (shield_check/groundedness_check/claims_check) so those tools don't
       // recursively shield-scan their own attack-shaped test input. Passing the alias's stripped
       // name (e.g. "check") would miss that exemption and block a legitimate self-test call.
-      const shield = await inboundShield(canonicalName, handlerInput);
+      const shieldInput = def.shieldInputForScan
+        ? def.shieldInputForScan(handlerInput)
+        : handlerInput;
+      const shield = await inboundShield(canonicalName, shieldInput);
       if (shield.blocked) {
         const smsg =
           `Tool "${def.name}" blocked by Prompt Shields (SHIELD_MODE=enforce): a prompt-injection / ` +
@@ -845,7 +869,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (def.name === 'wake') {
           markWoken(callerHash);
         }
-        const { result, warning } = applyGuardrail(payload.data, acknowledged);
+        const validatedData = enforceStrictOutput
+          ? strictResultSchema.parse(payload.data)
+          : payload.data;
+        const { result, warning } = applyGuardrail(validatedData, acknowledged);
 
         // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
         // (query + text + sources). enforce-blocking is limited to READ tools — a write already ran, so

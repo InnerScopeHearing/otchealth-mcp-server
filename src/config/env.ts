@@ -329,6 +329,22 @@ const EnvSchema = z.object({
   AZURE_COMMONS_STORAGE_ACCOUNT: z.string().optional().default(''),
   AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
 
+  // HeyGen production-control feature gates. Every provider mutation family is independently dark by
+  // default; read/status tools and dry-run preflight remain available. The owner approval public key is
+  // verification-only and may be empty while all credit-consuming switches remain false.
+  ENABLE_HEYGEN_AVATAR_VIDEO_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_REFERENCE_LOOK_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_VIDEO_AGENT_GENERATION: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_ASSET_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_TRANSLATION_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_TTS_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_METADATA_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  HEYGEN_OWNER_APPROVAL_ISSUER: z.string().optional().default('https://approval.otchealth.app'),
+  HEYGEN_OWNER_APPROVAL_AUDIENCE: z.string().optional().default('otchealth-heygen'),
+  HEYGEN_OWNER_APPROVAL_SUBJECT: z.string().optional().default(''),
+  HEYGEN_OWNER_APPROVAL_PUBLIC_JWK: z.string().optional().default(''),
+
   // Agent State Plane - Cosmos DB for NoSQL work-ledger + structured memory-of-record.
   // Inert without COSMOS_ENDPOINT/COSMOS_KEY. Non-PHI, non-MNPI, non-privileged by construction
   // (the clo-personal lane is rejected). Verbatim-critical records live here, never in an

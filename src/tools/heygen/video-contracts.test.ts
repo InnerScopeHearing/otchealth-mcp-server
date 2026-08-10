@@ -4,6 +4,7 @@ import {
   buildHeyGenAvatarVideoPlan,
   canonicalRequestSha256,
   estimateAvatarVideoCredits,
+  isHeyGenConsentAccepted,
   isHeyGenConsentStatusReady,
   parseHeyGenAvatarGroup,
   parseHeyGenAvatarLook,
@@ -40,6 +41,15 @@ function validInput(overrides: Partial<HeyGenAvatarVideoCreateInput> = {}): HeyG
     ...overrides,
   };
 }
+
+test('completed consent normalization accepts current provider spellings and fails closed otherwise', () => {
+  for (const value of ['accepted', 'Accepted', ' approved ', 'complete', 'completed']) {
+    assert.equal(isHeyGenConsentAccepted(value), true, value);
+  }
+  for (const value of [null, undefined, '', 'pending', 'pending_consent', 'rejected', 'unknown']) {
+    assert.equal(isHeyGenConsentAccepted(value), false, String(value));
+  }
+});
 
 test('direct video plan emits the exact bounded upstream body and preserves approved script bytes', () => {
   const input = validInput();
@@ -86,7 +96,21 @@ test('credit estimate is conservative, engine-aware, and custom Avatar IV motion
   const ivMotion = estimateAvatarVideoCredits(text, 'avatar_iv', 1, true);
   assert.ok(iii.durationSeconds >= 60);
   assert.ok(iv.credits > iii.credits);
-  assert.equal(ivMotion.credits, iv.credits * 2);
+  assert.equal(ivMotion.credits, (iv.credits - 1) * 2 + 1);
+});
+
+test('Avatar IV six-second canary uses a three-credit conservative bound after the 591-to-588 incident', () => {
+  const script = 'one two three four five six seven eight nine ten eleven twelve';
+  const estimate = estimateAvatarVideoCredits(script, 'avatar_iv', 1, false);
+  assert.equal(estimate.durationSeconds, 6);
+  assert.equal(estimate.credits, 3);
+  assert.throws(() => buildHeyGenAvatarVideoPlan(validInput({
+    script,
+    engine: 'avatar_iv',
+    referenceLookId: undefined,
+    maxApprovedCredits: 2,
+    motionPrompt: undefined,
+  })), /exceeds max_approved_credits 2/);
 });
 
 test('plan rejects invalid approvals, tuning, IDs, and an estimate above the approved ceiling', () => {

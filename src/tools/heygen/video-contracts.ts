@@ -11,6 +11,17 @@ export type HeyGenAvatarType = 'studio_avatar' | 'digital_twin' | 'photo_avatar'
 export type HeyGenVideoResolution = '720p' | '1080p';
 export type HeyGenVideoAspectRatio = '16:9' | '9:16' | '4:5' | '5:4' | '1:1' | 'auto';
 
+const ACCEPTED_CONSENT_STATUSES = new Set(['accepted', 'approved', 'complete', 'completed']);
+
+/**
+ * Normalize the provider's documented/current completed-consent spellings in one place.
+ * Unknown, empty, pending, and rejected values fail closed.
+ */
+export function isHeyGenConsentAccepted(value: string | null | undefined): boolean {
+  if (typeof value !== 'string') return false;
+  return ACCEPTED_CONSENT_STATUSES.has(value.trim().toLowerCase());
+}
+
 export interface HeyGenVoiceSettings {
   speed?: number;
   pitch?: number;
@@ -54,6 +65,10 @@ export interface HeyGenAvatarVideoCreateInput {
   brandGlossaryId?: string;
   confirmCreditUse: boolean;
   confirmedPremiumCreditsBefore: number;
+  confirmedBillingSnapshotSha256?: string;
+  confirmedBillingStateSha256?: string;
+  confirmedBillingObservedAt?: string;
+  ownerApprovalJws?: string;
   maxApprovedCredits: number;
   reservePremiumCredits: number;
 }
@@ -183,7 +198,7 @@ function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function canonicalize(value: unknown): string {
+export function canonicalize(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map((entry) => canonicalize(entry)).join(',')}]`;
   const record = value as Record<string, unknown>;
@@ -193,8 +208,12 @@ function canonicalize(value: unknown): string {
     .join(',')}}`;
 }
 
+export function canonicalJsonSha256(value: unknown): string {
+  return sha256(canonicalize(value));
+}
+
 export function canonicalRequestSha256(body: HeyGenCreateVideoBody): string {
-  return sha256(canonicalize(body));
+  return canonicalJsonSha256(body);
 }
 
 function assertString(value: string, field: string, min: number, max: number, preserve = false): string {
@@ -213,10 +232,16 @@ export function estimateAvatarVideoCredits(
   const words = script.trim().split(/\s+/).filter(Boolean).length;
   const normalizedSpeed = Number.isFinite(speed) && speed >= 0.5 && speed <= 1.5 ? speed : 1;
   const durationSeconds = Math.max(3, Math.ceil((words / 2.5 / normalizedSpeed) * 1.15));
-  const base = engine === 'avatar_iii'
+  const avatarCredits = engine === 'avatar_iii'
     ? Math.max(1, Math.ceil((durationSeconds / 60) * 3))
     : Math.max(1, Math.ceil(durationSeconds / 3));
-  const credits = engine === 'avatar_iv' && hasCustomMotion ? base * 2 : base;
+  const motionAdjusted = engine === 'avatar_iv' && hasCustomMotion ? avatarCredits * 2 : avatarCredits;
+  // Conservative subscription bound: the 2026-08-09 owner-approved direct Avatar IV canary had a
+  // six-second local duration estimate and an actual three-credit debit despite the published
+  // one-credit-per-three-seconds rate. The extra fixed credit is treated as provider/TTS rounding
+  // overhead until HeyGen exposes a quote or hard cap. Overestimation is intentional; undershooting
+  // the signed maximum is a hard safety defect.
+  const credits = motionAdjusted + 1;
   return { durationSeconds, credits };
 }
 
@@ -224,6 +249,15 @@ export function buildHeyGenAvatarVideoPlan(input: HeyGenAvatarVideoCreateInput):
   if (!HEYGEN_OPERATION_ID_RE.test(input.operationId)) throw new Error('operation_id is invalid.');
   if (!HEYGEN_IDEMPOTENCY_KEY_RE.test(input.idempotencyKey)) throw new Error('idempotency_key is invalid.');
   if (!HEYGEN_SHA256_RE.test(input.manifestSha256)) throw new Error('manifest_sha256 must be lowercase SHA-256.');
+  if (input.confirmedBillingSnapshotSha256 && !HEYGEN_SHA256_RE.test(input.confirmedBillingSnapshotSha256)) {
+    throw new Error('confirmed_billing_snapshot_sha256 must be lowercase SHA-256.');
+  }
+  if (input.confirmedBillingStateSha256 && !HEYGEN_SHA256_RE.test(input.confirmedBillingStateSha256)) {
+    throw new Error('confirmed_billing_state_sha256 must be lowercase SHA-256.');
+  }
+  if (input.confirmedBillingObservedAt && !Number.isFinite(Date.parse(input.confirmedBillingObservedAt))) {
+    throw new Error('confirmed_billing_observed_at must be an ISO timestamp.');
+  }
   if (input.confirmCreditUse !== true) throw new Error('confirm_credit_use=true is required.');
   for (const [name, value] of [
     ['confirmed_premium_credits_before', input.confirmedPremiumCreditsBefore],

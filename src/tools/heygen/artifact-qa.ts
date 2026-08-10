@@ -130,6 +130,7 @@ export function validateSrt(value: string): number {
   const lines = value.replace(/\r\n/g, '\n').split('\n');
   let cues = 0;
   let previousStart = -1;
+  let previousEnd = -1;
   for (const line of lines) {
     const match = line.trim().match(/^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})$/);
     if (!match) continue;
@@ -137,11 +138,47 @@ export function validateSrt(value: string): number {
     const end = parseSrtTime(match[2]);
     if (end <= start) throw new Error('HeyGen subtitle cue has non-positive duration.');
     if (start < previousStart) throw new Error('HeyGen subtitle cues are not monotonic.');
+    if (start < previousEnd) throw new Error('HeyGen subtitle cues overlap.');
     previousStart = start;
+    previousEnd = end;
     cues += 1;
   }
   if (cues < 1) throw new Error('HeyGen subtitle has no valid SRT cues.');
   return cues;
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  maxAssetBytes: number,
+  kind: HeyGenArtifactKind,
+): Promise<Uint8Array> {
+  if (!response.body) throw new Error(`HeyGen ${kind} download returned no body.`);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxAssetBytes) {
+        await reader.cancel('size limit exceeded').catch(() => undefined);
+        throw new Error(`HeyGen ${kind} exceeds max_asset_bytes.`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (total < 1) throw new Error(`HeyGen ${kind} size is outside the allowed range.`);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
 }
 
 async function fetchAsset(
@@ -169,10 +206,7 @@ async function fetchAsset(
   if (!response?.ok) throw new Error(`HeyGen ${kind} download failed.`);
   const announced = Number(response.headers.get('content-length') || 0);
   if (announced > maxAssetBytes) throw new Error(`HeyGen ${kind} exceeds max_asset_bytes.`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.length < 1 || bytes.length > maxAssetBytes) {
-    throw new Error(`HeyGen ${kind} size is outside the allowed range.`);
-  }
+  const bytes = await readBoundedResponseBody(response, maxAssetBytes, kind);
   const detected = mediaTypeFor(kind, bytes, response.headers.get('content-type') || '');
   return {
     kind,
@@ -208,8 +242,17 @@ export async function ingestHeyGenVideoArtifacts(
   if (!store.configured()) throw new Error('HeyGen artifact storage is not configured.');
 
   const downloads: DownloadedAsset[] = [];
+  const aggregateLimit = Math.min(104_857_600, options.maxAssetBytes * 2);
+  let aggregateBytes = 0;
+  const deadline = Date.now() + 120_000;
   for (const [kind, url] of requestedAssets(detail, options)) {
-    downloads.push(await fetchAsset(kind, url, options.maxAssetBytes, fetchImpl));
+    if (Date.now() >= deadline) throw new Error('HeyGen artifact ingestion exceeded its overall deadline.');
+    const downloaded = await fetchAsset(kind, url, options.maxAssetBytes, fetchImpl);
+    aggregateBytes += downloaded.bytes.length;
+    if (aggregateBytes > aggregateLimit) {
+      throw new Error('HeyGen artifact bundle exceeds the aggregate byte limit.');
+    }
+    downloads.push(downloaded);
   }
 
   const assets: HeyGenArtifactQaResult[] = [];
@@ -236,13 +279,13 @@ export async function ingestHeyGenVideoArtifacts(
     'content_magic_valid',
     'sha256_recorded',
   ];
-  if (assets.some((asset) => asset.kind === 'subtitle')) checks.push('subtitle_cues_monotonic');
+  if (assets.some((asset) => asset.kind === 'subtitle')) checks.push('subtitle_cues_monotonic_nonoverlapping');
   const manifest = {
     schema: 'otchealth.heygen.artifact-manifest.v1',
     operation_id: options.operationId,
     video_id: detail.id,
     provider_status: detail.status,
-    title: detail.title,
+    title_sha256: createHash('sha256').update(detail.title ?? '', 'utf8').digest('hex'),
     duration_seconds: detail.duration,
     completed_at: detail.completedAt,
     ingested_at: new Date().toISOString(),
