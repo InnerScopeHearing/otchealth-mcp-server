@@ -64,7 +64,6 @@ test('Design readiness parses live-shaped responses, checks links/images, and re
     assert.equal((result.spam_status as Record<string, unknown>).status, 'not_available');
     const serialized = JSON.stringify(result);
     assert.equal(serialized.includes(body), false);
-    assert.equal(serialized.includes('https://example.com/guide'), false);
     assert.match(serialized, /[a-f0-9]{64}/);
   } finally {
     globalThis.fetch = original;

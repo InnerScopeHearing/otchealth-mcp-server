@@ -34,4 +34,12 @@ jobs:
       - name: Build
         run: npm run build
       - name: Test
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee /tmp/test-output.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            node -e "const fs=require('fs');let s=fs.readFileSync('/tmp/test-output.log','utf8').slice(-12000);s=s.replace(/%/g,'%25').replace(/\r/g,'%0D').replace(/\n/g,'%0A');console.log('::error title=Test failure details::'+s)"
+          fi
+          exit "$status"
