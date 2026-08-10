@@ -327,6 +327,19 @@ export function parseHeyGenAvatarLook(value: unknown): HeyGenAvatarLook {
   };
 }
 
+const READY_CONSENT_STATUSES = new Set(['accepted', 'approved', 'complete', 'completed']);
+
+/**
+ * Match only HeyGen's observed ready values (case-insensitive, without trimming). Missing/null
+ * consent preserves the existing photo-avatar path where the provider does not require consent;
+ * every present unrecognized value
+ * (including blank) fails closed.
+ */
+export function isHeyGenConsentStatusReady(consentStatus: string | null): boolean {
+  if (consentStatus === null) return true;
+  return READY_CONSENT_STATUSES.has(consentStatus.toLowerCase());
+}
+
 export function parseHeyGenAvatarGroup(value: unknown): HeyGenAvatarGroup {
   const data = AvatarGroupEnvelopeSchema.parse(value).data;
   return { id: data.id, status: data.status ?? null, consentStatus: data.consent_status ?? null };
