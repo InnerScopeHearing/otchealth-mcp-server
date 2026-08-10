@@ -17,6 +17,7 @@ import {
   executeHeyGenRead,
   getHeyGenAccessToken,
   getHeyGenVideoOperation,
+  getHeyGenVideoTerminalReplay,
   getHeyGenPairingStatus,
   newHeyGenPairId,
   parseOfficialCredentialsHeader,
@@ -27,7 +28,7 @@ import {
   type HeyGenTokenDoc,
   type HeyGenTokenState,
 } from './broker.js';
-import { buildHeyGenAvatarVideoPlan } from './video-contracts.js';
+import { buildHeyGenAvatarVideoPlan, HEYGEN_FAMILY_STORY_PROFILES } from './video-contracts.js';
 import { parseHeyGenBillingSnapshot } from './look-contracts.js';
 
 const SECRET = 'test-signing-secret-with-enough-entropy-for-hkdf';
@@ -1115,6 +1116,8 @@ function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<t
     iat: now, nbf: now, exp: now + 300, jti: `grant-${base.operationId}`,
     grant_type: 'heygen_avatar_video_create', tool: 'heygen_avatar_video_create',
     operation_id: base.operationId, request_sha256: plan.requestSha256,
+    idempotency_key_sha256: plan.idempotencyKeySha256,
+    manifest_sha256: base.manifestSha256,
     billing_snapshot_sha256: base.confirmedBillingSnapshotSha256,
     billing_state_sha256: base.confirmedBillingStateSha256,
     billing_observed_at: base.confirmedBillingObservedAt,
@@ -1135,6 +1138,7 @@ function avatarVideoHarness(options: {
   account?: unknown;
   accountAfter?: unknown;
   look?: unknown;
+  referenceLook?: unknown;
   group?: unknown;
   voice?: unknown;
 } = {}) {
@@ -1182,18 +1186,28 @@ function avatarVideoHarness(options: {
         accountReads += 1;
         return jsonResponse(accountReads > 1 && options.accountAfter ? options.accountAfter : (options.account ?? USER_RESPONSE));
       }
-      if (parsed.pathname === '/v3/avatars/looks/look_1') return jsonResponse(options.look ?? {
+      const lookBody = options.look ?? {
         data: {
           id: 'look_1', avatar_type: 'digital_twin', group_id: 'group_1', default_voice_id: 'voice_1',
           supported_api_engines: ['avatar_iii', 'avatar_iv', 'avatar_v'], status: 'completed',
         },
-      });
-      if (parsed.pathname === '/v3/avatars/group_1') return jsonResponse(options.group ?? {
+      };
+      const referenceBody = options.referenceLook as { data?: { id?: string } } | undefined;
+      const lookId = (lookBody as { data: { id: string } }).data.id;
+      if (parsed.pathname === `/v3/avatars/looks/${lookId}`) return jsonResponse(lookBody);
+      if (referenceBody?.data?.id && parsed.pathname === `/v3/avatars/looks/${referenceBody.data.id}`) {
+        return jsonResponse(referenceBody);
+      }
+      const groupBody = options.group ?? {
         data: { id: 'group_1', status: 'completed', consent_status: 'accepted' },
-      });
-      if (parsed.pathname === '/v3/voices/voice_1') return jsonResponse(options.voice ?? {
+      };
+      const groupId = (groupBody as { data: { id: string } }).data.id;
+      if (parsed.pathname === `/v3/avatars/${groupId}`) return jsonResponse(groupBody);
+      const voiceBody = options.voice ?? {
         data: { voice_id: 'voice_1', status: 'complete', support_pause: true },
-      });
+      };
+      const voiceId = (voiceBody as { data: { voice_id: string } }).data.voice_id;
+      if (parsed.pathname === `/v3/voices/${voiceId}`) return jsonResponse(voiceBody);
       if (parsed.pathname === '/v3/videos') {
         postCalls += 1;
         return options.post ? options.post(postCalls) : jsonResponse({ data: { video_id: 'v_1', status: 'pending' } });
@@ -1202,6 +1216,43 @@ function avatarVideoHarness(options: {
     }) as typeof fetch,
   });
   return { deps, store, requests, postCalls: () => postCalls };
+}
+
+function matthewFamilyOptions(supportPause = true) {
+  const matt = HEYGEN_FAMILY_STORY_PROFILES.matthew;
+  return {
+    look: { data: {
+      id: matt.selectedPhotoLookId, avatar_type: 'photo_avatar', group_id: matt.groupId,
+      default_voice_id: matt.privateVoiceId, supported_api_engines: ['avatar_v'], status: 'completed',
+    } },
+    referenceLook: { data: {
+      id: matt.personalizedMotionReferenceLookId, avatar_type: 'digital_twin', group_id: matt.groupId,
+      default_voice_id: matt.privateVoiceId, supported_api_engines: ['avatar_v'], status: 'completed',
+    } },
+    group: { data: { id: matt.groupId, status: 'completed', consent_status: 'accepted' } },
+    voice: { data: {
+      voice_id: matt.privateVoiceId, status: 'complete', support_pause: supportPause,
+    } },
+  };
+}
+
+function matthewFamilyInput(overrides: Record<string, unknown> = {}) {
+  const matt = HEYGEN_FAMILY_STORY_PROFILES.matthew;
+  return avatarVideoInput({
+    productionProfile: 'family_story_final',
+    familyStoryFounder: 'matthew',
+    avatarId: matt.selectedPhotoLookId,
+    voiceId: matt.privateVoiceId,
+    referenceLookId: matt.personalizedMotionReferenceLookId!,
+    resolution: '1080p',
+    aspectRatio: '16:9',
+    motionPrompt: undefined,
+    expressiveness: undefined,
+    voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
+    maxApprovedCredits: 2,
+    reservePremiumCredits: 5,
+    ...overrides,
+  });
 }
 
 test('Avatar Video dry-run helper performs live read-only preflight and returns a billing packet without POST or operation writes', async () => {
@@ -1214,6 +1265,204 @@ test('Avatar Video dry-run helper performs live read-only preflight and returns 
   assert.match(prepared.billing.snapshot_sha256, /^[a-f0-9]{64}$/);
   assert.equal(harness.requests.some((entry) => entry.method === 'POST'), false);
   assert.equal(harness.store.size, beforeDocs);
+});
+
+test('Matthew Family Story Avatar V preflight verifies selected photo Look, exact voice, and same-group eligible Digital Twin reference', async () => {
+  const matt = HEYGEN_FAMILY_STORY_PROFILES.matthew;
+  const harness = avatarVideoHarness(matthewFamilyOptions());
+  const prepared = await prepareHeyGenAvatarVideoCreate(matthewFamilyInput(), harness.deps);
+  assert.equal(prepared.look.id, matt.selectedPhotoLookId);
+  assert.equal(prepared.referenceLook?.id, matt.personalizedMotionReferenceLookId);
+  assert.equal(prepared.group.consentStatus, 'accepted');
+  assert.equal(prepared.voice.supportPause, true);
+  assert.equal(prepared.plan.productionProfile, 'family_story_final');
+  assert.equal(prepared.plan.conservativeCreditCap, 2);
+  assert.equal(harness.requests.some((entry) => entry.method === 'POST'), false);
+});
+
+test('a caller cannot bypass Family Story policy with an alternate Look from a locked founder group under standard profile', async () => {
+  const matt = HEYGEN_FAMILY_STORY_PROFILES.matthew;
+  const harness = avatarVideoHarness({
+    look: { data: {
+      id: 'alternate_matt_look', avatar_type: 'photo_avatar', group_id: matt.groupId,
+      default_voice_id: 'other_voice', supported_api_engines: ['avatar_v'], status: 'completed',
+    } },
+    group: { data: { id: matt.groupId, status: 'completed', consent_status: 'accepted' } },
+    voice: { data: { voice_id: 'other_voice', status: 'complete', support_pause: true } },
+  });
+  await assert.rejects(() => prepareHeyGenAvatarVideoCreate(avatarVideoInput({
+    avatarId: 'alternate_matt_look',
+    voiceId: 'other_voice',
+    referenceLookId: undefined,
+    resolution: '1080p',
+    aspectRatio: '16:9',
+    motionPrompt: undefined,
+  }), harness.deps), /explicit Family Story profile is required/);
+  assert.equal(harness.postCalls(), 0);
+});
+
+test('Family Story live metadata fails closed on group drift, missing source status, missing consent, or ineligible reference', async () => {
+  const base = matthewFamilyOptions();
+  const cases = [
+    {
+      options: { ...base, look: { data: { ...base.look.data, group_id: 'wrong_group' } } },
+      error: /owner-locked founder group/,
+    },
+    {
+      options: { ...base, look: { data: { ...base.look.data, status: null } } },
+      error: /completed owner-selected photo Look/,
+    },
+    {
+      options: { ...base, group: { data: { ...base.group.data, consent_status: null } } },
+      error: /explicit accepted\/completed consent/,
+    },
+    {
+      options: { ...base, referenceLook: { data: { ...base.referenceLook.data, supported_api_engines: ['avatar_iv'] } } },
+      error: /Avatar V-eligible Digital Twin/,
+    },
+  ];
+  for (const entry of cases) {
+    const harness = avatarVideoHarness(entry.options);
+    await assert.rejects(() => prepareHeyGenAvatarVideoCreate(matthewFamilyInput(), harness.deps), entry.error);
+    assert.equal(harness.postCalls(), 0);
+  }
+});
+
+test('Family Story pause tags are duration-billed and require support_pause=true on the exact voice', async () => {
+  const script = 'Hello <break time="1s"/> world.';
+  const supported = avatarVideoHarness(matthewFamilyOptions(true));
+  const prepared = await prepareHeyGenAvatarVideoCreate(matthewFamilyInput({
+    script,
+    maxApprovedCredits: 3,
+    reservePremiumCredits: 4,
+  }), supported.deps);
+  assert.equal(prepared.plan.pauseSeconds, 1);
+  assert.equal(prepared.plan.estimatedDurationSeconds, 4);
+  assert.equal(prepared.plan.conservativeCreditCap, 3);
+
+  const unsupported = avatarVideoHarness(matthewFamilyOptions(false));
+  await assert.rejects(() => prepareHeyGenAvatarVideoCreate(matthewFamilyInput({
+    script,
+    maxApprovedCredits: 3,
+    reservePremiumCredits: 4,
+  }), unsupported.deps), /does not explicitly advertise support_pause=true/);
+  assert.equal(unsupported.postCalls(), 0);
+});
+
+test('Family Story profile/founder/fallback labels persist durably and terminal replay validates the full request', async () => {
+  const harness = avatarVideoHarness(matthewFamilyOptions());
+  const input = matthewFamilyInput();
+  const result = await executeHeyGenAvatarVideoCreate(input, harness.deps);
+  assert.equal(result.state, 'accepted');
+  assert.equal(result.productionProfile, 'family_story_final');
+  assert.equal(result.familyStoryFounder, 'matthew');
+  assert.equal(result.personalizedMotion, true);
+  assert.equal(result.photoFallback, false);
+  const stored = await getHeyGenVideoOperation(input.operationId, harness.deps);
+  assert.equal(stored?.productionProfile, 'family_story_final');
+  assert.equal(stored?.familyStoryFounder, 'matthew');
+  const replay = await getHeyGenVideoTerminalReplay(input, harness.deps);
+  assert.equal(replay?.replayed, true);
+  for (const drift of [
+    { manifestSha256: 'b'.repeat(64) },
+    { idempotencyKey: 'changed-key' },
+    { confirmedPremiumCreditsBefore: 6 },
+    { reservePremiumCredits: 4 },
+  ]) {
+    await assert.rejects(
+      () => getHeyGenVideoTerminalReplay(matthewFamilyInput(drift), harness.deps),
+      /different request, manifest, idempotency key, or approval envelope/,
+    );
+  }
+  assert.equal(harness.postCalls(), 1);
+});
+
+test('an explicitly approved future Kimberly photo fallback remains durably labeled as non-personalized', async () => {
+  const kim = HEYGEN_FAMILY_STORY_PROFILES.kimberly;
+  const harness = avatarVideoHarness({
+    look: { data: {
+      id: kim.selectedPhotoLookId, avatar_type: 'photo_avatar', group_id: kim.groupId,
+      default_voice_id: kim.privateVoiceId, supported_api_engines: ['avatar_v'], status: 'completed',
+    } },
+    group: { data: { id: kim.groupId, status: 'completed', consent_status: 'accepted' } },
+    voice: { data: { voice_id: kim.privateVoiceId, status: 'complete', support_pause: true } },
+  });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput({
+    productionProfile: 'family_story_photo_fallback',
+    familyStoryFounder: 'kimberly',
+    avatarId: kim.selectedPhotoLookId,
+    voiceId: kim.privateVoiceId,
+    referenceLookId: undefined,
+    resolution: '1080p',
+    aspectRatio: '16:9',
+    motionPrompt: undefined,
+    expressiveness: undefined,
+    voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
+    maxApprovedCredits: 2,
+    reservePremiumCredits: 5,
+  }), harness.deps);
+  assert.equal(result.productionProfile, 'family_story_photo_fallback');
+  assert.equal(result.familyStoryFounder, 'kimberly');
+  assert.equal(result.personalizedMotion, false);
+  assert.equal(result.photoFallback, true);
+  const replay = await getHeyGenVideoOperation(result.operationId, harness.deps);
+  assert.equal(replay?.photoFallback, true);
+});
+
+test('legacy version-1 Matthew terminal operation remains readable without reopening standard-profile writes', async () => {
+  const harness = avatarVideoHarness(matthewFamilyOptions());
+  const legacyInput = {
+    ...matthewFamilyInput(),
+    productionProfile: undefined,
+    familyStoryFounder: undefined,
+    engine: 'avatar_iv' as const,
+    referenceLookId: undefined,
+    script: 'Hello <break time="1s"/> world.',
+  };
+  const plan = buildHeyGenAvatarVideoPlan(legacyInput, { legacyTerminalReplay: true });
+  assert.equal(plan.conservativeCreditCap, 3, 'new estimator is stricter than the stored v1 approval');
+  assert.equal(legacyInput.maxApprovedCredits, 2);
+  const id = `heygen.video.${legacyInput.operationId}`;
+  harness.store.set(id, { doc: {
+    id,
+    cacheScope: id,
+    ttl: 7 * 24 * 60 * 60,
+    kind: 'heygen_avatar_video_operation',
+    version: 1,
+    operationId: legacyInput.operationId,
+    idempotencyKeySha256: plan.idempotencyKeySha256,
+    manifestSha256: legacyInput.manifestSha256,
+    requestSha256: plan.requestSha256,
+    scriptSha256: plan.scriptSha256,
+    state: 'accepted',
+    attemptCount: 1,
+    createdAt: new Date(1_000_000).toISOString(),
+    updatedAt: new Date(1_000_000).toISOString(),
+    plan: 'team',
+    premiumCreditsConfirmed: 7,
+    confirmedBillingSnapshotSha256: legacyInput.confirmedBillingSnapshotSha256,
+    confirmedBillingStateSha256: legacyInput.confirmedBillingStateSha256,
+    confirmedBillingObservedAt: legacyInput.confirmedBillingObservedAt,
+    maxApprovedCredits: 2,
+    reservePremiumCredits: 5,
+    estimatedCredits: 2,
+    estimatedDurationSeconds: 3,
+    avatarId: legacyInput.avatarId,
+    voiceId: legacyInput.voiceId,
+    engine: legacyInput.engine,
+    videoId: 'legacy_matt_video',
+  }, etag: 'LEGACY1' });
+
+  const replay = await getHeyGenVideoTerminalReplay(legacyInput, harness.deps);
+  assert.equal(replay?.videoId, 'legacy_matt_video');
+  assert.equal(replay?.replayed, true);
+  const executeReplay = await executeHeyGenAvatarVideoCreate(legacyInput, harness.deps);
+  assert.equal(executeReplay.videoId, 'legacy_matt_video');
+  assert.equal(harness.requests.length, 0);
+  await assert.rejects(
+    () => getHeyGenVideoTerminalReplay({ ...legacyInput, script: 'Changed script.' }, harness.deps),
+    /legacy operation_id was already bound to a different request/,
+  );
 });
 
 test('direct Avatar Video create runs guarded live preflight, sends one exact idempotent POST, and persists accepted state', async () => {
@@ -1368,6 +1617,21 @@ test('current provider completed plus accepted consent passes direct-video prefl
   assert.equal(harness.postCalls(), 1);
 });
 
+test('Avatar V photo fallback without motion_prompt can proceed without a reference on a completed consented group', async () => {
+  const harness = avatarVideoHarness({
+    look: { data: {
+      id: 'look_1', avatar_type: 'photo_avatar', group_id: 'group_1', default_voice_id: 'voice_1',
+      supported_api_engines: ['avatar_v'], status: 'completed',
+    } },
+  });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput({
+    referenceLookId: undefined,
+    motionPrompt: undefined,
+  }), harness.deps);
+  assert.equal(result.state, 'accepted');
+  assert.equal(harness.postCalls(), 1);
+});
+
 test('look, group, voice, and Avatar V reference incompatibilities block before POST', async () => {
   const cases = [
     {
@@ -1387,8 +1651,8 @@ test('look, group, voice, and Avatar V reference incompatibilities block before 
     },
     {
       options: { look: { data: { id: 'look_1', avatar_type: 'photo_avatar', group_id: 'group_1', supported_api_engines: ['avatar_v'], status: 'completed' } } },
-      input: avatarVideoInput(),
-      error: /explicit completed Digital Twin reference/,
+      input: avatarVideoInput({ motionPrompt: 'Wave gently.' }),
+      error: /requires an eligible same-group Digital Twin animation reference/,
     },
   ];
   for (const entry of cases) {

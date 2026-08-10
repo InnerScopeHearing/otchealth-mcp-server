@@ -7,6 +7,7 @@ import {
   executeHeyGenRead,
   getHeyGenVideoDetail,
   getHeyGenVideoOperation,
+  getHeyGenVideoTerminalReplay,
   prepareHeyGenAvatarVideoCreate,
   HEYGEN_LOCALE_RE,
   HEYGEN_SAFE_ID_RE,
@@ -107,6 +108,8 @@ export const HEYGEN_AVATAR_VIDEO_CREATE_INPUT = {
   voice_id: SAFE_ID,
   script: z.string().min(1).max(10_000).refine((value) => value.trim().length > 0, 'script cannot be blank'),
   engine: z.enum(['avatar_iii', 'avatar_iv', 'avatar_v']),
+  production_profile: z.enum(['standard', 'family_story_final', 'family_story_photo_fallback']).optional(),
+  family_story_founder: z.enum(['matthew', 'kimberly', 'mark']).optional(),
   reference_look_id: SAFE_ID.optional(),
   resolution: z.enum(['720p', '1080p']),
   aspect_ratio: z.enum(['16:9', '9:16', '4:5', '5:4', '1:1', 'auto']),
@@ -171,6 +174,11 @@ const VIDEO_OPERATION_OUTPUT = {
   reserve_premium_credits: z.number().int(),
   estimated_credits: z.number().int(),
   estimated_duration_seconds: z.number().int(),
+  pause_seconds: z.number().nonnegative().optional(),
+  production_profile: z.enum(['standard', 'family_story_final', 'family_story_photo_fallback']).optional(),
+  family_story_founder: z.enum(['matthew', 'kimberly', 'mark']).optional(),
+  personalized_motion: z.boolean().optional(),
+  photo_fallback: z.boolean().optional(),
   provider_idempotency_expires_at: z.string().optional(),
   error_code: z.string().optional(),
 } as const;
@@ -199,6 +207,8 @@ function avatarVideoInput(input: Record<string, unknown>, dryRun: boolean): HeyG
     voiceId: String(input.voice_id),
     script: String(input.script),
     engine: input.engine as HeyGenAvatarVideoCreateInput['engine'],
+    productionProfile: input.production_profile as HeyGenAvatarVideoCreateInput['productionProfile'],
+    familyStoryFounder: input.family_story_founder as HeyGenAvatarVideoCreateInput['familyStoryFounder'],
     referenceLookId: typeof input.reference_look_id === 'string' ? input.reference_look_id : undefined,
     resolution: input.resolution as HeyGenAvatarVideoCreateInput['resolution'],
     aspectRatio: input.aspect_ratio as HeyGenAvatarVideoCreateInput['aspectRatio'],
@@ -248,6 +258,11 @@ function operationData(result: HeyGenAvatarVideoCreateResult): Record<string, un
     reserve_premium_credits: result.reservePremiumCredits,
     estimated_credits: result.estimatedCredits,
     estimated_duration_seconds: result.estimatedDurationSeconds,
+    pause_seconds: result.pauseSeconds,
+    production_profile: result.productionProfile,
+    family_story_founder: result.familyStoryFounder,
+    personalized_motion: result.personalizedMotion,
+    photo_fallback: result.photoFallback,
     provider_idempotency_expires_at: result.providerIdempotencyExpiresAt,
     error_code: result.errorCode,
   };
@@ -562,7 +577,7 @@ export function registerHeyGenProductionTools(
     category: 'write_orchestrated',
     annotations: {
       title: 'HeyGen: create idempotent Avatar Video (CTO only)',
-      description: 'Creates exactly one direct Avatar Video through POST /v3/videos with a mandatory 24-hour provider Idempotency-Key, durable cross-replica operation record, exact live subscription balance, explicit credit ceiling/reserve, look/group/voice/engine validation, and no API-key billing path.',
+      description: 'Creates exactly one direct Avatar Video through POST /v3/videos with a mandatory 24-hour provider Idempotency-Key, durable cross-replica operation record, exact live subscription balance, conservative credit ceiling/reserve, look/group/voice/engine validation, and no API-key billing path. Family Story profiles require Avatar V, 1080p/16:9, owner-locked Look/voice, exact conservative cap, and an eligible same-group Digital Twin reference for final personalized motion.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
@@ -593,6 +608,11 @@ export function registerHeyGenProductionTools(
           reservePremiumCredits: mapped.reservePremiumCredits,
           estimatedCredits: prepared.plan.estimatedCredits,
           estimatedDurationSeconds: prepared.plan.estimatedDurationSeconds,
+          pauseSeconds: prepared.plan.pauseSeconds,
+          productionProfile: prepared.plan.productionProfile,
+          familyStoryFounder: prepared.plan.familyStoryFounder,
+          personalizedMotion: prepared.plan.personalizedMotion,
+          photoFallback: prepared.plan.productionProfile === 'family_story_photo_fallback',
         };
         return {
           data: {
@@ -607,20 +627,34 @@ export function registerHeyGenProductionTools(
               consent_status: prepared.group.consentStatus,
               voice_id: prepared.voice.voiceId,
               voice_status: prepared.voice.status,
+              voice_support_pause: prepared.voice.supportPause,
+              estimated_pause_seconds: prepared.plan.pauseSeconds,
               engine: mapped.engine,
+              production_profile: prepared.plan.productionProfile,
+              family_story_founder: prepared.plan.familyStoryFounder,
+              avatar_v_eligible: prepared.look.supportedApiEngines.includes('avatar_v'),
               reference_look_id: prepared.referenceLook?.id,
+              personalized_motion: prepared.plan.personalizedMotion,
+              photo_fallback: prepared.plan.productionProfile === 'family_story_photo_fallback',
             },
             approval_packet: {
               grant_type: 'heygen_avatar_video_create',
               tool: 'heygen_avatar_video_create',
               operation_id: mapped.operationId,
               request_sha256: prepared.plan.requestSha256,
+              idempotency_key_sha256: prepared.plan.idempotencyKeySha256,
+              manifest_sha256: mapped.manifestSha256,
               billing_snapshot_sha256: prepared.billing.snapshot_sha256,
               billing_state_sha256: prepared.billing.state_sha256,
               billing_observed_at: prepared.billing.observed_at,
               confirmed_premium_credits_before: prepared.billing.premium.remaining,
               reserve_credits: mapped.reservePremiumCredits,
               max_credits: mapped.maxApprovedCredits,
+              conservative_credit_cap: prepared.plan.conservativeCreditCap,
+              provider_credit_cap_available: prepared.plan.providerCreditCapAvailable,
+              gateway_pre_submission_cap_enforced: true,
+              post_call_overage_locks_account: true,
+              family_story_exact_cap_required: prepared.plan.productionProfile !== 'standard',
               owner_grant_required: true,
               zero_automatic_retries: true,
             },
@@ -628,11 +662,11 @@ export function registerHeyGenProductionTools(
           summary: `DRY RUN: live Avatar Video preflight passed; estimated ${prepared.plan.estimatedCredits} credit(s), no provider or operation-record mutation.`,
         };
       }
-      const existing = await getHeyGenVideoOperation(mapped.operationId, deps);
-      if (existing && (existing.state === 'accepted' || existing.state === 'rejected')) {
+      const existing = await getHeyGenVideoTerminalReplay(mapped, deps);
+      if (existing) {
         return {
           data: operationData(existing),
-          summary: `HeyGen Avatar Video operation ${existing.operationId}: ${existing.state} (terminal replay; writes remain disabled).`,
+          summary: `HeyGen Avatar Video operation ${existing.operationId}: ${existing.state} (request-validated terminal replay; writes remain disabled).`,
         };
       }
       if (!isHeyGenProviderWriteEnabled('ENABLE_HEYGEN_AVATAR_VIDEO_WRITES')) {

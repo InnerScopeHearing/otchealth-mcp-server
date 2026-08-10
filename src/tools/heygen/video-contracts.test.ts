@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import {
   buildHeyGenAvatarVideoPlan,
   canonicalRequestSha256,
+  conservativeAvatarVideoCreditCap,
   estimateAvatarVideoCredits,
+  HEYGEN_FAMILY_STORY_PROFILES,
   isHeyGenConsentAccepted,
   isHeyGenConsentStatusReady,
+  parseHeyGenBreakSeconds,
   parseHeyGenAvatarGroup,
   parseHeyGenAvatarLook,
   parseHeyGenCreateVideo,
@@ -113,6 +116,139 @@ test('Avatar IV six-second canary uses a three-credit conservative bound after t
   })), /exceeds max_approved_credits 2/);
 });
 
+test('Avatar V conservative cap rounds provider duration upward and includes the observed safety credit', () => {
+  assert.equal(conservativeAvatarVideoCreditCap(3, 'avatar_v'), 2);
+  assert.equal(conservativeAvatarVideoCreditCap(3.000001, 'avatar_v'), 3);
+  assert.equal(conservativeAvatarVideoCreditCap(4.62367, 'avatar_v'), 3);
+  assert.equal(conservativeAvatarVideoCreditCap(6, 'avatar_v'), 3);
+  assert.equal(conservativeAvatarVideoCreditCap(6.000001, 'avatar_v'), 4);
+  assert.throws(() => conservativeAvatarVideoCreditCap(0, 'avatar_v'));
+});
+
+test('Avatar V six-second dry run rejects the old two-credit maximum', () => {
+  const script = 'one two three four five six seven eight nine ten eleven twelve';
+  const estimate = estimateAvatarVideoCredits(script, 'avatar_v', 1, false);
+  assert.deepEqual(estimate, { durationSeconds: 6, pauseSeconds: 0, credits: 3 });
+  assert.throws(() => buildHeyGenAvatarVideoPlan(validInput({ script, maxApprovedCredits: 2 })), /exceeds max_approved_credits 2/);
+});
+
+test('Matthew Family Story final contract locks Avatar V, exact casting, 1080p 16:9, reference, natural audio, and exact cap', () => {
+  const matt = HEYGEN_FAMILY_STORY_PROFILES.matthew;
+  const script = 'one two three four five six seven eight nine ten eleven twelve';
+  const base = validInput({
+    script,
+    productionProfile: 'family_story_final',
+    familyStoryFounder: 'matthew',
+    avatarId: matt.selectedPhotoLookId,
+    voiceId: matt.privateVoiceId,
+    referenceLookId: matt.personalizedMotionReferenceLookId!,
+    resolution: '1080p',
+    aspectRatio: '16:9',
+    motionPrompt: undefined,
+    expressiveness: undefined,
+    voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
+    maxApprovedCredits: 3,
+  });
+  const plan = buildHeyGenAvatarVideoPlan(base);
+  assert.deepEqual(plan.body.engine, { type: 'avatar_v', reference_look_id: matt.personalizedMotionReferenceLookId });
+  assert.equal(plan.productionProfile, 'family_story_final');
+  assert.equal(plan.familyStoryFounder, 'matthew');
+  assert.equal(plan.personalizedMotion, true);
+  assert.equal(plan.conservativeCreditCap, 3);
+  assert.equal(plan.providerCreditCapAvailable, false);
+  assert.equal(Object.hasOwn(plan.body, 'expressiveness'), false);
+  assert.equal(Object.hasOwn(plan.body, 'motion_prompt'), false);
+  assert.equal(parseHeyGenBreakSeconds('Hello <break time="0.35s"/> world <break time="2s"/>.'), 2.35);
+  const pausePlan = buildHeyGenAvatarVideoPlan({
+    ...base,
+    script: 'Hello <break time="60s"/> world.',
+    maxApprovedCredits: 22,
+  });
+  assert.equal(pausePlan.pauseSeconds, 60);
+  assert.equal(pausePlan.estimatedDurationSeconds, 63);
+  assert.equal(pausePlan.conservativeCreditCap, 22);
+  assert.throws(() => buildHeyGenAvatarVideoPlan({
+    ...base,
+    script: 'Hello <break time="60s"/> world.',
+    maxApprovedCredits: 2,
+  }), /exceeds max_approved_credits 2/);
+  assert.throws(() => buildHeyGenAvatarVideoPlan({
+    ...base,
+    script: '<prosody rate="slow">Hello.</prosody>',
+  }), /plain text plus <break/);
+  assert.notEqual(
+    canonicalRequestSha256(plan.body),
+    plan.requestSha256,
+    'family quality profile and founder must be included in the owner-grant request hash',
+  );
+  assert.throws(() => buildHeyGenAvatarVideoPlan({
+    ...base,
+    productionProfile: undefined,
+    familyStoryFounder: undefined,
+  }), /require an explicit Family Story production profile/);
+
+  for (const override of [
+    { engine: 'avatar_iv' as const },
+    { resolution: '720p' as const },
+    { aspectRatio: 'auto' as const },
+    { avatarId: 'wrong_look' },
+    { voiceId: 'wrong_voice' },
+    { referenceLookId: 'wrong_reference' },
+    { expressiveness: 'low' as const },
+    { voiceSettings: { speed: 1.1 } },
+    { maxApprovedCredits: 2 },
+    { maxApprovedCredits: 4 },
+  ]) {
+    assert.throws(() => buildHeyGenAvatarVideoPlan({ ...base, ...override }));
+  }
+});
+
+test('Kimberly and Mark final personalized motion remain blocked while a separately labeled photo fallback stays reference-free', () => {
+  const script = 'one two three four five six seven eight nine ten eleven twelve';
+  for (const founder of ['kimberly', 'mark'] as const) {
+    const profile = HEYGEN_FAMILY_STORY_PROFILES[founder];
+    const common = validInput({
+      script,
+      familyStoryFounder: founder,
+      avatarId: profile.selectedPhotoLookId,
+      voiceId: profile.privateVoiceId,
+      referenceLookId: undefined,
+      resolution: '1080p',
+      aspectRatio: '16:9',
+      motionPrompt: undefined,
+      expressiveness: undefined,
+      voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
+      maxApprovedCredits: 3,
+    });
+    assert.throws(
+      () => buildHeyGenAvatarVideoPlan({ ...common, productionProfile: 'family_story_final' }),
+      /blocked until consent is completed and an eligible same-group Digital Twin reference is verified/,
+    );
+    const fallback = buildHeyGenAvatarVideoPlan({ ...common, productionProfile: 'family_story_photo_fallback' });
+    assert.equal(fallback.personalizedMotion, false);
+    assert.deepEqual(fallback.body.engine, { type: 'avatar_v' });
+    assert.throws(() => buildHeyGenAvatarVideoPlan({
+      ...common,
+      productionProfile: 'family_story_photo_fallback',
+      motionPrompt: 'Wave gently.',
+    }), /must omit motion_prompt/);
+  }
+  const matt = HEYGEN_FAMILY_STORY_PROFILES.matthew;
+  assert.throws(() => buildHeyGenAvatarVideoPlan(validInput({
+    script,
+    productionProfile: 'family_story_photo_fallback',
+    familyStoryFounder: 'matthew',
+    avatarId: matt.selectedPhotoLookId,
+    voiceId: matt.privateVoiceId,
+    referenceLookId: undefined,
+    resolution: '1080p',
+    aspectRatio: '16:9',
+    motionPrompt: undefined,
+    voiceSettings: { speed: 1, pitch: 0, volume: 1 },
+    maxApprovedCredits: 3,
+  })), /do not downgrade/);
+});
+
 test('plan rejects invalid approvals, tuning, IDs, and an estimate above the approved ceiling', () => {
   for (const input of [
     validInput({ confirmCreditUse: false }),
@@ -138,8 +274,8 @@ test('provider parsers normalize only required fields and reject malformed succe
   assert.deepEqual(parseHeyGenAvatarGroup({ data: { id: 'group_1', status: 'completed', consent_status: 'approved' } }), {
     id: 'group_1', status: 'completed', consentStatus: 'approved',
   });
-  assert.deepEqual(parseHeyGenVoice({ data: { voice_id: 'voice_1', status: 'complete' } }), {
-    voiceId: 'voice_1', status: 'complete', failureMessage: null,
+  assert.deepEqual(parseHeyGenVoice({ data: { voice_id: 'voice_1', status: 'complete', support_pause: true } }), {
+    voiceId: 'voice_1', status: 'complete', failureMessage: null, supportPause: true,
   });
   assert.deepEqual(parseHeyGenCreateVideo({ data: { video_id: 'v_1', status: 'pending' } }), {
     videoId: 'v_1', status: 'pending',
@@ -181,5 +317,26 @@ test('compatibility matrix blocks unsupported engines and invalid motion/express
   assert.throws(() => validateHeyGenAvatarVideoCompatibility(
     validInput({ engine: 'avatar_v', expressiveness: 'high' }),
     { ...digital, supportedApiEngines: [...digital.supportedApiEngines] },
+  ));
+  assert.throws(() => validateHeyGenAvatarVideoCompatibility(
+    validInput({ engine: 'avatar_v', referenceLookId: undefined, motionPrompt: 'Wave gently.' }),
+    { ...digital, supportedApiEngines: [...digital.supportedApiEngines] },
+  ), /requires an eligible same-group Digital Twin animation reference/);
+  const photo = {
+    ...digital,
+    avatarType: 'photo_avatar' as const,
+    supportedApiEngines: [...digital.supportedApiEngines],
+  };
+  assert.doesNotThrow(() => validateHeyGenAvatarVideoCompatibility(
+    validInput({ engine: 'avatar_v', referenceLookId: undefined, motionPrompt: undefined }),
+    photo,
+  ));
+  assert.throws(() => validateHeyGenAvatarVideoCompatibility(
+    validInput({ engine: 'avatar_v', referenceLookId: undefined, motionPrompt: 'Wave gently.' }),
+    photo,
+  ), /requires an eligible same-group Digital Twin animation reference/);
+  assert.doesNotThrow(() => validateHeyGenAvatarVideoCompatibility(
+    validInput({ engine: 'avatar_v', referenceLookId: 'ref_1', motionPrompt: 'Wave gently.' }),
+    photo,
   ));
 });

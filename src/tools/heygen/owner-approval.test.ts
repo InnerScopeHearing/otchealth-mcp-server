@@ -54,7 +54,7 @@ function grant(overrides: Record<string, unknown> = {}, headerOverrides: Record<
   return `${header}.${claims}.${signature}`;
 }
 
-function videoGrant(maxCredits = 5): string {
+function videoGrant(maxCredits = 5, overrides: Record<string, unknown> = {}): string {
   const header = enc({ alg: 'ES256', typ: 'OTC-HeyGen-Approval+jwt', kid: 'key-1' });
   const payload = enc({
     iss: config.issuer,
@@ -68,12 +68,15 @@ function videoGrant(maxCredits = 5): string {
     tool: 'heygen_avatar_video_create',
     operation_id: 'video_op_01',
     request_sha256: 'c'.repeat(64),
+    idempotency_key_sha256: '1'.repeat(64),
+    manifest_sha256: '2'.repeat(64),
     billing_snapshot_sha256: 'd'.repeat(64),
     billing_state_sha256: 'f'.repeat(64),
     billing_observed_at: '2026-08-10T00:00:00Z',
     confirmed_premium_credits_before: 591,
     reserve_credits: 100,
     max_credits: maxCredits,
+    ...overrides,
   });
   const signature = sign('sha256', Buffer.from(`${header}.${payload}`, 'ascii'), {
     key: privateKey,
@@ -100,29 +103,37 @@ test('owner grant verifier accepts one exact ES256 grant bound to operation, req
   assert.match(heyGenApprovalJtiSha256(claims.jti), /^[a-f0-9]{64}$/);
 });
 
-test('Avatar Video owner grant binds the exact request, billing snapshot, and credit ceiling', () => {
-  const claims = verifyHeyGenAvatarVideoApproval(videoGrant(5), {
+test('Avatar Video owner grant binds request, idempotency key, manifest, billing snapshot, and credit ceiling', () => {
+  const expectedVideo = {
     operationId: 'video_op_01',
     requestSha256: 'c'.repeat(64),
+    idempotencyKeySha256: '1'.repeat(64),
+    manifestSha256: '2'.repeat(64),
     billingSnapshotSha256: 'd'.repeat(64),
     billingStateSha256: 'f'.repeat(64),
     billingObservedAt: '2026-08-10T00:00:00Z',
     confirmedPremiumCreditsBefore: 591,
     reserveCredits: 100,
     maxCredits: 5,
-  }, NOW_MS, config);
+  };
+  const claims = verifyHeyGenAvatarVideoApproval(videoGrant(5), expectedVideo, NOW_MS, config);
   assert.equal(claims.grant_type, 'heygen_avatar_video_create');
   assert.equal(claims.max_credits, 5);
-  assert.throws(() => verifyHeyGenAvatarVideoApproval(videoGrant(5), {
-    operationId: 'video_op_01',
-    requestSha256: 'c'.repeat(64),
-    billingSnapshotSha256: 'd'.repeat(64),
-    billingStateSha256: 'f'.repeat(64),
-    billingObservedAt: '2026-08-10T00:00:00Z',
-    confirmedPremiumCreditsBefore: 591,
-    reserveCredits: 100,
-    maxCredits: 6,
-  }, NOW_MS, config));
+  assert.equal(claims.idempotency_key_sha256, expectedVideo.idempotencyKeySha256);
+  assert.equal(claims.manifest_sha256, expectedVideo.manifestSha256);
+  assert.throws(() => verifyHeyGenAvatarVideoApproval(videoGrant(5), { ...expectedVideo, maxCredits: 6 }, NOW_MS, config));
+  assert.throws(() => verifyHeyGenAvatarVideoApproval(
+    videoGrant(5, { idempotency_key_sha256: '3'.repeat(64) }),
+    expectedVideo,
+    NOW_MS,
+    config,
+  ));
+  assert.throws(() => verifyHeyGenAvatarVideoApproval(
+    videoGrant(5, { manifest_sha256: '4'.repeat(64) }),
+    expectedVideo,
+    NOW_MS,
+    config,
+  ));
 });
 
 test('owner grant verifier rejects algorithm, key, principal, time, and binding drift', () => {

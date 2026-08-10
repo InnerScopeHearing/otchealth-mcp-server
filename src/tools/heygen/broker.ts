@@ -16,9 +16,13 @@ import {
 import { z } from 'zod';
 import {
   buildHeyGenAvatarVideoPlan,
+  findHeyGenFamilyStoryFounderByGroupId,
+  HEYGEN_FAMILY_STORY_PROFILES,
+  isHeyGenConsentAccepted,
   isHeyGenConsentStatusReady,
   parseHeyGenAvatarGroup,
   parseHeyGenAvatarLook,
+  parseHeyGenBreakSeconds,
   parseHeyGenCreateVideo,
   parseHeyGenVideoDetail,
   parseHeyGenVoice,
@@ -1615,7 +1619,7 @@ export interface HeyGenVideoOperationDoc extends Record<string, unknown> {
   cacheScope: string;
   ttl: number;
   kind: 'heygen_avatar_video_operation';
-  version: 1;
+  version: 1 | 2;
   operationId: string;
   idempotencyKeySha256: string;
   manifestSha256: string;
@@ -1643,6 +1647,10 @@ export interface HeyGenVideoOperationDoc extends Record<string, unknown> {
   avatarId: string;
   voiceId: string;
   engine: string;
+  productionProfile?: HeyGenAvatarVideoPlan['productionProfile'];
+  familyStoryFounder?: HeyGenAvatarVideoPlan['familyStoryFounder'];
+  personalizedMotion?: boolean;
+  pauseSeconds?: number;
   firstSubmittedAt?: string;
   providerWindowExpiresAt?: string;
   leaseExpiresAt?: string;
@@ -1669,6 +1677,11 @@ export interface HeyGenAvatarVideoCreateResult {
   reservePremiumCredits: number;
   estimatedCredits: number;
   estimatedDurationSeconds: number;
+  pauseSeconds?: number;
+  productionProfile?: HeyGenAvatarVideoPlan['productionProfile'];
+  familyStoryFounder?: HeyGenAvatarVideoPlan['familyStoryFounder'];
+  personalizedMotion?: boolean;
+  photoFallback?: boolean;
   providerIdempotencyExpiresAt?: string;
   errorCode?: string;
 }
@@ -1684,7 +1697,7 @@ function isVideoOperationDoc(value: unknown): value is HeyGenVideoOperationDoc {
     typeof doc.id === 'string' &&
     doc.cacheScope === doc.id &&
     doc.kind === 'heygen_avatar_video_operation' &&
-    doc.version === 1 &&
+    (doc.version === 1 || doc.version === 2) &&
     doc.ttl === HEYGEN_VIDEO_OPERATION_TTL_SECONDS &&
     typeof doc.operationId === 'string' &&
     typeof doc.requestSha256 === 'string' &&
@@ -1718,6 +1731,11 @@ function operationView(
     reservePremiumCredits: doc.reservePremiumCredits,
     estimatedCredits: doc.estimatedCredits,
     estimatedDurationSeconds: doc.estimatedDurationSeconds,
+    pauseSeconds: doc.pauseSeconds,
+    productionProfile: doc.productionProfile,
+    familyStoryFounder: doc.familyStoryFounder,
+    personalizedMotion: doc.personalizedMotion,
+    photoFallback: doc.productionProfile === 'family_story_photo_fallback',
     providerIdempotencyExpiresAt: doc.providerWindowExpiresAt,
     errorCode: doc.lastErrorCode,
   };
@@ -1737,12 +1755,39 @@ function assertSameVideoOperation(
     doc.confirmedBillingSnapshotSha256 === input.confirmedBillingSnapshotSha256 &&
     doc.confirmedBillingStateSha256 === input.confirmedBillingStateSha256 &&
     doc.confirmedBillingObservedAt === input.confirmedBillingObservedAt &&
+    (doc.productionProfile ?? 'standard') === plan.productionProfile &&
+    doc.familyStoryFounder === plan.familyStoryFounder &&
+    Boolean(doc.personalizedMotion) === plan.personalizedMotion &&
+    (doc.pauseSeconds ?? 0) === plan.pauseSeconds &&
     doc.maxApprovedCredits === input.maxApprovedCredits &&
     doc.reservePremiumCredits === input.reservePremiumCredits;
   if (!same) {
     throw brokerError(
       'heygen_video_idempotency_conflict',
       'This operation_id was already bound to a different request, manifest, idempotency key, or approval envelope.',
+      409,
+    );
+  }
+}
+
+function assertSameTerminalReplay(
+  doc: HeyGenVideoOperationDoc,
+  input: HeyGenAvatarVideoCreateInput,
+  plan: HeyGenAvatarVideoPlan,
+): void {
+  if (doc.version === 2) {
+    assertSameVideoOperation(doc, input, plan);
+    return;
+  }
+  const sameLegacyRequest =
+    doc.idempotencyKeySha256 === plan.idempotencyKeySha256 &&
+    doc.manifestSha256 === input.manifestSha256 &&
+    doc.requestSha256 === plan.requestSha256 &&
+    doc.scriptSha256 === plan.scriptSha256;
+  if (!sameLegacyRequest) {
+    throw brokerError(
+      'heygen_video_idempotency_conflict',
+      'This legacy operation_id was already bound to a different request, manifest, or idempotency key.',
       409,
     );
   }
@@ -1783,7 +1828,7 @@ async function ensureVideoOperation(
     cacheScope: id,
     ttl: HEYGEN_VIDEO_OPERATION_TTL_SECONDS,
     kind: 'heygen_avatar_video_operation',
-    version: 1,
+    version: 2,
     operationId: input.operationId,
     idempotencyKeySha256: plan.idempotencyKeySha256,
     manifestSha256: input.manifestSha256,
@@ -1805,6 +1850,10 @@ async function ensureVideoOperation(
     avatarId: input.avatarId,
     voiceId: input.voiceId,
     engine: input.engine,
+    productionProfile: plan.productionProfile,
+    familyStoryFounder: plan.familyStoryFounder,
+    personalizedMotion: plan.personalizedMotion,
+    pauseSeconds: plan.pauseSeconds,
   };
   try {
     const created = await deps.create(CACHE_CONTAINER, id, doc);
@@ -1883,6 +1932,23 @@ async function runVideoPreflight(
   if (look.id !== input.avatarId) {
     throw brokerError('heygen_avatar_lookup_mismatch', 'HeyGen returned the wrong avatar look.', 502);
   }
+  const liveFamilyFounder = findHeyGenFamilyStoryFounderByGroupId(look.groupId);
+  if (liveFamilyFounder && (input.productionProfile ?? 'standard') === 'standard') {
+    throw brokerError(
+      'heygen_family_story_profile_required',
+      `Look belongs to locked Family Story founder ${liveFamilyFounder}; an explicit Family Story profile is required.`,
+      409,
+    );
+  }
+  if (input.familyStoryFounder) {
+    const profile = HEYGEN_FAMILY_STORY_PROFILES[input.familyStoryFounder];
+    if (look.groupId !== profile.groupId || liveFamilyFounder !== input.familyStoryFounder) {
+      throw brokerError('heygen_family_story_group_mismatch', 'Family Story Look does not belong to the owner-locked founder group.', 409);
+    }
+    if (look.avatarType !== 'photo_avatar' || look.status !== 'completed') {
+      throw brokerError('heygen_family_story_look_incompatible', 'Family Story source must remain the completed owner-selected photo Look.', 409);
+    }
+  }
   validateHeyGenAvatarVideoCompatibility(input, look);
 
   const groupResponse = await requiredGet(`/v3/avatars/${look.groupId}`, accessToken, deps);
@@ -1898,7 +1964,16 @@ async function runVideoPreflight(
       409,
     );
   }
-  if (!isHeyGenConsentStatusReady(group.consentStatus)) {
+  if (input.familyStoryFounder) {
+    const profile = HEYGEN_FAMILY_STORY_PROFILES[input.familyStoryFounder];
+    if (group.id !== profile.groupId || !isHeyGenConsentAccepted(group.consentStatus)) {
+      throw brokerError(
+        'heygen_family_story_consent_required',
+        'Family Story founder group must have explicit accepted/completed consent before any dry run or render.',
+        409,
+      );
+    }
+  } else if (!isHeyGenConsentStatusReady(group.consentStatus)) {
     throw brokerError('heygen_avatar_consent_required', 'HeyGen avatar group consent is not approved.', 409);
   }
 
@@ -1911,6 +1986,13 @@ async function runVideoPreflight(
   if (voice.status === 'processing' || voice.status === 'failed') {
     throw brokerError('heygen_voice_not_ready', `HeyGen voice is not ready (${voice.status}).`, 409);
   }
+  if (input.familyStoryFounder && parseHeyGenBreakSeconds(input.script) > 0 && voice.supportPause !== true) {
+    throw brokerError(
+      'heygen_family_story_pause_unsupported',
+      'Family Story script contains pause tags, but the exact founder voice does not explicitly advertise support_pause=true.',
+      409,
+    );
+  }
 
   let referenceLook: HeyGenAvatarLook | undefined;
   if (input.referenceLookId) {
@@ -1921,23 +2003,16 @@ async function runVideoPreflight(
       referenceLook.id !== input.referenceLookId ||
       referenceLook.avatarType !== 'digital_twin' ||
       referenceLook.groupId !== look.groupId ||
-      (referenceLook.status && referenceLook.status !== 'completed')
+      !referenceLook.supportedApiEngines.includes('avatar_v') ||
+      referenceLook.status !== 'completed'
     ) {
       throw brokerError(
         'heygen_reference_look_incompatible',
-        'Avatar V reference_look_id must be a completed Digital Twin look in the same avatar group.',
+        'Avatar V reference_look_id must be a completed, Avatar V-eligible Digital Twin look in the same avatar group.',
         409,
       );
     }
   }
-  if (input.engine === 'avatar_v' && look.avatarType === 'photo_avatar' && !referenceLook) {
-    throw brokerError(
-      'heygen_avatar_v_reference_required',
-      'Avatar V on a photo avatar requires an explicit completed Digital Twin reference look in the same group.',
-      409,
-    );
-  }
-
   return {
     account: accountResponse.body,
     billing,
@@ -2064,27 +2139,43 @@ export async function getHeyGenVideoOperation(
   return row ? operationView(row.doc, true, deps.now()) : null;
 }
 
+/** Safe terminal replay for the create surface: validates the complete request envelope before reuse. */
+export async function getHeyGenVideoTerminalReplay(
+  input: HeyGenAvatarVideoCreateInput,
+  deps: HeyGenBrokerDeps = defaultHeyGenBrokerDeps,
+): Promise<HeyGenAvatarVideoCreateResult | null> {
+  const row = await readVideoOperation(input.operationId, deps);
+  if (!row || (row.doc.state !== 'accepted' && row.doc.state !== 'rejected')) return null;
+  let plan: HeyGenAvatarVideoPlan;
+  try {
+    plan = buildHeyGenAvatarVideoPlan(input, {
+      legacyTerminalReplay: row.doc.version === 1,
+    });
+  } catch (error) {
+    throw brokerError('heygen_video_input_invalid', (error as Error).message, 400);
+  }
+  assertSameTerminalReplay(row.doc, input, plan);
+  return operationView(row.doc, true, deps.now());
+}
+
 export async function executeHeyGenAvatarVideoCreate(
   input: HeyGenAvatarVideoCreateInput,
   deps: HeyGenBrokerDeps = defaultHeyGenBrokerDeps,
 ): Promise<HeyGenAvatarVideoCreateResult> {
+  const existingTerminal = await readVideoOperation(input.operationId, deps);
   let plan: HeyGenAvatarVideoPlan;
   try {
-    plan = buildHeyGenAvatarVideoPlan(input);
+    plan = buildHeyGenAvatarVideoPlan(input, {
+      legacyTerminalReplay:
+        existingTerminal?.doc.version === 1 &&
+        (existingTerminal.doc.state === 'accepted' || existingTerminal.doc.state === 'rejected'),
+    });
   } catch (error) {
     throw brokerError('heygen_video_input_invalid', (error as Error).message, 400);
   }
-  const legacyTerminal = await readVideoOperation(input.operationId, deps);
-  if (legacyTerminal && (legacyTerminal.doc.state === 'accepted' || legacyTerminal.doc.state === 'rejected')) {
-    const sameLegacyRequest =
-      legacyTerminal.doc.idempotencyKeySha256 === plan.idempotencyKeySha256 &&
-      legacyTerminal.doc.manifestSha256 === input.manifestSha256 &&
-      legacyTerminal.doc.requestSha256 === plan.requestSha256 &&
-      legacyTerminal.doc.scriptSha256 === plan.scriptSha256;
-    if (!sameLegacyRequest) {
-      throw brokerError('heygen_video_idempotency_conflict', 'This operation_id was already bound to a different request (legacy operation record).', 409);
-    }
-    return operationView(legacyTerminal.doc, true, deps.now());
+  if (existingTerminal && (existingTerminal.doc.state === 'accepted' || existingTerminal.doc.state === 'rejected')) {
+    assertSameTerminalReplay(existingTerminal.doc, input, plan);
+    return operationView(existingTerminal.doc, true, deps.now());
   }
   if (
     !input.confirmedBillingSnapshotSha256 ||
@@ -2159,6 +2250,8 @@ export async function executeHeyGenAvatarVideoCreate(
     const approval = verifyHeyGenAvatarVideoApproval(input.ownerApprovalJws, {
       operationId: input.operationId,
       requestSha256: plan.requestSha256,
+      idempotencyKeySha256: plan.idempotencyKeySha256,
+      manifestSha256: input.manifestSha256,
       billingSnapshotSha256: input.confirmedBillingSnapshotSha256,
       billingStateSha256: input.confirmedBillingStateSha256,
       billingObservedAt: input.confirmedBillingObservedAt,

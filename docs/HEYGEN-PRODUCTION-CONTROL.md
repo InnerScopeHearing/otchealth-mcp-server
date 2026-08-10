@@ -159,3 +159,53 @@ There is no honest way to make the provider itself enforce a subscription-credit
 ## Next action
 
 The hard-stop release is deployed. Do not run another founder test. Any re-enable proposal must first configure the owner approval issuer, deliberately set the global provider-write interlock plus one exact family flag, and separately approve one canary under the revised bound. Kimberly and Mark remain blocked on consent regardless.
+
+## Family Story final-quality profile — Avatar V only
+
+Matt's owner-locked final-quality rule supersedes Avatar IV as a production choice. HeyGen's current v3 model guide calls Avatar V the highest-fidelity motion/lip-sync engine; Avatar IV remains the broad-coverage default. The completed Matthew Avatar IV canary is pipeline validation only.
+
+Official constraints implemented in the `family_story_final` profile:
+
+- explicit `engine.type=avatar_v`;
+- `1080p`, `16:9`; Avatar IV/V 4K is currently unavailable;
+- owner-selected `photo_avatar` Look as `avatar_id`;
+- exact matched private cloned voice;
+- natural voice tuning only: speed 1, pitch 0, volume 1, or omitted;
+- pause-aware duration: every supported `<break time="Ns"/>` contributes to the cap and requires `support_pause=true` on the exact voice; other markup is rejected;
+- no `expressiveness` (Avatar IV-only);
+- `motion_prompt` only when an eligible same-group completed Digital Twin reference is present;
+- exact live founder group, selected source type/status, explicit accepted consent, voice, and reference eligibility; missing metadata fails closed;
+- locked founder IDs or any Look returned from a locked founder group cannot bypass this policy under the `standard` profile;
+- exact conservative `max_approved_credits`, not merely a loose ceiling;
+- profile, founder, idempotency-key hash, and manifest hash are owner-grant bound with request and billing state even though policy labels are not forwarded to HeyGen;
+- new version-2 durable operation records retain final/fallback classification; version-1 terminal records stay readable through a replay-only legacy comparator and can never open a new submission.
+
+Owner-locked casting:
+
+| Founder | Group | Selected photo Look | Private voice | Personalized-motion reference | Current profile |
+|---|---|---|---|---|---|
+| Matthew | `81ae4b7368b444d4847ce6f0d3d42674` | `1916ba1b808d49e8829908e29c659469` | `7092904ddda348049fb0eeecf3fdfbb6` | completed same-group Digital Twin `f18ef8e05e564f998b87af7a951fe05a` | `family_story_final` eligible |
+| Kimberly | `ad43b5258baf4328a641a59cfebc15c9` | `3c3f4eabdcac4b70baea8ea3299cdc6b` | `551fec783f294caa97696574d7f6d85e` | none; group pending consent | final personalized motion blocked; fallback separately labeled |
+| Mark | `319e339d9e3949038f0b7c17c4521f00` | `2a75cc08b7a74baba1ed2a468f796436` | `7a301178c14a49ee9a7deb508d36a1ec` | none; group pending consent | final personalized motion blocked; fallback separately labeled |
+
+Live read-only verification showed all selected photo Looks advertise `avatar_v`. Matthew's photo and Digital Twin reference are completed, in the same group, and the group is completed/accepted. Kimberly and Mark remain `pending_consent/pending`, and group-scoped Digital Twin queries return zero for both.
+
+`family_story_photo_fallback` is an explicit non-equivalent mode for Kimberly or Mark only. It uses Avatar V directly from the selected photo, omits `reference_look_id`, `motion_prompt`, and `expressiveness`, and must never be described as personalized/top-tier motion. The live consent gate still blocks it while the group remains pending. Matthew cannot be downgraded to fallback because he has an eligible reference.
+
+### Avatar V conservative caps
+
+The gateway rounds every positive duration up to a three-second billing bucket and adds the one-credit safety allowance proven by the 591-to-588 incident:
+
+```text
+Avatar V cap = ceil(estimated_seconds / 3) + 1
+```
+
+Examples: up to 3.000s -> 2; 3.001-6.000s -> 3; 6.001-9.000s -> 4. The observed 4.62367-second canary maps to 3. Family Story requests must set `max_approved_credits` equal to this cap; lower and higher values both fail locally. HeyGen still exposes no provider-enforced cap, so the owner grant, global/family switches, reservation, no-retry rule, and post-call reconciliation lock remain mandatory.
+
+Official sources:
+
+- https://developers.heygen.com/avatar-v
+- https://developers.heygen.com/models
+- https://developers.heygen.com/reference/create-video
+- https://developers.heygen.com/changelog
+- https://help.heygen.com/en/articles/15126059-how-to-use-credits-on-heygen
