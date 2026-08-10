@@ -32,10 +32,51 @@ export function redactHeyGenAvatarVideoInputForLog(input: Record<string, unknown
       typeof input.confirmed_premium_credits_before === 'number'
         ? input.confirmed_premium_credits_before
         : undefined,
+    confirmed_billing_snapshot_sha256:
+      typeof input.confirmed_billing_snapshot_sha256 === 'string'
+        ? input.confirmed_billing_snapshot_sha256
+        : undefined,
+    confirmed_billing_state_sha256:
+      typeof input.confirmed_billing_state_sha256 === 'string'
+        ? input.confirmed_billing_state_sha256
+        : undefined,
+    confirmed_billing_observed_at:
+      typeof input.confirmed_billing_observed_at === 'string'
+        ? input.confirmed_billing_observed_at
+        : undefined,
+    owner_approval_jws_present: typeof input.owner_approval_jws === 'string',
     max_approved_credits:
       typeof input.max_approved_credits === 'number' ? input.max_approved_credits : undefined,
     reserve_premium_credits:
       typeof input.reserve_premium_credits === 'number' ? input.reserve_premium_credits : undefined,
+  };
+}
+
+export function redactHeyGenReferenceLookInputForLog(input: Record<string, unknown>): unknown {
+  return {
+    operation_id: typeof input.operation_id === 'string' ? input.operation_id : '(invalid)',
+    idempotency_key_sha256: sha256(String(input.idempotency_key ?? '')),
+    source_avatar_id: typeof input.source_avatar_id === 'string' ? input.source_avatar_id : undefined,
+    destination_group_id: typeof input.destination_group_id === 'string' ? input.destination_group_id : undefined,
+    name_sha256: sha256(String(input.name ?? '')),
+    prompt_sha256: sha256(String(input.prompt ?? '')),
+    reference_asset_count: Array.isArray(input.reference_asset_ids) ? input.reference_asset_ids.length : 0,
+    confirmed_billing_snapshot_sha256:
+      typeof input.confirmed_billing_snapshot_sha256 === 'string'
+        ? input.confirmed_billing_snapshot_sha256
+        : undefined,
+    confirmed_billing_state_sha256:
+      typeof input.confirmed_billing_state_sha256 === 'string'
+        ? input.confirmed_billing_state_sha256
+        : undefined,
+    confirmed_billing_observed_at:
+      typeof input.confirmed_billing_observed_at === 'string'
+        ? input.confirmed_billing_observed_at
+        : undefined,
+    reserve_premium_credits:
+      typeof input.reserve_premium_credits === 'number' ? input.reserve_premium_credits : undefined,
+    owner_approval_jws_present: typeof input.owner_approval_jws === 'string',
+    confirm_credit_use: input.confirm_credit_use === true,
   };
 }
 

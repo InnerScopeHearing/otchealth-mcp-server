@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { loadEnv } from '../../config/env.js';
 import {
   executeHeyGenAvatarVideoCreate,
   executeHeyGenRead,
@@ -18,10 +20,15 @@ import {
   type HeyGenAvatarVideoCreateInput,
 } from './video-contracts.js';
 import { ingestHeyGenVideoArtifacts } from './artifact-qa.js';
+import { defaultHeyGenArtifactStore } from './artifact-store.js';
+import { safeHeyGenAssetMetadata, safeHeyGenSessionResource } from './metadata.js';
 import {
   HEYGEN_CREATION_TOOLS,
   HEYGEN_DATA_LANES,
+  HEYGEN_DATA_TOOLS,
+  HEYGEN_METADATA_TOOLS,
   HEYGEN_PAIRING_TOOLS,
+  HEYGEN_PREFLIGHT_TOOLS,
   isHeyGenToolAllowed,
   type HeyGenToolName,
 } from './access.js';
@@ -54,6 +61,12 @@ export const HEYGEN_VIDEO_STATUSES_INPUT = {
 export const HEYGEN_VIDEO_AGENT_SESSIONS_LIST_INPUT = LIST_100_INPUT;
 export const HEYGEN_VIDEO_AGENT_SESSION_GET_INPUT = { session_id: SAFE_ID } as const;
 export const HEYGEN_VIDEO_AGENT_SESSION_VIDEOS_LIST_INPUT = { session_id: SAFE_ID } as const;
+export const HEYGEN_VIDEO_AGENT_RESOURCE_GET_INPUT = { session_id: SAFE_ID, resource_id: SAFE_ID } as const;
+export const HEYGEN_ASSET_GET_INPUT = { asset_id: SAFE_ID } as const;
+export const HEYGEN_ASSET_STATUSES_INPUT = {
+  asset_ids: SAFE_ID_ARRAY,
+  batch_ids: SAFE_ID_ARRAY,
+} as const;
 export const HEYGEN_BRAND_KITS_LIST_INPUT = LIST_100_INPUT;
 export const HEYGEN_BRAND_GLOSSARIES_LIST_INPUT = LIST_100_INPUT;
 export const HEYGEN_BRAND_GLOSSARY_GET_INPUT = { brand_glossary_id: SAFE_ID } as const;
@@ -105,8 +118,23 @@ export const HEYGEN_AVATAR_VIDEO_CREATE_INPUT = {
   brand_glossary_id: SAFE_ID.optional(),
   confirm_credit_use: z.boolean().optional(),
   confirmed_premium_credits_before: z.number().int().min(0),
+  confirmed_billing_snapshot_sha256: z.string().regex(HEYGEN_SHA256_RE).optional(),
+  confirmed_billing_state_sha256: z.string().regex(HEYGEN_SHA256_RE).optional(),
+  confirmed_billing_observed_at: z.string().datetime().optional(),
+  owner_approval_jws: z.string().min(64).max(8192).optional(),
   max_approved_credits: z.number().int().min(1),
   reserve_premium_credits: z.number().int().min(0),
+} as const;
+
+export const HEYGEN_EXISTING_VIDEO_INGEST_QA_INPUT = {
+  ingest_id: z.string().regex(HEYGEN_OPERATION_ID_RE),
+  video_id: SAFE_ID,
+  expected_title_sha256: z.string().regex(HEYGEN_SHA256_RE),
+  include_captioned_video: z.boolean().optional(),
+  include_subtitle: z.boolean().optional(),
+  include_thumbnail: z.boolean().optional(),
+  include_gif: z.boolean().optional(),
+  max_asset_bytes: z.number().int().min(1_048_576).max(52_428_800).optional(),
 } as const;
 
 export const HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT = {
@@ -130,6 +158,10 @@ const VIDEO_OPERATION_OUTPUT = {
   provider_status: z.string().optional(),
   plan: z.string(),
   premium_credits_before: z.number().int().optional(),
+  premium_credits_after: z.number().int().optional(),
+  actual_credit_delta: z.number().int().optional(),
+  billing_snapshot_before_sha256: z.string().optional(),
+  billing_snapshot_after_sha256: z.string().optional(),
   max_approved_credits: z.number().int(),
   reserve_premium_credits: z.number().int(),
   estimated_credits: z.number().int(),
@@ -178,6 +210,16 @@ function avatarVideoInput(input: Record<string, unknown>, dryRun: boolean): HeyG
     brandGlossaryId: typeof input.brand_glossary_id === 'string' ? input.brand_glossary_id : undefined,
     confirmCreditUse: dryRun || input.confirm_credit_use === true,
     confirmedPremiumCreditsBefore: Number(input.confirmed_premium_credits_before),
+    confirmedBillingSnapshotSha256: typeof input.confirmed_billing_snapshot_sha256 === 'string'
+      ? input.confirmed_billing_snapshot_sha256
+      : undefined,
+    confirmedBillingStateSha256: typeof input.confirmed_billing_state_sha256 === 'string'
+      ? input.confirmed_billing_state_sha256
+      : undefined,
+    confirmedBillingObservedAt: typeof input.confirmed_billing_observed_at === 'string'
+      ? input.confirmed_billing_observed_at
+      : undefined,
+    ownerApprovalJws: typeof input.owner_approval_jws === 'string' ? input.owner_approval_jws : undefined,
     maxApprovedCredits: Number(input.max_approved_credits),
     reservePremiumCredits: Number(input.reserve_premium_credits),
   };
@@ -193,6 +235,10 @@ function operationData(result: HeyGenAvatarVideoCreateResult): Record<string, un
     provider_status: result.providerStatus,
     plan: result.plan,
     premium_credits_before: result.premiumCreditsBefore,
+    premium_credits_after: result.premiumCreditsAfter,
+    actual_credit_delta: result.actualCreditDelta,
+    billing_snapshot_before_sha256: result.billingSnapshotBeforeSha256,
+    billing_snapshot_after_sha256: result.billingSnapshotAfterSha256,
     max_approved_credits: result.maxApprovedCredits,
     reserve_premium_credits: result.reservePremiumCredits,
     estimated_credits: result.estimatedCredits,
@@ -213,6 +259,57 @@ export function registerHeyGenProductionTools(
   callerHash: CallerHashProvider,
   deps: HeyGenBrokerDeps,
 ): void {
+  registerTool(server, {
+    name: 'heygen_diagnostics_get',
+    category: 'read',
+    annotations: {
+      title: 'HeyGen: safe production diagnostics',
+      description: 'Returns the gateway build marker, exact fixed HeyGen action inventory, OAuth-only transport posture, artifact-store readiness, mutation switches, and owner-verifier readiness. No provider call, credential, token, or signed URL is returned.',
+      ...READ_ANNOTATIONS,
+      openWorldHint: false,
+    },
+    inputShape: {},
+    outputShape: { diagnostics: z.unknown(), error: z.string().optional() },
+    handler: async (_input, ctx) => {
+      if (!isHeyGenToolAllowed('heygen_diagnostics_get', ctx.callerAgent)) return laneRefusal('heygen_diagnostics_get', ctx.callerAgent);
+      const env = loadEnv();
+      const tools = [
+        ...HEYGEN_PAIRING_TOOLS,
+        ...HEYGEN_DATA_TOOLS,
+        ...HEYGEN_METADATA_TOOLS,
+        ...HEYGEN_PREFLIGHT_TOOLS,
+        ...HEYGEN_CREATION_TOOLS,
+      ];
+      return {
+        data: {
+          diagnostics: {
+            build: process.env.DD_VERSION || process.env.GITHUB_SHA || 'unknown',
+            provider_base: 'https://api.heygen.com',
+            credential_transport: 'oauth_bearer_only',
+            api_key_path_present: false,
+            subscription_guard: true,
+            action_count: tools.length,
+            actions: tools,
+            artifact_store_configured: defaultHeyGenArtifactStore.configured(),
+            feature_flags: {
+              reference_look_writes: env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES,
+              video_agent_chat_writes: env.ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES,
+              video_agent_generation: env.ENABLE_HEYGEN_VIDEO_AGENT_GENERATION,
+              asset_writes: env.ENABLE_HEYGEN_ASSET_WRITES,
+              translation_writes: env.ENABLE_HEYGEN_TRANSLATION_WRITES,
+              tts_writes: env.ENABLE_HEYGEN_TTS_WRITES,
+              metadata_writes: env.ENABLE_HEYGEN_METADATA_WRITES,
+            },
+            owner_approval_verifier_configured: Boolean(
+              env.HEYGEN_OWNER_APPROVAL_SUBJECT && env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK,
+            ),
+          },
+        },
+        summary: `HeyGen diagnostics: ${tools.length} fixed actions, OAuth Bearer only, credit-consuming feature lanes ${env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES || env.ENABLE_HEYGEN_VIDEO_AGENT_GENERATION || env.ENABLE_HEYGEN_TRANSLATION_WRITES || env.ENABLE_HEYGEN_TTS_WRITES ? 'partially enabled' : 'dark'}.`,
+      };
+    },
+  }, callerHash);
+
   registerTool(server, {
     name: 'heygen_video_statuses_get',
     category: 'read',
@@ -262,6 +359,63 @@ export function registerHeyGenProductionTools(
       if (!isHeyGenToolAllowed('heygen_video_agent_session_videos_list', ctx.callerAgent)) return laneRefusal('heygen_video_agent_session_videos_list', ctx.callerAgent);
       const body = await executeHeyGenRead({ kind: 'videoAgentSessionVideos', sessionId: input.session_id }, deps);
       return { data: { body }, summary: `HeyGen videos for session ${input.session_id} retrieved.` };
+    },
+  }, callerHash);
+
+  registerTool(server, {
+    name: 'heygen_video_agent_resource_get',
+    category: 'read',
+    annotations: {
+      title: 'HeyGen: get safe Video Agent resource metadata',
+      description: 'Reads one Video Agent session resource and returns only bounded metadata plus URL fingerprints. Provider URLs and open-ended instructions never leave the gateway.',
+      ...READ_ANNOTATIONS,
+    },
+    inputShape: HEYGEN_VIDEO_AGENT_RESOURCE_GET_INPUT,
+    outputShape: { resource: z.unknown(), error: z.string().optional() },
+    handler: async (input, ctx) => {
+      if (!isHeyGenToolAllowed('heygen_video_agent_resource_get', ctx.callerAgent)) return laneRefusal('heygen_video_agent_resource_get', ctx.callerAgent);
+      const raw = await executeHeyGenRead({
+        kind: 'videoAgentResource',
+        sessionId: input.session_id,
+        resourceId: input.resource_id,
+      }, deps);
+      const resource = safeHeyGenSessionResource(raw);
+      return { data: { resource }, summary: `Safe HeyGen resource metadata ${input.resource_id} retrieved.` };
+    },
+  }, callerHash);
+
+  registerTool(server, {
+    name: 'heygen_asset_get',
+    category: 'read',
+    annotations: {
+      title: 'HeyGen: get safe asset metadata',
+      description: 'Reads GET /v3/assets/{asset_id} and removes the owner and provider URL, returning a URL-presence flag and SHA-256 fingerprint instead.',
+      ...READ_ANNOTATIONS,
+    },
+    inputShape: HEYGEN_ASSET_GET_INPUT,
+    outputShape: { asset: z.unknown(), error: z.string().optional() },
+    handler: async (input, ctx) => {
+      if (!isHeyGenToolAllowed('heygen_asset_get', ctx.callerAgent)) return laneRefusal('heygen_asset_get', ctx.callerAgent);
+      const raw = await executeHeyGenRead({ kind: 'asset', assetId: input.asset_id }, deps);
+      const asset = safeHeyGenAssetMetadata(raw);
+      return { data: { asset }, summary: `Safe HeyGen asset metadata ${input.asset_id} retrieved.` };
+    },
+  }, callerHash);
+
+  registerTool(server, {
+    name: 'heygen_asset_statuses_get',
+    category: 'read',
+    annotations: {
+      title: 'HeyGen: bulk asset statuses',
+      description: 'Read-only GET /v3/assets/statuses for up to 100 asset or batch ids.',
+      ...READ_ANNOTATIONS,
+    },
+    inputShape: HEYGEN_ASSET_STATUSES_INPUT,
+    outputShape: { body: z.unknown(), error: z.string().optional() },
+    handler: async (input, ctx) => {
+      if (!isHeyGenToolAllowed('heygen_asset_statuses_get', ctx.callerAgent)) return laneRefusal('heygen_asset_statuses_get', ctx.callerAgent);
+      const body = await executeHeyGenRead({ kind: 'assetStatuses', assetIds: input.asset_ids, batchIds: input.batch_ids }, deps);
+      return { data: { body }, summary: 'HeyGen asset statuses retrieved.' };
     },
   }, callerHash);
 
@@ -409,6 +563,7 @@ export function registerHeyGenProductionTools(
     inputShape: HEYGEN_AVATAR_VIDEO_CREATE_INPUT,
     outputShape: VIDEO_OPERATION_OUTPUT,
     redactInputForLog: redactHeyGenAvatarVideoInputForLog,
+    shieldInputForScan: (input) => ({ script: input.script, motion_prompt: input.motion_prompt }),
     handler: async (input, ctx) => {
       if (!isHeyGenToolAllowed('heygen_avatar_video_create', ctx.callerAgent)) return laneRefusal('heygen_avatar_video_create', ctx.callerAgent);
       const mapped = avatarVideoInput(input as unknown as Record<string, unknown>, ctx.dryRun);
@@ -432,6 +587,103 @@ export function registerHeyGenProductionTools(
         data: operationData(result),
         audit: { after: { operation_id: result.operationId, state: result.state, video_id: result.videoId } },
         summary: `HeyGen Avatar Video operation ${result.operationId}: ${result.state}${result.videoId ? `, video ${result.videoId}` : ''}.`,
+      };
+    },
+  }, callerHash);
+
+  registerTool(server, {
+    name: 'heygen_existing_video_ingest_qa',
+    category: 'write_orchestrated',
+    annotations: {
+      title: 'HeyGen: securely ingest an existing completed account video (CTO only)',
+      description: 'Reads one owner-designated existing account video, verifies its title hash and completed state, downloads only allowlisted HeyGen assets without exposing signed URLs, validates/hashes them, and stores a private Azure artifact manifest. It never creates or alters provider media.',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputShape: HEYGEN_EXISTING_VIDEO_INGEST_QA_INPUT,
+    outputShape: {
+      status: z.string(),
+      ingested: z.boolean(),
+      video_id: z.string(),
+      manifest_uri: z.string().optional(),
+      duration_seconds: z.number().optional(),
+      assets: z.array(z.object({
+        kind: z.string(),
+        artifact_uri: z.string(),
+        sha256: z.string(),
+        size_bytes: z.number().int(),
+        content_type: z.string(),
+        extension: z.string(),
+        magic_valid: z.boolean(),
+        srt_cue_count: z.number().int().optional(),
+      }).strict()).optional(),
+      qa: z.object({
+        technical_pass: z.boolean(),
+        manual_visual_review_required: z.boolean(),
+        checks: z.array(z.string()),
+      }).strict().optional(),
+    },
+    handler: async (input, ctx) => {
+      if (!isHeyGenToolAllowed('heygen_existing_video_ingest_qa', ctx.callerAgent)) return laneRefusal('heygen_existing_video_ingest_qa', ctx.callerAgent);
+      if (ctx.dryRun) {
+        return {
+          data: { status: 'dry_run', ingested: false, video_id: input.video_id },
+          summary: 'DRY RUN: no download, provider mutation, QA, or Blob write occurred.',
+        };
+      }
+      const detail = await getHeyGenVideoDetail(input.video_id, deps);
+      const titleSha256 = createHash('sha256').update(detail.title ?? '', 'utf8').digest('hex');
+      if (titleSha256 !== input.expected_title_sha256) {
+        throw new Error('Existing HeyGen video title hash does not match the owner-designated artifact.');
+      }
+      if (detail.status !== 'completed') {
+        return {
+          data: { status: detail.status, ingested: false, video_id: detail.id },
+          summary: `HeyGen video ${detail.id} is ${detail.status}; no artifact was ingested.`,
+        };
+      }
+      const ingested = await ingestHeyGenVideoArtifacts(detail, {
+        operationId: input.ingest_id,
+        includeCaptionedVideo: input.include_captioned_video ?? false,
+        includeSubtitle: input.include_subtitle ?? true,
+        includeThumbnail: input.include_thumbnail ?? true,
+        includeGif: input.include_gif ?? false,
+        maxAssetBytes: input.max_asset_bytes ?? 52_428_800,
+      });
+      return {
+        data: {
+          status: 'completed',
+          ingested: true,
+          video_id: ingested.videoId,
+          manifest_uri: ingested.manifestUri,
+          duration_seconds: ingested.duration,
+          assets: ingested.assets.map((asset) => ({
+            kind: asset.kind,
+            artifact_uri: asset.artifactUri,
+            sha256: asset.sha256,
+            size_bytes: asset.sizeBytes,
+            content_type: asset.contentType,
+            extension: asset.extension,
+            magic_valid: asset.magicValid,
+            srt_cue_count: asset.srtCueCount,
+          })),
+          qa: {
+            technical_pass: ingested.qa.technicalPass,
+            manual_visual_review_required: ingested.qa.manualVisualReviewRequired,
+            checks: ingested.qa.checks,
+          },
+        },
+        audit: {
+          after: {
+            ingest_id: input.ingest_id,
+            video_id: ingested.videoId,
+            manifest_uri: ingested.manifestUri,
+            asset_count: ingested.assets.length,
+          },
+        },
+        summary: `Existing HeyGen video ${ingested.videoId} securely ingested with ${ingested.assets.length} artifact(s); visual/likeness approval remains manual.`,
       };
     },
   }, callerHash);

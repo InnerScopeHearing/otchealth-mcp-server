@@ -26,4 +26,14 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
   assert.ok('env' in payload);
   assert.ok('read_only_mode' in payload);
   assert.ok('connector_token_revoked' in payload);
+  assert.deepEqual(payload.heygen, {
+    reference_look_writes: false,
+    video_agent_chat_writes: false,
+    video_agent_generation: false,
+    asset_writes: false,
+    translation_writes: false,
+    tts_writes: false,
+    metadata_writes: false,
+    owner_approval_verifier_configured: false,
+  });
 });

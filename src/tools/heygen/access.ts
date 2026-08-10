@@ -2,6 +2,7 @@ export const HEYGEN_DATA_LANES = ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer
 export const HEYGEN_PAIRING_TOOLS = ['heygen_pairing_start', 'heygen_pairing_status'] as const;
 export const HEYGEN_DATA_TOOLS = [
   'heygen_account_get',
+  'heygen_diagnostics_get',
   'heygen_videos_list',
   'heygen_video_get',
   'heygen_video_agent_styles_list',
@@ -15,6 +16,9 @@ export const HEYGEN_DATA_TOOLS = [
   'heygen_video_agent_sessions_list',
   'heygen_video_agent_session_get',
   'heygen_video_agent_session_videos_list',
+  'heygen_video_agent_resource_get',
+  'heygen_asset_get',
+  'heygen_asset_statuses_get',
   'heygen_brand_kits_list',
   'heygen_brand_glossaries_list',
   'heygen_brand_glossary_get',
@@ -25,17 +29,36 @@ export const HEYGEN_DATA_TOOLS = [
   'heygen_translation_statuses_get',
   'heygen_proofread_get',
   'heygen_avatar_video_operation_get',
+  'heygen_reference_look_operation_get',
 ] as const;
 export const HEYGEN_CREATION_TOOLS = [
   'heygen_prompt_avatar_create',
   'heygen_avatar_video_create',
+  'heygen_existing_video_ingest_qa',
   'heygen_video_wait_ingest_qa',
+] as const;
+export const HEYGEN_METADATA_TOOLS = [
+  'heygen_avatar_look_name_update',
+] as const;
+export const HEYGEN_PREFLIGHT_TOOLS = [
+  'heygen_reference_look_create',
+  'heygen_video_agent_session_create',
+  'heygen_video_agent_feedback_send',
+  'heygen_video_agent_generation_approve',
+  'heygen_video_agent_session_stop',
+  'heygen_asset_upload',
+  'heygen_translation_create',
+  'heygen_proofread_create',
+  'heygen_proofread_generate',
+  'heygen_speech_preview_create',
 ] as const;
 
 export type HeyGenToolName =
   | (typeof HEYGEN_PAIRING_TOOLS)[number]
   | (typeof HEYGEN_DATA_TOOLS)[number]
-  | (typeof HEYGEN_CREATION_TOOLS)[number];
+  | (typeof HEYGEN_METADATA_TOOLS)[number]
+  | (typeof HEYGEN_CREATION_TOOLS)[number]
+  | (typeof HEYGEN_PREFLIGHT_TOOLS)[number];
 
 /** Exact in-handler authorization model. Unknown/external lanes always fail closed. */
 export function isHeyGenToolAllowed(toolName: HeyGenToolName, caller: string | undefined | null): boolean {

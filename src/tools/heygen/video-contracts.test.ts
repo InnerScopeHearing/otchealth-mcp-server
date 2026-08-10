@@ -4,6 +4,7 @@ import {
   buildHeyGenAvatarVideoPlan,
   canonicalRequestSha256,
   estimateAvatarVideoCredits,
+  isHeyGenConsentAccepted,
   isHeyGenConsentStatusReady,
   parseHeyGenAvatarGroup,
   parseHeyGenAvatarLook,
@@ -40,6 +41,15 @@ function validInput(overrides: Partial<HeyGenAvatarVideoCreateInput> = {}): HeyG
     ...overrides,
   };
 }
+
+test('completed consent normalization accepts current provider spellings and fails closed otherwise', () => {
+  for (const value of ['accepted', 'Accepted', ' approved ', 'complete', 'completed']) {
+    assert.equal(isHeyGenConsentAccepted(value), true, value);
+  }
+  for (const value of [null, undefined, '', 'pending', 'pending_consent', 'rejected', 'unknown']) {
+    assert.equal(isHeyGenConsentAccepted(value), false, String(value));
+  }
+});
 
 test('direct video plan emits the exact bounded upstream body and preserves approved script bytes', () => {
   const input = validInput();

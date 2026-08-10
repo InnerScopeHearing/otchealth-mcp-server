@@ -19,6 +19,18 @@ export function buildHealthPayload() {
     enable_write_tools: env.ENABLE_WRITE_TOOLS,
     enable_high_risk_tools: env.ENABLE_HIGH_RISK_TOOLS,
     dry_run_default: env.DRY_RUN_DEFAULT,
+    heygen: {
+      reference_look_writes: env.ENABLE_HEYGEN_REFERENCE_LOOK_WRITES,
+      video_agent_chat_writes: env.ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES,
+      video_agent_generation: env.ENABLE_HEYGEN_VIDEO_AGENT_GENERATION,
+      asset_writes: env.ENABLE_HEYGEN_ASSET_WRITES,
+      translation_writes: env.ENABLE_HEYGEN_TRANSLATION_WRITES,
+      tts_writes: env.ENABLE_HEYGEN_TTS_WRITES,
+      metadata_writes: env.ENABLE_HEYGEN_METADATA_WRITES,
+      owner_approval_verifier_configured: Boolean(
+        env.HEYGEN_OWNER_APPROVAL_SUBJECT && env.HEYGEN_OWNER_APPROVAL_PUBLIC_JWK,
+      ),
+    },
     cio_workspace_id: env.CIO_WORKSPACE_ID,
     connector_token_revoked: rev.revoked_token_hash !== null,
     // Regression guard: the deploy pipeline asserts this stays >= the expected catalog size,
