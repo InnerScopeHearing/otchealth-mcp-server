@@ -40,6 +40,6 @@ jobs:
           npm test 2>&1 | tee /tmp/test-output.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            node -e "const fs=require('fs');let s=fs.readFileSync('/tmp/test-output.log','utf8').slice(-12000);s=s.replace(/%/g,'%25').replace(/\r/g,'%0D').replace(/\n/g,'%0A');console.log('::error title=Test failure details::'+s)"
+            node -e "const fs=require('fs');const lines=fs.readFileSync('/tmp/test-output.log','utf8').split(/\r?\n/);const out=[];for(let i=0;i<lines.length;i++){if(/^not ok /.test(lines[i]))out.push(...lines.slice(Math.max(0,i-3),Math.min(lines.length,i+45)));}out.push(...lines.slice(-30));let s=out.join('\n').slice(-60000);s=s.replace(/%/g,'%25').replace(/\r/g,'%0D').replace(/\n/g,'%0A');console.log('::error title=Test failure details::'+s)"
           fi
           exit "$status"
