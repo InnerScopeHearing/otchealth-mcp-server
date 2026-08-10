@@ -171,5 +171,3 @@ export async function identifyCustomer(args: {
   if (args.correlationId !== undefined) opts.correlationId = args.correlationId;
   return trackRequest('PUT', path, args.attributes, opts);
 }
-;
-}

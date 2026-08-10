@@ -161,7 +161,3 @@ function mapAppApiError(status: number, path: string, body: string): CustomerIoA
     upstream,
   });
 }
- match the App API documentation.',
-    upstream,
-  });
-}

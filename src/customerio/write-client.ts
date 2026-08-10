@@ -394,7 +394,3 @@ export async function triggerBroadcast(
     correlationId,
   );
 }
- body,
-    correlationId,
-  );
-}
