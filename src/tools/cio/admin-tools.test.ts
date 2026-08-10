@@ -136,9 +136,11 @@ test('non-approved lane cannot read administrative Customer.io state and causes 
   }) as typeof fetch;
   try {
     const response = await invoke(tools.get('cio_admin_read_workspace_health')!, 'coo', {});
-    const result = resultOf(response);
-    assert.equal(result.executed, false);
-    assert.equal(result.error, 'forbidden_cio_admin_lane');
+    assert.equal(response.isError, true);
+    assert.match(
+      String((response.content as Array<{ text?: string }>)[0]?.text),
+      /restricted to the cto\/cro\/exec agent\(s\)/,
+    );
     assert.equal(networkCalls, 0);
   } finally {
     globalThis.fetch = original;
