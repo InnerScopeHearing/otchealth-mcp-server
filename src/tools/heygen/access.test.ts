@@ -205,6 +205,7 @@ test('public HeyGen surface is fixed and exposes only bounded direct video while
   assert.match(productionSource, /name: 'heygen_avatar_video_create',[\s\S]*?category: 'write_orchestrated'/);
   assert.match(productionSource, /isHeyGenProviderWriteEnabled\('ENABLE_HEYGEN_AVATAR_VIDEO_WRITES'\)/);
   assert.match(lookSource, /isHeyGenProviderWriteEnabled\('ENABLE_HEYGEN_REFERENCE_LOOK_WRITES'\)/);
+  assert.match(lookSource, /operation_id: z\.string\(\)\.optional\(\),[\s\S]*?request_sha256: z\.string\(\)\.optional\(\),[\s\S]*?published_cost_credits: z\.number\(\)\.int\(\)\.optional\(\)/);
   assert.match(productionSource, /name: 'heygen_existing_video_ingest_qa',[\s\S]*?category: 'write_orchestrated'/);
   assert.match(productionSource, /name: 'heygen_video_wait_ingest_qa',[\s\S]*?category: 'write_orchestrated'/);
 });
