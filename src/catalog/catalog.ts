@@ -85,9 +85,10 @@ export interface ServiceInfo {
  */
 export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
   cio: {
-    description: 'Customer.io lifecycle CRM: newsletters, segments, customers, events.',
-    ring: 'non-phi', auth: 'CIO_SITE_ID / CIO_TRACK_KEY / CIO_APP_API_BEARER', status: 'wired',
-    available: [],
+    description: 'Customer.io lifecycle CRM plus a bounded administrative control plane for health, limits, Goals, subscriptions, consent, audit, and Design Studio readiness.',
+    ring: 'non-phi', auth: 'CIO_SITE_ID / CIO_TRACK_KEY / CIO_APP_API_BEARER / CIO_FLY_SERVICE_ACCOUNT_TOKEN', status: 'wired',
+    available: ['Customer.io Agent Routines, custom Skills, business context, and compliance-prompt administration remain UI-only; the 2026-08-09 OpenAPI schema exposes no spam-score endpoint.'],
+    rule: 'cio_admin_read_* is cto/cro/exec. cio_admin_write_* is dry-run by default; CRO is preview-only; live writes are cto/exec, high-risk gated, and require owner_approval_ref. Customer/profile data is excluded from the admin surface.',
   },
   cloudflare: {
     description: 'Cloudflare fleet email routing + DNS.',

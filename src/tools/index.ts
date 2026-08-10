@@ -135,6 +135,7 @@ import { registerLlmAzure } from './llm/azure.js';
 import { registerGatewayFetchResult } from './gateway-fetch-result.js';
 
 // ===== EXHAUSTIVE WAVE: complete per-connector CRUD surface =====
+import { registerCioAdminTools } from './cio/admin-tools.js';
 import { registerCioActivitiesList } from './cio/activities-list.js';
 import { registerCioBroadcastGetErrors } from './cio/broadcast-get-errors.js';
 import { registerCioBroadcastGetMetrics } from './cio/broadcast-get-metrics.js';
@@ -1175,6 +1176,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerTwilioSendSms(server, callerHash);
 
   // ===== EXHAUSTIVE WAVE registrations =====
+  registerCioAdminTools(server, callerHash);
   registerCioActivitiesList(server, callerHash);
   registerCioBroadcastGetErrors(server, callerHash);
   registerCioBroadcastGetMetrics(server, callerHash);

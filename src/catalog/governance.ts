@@ -15,6 +15,11 @@ export interface GovRule {
 }
 
 export const GOVERNANCE: GovRule[] = [
+  // Customer.io administrative control plane. CRO can read and dry-run every bounded wrapper; live
+  // configuration writes are additionally restricted in-handler to cto/exec and require an owner
+  // approval reference. This central rule duplicates the fixed in-handler lane model for visibility.
+  { pattern: 'cio_admin_read_*', requiredRole: ['cto', 'cro', 'exec'], reason: 'Customer.io administrative reads are limited to approved internal revenue/technology lanes.' },
+  { pattern: 'cio_admin_write_*', requiredRole: ['cto', 'cro', 'exec'], reason: 'Customer.io admin writes require the approved internal lane; in-handler policy limits live execution to cto/exec with owner approval while CRO remains dry-run-only.' },
   // HeyGen credential pairing changes the durable OAuth token chain. Keep BOTH pairing controls
   // CTO-only by exact name; a broad heygen_* rule would incorrectly block approved internal data lanes.
   { pattern: 'heygen_pairing_start', requiredRole: 'cto', reason: 'Creating a HeyGen OAuth pairing session is CTO-owned credential administration.' },

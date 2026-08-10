@@ -5,6 +5,17 @@ const EnvSchema = z.object({
   CIO_SITE_ID: z.string().min(1, 'CIO_SITE_ID is required'),
   CIO_TRACK_KEY: z.string().min(1, 'CIO_TRACK_KEY is required'),
   CIO_APP_API_BEARER: z.string().min(1, 'CIO_APP_API_BEARER is required'),
+  // Customer.io Journeys UI API / Design Studio control plane. Long-lived service-account token
+  // exchanged at runtime for a one-hour JWT; inert when unset so the existing App/Track surface
+  // remains boot-compatible until the least-privilege Customer.io role is provisioned.
+  CIO_FLY_SERVICE_ACCOUNT_TOKEN: z
+    .string()
+    .optional()
+    .default('')
+    .refine(
+      (value) => value === '' || value.startsWith('sa_live_') || value.startsWith('sa_sandbox_'),
+      'CIO_FLY_SERVICE_ACCOUNT_TOKEN must be a Customer.io sa_live_ or sa_sandbox_ token',
+    ),
 
   // MCP server auth
   PERPLEXITY_CONNECTOR_TOKEN: z

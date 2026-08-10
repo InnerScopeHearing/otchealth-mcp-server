@@ -130,6 +130,18 @@ Every tool returns a `structuredContent` JSON envelope:
 
 Every tool annotates: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` (ADR-001 §4d).
 
+### Customer.io governed administrative control plane
+
+The additional `cio_admin_*` surface is deliberately bounded: 20 read tools and 22 dry-run/high-risk configuration writes for workspace health, frequency caps, message limits, merge-unsubscribe policy, Goals, subscription-center settings/topics/channels/languages/pages/order, open-tracking consent, redacted audit logs, and Design Studio readiness. It is not a generic API proxy.
+
+- Reads: `cto`, `cro`, `exec`.
+- Write previews: `cto`, `cro`, `exec`.
+- Live writes: `cto`, `exec`, with `owner_approval_ref`; every write is `write_orchestrated` and dry-run by default.
+- No message sends, campaign activation, customer/profile/list/suppression changes, billing writes, or service-account administration exist in this surface.
+- The surface is inert until `CIO_FLY_SERVICE_ACCOUNT_TOKEN` is configured.
+
+Exact tool names, API baseline, limits, and provisioning steps: [`docs/CUSTOMERIO-GOVERNED-CONTROL.md`](docs/CUSTOMERIO-GOVERNED-CONTROL.md).
+
 ---
 
 ## Architecture

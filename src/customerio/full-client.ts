@@ -69,7 +69,7 @@ function mapAppError(status: number, path: string, body: string): CustomerIoApiE
   let up: unknown = body;
   try { up = JSON.parse(body); } catch { /**/ }
   if (status === 401 || status === 403)
-    return new CustomerIoApiError({ code: 'cio_auth_failed', status, message: `Customer.io App API rejected auth on ${path}.`, nextStep: 'Confirm CIO_APP_API_BEARER in the Notion Token Vault.', upstream: up });
+    return new CustomerIoApiError({ code: 'cio_auth_failed', status, message: `Customer.io App API rejected auth on ${path}.`, nextStep: 'Confirm Azure Key Vault kv-otc-55c84f6bef secret cio-app-api-bearer is synchronized to Container Apps local secret cio-app-bearer.', upstream: up });
   if (status === 404)
     return new CustomerIoApiError({ code: 'cio_not_found', status, message: `Customer.io App API returned 404 for ${path}.`, nextStep: `Verify the ID exists at https://fly.customer.io/env/${env.CIO_WORKSPACE_ID}/`, upstream: up });
   if (status === 400)
@@ -85,7 +85,7 @@ function mapTrackError(status: number, method: string, path: string, body: strin
   let up: unknown = body;
   try { up = JSON.parse(body); } catch { /**/ }
   if (status === 401 || status === 403)
-    return new CustomerIoApiError({ code: 'cio_auth_failed', status, message: `Customer.io Track API rejected basic auth on ${method} ${path}.`, nextStep: 'Confirm CIO_SITE_ID + CIO_TRACK_KEY match the Notion vault.', upstream: up });
+    return new CustomerIoApiError({ code: 'cio_auth_failed', status, message: `Customer.io Track API rejected basic auth on ${method} ${path}.`, nextStep: 'Confirm Azure Key Vault secrets cio-site-id and cio-track-key are synchronized to the same-named Container Apps local secrets.', upstream: up });
   if (status === 400)
     return new CustomerIoApiError({ code: 'cio_bad_request', status, message: `Customer.io Track API rejected ${method} ${path} as malformed.`, nextStep: 'Verify identifier, payload shape, and required fields.', upstream: up });
   if (status === 404)
@@ -115,7 +115,7 @@ async function appGet<T = unknown>(path: string, query?: Record<string, string |
     throw mapAppError(res.status, path, body);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
-    throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error GET ${path}: ${(err as Error).message}`, nextStep: 'Check Railway logs and Customer.io status page.', upstream: err });
+    throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error GET ${path}: ${(err as Error).message}`, nextStep: 'Check Azure Container Apps logs and Customer.io status.', upstream: err });
   }
 }
 
@@ -140,7 +140,7 @@ async function appWrite<T = unknown>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'
     throw mapAppError(res.status, path, raw);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
-    throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error ${method} ${path}: ${(err as Error).message}`, nextStep: 'Check Railway logs and Customer.io status page.', upstream: err });
+    throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error ${method} ${path}: ${(err as Error).message}`, nextStep: 'Check Azure Container Apps logs and Customer.io status.', upstream: err });
   }
 }
 
@@ -164,7 +164,7 @@ async function trackWrite(method: 'PUT' | 'POST' | 'DELETE' | 'PATCH', path: str
     throw mapTrackError(res.status, method, path, raw);
   } catch (err) {
     if (err instanceof CustomerIoApiError) throw err;
-    throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error ${method} ${path}: ${(err as Error).message}`, nextStep: 'Check Railway logs and Customer.io status page.', upstream: err });
+    throw new CustomerIoApiError({ code: 'cio_network_error', status: 0, message: `Network error ${method} ${path}: ${(err as Error).message}`, nextStep: 'Check Azure Container Apps logs and Customer.io status.', upstream: err });
   }
 }
 

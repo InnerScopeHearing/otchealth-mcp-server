@@ -151,7 +151,34 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'github_repo_list_branches', 'github_commit_get', 'github_commit_compare',
   // issues (file + close follow-ups without leaving the seat)
   'github_create_issue', 'github_issue_get', 'github_issue_update',
-  'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read', 'cio_get_customer', 'shield_check', 'groundedness_check',
+  'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read', 'cio_get_customer',
+  // Bounded Customer.io administrative control plane (2026-08-09): explicit names, not a generic
+  // proxy. Read tools are cto/cro/exec; write tools are visible for planning but live execution is
+  // re-gated in-handler to cto/exec with owner_approval_ref. The canonical cro client_credentials
+  // lane sees the full registry; this ship list keeps the CTO/exec connector surface complete.
+  'cio_admin_read_workspace_health', 'cio_admin_read_workspace_health_view',
+  'cio_admin_read_frequency_caps', 'cio_admin_read_frequency_cap_usage',
+  'cio_admin_read_message_limits', 'cio_admin_read_preserve_unsubscribes_on_merge',
+  'cio_admin_read_goals', 'cio_admin_read_goal', 'cio_admin_read_goal_data',
+  'cio_admin_read_subscription_center_settings', 'cio_admin_read_subscription_topics',
+  'cio_admin_read_subscription_topic', 'cio_admin_read_subscription_channels',
+  'cio_admin_read_subscription_languages', 'cio_admin_read_subscription_language',
+  'cio_admin_read_subscription_pages', 'cio_admin_read_subscription_order',
+  'cio_admin_read_open_tracking_consent', 'cio_admin_read_audit_logs',
+  'cio_admin_read_design_readiness',
+  'cio_admin_write_frequency_cap_create', 'cio_admin_write_frequency_cap_update',
+  'cio_admin_write_frequency_cap_delete', 'cio_admin_write_message_limits_update',
+  'cio_admin_write_preserve_unsubscribes_on_merge',
+  'cio_admin_write_goal_create', 'cio_admin_write_goal_update', 'cio_admin_write_goal_delete',
+  'cio_admin_write_subscription_center_settings',
+  'cio_admin_write_subscription_topic_create', 'cio_admin_write_subscription_topic_update',
+  'cio_admin_write_subscription_topic_delete', 'cio_admin_write_subscription_channel_upsert',
+  'cio_admin_write_subscription_channel_delete', 'cio_admin_write_subscription_languages_create',
+  'cio_admin_write_subscription_language_update', 'cio_admin_write_subscription_language_delete',
+  'cio_admin_write_subscription_page_create', 'cio_admin_write_subscription_page_update',
+  'cio_admin_write_subscription_topic_order', 'cio_admin_write_subscription_channel_order',
+  'cio_admin_write_open_tracking_consent',
+  'shield_check', 'groundedness_check',
   // mail_archive_* (2026-08-04): built for the CFO's Exchange Online Archive problem (Graph cannot
   // address an in-place archive mailbox at all; this reads it via EWS instead) and EXEC_RING-gated
   // in-handler, but never added here -- same omission class as xero_attachment_upload/catalog_probe/
