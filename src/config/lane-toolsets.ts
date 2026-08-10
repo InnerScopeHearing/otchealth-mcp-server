@@ -125,6 +125,7 @@ const CTO_M365_CURATED = [
   'azure_job_get', 'azure_job_update', 'azure_job_upsert', 'azure_jobs_list', 'azure_logs_query',
   'azure_resource_list', 'azure_search_index_stats', 'azure_search_index_upsert', 'azure_search_indexer_upsert',
   'brain_search', 'catalog_audit_unused', 'catalog_list_tools', 'catalog_master', 'catalog_probe',
+  'cio_admin_read_*', 'cio_admin_write_*',
   'catalog_service_capabilities', 'catalog_skill', 'checkpoint', 'cloudflare_add_email_destination',
   'cloudflare_cache_purge_all', 'cloudflare_cache_purge_by_tag', 'cloudflare_cache_purge_by_url',
   'cloudflare_create_dns_record', 'cloudflare_create_email_rule', 'cloudflare_delete_dns_record',
@@ -154,7 +155,8 @@ const CTO_M365_CURATED = [
   'github_branch_get',
 ] as const;
 const CRO_M365_CURATED = [
-  'brain_search', 'catalog_list_tools', 'checkpoint', 'cio_broadcast_get', 'cio_broadcast_get_metrics',
+  'brain_search', 'catalog_list_tools', 'checkpoint', 'cio_admin_read_*', 'cio_admin_write_*',
+  'cio_broadcast_get', 'cio_broadcast_get_metrics',
   'cio_broadcast_list', 'cio_campaign_get', 'cio_campaign_get_actions', 'cio_campaign_get_metrics',
   'cio_campaign_list', 'cio_create_or_update_customer', 'cio_customer_get_activities', 'cio_customer_get_attributes',
   'cio_customer_get_messages', 'cio_customer_get_segments', 'cio_customer_merge', 'cio_customer_search',

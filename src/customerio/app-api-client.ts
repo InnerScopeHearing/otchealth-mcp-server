@@ -102,7 +102,7 @@ export async function appApiGet<T = unknown>(
       status: 0,
       message: `Network error calling Customer.io App API at ${path}: ${(err as Error).message}`,
       nextStep:
-        'Check Railway logs and Customer.io status page. Retry if transient. If persistent, verify CIO_APP_API_BEARER in Notion vault.',
+        'Check Azure Container Apps logs and Customer.io status. If persistent, verify Azure Key Vault kv-otc-55c84f6bef secret cio-app-api-bearer is synchronized to Container Apps local secret cio-app-bearer.',
       upstream: err,
     });
   }
@@ -121,7 +121,7 @@ function mapAppApiError(status: number, path: string, body: string): CustomerIoA
       status,
       message: `Customer.io App API rejected auth on ${path}.`,
       nextStep:
-        'Confirm CIO_APP_API_BEARER matches the current value in Matt\'s Notion Token Vault (https://www.notion.so/35220e2667bc81e2b591fb1f641473f8). Rotate if leaked.',
+        'Confirm Azure Key Vault kv-otc-55c84f6bef secret cio-app-api-bearer is current and synchronize it to Container Apps local secret cio-app-bearer before rolling a safe revision.',
       upstream,
     });
   }
@@ -158,6 +158,10 @@ function mapAppApiError(status: number, path: string, body: string): CustomerIoA
     status,
     message: `Customer.io App API returned ${status} for ${path}.`,
     nextStep: 'Verify the input parameters match the App API documentation.',
+    upstream,
+  });
+}
+ match the App API documentation.',
     upstream,
   });
 }

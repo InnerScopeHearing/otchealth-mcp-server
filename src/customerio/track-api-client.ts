@@ -68,7 +68,7 @@ async function trackRequest(
       status: 0,
       message: `Network error calling Customer.io Track API ${method} ${path}: ${(err as Error).message}`,
       nextStep:
-        'Check Railway logs and Customer.io status page. Retry if transient. Verify CIO_SITE_ID + CIO_TRACK_KEY if persistent.',
+        'Check Azure Container Apps logs and Customer.io status. If persistent, verify Azure Key Vault secrets cio-site-id and cio-track-key are synchronized to the same-named Container Apps local secrets.',
       upstream: err,
     });
   }
@@ -100,7 +100,7 @@ function mapTrackError(
       status,
       message: `Customer.io Track API rejected basic auth on ${method} ${path}.`,
       nextStep:
-        'Confirm CIO_SITE_ID + CIO_TRACK_KEY match Matt\'s Notion vault. Track API uses HTTP Basic, NOT bearer.',
+        'Confirm Azure Key Vault secrets cio-site-id and cio-track-key are synchronized to the same-named Container Apps local secrets. Track API uses HTTP Basic, not the App API bearer.',
       upstream,
     });
   }
@@ -170,4 +170,6 @@ export async function identifyCustomer(args: {
   const opts: TrackApiOptions = {};
   if (args.correlationId !== undefined) opts.correlationId = args.correlationId;
   return trackRequest('PUT', path, args.attributes, opts);
+}
+;
 }

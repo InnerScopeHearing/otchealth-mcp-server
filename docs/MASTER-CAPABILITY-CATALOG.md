@@ -40,6 +40,6 @@ data, tools, or ledgers. Finance/PHI services above are listed for fleet awarene
 trusted engines; widen external access only via signed provider BAAs.
 
 ## Counts (snapshot; `catalog_master` is always current)
-Live `/health` after the HeyGen Phase 0/1 cutover reported 943 registered tools. The HeyGen service
+Live `/health` after the HeyGen Phase 0/1 cutover reported 943 registered tools. The Customer.io governed-control branch adds 42 credential-gated named wrappers, bringing the expected post-release catalog to 985 before unrelated concurrent changes. The HeyGen service
 contributes 29 tools at catalog version `c5392855`. Treat `catalog_master` and `catalog_list_tools` as
 the authoritative current inventory; this human mirror records only material milestones.

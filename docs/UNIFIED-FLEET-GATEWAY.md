@@ -11,12 +11,11 @@ one endpoint with bearer + OAuth auth, scoped gating, a compliance guardrail, an
 logging. ADR-001 Option C (Node + n8n hybrid). Public endpoint (when deployed):
 `https://mcp.otchealth.app/mcp`.
 
-## Actual state (reconciled 2026-06-14 against the git history — READ THIS)
-A prior cross-engine note claimed Depot, PostHog-management, and the Capability Catalog
-were "added." They are NOT in this repo. The honest, code-verified state:
+## Actual state
+The live capability catalog is authoritative; this human mirror records material milestones.
 
-WIRED (on main, registered in `src/tools/index.ts`):
-- **Customer.io** (Phase 1): 9 reads + 2 simple writes + 2 n8n-orchestrated writes.
+WIRED (registered in `src/tools/index.ts`):
+- **Customer.io**: 70 existing App/Track tools plus 42 bounded, service-account-gated `cio_admin_*` wrappers (20 reads; 22 dry-run/high-risk configuration writes). No generic Fly API proxy. See `CUSTOMERIO-GOVERNED-CONTROL.md`.
 - **Shopify** (Phase 2): list/get products, get order, list abandoned checkouts.
 - **Intercom** (Phase 2): list/get articles.
 - **n8n** (Phase 2 meta): list workflows, get execution.

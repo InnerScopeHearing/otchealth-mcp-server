@@ -93,7 +93,7 @@ async function trackWrite(
       status: 0,
       message: `Network error calling Customer.io Track API ${method} ${path}: ${(err as Error).message}`,
       nextStep:
-        'Check Railway logs and Customer.io status page. Retry if transient. Verify CIO_SITE_ID + CIO_TRACK_KEY if persistent.',
+        'Check Azure Container Apps logs and Customer.io status. If persistent, verify Azure Key Vault secrets cio-site-id and cio-track-key are synchronized to the same-named Container Apps local secrets.',
       upstream: err,
     });
   }
@@ -141,7 +141,7 @@ async function appWrite<T = unknown>(
       status: 0,
       message: `Network error calling Customer.io App API ${method} ${path}: ${(err as Error).message}`,
       nextStep:
-        'Check Railway logs and Customer.io status page. Retry if transient. Verify CIO_APP_API_BEARER if persistent.',
+        'Check Azure Container Apps logs and Customer.io status. If persistent, verify Azure Key Vault secret cio-app-api-bearer is synchronized to Container Apps local secret cio-app-bearer.',
       upstream: err,
     });
   }
@@ -160,7 +160,7 @@ function mapTrackError(status: number, method: string, path: string, body: strin
     return new CustomerIoApiError({
       code: 'cio_auth_failed', status,
       message: `Customer.io Track API rejected basic auth on ${method} ${path}.`,
-      nextStep: 'Confirm CIO_SITE_ID + CIO_TRACK_KEY match the Notion vault. Track API uses HTTP Basic, NOT bearer.',
+      nextStep: 'Confirm Azure Key Vault secrets cio-site-id and cio-track-key are synchronized to the same-named Container Apps local secrets. Track API uses HTTP Basic, not the App API bearer.',
       upstream,
     });
   }
@@ -211,7 +211,7 @@ function mapAppError(status: number, path: string, body: string): CustomerIoApiE
     return new CustomerIoApiError({
       code: 'cio_auth_failed', status,
       message: `Customer.io App API rejected auth on ${path}.`,
-      nextStep: 'Confirm CIO_APP_API_BEARER matches the current value in the Notion Token Vault. Rotate if leaked.',
+      nextStep: 'Confirm Azure Key Vault secret cio-app-api-bearer is synchronized to Container Apps local secret cio-app-bearer before rolling a safe revision.',
       upstream,
     });
   }
@@ -391,6 +391,10 @@ export async function triggerBroadcast(
     'POST',
     `/campaigns/${campaign_id}/triggers`,
     body,
+    correlationId,
+  );
+}
+ body,
     correlationId,
   );
 }
