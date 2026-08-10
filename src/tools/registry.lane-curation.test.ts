@@ -209,8 +209,8 @@ test('TOOL_CATALOG_CURATION_MODE=curate-m365-only -- an M365 developer caller se
 // registerAllTools() -> McpServer._registeredTools path as the developer test above, locking a concrete
 // upper bound (not just "< full catalog") and asserting representative required tools survive.
 for (const [lane, upperBound, mustInclude] of [
-  ['cto', 200, ['brain_search', 'azure_jobs_list', 'github_branch_get']],
-  ['cro', 200, ['brain_search', 'cio_track_event', 'revenuecat_customer_get']],
+  ['cto', 240, ['brain_search', 'azure_jobs_list', 'github_branch_get', 'cio_admin_read_workspace_health']],
+  ['cro', 240, ['brain_search', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
   // 2026-08-02: developer_wake_lite was silently excluded from the developer lane's M365-curated
   // registration (no wildcard/exact match in LANE_TOOLSETS.developer covered it) -- invisible to
   // catalog_probe's known_tools_present check (which reads the full unscoped catalog, not this
@@ -225,8 +225,8 @@ for (const [lane, upperBound, mustInclude] of [
     assert.ok(
       names.length <= upperBound,
       `${lane}'s M365-curated registration should stay at or under ${upperBound} tools ` +
-        `(PR #185 measured 149/147 locally for cto/cro; this is a generous ceiling, not the exact ` +
-        `number, so routine curated-list growth doesn't flake this test) -- got ${names.length}. A ` +
+        `(PR #199 adds a fixed 42-tool governed Customer.io admin surface; branch CI measured 220/218 ` +
+        `for cto/cro, so 240 is a bounded ceiling, not the exact count) -- got ${names.length}. A ` +
         `count blowing past this means CTO_M365_CURATED/CRO_M365_CURATED regressed toward a wildcard ` +
         `again or the dedup fix broke.`,
     );
