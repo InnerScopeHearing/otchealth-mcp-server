@@ -597,8 +597,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // control surface opts into strict result schemas so provider-shape drift cannot bypass redaction.
   const enforceStrictOutput = canonicalName.startsWith('heygen_');
   const strictResultSchema = z.object(def.outputShape).strict();
+  const jitStubSchema = z.object({
+    _jit_offloaded: z.literal(true),
+    result_id: z.string(),
+    total_bytes: z.number().int().nonnegative(),
+    note: z.string(),
+  }).strict();
   const outputShape: ZodRawShape = {
-    result: enforceStrictOutput ? strictResultSchema : z.unknown(),
+    result: enforceStrictOutput ? z.union([strictResultSchema, jitStubSchema]) : z.unknown(),
     compliance_warning: z
       .object({
         triggers: z.array(z.string()),

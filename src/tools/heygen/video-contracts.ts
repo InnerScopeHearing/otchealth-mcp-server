@@ -232,10 +232,16 @@ export function estimateAvatarVideoCredits(
   const words = script.trim().split(/\s+/).filter(Boolean).length;
   const normalizedSpeed = Number.isFinite(speed) && speed >= 0.5 && speed <= 1.5 ? speed : 1;
   const durationSeconds = Math.max(3, Math.ceil((words / 2.5 / normalizedSpeed) * 1.15));
-  const base = engine === 'avatar_iii'
+  const avatarCredits = engine === 'avatar_iii'
     ? Math.max(1, Math.ceil((durationSeconds / 60) * 3))
     : Math.max(1, Math.ceil(durationSeconds / 3));
-  const credits = engine === 'avatar_iv' && hasCustomMotion ? base * 2 : base;
+  const motionAdjusted = engine === 'avatar_iv' && hasCustomMotion ? avatarCredits * 2 : avatarCredits;
+  // Conservative subscription bound: the 2026-08-09 owner-approved direct Avatar IV canary had a
+  // six-second local duration estimate and an actual three-credit debit despite the published
+  // one-credit-per-three-seconds rate. The extra fixed credit is treated as provider/TTS rounding
+  // overhead until HeyGen exposes a quote or hard cap. Overestimation is intentional; undershooting
+  // the signed maximum is a hard safety defect.
+  const credits = motionAdjusted + 1;
   return { durationSeconds, credits };
 }
 

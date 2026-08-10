@@ -456,6 +456,7 @@ export async function executeHeyGenReferenceLookCreate(
     const beforeCredits = before.premium.remaining;
     const afterCredits = after?.premium.remaining ?? null;
     const delta = beforeCredits === null || afterCredits === null ? null : beforeCredits - afterCredits;
+    const creditReconciliationFailed = delta === null || delta !== 1;
     const accepted = await replaceOperation(current, {
       state: 'accepted',
       providerLookId: created.lookId,
@@ -466,11 +467,21 @@ export async function executeHeyGenReferenceLookCreate(
       premiumCreditsAfter: afterCredits,
       actualCreditDelta: delta,
       verificationStatus,
-      lastErrorCode: delta !== null && delta !== 1 ? 'unexpected_credit_delta' : undefined,
+      lastErrorCode: delta === null
+        ? 'credit_delta_unverified'
+        : delta !== 1
+          ? 'unexpected_credit_delta'
+          : undefined,
       leaseExpiresAt: undefined,
     }, deps);
     if (accepted) {
-      if (spendReservation) await settleHeyGenSpend(spendReservation, 'accepted', deps);
+      if (spendReservation) {
+        await settleHeyGenSpend(
+          spendReservation,
+          creditReconciliationFailed ? 'outcome_unknown' : 'accepted',
+          deps,
+        );
+      }
       return view(accepted.doc, false, deps.now());
     }
     const winner = await readOperation(input.operationId, deps);
@@ -478,7 +489,7 @@ export async function executeHeyGenReferenceLookCreate(
       if (spendReservation) {
         await settleHeyGenSpend(
           spendReservation,
-          winner.doc.state === 'accepted' ? 'accepted' : 'outcome_unknown',
+          winner.doc.state === 'accepted' && !creditReconciliationFailed ? 'accepted' : 'outcome_unknown',
           deps,
         );
       }

@@ -297,6 +297,7 @@ test('prompt-bearing HeyGen tools log only SHA-256 fingerprints, never full prom
   assert.match(registrySource, /input: def\.redactInputForLog/);
   assert.match(registrySource, /args: def\.redactInputForLog/);
   assert.match(registrySource, /def\.shieldInputForScan\(handlerInput\)/);
+  assert.match(registrySource, /z\.union\(\[strictResultSchema, jitStubSchema\]\)/);
 });
 
 test('connector curation includes every exact HeyGen tool only in the CTO ship set', () => {

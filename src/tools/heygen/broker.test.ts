@@ -1103,8 +1103,8 @@ function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<t
     confirmedBillingSnapshotSha256: billing.snapshot_sha256,
     confirmedBillingStateSha256: billing.state_sha256,
     confirmedBillingObservedAt: billing.observed_at,
-    maxApprovedCredits: 2,
-    reservePremiumCredits: 5,
+    maxApprovedCredits: 3,
+    reservePremiumCredits: 4,
     ...overrides,
   } as Parameters<typeof executeHeyGenAvatarVideoCreate>[0];
   const plan = buildHeyGenAvatarVideoPlan(base);
@@ -1133,6 +1133,7 @@ function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<t
 function avatarVideoHarness(options: {
   post?: (call: number) => Response | Promise<Response>;
   account?: unknown;
+  accountAfter?: unknown;
   look?: unknown;
   group?: unknown;
   voice?: unknown;
@@ -1142,6 +1143,7 @@ function avatarVideoHarness(options: {
   store.set(HEYGEN_TOKEN_DOC_ID, { doc: tokenDoc({ ...BASE_STATE, expiresAt: 0 }), etag: 'T1' });
   let etag = 1;
   let postCalls = 0;
+  let accountReads = 0;
   const requests: Array<{ path: string; method: string; headers: Record<string, string>; body?: unknown }> = [];
   const deps = baseDeps({
     now: () => 1_000_000,
@@ -1176,7 +1178,10 @@ function avatarVideoHarness(options: {
         headers: headers ?? {},
         body: init?.body ? JSON.parse(String(init.body)) : undefined,
       });
-      if (parsed.pathname === '/v3/users/me') return jsonResponse(options.account ?? USER_RESPONSE);
+      if (parsed.pathname === '/v3/users/me') {
+        accountReads += 1;
+        return jsonResponse(accountReads > 1 && options.accountAfter ? options.accountAfter : (options.account ?? USER_RESPONSE));
+      }
       if (parsed.pathname === '/v3/avatars/looks/look_1') return jsonResponse(options.look ?? {
         data: {
           id: 'look_1', avatar_type: 'digital_twin', group_id: 'group_1', default_voice_id: 'voice_1',
@@ -1312,6 +1317,35 @@ test('credit snapshot and reserve violations block before POST', async () => {
       '/v3/users/me', '/v3/avatars/looks/look_1', '/v3/avatars/group_1', '/v3/voices/voice_1',
     ]);
   }
+});
+
+test('post-call credit delta above the approved maximum locks account spending for reconciliation', async () => {
+  const accountAfter = {
+    data: {
+      username: 'test-user',
+      billing_type: 'subscription',
+      subscription: { plan: 'team', credits: { premium_credits: { remaining: 3 } } },
+    },
+  };
+  const harness = avatarVideoHarness({ accountAfter });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  assert.equal(result.state, 'accepted');
+  assert.equal(result.actualCreditDelta, 4);
+  assert.equal(result.errorCode, 'unexpected_credit_delta');
+  const afterSnapshot = parseHeyGenBillingSnapshot(accountAfter, new Date(1_000_000).toISOString());
+  await assert.rejects(
+    () => executeHeyGenAvatarVideoCreate(avatarVideoInput({
+      operationId: 'video_op_02',
+      idempotencyKey: 'video-op:02',
+      confirmedPremiumCreditsBefore: 3,
+      confirmedBillingSnapshotSha256: afterSnapshot.snapshot_sha256,
+      confirmedBillingStateSha256: afterSnapshot.state_sha256,
+      confirmedBillingObservedAt: afterSnapshot.observed_at,
+      reservePremiumCredits: 0,
+    }), harness.deps),
+    /pending reconciliation/,
+  );
+  assert.equal(harness.postCalls(), 1);
 });
 
 test('account spend controller allows only one concurrent Avatar Video submission', async () => {

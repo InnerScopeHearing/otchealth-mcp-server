@@ -625,8 +625,15 @@ export function registerHeyGenProductionTools(
           summary: `DRY RUN: live Avatar Video preflight passed; estimated ${prepared.plan.estimatedCredits} credit(s), no provider or operation-record mutation.`,
         };
       }
+      const existing = await getHeyGenVideoOperation(mapped.operationId, deps);
+      if (existing && (existing.state === 'accepted' || existing.state === 'rejected')) {
+        return {
+          data: operationData(existing),
+          summary: `HeyGen Avatar Video operation ${existing.operationId}: ${existing.state} (terminal replay; writes remain disabled).`,
+        };
+      }
       if (!loadEnv().ENABLE_HEYGEN_AVATAR_VIDEO_WRITES) {
-        throw new Error('HeyGen Avatar Video writes are disabled. Dry-run preflight remains available.');
+        throw new Error('HeyGen Avatar Video writes are disabled. Dry-run preflight and terminal operation replay remain available.');
       }
       const result = await executeHeyGenAvatarVideoCreate(mapped, deps);
       return {

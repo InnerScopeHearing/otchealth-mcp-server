@@ -2291,6 +2291,7 @@ export async function executeHeyGenAvatarVideoCreate(
     const premiumAfter = billingAfter?.premium.remaining ?? undefined;
     const actualCreditDelta = premiumAfter === undefined ? undefined : preflight.credits - premiumAfter;
     const unexpectedDelta = actualCreditDelta !== undefined && actualCreditDelta > input.maxApprovedCredits;
+    const creditReconciliationFailed = actualCreditDelta === undefined || unexpectedDelta;
     const updated = await replaceVideoOperation(
       claimed,
       {
@@ -2301,18 +2302,34 @@ export async function executeHeyGenAvatarVideoCreate(
         premiumCreditsAfter: premiumAfter,
         actualCreditDelta,
         billingAfterSha256: billingAfter?.snapshot_sha256,
-        lastErrorCode: unexpectedDelta ? 'unexpected_credit_delta' : undefined,
+        lastErrorCode: unexpectedDelta
+          ? 'unexpected_credit_delta'
+          : actualCreditDelta === undefined
+            ? 'credit_delta_unverified'
+            : undefined,
         leaseExpiresAt: undefined,
       },
       deps,
     );
     if (updated) {
-      if (spendReservation) await settleHeyGenSpend(spendReservation, 'accepted', deps);
+      if (spendReservation) {
+        await settleHeyGenSpend(
+          spendReservation,
+          creditReconciliationFailed ? 'outcome_unknown' : 'accepted',
+          deps,
+        );
+      }
       return operationView(updated.doc, false, deps.now());
     }
     const winner = await readVideoOperation(input.operationId, deps);
     if (winner?.doc.state === 'accepted') {
-      if (spendReservation) await settleHeyGenSpend(spendReservation, 'accepted', deps);
+      if (spendReservation) {
+        await settleHeyGenSpend(
+          spendReservation,
+          creditReconciliationFailed ? 'outcome_unknown' : 'accepted',
+          deps,
+        );
+      }
       return operationView(winner.doc, true, deps.now());
     }
     if (spendReservation) await settleHeyGenSpend(spendReservation, 'outcome_unknown', deps);
