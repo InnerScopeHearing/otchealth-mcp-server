@@ -46,6 +46,8 @@ Required controls:
 - `confirm_credit_use=true`;
 - current look, group, consent, voice, engine, optional reference-look, and parameter compatibility preflight.
 
+Consent normalization is fail-closed. Group status must be exactly `completed`; missing/null group status blocks. A missing/null consent field preserves an avatar path where HeyGen does not require consent. Present consent values are ready only when they case-insensitively equal `accepted`, `approved`, `complete`, or `completed` without surrounding whitespace; `pending`, `pending_consent`, `rejected`, blank, padded, and unknown values block before `POST /v3/videos`. The live Matthew group uses the exact provider value `accepted`; Kimberly and Mark remain blocked at pending consent.
+
 The deterministic Cosmos operation record stores hashes, approval metadata, provider ids/status, and the 24-hour replay boundary. It never stores raw script, title, idempotency key, signed URLs, or upstream response bodies.
 
 The gateway rejects:
