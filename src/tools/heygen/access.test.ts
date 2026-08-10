@@ -174,7 +174,6 @@ test('public HeyGen surface is fixed and exposes only bounded direct video while
   const baseSource = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
   const productionSource = readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8');
   const lookSource = readFileSync(new URL('./look-tools.ts', import.meta.url), 'utf8');
-  const source = `${baseSource}\n${productionSource}\n${lookSource}`;
   assert.match(lookSource, /name: 'heygen_reference_look_create',[\s\S]*?category: 'write_orchestrated'/);
   assert.match(lookSource, /reference_asset_ids:[\s\S]*?max\(3\)/);
   const promptStart = baseSource.indexOf("name: 'heygen_prompt_avatar_create'");

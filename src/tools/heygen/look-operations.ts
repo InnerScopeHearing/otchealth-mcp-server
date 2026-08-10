@@ -435,7 +435,7 @@ export async function executeHeyGenReferenceLookCreate(
       return view((unknown ?? current).doc, false, deps.now());
     }
 
-    let verificationStatus: 'verified' | 'pending' | 'failed' = 'pending';
+    let verificationStatus: 'verified' | 'pending' | 'failed';
     let after: HeyGenBillingSnapshot | null = null;
     try {
       const createdRaw = requireOk(
