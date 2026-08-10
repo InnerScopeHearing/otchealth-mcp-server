@@ -1137,7 +1137,7 @@ function avatarVideoHarness(options: {
         },
       });
       if (parsed.pathname === '/v3/avatars/group_1') return jsonResponse(options.group ?? {
-        data: { id: 'group_1', status: 'completed', consent_status: 'approved' },
+        data: { id: 'group_1', status: 'completed', consent_status: 'accepted' },
       });
       if (parsed.pathname === '/v3/voices/voice_1') return jsonResponse(options.voice ?? {
         data: { voice_id: 'voice_1', status: 'complete', support_pause: true },
@@ -1186,6 +1186,41 @@ test('direct Avatar Video create runs guarded live preflight, sends one exact id
   const stored = await getHeyGenVideoOperation('video_op_01', harness.deps);
   assert.equal(stored?.state, 'accepted');
   assert.equal(stored?.videoId, 'v_1');
+});
+
+test('live accepted consent passes, while pending, rejected, unknown, or incomplete group states block before POST', async () => {
+  for (const group of [
+    { data: { id: 'group_1', status: 'completed', consent_status: 'accepted' } },
+    { data: { id: 'group_1', status: 'completed', consent_status: null } },
+    { data: { id: 'group_1', status: 'completed' } },
+  ]) {
+    const harness = avatarVideoHarness({ group });
+    const accepted = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+    assert.equal(accepted.state, 'accepted');
+    assert.equal(harness.postCalls(), 1);
+  }
+
+  const blockedCases = [
+    { status: 'completed', consent_status: 'pending', error: /consent is not approved/ },
+    { status: 'completed', consent_status: 'pending_consent', error: /consent is not approved/ },
+    { status: 'completed', consent_status: 'rejected', error: /consent is not approved/ },
+    { status: 'completed', consent_status: 'unexpected_provider_value', error: /consent is not approved/ },
+    { status: 'completed', consent_status: '', error: /consent is not approved/ },
+    { status: 'completed', consent_status: ' accepted ', error: /consent is not approved/ },
+    { status: 'pending_consent', consent_status: 'accepted', error: /group is not completed/ },
+    { status: null, consent_status: 'accepted', error: /group is not completed/ },
+    { status: undefined, consent_status: 'accepted', error: /group is not completed/ },
+  ];
+  for (const blocked of blockedCases) {
+    const harness = avatarVideoHarness({
+      group: { data: { id: 'group_1', status: blocked.status, consent_status: blocked.consent_status } },
+    });
+    await assert.rejects(() => executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps), blocked.error);
+    assert.equal(harness.postCalls(), 0, `${blocked.status}/${blocked.consent_status} must not submit`);
+    assert.deepEqual(harness.requests.map((entry) => entry.path), [
+      '/v3/users/me', '/v3/avatars/looks/look_1', '/v3/avatars/group_1',
+    ]);
+  }
 });
 
 test('accepted operation replays without network and changed payload is refused locally', async () => {

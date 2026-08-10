@@ -16,6 +16,7 @@ import {
 import { z } from 'zod';
 import {
   buildHeyGenAvatarVideoPlan,
+  isHeyGenConsentStatusReady,
   parseHeyGenAvatarGroup,
   parseHeyGenAvatarLook,
   parseHeyGenCreateVideo,
@@ -1796,10 +1797,14 @@ async function runVideoPreflight(
   if (group.id !== look.groupId) {
     throw brokerError('heygen_avatar_group_lookup_mismatch', 'HeyGen returned the wrong avatar group.', 502);
   }
-  if (group.status && group.status !== 'completed') {
-    throw brokerError('heygen_avatar_group_not_ready', `HeyGen avatar group is not completed (${group.status}).`, 409);
+  if (group.status !== 'completed') {
+    throw brokerError(
+      'heygen_avatar_group_not_ready',
+      `HeyGen avatar group is not completed (${group.status ?? 'missing'}).`,
+      409,
+    );
   }
-  if (group.consentStatus && !['approved', 'complete', 'completed'].includes(group.consentStatus.toLowerCase())) {
+  if (!isHeyGenConsentStatusReady(group.consentStatus)) {
     throw brokerError('heygen_avatar_consent_required', 'HeyGen avatar group consent is not approved.', 409);
   }
 

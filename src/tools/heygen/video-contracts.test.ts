@@ -4,6 +4,7 @@ import {
   buildHeyGenAvatarVideoPlan,
   canonicalRequestSha256,
   estimateAvatarVideoCredits,
+  isHeyGenConsentStatusReady,
   parseHeyGenAvatarGroup,
   parseHeyGenAvatarLook,
   parseHeyGenCreateVideo,
@@ -127,6 +128,16 @@ test('provider parsers normalize only required fields and reject malformed succe
     failureCode: null, failureMessage: null, completedAt: null,
   });
   assert.throws(() => parseHeyGenCreateVideo({ data: { status: 'pending' } }));
+});
+
+test('consent readiness accepts exact provider-ready values and fails closed on pending or unknown states', () => {
+  for (const ready of ['accepted', 'approved', 'complete', 'completed', 'ACCEPTED']) {
+    assert.equal(isHeyGenConsentStatusReady(ready), true, `${JSON.stringify(ready)} should be ready`);
+  }
+  assert.equal(isHeyGenConsentStatusReady(null), true, 'missing consent preserves the no-consent photo-avatar path');
+  for (const blocked of ['pending', 'pending_consent', 'rejected', 'unknown', '', ' ', ' accepted ']) {
+    assert.equal(isHeyGenConsentStatusReady(blocked), false, `${JSON.stringify(blocked)} must fail closed`);
+  }
 });
 
 test('compatibility matrix blocks unsupported engines and invalid motion/expressiveness combinations', () => {
