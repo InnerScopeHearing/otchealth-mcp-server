@@ -125,6 +125,53 @@ test('Avatar V conservative cap rounds provider duration upward and includes the
   assert.throws(() => conservativeAvatarVideoCreditCap(0, 'avatar_v'));
 });
 
+test('historical Moore-family Avatar V dry-run receipts map to corrected conservative maxima', () => {
+  const cases = [
+    {
+      founder: 'kimberly' as const,
+      lookId: '3c3f4eabdcac4b70baea8ea3299cdc6b',
+      voiceId: '551fec783f294caa97696574d7f6d85e',
+      referenceLookId: undefined,
+      historicalRequestSha256: 'de5d7142aab962f341a58b5d2d57e5297da274f4d88e15ced60efacc848e20ce',
+      durationSeconds: 6,
+      historicalEstimate: 2,
+      correctedCap: 3,
+    },
+    {
+      founder: 'mark' as const,
+      lookId: '2a75cc08b7a74baba1ed2a468f796436',
+      voiceId: '7a301178c14a49ee9a7deb508d36a1ec',
+      referenceLookId: undefined,
+      historicalRequestSha256: 'fd24b6fbdcdc1e28f696117dcb6a68561da5f7b24ccbc1a8afb38efea813337a',
+      durationSeconds: 7,
+      historicalEstimate: 3,
+      correctedCap: 4,
+    },
+    {
+      founder: 'matthew' as const,
+      lookId: '1916ba1b808d49e8829908e29c659469',
+      voiceId: '7092904ddda348049fb0eeecf3fdfbb6',
+      referenceLookId: 'f18ef8e05e564f998b87af7a951fe05a',
+      historicalRequestSha256: 'c31a0562dd8a0d041b28d3a154e6a97277cc793673e70a39515f40be9fa0fdab',
+      durationSeconds: 6,
+      historicalEstimate: 2,
+      correctedCap: 3,
+    },
+  ];
+  for (const receipt of cases) {
+    const profile = HEYGEN_FAMILY_STORY_PROFILES[receipt.founder];
+    assert.equal(receipt.lookId, profile.selectedPhotoLookId);
+    assert.equal(receipt.voiceId, profile.privateVoiceId);
+    assert.equal(receipt.referenceLookId ?? null, profile.personalizedMotionReferenceLookId);
+    assert.match(receipt.historicalRequestSha256, /^[a-f0-9]{64}$/);
+    assert.equal(
+      conservativeAvatarVideoCreditCap(receipt.durationSeconds, 'avatar_v'),
+      receipt.correctedCap,
+    );
+    assert.ok(receipt.historicalEstimate < receipt.correctedCap, `${receipt.founder} old estimate must be rejected`);
+  }
+});
+
 test('Avatar V six-second dry run rejects the old two-credit maximum', () => {
   const script = 'one two three four five six seven eight nine ten eleven twelve';
   const estimate = estimateAvatarVideoCredits(script, 'avatar_v', 1, false);
