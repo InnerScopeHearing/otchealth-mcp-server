@@ -90,7 +90,9 @@ function registerPagedAccountingRead(
       category: 'read',
       annotations: {
         title: cfg.title,
-        description: cfg.description,
+        description: cfg.countKey
+          ? `${cfg.description} RESPONSE SHAPE: the array is at data.body.${cfg.countKey}, not data.${cfg.countKey} — Xero wraps every list response in an envelope and this tool passes it through verbatim; unwrapping only one level yields an empty array on every page, which reads as "not found" rather than a real absence.`
+          : cfg.description,
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -99,7 +101,9 @@ function registerPagedAccountingRead(
       inputShape: {
         org: ORG_ENUM,
         page: z.number().int().min(1).optional().describe('Page number (100/page). Default 1.'),
-        where: z.string().optional().describe(cfg.whereHint ?? 'Optional Xero where filter.'),
+        where: z.string().optional().describe(
+          `${cfg.whereHint ?? 'Optional Xero where filter.'} For completeness/duplicate/exception analysis, add Status=="AUTHORISED" — deleted/voided records are returned by default and are not excluded, which can fabricate exceptions that do not exist.`,
+        ),
         modifiedAfter: z.string().optional().describe('ISO timestamp — only records modified after this (If-Modified-Since).'),
       },
       outputShape: { org: z.string(), body: z.unknown(), error: z.string().optional() },
@@ -291,7 +295,8 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       category: 'read',
       annotations: {
         title: 'Xero: manual journals (executive ring only)',
-        description: 'Manual journals for an org — paged list, or one journal by id (with lines). MNPI: executive-ring lanes only. Read-only.',
+        description:
+          'Manual journals for an org — paged list, or one journal by id (with lines). RESPONSE SHAPE (list mode): the array is at data.body.ManualJournals, NOT data.ManualJournals or data.body[0] — Xero wraps every list response in an envelope ({Id,Status,ProviderName,DateTimeUTC,pagination,ManualJournals:[...]}) and this tool passes that envelope through as body verbatim; unwrapping only one level yields an empty array on every page, which reads as "not found" and is dangerous for duplicate-detection work (a false "not found" can authorize posting an actual duplicate). If a paged query returns zero rows across all pages, suspect an unwrap bug before concluding absence. A boolean-style where filter such as HasAttachments is NOT reliable on this endpoint (silently returns zero for both true and false even when matching records exist) — filter that condition client-side instead. For any completeness/duplicate/exception analysis, always add Status=="AUTHORISED" to your where filter: deleted/voided journals are returned by default and are not excluded from the count, which can fabricate exceptions that do not exist. MNPI: executive-ring lanes only. Read-only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -332,7 +337,8 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       category: 'read',
       annotations: {
         title: 'Xero: bank transactions (executive ring only)',
-        description: 'Bank transactions for an org — paged list, optional where filter (e.g. by bank account). MNPI: executive-ring lanes only. Read-only.',
+        description:
+          'Bank transactions for an org — paged list, optional where filter (e.g. by bank account). RESPONSE SHAPE: the array is at data.body.BankTransactions, not data.BankTransactions (Xero wraps every list response in an envelope). For any completeness/duplicate/exception analysis, add Status=="AUTHORISED" to your where filter — deleted duplicate transactions (including duplicate large wires from a prior import event) are returned by default and are excluded from Xero\'s own bank summary but NOT from this endpoint, which fabricates exceptions that do not exist if left unfiltered. Bank-transfer legs between own accounts DO come through this endpoint as Type SPEND-TRANSFER/RECEIVE-TRANSFER; they are not a disjoint population from xero_bank_transfers. MNPI: executive-ring lanes only. Read-only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -370,7 +376,8 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       category: 'read',
       annotations: {
         title: 'Xero: invoices (executive ring only)',
-        description: 'Invoices (AR + AP) for an org — paged list, filterable by status/number. MNPI: executive-ring lanes only. Read-only.',
+        description:
+          'Invoices (AR + AP) for an org — paged list, filterable by status/number. RESPONSE SHAPE: the array is at data.body.Invoices (Xero wraps every list response in an envelope), not data.Invoices. invoiceNumber IS UNRELIABLE for cross-org or migrated-era lookups and has produced confirmed false negatives (a document later confirmed to exist via a different query). For cross-entity duplicate/AP verification, do not rely on invoiceNumber — instead use xero_get on the same org with path "/Invoices" and an explicit where clause on the field you actually posted under, e.g. where:\'Reference=="QBO-Bill-XXXXX"\'. For any completeness/duplicate/exception analysis, add Status=="AUTHORISED" to your where filter or statuses param — deleted/voided invoices are returned by default and are not excluded, which can fabricate exceptions that do not exist. MNPI: executive-ring lanes only. Read-only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -379,8 +386,8 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       inputShape: {
         org: ORG_ENUM,
         page: z.number().int().min(1).optional().describe('Page number (100/page). Default 1.'),
-        statuses: z.string().optional().describe('CSV of statuses, e.g. AUTHORISED,PAID.'),
-        invoiceNumber: z.string().optional().describe('Exact invoice number lookup.'),
+        statuses: z.string().optional().describe('CSV of statuses, e.g. AUTHORISED,PAID. Include AUTHORISED explicitly when doing completeness/duplicate work — deleted/voided invoices are returned by default otherwise.'),
+        invoiceNumber: z.string().optional().describe('Exact invoice number lookup. UNRELIABLE for cross-org/migrated-era invoices (confirmed false negatives) — prefer xero_get with an explicit where:\'Reference=="..."\' clause instead.'),
         modifiedAfter: z.string().optional().describe('ISO timestamp — only invoices modified after this.'),
       },
       outputShape: { org: z.string(), body: z.unknown(), error: z.string().optional() },
@@ -415,7 +422,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Xero: universal read — any scoped endpoint (executive ring only)',
         description:
-          'GET any read endpoint on any Xero API the tokens are scoped for. api = accounting (default) | payroll | assets | projects | files. path starts with "/" and is the endpoint after the base, e.g. "/Contacts", "/Reports/BankSummary", "/Payments" (accounting); "/Employees", "/PayRuns" (payroll); "/Assets" (assets); "/Projects" (projects); "/Files" (files). params is a query-string map (page, where, dates, statuses, ...). Read-only: GET only, so no path can mutate the books. MNPI: executive-ring lanes only.',
+          'GET any read endpoint on any Xero API the tokens are scoped for. api = accounting (default) | payroll | assets | projects | files. path starts with "/" and is the endpoint after the base, e.g. "/Contacts", "/Reports/BankSummary", "/Payments" (accounting); "/Employees", "/PayRuns" (payroll); "/Assets" (assets); "/Projects" (projects); "/Files" (files). params is a query-string map (page, where, dates, statuses, ...). RESPONSE SHAPE: for any list endpoint, the array is nested under Xero\'s own envelope at data.body.<ResourceName> (e.g. data.body.Invoices), never at data.<ResourceName> directly. This is the reliable path for a cross-org or exact-reference lookup when a typed tool\'s own convenience filter (e.g. xero_invoices\' invoiceNumber) produces a false negative — pass params:{"where":\'Reference=="..."\'} against the resource\'s collection path instead. For completeness/duplicate/exception analysis on any endpoint, add Status=="AUTHORISED" to your where param — deleted/voided records are returned by default on most accounting endpoints. Read-only: GET only, so no path can mutate the books. MNPI: executive-ring lanes only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
