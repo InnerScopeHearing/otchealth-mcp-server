@@ -21,8 +21,81 @@ Endpoints:
 - `GET /health` — public, returns operational flags
 - `GET /version` — public, returns service version/build metadata
 - `POST /mcp` — Streamable HTTP, JSON-RPC 2.0, bearer-auth required
+- `POST /heygen/pair` — one-time HeyGen OAuth credential handoff (pair-id capability)
 - `POST /admin/revoke` — kill-switch (separate admin token)
 - `GET /admin/revoke`, `POST /admin/clear-revoke` — inspect / clear revocation
+
+---
+
+## HeyGen OAuth broker and production control plane
+
+The durable broker exposes a closed, typed subscription-credit surface. It rejects API-key credentials.
+Every target-capable operation calls `GET /v3/users/me` immediately before its target and refuses unless
+`billing_type=subscription` has a populated subscription.
+
+Phase 0 read tools cover:
+
+- account, videos, bulk video status, avatar groups/looks, voices, and Video Agent styles;
+- Video Agent session list/get/session-videos;
+- brand kits and brand glossaries;
+- supported translation languages, translation list/get/bulk status, and proofread get;
+- durable gateway-owned Avatar Video operation state.
+
+Reads and semantic voice search are allowed only to exact internal lanes `cto`, `exec`, `coo`, `cro`,
+`cpo`, and `developer`, duplicated in governance and in each handler.
+
+Bounded writes are CTO-only:
+
+- `heygen_prompt_avatar_create`: one prompt-avatar creation, exact positive balance snapshot, no photo,
+  Digital Twin, upload, reference-image, clone, speech, delete, or generic request surface.
+- `heygen_avatar_video_create`: direct `POST /v3/videos` using only an existing look, explicit voice,
+  locked script, explicit Avatar III/IV/V engine, 720p/1080p, bounded fit/background/caption/voice settings,
+  optional glossary, and MP4 output. It requires `confirm_credit_use=true`, the exact first-submission
+  balance, a maximum approved credit envelope, a reserve floor, `operation_id`, manifest SHA-256, and a
+  provider `Idempotency-Key`.
+- `heygen_video_wait_ingest_qa`: polls only a video already bound to the durable operation, downloads only
+  allowlisted `*.heygen.ai` signed assets without logging their URLs, validates byte limits/content magic
+  and SRT cue order, hashes every file, writes private non-PHI Blob artifacts plus a final manifest, and
+  leaves visual/likeness approval explicitly manual.
+
+Direct video idempotency is enforced twice. HeyGen replays the same key for 24 hours and returns
+`409 request_in_progress` while the original call is running. The gateway binds `operation_id` to hashes of
+the idempotency key, manifest, exact upstream body, and script plus the immutable credit envelope in
+Cosmos. Reusing the operation with changed content fails locally before HeyGen. Cross-replica submission is
+ETag/lease fenced. Network, 429, and 5xx retries reuse the same key and body exactly; ambiguous outcomes are
+stored as `outcome_unknown`, never converted into a new key. No raw script, title, idempotency key, OAuth
+token, provider signed URL, or upstream response body enters durable operation metadata or structured logs.
+
+Both production write tools are `write_orchestrated`, so normal write and high-risk enablement plus dry-run
+controls apply. Dry-run validates and estimates without calling HeyGen or mutating Cosmos/Blob. The public
+surface still excludes arbitrary callbacks, arbitrary URL/audio inputs, WebM, watermark, raw image/studio/
+cinematic modes, voice clone, speech, delete/update, and generic requests.
+
+Pairing is CTO-only:
+
+1. Call `heygen_pairing_start` with `dry_run:false`. Its random 32-byte id expires after 15 minutes.
+2. Build base64 from the official HeyGen credentials shape, exactly
+   `{"oauth":{"access_token":"…","refresh_token":"…","expires_at":"…","scope":"…","token_type":"…"}}`.
+   Any `api_key` field, including a nested one, is refused.
+3. `POST /heygen/pair` with JSON `{"pair_id":"…"}` and the base64 value in
+   `x-heygen-oauth-credentials`. The pair id is one-time and is consumed before the header is parsed.
+4. Check `heygen_pairing_status`.
+
+The broker requires Cosmos plus the existing `OAUTH_TOKEN_SIGNING_SECRET`. Tokens are derived-key
+AES-256-GCM encrypted before durable storage (`ttl:-1`); only ciphertext/IV/tag and non-secret status
+metadata are stored. OAuth refresh rotation uses an in-process mutex plus Cosmos ETags and persists a
+new encrypted chain before returning its access token. Rotating `OAUTH_TOKEN_SIGNING_SECRET` makes the
+old HeyGen ciphertext intentionally undecryptable, so run a fresh pairing after that rotation.
+
+Contracts were checked against the live HeyGen External API OpenAPI document on 2026-08-09
+(SHA-256 `6271a0ca7605d8aaa38d599789ddece7c544c5f5fb3ce702b2685baff6dd4c36`),
+[`heygen-cli` v0.6.0 commit `7a698ba72e828a233df87bd9526f343fa1b3ee29`](https://github.com/heygen-com/heygen-cli/tree/7a698ba72e828a233df87bd9526f343fa1b3ee29),
+and official HeyGen Skills v3.2.0 at
+[commit `1bd5e4d33a028dfed3abf504c5e3dd644fb9ea8a`](https://github.com/heygen-com/skills/tree/1bd5e4d33a028dfed3abf504c5e3dd644fb9ea8a).
+
+Live receipt: source `555e5fd567d146bfb970616af8a1d90d3bbf9461`, deploy `31299016759`, 29
+HeyGen tools, catalog version `c5392855`, gateway tool count 943, and zero credits consumed in the
+post-cutover no-render verification. Full operating detail: `docs/HEYGEN-PRODUCTION-CONTROL.md`.
 
 ---
 
@@ -56,6 +129,18 @@ Every tool returns a `structuredContent` JSON envelope:
 ```
 
 Every tool annotates: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` (ADR-001 §4d).
+
+### Customer.io governed administrative control plane
+
+The additional `cio_admin_*` surface is deliberately bounded: 20 read tools and 22 dry-run/high-risk configuration writes for workspace health, frequency caps, message limits, merge-unsubscribe policy, Goals, subscription-center settings/topics/channels/languages/pages/order, open-tracking consent, redacted audit logs, and Design Studio readiness. It is not a generic API proxy.
+
+- Reads: `cto`, `cro`, `exec`.
+- Write previews: `cto`, `cro`, `exec`.
+- Live writes: `cto`, `exec`, with `owner_approval_ref`; every write is `write_orchestrated` and dry-run by default.
+- No message sends, campaign activation, customer/profile/list/suppression changes, billing writes, or service-account administration exist in this surface.
+- The surface is inert until `CIO_FLY_SERVICE_ACCOUNT_TOKEN` is configured.
+
+Exact tool names, API baseline, limits, and provisioning steps: [`docs/CUSTOMERIO-GOVERNED-CONTROL.md`](docs/CUSTOMERIO-GOVERNED-CONTROL.md).
 
 ---
 

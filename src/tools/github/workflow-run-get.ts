@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 import { workflowRunGet } from '../../github/full-client.js';
 
 export function registerGitHubWorkflowRunGet(server: McpServer, callerHash: CallerHashProvider): void {
@@ -31,7 +32,8 @@ export function registerGitHubWorkflowRunGet(server: McpServer, callerHash: Call
       run_started_at: z.string().nullable().optional(),
       url: z.string().optional(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const r = await workflowRunGet(input.owner, input.repo, input.run_id);
       return {
         data: {

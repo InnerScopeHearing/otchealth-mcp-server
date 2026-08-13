@@ -44,8 +44,8 @@ test('parseCaptureThreshold: unset, garbage, zero, or negative all default to DE
   assert.equal(parseCaptureThreshold('-3'), DEFAULT_CAPTURE_THRESHOLD);
 });
 
-test('DEFAULT_CAPTURE_THRESHOLD is the documented 10', () => {
-  assert.equal(DEFAULT_CAPTURE_THRESHOLD, 10);
+test('DEFAULT_CAPTURE_THRESHOLD is the documented 50', () => {
+  assert.equal(DEFAULT_CAPTURE_THRESHOLD, 50);
 });
 
 // ---- computeCapturePressureOutcome (pure decision core) -------------------------------------------
@@ -115,14 +115,14 @@ test('recordMutation: waking one identity does not affect a DIFFERENT identity',
   assert.equal(outB.mutations, 0);
 });
 
-test('evaluateCapturePressure: crossing the threshold (default 10) nudges', () => {
+test('evaluateCapturePressure: crossing the threshold (default 50) nudges', () => {
   __resetCapturePressureState();
   const prev = process.env.CAPTURE_PRESSURE_THRESHOLD;
   delete process.env.CAPTURE_PRESSURE_THRESHOLD;
   const id = 'caller-threshold';
-  for (let i = 0; i < 10; i++) recordMutation(id);
+  for (let i = 0; i < 50; i++) recordMutation(id);
   const out = evaluateCapturePressure(id);
-  assert.equal(out.mutations, 10);
+  assert.equal(out.mutations, 50);
   assert.equal(out.nudge, true);
   if (prev !== undefined) process.env.CAPTURE_PRESSURE_THRESHOLD = prev;
 });

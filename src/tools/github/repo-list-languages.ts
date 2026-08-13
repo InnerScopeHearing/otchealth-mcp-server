@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 import { repoListLanguages } from '../../github/full-client.js';
 
 export function registerGitHubRepoListLanguages(server: McpServer, callerHash: CallerHashProvider): void {
@@ -22,7 +23,8 @@ export function registerGitHubRepoListLanguages(server: McpServer, callerHash: C
     outputShape: {
       languages: z.record(z.number()),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const languages = await repoListLanguages(input.owner, input.repo);
       const total = Object.values(languages).reduce((s, n) => s + n, 0);
       return {

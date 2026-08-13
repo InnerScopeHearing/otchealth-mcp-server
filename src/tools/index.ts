@@ -5,7 +5,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallerHashProvider } from './registry.js';
+import { finalizeM365Aliases, type CallerHashProvider } from './registry.js';
 
 // Phase 1 — Customer.io
 import { registerListNewsletters } from './cio/list-newsletters.js';
@@ -66,10 +66,13 @@ import { registerGumroadListSales } from './gumroad/list-sales.js';
 // Phase 4 — kb-memory shared brain (commons feed; the cross-agent / cross-platform memory)
 import { registerMemoryRemember } from './memory/remember.js';
 import { registerMemoryRecall } from './memory/recall.js';
+import { registerMemoryRecallAlias } from './memory/recall-alias.js';
 import { registerMemoryTeam } from './memory/team.js';
 import { registerMemoryPack } from './memory/pack.js';
 import { registerMemoryInbound } from './memory/inbound.js';
 import { registerWake } from './memory/wake.js';
+import { registerDeveloperWakeLite } from './diagnostics/developer-wake-lite.js';
+import { registerCatalogProbe } from './diagnostics/catalog-probe.js';
 import { registerMemoryReconcile } from './memory/reconcile.js';
 import { registerCheckpoint } from './memory/checkpoint.js';
 // Wave 7 item 7.1 (production feedback loop): opt-in reporting on brain_search/kb_search hits.
@@ -132,6 +135,7 @@ import { registerLlmAzure } from './llm/azure.js';
 import { registerGatewayFetchResult } from './gateway-fetch-result.js';
 
 // ===== EXHAUSTIVE WAVE: complete per-connector CRUD surface =====
+import { registerCioAdminTools } from './cio/admin-tools.js';
 import { registerCioActivitiesList } from './cio/activities-list.js';
 import { registerCioBroadcastGetErrors } from './cio/broadcast-get-errors.js';
 import { registerCioBroadcastGetMetrics } from './cio/broadcast-get-metrics.js';
@@ -865,6 +869,9 @@ import { registerGraphReplyEmail } from './graph/reply-email.js';
 import { registerLegalBlobList } from './legal/blob-list.js';
 import { registerLegalBlobGet } from './legal/blob-get.js';
 import { registerLegalBlobPut } from './legal/blob-put.js';
+import { registerLegalBlobMove } from './legal/blob-move.js';
+import { registerLegalBlobCopy } from './legal/blob-copy.js';
+import { registerLegalBlobDelete } from './legal/blob-delete.js';
 import { registerGraphDriveList } from './graph-drive/list.js';
 import { registerGraphDriveDownload } from './graph-drive/download.js';
 import { registerGraphDriveUpload } from './graph-drive/upload.js';
@@ -942,6 +949,8 @@ import { registerAzureContainerappSetEnv } from './azure/containerapp-set-env.js
 import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
 import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
 import { registerXeroTools } from './xero/tools.js';
+import { registerHeyGenTools } from './heygen/index.js';
+import { registerMailArchiveTools } from './mail/tools.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -1007,11 +1016,23 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // ===== Phase 4: kb-memory shared brain (cross-agent / cross-platform memory) =====
   registerMemoryRecall(server, callerHash);
+  // RESTORED (2026-07-28, review finding): briefly retired as "redundant" with the widened M365
+  // prefix-strip shim, but that shim is gated to M365 requests only (registry.ts's
+  // finalizeM365Aliases) -- deleting this would have silently broken "recall" for every OTHER
+  // (non-connector) caller that already depends on it, e.g. Claude Code, Hyperagent. NOTE:
+  // connector-surface (Claude Chat DCR) clients never received "recall" either way -- their
+  // allowlist (CONNECTOR_TOOLSET, registry.ts) only lists "memory_recall". Kept as the always-on
+  // alias for the callers that do reach it; see recall-alias.ts's header for how it coexists with
+  // the generic M365 shim without a duplicate-registration crash (primaryNamesFor() tracks this
+  // registration so the generic shim's own "recall" candidate is excluded, not colliding with it).
+  registerMemoryRecallAlias(server, callerHash);
   registerMemoryTeam(server, callerHash);
   registerMemoryPack(server, callerHash);
   registerMemoryRemember(server, callerHash); // write_simple: gated by ENABLE_WRITE_TOOLS
   registerMemoryInbound(server, callerHash); // read: cross-agent notes on your ledger (wake first-duty)
   registerWake(server, callerHash); // read: ONE federated boot call (pack + cosmos memory + active tasks + inbox peek + inbound)
+  registerDeveloperWakeLite(server, callerHash); // read: diagnostic -- unconditionally tiny wake alternative (2026-07-26, M365 tool-rendering isolation)
+  registerCatalogProbe(server, callerHash); // read: diagnostic -- build/registry/caller-auth probe (2026-07-26, M365 tool-rendering isolation)
   registerMemoryReconcile(server, callerHash); // write_simple: ack inbound (advances marker; deletes nothing)
   registerCheckpoint(server, callerHash); // write_simple: platform-agnostic session-end capture; resets capture-pressure
 
@@ -1074,6 +1095,12 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerLegalBlobList(server, callerHash);
   registerLegalBlobGet(server, callerHash);
   registerLegalBlobPut(server, callerHash);
+  // legal_blob_move/copy/delete (2026-08-04, CLO brief §1): the store previously had create +
+  // overwrite only, no way to delete/move/copy/rename. delete is a SOFT delete (move to _TRASH/),
+  // never a hard delete of the only copy -- see blob-delete.ts's header.
+  registerLegalBlobMove(server, callerHash);
+  registerLegalBlobCopy(server, callerHash);
+  registerLegalBlobDelete(server, callerHash);
   registerGraphDriveList(server, callerHash);
   registerGraphDriveDownload(server, callerHash);
   registerGraphDriveUpload(server, callerHash);
@@ -1149,6 +1176,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerTwilioSendSms(server, callerHash);
 
   // ===== EXHAUSTIVE WAVE registrations =====
+  registerCioAdminTools(server, callerHash);
   registerCioActivitiesList(server, callerHash);
   registerCioBroadcastGetErrors(server, callerHash);
   registerCioBroadcastGetMetrics(server, callerHash);
@@ -1895,4 +1923,15 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAzureSearchIndexerUpsert(server, callerHash);
   // Xero (read-only, executive-ring gated in-handler; MNPI — see tools/xero/client.ts).
   registerXeroTools(server, callerHash);
+  // HeyGen (durable subscription OAuth + Phase 0 discovery/reconciliation + bounded idempotent direct video/ingestion writes; every handler lane-gated).
+  registerHeyGenTools(server, callerHash);
+  // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
+  // for the retirement timeline this must be replaced before).
+  registerMailArchiveTools(server, callerHash);
+
+  // M365 PREFIX-STRIP COMPAT SHIM finalization (2026-07-28): MUST run last, after every real tool
+  // above has registered, so the full alias-candidate set (and the full set of real primary tool
+  // names) is known before any alias is actually registered. See registry.ts's
+  // finalizeM365Aliases()/registerTool() for the full rationale (a no-op for non-M365 requests).
+  finalizeM365Aliases(server, callerHash);
 }

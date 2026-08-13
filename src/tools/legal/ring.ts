@@ -28,6 +28,7 @@
  */
 
 import { INDEX_LANES } from '../kb/search-privileged.js';
+import { loadEnv } from '../../config/env.js';
 
 export type LegalContainer = 'company' | 'personal';
 
@@ -42,6 +43,15 @@ export function lanesForContainer(container: LegalContainer): string[] {
   return INDEX_LANES[CONTAINER_INDEX[container]] ?? [];
 }
 
+/** The AI-Search index that indexes this container's blobs (2026-08-04, CLO field report Finding
+ *  3): legal_blob_delete/legal_blob_move need this to de-index a stale entry at the OLD path when
+ *  a blob's path changes, since the chunked doc rooms are fed by slow-cadence native pull-indexers
+ *  with no deletion-detection policy -- a moved/soft-deleted blob's index entry otherwise survives
+ *  indefinitely, citing a path that no longer resolves. */
+export function searchIndexForContainer(container: LegalContainer): string {
+  return CONTAINER_INDEX[container];
+}
+
 /**
  * Pure ring-enforcement predicate for the legal blob store, exported for unit testing without
  * spinning up the MCP server. Mirrors isLaneAllowed() in kb/search-privileged.ts: an unknown/absent
@@ -53,4 +63,20 @@ export function isLegalContainerAllowed(
 ): boolean {
   const lanes = lanesForContainer(container);
   return Boolean(caller) && lanes.includes(caller as string);
+}
+
+/**
+ * Protected-prefix guard for destructive/relocating operations (legal_blob_delete,
+ * legal_blob_move) — see LEGAL_PROTECTED_PREFIXES in env.ts for the full rationale. A path is
+ * protected when it falls under any configured prefix, checked case-sensitively (Azure blob names
+ * are case-sensitive) after stripping a leading slash. Pure + exported for unit testing.
+ */
+export function protectedPrefixes(): string[] {
+  const env = loadEnv();
+  return env.LEGAL_PROTECTED_PREFIXES.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+export function isProtectedPath(path: string): boolean {
+  const normalized = path.replace(/^\/+/, '');
+  return protectedPrefixes().some((prefix) => normalized.startsWith(prefix));
 }

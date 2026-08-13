@@ -69,6 +69,7 @@ export function azSig(
   contentLength: string,
   contentType: string,
   ifNoneMatch = '',
+  ifMatch = '',
 ): string {
   const canonHeaders =
     Object.keys(xms)
@@ -86,7 +87,7 @@ export function azSig(
     contentType || '', // Content-Type
     '', // Date (using x-ms-date header instead)
     '', // If-Modified-Since
-    '', // If-Match
+    ifMatch || '', // If-Match
     ifNoneMatch || '', // If-None-Match
     '', // If-Unmodified-Since
     '', // Range
@@ -94,6 +95,24 @@ export function azSig(
   ].join('\n');
   const sig = crypto.createHmac('sha256', Buffer.from(key, 'base64')).update(sts, 'utf8').digest('base64');
   return `SharedKey ${account}:${sig}`;
+}
+
+/**
+ * Decode the small set of XML entities Azure's List Blobs response can contain in a <Name> (or
+ * other text node) — a real blob like "Motion & Order.pdf" comes back as "Motion &amp; Order.pdf"
+ * (2026-08-04, PR #190 review: an undecoded name sent back to Azure on a subsequent mutation
+ * targets a DIFFERENT, nonexistent blob and fails mid-batch). `&amp;` is decoded LAST so a literal
+ * escaped entity in the source text (e.g. "&amp;lt;") is never double-unescaped into "<".
+ */
+function xmlDecode(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, h: string) => String.fromCodePoint(Number.parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_m, d: string) => String.fromCodePoint(Number.parseInt(d, 10)))
+    .replace(/&amp;/g, '&');
 }
 
 /** Percent-encode each path segment (blob names may contain slashes as virtual folders). */
@@ -109,39 +128,60 @@ export interface BlobListItem {
   size: number | null;
   lastModified: string | null;
   contentType: string | null;
+  /** The blob's current ETag, when Azure returns one on the list op — used by bulk callers (e.g.
+   *  legal_blob_delete) to pin a subsequent copy/delete to this exact version without a second HEAD
+   *  per item. Null on a listing error edge case, never on a normal successful list. */
+  etag: string | null;
 }
 
 /**
  * List blobs in a container under an optional prefix. Read-only.
  * Uses the Blob "List Blobs" REST op (restype=container&comp=list) — the same call shape as
  * legal.mjs listMatterNames, generalized to an arbitrary prefix.
+ *
+ * PAGINATED TO EXHAUSTION (2026-08-04, PR #190 review): Azure can return a partial page and a
+ * <NextMarker> for a large or busy container. A caller like legal_blob_delete's bulk mode enforces
+ * max_items against the FULL matched set and must never mistake one truncated page for the whole
+ * result -- that would let it silently under-count and mutate an incomplete slice. Bounded at 200
+ * pages (Azure's default page size is up to 5000 blobs/page, so this comfortably covers any
+ * realistic legal-document container) as a backstop against an infinite loop on a malformed/looping
+ * marker, never expected to bind in practice.
  */
 export async function listBlobs(container: LegalContainer, prefix?: string): Promise<BlobListItem[]> {
   const c = creds();
   if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
-  const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
-  const query: Record<string, string> = { comp: 'list', restype: 'container' };
-  if (prefix) query.prefix = prefix;
-  const auth = azSig(c.account, c.key, 'GET', container, '', xms, query, '', '');
-  let url = `https://${c.account}.blob.core.windows.net/${container}?restype=container&comp=list`;
-  if (prefix) url += `&prefix=${encodeURIComponent(prefix)}`;
-  const r = await fetch(url, { headers: { ...xms, Authorization: auth } });
-  if (r.status === 404) return [];
-  if (!r.ok) throw new Error(`legal blob list ${r.status}: ${(await r.text()).slice(0, 160)}`);
-  const xml = await r.text();
   const items: BlobListItem[] = [];
-  // Parse each <Blob>…</Blob> block: <Name>, <Content-Length>, <Last-Modified>, <Content-Type>.
-  for (const block of xml.matchAll(/<Blob>([\s\S]*?)<\/Blob>/g)) {
-    const b = block[1];
-    const name = (b.match(/<Name>([^<]+)<\/Name>/) || [])[1];
-    if (!name) continue;
-    const sizeStr = (b.match(/<Content-Length>([^<]*)<\/Content-Length>/) || [])[1];
-    items.push({
-      name,
-      size: sizeStr ? Number.parseInt(sizeStr, 10) : null,
-      lastModified: (b.match(/<Last-Modified>([^<]+)<\/Last-Modified>/) || [])[1] || null,
-      contentType: (b.match(/<Content-Type>([^<]*)<\/Content-Type>/) || [])[1] || null,
-    });
+  let marker: string | undefined;
+  for (let page = 0; page < 200; page++) {
+    const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
+    const query: Record<string, string> = { comp: 'list', restype: 'container' };
+    if (prefix) query.prefix = prefix;
+    if (marker) query.marker = marker;
+    const auth = azSig(c.account, c.key, 'GET', container, '', xms, query, '', '');
+    let url = `https://${c.account}.blob.core.windows.net/${container}?restype=container&comp=list`;
+    if (prefix) url += `&prefix=${encodeURIComponent(prefix)}`;
+    if (marker) url += `&marker=${encodeURIComponent(marker)}`;
+    const r = await fetch(url, { headers: { ...xms, Authorization: auth } });
+    if (r.status === 404) break;
+    if (!r.ok) throw new Error(`legal blob list ${r.status}: ${(await r.text()).slice(0, 160)}`);
+    const xml = await r.text();
+    // Parse each <Blob>…</Blob> block: <Name>, <Content-Length>, <Last-Modified>, <Content-Type>, <Etag>.
+    for (const block of xml.matchAll(/<Blob>([\s\S]*?)<\/Blob>/g)) {
+      const b = block[1];
+      const name = (b.match(/<Name>([^<]+)<\/Name>/) || [])[1];
+      if (!name) continue;
+      const sizeStr = (b.match(/<Content-Length>([^<]*)<\/Content-Length>/) || [])[1];
+      items.push({
+        name: xmlDecode(name),
+        size: sizeStr ? Number.parseInt(sizeStr, 10) : null,
+        lastModified: (b.match(/<Last-Modified>([^<]+)<\/Last-Modified>/) || [])[1] || null,
+        contentType: (b.match(/<Content-Type>([^<]*)<\/Content-Type>/) || [])[1] || null,
+        etag: (b.match(/<Etag>([^<]*)<\/Etag>/) || [])[1] || null,
+      });
+    }
+    const nextMarker = (xml.match(/<NextMarker>([^<]*)<\/NextMarker>/) || [])[1] || '';
+    if (!nextMarker) break;
+    marker = nextMarker;
   }
   return items;
 }
@@ -213,8 +253,22 @@ export async function getBlob(
   return { found: true, contentType, size: buf.length, text: null, base64: buf.toString('base64') };
 }
 
-/** HEAD a blob to test existence without downloading it (fail-closed overwrite check). */
-export async function blobExists(container: LegalContainer, path: string): Promise<boolean> {
+export interface BlobHeadResult {
+  exists: boolean;
+  /** Current ETag, when the blob exists — the version-pinning token for a subsequent conditional
+   *  copy (x-ms-source-if-match) or delete (If-Match), see copyBlob/deleteBlobHard below. */
+  etag: string | null;
+  size: number | null;
+}
+
+/**
+ * HEAD a blob: existence + ETag + size in one call. The ETag is what lets a copy-then-delete
+ * caller (legal_blob_move, legal_blob_delete) pin BOTH the copy and the delete to the exact source
+ * version this HEAD observed, so a concurrent overwrite of the source between "check" and "act"
+ * fails the operation closed instead of silently deleting a different version than was copied
+ * (2026-08-04, PR #190 review — the original copy-then-delete had no such guard at all).
+ */
+export async function headBlob(container: LegalContainer, path: string): Promise<BlobHeadResult> {
   const c = creds();
   if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
   const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
@@ -223,9 +277,50 @@ export async function blobExists(container: LegalContainer, path: string): Promi
     method: 'HEAD',
     headers: { ...xms, Authorization: auth },
   });
-  if (r.status === 404) return false;
-  if (r.status === 200) return true;
-  throw new Error(`legal blob head ${r.status}`);
+  if (r.status === 404) return { exists: false, etag: null, size: null };
+  if (r.status !== 200) throw new Error(`legal blob head ${r.status}`);
+  const cl = r.headers.get('content-length');
+  return { exists: true, etag: r.headers.get('etag'), size: cl ? Number.parseInt(cl, 10) : null };
+}
+
+/** HEAD a blob to test existence without downloading it (fail-closed overwrite check). Thin
+ *  boolean wrapper over headBlob for callers that only need existence, not the ETag. */
+export async function blobExists(container: LegalContainer, path: string): Promise<boolean> {
+  return (await headBlob(container, path)).exists;
+}
+
+/** Races `blobExists` against `timeoutMs`, resolving to `null` ("could not confirm in time")
+ *  rather than throwing or hanging -- the losing call is not cancelled (JS has no such primitive
+ *  for a bare `fetch()`) and keeps running in the background; its eventual result is simply
+ *  discarded. `headBlob` (which `blobExists` calls) has no timeout of its own, so any caller on a
+ *  time-budgeted path (a deindex sweep, a synchronous MCP tool response) MUST bound it locally or
+ *  a single hung Azure Blob HEAD request can stall the whole caller indefinitely. Shared here
+ *  (2026-08-04, Copilot review PR #192 round 16) rather than duplicated per call site -- originally
+ *  written once inline in agentstate/deindex-resweep.ts for its delayed resweep tick, then reused
+ *  identically by azure/search-write.ts's synchronous immediate-cleanup path once that path grew
+ *  the SAME existence-check guard for the SAME same-path-recreation race, just one layer earlier. */
+export async function blobExistsWithTimeout(container: LegalContainer, path: string, timeoutMs: number): Promise<boolean | null> {
+  // `Promise.race` does NOT convert a rejection into `null` -- it propagates the rejection through
+  // as soon as either promise settles, timer or not (2026-08-04, Copilot review PR #192 round 18):
+  // a Blob HEAD returning 500, or a network error, made `blobExists` REJECT before the timer could
+  // ever win, so this function violated its own "never throws" contract on exactly the kind of
+  // transient Blob Storage hiccup it exists to tolerate. In deindex-resweep.ts that rejection
+  // reached the per-item catch-all, which (as of round 17) treats an unexpected exception as
+  // `nonRetriable` -- so a transient Storage outage could terminally fail the durable cleanup entry
+  // after DEINDEX_RESWEEP_MAX_ATTEMPTS, the exact "permanently stranded" bug round 17 closed for
+  // Search/auth outages but missed here. Fix: swallow a HEAD failure into `null` ("could not
+  // confirm") BEFORE racing, so the raced promise can only ever resolve, never reject.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean | null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  const safeExists = blobExists(container, path).catch(() => null);
+  try {
+    return await Promise.race([safeExists, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export interface BlobPutResult {
@@ -283,5 +378,174 @@ export async function putBlob(
     );
   }
   if (!r.ok) throw new Error(`legal blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  return { path, container, bytes: buf.length, contentType: ct };
+}
+
+/**
+ * Server-side Copy Blob (2026-08-04, CLO brief §1 — the store had create + overwrite but no way to
+ * move, copy, rename, or delete a blob at all). Azure Blob has no native rename/move op; both are
+ * built from this copy primitive + deleteBlobHard below (copy-verify-then-delete-original).
+ *
+ * Same-account, same-key copy: the destination PUT carries `x-ms-copy-source` (the source blob's
+ * full URL) and Azure reads the source using the SAME SharedKey principal making the request — no
+ * separate source auth needed. Azure Copy Blob can be asynchronous for large blobs; this polls
+ * `x-ms-copy-status` via HEAD on the destination (bounded, since these are legal documents in the
+ * KB range, not multi-GB files) rather than assuming synchronous completion.
+ */
+export async function copyBlob(
+  container: LegalContainer,
+  srcPath: string,
+  dstPath: string,
+  overwrite = false,
+  srcEtag?: string,
+): Promise<{ bytes: number; copyStatus: string }> {
+  const c = creds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
+  const sourceUrl = `https://${c.account}.blob.core.windows.net/${container}/${encPath(srcPath)}`;
+  const xms: Record<string, string> = {
+    'x-ms-copy-source': sourceUrl,
+    'x-ms-date': new Date().toUTCString(),
+    'x-ms-version': AVER,
+  };
+  // Pin the copy to the exact source version the caller observed (via headBlob/listBlobs) just
+  // before calling this: if another writer overwrites the source between that observation and this
+  // PUT, Azure itself refuses the copy (412) instead of silently copying a different version. See
+  // the matching If-Match guard on deleteBlobHard below -- together they close the copy-then-delete
+  // TOCTOU window a caller-supplied srcEtag protects (2026-08-04, PR #190 review).
+  if (srcEtag) xms['x-ms-source-if-match'] = srcEtag;
+  const ifNoneMatch = overwrite ? '' : '*';
+  const auth = azSig(c.account, c.key, 'PUT', container, encPath(dstPath), xms, null, '', '', ifNoneMatch);
+  const headers: Record<string, string> = { ...xms, Authorization: auth };
+  if (!overwrite) headers['If-None-Match'] = ifNoneMatch;
+  const r = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(dstPath)}`, {
+    method: 'PUT',
+    headers,
+  });
+  if (r.status === 404) {
+    throw new Error(`legal blob copy: source ${container}/${srcPath} not found.`);
+  }
+  if (r.status === 409 || r.status === 412) {
+    throw new Error(
+      `legal blob copy refused (HTTP ${r.status}): either a blob already exists at ${container}/${dstPath} ` +
+        `(pass overwrite=true to replace it), or the source at ${container}/${srcPath} changed since it was ` +
+        `last checked and no longer matches the expected version. Re-check and retry.`,
+    );
+  }
+  if (!r.ok) throw new Error(`legal blob copy ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  let copyStatus = r.headers.get('x-ms-copy-status') || 'success';
+
+  // Bounded poll if Azure started an async copy (rare for small legal documents, but handle it).
+  const deadline = Date.now() + 20_000;
+  while (copyStatus === 'pending' && Date.now() < deadline) {
+    await new Promise((res) => setTimeout(res, 500));
+    const hxms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
+    const hauth = azSig(c.account, c.key, 'HEAD', container, encPath(dstPath), hxms, null, '', '');
+    const hr = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(dstPath)}`, {
+      method: 'HEAD',
+      headers: { ...hxms, Authorization: hauth },
+    });
+    copyStatus = hr.headers.get('x-ms-copy-status') || copyStatus;
+  }
+  if (copyStatus === 'pending') {
+    throw new Error(`legal blob copy did not complete (status=pending) within 20s for ${container}/${dstPath}.`);
+  }
+  if (copyStatus !== 'success') {
+    throw new Error(`legal blob copy failed to complete (status=${copyStatus}) for ${container}/${dstPath}.`);
+  }
+
+  // Content-Length on the Copy Blob PUT response is the HTTP RESPONSE-BODY length (normally 0,
+  // since a successful PUT returns no body) -- NOT the copied blob's size. A final HEAD on the
+  // destination is the only reliable way to report real bytes (2026-08-04, PR #190 review: every
+  // caller was previously reporting bytes:0 on every real copy).
+  const fxms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
+  const fauth = azSig(c.account, c.key, 'HEAD', container, encPath(dstPath), fxms, null, '', '');
+  const fr = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(dstPath)}`, {
+    method: 'HEAD',
+    headers: { ...fxms, Authorization: fauth },
+  });
+  const sizeHeader = fr.ok ? fr.headers.get('content-length') : null;
+  return { bytes: sizeHeader ? Number.parseInt(sizeHeader, 10) : 0, copyStatus };
+}
+
+/**
+ * Hard DELETE of a blob. LOW-LEVEL primitive only — never call this directly from a tool handler
+ * for a caller-initiated delete. The tool layer (legal-blob-delete.ts) always copies to
+ * `_TRASH/<original-path>` FIRST and verifies the copy landed before calling this to remove the
+ * original, so a caller-facing "delete" is a soft, recoverable move, never a direct hard delete of
+ * the only copy. This primitive exists so that move-to-trash flow (and legal_blob_move, which is
+ * copy-then-remove-original between two arbitrary paths) has something to call once the copy is
+ * verified.
+ */
+export async function deleteBlobHard(container: LegalContainer, path: string, ifMatch?: string): Promise<void> {
+  const c = creds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
+  const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
+  const auth = azSig(c.account, c.key, 'DELETE', container, encPath(path), xms, null, '', '', '', ifMatch || '');
+  const headers: Record<string, string> = { ...xms, Authorization: auth };
+  // Pins the delete to the exact version that was just copied (see copyBlob's matching
+  // x-ms-source-if-match): if the source changed after the copy but before this DELETE, Azure
+  // refuses (412) instead of deleting a version that was never actually copied to safety.
+  if (ifMatch) headers['If-Match'] = ifMatch;
+  const r = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(path)}`, {
+    method: 'DELETE',
+    headers,
+  });
+  if (r.status === 404) return; // already gone; treat as success (idempotent)
+  if (r.status === 412) {
+    throw new Error(
+      `legal blob delete refused: the blob at ${container}/${path} changed since it was copied (ETag no ` +
+        `longer matches what was just moved to safety). Nothing was deleted; investigate and retry.`,
+    );
+  }
+  if (!r.ok) throw new Error(`legal blob delete ${r.status}: ${(await r.text()).slice(0, 200)}`);
+}
+
+export interface BlobPutRawResult {
+  path: string;
+  container: string;
+  bytes: number;
+  contentType: string;
+}
+
+/**
+ * Generic SharedKey blob PUT against ANY account/container (2026-07-25, added for
+ * mail_archive_save_attachment_to_dataroom) — the write-side counterpart to fetchBlobRaw above.
+ * Same reasoning: reuse the proven azSig construction rather than re-deriving Azure SharedKey
+ * signing for a second store. Binary-safe (pass base64 or text). Same fail-closed
+ * no-silent-clobber default as putBlob, and the same BUGFIX documented above putBlob (If-None-Match
+ * must be threaded into azSig, not just sent on the wire, or the signature won't match what Azure
+ * actually received and every non-overwrite PUT 403s).
+ */
+export async function putBlobRaw(
+  account: string,
+  key: string,
+  container: string,
+  path: string,
+  body: { text?: string; base64?: string; contentType?: string },
+  overwrite = false,
+): Promise<BlobPutRawResult> {
+  const buf = body.base64 != null ? Buffer.from(body.base64, 'base64') : Buffer.from(body.text ?? '', 'utf8');
+  const ct = body.contentType || (body.base64 != null ? 'application/octet-stream' : 'application/json');
+  const xms: Record<string, string> = {
+    'x-ms-blob-type': 'BlockBlob',
+    'x-ms-date': new Date().toUTCString(),
+    'x-ms-version': AVER,
+  };
+  const ifNoneMatch = overwrite ? '' : '*';
+  const auth = azSig(account, key, 'PUT', container, encPath(path), xms, null, String(buf.length), ct, ifNoneMatch);
+  const headers: Record<string, string> = { ...xms, 'Content-Type': ct, Authorization: auth };
+  if (!overwrite) headers['If-None-Match'] = ifNoneMatch;
+  const r = await fetch(`https://${account}.blob.core.windows.net/${container}/${encPath(path)}`, {
+    method: 'PUT',
+    headers,
+    body: buf,
+  });
+  if (r.status === 409 || r.status === 412) {
+    throw new Error(
+      `blob put refused: a blob already exists at ${container}/${path} (HTTP ${r.status}). ` +
+        `Pass overwrite=true to intentionally replace it.`,
+    );
+  }
+  if (!r.ok) throw new Error(`blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
   return { path, container, bytes: buf.length, contentType: ct };
 }

@@ -393,6 +393,128 @@ test('FAIL-OPEN (chunked room): a 400 degrades to a BARE keyword query with NO s
   );
 });
 
+// --- behavior 4b (2026-08-04, CLO field report): soft-deleted (_TRASH/) hits are suppressed, and
+// byte-identical content under DIFFERENT parents (cross-prefix duplication) is collapsed with a
+// `variants` field on the survivor. ---
+
+test('hybridSearch (chunked room): a hit whose path is under _TRASH/ is suppressed entirely, even if it would have won its parent group', async () => {
+  const DOCS_WITH_TRASH = [
+    // The higher-scored chunk for parent p1 is the SOFT-DELETED one; the lower-scored survives.
+    { chunk_id: 'p1#0', parent_id: 'p1', path: '_TRASH/legal/contractA.pdf', chunk: 'trashed copy', '@search.rerankerScore': 9.9 },
+    { chunk_id: 'p1#1', parent_id: 'p1', path: 'legal/contractA.pdf', chunk: 'live copy', '@search.rerankerScore': 3.0 },
+  ];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: DOCS_WITH_TRASH }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-personal', 'contract', 8, { includeOps: false });
+      assert.ok(res);
+      assert.equal(res!.matches.length, 1, 'the _TRASH/ chunk must never surface as its own hit, and must never win the parent-group contest');
+      assert.equal(res!.matches[0]!.path, 'legal/contractA.pdf');
+      assert.equal(res!.matches[0]!.text, 'live copy');
+    },
+  );
+});
+
+test('hybridSearch (chunked room): a parent whose ONLY chunk is _TRASH/ produces no hit at all (not an empty/broken one)', async () => {
+  const ONLY_TRASHED = [{ chunk_id: 'p9#0', parent_id: 'p9', path: '_TRASH/legal/gone.pdf', chunk: 'gone', '@search.rerankerScore': 5.0 }];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: ONLY_TRASHED }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-personal', 'gone', 8, { includeOps: false });
+      assert.ok(res);
+      assert.equal(res!.matches.length, 0);
+    },
+  );
+});
+
+const LONG_TEXT_A = 'This letter concerns the finding and order after hearing entered by the court on the divorce matter.';
+
+test('hybridSearch (chunked room): byte-identical content under TWO DIFFERENT parents collapses to one hit with a variants field, shallowest path wins', async () => {
+  const CROSS_PREFIX_DUPES = [
+    { chunk_id: 'd1#0', parent_id: 'd1', path: '_SUMMARY/clo-outgoing/01-Divorce/letter.md', chunk: LONG_TEXT_A, '@search.rerankerScore': 2.8471813201904297 },
+    { chunk_id: 'd2#0', parent_id: 'd2', path: '_SUMMARY/divorce/letter.md', chunk: LONG_TEXT_A, '@search.rerankerScore': 2.8471813201904297 },
+    { chunk_id: 'd3#0', parent_id: 'd3', path: 'legal/unrelated-contract.pdf', chunk: 'a completely different, unrelated document body long enough to pass the threshold', '@search.rerankerScore': 1.0 },
+  ];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: CROSS_PREFIX_DUPES }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-personal', 'letter', 10, { includeOps: false });
+      assert.ok(res);
+      assert.equal(res!.matches.length, 2, 'the two byte-identical duplicates collapse to ONE hit; the unrelated doc is untouched');
+      const survivor = res!.matches.find((m) => m.text === LONG_TEXT_A)!;
+      assert.ok(survivor, 'the duplicate-content hit must still be present, exactly once');
+      assert.equal(survivor.path, '_SUMMARY/divorce/letter.md', 'shallowest path (fewer path segments) wins as canonical');
+      assert.deepEqual(survivor.variants, ['_SUMMARY/clo-outgoing/01-Divorce/letter.md'], 'the non-canonical duplicate is recorded, not silently dropped');
+      const unrelated = res!.matches.find((m) => m.path === 'legal/unrelated-contract.pdf')!;
+      assert.ok(unrelated);
+      assert.equal(unrelated.variants, undefined, 'a hit with no collapsed duplicate must never carry a variants key');
+    },
+  );
+});
+
+test('hybridSearch (chunked room): matching TEXT but a DIFFERENT score does NOT merge -- guards against shared-boilerplate false merges (PR #191 review)', async () => {
+  // Two DIFFERENT real pleadings that happen to share the exact same boilerplate opening chunk as
+  // their highest-scoring chunk (a realistic case: standard caption/header language). If text alone
+  // were the grouping key, one of these would vanish from the results and get silently relabeled a
+  // "variant" of the other -- exactly the false-merge risk the score+text combined key exists to
+  // prevent. Distinct scores here (relevance is a function of each PARENT's full embedding, not just
+  // this one shared chunk) must keep them as two separate hits.
+  const SHARED_BOILERPLATE = 'IN THE SUPERIOR COURT OF THE STATE OF CALIFORNIA, COUNTY OF PLACER, FAMILY DIVISION';
+  const SHARED_CHUNK_DOCS = [
+    { chunk_id: 'f1#0', parent_id: 'f1', path: 'clo-outgoing/02-Civil/motion-to-compel.pdf', chunk: SHARED_BOILERPLATE, '@search.rerankerScore': 3.14159265358979 },
+    { chunk_id: 'f2#0', parent_id: 'f2', path: 'clo-outgoing/01-Divorce/response-to-motion.pdf', chunk: SHARED_BOILERPLATE, '@search.rerankerScore': 2.71828182845904 },
+  ];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: SHARED_CHUNK_DOCS }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-personal', 'court', 10, { includeOps: false });
+      assert.ok(res);
+      assert.equal(res!.matches.length, 2, 'different documents sharing one boilerplate chunk must NEVER collapse into one hit');
+      assert.ok(res!.matches.every((m) => m.variants === undefined), 'neither hit should be mislabeled as a variant of the other');
+    },
+  );
+});
+
+test('hybridSearch (chunked room): short/empty-text hits are NEVER merged with each other just for lacking distinguishing content', async () => {
+  const SHORT_TEXT_DOCS = [
+    { chunk_id: 'e1#0', parent_id: 'e1', path: 'legal/a.pdf', chunk: 'ok', '@search.rerankerScore': 2.0 },
+    { chunk_id: 'e2#0', parent_id: 'e2', path: 'legal/b.pdf', chunk: 'ok', '@search.rerankerScore': 1.9 },
+  ];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: SHORT_TEXT_DOCS }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await hybridSearch('legal-personal', 'ok', 10, { includeOps: false });
+      assert.ok(res);
+      assert.equal(res!.matches.length, 2, 'two genuinely different (unrelated) documents that happen to share short text must stay separate');
+    },
+  );
+});
+
 test('hybridSearch (flat room): still uses contentVector, no select, exact `top` — byte-identical to before', async () => {
   let capturedBody: Record<string, unknown> | undefined;
   await withStubbedFetch(

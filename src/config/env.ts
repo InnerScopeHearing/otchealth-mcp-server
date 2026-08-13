@@ -5,6 +5,17 @@ const EnvSchema = z.object({
   CIO_SITE_ID: z.string().min(1, 'CIO_SITE_ID is required'),
   CIO_TRACK_KEY: z.string().min(1, 'CIO_TRACK_KEY is required'),
   CIO_APP_API_BEARER: z.string().min(1, 'CIO_APP_API_BEARER is required'),
+  // Customer.io Journeys UI API / Design Studio control plane. Long-lived service-account token
+  // exchanged at runtime for a one-hour JWT; inert when unset so the existing App/Track surface
+  // remains boot-compatible until the least-privilege Customer.io role is provisioned.
+  CIO_FLY_SERVICE_ACCOUNT_TOKEN: z
+    .string()
+    .optional()
+    .default('')
+    .refine(
+      (value) => value === '' || value.startsWith('sa_live_') || value.startsWith('sa_sandbox_'),
+      'CIO_FLY_SERVICE_ACCOUNT_TOKEN must be a Customer.io sa_live_ or sa_sandbox_ token',
+    ),
 
   // MCP server auth
   PERPLEXITY_CONNECTOR_TOKEN: z
@@ -18,6 +29,44 @@ const EnvSchema = z.object({
   // Maps to caller_agent='copilot-agent' (reads/commons/llm_azure/guardrails only; NO privileged RAG,
   // NO GitHub writes, NO builds). Inert when unset. Rotate-before-launch.
   COPILOT_AGENT_TOKEN: z.string().optional().default(''),
+
+  // Long-lived token for the 'otchealth-dev' GitHub Copilot CUSTOM AGENT's MCP header
+  // (.github-private/agents/otchealth-dev.agent.md, target: github-copilot, tools: ["*"]).
+  // Maps to caller_agent='developer' -- the SAME lane the Hyperagent "OTCHealth Gateway (Developer)"
+  // skill and the M365 declarative Developer agent (M365_DEVELOPER_MCP_TOKEN below) already reach.
+  // Deliberately a DISTINCT token from COPILOT_AGENT_TOKEN (2026-07-26): otchealth-dev is a
+  // user-invocable custom agent with a real app-build job, a different trust profile than GitHub's
+  // fully-autonomous issue-assignment coding agent, which correctly stays on COPILOT_AGENT_TOKEN's
+  // low-privilege lane. Also distinct from M365_DEVELOPER_MCP_TOKEN so each front door's token can be
+  // rotated independently (this file's existing convention -- see the M365 static tokens below).
+  // Inert when unset. Rotate-before-launch.
+  COPILOT_DEV_AGENT_TOKEN: z.string().optional().default(''),
+
+  // Long-lived token for the M365 declarative Developer agent's native MCP runtime
+  // (ai-plugin.json "RemoteMCPServer", auth type "None"). See auth/bearer.ts's extractQueryToken
+  // for why this travels as a ?m365_dev_token= query-string value baked into the published
+  // manifest's spec.url, not a real Authorization header — ApiKeyPluginVault is not supported for
+  // MCP plugins and OAuthPluginVault requires a Teams Developer Portal UI step with no API/CLI
+  // path, so this is the only fully non-interactive option (confirmed via research 2026-07-25).
+  // Maps to caller_agent='developer' — the SAME lane the Hyperagent "OTCHealth Gateway (Developer)"
+  // skill already uses via OAuth client_credentials; this is a second front door to that lane, not
+  // a new/wider privilege grant. Inert when unset. Rotate-before-launch (rotation = replace this
+  // secret + republish the app package via the same Graph appCatalogs/teamsApps call already used
+  // to publish it).
+  M365_DEVELOPER_MCP_TOKEN: z.string().optional().default(''),
+
+  // Fleet-wide extension of the SAME auth:none + query-string-token pattern above (2026-07-25
+  // deep-research fix), one static token per remaining fleet lane's own M365 declarative agent
+  // RemoteMCPServer runtime. Each maps to that lane's existing caller_agent identity via
+  // auth/bearer.ts's m365StaticAgentTokens() map — a second non-interactive front door to the
+  // SAME lane the Hyperagent "OTCHealth Gateway (<Role>)" skill already reaches via OAuth
+  // client_credentials, not a new/wider privilege grant. All inert when unset; all
+  // rotate-before-launch (rotation = replace the secret + republish that agent's app package).
+  M365_CTO_MCP_TOKEN: z.string().optional().default(''),
+  M365_CFO_MCP_TOKEN: z.string().optional().default(''),
+  M365_CLO_MCP_TOKEN: z.string().optional().default(''),
+  M365_COO_MCP_TOKEN: z.string().optional().default(''),
+  M365_CRO_MCP_TOKEN: z.string().optional().default(''),
 
   // n8n
   N8N_BASE_URL: z
@@ -44,11 +93,39 @@ const EnvSchema = z.object({
   CLOUDFLARE_API_TOKEN: z.string().optional().default(''),
   CLOUDFLARE_ZONE_ID: z.string().optional().default(''),
 
-  // Microsoft Graph (COO send-as coo@otchealthmart.com)
+  // Microsoft Graph (Exec Fleet Microsoft Graph app; send/read-as multiple CS personas)
   GRAPH_TENANT_ID: z.string().optional().default(''),
   GRAPH_CLIENT_ID: z.string().optional().default(''),
   GRAPH_CLIENT_SECRET: z.string().optional().default(''),
   GRAPH_SENDER_EMAIL: z.string().optional().default('coo@otchealthmart.com'),
+  // Allowlist of mailboxes the graph_* mail tools (send/list/get/mark-read) are permitted to touch
+  // (see graph/api-client.ts's allowedMailboxes() header for why this exists: the app's application
+  // permissions -- Mail.ReadWrite, Mail.Send, etc. -- are tenant-wide by default with no Graph-level
+  // way to scope them; this is a code-level guard running in front of the real Exchange
+  // ApplicationAccessPolicy, live since 2026-07-26 and confirmed enforcing via
+  // Test-ApplicationAccessPolicy, added 2026-07-25 for the CRO customer-service-engine handoff).
+  // CSV, case-insensitive. Defaults to the 5 known CS personas.
+  GRAPH_CS_MAILBOXES: z.string().optional().default('care@otchealthmart.com,sarah@otchealthmart.com,helen@otchealthmart.com,ray@otchealthmart.com,coo@otchealthmart.com'),
+
+  // Executive-lane READ-ONLY mailbox allowlist (2026-08-04, CFO FY2021-close regression fix).
+  // graph_list_messages/graph_message_get resolve mailboxes on THIS list through a SEPARATE app --
+  // the already-deployed otchealth-mail-readonly registration (reusing MAIL_ARCHIVE_EWS_CLIENT_ID/
+  // SECRET/TENANT_ID below, its Graph-permissions grant, distinct from its EWS role) -- instead of
+  // the CS-restricted GRAPH_CLIENT_ID app. Empirically confirmed 2026-08-04 that this app is NOT
+  // subject to the CS-Engine-Mailboxes ApplicationAccessPolicy (live HTTP 200 direct-Graph reads
+  // against every mailbox in the default list below). Gated to EXEC_RING callers only (see
+  // isExecMailboxRequest()); the CS allowlist/app/policy above is completely untouched by this --
+  // customer-service mailboxes and personas keep working exactly as before. READ ONLY: send/write
+  // stay on the CS-only path. CSV, case-insensitive, env-overridable.
+  GRAPH_EXEC_MAILBOXES: z.string().optional().default('matthew@innd.com,ap@innd.com,accounting@hearingassist.com,cfo@innd.com'),
+
+  // Repo-scoping allowlist for github_*/depot_* READ tools, for non-cto/exec callers (2026-07-26,
+  // hardening follow-up to the otchealth-dev Copilot custom agent wiring -- see
+  // github/api-client.ts's assertRepoAllowed() header for the full rationale). CSV of "owner/repo"
+  // pairs, case-insensitive. DEFAULT (unset/empty) IS UNRESTRICTED -- Matt's explicit call,
+  // 2026-07-26: ships as a zero-risk, inert control point, not a live restriction today. cto/exec
+  // are never subject to this check regardless of its value.
+  DEVELOPER_ALLOWED_REPOS: z.string().optional().default(''),
 
   // Stripe (read-only)
   STRIPE_SECRET_KEY: z.string().optional().default(''),
@@ -68,6 +145,17 @@ const EnvSchema = z.object({
   XERO_TENANT_INND: z.string().optional().default(''),
   XERO_TENANT_HEARINGASSIST: z.string().optional().default(''),
   XERO_TENANT_PERSONAL: z.string().optional().default(''),
+
+  // Mail archive (TEMPORARY — see tools/mail/client.ts header). EWS app-only client_credentials
+  // against the Office 365 Exchange Online resource, reusing the otchealth-mail-readonly app
+  // registration's client id/secret/tenant (a distinct EWS-resource app-role grant, separate from
+  // its Graph permissions). Single hardcoded target mailbox (default matthew@innd.com). Bridges the
+  // CFO agent to the Online Archive mailbox until this is replaced ahead of the EWS shutdown
+  // (phased disable 2026-10-01, full shutdown 2027-04-01).
+  MAIL_ARCHIVE_EWS_CLIENT_ID: z.string().optional().default(''),
+  MAIL_ARCHIVE_EWS_CLIENT_SECRET: z.string().optional().default(''),
+  MAIL_ARCHIVE_EWS_TENANT_ID: z.string().optional().default(''),
+  MAIL_ARCHIVE_MAILBOX: z.string().optional().default('matthew@innd.com'),
 
   // OAuth 2.1 (confidential client). When OAUTH_CLIENT_ID + OAUTH_TOKEN_SIGNING_SECRET are set,
   // the gateway issues real expiring JWT access/refresh tokens (PKCE S256 mandatory). When unset,
@@ -241,6 +329,38 @@ const EnvSchema = z.object({
   AZURE_COMMONS_STORAGE_ACCOUNT: z.string().optional().default(''),
   AZURE_COMMONS_STORAGE_KEY: z.string().optional().default(''),
 
+  // HeyGen production-control feature gates. Every provider mutation family is independently dark by
+  // default; read/status tools and dry-run preflight remain available. The fleet-wide provider-write
+  // interlock AND the exact family flag must both be true before any credit-consuming provider call.
+  // The owner approval public key is verification-only and may be empty while writes remain false.
+  ENABLE_HEYGEN_PROVIDER_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_PROMPT_AVATAR_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_AVATAR_VIDEO_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_REFERENCE_LOOK_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_VIDEO_AGENT_GENERATION: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_ASSET_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_TRANSLATION_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_TTS_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  ENABLE_HEYGEN_METADATA_WRITES: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  HEYGEN_OWNER_APPROVAL_ISSUER: z.string().optional().default('https://approval.otchealth.app'),
+  HEYGEN_OWNER_APPROVAL_AUDIENCE: z.string().optional().default('otchealth-heygen'),
+  HEYGEN_OWNER_APPROVAL_SUBJECT: z.string().optional().default(''),
+  HEYGEN_OWNER_APPROVAL_PUBLIC_JWK: z.string().optional().default(''),
+  HEYGEN_OWNER_APPROVAL_PRIVATE_JWK: z.string().optional().default(''),
+  HEYGEN_OWNER_APPROVAL_EMAIL: z.string().optional().default('').refine(
+    (value) => value === '' || z.string().email().safeParse(value).success,
+    'HEYGEN_OWNER_APPROVAL_EMAIL must be a valid email when configured',
+  ),
+  HEYGEN_APPROVAL_CONTEXT_SECRET: z.string().optional().default(''),
+  HEYGEN_APPROVAL_HANDLE_SECRET: z.string().optional().default(''),
+  HEYGEN_APPROVAL_CALLBACK_SECRET: z.string().optional().default(''),
+  HEYGEN_APPROVAL_BROKER_URL: z.string().optional().default('').refine(
+    (value) => value === '' || z.string().url().safeParse(value).success,
+    'HEYGEN_APPROVAL_BROKER_URL must be a valid URL when configured',
+  ),
+  HEYGEN_APPROVAL_CALLBACK_URL: z.string().url().optional().default('https://mcp.otchealth.app/heygen/approval/callback'),
+
   // Agent State Plane - Cosmos DB for NoSQL work-ledger + structured memory-of-record.
   // Inert without COSMOS_ENDPOINT/COSMOS_KEY. Non-PHI, non-MNPI, non-privileged by construction
   // (the clo-personal lane is rejected). Verbatim-critical records live here, never in an
@@ -269,6 +389,40 @@ const EnvSchema = z.object({
   // result rather than throwing. The account defaults to otchealthlegalstore (as in the skill).
   AZURE_LEGAL_STORAGE_ACCOUNT: z.string().optional().default('otchealthlegalstore'),
   AZURE_LEGAL_STORAGE_KEY: z.string().optional().default(''),
+  // Protected prefixes for legal_blob_delete/legal_blob_move (2026-08-04, CLO brief §1): a delete
+  // or a move-away-from-here is refused outright, regardless of caller/dry_run, when the SOURCE
+  // path falls under one of these prefixes. The court-download folder and any raw filings tree are
+  // evidence and stay append-only no matter what any agent asks -- this is a second, independent
+  // control from the soft-delete-to-_TRASH mechanism (both must be defeated to lose a document).
+  // Prefix match is case-sensitive (Azure blob names are case-sensitive); CSV, env-overridable.
+  LEGAL_PROTECTED_PREFIXES: z
+    .string()
+    .optional()
+    .default('clo-outgoing/Divorce Case Summary and ALL Filings/,filings/'),
+  // Soft time budget for legal_blob_delete's bulk (prefix) mode, in milliseconds (2026-08-04, CLO
+  // field report Finding 1): 147 soft-deletes = 294 Azure ops (copy+remove each) at the CLO's
+  // measured ~0.7s/item ran ~100s -- over the 60s MCP transport timeout, with the caller left unable
+  // to tell whether the call had done nothing, some, or all of the batch (it HAD completed
+  // server-side; the client just never learned that). The bulk loop checks elapsed time BEFORE
+  // starting each item and returns {status:'partial', remaining} well inside the transport ceiling
+  // rather than risk an orphaned execution the caller can't observe. A partial result is naturally
+  // resumable: re-invoking with the SAME prefix only re-matches what has not yet moved (moved items
+  // are gone from the source prefix).
+  //
+  // BOUND TIGHTENED to 1s..35s, default 30s (2026-08-04, PR #191 review; was 1s..55s/45s): the
+  // per-item budget check bounds how many items are STARTED, not how long the item already in
+  // flight when the check last passed can run -- copyBlob's own async-copy poll loop has a hard 20s
+  // ceiling (src/legal/blob-store.ts), so an item that starts just under the budget could still push
+  // total elapsed close to budget+20s. The old 55s ceiling left almost no margin (55+20=75s, well
+  // past the 60s transport timeout); the new ceiling guarantees at least 25s of headroom under 60s
+  // even in that worst case (35+20=55s), while 30s default leaves 30s of headroom in normal
+  // operation. A future fix could thread a real deadline through listing/copy/delete instead of only
+  // checking between items; this bound is the cheap, low-risk mitigation until that lands.
+  LEGAL_DELETE_TIME_BUDGET_MS: z
+    .string()
+    .default('30000')
+    .transform((v) => Number.parseInt(v, 10))
+    .refine((n) => Number.isFinite(n) && n >= 1000 && n <= 35000, 'LEGAL_DELETE_TIME_BUDGET_MS must be 1000..35000'),
 
   // Finance dataroom store (the CFO source-docs blobs behind the finance-* AI Search rooms, account
   // otchealthcfodata). Powers kb_get_document — ring-gated WHOLE-document retrieval (search returns
@@ -316,7 +470,7 @@ const EnvSchema = z.object({
   // the existing Foundry embed() (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY above) — no new credentials.
   //
   // llm_azure FAQ/INTENT DEFLECTION (src/tools/llm/faq-deflect.ts). Also NOT in this schema on
-  // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh per call so it can
+  // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh from process.env per call so it can
   // be flipped without a redeploy:
   //   FAQ_DEFLECT_MODE                  off (default) | on  — deterministic FAQ/intent check before
   //                                     any llm_azure task='complete' model call; a high-confidence
@@ -349,7 +503,7 @@ const EnvSchema = z.object({
   // WITHOUT being awaited, so it can never add latency or fail the response it rides on). 'off'
   // skips the episode write entirely; capture-pressure counting (below) still runs regardless.
   //   CAPTURE_MODE               off | warn (default)
-  //   CAPTURE_PRESSURE_THRESHOLD a positive integer (default 10)
+  //   CAPTURE_PRESSURE_THRESHOLD a positive integer (default 50)
   // Tracks, per bearer identity (a separate in-memory Map from cold-start's, no TTL, no new
   // store), how many mutating tool calls have happened since the caller last called checkpoint().
   // 'warn' attaches a non-fatal CAPTURE_PRESSURE nudge once the threshold is crossed, urging a

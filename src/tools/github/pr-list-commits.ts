@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertRepoAllowed } from '../../github/api-client.js';
 import { prListCommits } from '../../github/full-client.js';
 
 export function registerGitHubPrListCommits(server: McpServer, callerHash: CallerHashProvider): void {
@@ -26,7 +27,8 @@ export function registerGitHubPrListCommits(server: McpServer, callerHash: Calle
       commits: z.array(z.unknown()),
       count: z.number(),
     },
-    handler: async (input) => {
+    handler: async (input, ctx) => {
+      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
       const commits = await prListCommits(input.owner, input.repo, input.pull_number, input.per_page ?? 30, input.page ?? 1);
       return {
         data: {

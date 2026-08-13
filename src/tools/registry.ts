@@ -8,7 +8,7 @@
  *  - Structured-content responses with text + structured payload
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
 import {
@@ -19,9 +19,10 @@ import {
 } from '../audit/logger.js';
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
-import { requiredRoleFor } from '../catalog/governance.js';
-import { currentCallerAgent, isConnectorSurface } from '../server/request-context.js';
+import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
+import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult } from './result-store.js';
+import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
 import {
   inboundShield,
   outboundGroundedness,
@@ -93,6 +94,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // and re-check the ring per call, they are not widened just because cto/exec can see them here.
   'search', 'fetch',
   'legal_blob_list', 'legal_blob_get', 'legal_blob_put',
+  // legal_blob_move/copy/delete (2026-08-04, CLO brief §1): added in the SAME PR that registers
+  // them, deliberately, to not repeat the catalog_probe/xero_attachment_upload/kb_get_document/
+  // mail_archive_* omission class -- built-but-invisible-on-every-connector has bitten this ship
+  // set five separate times now; a tool is not done until it is visible here too.
+  'legal_blob_move', 'legal_blob_copy', 'legal_blob_delete',
   'graph_drive_list', 'graph_drive_download', 'graph_drive_upload',
   'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
   // Wave 7 item 7.1: opt-in feedback reporting on a brain_search/kb_search hit (see kb/search.ts,
@@ -100,6 +106,13 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
   'retrieval_feedback',
   'llm_azure', 'catalog_list_tools', 'catalog_master', 'gateway_fetch_result',
+  // catalog_probe (2026-08-03): a diagnostic tool built specifically to answer "what caller_agent/
+  // connector_surface/m365_static_auth did THIS request actually resolve to" -- exactly the question
+  // needed to root-cause a connector showing an unexpectedly narrow toolset -- was itself never added
+  // to this allowlist, so it was invisible to every connector-surface caller including the ones it
+  // exists to diagnose (the same class of omission as developer_wake_lite, 2026-08-02). Read-only, no
+  // role gate (catalog/governance.ts), no secrets in its output; safe on every ship lane.
+  'catalog_probe',
   'task_list', 'task_get', 'task_create', 'task_claim', 'task_update', 'task_complete', 'task_heartbeat', 'inbox_read', 'agent_dispatch',
   'posthog_query_hogql', 'posthog_insight_list',
   'github_get_file_contents', 'github_list_pull_requests', 'github_issue_list', 'sentry_list_issues',
@@ -121,11 +134,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // seat and never re-scoped when it became a PRIMARY one.
   //
   // NOT a privilege grant on its own: execution-time role gating in catalog/governance.ts still
-  // refuses every non-cto caller for the write tools below. Other exec connectors used to merely SEE
-  // these entries and get refused if they called them -- as of the 2026-07-15 lane split, a non-ship
-  // connector lane no longer even SEES this list at all (it gets EXTERNAL_READONLY_TOOLSET instead),
-  // which is this file's actual security boundary; governance.ts's execution-time gating remains a
-  // second, independent layer under it.
+  // refuses every non-cto/non-developer caller for the write tools below. Other exec connectors used
+  // to merely SEE these entries and get refused if they called them -- as of the 2026-07-15 lane
+  // split, a non-ship connector lane no longer even SEES this list at all (it gets
+  // EXTERNAL_READONLY_TOOLSET instead), which is this file's actual security boundary;
+  // governance.ts's execution-time gating remains a second, independent layer under it.
   // write + branch
   'github_create_branch', 'github_create_or_update_file', 'github_edit_file', 'github_push_files', 'github_create_pull_request',
   'github_pr_update', 'github_pr_update_branch', 'github_ref_delete',
@@ -139,15 +152,86 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'github_repo_list_branches', 'github_commit_get', 'github_commit_compare',
   // issues (file + close follow-ups without leaving the seat)
   'github_create_issue', 'github_issue_get', 'github_issue_update',
-  'graph_send_email', 'graph_list_messages', 'cio_get_customer', 'shield_check', 'groundedness_check',
-  // Xero (read-only accounting of record). MUST be on the connector surface or the Claude Chat CFO
-  // (the whole reason this service exists — no filesystem/CLI to reach the old skills/xero path)
-  // cannot SEE them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that
-  // sees them is still refused at call time; this list only controls VISIBILITY, not authorization.
+  'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read', 'cio_get_customer',
+  // Bounded Customer.io administrative control plane (2026-08-09): explicit names, not a generic
+  // proxy. Read tools are cto/cro/exec; write tools are visible for planning but live execution is
+  // re-gated in-handler to cto/exec with owner_approval_ref. The canonical cro client_credentials
+  // lane sees the full registry; this ship list keeps the CTO/exec connector surface complete.
+  'cio_admin_read_workspace_health', 'cio_admin_read_workspace_health_view',
+  'cio_admin_read_frequency_caps', 'cio_admin_read_frequency_cap_usage',
+  'cio_admin_read_message_limits', 'cio_admin_read_preserve_unsubscribes_on_merge',
+  'cio_admin_read_goals', 'cio_admin_read_goal', 'cio_admin_read_goal_data',
+  'cio_admin_read_subscription_center_settings', 'cio_admin_read_subscription_topics',
+  'cio_admin_read_subscription_topic', 'cio_admin_read_subscription_channels',
+  'cio_admin_read_subscription_languages', 'cio_admin_read_subscription_language',
+  'cio_admin_read_subscription_pages', 'cio_admin_read_subscription_order',
+  'cio_admin_read_open_tracking_consent', 'cio_admin_read_audit_logs',
+  'cio_admin_read_design_readiness',
+  'cio_admin_write_frequency_cap_create', 'cio_admin_write_frequency_cap_update',
+  'cio_admin_write_frequency_cap_delete', 'cio_admin_write_message_limits_update',
+  'cio_admin_write_preserve_unsubscribes_on_merge',
+  'cio_admin_write_goal_create', 'cio_admin_write_goal_update', 'cio_admin_write_goal_delete',
+  'cio_admin_write_subscription_center_settings',
+  'cio_admin_write_subscription_topic_create', 'cio_admin_write_subscription_topic_update',
+  'cio_admin_write_subscription_topic_delete', 'cio_admin_write_subscription_channel_upsert',
+  'cio_admin_write_subscription_channel_delete', 'cio_admin_write_subscription_languages_create',
+  'cio_admin_write_subscription_language_update', 'cio_admin_write_subscription_language_delete',
+  'cio_admin_write_subscription_page_create', 'cio_admin_write_subscription_page_update',
+  'cio_admin_write_subscription_topic_order', 'cio_admin_write_subscription_channel_order',
+  'cio_admin_write_open_tracking_consent',
+  'shield_check', 'groundedness_check',
+  // mail_archive_* (2026-08-04): built for the CFO's Exchange Online Archive problem (Graph cannot
+  // address an in-place archive mailbox at all; this reads it via EWS instead) and EXEC_RING-gated
+  // in-handler, but never added here -- same omission class as xero_attachment_upload/catalog_probe/
+  // kb_get_document, so it was globally registered yet invisible on every connector. The first four
+  // are read-only; mail_archive_save_attachment_to_dataroom is a write_simple tool (writes an
+  // attachment into the finance dataroom), dry_run-defaulted like every write tool here and still
+  // EXEC_RING-gated -- exposing it is a deliberate, not incidental, mutating capability.
+  'mail_archive_list_folders', 'mail_archive_search', 'mail_archive_get_message',
+  'mail_archive_download_attachment', 'mail_archive_save_attachment_to_dataroom',
+  // Xero (accounting of record). MUST be on the connector surface or the Claude Chat CFO (the whole
+  // reason this service exists — no filesystem/CLI to reach the old skills/xero path) cannot SEE
+  // them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that sees them is
+  // still refused at call time; this list only controls VISIBILITY, not authorization.
   'xero_orgs', 'xero_report', 'xero_accounts', 'xero_manual_journals', 'xero_bank_transactions', 'xero_invoices',
   'xero_get', 'xero_contacts', 'xero_payments', 'xero_credit_notes', 'xero_bank_transfers', 'xero_budgets',
   'xero_settings', 'xero_attachments', 'xero_payroll', 'xero_assets', 'xero_projects', 'xero_files',
   'xero_request', // the write lane (POST/PUT/DELETE); execution stays EXEC_RING-gated in-handler
+  // xero_attachment_upload (P0-1, 2026-07-30): a real production gap found by the CFO agent -- the
+  // tool was fully built, registered, and reachable via a direct minted-token MCP call, but was
+  // simply missing from THIS curated allowlist (its read-side sibling xero_attachments was listed;
+  // the write tool never was), so the Claude Chat CFO connector never advertised it. Narrower than
+  // the already-exposed xero_request (a single attachment upload vs. arbitrary POST/PUT/DELETE), so
+  // adding it does not widen the security model -- it completes an omission within a model that
+  // already accepts EXEC_RING in-handler gating as the real authorization boundary for Xero writes.
+  'xero_attachment_upload',
+  // xero_gl_assemble + xero_connections (CFO round-2 mega-prompt, 2026-07-30): a Copilot review on
+  // the PR that added them caught the SAME omission class as xero_attachment_upload above -- both
+  // tools were fully built, registered, and EXEC_RING-gated in-handler, but never added to this
+  // curated allowlist, so the Claude Chat CFO connector could not see or call the new GL-assembly
+  // feature at all. Adding them here is VISIBILITY only (the security boundary is the in-handler
+  // isXeroAllowed(ctx.callerAgent) gate, unchanged); see registry.connector-lanes.test.ts.
+  'xero_gl_assemble', 'xero_connections',
+  // HeyGen durable subscription-OAuth broker: Phase 0 discovery/reconciliation plus bounded CTO-only
+  // prompt-avatar, idempotent direct-video, and private artifact-ingestion writes. Visibility here is not
+  // authorization: every handler re-checks the exact lane and every write has an exact governance rule.
+  // Deliberately absent from the external-readonly set below.
+  'heygen_pairing_start', 'heygen_pairing_status', 'heygen_account_get', 'heygen_diagnostics_get',
+  'heygen_videos_list', 'heygen_video_get', 'heygen_video_agent_styles_list',
+  'heygen_avatar_groups_list', 'heygen_avatar_group_get', 'heygen_avatar_looks_list',
+  'heygen_avatar_look_get', 'heygen_voices_list', 'heygen_voice_design', 'heygen_voice_get',
+  'heygen_video_statuses_get', 'heygen_video_agent_sessions_list', 'heygen_video_agent_session_get',
+  'heygen_video_agent_session_videos_list', 'heygen_video_agent_resource_get', 'heygen_asset_get',
+  'heygen_asset_statuses_get', 'heygen_brand_kits_list', 'heygen_brand_glossaries_list',
+  'heygen_brand_glossary_get', 'heygen_translation_languages_list', 'heygen_translations_list',
+  'heygen_translation_get', 'heygen_translation_statuses_get', 'heygen_proofread_get',
+  'heygen_avatar_video_operation_get', 'heygen_owner_approval_status_get', 'heygen_reference_look_operation_get',
+  'heygen_prompt_avatar_create', 'heygen_avatar_look_name_update', 'heygen_reference_look_create',
+  'heygen_video_agent_session_create_preflight', 'heygen_video_agent_feedback_send_preflight',
+  'heygen_video_agent_generation_approve_preflight', 'heygen_video_agent_session_stop_preflight',
+  'heygen_asset_upload_preflight', 'heygen_translation_create_preflight', 'heygen_proofread_create_preflight',
+  'heygen_proofread_generate_preflight', 'heygen_speech_preview_create_preflight',
+  'heygen_avatar_video_create', 'heygen_existing_video_ingest_qa', 'heygen_video_wait_ingest_qa',
 ] as const;
 
 /**
@@ -164,6 +248,23 @@ export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
   // brain-search.ts's roomsFor() and fetch independently re-derives + re-checks the ring per call
   // rather than trusting the id) — see kb/openai-search.ts + kb/openai-fetch.ts headers.
   'search', 'fetch',
+] as const;
+
+/**
+ * Fixed owner-delegated CRO connector surface. The saved CRO Hyperagent skill still carries the
+ * occ_cro connector credential, so this lane must be useful without widening it to the full ship
+ * catalog. It exposes all bounded HeyGen reads and non-executing preflights plus only the guarded
+ * direct Avatar Video and private QA actions. Pairing, prompt-avatar, Look mutation, metadata,
+ * Video Agent writes, assets, translation, TTS, arbitrary provider access, deletes, and public share
+ * remain absent. Every listed action still has its own in-handler lane/feature/owner/cost checks.
+ */
+export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
+  ...EXTERNAL_READONLY_TOOLSET,
+  ...HEYGEN_DATA_TOOLS,
+  ...HEYGEN_PREFLIGHT_TOOLS,
+  'heygen_avatar_video_create',
+  'heygen_existing_video_ingest_qa',
+  'heygen_video_wait_ingest_qa',
 ] as const;
 
 /**
@@ -188,7 +289,9 @@ export function isShipLane(lane: string): boolean {
 export function connectorToolset(env: Env, lane: string): Set<string> {
   const csv = isShipLane(lane)
     ? env.CONNECTOR_TOOLSET || CTO_SHIP_LANE_TOOLSET.join(',')
-    : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
+    : lane === 'cro'
+      ? CRO_CONNECTOR_TOOLSET.join(',')
+      : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   return new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
 }
 
@@ -239,6 +342,26 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   inputShape: Shape;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
+  /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
+  redactInputForLog?: (input: Record<string, unknown>) => unknown;
+  /**
+   * Optional projection for the company Prompt Shield scan. Use when an input mixes scan-worthy prose
+   * with credentials/capability grants/signed URLs that must never be sent to the safety service.
+   * Omit to preserve the existing behavior of scanning all handler arguments.
+   */
+  shieldInputForScan?: (input: Record<string, unknown>) => unknown;
+  /**
+   * SECURITY (2026-07-28 review fix): set ONLY on a generated M365 prefix-strip alias (see the
+   * alias-generation block at the bottom of registerTool) to the REAL tool's name, e.g.
+   * "azure_containerapp_get" when name="containerapp_get". Every name-PATTERN-based gate
+   * (requiredRoleFor, lane curation, JIT doctrine) MUST evaluate against this canonical identity,
+   * not the alias's bare `name` -- a review finding caught the alias otherwise bypassing role
+   * gating entirely: "containerapp_get" doesn't match the `azure_*` governance pattern that makes
+   * "azure_containerapp_get" CTO-only, so any authenticated lane could call the alias unrestricted.
+   * `name` itself stays the SDK lookup key / what a caller actually invokes; only defaults to
+   * itself for a primary (non-alias) registration.
+   */
+  canonicalName?: string;
 }
 
 function parseUpstreamToolError(err: unknown): { code: string; nextStep: string; status?: number } | null {
@@ -321,10 +444,135 @@ function gatedReject(
   return { rejected: false };
 }
 
+/**
+ * M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, restructured to TWO-PASS 2026-07-28): every PRIMARY
+ * (non-alias) tool name actually registered on a given McpServer instance, tracked UNCONDITIONALLY
+ * (not just for M365 requests) so a candidate alias can be checked against it during finalization.
+ * Scoped per McpServer instance (WeakMap) rather than module-global so multiple server instances in
+ * the same process (e.g. tests, or the stateless per-request servers in server/mcp.ts) never share
+ * state.
+ */
+const primaryNamesByServer = new WeakMap<McpServer, Set<string>>();
+
+/**
+ * DEDUP FIX (2026-08-02, "curate-m365-only doesn't shrink the M365 catalog" root cause, part 2 of
+ * 2): the primary (long, canonical-named) `RegisteredTool` handle for every M365 static-auth
+ * request, keyed by canonical name, ONLY populated when isM365StaticAuth() (see the collection
+ * site below) -- so this is a genuine no-op for every other caller. WHY THIS EXISTS: every tool
+ * that gets an unambiguous M365 prefix-strip alias (finalizeM365Aliases below) was ALSO still
+ * advertised under its full canonical name, so the M365-visible tools/list carried BOTH forms of
+ * essentially every tool -- roughly DOUBLING the advertised catalog size for the exact audience
+ * TOOL_CATALOG_CURATION_MODE=curate-m365-only exists to shrink (live-measured 2026-08-02: cto
+ * 905 canonical tools admitted by curation -> 1655 advertised once aliases were added; clo 48 ->
+ * 83). Since M365 Copilot's own tool-calling orchestrator has been repeatedly confirmed (see this
+ * shim's header above) to ALWAYS strip and call the SHORT alias form, never the long canonical
+ * one, the long form is dead weight for an M365 caller whenever an unambiguous alias exists --
+ * finalizeM365Aliases() now `.remove()`s the primary registration in that case (see its body),
+ * using the handle captured here, leaving exactly ONE advertised name per tool. A tool whose alias
+ * is AMBIGUOUS (2+ canonical tools collide on the same stripped name) keeps its primary
+ * registration untouched, exactly as before -- unaffected by this change.
+ */
+const primaryHandlesByServer = new WeakMap<McpServer, Map<string, RegisteredTool>>();
+
+function primaryHandlesFor(server: McpServer): Map<string, RegisteredTool> {
+  let handles = primaryHandlesByServer.get(server);
+  if (!handles) {
+    handles = new Map<string, RegisteredTool>();
+    primaryHandlesByServer.set(server, handles);
+  }
+  return handles;
+}
+
+function primaryNamesFor(server: McpServer): Set<string> {
+  let names = primaryNamesByServer.get(server);
+  if (!names) {
+    names = new Set<string>();
+    primaryNamesByServer.set(server, names);
+  }
+  return names;
+}
+
+/**
+ * TWO-PASS REDESIGN (2026-07-28 review fix, "first wins can silently mis-route a call"): the
+ * original single-pass version registered whichever tool's alias arrived FIRST (import order in
+ * tools/index.ts) and left the loser reachable only by its full name. A review finding caught that
+ * this is worse than merely "the loser is unreachable by alias" -- since M365's own behavior is to
+ * strip and call the SHORT name regardless of which tool the caller meant, a THREE-way collision
+ * like n8n_workflow_get / github_workflow_get / depot_workflow_get all stripping to "workflow_get"
+ * means whichever registers first SILENTLY ANSWERS A CALL MEANT FOR ONE OF THE OTHER TWO -- wrong
+ * data, wrong side effects, or a schema mismatch, not just an inconvenience.
+ *
+ * Fix: collect every alias CANDIDATE (aliasName -> every {canonicalName, def} that would strip to
+ * it) during the normal registration pass, but do not register any of them yet. A NEW
+ * finalizeM365Aliases() runs ONCE at the very end of registerAllTools() (after every real tool has
+ * registered, so the full candidate set is finally known) and registers an alias ONLY for a name
+ * that is genuinely unambiguous: exactly one canonical tool wants it, AND no real primary tool is
+ * already registered under that exact name. Any name with 2+ distinct canonical tools competing for
+ * it gets NO alias at all -- callers hitting that ambiguity must use a tool's full, unambiguous
+ * name (which was always correct), not have a coin-flip winner silently answer for all of them.
+ */
+interface AliasCandidate {
+  canonicalName: string;
+  def: ToolDefinition<ZodRawShape, ZodRawShape>;
+}
+const aliasCandidatesByServer = new WeakMap<McpServer, Map<string, AliasCandidate[]>>();
+
+function aliasCandidatesFor(server: McpServer): Map<string, AliasCandidate[]> {
+  let candidates = aliasCandidatesByServer.get(server);
+  if (!candidates) {
+    candidates = new Map<string, AliasCandidate[]>();
+    aliasCandidatesByServer.set(server, candidates);
+  }
+  return candidates;
+}
+
+/**
+ * Registers exactly the UNAMBIGUOUS M365 prefix-strip aliases collected during this server
+ * instance's registration pass -- call ONCE, after every other registerXxx() call in
+ * registerAllTools() has run, so the full candidate set (and the full set of real primary tool
+ * names) is known before any alias decision is made. A no-op if no M365 request ever collected any
+ * candidates (the collection step itself is gated on isM365StaticAuth() at the call site below).
+ */
+export function finalizeM365Aliases(server: McpServer, callerHashProvider: () => string): void {
+  const candidates = aliasCandidatesByServer.get(server);
+  if (!candidates || candidates.size === 0) return;
+  const primaryNames = primaryNamesByServer.get(server) ?? new Set<string>();
+  for (const [aliasName, entries] of candidates) {
+    if (primaryNames.has(aliasName)) {
+      // A REAL tool (e.g. "search"/"fetch"/"recall") already owns this exact name -- never eligible
+      // to be auto-claimed by an alias, regardless of order. No warning: this is an expected,
+      // permanent exclusion, not an ad hoc collision.
+      continue;
+    }
+    const distinctCanonical = new Set(entries.map((e) => e.canonicalName));
+    if (distinctCanonical.size > 1) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[registry] M365 alias AMBIGUOUS: "${aliasName}" would match ${distinctCanonical.size} different ` +
+          `tools (${[...distinctCanonical].join(', ')}) -- registering NONE of them under this name rather ` +
+          `than risk silently routing a mis-stripped call to the wrong handler. Callers must use the full name.`,
+      );
+      continue;
+    }
+    const { canonicalName, def } = entries[0]!;
+    registerTool(server, { ...def, name: aliasName, canonicalName }, callerHashProvider, true);
+    // DEDUP FIX (2026-08-02): the alias is unambiguous and just got registered under `aliasName` --
+    // M365 Copilot will call it there, never under `canonicalName` (see this shim's header + the
+    // primaryHandlesByServer comment above for the evidence). Drop the now-redundant long-form
+    // primary registration so the tool is advertised to this M365 caller exactly ONCE instead of
+    // twice. `.remove()` is the MCP SDK's own RegisteredTool API (server/mcp.d.ts); it only detaches
+    // the tool from THIS McpServer instance (stateless, one per request -- server/mcp.ts), so it
+    // cannot affect any other in-flight request or caller.
+    const primaryHandle = primaryHandlesByServer.get(server)?.get(canonicalName);
+    primaryHandle?.remove();
+  }
+}
+
 export function registerTool<Shape extends ZodRawShape, Output extends ZodRawShape>(
   server: McpServer,
   def: ToolDefinition<Shape, Output>,
   callerHashProvider: () => string,
+  isAlias = false,
 ): void {
   const env = loadEnv();
   const CONNECTOR_TOOLSET = connectorToolset(env, currentCallerAgent());
@@ -333,6 +581,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // connectorToolset() above, this file's actual security boundary. All other callers see
   // everything, and the startup catalog-warm runs with no request context (currentCallerAgent() ===
   // '', isConnectorSurface() === false) so /health tool_count (deploy gate) is unaffected.
+  // SECURITY (2026-07-28 review fix): every name-PATTERN gate below evaluates against the
+  // CANONICAL name (see ToolDefinition.canonicalName's doc comment) -- for a primary registration
+  // this is just def.name; for a generated alias it's the real tool the alias stands in for.
+  const canonicalName = def.canonicalName ?? def.name;
   const connectorSurfaceForThisTool = isConnectorSurface();
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
@@ -346,21 +598,33 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const laneForThisTool = currentCallerAgent();
   const catalogCuration = connectorSurfaceForThisTool
     ? null
-    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, def.name);
+    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth());
   if (catalogCuration && !catalogCuration.advertise) return;
-  // Record into the Capability Catalog so catalog_* tools stay truthful automatically.
+  // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
+  // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
+  // fake "service" derived from the alias's stripped bare name (e.g. "containerapp" instead of
+  // "azure" for the "containerapp_get" alias of azure_containerapp_get).
   recordTool({
-    name: def.name,
-    service: deriveService(def.name),
+    name: canonicalName,
+    service: deriveService(canonicalName),
     category: def.category,
     title: def.annotations.title,
     description: def.annotations.description,
     readOnly: def.annotations.readOnlyHint,
   });
   const inputShape: ZodRawShape = { ...def.inputShape, ...COMMON_INPUT };
-  // outputSchema is wrapped: every tool reports compliance_warning + result.
+  // outputSchema is wrapped: every tool reports compliance_warning + result. HeyGen's production
+  // control surface opts into strict result schemas so provider-shape drift cannot bypass redaction.
+  const enforceStrictOutput = canonicalName.startsWith('heygen_');
+  const strictResultSchema = z.object(def.outputShape).strict();
+  const jitStubSchema = z.object({
+    _jit_offloaded: z.literal(true),
+    result_id: z.string(),
+    total_bytes: z.number().int().nonnegative(),
+    note: z.string(),
+  }).strict();
   const outputShape: ZodRawShape = {
-    result: z.unknown(),
+    result: enforceStrictOutput ? z.union([strictResultSchema, jitStubSchema]) : z.unknown(),
     compliance_warning: z
       .object({
         triggers: z.array(z.string()),
@@ -394,7 +658,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           openWorldHint: def.annotations.openWorldHint,
         },
       };
-  server.registerTool(
+  const registeredHandle = server.registerTool(
     def.name,
     toolConfig,
     async (rawArgs) => {
@@ -456,22 +720,28 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           evaluateCatalogCuration(
             parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE),
             callerAgent,
-            def.name,
+            canonicalName,
+            isM365StaticAuth(),
           ),
           callerAgent,
-          def.name,
+          canonicalName,
           callerHash,
         );
       }
 
-      let gov = requiredRoleFor(def.name);
+      // SECURITY (2026-07-28 review fix): canonicalName, not def.name -- see ToolDefinition's doc
+      // comment. Evaluating against an alias's stripped bare name here was a real, live governance
+      // bypass (e.g. "containerapp_get" wouldn't match the azure_* CTO-only pattern that
+      // "azure_containerapp_get" itself is gated by).
+      let gov = requiredRoleFor(canonicalName);
       // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
       // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
       if (!gov && def.category === 'write_orchestrated') {
         gov = { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
       }
-      if (gov && callerAgent !== gov.role) {
-        const gmsg = `Tool "${def.name}" is restricted to the ${gov.role} agent. ${gov.reason}` +
+      if (gov && !roleAllows(gov.role, callerAgent)) {
+        const roleLabel = Array.isArray(gov.role) ? gov.role.join('/') : gov.role;
+        const gmsg = `Tool "${def.name}" is restricted to the ${roleLabel} agent(s). ${gov.reason}` +
           (callerAgent ? ` Your identity: ${callerAgent}.` : ' No agent identity on your token.');
         logToolEnd({
           correlation_id: correlationId,
@@ -558,7 +828,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         correlation_id: correlationId,
         tool: def.name,
         caller_hash: callerHash,
-        input: args,
+        input: def.redactInputForLog
+          ? def.redactInputForLog(args as Record<string, unknown>)
+          : args,
         dry_run: dryRun,
         read_only_mode: env.READ_ONLY_MODE,
       });
@@ -571,7 +843,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // AUTO-GUARD (inbound): Prompt Shields on the tool-call args, BEFORE the handler runs (no side
       // effect yet, so enforce-blocking here is safe for any category). Fail-open + mode-gated (SHIELD_MODE
       // off|report|enforce, default report) + inert until CONTENT_SAFETY_* is set. report annotates only.
-      const shield = await inboundShield(def.name, handlerInput);
+      // canonicalName, not def.name (2026-07-28 review fix): inboundShield's SELF_TOOLS exemption is
+      // keyed by canonical names (shield_check/groundedness_check/claims_check) so those tools don't
+      // recursively shield-scan their own attack-shaped test input. Passing the alias's stripped
+      // name (e.g. "check") would miss that exemption and block a legitimate self-test call.
+      const shieldInput = def.shieldInputForScan
+        ? def.shieldInputForScan(handlerInput)
+        : handlerInput;
+      const shield = await inboundShield(canonicalName, shieldInput);
       if (shield.blocked) {
         const smsg =
           `Tool "${def.name}" blocked by Prompt Shields (SHIELD_MODE=enforce): a prompt-injection / ` +
@@ -610,7 +889,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         if (def.name === 'wake') {
           markWoken(callerHash);
         }
-        const { result, warning } = applyGuardrail(payload.data, acknowledged);
+        const validatedData = enforceStrictOutput
+          ? strictResultSchema.parse(payload.data)
+          : payload.data;
+        const { result, warning } = applyGuardrail(validatedData, acknowledged);
 
         // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
         // (query + text + sources). enforce-blocking is limited to READ tools — a write already ran, so
@@ -679,7 +961,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
               tool: def.name,
               actor: callerAgent,
               correlationId,
-              args: handlerInput,
+              args: def.redactInputForLog
+                ? def.redactInputForLog(handlerInput)
+                : handlerInput,
               result,
             }).catch(() => undefined);
           }
@@ -717,7 +1001,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // on `def.category !== 'read'`. Advisory only in v1 (no enforce mode, never blocks); fail-open
         // by construction and never throws (safety/jit-doctrine.ts). Throttled once per (caller, tool)
         // per process so the same pitfall does not nag on every subsequent call.
-        const jitDoctrine = evaluateJitDoctrine(callerHash, def.name);
+        // canonicalName, not def.name -- a pitfall bound to e.g. "posthog_" or "azure_containerapp_set_env"
+        // should still fire when reached via an M365 alias, not silently go dark under the stripped name.
+        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName);
         if (jitDoctrine.pitfalls.length) {
           structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
           // PHASE 2 SLO TELEMETRY (observe-only): feeds the doctrine-coverage SLO -- how often a
@@ -764,7 +1050,16 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
         // Fail-open: offloadResult returns null on any error, so we keep the full inline result.
         // Small results are untouched (backward-compatible).
-        if (shouldOffload(text)) {
+        //
+        // M365 EXCEPTION (2026-07-25): skip offloading entirely for M365 declarative-agent static-
+        // token callers (isM365StaticAuth()). Confirmed via direct reproduction that M365 Copilot's
+        // own tool-calling orchestrator does NOT reliably chain into gateway_fetch_result when it
+        // sees the offload stub -- it reports "no content available" instead, even when
+        // gateway_fetch_result is a declared, callable tool on that same agent (Matt hit this live on
+        // wake(), whose payload is routinely >40KB). Other engines (Claude Code, Hyperagent) are
+        // UNCHANGED -- they reliably use the two-hop pattern today, so this is scoped narrowly to the
+        // one consumer confirmed not to support it, not a global behavior change.
+        if (shouldOffload(text) && !isM365StaticAuth()) {
           const off = await offloadResult(text, result, correlationId);
           if (off) {
             text = off.preview;
@@ -826,6 +1121,61 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       }
     },
   );
+
+  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED + HARDENED 2026-07-28): M365 Copilot's own
+  // tool-calling orchestrator has been observed splitting a registered tool name on its first
+  // underscore and calling only the remainder -- confirmed precedent in memory/recall-alias.ts
+  // (2026-07-25: "memory_recall" -> "recall"), then "github_repo_get" -> "repo_get" and
+  // "depot_run_list" -> "run_list" (2026-07-26). Originally scoped to just the github_/depot_
+  // prefixes. WIDENED 2026-07-28 after a live Developer-agent diagnostic run (Matt, in production
+  // M365 Copilot) hit the SAME failure on "catalog_probe" -> "probe" and "developer_wake_lite" ->
+  // "wake_lite" -- proving the behavior is generic to ANY underscored tool name.
+  //
+  // THIS BLOCK ONLY COLLECTS CANDIDATES -- it never registers an alias directly. See
+  // finalizeM365Aliases() above for why (a single-pass "first tool through wins" policy was found,
+  // in review, to be able to SILENTLY MIS-ROUTE a call to the wrong tool's handler when 3+ tools
+  // collide on the same stripped name, e.g. n8n_workflow_get / github_workflow_get /
+  // depot_workflow_get all -> "workflow_get" -- not merely leave the loser unreachable). Every
+  // primary (non-alias) registration is also tracked in primaryNamesFor() UNCONDITIONALLY (not just
+  // for M365 requests) so finalizeM365Aliases() can exclude any candidate name a REAL tool already
+  // owns (e.g. "search"/"fetch"/"recall") regardless of registration order.
+  //
+  // SCOPE (review finding): candidate collection itself is gated behind isM365StaticAuth() -- an
+  // unconditional version would collect (and eventually finalize) a compatibility alias for nearly
+  // the whole ~850-tool catalog on EVERY request (Claude Code, Hyperagent, connector clients too),
+  // materially inflating tools/list size and prompt-token cost for callers that never needed M365
+  // compatibility. Each per-request McpServer instance is stateless (server/mcp.ts), so this
+  // correctly scopes the extra registrations to only the M365 static-auth request that needs them.
+  //
+  // GOVERNANCE BYPASS (review finding, the security one): an alias is a recursive registerTool()
+  // call with `{...def, name: aliasName}`, so EVERY name-pattern-based gate inside the handler
+  // (requiredRoleFor, lane curation, JIT doctrine) was evaluating against the STRIPPED name, not the
+  // real tool -- e.g. "containerapp_get" (alias of the CTO-only azure_containerapp_get) doesn't
+  // match the `azure_*` governance pattern, so ANY authenticated lane could call it unrestricted.
+  // Fixed by passing `canonicalName: def.name` into the alias's def (see ToolDefinition's doc
+  // comment) so those gates evaluate the real tool's identity while `name` stays only the SDK
+  // lookup key / what the caller actually invokes.
+  if (!isAlias) {
+    primaryNamesFor(server).add(def.name);
+    if (isM365StaticAuth()) {
+      const stripped = /^[^_]+_(.+)$/.exec(def.name);
+      if (stripped) {
+        const aliasName = stripped[1];
+        const bucket = aliasCandidatesFor(server);
+        const list = bucket.get(aliasName) ?? [];
+        // Type erasure to the WeakMap's fixed shape is safe here: def is only ever forwarded
+        // opaquely into a later registerTool() call (finalizeM365Aliases), never inspected by
+        // field-specific generic logic.
+        list.push({ canonicalName: def.name, def: def as unknown as ToolDefinition<ZodRawShape, ZodRawShape> });
+        bucket.set(aliasName, list);
+        // DEDUP FIX (2026-08-02): remember this primary's RegisteredTool handle so
+        // finalizeM365Aliases() can `.remove()` it once it knows whether `aliasName` actually
+        // ended up unambiguous (only known after every tool in this request has registered). See
+        // primaryHandlesByServer's header comment above for why this matters.
+        primaryHandlesFor(server).set(def.name, registeredHandle);
+      }
+    }
+  }
 }
 
 export type CallerHashProvider = () => string;

@@ -8,14 +8,17 @@ export function registerGraphListMessages(server: McpServer, callerHash: CallerH
     name: 'graph_list_messages',
     category: 'read',
     annotations: {
-      title: 'List COO inbox messages',
-      description: 'List recent messages in the COO mailbox (coo@otchealthmart.com). Read-only.',
+      title: 'List messages in an allowlisted mailbox',
+      description: 'List recent messages in one of the allowlisted customer-service / COO mailboxes (see the `mailbox` param, GRAPH_CS_MAILBOXES), OR, for EXEC_RING callers only, one of the executive mailboxes on GRAPH_EXEC_MAILBOXES (e.g. matthew@innd.com, ap@innd.com, accounting@hearingassist.com, cfo@innd.com). Read-only. Defaults to coo@otchealthmart.com for back-compat.',
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true,
     },
     inputShape: {
+      mailbox: z.string().optional().describe('Mailbox UPN to list (e.g. care@otchealthmart.com). Must be on the GRAPH_CS_MAILBOXES allowlist. Defaults to coo@otchealthmart.com.'),
       folder: z.string().optional().describe('Mail folder (default "inbox"). Options: inbox, sentitems, drafts, deleteditems.'),
       top: z.number().int().min(1).max(50).optional().describe('Number of messages to return (max 50).'),
-      filter: z.string().optional().describe('OData filter expression (e.g. "isRead eq false").'),
+      filter: z.string().optional().describe('OData filter expression (e.g. "isRead eq false"). Combined with since/unread_only via AND if both given.'),
+      since: z.string().optional().describe('ISO 8601 datetime. Only messages received on/after this time.'),
+      unread_only: z.boolean().optional().describe('Only return unread messages.'),
     },
     outputShape: {
       messages: z.array(z.object({
@@ -27,9 +30,17 @@ export function registerGraphListMessages(server: McpServer, callerHash: CallerH
         preview: z.string(),
       })),
       count: z.number(),
+      mailbox: z.string(),
     },
     handler: async (input, _ctx) => {
-      const msgs = await listMessages({ folder: input.folder, top: input.top, filter: input.filter });
+      const msgs = await listMessages({
+        mailbox: input.mailbox,
+        folder: input.folder,
+        top: input.top,
+        filter: input.filter,
+        since: input.since,
+        unreadOnly: input.unread_only,
+      });
       const mapped = msgs.map((m: any) => ({
         id: m.id ?? '',
         subject: m.subject ?? '',
@@ -38,9 +49,10 @@ export function registerGraphListMessages(server: McpServer, callerHash: CallerH
         is_read: m.isRead ?? false,
         preview: (m.bodyPreview ?? '').slice(0, 200),
       }));
+      const mailboxUsed = input.mailbox ?? 'coo@otchealthmart.com';
       return {
-        data: { messages: mapped, count: mapped.length },
-        summary: `Found ${mapped.length} message(s) in ${input.folder ?? 'inbox'}.`,
+        data: { messages: mapped, count: mapped.length, mailbox: mailboxUsed },
+        summary: `Found ${mapped.length} message(s) in ${mailboxUsed} / ${input.folder ?? 'inbox'}.`,
       };
     },
   }, callerHash);

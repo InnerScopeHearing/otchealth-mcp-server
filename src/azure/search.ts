@@ -49,6 +49,11 @@ export interface KbHit {
   type?: string;
   /** Source path of the parent document (chunked doc rooms only), for citation. Flat rooms omit it. */
   path?: string;
+  /** Other parent paths (chunked doc rooms only) collapsed into this hit because their content was
+   *  BYTE-IDENTICAL to it (e.g. the same source document filed under two organizational prefixes).
+   *  Present only when at least one alternate was collapsed; `path` above is the survivor (shallowest
+   *  path). See the cross-parent content-dedup pass in runHybridSearch's chunked branch. */
+  variants?: string[];
 }
 
 /**
@@ -261,19 +266,83 @@ async function runHybridSearch(
     // unique key when a doc has none of parent_id/path/id/chunk_id, so unrelated hits can never merge
     // onto an empty ''. Flat rooms never dedup (each is its own key).
     _parent: String(d['parent_id'] ?? d['path'] ?? d['id'] ?? d['chunk_id'] ?? `__row${i}`),
+    // Cross-parent content-dedup output (chunked rooms only; always undefined on a fresh row -- only
+    // ever set by PASS 2 below when this row's content collapsed one or more sibling parents into
+    // it). Declared here (rather than only on the merged branch) so every row has a statically
+    // consistent shape and the final KbHit mapping never has to reason about a union type.
+    _variantPaths: undefined as string[] | undefined,
   }));
 
   let hits = raw;
   if (chunked) {
-    // Collapse chunks to their parent: keep the single highest-scored chunk per parent and cite the
-    // parent (id = parent key, path = source path). Stops one document from filling the result set
-    // with N of its own chunks, and makes `count` mean "distinct documents", not "chunks".
-    const best = new Map<string, (typeof raw)[number]>();
-    for (const h of raw) {
+    // Soft-deleted blobs (legal_blob_delete moves the original to _TRASH/<path>, PR #190) can still
+    // be served by search until the room's next reindex -- a caller trusting search would otherwise
+    // fetch a _TRASH/ path or cite a superseded document as current (confirmed live, CLO field report
+    // 2026-08-04: kb_search_privileged returned a just-soft-deleted path at rank 2). Dropped BEFORE
+    // the parent collapse below so a trashed chunk can never win the "highest score per parent"
+    // contest and surface as the representative hit for its parent.
+    const visible = raw.filter((h) => !h.path || !h.path.startsWith('_TRASH/'));
+
+    // PASS 1 -- collapse chunks to their parent: keep the single highest-scored chunk per parent and
+    // cite the parent (id = parent key, path = source path). Stops one document from filling the
+    // result set with N of its own chunks, and makes `count` mean "distinct documents", not "chunks".
+    const best = new Map<string, (typeof visible)[number]>();
+    for (const h of visible) {
       const cur = best.get(h._parent);
       if (!cur || (h.score ?? -Infinity) > (cur.score ?? -Infinity)) best.set(h._parent, h);
     }
-    hits = [...best.values()]
+    const collapsed = [...best.values()];
+
+    // PASS 2 (2026-08-04, CLO brief §2 ask #3 / live field-measured Finding 4) -- collapse across
+    // DIFFERENT parent documents that are byte-identical copies of each other, e.g. the same source
+    // document filed under two organizational prefixes (divorce/ vs clo-outgoing/01-Divorce/). Pass 1
+    // only merges multiple CHUNKS of the SAME parent; it cannot catch this because the duplicates are
+    // genuinely distinct parent_id/path values. Confirmed live as the DOMINANT remaining duplication
+    // once legacy mirror-artifact debris was cleaned up (4 of 10 result slots on one real query).
+    //
+    // Grouping key: score (to FULL float precision) AND text must BOTH match, not text alone
+    // (2026-08-04, PR #191 review). `h.text` is only the single highest-scoring CHUNK for that
+    // parent (truncated to 1200 chars at construction) -- two genuinely DIFFERENT documents that
+    // happen to share a common boilerplate opening chunk (or that differ only after char 1200) would
+    // have identical `text` but, because relevance score is a function of each PARENT'S full
+    // embedding against this query, essentially never an identical score to full double precision.
+    // Requiring both closes that false-merge risk while still catching the real cross-prefix mirror
+    // duplicates -- which are TRUE full-content copies, so both their best-chunk text AND their score
+    // are identical (this is exactly the CLO's own field-measured signal: two mirror copies scored
+    // identically to 16 significant digits). A hit with no score, or text below a minimum length
+    // (pickText can legitimately return '' or a short fragment), is NEVER eligible to merge with
+    // anything -- it gets its own unique key (its parent id).
+    const MIN_DEDUP_TEXT_LEN = 40;
+    const contentKey = (h: (typeof collapsed)[number]): string => {
+      const t = h.text.trim();
+      if (t.length < MIN_DEDUP_TEXT_LEN || h.score === undefined) return `__unique_${h._parent}`;
+      return `${h.score}::${t}`;
+    };
+    const byContent = new Map<string, typeof collapsed>();
+    for (const h of collapsed) {
+      const key = contentKey(h);
+      const group = byContent.get(key);
+      if (group) group.push(h);
+      else byContent.set(key, [h]);
+    }
+    // "Shallowest path" survives as canonical (fewest '/' segments, then shortest string, matching
+    // the CLO's explicit ask), keeping the highest score seen across the group; the collapsed
+    // alternates are recorded on the survivor's `variants` rather than silently dropped.
+    const deduped = [...byContent.values()].map((group) => {
+      if (group.length === 1) return group[0];
+      const sorted = [...group].sort((a, b) => {
+        const da = (a.path ?? '').split('/').length;
+        const db = (b.path ?? '').split('/').length;
+        if (da !== db) return da - db;
+        return (a.path ?? '').length - (b.path ?? '').length;
+      });
+      const [canonical, ...rest] = sorted;
+      const bestScore = Math.max(...group.map((g) => g.score ?? -Infinity));
+      const variantPaths = rest.map((r) => r.path).filter((p): p is string => typeof p === 'string' && p.length > 0);
+      return { ...canonical, score: bestScore, _variantPaths: variantPaths.length ? variantPaths : undefined };
+    });
+
+    hits = deduped
       .sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))
       .slice(0, top)
       .map((h) => ({ ...h, id: h._parent || h.id }));
@@ -298,9 +367,14 @@ async function runHybridSearch(
   // sees (and truncates) the full over-fetched, re-ranked pool: demoteExhaustHits moves any
   // exhaust-typed hit to the end (never crowding out a non-exhaust hit that fits within `top`, but
   // never permanently dropping one either) and only then slices to `top`. `includeOps=true` is a
-  // no-op reorder, just the same `top` truncation every caller already expects. The KbHit output
-  // shape is unchanged (ts/source/by never leave this function).
-  let matches: KbHit[] = hits.map(({ _parent, ts, source, by, ...h }) => h);
+  // no-op reorder, just the same `top` truncation every caller already expects. _variantPaths is
+  // promoted to the public `variants` field (only when non-empty -- absent on every flat-room hit
+  // and on a chunked hit with no collapsed sibling, so the KbHit shape is unchanged for every
+  // existing caller that never sees a variants key today).
+  let matches: KbHit[] = hits.map(({ _parent, ts, source, by, _variantPaths, ...h }) => ({
+    ...h,
+    ...(_variantPaths && _variantPaths.length ? { variants: _variantPaths } : {}),
+  }));
   matches = demoteExhaustHits(matches, includeOps, top);
   return { matches, mode: vector ? 'hybrid+semantic' : 'keyword' };
 }

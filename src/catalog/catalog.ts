@@ -43,6 +43,30 @@ export function toolCount(): number {
   return registeredTools.length;
 }
 
+/**
+ * A short, deterministic fingerprint of the CURRENT tool catalog (name+category, sorted). Changes
+ * whenever a tool is added, removed, or recategorized. Exists so a client can detect a STALE cached
+ * tools/list without a human first having to notice a "missing" tool is actually just an unrefreshed
+ * cache (CFO P1-A / P0-1 post-mortem, 2026-07-30: a full connector reconnect did NOT clear a client's
+ * cached MCP tool list, and the resulting "xero_attachment_upload is absent" symptom cost two full
+ * review rounds before the real cause -- a stale cache, not a missing/allowlist bug -- was found by
+ * asking the gateway's own catalog directly). Cheap FNV-1a hash (no crypto import needed for a
+ * non-security fingerprint); collisions are not a security concern here, only a staleness signal.
+ * Pure/testable.
+ */
+export function catalogVersion(): string {
+  const key = allTools()
+    .map((t) => `${t.name}:${t.category}`)
+    .sort()
+    .join('|');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
 export interface ServiceInfo {
   description: string;
   ring: 'non-phi' | 'phi-carved-out';
@@ -61,9 +85,10 @@ export interface ServiceInfo {
  */
 export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
   cio: {
-    description: 'Customer.io lifecycle CRM: newsletters, segments, customers, events.',
-    ring: 'non-phi', auth: 'CIO_SITE_ID / CIO_TRACK_KEY / CIO_APP_API_BEARER', status: 'wired',
-    available: [],
+    description: 'Customer.io lifecycle CRM plus a bounded administrative control plane for health, limits, Goals, subscriptions, consent, audit, and Design Studio readiness.',
+    ring: 'non-phi', auth: 'CIO_SITE_ID / CIO_TRACK_KEY / CIO_APP_API_BEARER / CIO_FLY_SERVICE_ACCOUNT_TOKEN', status: 'wired',
+    available: ['Customer.io Agent Routines, custom Skills, business context, and compliance-prompt administration remain UI-only; the 2026-08-09 OpenAPI schema exposes no spam-score endpoint.'],
+    rule: 'cio_admin_read_* is cto/cro/exec. cio_admin_write_* is dry-run by default; CRO is preview-only; live writes are cto/exec, high-risk gated, and require owner_approval_ref. Customer/profile data is excluded from the admin surface.',
   },
   cloudflare: {
     description: 'Cloudflare fleet email routing + DNS.',
@@ -280,7 +305,7 @@ export const EXTRA_SERVICES: Record<string, ServiceInfo> = {
   mercury: { description: 'Mercury banking (read).', ring: 'non-phi', auth: 'mercury token', status: 'planned', available: ['balances', 'transactions'], rule: 'Finance data - CFO lane; not for external clients.' },
   xero: { description: 'Xero accounting of record (read-only): reports (trial balance, balance sheet, P&L, aged), chart of accounts, manual journals, bank transactions, invoices across all 4 orgs. QuickBooks is RETIRED (2026-07-16); QBO history lives in the finance data room as static exports.', ring: 'non-phi', auth: 'XERO_CLIENT_ID/SECRET + per-org rotating refresh tokens (Cosmos-managed chain)', status: 'wired', available: [], rule: 'MNPI financial data — executive-ring lanes ONLY (same ring as the finance rooms); never external clients. Read-only by construction: financial writes stay Matt-gated.' },
   plaid: { description: 'Plaid bank aggregation (read).', ring: 'non-phi', auth: 'plaid tokens', status: 'planned', available: ['accounts', 'transactions'], rule: 'Finance data - CFO lane; not for external clients.' },
-  heygen: { description: 'HeyGen avatar video generation.', ring: 'non-phi', auth: 'heygen key', status: 'planned', available: ['avatar video'] },
+  heygen: { description: 'HeyGen subscription-credit avatar production, discovery, ingestion, and technical QA.', ring: 'non-phi', auth: 'durable OAuth broker (API keys rejected)', status: 'wired', available: ['avatar and voice discovery', 'direct Avatar Video', 'Video Agent/brand/translation reads', 'artifact ingestion and technical QA'], rule: 'Credit-consuming creates and artifact writes are CTO-only, balance-bound, and idempotent; no API-key billing path.' },
 };
 
 // ---- Fleet SKILLS (octools, public repo skills/<name>/SKILL.md) - snapshot; live source is the repo ----

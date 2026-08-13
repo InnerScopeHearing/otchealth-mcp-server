@@ -9,7 +9,7 @@ export function registerGraphMessageGet(server: McpServer, callerHash: CallerHas
     category: 'read',
     annotations: {
       title: 'Get a single email message',
-      description: 'Retrieve the full details of a specific message by ID from the COO mailbox via GET /users/{sender}/messages/{id}. Read-only.',
+      description: 'Retrieve the full details of a specific message by ID via GET /users/{mailbox}/messages/{id}. Defaults to the COO mailbox; pass `mailbox` to read one of the other allowlisted customer-service personas (care@, sarah@, helen@, ray@ -- see GRAPH_CS_MAILBOXES), OR, for EXEC_RING callers only, one of the executive mailboxes on GRAPH_EXEC_MAILBOXES (e.g. matthew@innd.com, ap@innd.com). Read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -17,6 +17,7 @@ export function registerGraphMessageGet(server: McpServer, callerHash: CallerHas
     },
     inputShape: {
       message_id: z.string().describe('The Graph message ID to retrieve.'),
+      mailbox: z.string().optional().describe('Mailbox UPN the message lives in (e.g. care@otchealthmart.com). Must be on the GRAPH_CS_MAILBOXES allowlist. Defaults to coo@otchealthmart.com.'),
     },
     outputShape: {
       id: z.string(),
@@ -33,7 +34,7 @@ export function registerGraphMessageGet(server: McpServer, callerHash: CallerHas
       web_link: z.string(),
     },
     handler: async (input, _ctx) => {
-      const m = await getMessage(input.message_id);
+      const m = await getMessage(input.message_id, input.mailbox);
       const toList: string[] = (m.toRecipients ?? []).map((r: any) => r.emailAddress?.address ?? '');
       const ccList: string[] = (m.ccRecipients ?? []).map((r: any) => r.emailAddress?.address ?? '');
       return {

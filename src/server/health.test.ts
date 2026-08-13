@@ -26,4 +26,36 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
   assert.ok('env' in payload);
   assert.ok('read_only_mode' in payload);
   assert.ok('connector_token_revoked' in payload);
+  assert.deepEqual(payload.heygen, {
+    provider_writes: false,
+    prompt_avatar_writes: false,
+    avatar_video_writes: false,
+    reference_look_writes: false,
+    video_agent_chat_writes: false,
+    video_agent_generation: false,
+    asset_writes: false,
+    translation_writes: false,
+    tts_writes: false,
+    metadata_writes: false,
+    cro_direct_enabled: true,
+    cro_direct_tools: [
+      'heygen_avatar_video_create',
+      'heygen_existing_video_ingest_qa',
+      'heygen_video_wait_ingest_qa',
+    ],
+    owner_approval_verifier_configured: false,
+    owner_approval_context_configured: false,
+    owner_approval_handle_configured: false,
+    owner_approval_callback_configured: false,
+    owner_approval_broker_configured: false,
+    owner_approval_issuer: 'https://approval.otchealth.app',
+    owner_approval_audience: 'otchealth-heygen',
+    owner_approval_subject_sha256: undefined,
+    owner_approval_compatibility: {
+      public_jwk_sha256: undefined,
+      context_secret_sha256: undefined,
+      handle_secret_sha256: undefined,
+      callback_secret_sha256: undefined,
+    },
+  });
 });

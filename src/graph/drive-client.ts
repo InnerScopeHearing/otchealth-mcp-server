@@ -21,6 +21,7 @@
  * can be pointed at. Inert without Graph creds — the tools surface a clear "not configured" result.
  */
 
+import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { getAccessToken } from './api-client.js';
@@ -73,7 +74,7 @@ function itemRef(owner: string, path: string): string {
   return clean ? `${base}:/${encPath(clean)}:` : base;
 }
 
-async function graphFetch(method: string, path: string, opts?: { body?: Buffer | string; headers?: Record<string, string> }) {
+async function graphFetch(method: string, path: string, opts?: { body?: Buffer | string; headers?: Record<string, string>; timeoutMs?: number }) {
   const token = await getAccessToken();
   const url = path.startsWith('http') ? path : `https://graph.microsoft.com/v1.0${path}`;
   // GET is read-only (safe to retry once); uploads are non-idempotent -> retries:0.
@@ -85,7 +86,7 @@ async function graphFetch(method: string, path: string, opts?: { body?: Buffer |
       headers: { Authorization: `Bearer ${token}`, ...(opts?.headers || {}) },
       body: opts?.body,
     },
-    { retries },
+    { retries, timeoutMs: opts?.timeoutMs },
   );
 }
 
@@ -146,20 +147,59 @@ export interface DriveUploadResult {
 }
 
 /**
+ * Microsoft Graph's SIMPLE content-upload endpoint (PUT …/content, what `uploadFile` below uses)
+ * is documented to support files up to 250 MB (learn.microsoft.com/en-us/graph/api/driveitem-put-content,
+ * "This method only supports files up to 250 MB in size", verified 2026-07-30). Larger files
+ * require a resumable upload session (POST createUploadSession + chunked PUTs against the
+ * returned uploadUrl), which this client does not implement. `uploadFile` refuses anything over
+ * this ceiling before ever making the PUT (see the caller-side check in
+ * tools/graph-drive/upload.ts and the belt-and-suspenders check inside uploadFile itself below)
+ * rather than sending it to an endpoint that can't carry it. A chunked/resumable session is a
+ * deferred follow-up, not implemented here.
+ */
+export const MAX_SIMPLE_UPLOAD_BYTES = 250 * 1024 * 1024;
+
+/** Uploads (writes up to MAX_SIMPLE_UPLOAD_BYTES) get more time than the generic 8s API-call
+ *  budget — a multi-megabyte PUT over a slow link can legitimately take longer than that, and an
+ *  overly tight timeout aborting mid-transfer is itself a plausible truncation vector. */
+const UPLOAD_TIMEOUT_MS = 30_000;
+
+/**
  * Upload a file to folder/filename (relative to the drive root). Mirrors the source skill's
  * `upload` (PUT …:/content). Binary-safe (accepts a Buffer). Non-idempotent (retries:0).
- * Uses simple content upload (fine for the small documents the exchange folders carry).
+ * Uses simple content upload (fine for the small documents the exchange folders carry — see
+ * MAX_SIMPLE_UPLOAD_BYTES above for the hard ceiling on that).
+ *
+ * `size` is `null`, NEVER defaulted to `content.length`, when Graph's response omits a numeric
+ * size. Defaulting it here used to mask a short/incomplete write (the caller-side integrity check
+ * in tools/graph-drive/upload.ts compares this `size` against the bytes it sent — if this function
+ * quietly substituted `content.length` whenever Graph's own confirmation was missing, that
+ * comparison would trivially "pass" even on a write Graph never actually confirmed, which is
+ * exactly the silent-success failure mode being fixed).
  */
 export async function uploadFile(folderPath: string, fileName: string, content: Buffer, contentType?: string): Promise<DriveUploadResult> {
+  // Belt-and-suspenders: tools/graph-drive/upload.ts already refuses an oversized payload before
+  // calling this function, but that guard living only at the one current call site means a future
+  // second caller could bypass it by omission. Enforcing it here too costs nothing and protects
+  // every caller, present or future.
+  if (content.length > MAX_SIMPLE_UPLOAD_BYTES) {
+    throw new GraphDriveError({
+      code: 'file_too_large_for_simple_upload',
+      status: 413,
+      message: `uploadFile: ${content.length} bytes exceeds the ${MAX_SIMPLE_UPLOAD_BYTES}-byte (250 MB) limit Microsoft Graph's simple upload endpoint supports.`,
+      nextStep: 'Split the file or implement a resumable upload session (POST createUploadSession) for files over 250 MB.',
+    });
+  }
   const owner = driveOwner();
   const path = [folderPath.replace(/^\/+|\/+$/g, ''), fileName].filter(Boolean).join('/');
   const r = await graphFetch('PUT', `${itemRef(owner, path)}/content`, {
     headers: { 'Content-Type': contentType || 'application/octet-stream' },
     body: content,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
   });
   if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `upload "${path}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the folder exists and the app holds Files.ReadWrite.All.' });
   const j = (await r.json()) as { id?: string; size?: number };
-  return { path, id: j.id ?? '', size: typeof j.size === 'number' ? j.size : content.length };
+  return { path, id: j.id ?? '', size: typeof j.size === 'number' ? j.size : null };
 }
 
 export interface DriveDownloadResult {
@@ -170,9 +210,26 @@ export interface DriveDownloadResult {
   base64: string | null;
 }
 
-function looksTextual(contentType: string | null): boolean {
-  if (!contentType) return false;
-  return /^(text\/|application\/(json|xml|x-ndjson|javascript)|application\/.*\+(json|xml))/i.test(contentType);
+/** Extensions Graph/OneDrive is known to mis-report (or not report at all, falling back to
+ * application/octet-stream) on the simple content-upload/download path, even when the upload sent
+ * an explicit, correct Content-Type. Confirmed live (CFO P1-D, 2026-07-30): uploading a .md file
+ * with content_type:"text/markdown" round-tripped as application/octet-stream on download. This is
+ * OneDrive inferring/storing the item's mimeType from the file EXTENSION rather than honoring an
+ * arbitrary Content-Type sent on `PUT :/content` (Graph does not expose a way to force-set
+ * driveItem.file.mimeType directly) -- so relying on the response's Content-Type header alone to
+ * decide text-vs-binary is unreliable for any extension OneDrive does not have a built-in mapping
+ * for. Extend by filename extension as a second signal so a genuinely textual file we KNOW the
+ * extension of still comes back as text even when Graph reports a generic/wrong content-type. */
+const TEXTUAL_EXTENSIONS = /\.(md|markdown|txt|csv|json|jsonl|ndjson|xml|yaml|yml|log|ts|tsx|js|jsx|mjs|cjs|css|html|htm|sh|sql|toml|ini|env)$/i;
+
+function looksTextual(contentType: string | null, fileName?: string): boolean {
+  if (contentType && /^(text\/|application\/(json|xml|x-ndjson|javascript)|application\/.*\+(json|xml))/i.test(contentType)) {
+    return true;
+  }
+  // Fall back to the extension when the reported type is absent/generic (see TEXTUAL_EXTENSIONS
+  // comment above) -- but only ever WIDENS text detection, never narrows a type Graph already
+  // reported correctly as textual.
+  return Boolean(fileName && TEXTUAL_EXTENSIONS.test(fileName));
 }
 
 /**
@@ -187,8 +244,47 @@ export async function downloadFile(folderPath: string, fileName: string, forceBa
   if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `download "${path}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the file path + app permissions.' });
   const contentType = r.headers.get('content-type');
   const buf = Buffer.from(await r.arrayBuffer());
-  if (!forceBase64 && looksTextual(contentType)) {
+  if (!forceBase64 && looksTextual(contentType, fileName)) {
     return { found: true, contentType, size: buf.length, text: buf.toString('utf8'), base64: null };
   }
   return { found: true, contentType, size: buf.length, text: null, base64: buf.toString('base64') };
+}
+
+export interface DriveDownloadHashResult {
+  found: boolean;
+  contentType: string | null;
+  size: number | null;
+  sha256: string | null;
+}
+
+/**
+ * Download a file's content and return ONLY its sha256/size/contentType -- never the bytes
+ * themselves, in any encoding. A dedicated sibling to downloadFile (not a `verify_sha256_only`
+ * flag added onto it) so this path never allocates a base64 string it would immediately throw
+ * away: downloadFile's own base64 branch already costs one extra full-size string allocation
+ * (`buf.toString('base64')`, ~1.33x the byte length) plus a caller that then had to
+ * `Buffer.from(base64, 'base64')` it BACK to hash it paid for a third allocation on top of that
+ * (review finding, 2026-07-30, PR #175 round 2) -- three copies of the file in memory at once for
+ * a caller that only ever wanted a 64-character hex digest. This function holds exactly one Buffer
+ * (`buf`, the raw response bytes) for the lifetime of the call.
+ *
+ * NOT a fully streaming hash (piping the HTTP response body through the hash incrementally without
+ * ever buffering the whole file) -- `graphFetch`'s Response is still consumed via `arrayBuffer()`
+ * below, so this function's peak memory is still O(file size), just 1x instead of the prior ~3.66x.
+ * A true zero-buffer streaming hash would touch graphFetch itself (a shared low-level helper other
+ * call sites also use) and is a larger, separate change; flagged as a follow-up, not done here
+ * under time pressure to ship the correctness/memory fixes already found. If OneDrive files in the
+ * role folders this serves grow large enough for even 1x file size to matter, a size ceiling ahead
+ * of the fetch (mirroring upload.ts's MAX_SIMPLE_UPLOAD_BYTES refusal) is the next cheap lever.
+ */
+export async function downloadFileHash(folderPath: string, fileName: string): Promise<DriveDownloadHashResult> {
+  const owner = driveOwner();
+  const path = [folderPath.replace(/^\/+|\/+$/g, ''), fileName].filter(Boolean).join('/');
+  const r = await graphFetch('GET', `${itemRef(owner, path)}/content`);
+  if (r.status === 404) return { found: false, contentType: null, size: null, sha256: null };
+  if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `download "${path}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the file path + app permissions.' });
+  const contentType = r.headers.get('content-type');
+  const buf = Buffer.from(await r.arrayBuffer());
+  const sha256 = createHash('sha256').update(buf).digest('hex');
+  return { found: true, contentType, size: buf.length, sha256 };
 }

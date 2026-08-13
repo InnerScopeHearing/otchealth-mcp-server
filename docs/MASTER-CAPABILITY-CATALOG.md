@@ -26,10 +26,12 @@ single connector is identified by `OAUTH_DEFAULT_AGENT`). `memory_pack` / `memor
 to the caller's agent lane.
 
 ## Services (wired = tools live; planned = known, not yet wired)
-**Wired:** Customer.io, Shopify, Intercom, n8n, Cloudflare (email + DNS), Microsoft Graph (COO
-send-as), Stripe (read), Netlify, Gumroad, kb-memory (shared brain), Capability Catalog.
-**Planned (on the roadmap, surfaced so agents know they're coming):** Depot, PostHog, RevenueCat,
-Twilio/ElevenLabs, Sentry, GitHub, Mercury, QuickBooks/Xero, Plaid, HeyGen.
+**Wired:** Customer.io, Shopify, Intercom, n8n, Cloudflare, Microsoft Graph, Stripe, Netlify,
+Gumroad, kb-memory, Capability Catalog, Depot, PostHog, RevenueCat, Twilio/ElevenLabs, Sentry,
+GitHub, Xero, and HeyGen. HeyGen now provides subscription-OAuth discovery, guarded direct Avatar
+Video generation, durable operation reconciliation, and private artifact ingestion/technical QA.
+**Known/planned surfaces:** Mercury and Plaid remain cataloged for future direct gateway wiring where
+the live catalog still reports them as planned.
 
 ## Ring safety (the one hard boundary)
 The gateway carves PHI out by design and is non-PHI/non-MNPI/non-privileged. The external-client
@@ -38,4 +40,6 @@ data, tools, or ledgers. Finance/PHI services above are listed for fleet awarene
 trusted engines; widen external access only via signed provider BAAs.
 
 ## Counts (snapshot; `catalog_master` is always current)
-~48 tools · ~20 services · ~90 skills · plugins · 4 governance rules.
+Live `/health` after the HeyGen Phase 0/1 cutover reported 943 registered tools. The Customer.io governed-control branch adds 42 credential-gated named wrappers, bringing the expected post-release catalog to 985 before unrelated concurrent changes. The HeyGen service
+contributes 29 tools at catalog version `c5392855`. Treat `catalog_master` and `catalog_list_tools` as
+the authoritative current inventory; this human mirror records only material milestones.
