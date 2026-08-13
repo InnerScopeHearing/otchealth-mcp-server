@@ -133,6 +133,8 @@ import { registerOpenAiFetch } from './kb/openai-fetch.js';
 // Wave A+ — llm_azure commodity path (credit-funded gpt-4.1, tiered): the cost-protocol escape hatch
 import { registerLlmAzure } from './llm/azure.js';
 import { registerGatewayFetchResult } from './gateway-fetch-result.js';
+// Governed AWS AgentCore Browser public-read-only bridge for Wefunder Campaign Director.
+import { registerBrowserAgentcoreTools } from './browser-agentcore/tools.js';
 
 // ===== EXHAUSTIVE WAVE: complete per-connector CRUD surface =====
 import { registerCioAdminTools } from './cio/admin-tools.js';
