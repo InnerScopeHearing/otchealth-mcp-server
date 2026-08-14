@@ -4,14 +4,20 @@ const BLOCKED = /\b(login|log\s*in|sign\s*in|password|passcode|one[-\s]?time|ver
 export const MAX_TARGETS = 12;
 export const MAX_SECONDS = 300;
 
-export function validatePublicTargets(targets: unknown): { ok: true; urls: URL[] } | { ok: false; reason: string } {
-  if (!Array.isArray(targets) || targets.length === 0 || targets.length > MAX_TARGETS) return { ok: false, reason: `targets must contain 1-${MAX_TARGETS} HTTPS URLs` };
+export type TargetValidation = { ok: true; urls: URL[] } | { ok: false; reason: string };
+
+export function validatePublicTargets(targets: unknown): TargetValidation {
+  if (!Array.isArray(targets) || targets.length === 0 || targets.length > MAX_TARGETS) {
+    return { ok: false, reason: `targets must contain 1-${MAX_TARGETS} HTTPS URLs` };
+  }
   const urls: URL[] = [];
   for (const raw of targets) {
     if (typeof raw !== 'string' || raw.length > 2048) return { ok: false, reason: 'target must be a bounded URL string' };
     let url: URL;
     try { url = new URL(raw); } catch { return { ok: false, reason: 'target is not a valid URL' }; }
-    if (url.protocol !== 'https:' || url.username || url.password || url.port || !ALLOWED_HOSTS.has(url.hostname.toLowerCase())) return { ok: false, reason: 'target host is not in the strict public allowlist' };
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || !ALLOWED_HOSTS.has(url.hostname.toLowerCase())) {
+      return { ok: false, reason: 'target host is not in the strict public allowlist' };
+    }
     urls.push(url);
   }
   return { ok: true, urls };
@@ -33,8 +39,24 @@ export class ProfileLeaseStore {
   release(provider: string, role: string, profile: string): void { this.leases.delete(`${provider}:${role}:${profile}`); }
 }
 
-export function redactedReceipt(target: URL, status: number | null, title: string | null, finalUrl: string | null) {
+export interface RedactedReceipt {
+  host: string;
+  status: number | null;
+  title: string | null;
+  final_host: string | null;
+  cleanup_success: boolean;
+  observed_at: string;
+}
+
+export function redactedReceipt(target: URL, status: number | null, title: string | null, finalUrl: string | null, cleanupSuccess = true): RedactedReceipt {
   let finalHost: string | null = null;
   try { finalHost = finalUrl ? new URL(finalUrl).hostname : null; } catch { finalHost = null; }
-  return { host: target.hostname, status, title: title?.slice(0, 160) ?? null, final_host: finalHost, body: undefined, cookies: undefined, session_id: undefined, profile_id: undefined, cdp_endpoint: undefined };
+  return {
+    host: target.hostname,
+    status,
+    title: title?.slice(0, 160) ?? null,
+    final_host: finalHost,
+    cleanup_success: cleanupSuccess,
+    observed_at: new Date().toISOString(),
+  };
 }
