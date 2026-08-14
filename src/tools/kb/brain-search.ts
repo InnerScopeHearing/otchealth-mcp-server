@@ -61,7 +61,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { hybridSearch, searchConfigured } from '../../azure/search.js';
+import { hybridSearch, searchConfigured } from '../../search/index.js';
 import { isLaneAllowed } from './search-privileged.js';
 import { retractedIds, filterRetracted } from '../../memory/retractions.js';
 import { rrfFuse, type FusedHit } from '../../memory/rrf.js';

@@ -37,7 +37,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { getDocumentByKey, searchConfigured } from '../../azure/search.js';
+import { getDocumentByKey, searchConfigured } from '../../search/index.js';
 import { parseCompositeId } from './openai-ids.js';
 import { parseOpenAiSearchMode, nonPrivilegedRoomsFor } from './openai-search.js';
 

@@ -258,6 +258,30 @@ const EnvSchema = z.object({
   AZURE_SEARCH_ENDPOINT: z.string().optional().default(''),
   AZURE_SEARCH_QUERY_KEY: z.string().optional().default(''),
 
+  // SEARCH BACKEND SWITCH (src/search/index.ts dispatcher). Default 'azure' is BYTE-IDENTICAL to
+  // every deploy before this variable existed: every dispatched caller keeps calling
+  // src/azure/search.ts exactly as before. Flip to 'opensearch' to route those same callers at
+  // Amazon OpenSearch instead (src/search/opensearch.ts). kb_search_privileged (the ring-gated
+  // privileged path in src/tools/kb/search-privileged.ts) is DELIBERATELY NOT wired to this
+  // dispatcher and always uses Azure regardless of this value -- see that file's own header and
+  // the PR description for why.
+  SEARCH_BACKEND: z.enum(['azure', 'opensearch']).default('azure'),
+
+  // Amazon OpenSearch (SigV4-signed, service 'es'), the alternate backend behind
+  // SEARCH_BACKEND=opensearch. Inert (searchConfigured() -> false) unless OPENSEARCH_ENDPOINT is
+  // set. Endpoint is the domain HOST ONLY, no scheme (e.g.
+  // "search-otchealth-brain-uqmq2jw23cv4yjnnxblxzb7nny.us-east-1.es.amazonaws.com") -- HTTPS is
+  // always assumed. Credentials resolve in this order: (1) AWS_ACCESS_KEY_ID +
+  // AWS_SECRET_ACCESS_KEY (+ optional AWS_SESSION_TOKEN) when both are set; (2) the ECS task-role
+  // container credential endpoint (AWS_CONTAINER_CREDENTIALS_RELATIVE_URI, set automatically by
+  // the ECS agent -- no explicit env var needed here beyond what ECS already injects). Neither
+  // path pulls in the aws-sdk (this repo intentionally carries none); see src/search/sigv4.ts.
+  OPENSEARCH_ENDPOINT: z.string().optional().default(''),
+  OPENSEARCH_REGION: z.string().optional().default('us-east-1'),
+  AWS_ACCESS_KEY_ID: z.string().optional().default(''),
+  AWS_SECRET_ACCESS_KEY: z.string().optional().default(''),
+  AWS_SESSION_TOKEN: z.string().optional().default(''),
+
   // Kill-switch for the memory-room authority+freshness re-rank (src/memory/authority-rerank.ts).
   // Default ON. Set to 'off' to fall back to pure relevance order (byte-identical to pre-Wave-1).
   MEMORY_RERANK_MODE: z.string().optional().default('on'),

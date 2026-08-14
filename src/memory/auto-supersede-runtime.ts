@@ -18,7 +18,7 @@
  */
 import { loadEnv } from '../config/env.js';
 import { embed, chat, type ChatMessage } from '../azure/foundry.js';
-import { hybridSearch, type KbHit } from '../azure/search.js';
+import { hybridSearch, type KbHit } from '../search/index.js';
 import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
 import { entryIdFromDocId } from './retractions.js';
 import {

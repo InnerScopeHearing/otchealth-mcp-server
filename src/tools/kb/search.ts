@@ -12,7 +12,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { hybridSearch, searchConfigured } from '../../azure/search.js';
+import { hybridSearch, searchConfigured } from '../../search/index.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 
 const OPEN_INDEXES = new Set(['commons-company-journal', 'memory-exec']);

@@ -60,7 +60,7 @@
  *    may see `already_surfaced` under-report. Acceptable -- it is a soft annotation, not a
  *    correctness guarantee, exactly the same caveat jit-doctrine.ts documents for its own Set.
  */
-import { hybridSearch, searchConfigured, type KbHit } from '../azure/search.js';
+import { hybridSearch, searchConfigured, type KbHit } from '../search/index.js';
 
 /** The two durable memory kinds this recall targets (see agentstate/agents.ts MEMORY_KINDS for the
  *  full durable-kind vocabulary: fact/decision/correction/pitfall/status/episode). Only the two
