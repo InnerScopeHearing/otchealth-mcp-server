@@ -13,13 +13,15 @@ function refusal(code: string, summary: string): ToolResultPayload {
   return { data: { mode: 'refused', error: code }, summary };
 }
 
-function enrollmentFor(callerAgent: string | undefined | null, capability: BrowserCapability): ReturnType<typeof resolveBrowserEnrollment> | ToolResultPayload {
+type EnrollmentDecision = { enrollment: NonNullable<ReturnType<typeof resolveBrowserEnrollment>> } | { refusal: ToolResultPayload };
+
+function enrollmentFor(callerAgent: string | undefined | null, capability: BrowserCapability): EnrollmentDecision {
   const enrollment = resolveBrowserEnrollment(callerAgent);
-  if (!enrollment) return refusal('agent_not_enrolled', 'Refused: this agent is not enrolled in the AgentCore Browser broker. No browser session was created.');
+  if (!enrollment) return { refusal: refusal('agent_not_enrolled', 'Refused: this agent is not enrolled in the AgentCore Browser broker. No browser session was created.') };
   if (!enrollmentAllows(enrollment, capability)) {
-    return refusal('capability_not_enrolled', `Refused: ${capability} is not enrolled for ${enrollment.callerAgent}. No browser session was created.`);
+    return { refusal: refusal('capability_not_enrolled', `Refused: ${capability} is not enrolled for ${enrollment.callerAgent}. No browser session was created.`) };
   }
-  return enrollment;
+  return { enrollment };
 }
 
 /**
