@@ -105,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           OLD=$(az containerapp revision list -n "$APP" -g "$APP_RG" --query '[?properties.trafficWeight>`0`].name | [0]' -o tsv)
-          SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)a${GITHUB_RUN_ATTEMPT}"
+          SUFFIX="g$(echo "$GITHUB_SHA" | cut -c1-8)r${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
           echo "previous=${OLD}" >> "$GITHUB_OUTPUT"
           az containerapp update -n "$APP" -g "$APP_RG" \
             --image "${{ steps.digest.outputs.ref }}" --revision-suffix "$SUFFIX" \
