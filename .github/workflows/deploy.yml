@@ -80,7 +80,7 @@ jobs:
           set -euo pipefail
           az containerapp revision set-mode -n "$APPROVAL_APP" -g "$APP_RG" --mode multiple
           OLD=$(az containerapp revision list -n "$APPROVAL_APP" -g "$APP_RG" --query '[?properties.trafficWeight>`0`].name | [0]' -o tsv)
-          SUFFIX="b$(echo "$GITHUB_SHA" | cut -c1-8)a${GITHUB_RUN_ATTEMPT}"
+          SUFFIX="b$(echo "$GITHUB_SHA" | cut -c1-8)r${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
           REV="${APPROVAL_APP}--${SUFFIX}"
           echo "previous=${OLD}" >> "$GITHUB_OUTPUT"
           echo "revision=${REV}" >> "$GITHUB_OUTPUT"
