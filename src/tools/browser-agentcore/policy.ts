@@ -13,6 +13,12 @@ export function validatePublicTargets(targets: unknown): TargetValidation {
   const urls: URL[] = [];
   for (const raw of targets) {
     if (typeof raw !== 'string' || raw.length > 2048) return { ok: false, reason: 'target must be a bounded URL string' };
+    // WHATWG URL normalizes an explicit default port (https://host:443) to an empty URL.port.
+    // Check raw authority first so no caller can bypass the no-port rule through normalization.
+    const authority = /^https:\/\/([^/?#]+)/i.exec(raw)?.[1] ?? '';
+    if (authority.includes('@') || authority.includes(':')) {
+      return { ok: false, reason: 'target must not contain userinfo, an IP literal, or an explicit port' };
+    }
     let url: URL;
     try { url = new URL(raw); } catch { return { ok: false, reason: 'target is not a valid URL' }; }
     if (url.protocol !== 'https:' || url.username || url.password || url.port || !ALLOWED_HOSTS.has(url.hostname.toLowerCase())) {
