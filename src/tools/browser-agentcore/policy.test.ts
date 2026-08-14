@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProfileLeaseStore, redactedReceipt, rejectSensitiveIntent, validatePublicTargets } from './policy.js';
-import { agentCoreRuntimeConfig, assertAgentCoreConfigured, buildAgentCoreStartRequest, signAgentCoreAutomationStream, signAgentCoreListBrowsers } from './transport.js';
+import { agentCoreRuntimeConfig, assertAgentCoreConfigured, buildAgentCoreStartRequest, cdpCommandEnvelope, signAgentCoreAutomationStream, signAgentCoreListBrowsers } from './transport.js';
 
 test('allows only exact HTTPS public hosts', () => {
   assert.equal(validatePublicTargets(['https://wefunder.com/otchealth.inc']).ok, true);
