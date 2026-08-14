@@ -73,7 +73,9 @@ interface SignedRequest {
   headers: Record<string, string>;
 }
 
-function signedAgentCoreRequest(config: AgentCoreRuntimeConfig, method: string, path: string, body: Buffer, now = new Date()): SignedRequest {
+type AgentCoreSigningConfig = Pick<AgentCoreRuntimeConfig, 'region' | 'accessKeyId' | 'secretAccessKey' | 'sessionToken'>;
+
+function signedAgentCoreRequest(config: AgentCoreSigningConfig, method: string, path: string, body: Buffer, now = new Date()): SignedRequest {
   const service = 'bedrock-agentcore';
   const host = `${service}.${config.region}.amazonaws.com`;
   const stamp = now.toISOString().replace(/[:-]|\.\d{3}/g, '').replace('Z', 'Z');
