@@ -34,8 +34,8 @@ function testEnv(): Env {
 
 test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each other in intent: the external set is a strict, minimal subset of tool names', () => {
   // Sanity check on the fixtures themselves before testing the routing that hands them out.
-  // 9 original read tools + Phase 6's search/fetch (OpenAI connector contract) = 11.
-  assert.equal(EXTERNAL_READONLY_TOOLSET.length, 11);
+  // 9 original read tools + browser broker public reads + Phase 6 search/fetch = 13.
+  assert.equal(EXTERNAL_READONLY_TOOLSET.length, 13);
   for (const name of EXTERNAL_READONLY_TOOLSET) {
     assert.ok(CTO_SHIP_LANE_TOOLSET.includes(name), `${name} should also be reachable on the ship lane`);
   }
@@ -141,12 +141,14 @@ test('(e) Wefunder Campaign Director gets only the external baseline plus bounde
   ]) assert.equal(set.has(forbidden), false, `Wefunder connector must not expose ${forbidden}`);
 });
 
-test("(f) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 search/fetch) and excludes every privileged/write tool", () => {
+test("(f) 'external-read' lane set is EXACTLY the 13 bounded read tools (including broker public reads and Phase 6 search/fetch) and excludes every privileged/write tool", () => {
   const set = connectorToolset(testEnv(), 'external-read');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
-  assert.equal(set.size, 11);
+  assert.equal(set.size, 13);
   assert.ok(set.has('search'), 'external-read must see the OpenAI connector search tool');
   assert.ok(set.has('fetch'), 'external-read must see the OpenAI connector fetch tool');
+  assert.ok(set.has('browser_broker_preflight'), 'external-read must see public-read browser preflight');
+  assert.ok(set.has('browser_broker_inspect_public'), 'external-read must see public-read browser inspection');
   for (const forbidden of [
     'kb_search_privileged', 'kb_get_document',
     'legal_blob_list', 'legal_blob_get', 'legal_blob_put',

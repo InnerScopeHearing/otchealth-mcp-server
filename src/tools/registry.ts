@@ -247,6 +247,10 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
 export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
   'brain_search', 'kb_search', 'web_search', 'catalog_list_tools', 'catalog_master',
   'wake', 'memory_recall', 'memory_search', 'gateway_fetch_result',
+  // AgentCore Browser broker: strictly public-read-only. The broker independently resolves the
+  // external-read enrollment, host allowlist, isolated non-persistent profile, and redacted receipt.
+  // Visibility grants neither authentication nor any draft/write capability.
+  'browser_broker_preflight', 'browser_broker_inspect_public',
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. Deliberately safe to hand to
   // EVERY external/unrecognized lane: both tools are non-privileged by construction (they reuse
   // brain-search.ts's roomsFor() and fetch independently re-derives + re-checks the ring per call
