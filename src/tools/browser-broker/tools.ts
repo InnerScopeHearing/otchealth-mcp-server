@@ -36,11 +36,11 @@ export function registerAgentCoreBrowserBrokerTools(server: McpServer, callerHas
     inputShape: { capability: z.enum(['public_read', 'authenticated_read', 'draft_write', 'committed_write']), targets: z.array(z.string()).min(1).max(12) },
     outputShape: { ok: z.boolean(), mode: z.string(), enrollment: z.unknown().optional(), error: z.string().optional() },
     handler: async (input, ctx) => {
-      const enrollment = enrollmentFor(ctx.callerAgent, input.capability);
-      if (!('callerAgent' in enrollment)) return enrollment;
-      const targets = validateEnrollmentTargets(enrollment, input.targets);
+      const decision = enrollmentFor(ctx.callerAgent, input.capability);
+      if ('refusal' in decision) return decision.refusal;
+      const targets = validateEnrollmentTargets(decision.enrollment, input.targets);
       if (!targets.ok) return refusal('target_not_enrolled', `Refused: ${targets.reason}. No browser session was created.`);
-      return { data: { ok: true, mode: 'preflight', enrollment: browserEnrollmentSnapshot(enrollment) }, summary: `Browser broker preflight passed for ${enrollment.callerAgent}; no browser session was created.` };
+      return { data: { ok: true, mode: 'preflight', enrollment: browserEnrollmentSnapshot(decision.enrollment) }, summary: `Browser broker preflight passed for ${decision.enrollment.callerAgent}; no browser session was created.` };
     },
   }, callerHash);
 
