@@ -95,7 +95,10 @@ export interface HybridSearchOptions {
   filter?: string;
 }
 
-function pickText(doc: Record<string, unknown>): string {
+/** Exported so alternate search backends (see src/search/opensearch.ts) reuse the exact same
+ *  text-field-picking convention as the Azure client, keeping result shape identical regardless of
+ *  SEARCH_BACKEND. Pure; unchanged behavior for every existing internal caller in this file. */
+export function pickText(doc: Record<string, unknown>): string {
   for (const f of ['text', 'content', 'chunk', 'body', 'pageContent']) {
     if (typeof doc[f] === 'string' && (doc[f] as string).length) return doc[f] as string;
   }

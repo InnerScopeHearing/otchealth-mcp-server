@@ -59,7 +59,7 @@
  * just runs the fast path, so 'deep' behaves EXACTLY like 'fast'.
  */
 import { chat, foundryConfigured, type ChatMessage } from '../azure/foundry.js';
-import { hybridSearch, searchConfigured, type KbHit } from '../azure/search.js';
+import { hybridSearch, searchConfigured, type KbHit } from '../search/index.js';
 import { rrfFuse, type FusedHit } from './rrf.js';
 import { retractedIds, filterRetracted } from './retractions.js';
 import { retrievalShield, type GuardMode } from '../safety/auto-guard.js';
