@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET } from './registry.js';
+import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET, WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET } from './registry.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
 
