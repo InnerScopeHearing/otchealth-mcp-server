@@ -19,6 +19,15 @@ const ENROLLMENTS: readonly BrowserAgentEnrollment[] = [
     allowedHosts: ['wefunder.com', 'help.wefunder.com', 'otchealth.app'],
     capabilities: ['public_read'],
   },
+  // Compatibility enrollment for the existing confidential CTO connector bound to the
+  // Wefunder Campaign Director. This is a separate, non-persistent public-read identity:
+  // it cannot inherit the Wefunder agent profile, authenticate, retain a session, draft, or write.
+  {
+    callerAgent: 'cto',
+    profileLabel: 'cto_wefunder_public_read',
+    allowedHosts: ['wefunder.com', 'help.wefunder.com', 'otchealth.app'],
+    capabilities: ['public_read'],
+  },
 ];
 
 export function resolveBrowserEnrollment(callerAgent: string | undefined | null): BrowserAgentEnrollment | null {

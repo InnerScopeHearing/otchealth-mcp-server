@@ -106,6 +106,10 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
   'retrieval_feedback',
   'llm_azure', 'catalog_list_tools', 'catalog_master', 'gateway_fetch_result',
+  // AgentCore Browser broker: read-only inspection tools. The broker independently resolves
+  // the enrolled caller/profile and permits only public_read; visibility here does not grant
+  // authentication, persistence, draft, committed-write, or any campaign capability.
+  'browser_broker_preflight', 'browser_broker_inspect_public',
   // catalog_probe (2026-08-03): a diagnostic tool built specifically to answer "what caller_agent/
   // connector_surface/m365_static_auth did THIS request actually resolve to" -- exactly the question
   // needed to root-cause a connector showing an unexpectedly narrow toolset -- was itself never added
