@@ -58,7 +58,12 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       async () => {
         const mcp = new McpServer(
           SERVER_INFO,
-          ctx.connector_surface ? { capabilities: { tools: {} } } : SERVER_OPTIONS,
+          // Connector clients also need listChanged advertised. Without it, a Custom MCP client
+          // can cache an earlier curated tools/list response indefinitely after a gateway deploy,
+          // leaving server-registered browser tools visible only through catalog introspection but
+          // absent from the client-callable action manifest. Tool availability still remains
+          // authorization- and lane-specific at registration time.
+          SERVER_OPTIONS,
         );
         registerAllTools(mcp, currentCallerHash);
         const transport = new StreamableHTTPServerTransport({
