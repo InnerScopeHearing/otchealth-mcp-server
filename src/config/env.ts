@@ -421,6 +421,16 @@ const EnvSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
 
+  // Kill-switch for the search-mode telemetry emitted by the dispatcher (src/search/index.ts).
+  // 'on' (default) emits one fire-and-forget gw_search_mode event per room query carrying ONLY the
+  // backend, room name, degraded flag and hit count -- never the query text or any hit content.
+  // This exists because hybrid search fails OPEN: src/search/opensearch.ts catches an embed()
+  // failure and continues keyword-only, so losing Azure Foundry (which still serves embeddings even
+  // after the OpenSearch cutover) silently halves retrieval quality while every health check stays
+  // green. The keyword/hybrid ratio is the only signal that distinguishes that from normal
+  // operation. Set to 'off' to disable emission entirely.
+  SEARCH_MODE_TELEMETRY: z.enum(['on', 'off']).default('on'),
+
   // Amazon OpenSearch (SigV4-signed, service 'es'), the alternate backend behind
   // SEARCH_BACKEND=opensearch. Inert (searchConfigured() -> false) unless OPENSEARCH_ENDPOINT is
   // set. Endpoint is the domain HOST ONLY, no scheme (e.g.

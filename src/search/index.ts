@@ -22,6 +22,7 @@
  * to pin the lane matrix (notably that the cfo lane cannot reach legal-personal*).
  */
 import { loadEnv } from '../config/env.js';
+import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
 import * as azureSearch from '../azure/search.js';
 import * as openSearchBackend from './opensearch.js';
 import * as azureWrite from '../azure/search-write.js';
@@ -45,15 +46,50 @@ export function isChunkedRoom(index: string): boolean {
   return azureSearch.isChunkedRoom(index);
 }
 
+/**
+ * Modes that mean "the vector half of the query did NOT run". Hybrid search fails OPEN by design:
+ * src/search/opensearch.ts catches an embed() failure and continues keyword-only rather than
+ * erroring, and azure/search.ts degrades similarly. That is the right runtime behavior and the
+ * wrong OBSERVABILITY behavior -- a total loss of Azure Foundry (which still serves embeddings even
+ * after the OpenSearch cutover, so it is a live single point of failure) would halve retrieval
+ * quality while every health check, every tool call and every log line stayed green. Anything not
+ * in this set is treated as non-degraded, so a new richer mode name never false-alarms.
+ */
+const DEGRADED_MODES = new Set(['keyword']);
+
+/** Fire-and-forget; captureGatewayEvent never throws and is never awaited, but the whole emit is
+ *  guarded anyway so telemetry can never be the reason a search fails. */
+function emitSearchMode(backend: string, index: string, res: { matches: KbHit[]; mode: string } | null): void {
+  try {
+    if (loadEnv().SEARCH_MODE_TELEMETRY !== 'on') return;
+    captureGatewayEvent('gw_search_mode', {
+      backend,
+      room: index,
+      mode: res?.mode ?? 'null',
+      degraded: res ? DEGRADED_MODES.has(res.mode) : false,
+      unconfigured: res === null,
+      hits: res?.matches.length ?? 0,
+    });
+  } catch {
+    /* telemetry is never load-bearing */
+  }
+}
+
 export async function hybridSearch(
   index: string,
   query: string,
   top: number,
   opts?: HybridSearchOptions,
 ): Promise<{ matches: KbHit[]; mode: string } | null> {
-  return activeBackend() === 'opensearch'
-    ? openSearchBackend.hybridSearch(index, query, top, opts)
-    : azureSearch.hybridSearch(index, query, top, opts);
+  const backend = activeBackend();
+  const res =
+    backend === 'opensearch'
+      ? await openSearchBackend.hybridSearch(index, query, top, opts)
+      : await azureSearch.hybridSearch(index, query, top, opts);
+  // Room name, mode and counts only -- never the query text and never hit content, so this stays
+  // safe to emit for privileged rooms too (kb_search_privileged now routes through here).
+  emitSearchMode(backend, index, res);
+  return res;
 }
 
 export async function getDocumentByKey(index: string, key: string): Promise<FetchedDocument | null> {
