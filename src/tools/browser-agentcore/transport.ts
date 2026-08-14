@@ -307,9 +307,10 @@ function streamHeaders(config: AgentCoreRuntimeConfig, endpoint: string): Record
   return signAgentCoreAutomationStream(config, endpoint);
 }
 
-function evaluatedResult(value: Record<string, unknown>): CdpResult {
-  const result = value.result as { result?: { value?: unknown } } | undefined;
-  const serialized = result?.result?.value;
+/** Parse the exact result object returned by Runtime.evaluate through CdpSocket.request. */
+export function evaluatedResult(value: Record<string, unknown>): CdpResult {
+  const result = value.result as { value?: unknown } | undefined;
+  const serialized = result?.value;
   if (typeof serialized !== 'string') throw new AgentCoreBrowserTransportError('provider_result_invalid', 'AgentCore did not return a bounded public page receipt.', 'No browser content was returned.');
   let parsed: { title?: unknown; url?: unknown; status?: unknown };
   try { parsed = JSON.parse(serialized) as { title?: unknown; url?: unknown; status?: unknown }; }
