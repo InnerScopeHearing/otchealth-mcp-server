@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProfileLeaseStore, redactedReceipt, rejectSensitiveIntent, validatePublicTargets } from './policy.js';
-import { agentCoreRuntimeConfig, assertAgentCoreConfigured, buildAgentCoreStartRequest, signAgentCoreListBrowsers } from './transport.js';
+import { agentCoreRuntimeConfig, assertAgentCoreConfigured, buildAgentCoreStartRequest, signAgentCoreAutomationStream, signAgentCoreListBrowsers } from './transport.js';
 
 test('allows only exact HTTPS public hosts', () => {
   assert.equal(validatePublicTargets(['https://wefunder.com/otchealth.inc']).ok, true);
@@ -54,4 +54,17 @@ test('SigV4 header construction is deterministic and does not expose secret', ()
   assert.match(headers.authorization, /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\//);
   assert.doesNotMatch(JSON.stringify(headers), /test-secret/);
   assert.equal(headers.host, 'bedrock-agentcore.us-east-1.amazonaws.com');
+});
+
+test('AgentCore CDP stream signer signs only headers sent in the WebSocket upgrade', () => {
+  const headers = signAgentCoreAutomationStream(
+    { region: 'us-east-1', accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'test-secret', sessionToken: 'session-token' },
+    'wss://bedrock-agentcore.us-east-1.amazonaws.com/browser-streams/aws.browser.v1/sessions/session123/automation',
+    new Date('2026-08-13T00:00:00.000Z'),
+  );
+  assert.equal(headers.host, 'bedrock-agentcore.us-east-1.amazonaws.com');
+  assert.equal(headers['content-type'], undefined);
+  assert.equal(headers['x-amz-security-token'], 'session-token');
+  assert.match(headers.authorization, /SignedHeaders=host;x-amz-date;x-amz-security-token,/);
+  assert.doesNotMatch(JSON.stringify(headers), /test-secret/);
 });

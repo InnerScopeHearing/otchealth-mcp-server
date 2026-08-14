@@ -269,9 +269,37 @@ class CdpSocket {
   }
 }
 
-function streamHeaders(config: AgentCoreRuntimeConfig, endpoint: string): Record<string, string> {
+/**
+ * CDP automation streams are WebSocket upgrades, not JSON API requests. AWS's browser
+ * client signs a GET with host only, then lets the WebSocket implementation add its
+ * transport headers. Do not reuse signedAgentCoreRequest here: it intentionally signs
+ * content-type for JSON REST bodies, and a signed header omitted from an upgrade causes
+ * AgentCore to reject the stream.
+ */
+export function signAgentCoreAutomationStream(config: AgentCoreSigningConfig, endpoint: string, now = new Date()): Record<string, string> {
   const url = new URL(endpoint);
-  return signedAgentCoreRequest(config, 'GET', `${url.pathname}${url.search}`, Buffer.alloc(0)).headers;
+  if (url.protocol !== 'wss:') throw new AgentCoreBrowserTransportError('provider_stream_invalid', 'AgentCore returned a non-secure automation stream.', 'No browser content was returned.');
+  const service = 'bedrock-agentcore';
+  const host = url.host;
+  const stamp = now.toISOString().replace(/[:-]|\.\d{3}/g, '').replace('Z', 'Z');
+  const day = stamp.slice(0, 8);
+  const headers: Record<string, string> = { host, 'x-amz-date': stamp };
+  if (config.sessionToken) headers['x-amz-security-token'] = config.sessionToken;
+  const signedHeaders = Object.keys(headers).sort().join(';');
+  const canonicalHeaders = Object.keys(headers).sort().map((key) => `${key}:${headers[key]}\n`).join('');
+  const canonicalRequest = `GET\n${url.pathname}\n${url.search.slice(1)}\n${canonicalHeaders}\n${signedHeaders}\n${createHash('sha256').update('').digest('hex')}`;
+  const scope = `${day}/${config.region}/${service}/aws4_request`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${stamp}\n${scope}\n${createHash('sha256').update(canonicalRequest).digest('hex')}`;
+  const kDate = hmac(`AWS4${config.secretAccessKey}`, day);
+  const kRegion = hmac(kDate, config.region);
+  const kService = hmac(kRegion, service);
+  const signingKey = hmac(kService, 'aws4_request');
+  headers.authorization = `AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${hmac(signingKey, stringToSign).toString('hex')}`;
+  return headers;
+}
+
+function streamHeaders(config: AgentCoreRuntimeConfig, endpoint: string): Record<string, string> {
+  return signAgentCoreAutomationStream(config, endpoint);
 }
 
 function evaluatedResult(value: Record<string, unknown>): CdpResult {
