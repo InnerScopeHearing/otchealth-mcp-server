@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProfileLeaseStore, redactedReceipt, rejectSensitiveIntent, validatePublicTargets } from './policy.js';
-import { agentCoreRuntimeConfig, assertAgentCoreConfigured, buildAgentCoreStartRequest, signAgentCoreAutomationStream, signAgentCoreListBrowsers } from './transport.js';
+import { agentCoreRuntimeConfig, assertAgentCoreConfigured, buildAgentCoreStartRequest, cdpCommandEnvelope, signAgentCoreAutomationStream, signAgentCoreListBrowsers } from './transport.js';
 
 test('allows only exact HTTPS public hosts', () => {
   assert.equal(validatePublicTargets(['https://wefunder.com/otchealth.inc']).ok, true);
@@ -67,4 +67,12 @@ test('AgentCore CDP stream signer signs only headers sent in the WebSocket upgra
   assert.equal(headers['x-amz-security-token'], 'session-token');
   assert.match(headers.authorization, /SignedHeaders=host;x-amz-date;x-amz-security-token,/);
   assert.doesNotMatch(JSON.stringify(headers), /test-secret/);
+});
+
+test('page CDP commands carry the attached target session id', () => {
+  assert.deepEqual(
+    cdpCommandEnvelope(7, 'Page.navigate', { url: 'https://wefunder.com/otchealth.inc' }, 'target-session'),
+    { id: 7, method: 'Page.navigate', params: { url: 'https://wefunder.com/otchealth.inc' }, sessionId: 'target-session' },
+  );
+  assert.deepEqual(cdpCommandEnvelope(8, 'Target.getTargets', {}), { id: 8, method: 'Target.getTargets', params: {} });
 });
