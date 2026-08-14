@@ -133,6 +133,8 @@ import { registerOpenAiFetch } from './kb/openai-fetch.js';
 // Wave A+ — llm_azure commodity path (credit-funded gpt-4.1, tiered): the cost-protocol escape hatch
 import { registerLlmAzure } from './llm/azure.js';
 import { registerGatewayFetchResult } from './gateway-fetch-result.js';
+// Governed AWS AgentCore Browser public-read-only bridge for Wefunder Campaign Director.
+import { registerBrowserAgentcoreTools } from './browser-agentcore/tools.js';
 
 // ===== EXHAUSTIVE WAVE: complete per-connector CRUD surface =====
 import { registerCioAdminTools } from './cio/admin-tools.js';
@@ -1925,6 +1927,8 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerXeroTools(server, callerHash);
   // HeyGen (durable subscription OAuth + Phase 0 discovery/reconciliation + bounded idempotent direct video/ingestion writes; every handler lane-gated).
   registerHeyGenTools(server, callerHash);
+  // AgentCore Browser (Wefunder public-read-only policy/preflight; provider transport remains disabled unless separately configured).
+  registerBrowserAgentcoreTools(server, callerHash);
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).
   registerMailArchiveTools(server, callerHash);
