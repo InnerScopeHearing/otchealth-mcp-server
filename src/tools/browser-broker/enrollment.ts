@@ -28,6 +28,15 @@ const ENROLLMENTS: readonly BrowserAgentEnrollment[] = [
     allowedHosts: ['wefunder.com', 'help.wefunder.com', 'otchealth.app'],
     capabilities: ['public_read'],
   },
+  // Public DCR callers receive a distinct, non-persistent public-read identity. This allows
+  // a zero-secret Hyperagent reconnect while preserving the external-read ring: no authenticated
+  // profile, session persistence, draft, committed write, or non-allowlisted target is reachable.
+  {
+    callerAgent: 'external-read',
+    profileLabel: 'external_wefunder_public_read',
+    allowedHosts: ['wefunder.com', 'help.wefunder.com', 'otchealth.app'],
+    capabilities: ['public_read'],
+  },
 ];
 
 export function resolveBrowserEnrollment(callerAgent: string | undefined | null): BrowserAgentEnrollment | null {
