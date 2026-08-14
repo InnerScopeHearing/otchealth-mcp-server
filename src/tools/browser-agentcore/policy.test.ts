@@ -76,3 +76,9 @@ test('page CDP commands carry the attached target session id', () => {
   );
   assert.deepEqual(cdpCommandEnvelope(8, 'Target.getTargets', {}), { id: 8, method: 'Target.getTargets', params: {} });
 });
+
+test('Runtime.evaluate receipt parser reads the exact CDP result envelope', () => {
+  const receipt = evaluatedResult({ result: { type: 'string', value: JSON.stringify({ title: 'Example', url: 'https://wefunder.com/otchealth.inc', status: 200 }) } });
+  assert.deepEqual(receipt, { title: 'Example', url: 'https://wefunder.com/otchealth.inc', status: 200 });
+  assert.throws(() => evaluatedResult({ result: { type: 'string' } }), /bounded public page receipt/);
+});
