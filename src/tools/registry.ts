@@ -268,6 +268,19 @@ export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
 ] as const;
 
 /**
+ * Fixed Wefunder Campaign Director connector surface. This is deliberately not a ship lane:
+ * it receives the external read baseline plus only the bounded AgentCore Browser broker tools.
+ * The broker independently enforces the Wefunder enrollment, public-read capability, public-host
+ * allowlist, isolated lease, and redacted receipt contract. No login, persistence, draft/write,
+ * financial, investor, KYC, tax, signature, or campaign-publish capability is exposed here.
+ */
+export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
+  ...EXTERNAL_READONLY_TOOLSET,
+  'browser_broker_preflight',
+  'browser_broker_inspect_public',
+] as const;
+
+/**
  * True when `lane` is entitled to the full CTO_SHIP_LANE_TOOLSET: the cto/developer engineering
  * identities, or any executive-ring lane. EXEC_RING is IMPORTED (never re-declared) from
  * kb/search-privileged.ts -- the single source of truth for the executive ring, so this can never
