@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET } from './registry.js';
+import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET, WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET } from './registry.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
 
@@ -127,7 +127,18 @@ test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus extern
   ]) assert.equal(set.has(forbidden), false, `cro connector must not expose ${forbidden}`);
 });
 
-test("(e) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 search/fetch) and excludes every privileged/write tool", () => {
+test('(e) Wefunder Campaign Director gets only the external baseline plus bounded browser broker reads', () => {
+  const set = connectorToolset(testEnv(), 'wefunder-campaign-director');
+  assert.deepEqual([...set].sort(), [...WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET].sort());
+  assert.ok(set.has('browser_broker_preflight'));
+  assert.ok(set.has('browser_broker_inspect_public'));
+  for (const forbidden of [
+    'browser_agentcore_wefunder_preflight', 'github_push_files', 'kb_search_privileged',
+    'memory_write', 'legal_blob_put', 'heygen_pairing_start',
+  ]) assert.equal(set.has(forbidden), false, `Wefunder connector must not expose ${forbidden}`);
+});
+
+test("(f) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 search/fetch) and excludes every privileged/write tool", () => {
   const set = connectorToolset(testEnv(), 'external-read');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
   assert.equal(set.size, 11);
