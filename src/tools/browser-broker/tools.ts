@@ -50,8 +50,9 @@ export function registerAgentCoreBrowserBrokerTools(server: McpServer, callerHas
     inputShape: { targets: z.array(z.string()).min(1).max(12), max_seconds: z.number().int().min(1).max(300).optional() },
     outputShape: { mode: z.string(), receipts: z.array(z.unknown()).optional(), error: z.string().optional() },
     handler: async (input, ctx) => {
-      const enrollment = enrollmentFor(ctx.callerAgent, 'public_read');
-      if (!('callerAgent' in enrollment)) return enrollment;
+      const decision = enrollmentFor(ctx.callerAgent, 'public_read');
+      if ('refusal' in decision) return decision.refusal;
+      const enrollment = decision.enrollment;
       const targets = validateEnrollmentTargets(enrollment, input.targets);
       if (!targets.ok) return refusal('target_not_enrolled', `Refused: ${targets.reason}. No browser session was created.`);
       const runtime = agentCoreRuntimeConfig();
