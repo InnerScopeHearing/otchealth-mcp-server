@@ -3,12 +3,12 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolResultPayload } from '../registry.js';
 import { BROWSER_AGENTCORE_PROFILE_LABEL, isBrowserAgentcoreCallerAllowed } from './access.js';
 import { MAX_SECONDS, MAX_TARGETS, ProfileLeaseStore, rejectSensitiveIntent, validatePublicTargets } from './policy.js';
-import { AgentCoreBrowserTransportError, UnconfiguredAgentCoreBrowserTransport, agentCoreRuntimeConfig, assertAgentCoreConfigured, type AgentCoreBrowserTransport } from './transport.js';
+import { AgentCoreBrowserTransportError, AwsAgentCorePublicReadOnlyTransport, agentCoreRuntimeConfig, assertAgentCoreConfigured, type AgentCoreBrowserTransport } from './transport.js';
 
 const leases = new ProfileLeaseStore();
 const PROVIDER = 'aws-agentcore-browser';
 const ROLE = 'wefunder-campaign-director';
-const defaultTransport = new UnconfiguredAgentCoreBrowserTransport();
+const defaultTransport = new AwsAgentCorePublicReadOnlyTransport();
 
 function refusal(caller: string): ToolResultPayload {
   return { data: { error: 'forbidden_lane' }, summary: `Refused: browser_agentcore_wefunder tools are available only to Wefunder Campaign Director or CTO. Your identity: ${caller || '(none)'}.` };
