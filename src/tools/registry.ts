@@ -304,7 +304,9 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
     ? env.CONNECTOR_TOOLSET || CTO_SHIP_LANE_TOOLSET.join(',')
     : lane === 'cro'
       ? CRO_CONNECTOR_TOOLSET.join(',')
-      : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
+      : lane === 'wefunder-campaign-director'
+        ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
+        : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   return new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
 }
 
