@@ -61,6 +61,16 @@ import {
   XERO_JOURNALS_GRANDFATHER_CUTOFF,
 } from './client.js';
 import { assembleGl } from './gl-assemble.js';
+import {
+  collectionOf,
+  isCreate,
+  unwrapItems,
+  naturalKeyOf,
+  findAccountCodeViolations,
+  existsFilterFor,
+  readExisting,
+  blocksCreate,
+} from './write-guard.js';
 
 const ORG_ENUM = z.enum(XERO_ORGS).describe('Which org: otchealth | innd | hearingassist | personal.');
 
@@ -1230,6 +1240,14 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         api: z.enum(API_ENUM).optional().describe('Which Xero API base. Default accounting.'),
         body: z.unknown().optional().describe('JSON payload. For accounting collections wrap in the plural key, e.g. {"Invoices":[{...}]}.'),
         params: z.record(z.string()).optional().describe('Query params as a string map, e.g. {"summarizeErrors":"false"}.'),
+        allow_duplicate: z
+          .boolean()
+          .optional()
+          .describe(
+            'Deliberately permit a create whose Reference already exists in this org. Default false. ' +
+              'The guard exists because a census found 49 phantom duplicate objects (13 bills as FOUR objects each) ' +
+              'produced by repeated creates against the same Reference. Use ONLY for a reviewed, intentional second object.',
+          ),
       },
       outputShape: {
         org: z.string(),
@@ -1251,10 +1269,84 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
             summary: 'xero_request: path must not contain "..".',
           };
         }
+        // --- WRITE GUARD (2026-08-14 duplicate-object incident). Runs BEFORE the dry-run return so
+        // a dry run also reports what the guard would do, making it a real preview. See
+        // write-guard.ts for the census that motivated each check.
+        if (api === 'accounting') {
+          // 1. MAP BY IDENTITY, NOT BY CODE. Account codes are per-org and Xero silently
+          //    re-resolves them in the destination org, which is how one document landed in both
+          //    the INND and HearingAssist ledgers.
+          const violations = findAccountCodeViolations(input.body);
+          if (violations.length) {
+            const where = violations
+              .slice(0, 5)
+              .map((v) => `item[${v.itemIndex}].LineItems[${v.lineIndex}] AccountCode=${v.accountCode}`)
+              .join('; ');
+            return {
+              data: { org: input.org, method: input.method, api, path, body: null, error: 'account_code_not_permitted' },
+              summary:
+                `REFUSED (${violations.length} line item(s) identify the account by CODE, not AccountID): ${where}. ` +
+                'Account codes are per-org and Xero re-resolves them locally, so the same code reaches an unrelated ' +
+                'account in another org (1251 is "Due from HearingAssist Inc" in INND but "Star Funding - AR" in ' +
+                'HearingAssist). Resolve each account to its AccountID in the DESTINATION org and resend.',
+            };
+          }
+
+          // 2. NO DUPLICATE CREATES. Read-before-write on the natural key, fail CLOSED.
+          if (isCreate(input.method, path) && !input.allow_duplicate) {
+            const collection = collectionOf(path);
+            const items = unwrapItems(input.body);
+            const keys = items.map(naturalKeyOf);
+            if (!items.length || keys.some((k) => k === null)) {
+              return {
+                data: { org: input.org, method: input.method, api, path, body: null, error: 'unverifiable_create' },
+                summary:
+                  `REFUSED (cannot verify this create is not a duplicate): ${items.length} item(s), ` +
+                  `${keys.filter((k) => k === null).length} without a Reference/InvoiceNumber/CreditNoteNumber. ` +
+                  'Every create on this collection needs a natural key so existence can be checked first. ' +
+                  'Add a Reference, or pass allow_duplicate:true to record a deliberate second object.',
+              };
+            }
+            const found: string[] = [];
+            for (const key of keys) {
+              if (!key) continue;
+              let probe;
+              try {
+                probe = await xeroGet(input.org as XeroOrg, `/${collection}`, { where: existsFilterFor(key) }, { api });
+              } catch (e) {
+                return {
+                  data: { org: input.org, method: input.method, api, path, body: null, error: 'probe_failed' },
+                  summary:
+                    `REFUSED (existence probe failed, failing closed): ${key.field}="${key.value}" — ` +
+                    `${e instanceof Error ? e.message : String(e)}. During a duplicate-object incident an ` +
+                    'unverifiable write is refused rather than risked. Retry, or pass allow_duplicate:true.',
+                };
+              }
+              const existing = readExisting(collection, probe.body);
+              if (blocksCreate(existing.map((x) => x.status))) {
+                found.push(
+                  `${key.field}="${key.value}" already exists as ${existing.length} object(s): ` +
+                    existing.map((x) => `${x.id}${x.status ? ` (${x.status})` : ''}`).join(', '),
+                );
+              }
+            }
+            if (found.length) {
+              return {
+                data: { org: input.org, method: input.method, api, path, body: null, error: 'duplicate_create_blocked' },
+                summary:
+                  `REFUSED (would create duplicate object(s) in ${input.org}): ${found.join(' | ')}. ` +
+                  'VOIDED and DELETED objects still block: re-creating against a voided copy is exactly how one ' +
+                  'bill reached four objects. To reverse an object use a reversing entry, never a re-create. ' +
+                  'Pass allow_duplicate:true only for a deliberate, reviewed second object.',
+              };
+            }
+          }
+        }
+
         if (ctx.dryRun) {
           return {
             data: { org: input.org, method: input.method, api, path, body: null, error: 'dry_run' },
-            summary: `DRY RUN (nothing written): ${input.method} ${api} ${path} for ${input.org}. Re-call with dry_run:false to execute.`,
+            summary: `DRY RUN (nothing written): ${input.method} ${api} ${path} for ${input.org}. Write guard passed. Re-call with dry_run:false to execute.`,
           };
         }
         const res = await xeroRequest(
