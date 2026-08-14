@@ -9,12 +9,17 @@
  * behavior to every deploy before this file existed, for every caller that gets repointed at this
  * module. This file is inert until SEARCH_BACKEND is deliberately set to 'opensearch'.
  *
- * NOT wired through this dispatcher: src/tools/kb/search-privileged.ts (kb_search_privileged), the
- * ring-gated privileged-room search path, which continues to import azure/search.ts DIRECTLY and
- * always uses Azure regardless of SEARCH_BACKEND. That file (and the INDEX_LANES /
- * PERSONAL_LEGAL_RING constants it defines) is the one thing keeping attorney-privileged
- * personal-legal documents out of the finance lane, and it is treated as read-only per this
- * migration's hard rules -- see the PR description for the explicit callout.
+ * ALSO wired through this dispatcher: src/tools/kb/search-privileged.ts (kb_search_privileged).
+ * An earlier revision deliberately left it pinned to Azure, reasoning that the file defining
+ * INDEX_LANES / PERSONAL_LEGAL_RING -- the one thing keeping attorney-privileged personal-legal
+ * documents out of the finance lane -- should not be touched at all. That was the safe default
+ * while unreviewed, but pinning it meant privileged rooms would go dark the moment Azure is
+ * retired, while every other room kept working. Repointing it is ring-NEUTRAL by construction:
+ * that file's ring decision (isLaneAllowed) is evaluated BEFORE the search call and depends only
+ * on (index, callerAgent), so hybridSearch() only ever receives an already-authorized index name.
+ * INDEX_LANES, PERSONAL_LEGAL_RING, isLaneAllowed, and the ring-check-before-search ordering are
+ * untouched -- only the import source changed. Locking tests in search-privileged.test.ts continue
+ * to pin the lane matrix (notably that the cfo lane cannot reach legal-personal*).
  */
 import { loadEnv } from '../config/env.js';
 import * as azureSearch from '../azure/search.js';

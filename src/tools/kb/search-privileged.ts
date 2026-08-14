@@ -71,7 +71,14 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { hybridSearch, searchConfigured } from '../../azure/search.js';
+// Routed through the SEARCH_BACKEND dispatcher, NOT azure/search.js directly, so privileged rooms
+// keep working when Azure is retired. This is ring-NEUTRAL by construction: the ring decision
+// (isLaneAllowed, from INDEX_LANES / PERSONAL_LEGAL_RING below) is made entirely BEFORE the search
+// call and depends only on (index, callerAgent). hybridSearch() therefore only ever receives an
+// index name that has ALREADY been authorized for this caller, so which engine serves that name
+// cannot widen a ring. INDEX_LANES, PERSONAL_LEGAL_RING, isLaneAllowed, and the order of the ring
+// check relative to the search call are all unchanged.
+import { hybridSearch, searchConfigured } from '../../search/index.js';
 
 /** The executive ring: the only identities permitted on privileged indexes. Defined once, applied to all.
  * 'exec' = the UNIFIED executive identity (CEO direction 2026-07-04): the solo operator wears every C-suite
