@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProfileLeaseStore, redactedReceipt, rejectSensitiveIntent, validatePublicTargets } from './policy.js';
-import { agentCoreRuntimeConfig, assertAgentCoreConfigured, signAgentCoreListBrowsers } from './transport.js';
+import { agentCoreRuntimeConfig, assertAgentCoreConfigured, buildAgentCoreStartRequest, signAgentCoreListBrowsers } from './transport.js';
 
 test('allows only exact HTTPS public hosts', () => {
   assert.equal(validatePublicTargets(['https://wefunder.com/otchealth.inc']).ok, true);
@@ -38,6 +38,15 @@ test('runtime remains disabled or unconfigured without secrets', () => {
   assert.throws(() => assertAgentCoreConfigured(disabled), /disabled/);
   const unconfigured = agentCoreRuntimeConfig({ ENABLE_AGENTCORE_WEFUNDER_PUBLIC_READONLY: 'true' });
   assert.throws(() => assertAgentCoreConfigured(unconfigured), /credentials/);
+});
+
+test('AgentCore start request is bounded, idempotent, and has no persistent profile', () => {
+  const request = buildAgentCoreStartRequest(300);
+  assert.equal(request.name, 'wefunder-public-readonly');
+  assert.equal(request.sessionTimeoutSeconds, 300);
+  assert.deepEqual(request.viewPort, { width: 1440, height: 900 });
+  assert.match(request.clientToken, /^[a-f0-9]{48}$/);
+  assert.equal('profileConfiguration' in request, false);
 });
 
 test('SigV4 header construction is deterministic and does not expose secret', () => {
