@@ -68,3 +68,11 @@ test('AgentCore CDP stream signer signs only headers sent in the WebSocket upgra
   assert.match(headers.authorization, /SignedHeaders=host;x-amz-date;x-amz-security-token,/);
   assert.doesNotMatch(JSON.stringify(headers), /test-secret/);
 });
+
+test('page CDP commands carry the attached target session id', () => {
+  assert.deepEqual(
+    cdpCommandEnvelope(7, 'Page.navigate', { url: 'https://wefunder.com/otchealth.inc' }, 'target-session'),
+    { id: 7, method: 'Page.navigate', params: { url: 'https://wefunder.com/otchealth.inc' }, sessionId: 'target-session' },
+  );
+  assert.deepEqual(cdpCommandEnvelope(8, 'Target.getTargets', {}), { id: 8, method: 'Target.getTargets', params: {} });
+});
