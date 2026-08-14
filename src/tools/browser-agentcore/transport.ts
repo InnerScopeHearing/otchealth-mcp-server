@@ -39,6 +39,11 @@ interface CdpResult {
   status: number | null;
 }
 
+/** Build a CDP command envelope; page-scoped calls carry the flattened target session id. */
+export function cdpCommandEnvelope(id: number, method: string, params: Record<string, unknown>, sessionId?: string): Record<string, unknown> {
+  return { id, method, params, ...(sessionId ? { sessionId } : {}) };
+}
+
 /**
  * Credentials are injected into the runtime from Azure Key Vault as local Container Apps secrets.
  * This module never reads Key Vault directly and never serializes credentials, browser profiles,
