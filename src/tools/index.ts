@@ -135,6 +135,8 @@ import { registerLlmAzure } from './llm/azure.js';
 import { registerGatewayFetchResult } from './gateway-fetch-result.js';
 // Governed AWS AgentCore Browser public-read-only bridge for Wefunder Campaign Director.
 import { registerBrowserAgentcoreTools } from './browser-agentcore/tools.js';
+// General AgentCore Browser broker with per-agent capability enrollment.
+import { registerAgentCoreBrowserBrokerTools } from './browser-broker/tools.js';
 
 // ===== EXHAUSTIVE WAVE: complete per-connector CRUD surface =====
 import { registerCioAdminTools } from './cio/admin-tools.js';
