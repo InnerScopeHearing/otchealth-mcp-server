@@ -329,12 +329,25 @@ export class AwsAgentCorePublicReadOnlyTransport implements AgentCoreBrowserTran
     let socket: CdpSocket | undefined;
     try {
       socket = await CdpSocket.connect(session.automationEndpoint, streamHeaders(this.config, session.automationEndpoint));
+      // AgentCore exposes browser-level CDP first. Page-domain commands must be routed through
+      // the attached page target's flattened CDP session, rather than the root connection.
+      const targetListing = await socket.request('Target.getTargets', {}, 20_000);
+      const targetInfos = targetListing.targetInfos as Array<{ targetId?: unknown; type?: unknown }> | undefined;
+      const pageTargetId = targetInfos?.find((candidate) => candidate.type === 'page' && typeof candidate.targetId === 'string')?.targetId;
+      if (typeof pageTargetId !== 'string') {
+        throw new AgentCoreBrowserTransportError('provider_page_target_missing', 'AgentCore did not expose a page target for the bounded inspection.', 'No browser content was returned.');
+      }
+      const attached = await socket.request('Target.attachToTarget', { targetId: pageTargetId, flatten: true }, 20_000);
+      const pageSessionId = attached.sessionId;
+      if (typeof pageSessionId !== 'string' || !pageSessionId) {
+        throw new AgentCoreBrowserTransportError('provider_page_session_missing', 'AgentCore did not return a page-scoped CDP session.', 'No browser content was returned.');
+      }
       for (const target of targets) {
         const remaining = maxSeconds * 1000 - (Date.now() - started);
         if (remaining <= 0) throw new AgentCoreBrowserTransportError('provider_timeout', 'AgentCore browser inspection exceeded its bounded deadline.', 'No additional page was inspected.');
-        await socket.request('Page.navigate', { url: target.toString() }, Math.min(remaining, 20_000));
+        await socket.request('Page.navigate', { url: target.toString() }, Math.min(remaining, 20_000), pageSessionId);
         await sleep(Math.min(750, Math.max(1, remaining)));
-        const inspected = evaluatedResult(await socket.request('Runtime.evaluate', { expression: "JSON.stringify({title:document.title,url:location.href,status:performance.getEntriesByType('navigation')[0]?.responseStatus ?? null})", returnByValue: true }, Math.min(remaining, 20_000)));
+        const inspected = evaluatedResult(await socket.request('Runtime.evaluate', { expression: "JSON.stringify({title:document.title,url:location.href,status:performance.getEntriesByType('navigation')[0]?.responseStatus ?? null})", returnByValue: true }, Math.min(remaining, 20_000), pageSessionId));
         if (!inspected.url || !validatePublicTargets([inspected.url]).ok) {
           throw new AgentCoreBrowserTransportError('redirect_outside_allowlist', 'A public target redirected outside the strict browser allowlist.', 'No page content or external destination was returned.');
         }
