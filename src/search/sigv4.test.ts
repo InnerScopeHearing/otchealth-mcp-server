@@ -22,6 +22,34 @@ test('canonicalUri: percent-encodes reserved chars AWS requires beyond encodeURI
   assert.match(out, /%27/); // "'"
 });
 
+test('canonicalUri: a path segment that already contains a percent-encoded byte gets encoded AGAIN (the general, non-S3 SigV4 "encode path segments twice" rule)', () => {
+  // AWS's canonical-request spec: "Each path segment must be URI-encoded twice (except for Amazon
+  // S3, which only gets URI-encoded once)." This signer has no S3 special case (it is only ever
+  // used for the 'es' service), so it always applies the general double-encode rule.
+  //
+  // This matters concretely for src/search/opensearch.ts's getDocumentByKey: it builds the actual
+  // WIRE path as `/${index}/_doc/${encodeURIComponent(key)}` (ONE encode, so a slash-containing
+  // chunked-room parent key like "legal/clo-outgoing/01-Divorce/letter.md" survives transport as a
+  // single opaque path segment: ".../_doc/legal%2Fclo-outgoing%2F01-Divorce%2Fletter.md"), then
+  // hands that SAME already-encoded string to signRequest as `path`. canonicalUri applies its own
+  // encoding pass on top of that, so the raw key ends up encoded TWICE in the canonical request used
+  // for the signature -- exactly the documented AWS rule -- even though the code never explicitly
+  // "double encodes" anywhere; it falls out of composing one encodeURIComponent at the call site
+  // with canonicalUri's own single internal encode.
+  const rawKeyWithSlash = 'legal/clo-outgoing/01-Divorce/letter.md';
+  const wirePath = `/legal-company/_doc/${encodeURIComponent(rawKeyWithSlash)}`;
+  assert.equal(wirePath, '/legal-company/_doc/legal%2Fclo-outgoing%2F01-Divorce%2Fletter.md', 'sanity: the wire path keeps the internal slash escaped as ONE opaque segment');
+
+  const canonical = canonicalUri(wirePath);
+  // The literal '%' from the already-encoded wire path must itself be re-escaped to '%25' -- i.e.
+  // the embedded "%2F" tokens become "%252F" in the canonical form used for signing.
+  assert.equal(canonical, '/legal-company/_doc/legal%252Fclo-outgoing%252F01-Divorce%252Fletter.md');
+  // The canonical form must still split into the SAME NUMBER of path segments as the wire path --
+  // proving the re-encoded '%2F' sequences were never mistaken for literal '/' segment separators
+  // (canonicalUri splits on real '/' characters BEFORE re-encoding each segment).
+  assert.equal(canonical.split('/').length, wirePath.split('/').length);
+});
+
 // --- canonicalQueryString ------------------------------------------------------------------------
 
 test('canonicalQueryString: sorts params by encoded key', () => {
