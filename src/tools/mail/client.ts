@@ -270,6 +270,24 @@ export interface ArchiveSearchHit {
   from?: string;
 }
 
+/**
+ * A page of search hits PLUS the paging facts EWS returns alongside them.
+ *
+ * The hit array alone is not an answer to "is this everything?", and treating it as one is how a
+ * search that silently returned the newest 25 of 1,400 matches got read as a settled finding.
+ */
+export interface ArchiveSearchResult {
+  hits: ArchiveSearchHit[];
+  /** EWS RootFolder@TotalItemsInView: how many items match the restriction in total. null if absent. */
+  totalInView: number | null;
+  /** EWS RootFolder@IncludesLastItemInRange: false means more pages exist after this one. */
+  includesLastItem: boolean | null;
+  /** The offset this page started at. */
+  offset: number;
+  /** True when this page provably does not contain the whole match set. */
+  truncated: boolean;
+}
+
 export async function ewsSearchItems(opts: {
   folderId: string;
   subjectContains?: string;
@@ -277,7 +295,11 @@ export async function ewsSearchItems(opts: {
   from?: string; // ISO date, inclusive lower bound on DateTimeReceived
   to?: string; // ISO date, inclusive upper bound on DateTimeReceived
   maxResults?: number;
-}): Promise<ArchiveSearchHit[]> {
+  /** Zero-based index of the first item to return, for paging past maxResults. */
+  offset?: number;
+  /** 'newest' (default, DateTimeReceived descending) or 'oldest' (ascending). */
+  sort?: 'newest' | 'oldest';
+}): Promise<ArchiveSearchResult> {
   const clauses: string[] = [];
   if (opts.subjectContains) {
     clauses.push(
@@ -297,13 +319,18 @@ export async function ewsSearchItems(opts: {
   }
   const restriction = clauses.length ? `<m:Restriction>${clauses.length > 1 ? `<t:And>${clauses.join('')}</t:And>` : clauses[0]}</m:Restriction>` : '';
   const max = Math.min(Math.max(1, opts.maxResults ?? 25), 100);
+  const offset = Math.max(0, Math.trunc(opts.offset ?? 0));
+  // Newest-first is the right default for "what happened lately", but it is exactly WRONG for a
+  // historical reconstruction: searching a closed year newest-first and capping at 25 hides the
+  // oldest matches, which are the ones a FY2022 close needs.
+  const order = opts.sort === 'oldest' ? 'Ascending' : 'Descending';
   const body =
     `<m:FindItem Traversal="Shallow"><m:ItemShape><t:BaseShape>Default</t:BaseShape>` +
     // item:DateTimeReceived is explicitly requested here (2026-07-25 fix) — FindItem's "Default"
     // shape does not include it on its own, unlike GetItem.
     `<t:AdditionalProperties><t:FieldURI FieldURI="message:From" /><t:FieldURI FieldURI="item:HasAttachments" /><t:FieldURI FieldURI="item:DateTimeReceived" /></t:AdditionalProperties></m:ItemShape>` +
-    `<m:IndexedPageItemView MaxEntriesReturned="${max}" Offset="0" BasePoint="Beginning" />` +
-    `<m:SortOrder><t:FieldOrder Order="Descending"><t:FieldURI FieldURI="item:DateTimeReceived" /></t:FieldOrder></m:SortOrder>` +
+    `<m:IndexedPageItemView MaxEntriesReturned="${max}" Offset="${offset}" BasePoint="Beginning" />` +
+    `<m:SortOrder><t:FieldOrder Order="${order}"><t:FieldURI FieldURI="item:DateTimeReceived" /></t:FieldOrder></m:SortOrder>` +
     restriction +
     `<m:ParentFolderIds><t:FolderId Id="${esc(opts.folderId)}" /></m:ParentFolderIds></m:FindItem>`;
   const xml = await ewsCall(body);
@@ -321,7 +348,38 @@ export async function ewsSearchItems(opts: {
       from: fromMatch?.[1],
     });
   }
-  return hits;
+  return { hits, ...parseSearchPaging(xml, offset, hits.length), offset };
+}
+
+/**
+ * Read the paging facts EWS reports on the RootFolder element of a FindItem response.
+ *
+ * WHY THIS EXISTS: the search returned a bare hit array, so a caller could not distinguish
+ * "25 matches exist" from "25 of 1,400 were returned, newest first". The second silently reads as a
+ * settled finding, and for a prior-year close the hidden matches are exactly the relevant ones.
+ *
+ * Split out from the network call so the truncation logic is unit-testable against real EWS
+ * response shapes instead of only observable through a live mailbox.
+ *
+ * Attributes are matched independently because EWS does not guarantee their order, and each may be
+ * absent. Absent is reported as null (unknown), never coerced to a confident false.
+ */
+export function parseSearchPaging(
+  xml: string,
+  offset: number,
+  returned: number,
+): { totalInView: number | null; includesLastItem: boolean | null; truncated: boolean } {
+  const rootFolder = /<(?:\w+:)?RootFolder\b[^>]*>/.exec(xml)?.[0] ?? '';
+  const totalRaw = /TotalItemsInView="(\d+)"/.exec(rootFolder)?.[1];
+  const lastRaw = /IncludesLastItemInRange="(true|false)"/.exec(rootFolder)?.[1];
+  const totalInView = totalRaw === undefined ? null : Number(totalRaw);
+  const includesLastItem = lastRaw === undefined ? null : lastRaw === 'true';
+  // Prefer the server's own statement. Fall back to arithmetic only when EWS omitted it, and when
+  // neither is available report false rather than inventing a truncation the server never claimed.
+  const truncated =
+    includesLastItem === false ||
+    (includesLastItem === null && totalInView !== null && offset + returned < totalInView);
+  return { totalInView, includesLastItem, truncated };
 }
 
 export interface ArchiveAttachmentMeta {
