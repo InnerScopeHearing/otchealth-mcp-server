@@ -51,6 +51,39 @@ export function isSafeBlobPath(path: string): boolean {
   return true;
 }
 
+/** Where the doc-indexer writes extracted text for a source blob: `_TEXT/<path>.txt`. */
+export const TEXT_PREFIX = '_TEXT/';
+export function sidecarPathFor(path: string): string {
+  return `${TEXT_PREFIX}${path}.txt`;
+}
+
+/**
+ * Is this buffer a binary file rather than readable text?
+ *
+ * THE DEFECT THIS CLOSES: the handler used to do `res.buf.toString('utf8')` unconditionally. Handing
+ * that a PDF, DOCX or scanned statement produced MOJIBAKE, and the tool returned found:true with a
+ * confident char count, line count and sha256 -- presenting binary noise to the CFO as though it
+ * were the document's contents. A confident wrong answer is worse than a refusal, especially on a
+ * source document being used to close a fiscal year.
+ *
+ * A NUL byte is the decisive tell: valid UTF-8 text never contains one, while PDF/ZIP (docx/xlsx)/
+ * legacy-Office/image containers all do. Magic numbers are checked first so the common finance
+ * formats are named explicitly in the error rather than reported as a generic "binary".
+ */
+export function looksBinary(buf: Buffer): boolean {
+  if (buf.length === 0) return false;
+  if (buf.length >= 4) {
+    const magic = buf.subarray(0, 4);
+    if (magic.toString('latin1') === '%PDF') return true;
+    if (magic[0] === 0x50 && magic[1] === 0x4b && (magic[2] === 0x03 || magic[2] === 0x05 || magic[2] === 0x07)) return true; // ZIP: docx/xlsx/pptx
+    if (magic[0] === 0xd0 && magic[1] === 0xcf) return true; // legacy OLE2: .doc/.xls
+    if (magic[0] === 0x89 && magic.subarray(1, 4).toString('latin1') === 'PNG') return true;
+    if (magic[0] === 0xff && magic[1] === 0xd8) return true; // JPEG
+  }
+  // A NUL anywhere in the leading window means this is not text.
+  return buf.subarray(0, Math.min(buf.length, 8192)).includes(0);
+}
+
 /** Pure pagination helper, exported for tests. */
 export function paginate(text: string, page: number): {
   content: string;
@@ -135,12 +168,41 @@ export function registerKbGetDocument(server: McpServer, callerHash: CallerHashP
               summary: `Blob is ${res.buf.length} bytes (> ${MAX_BYTES} cap). Ask the CTO for a chunked export of this file.`,
             };
           }
-          const text = res.buf.toString('utf8');
-          const sha256 = crypto.createHash('sha256').update(res.buf).digest('hex');
+          // A binary source blob (PDF/DOCX/scanned statement) is NOT readable content. Serve its
+          // extracted-text sidecar instead of decoding the bytes as UTF-8 and calling it a document.
+          let buf = res.buf;
+          let servedPath = path;
+          let viaSidecar = false;
+          if (looksBinary(buf) && !path.startsWith(TEXT_PREFIX)) {
+            const sidecar = sidecarPathFor(path);
+            const alt = await fetchBlobRaw(env.AZURE_CFO_STORAGE_ACCOUNT, env.AZURE_CFO_STORAGE_KEY, CONTAINER, sidecar);
+            if (alt.found && alt.buf && !looksBinary(alt.buf)) {
+              buf = alt.buf;
+              servedPath = sidecar;
+              viaSidecar = true;
+            } else {
+              // Refuse rather than return mojibake. The caller is told exactly why and what to do,
+              // because "unreadable" and "not yet extracted" need different follow-ups.
+              return {
+                data: { ...empty, error: 'binary_no_text' },
+                summary:
+                  `${CONTAINER}/${path} is a BINARY document (${res.buf.length} bytes), not text, and no extracted-text ` +
+                  `sidecar exists yet at ${CONTAINER}/${sidecar}. Returning nothing rather than decoding the bytes as ` +
+                  `UTF-8, which would look like content but be garbage. Text extraction is asynchronous: attachments ` +
+                  `saved via mail_archive_save_attachment_to_dataroom are indexed by the doc-indexer/OCR sweep on a ` +
+                  `later run, not at save time. Retry after the next sweep, or ask the CTO to run the indexer on this ` +
+                  `prefix. To fetch the raw bytes for download, use the blob path directly.`,
+              };
+            }
+          }
+          const text = buf.toString('utf8');
+          const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
           const pageData = paginate(text, page);
           return {
-            data: { index, path, found: true, ...pageData, sha256, content: pageData.content },
-            summary: `${CONTAINER}/${path}: page ${pageData.page}/${pageData.total_pages}, ${pageData.total_chars} chars, ${pageData.total_lines} lines total, sha256=${sha256.slice(0, 12)}… (lane=${caller}). Counts + hash are the completeness proof.`,
+            data: { index, path: servedPath, found: true, ...pageData, sha256, content: pageData.content },
+            summary:
+              `${CONTAINER}/${servedPath}: page ${pageData.page}/${pageData.total_pages}, ${pageData.total_chars} chars, ${pageData.total_lines} lines total, sha256=${sha256.slice(0, 12)}… (lane=${caller}). Counts + hash are the completeness proof.` +
+              (viaSidecar ? ` NOTE: "${path}" is a binary document; this is its extracted-text sidecar, so the hash is of the TEXT, not the original file.` : ''),
           };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);

@@ -76,7 +76,9 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
       annotations: {
         title: 'Mail archive: search a folder (executive ring only, TEMPORARY)',
         description:
-          `Search a named Online Archive folder (e.g. "Archive", "Inbox", "Sent Items", "Drafts") by subject substring, body substring, and/or a DateTimeReceived range, sorted newest-first. Returns itemId/changeKey (needed for mail_archive_get_message), subject, dateTimeReceived, sender, and whether it has attachments. There is no attachment-filename search — EWS's restriction language has no indexed field for that; search broadly and filter attachment names client-side against mail_archive_get_message results instead. ${TEMP_NOTICE}`,
+          `Search a named Online Archive folder (e.g. "Archive", "Inbox", "Sent Items", "Drafts") by subject substring, body substring, and/or a DateTimeReceived range. Returns itemId/changeKey (needed for mail_archive_get_message), subject, dateTimeReceived, sender, and whether it has attachments. ` +
+          `RESULTS ARE PAGED AND MAY BE INCOMPLETE: this returns at most \`maxResults\` items (default 25) starting at \`offset\`, sorted newest-first by default. ALWAYS read \`truncated\` and \`totalInView\` in the response before concluding something is absent — a "no hits" or "only these hits" reading of a truncated page is a FALSE NEGATIVE, not proof. When \`truncated\` is true, page with \`offset\`, or narrow the date range. For historical work (a prior-year close) pass \`sort:"oldest"\`: newest-first plus a 25-item cap hides precisely the oldest matches you are looking for. ` +
+          `There is no attachment-filename search — EWS's restriction language has no indexed field for that; search broadly and filter attachment names client-side against mail_archive_get_message results instead. ${TEMP_NOTICE}`,
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -88,24 +90,53 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
         bodyContains: z.string().optional().describe('Case-insensitive match on the message body — use this for content named generically in the subject (e.g. a counterparty mentioned only in the body). IMPORTANT: this is TOKEN-INDEXED, not substring — EWS content indexing matches whole words, not arbitrary character sequences. Confirmed live (2026-07-25): "wire transfer"/"Fedwire"/"Disbursement" all match correctly, but a dollar amount like "155,000" or a reference code like "INND16" returns ZERO hits even when the email genuinely contains it — these are FALSE NEGATIVES, not proof of absence. Never conclude "not documented" from a zero-hit amount/code search; search for surrounding words instead (e.g. the counterparty name or "wire") and inspect hits manually.'),
         from: z.string().optional().describe('ISO 8601 date/time — only items received on/after this.'),
         to: z.string().optional().describe('ISO 8601 date/time — only items received on/before this.'),
-        maxResults: z.number().int().min(1).max(100).optional().describe('Max results, default 25, hard cap 100.'),
+        maxResults: z.number().int().min(1).max(100).optional().describe('Max results per page, default 25, hard cap 100. This is a PAGE SIZE, not the match count -- check `totalInView`/`truncated` in the response before concluding you have seen everything.'),
+        offset: z.number().int().min(0).optional().describe('Zero-based index of the first result, for paging past maxResults. Combine with `totalInView` from a previous call to walk the full match set.'),
+        sort: z.enum(['newest', 'oldest']).optional().describe('Sort by DateTimeReceived. Default "newest". Use "oldest" for historical reconstruction: searching a closed year newest-first and capping at 25 hides the OLDEST matches, which are usually the ones a prior-year close needs.'),
       },
-      outputShape: { folder: z.string(), results: z.array(z.unknown()), error: z.string().optional() },
+      outputShape: {
+        folder: z.string(),
+        results: z.array(z.unknown()),
+        totalInView: z.number().nullable().optional(),
+        returned: z.number().optional(),
+        offset: z.number().optional(),
+        truncated: z.boolean().optional(),
+        error: z.string().optional(),
+      },
       handler: async (input, ctx) => {
         if (!isMailArchiveAllowed(ctx.callerAgent)) return mailRingRefusal('mail_archive_search', ctx.callerAgent);
         if (!mailArchiveConfigured()) return unconfigured('mail_archive_search');
         const folder = await resolveArchiveFolderId(input.folder);
-        const results = await ewsSearchItems({
+        const res = await ewsSearchItems({
           folderId: folder.folderId,
           subjectContains: input.subjectContains,
           bodyContains: input.bodyContains,
           from: input.from,
           to: input.to,
           maxResults: input.maxResults,
+          offset: input.offset,
+          sort: input.sort,
         });
+        const criteria =
+          `${input.subjectContains ? ` matching subject "${input.subjectContains}"` : ''}` +
+          `${input.bodyContains ? ` matching body "${input.bodyContains}"` : ''}`;
+        // The truncation state leads the summary. A caller who reads only the first line still
+        // learns that the result set is partial, which is the whole point of the fix.
+        const scope = res.truncated
+          ? `PARTIAL RESULTS -- showing ${res.hits.length} of ${res.totalInView ?? 'an unknown number of'} match(es)` +
+            ` starting at offset ${res.offset}. More exist: re-query with offset=${res.offset + res.hits.length}` +
+            ` (or sort:"oldest") before concluding anything is absent.`
+          : `${res.hits.length} result(s)${res.totalInView !== null ? ` of ${res.totalInView} match(es)` : ''} -- this is the COMPLETE match set.`;
         return {
-          data: { folder: folder.displayName, results },
-          summary: `${results.length} result(s) in "${folder.displayName}"${input.subjectContains ? ` matching subject "${input.subjectContains}"` : ''}${input.bodyContains ? ` matching body "${input.bodyContains}"` : ''}.`,
+          data: {
+            folder: folder.displayName,
+            results: res.hits,
+            totalInView: res.totalInView,
+            returned: res.hits.length,
+            offset: res.offset,
+            truncated: res.truncated,
+          },
+          summary: `${scope} In "${folder.displayName}"${criteria}.`,
         };
       },
     },
