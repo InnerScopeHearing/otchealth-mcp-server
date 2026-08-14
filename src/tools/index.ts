@@ -1929,8 +1929,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerXeroTools(server, callerHash);
   // HeyGen (durable subscription OAuth + Phase 0 discovery/reconciliation + bounded idempotent direct video/ingestion writes; every handler lane-gated).
   registerHeyGenTools(server, callerHash);
-  // AgentCore Browser (Wefunder public-read-only policy/preflight; provider transport remains disabled unless separately configured).
+  // AgentCore Browser (legacy Wefunder bridge retained during broker migration).
   registerBrowserAgentcoreTools(server, callerHash);
+  // General Browser broker: per-agent capability enrollments, beginning with Wefunder Campaign Director.
+  registerAgentCoreBrowserBrokerTools(server, callerHash);
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).
   registerMailArchiveTools(server, callerHash);
