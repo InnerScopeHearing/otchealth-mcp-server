@@ -79,7 +79,24 @@ test('every violation is reported, not just the first', () => {
 
 test('existsFilterFor escapes quotes so a reference cannot break the predicate', () => {
   assert.equal(existsFilterFor({ field: 'Reference', value: 'QBO-Bill-22838' }), 'Reference=="QBO-Bill-22838"');
-  assert.ok(!existsFilterFor({ field: 'Reference', value: 'a"b' }).includes('"a"b"'));
+  assert.equal(existsFilterFor({ field: 'Reference', value: 'a"b' }), 'Reference=="a\\"b"');
+});
+
+test('REGRESSION (CodeQL): backslashes are escaped BEFORE quotes', () => {
+  // The first version escaped only quotes. A value already containing a backslash then turned that
+  // backslash into an escape for the quote the function appends, closing the string early:
+  //   'a\"b'  ->  Reference=="a\\"b"   (malformed / injectable)
+  // A malformed predicate does not fail loudly here -- it returns the WRONG existence answer, and a
+  // false "no existing object" is exactly how a duplicate gets created.
+  assert.equal(existsFilterFor({ field: 'Reference', value: 'a\\"b' }), 'Reference=="a\\\\\\"b"');
+  assert.equal(existsFilterFor({ field: 'Reference', value: 'trailing\\' }), 'Reference=="trailing\\\\"');
+
+  // Structural invariant: every backslash and quote in the emitted value is escaped, so the closing
+  // delimiter can never be consumed by a dangling escape.
+  const emitted = existsFilterFor({ field: 'Reference', value: 'x\\y"z\\' });
+  const inner = emitted.slice('Reference=="'.length, -1);
+  assert.equal(inner.replace(/\\\\/g, '').replace(/\\"/g, '').includes('\\'), false, 'no unescaped backslash survives');
+  assert.equal(inner.replace(/\\\\/g, '').replace(/\\"/g, '').includes('"'), false, 'no unescaped quote survives');
 });
 
 test('readExisting pulls the id/status pairs the refusal message cites', () => {

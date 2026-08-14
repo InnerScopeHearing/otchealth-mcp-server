@@ -101,10 +101,23 @@ export function findAccountCodeViolations(body: unknown): MappingViolation[] {
   return out;
 }
 
-/** Xero's `where` filter for an exact-Reference existence probe, with quotes escaped so a
- *  reference containing an apostrophe cannot break out of the predicate. */
+/**
+ * Xero's `where` filter for an exact-Reference existence probe.
+ *
+ * ESCAPE ORDER MATTERS: backslashes FIRST, then quotes. Escaping only quotes (the first version of
+ * this function, caught by CodeQL) is broken, because a value already containing a backslash turns
+ * that backslash into an escape for the quote this function adds: the value `a\"b` became
+ * `Reference=="a\\"b"`, where `\\` is a literal backslash and the following `"` closes the string
+ * early — a malformed predicate at best and a filter-injection at worst. Escaping backslashes
+ * first makes each escape stand for exactly one input character.
+ *
+ * This matters here specifically because a wrong predicate does not fail loudly: it would return
+ * the WRONG existence answer, and a false "no existing object" is precisely how a duplicate gets
+ * created — the exact defect this guard exists to prevent.
+ */
 export function existsFilterFor(key: { field: string; value: string }): string {
-  return `${key.field}=="${key.value.replace(/"/g, '\\"')}"`;
+  const escaped = key.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `${key.field}=="${escaped}"`;
 }
 
 export interface ExistingHit {
