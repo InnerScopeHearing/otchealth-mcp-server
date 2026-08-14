@@ -246,10 +246,10 @@ class CdpSocket {
     return this.frames.shift() as string;
   }
 
-  async request(method: string, params: Record<string, unknown>, timeoutMilliseconds: number): Promise<Record<string, unknown>> {
+  async request(method: string, params: Record<string, unknown>, timeoutMilliseconds: number, sessionId?: string): Promise<Record<string, unknown>> {
     const id = this.nextId;
     this.nextId += 1;
-    this.writeFrame(0x1, Buffer.from(JSON.stringify({ id, method, params })));
+    this.writeFrame(0x1, Buffer.from(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })));
     const deadline = Date.now() + timeoutMilliseconds;
     while (true) {
       const raw = await this.nextFrame(Math.max(1, deadline - Date.now()));
