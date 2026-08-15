@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { createDoc, readDoc } from '../../agentstate/cosmos.js';
+import { createDoc, readDoc } from '../../agentstate/store.js';
 
 const CACHE = 'cache';
 const ApprovalDocSchema = z.object({

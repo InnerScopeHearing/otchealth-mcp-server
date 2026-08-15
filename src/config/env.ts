@@ -295,6 +295,36 @@ const EnvSchema = z.object({
   // reconciliation path, so writing to it directly would silently diverge it from the source).
   BLOB_BACKEND: z.enum(['azure', 's3']).default('azure'),
 
+  // Which store holds the AGENT STATE PLANE: the work-ledger (tasks), the memory-of-record
+  // (memory), the transition log (events), OAuth codes/tokens, and the LLM/FAQ caches.
+  //   cosmos (default)  Azure Cosmos DB, via src/agentstate/cosmos.ts. Byte-identical to prior deploys.
+  //   postgres          RDS Postgres, via src/agentstate/postgres.ts.
+  //
+  // This is the LAST Azure runtime dependency and the one with the worst failure mode. Search and
+  // documents degrade to "cannot read" if Azure goes away; state degrades to "cannot WRITE" --
+  // writeMemory() and memory-write.ts both await their create with no catch, so an Azure
+  // suspension does not make the fleet forgetful, it makes it unable to record anything at all.
+  // Consumers must therefore import from src/agentstate/store.ts (the dispatcher), never from
+  // cosmos.ts or postgres.ts directly; agentstate-dependency-guard.test.ts enforces that in CI.
+  STATE_BACKEND: z.enum(['cosmos', 'postgres']).default('cosmos'),
+
+  // RDS Postgres connection for STATE_BACKEND=postgres. Inert unless PG_HOST is set, so a
+  // deployment that never sets these behaves exactly as before this flag existed.
+  // NOTE the instance is PubliclyAccessible=false by design: it is reachable only from inside the
+  // VPC, which is why schema work runs as a Fargate task rather than from an operator shell.
+  PG_HOST: z.string().optional().default(''),
+  PG_PORT: z.coerce.number().int().positive().default(5432),
+  PG_DATABASE: z.string().optional().default('agentstate'),
+  PG_USER: z.string().optional().default(''),
+  PG_PASSWORD: z.string().optional().default(''),
+  // RDS terminates TLS with an Amazon-issued cert. Verification needs the RDS CA bundle in the
+  // image; until that is baked in, encrypt-without-verify is still strictly better than plaintext
+  // and the traffic never leaves the VPC. Set true once the bundle ships.
+  PG_SSL_VERIFY: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+
   // Dual-write the memory index to BOTH backends (see src/search/index.ts indexMemory). Reads still
   // come from SEARCH_BACKEND alone; this only widens WRITES. Turn ON before flipping reads so the
   // cutover has no lossy instant, and OFF only once the old backend is retired. Default false =

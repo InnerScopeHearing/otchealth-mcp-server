@@ -7,7 +7,7 @@ import {
   type HotCacheDeps,
 } from './hot-cache.js';
 import type { AgenticRecallResult } from './agentic.js';
-import type { VectorMatch } from '../agentstate/cosmos.js';
+import type { VectorMatch } from '../agentstate/store.js';
 
 // Pure, no-network: every Cosmos/Foundry/agentic call is faked via cachedAgenticRecall's injectable
 // deps bag. This repo's ESM build does not allow node:test's mock.method() to override another

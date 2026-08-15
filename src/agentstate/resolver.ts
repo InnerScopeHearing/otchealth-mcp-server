@@ -26,7 +26,7 @@ import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { loadEnv } from '../config/env.js';
-import { readDoc } from './cosmos.js';
+import { readDoc } from './store.js';
 
 /** SSRF guard: reject any IP in a private/reserved/loopback/link-local/metadata range. */
 function ipBlocked(ip: string): boolean {

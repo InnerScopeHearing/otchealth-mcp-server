@@ -10,7 +10,7 @@
  * null and the caller keeps the full inline result. This can never break a tool response. Small
  * results (the vast majority) are never touched, so behavior is backward-compatible.
  */
-import * as cosmos from '../agentstate/cosmos.js';
+import * as cosmos from '../agentstate/store.js';
 
 // Offload only when the serialized text exceeds this. Env-overridable. Kept well above typical
 // results so only genuinely large payloads are offloaded.

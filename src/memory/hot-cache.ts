@@ -31,7 +31,7 @@
  * not support overriding another module's live named export at runtime).
  */
 
-import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../agentstate/cosmos.js';
+import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../agentstate/store.js';
 import { embed as foundryEmbed } from '../azure/foundry.js';
 import { agenticRecall, type AgenticRecallResult } from './agentic.js';
 

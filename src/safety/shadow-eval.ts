@@ -86,7 +86,7 @@
  */
 import { writeMemory } from '../agentstate/memory.js';
 import { indexMemory as indexMemoryNow } from '../search/index.js';
-import { isConfigured as cosmosConfigured } from '../agentstate/cosmos.js';
+import { isConfigured as cosmosConfigured } from '../agentstate/store.js';
 import { looksLikeSecretValue } from './journal.js';
 
 // ---- pure core: mode / sample-rate parsing --------------------------------------------------

@@ -13,7 +13,7 @@ import { searchMemory } from '../../agentstate/memory.js';
 import { listTasks } from '../../agentstate/ledger.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
 type TaskStatus = (typeof TASK_STATUSES)[number];
-import { isConfigured as cosmosConfigured } from '../../agentstate/cosmos.js';
+import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
 import { isConfigured as inboxConfigured, readMessages } from '../../agentstate/queue.js';
 import { isM365StaticAuth } from '../../server/request-context.js';
 import { retractedIdsForAgent } from '../../memory/retractions.js';

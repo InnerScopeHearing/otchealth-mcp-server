@@ -42,7 +42,7 @@
  *     already governs physical expiry (see memory/hot-cache.ts CACHE_TTL_SECONDS).
  */
 
-import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../../agentstate/cosmos.js';
+import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../../agentstate/store.js';
 import { embed as foundryEmbed } from '../../azure/foundry.js';
 
 const CACHE_CONTAINER = 'cache';

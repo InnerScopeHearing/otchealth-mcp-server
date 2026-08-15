@@ -23,7 +23,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured } from '../../agentstate/cosmos.js';
+import { isConfigured } from '../../agentstate/store.js';
 import { writeMemory } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';

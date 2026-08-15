@@ -11,7 +11,7 @@ import {
   DEFAULT_SIMILARITY_THRESHOLD,
   type FaqDeflectDeps,
 } from './faq-deflect.js';
-import type { VectorMatch } from '../../agentstate/cosmos.js';
+import type { VectorMatch } from '../../agentstate/store.js';
 
 // Pure, no-network: every Cosmos/Foundry call is faked via the injectable deps bag, mirroring
 // semantic-cache.test.ts / memory/hot-cache.test.ts (this repo's ESM build does not allow

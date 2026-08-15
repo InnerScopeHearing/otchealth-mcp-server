@@ -39,7 +39,7 @@ import {
   readDoc,
   replaceDoc,
   createDoc,
-} from '../../agentstate/cosmos.js';
+} from '../../agentstate/store.js';
 
 /** Bounded network deadline for every Xero call — a hung refresh must never wedge a replica. */
 const FETCH_TIMEOUT_MS = 15000;

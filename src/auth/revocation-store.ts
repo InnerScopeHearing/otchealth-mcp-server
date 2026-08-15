@@ -16,7 +16,7 @@
  */
 
 import { hashToken } from '../audit/logger.js';
-import { isConfigured as cosmosConfigured, upsertDoc, deleteDoc, queryDocs } from '../agentstate/cosmos.js';
+import { isConfigured as cosmosConfigured, upsertDoc, deleteDoc, queryDocs } from '../agentstate/store.js';
 
 // The `cache` container's partition key path is /cacheScope (see tools/result-store.ts, which sets
 // cacheScope = id so each doc is its own partition -> a point read/write). We mirror that: one doc per
