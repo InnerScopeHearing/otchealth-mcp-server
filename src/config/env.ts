@@ -273,6 +273,19 @@ const EnvSchema = z.object({
   // misjudged during a migration.
   SEARCH_BACKEND: z.enum(['azure', 'opensearch']).default('azure'),
 
+  // Where query embeddings come from (src/azure/foundry.ts embeddingsTarget). Vector search embeds
+  // every query, so while this points at Azure the brain cannot outlive an Azure suspension no
+  // matter where search or the documents live.
+  //   foundry (default)  Azure Foundry. Byte-identical to every prior deploy.
+  //   openai             api.openai.com, using OPENAI_API_KEY.
+  // The MODEL is pinned to text-embedding-3-large on both paths and is NOT configurable: the
+  // OpenSearch index's 492k vectors were built with it, and query vectors from any other model are
+  // not comparable to them. That failure is silent -- relevance collapses, nothing errors -- and
+  // the only repair is re-embedding every document. It is also exactly why the AWS-native choice
+  // (Bedrock Titan/Cohere) is the WRONG one here despite the destination being AWS.
+  EMBEDDINGS_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
+  OPENAI_API_KEY: z.string().optional().default(''),
+
   // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars).
   //   azure (default)  Azure Blob, via src/legal/blob-store.ts. Byte-identical to every prior deploy.
   //   s3               the S3 mirror, via src/legal/s3-blob-store.ts.
