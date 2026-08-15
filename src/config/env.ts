@@ -261,11 +261,26 @@ const EnvSchema = z.object({
   // SEARCH BACKEND SWITCH (src/search/index.ts dispatcher). Default 'azure' is BYTE-IDENTICAL to
   // every deploy before this variable existed: every dispatched caller keeps calling
   // src/azure/search.ts exactly as before. Flip to 'opensearch' to route those same callers at
-  // Amazon OpenSearch instead (src/search/opensearch.ts). kb_search_privileged (the ring-gated
-  // privileged path in src/tools/kb/search-privileged.ts) is DELIBERATELY NOT wired to this
-  // dispatcher and always uses Azure regardless of this value -- see that file's own header and
-  // the PR description for why.
+  // Amazon OpenSearch instead (src/search/opensearch.ts).
+  //
+  // CORRECTED 2026-08-15: this comment previously said kb_search_privileged was "DELIBERATELY NOT
+  // wired to this dispatcher and always uses Azure regardless of this value". That is no longer
+  // true -- src/tools/kb/search-privileged.ts imports the dispatcher and therefore honours this
+  // variable like every other caller (see src/search/index.ts's header for why the repoint is
+  // ring-NEUTRAL: isLaneAllowed runs BEFORE the search call and depends only on index + caller).
+  // Leaving the stale text would have told a cutover reader that the privileged legal/finance rooms
+  // stay on Azure when they do not, which is exactly the belief that gets a ring boundary
+  // misjudged during a migration.
   SEARCH_BACKEND: z.enum(['azure', 'opensearch']).default('azure'),
+
+  // Dual-write the memory index to BOTH backends (see src/search/index.ts indexMemory). Reads still
+  // come from SEARCH_BACKEND alone; this only widens WRITES. Turn ON before flipping reads so the
+  // cutover has no lossy instant, and OFF only once the old backend is retired. Default false =
+  // byte-identical to the single-backend behavior that existed before dual-write.
+  SEARCH_DUAL_WRITE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 
   // Amazon OpenSearch (SigV4-signed, service 'es'), the alternate backend behind
   // SEARCH_BACKEND=opensearch. Inert (searchConfigured() -> false) unless OPENSEARCH_ENDPOINT is

@@ -26,7 +26,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured } from '../../agentstate/cosmos.js';
 import { writeMemory } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
-import { indexMemoryNow } from '../../azure/search-write.js';
+import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
 import { buildEpisodeText } from '../../safety/journal.js';
 import { recordCheckpoint } from '../../safety/capture-pressure.js';

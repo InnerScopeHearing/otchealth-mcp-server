@@ -4,7 +4,7 @@ import { registerTool, isShipLane, type CallerHashProvider, type ToolContext, ty
 import { isConfigured } from '../../agentstate/cosmos.js';
 import { writeMemory } from '../../agentstate/memory.js';
 import { MEMORY_KINDS, normalizeAgent } from '../../agentstate/agents.js';
-import { indexMemoryNow } from '../../azure/search-write.js';
+import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { embed } from '../../azure/foundry.js';
 import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { currentCallerAgent, isConnectorSurface } from '../../server/request-context.js';

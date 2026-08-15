@@ -32,7 +32,7 @@
  * and privileged/legal tools are stripped down to {tool, outcome} as above.
  */
 import { writeMemory } from '../agentstate/memory.js';
-import { indexMemoryNow } from '../azure/search-write.js';
+import { indexMemory as indexMemoryNow } from '../search/index.js';
 import { isConfigured as cosmosConfigured } from '../agentstate/cosmos.js';
 
 // ---- pure core -------------------------------------------------------------------------------
