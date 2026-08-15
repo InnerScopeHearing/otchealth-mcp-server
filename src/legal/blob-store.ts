@@ -22,6 +22,7 @@
 
 import crypto from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { s3BlobBackendActive, fetchBlobFromS3 } from './s3-blob-store.js';
 
 /** x-ms-version, matching skills/legal/legal.mjs exactly. */
 const AVER = '2021-06-08';
@@ -221,6 +222,16 @@ export async function fetchBlobRaw(
   container: string,
   path: string,
 ): Promise<{ found: boolean; contentType: string | null; buf: Buffer | null }> {
+  // BLOB_BACKEND=s3 serves document reads from the S3 mirror instead of Azure Blob. This is the
+  // switch that actually ends the Azure dependency: search can already run on OpenSearch, but a
+  // document whose CONTENTS still come from Azure keeps the whole brain tied to it.
+  //
+  // The mirror mapping is a ring-aware allow-list that FAILS CLOSED (see s3-blob-store.ts) --
+  // personal legal lives in its own bucket and nothing else may resolve there. Deliberately no
+  // fallback to Azure on an S3 miss: silently reading the other store would mask a broken mirror
+  // right up until Azure is gone, which is precisely when the mask stops working.
+  if (s3BlobBackendActive()) return fetchBlobFromS3(account, container, path);
+
   const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
   const auth = azSig(account, key, 'GET', container, encPath(path), xms, null, '', '');
   const r = await fetch(`https://${account}.blob.core.windows.net/${container}/${encPath(path)}`, {

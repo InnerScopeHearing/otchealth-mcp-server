@@ -273,6 +273,15 @@ const EnvSchema = z.object({
   // misjudged during a migration.
   SEARCH_BACKEND: z.enum(['azure', 'opensearch']).default('azure'),
 
+  // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars).
+  //   azure (default)  Azure Blob, via src/legal/blob-store.ts. Byte-identical to every prior deploy.
+  //   s3               the S3 mirror, via src/legal/s3-blob-store.ts.
+  // Search finding a document is useless if its CONTENTS still come from Azure -- that is what kept
+  // the gateway Azure-dependent after the search backend moved. Flipping this is what actually
+  // removes the dependency. Reads only; document WRITES continue to go to Azure (the mirror has no
+  // reconciliation path, so writing to it directly would silently diverge it from the source).
+  BLOB_BACKEND: z.enum(['azure', 's3']).default('azure'),
+
   // Dual-write the memory index to BOTH backends (see src/search/index.ts indexMemory). Reads still
   // come from SEARCH_BACKEND alone; this only widens WRITES. Turn ON before flipping reads so the
   // cutover has no lossy instant, and OFF only once the old backend is retired. Default false =
