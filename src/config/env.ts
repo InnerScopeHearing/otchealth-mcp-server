@@ -352,10 +352,11 @@ const EnvSchema = z.object({
   // class this fleet has hit before). A request/network failure returns {mode:'error', error:<msg>}.
   // Neither ever throws out of the tool handler.
   WEB_SEARCH_PROVIDER: z.enum(['azure', 'tavily']).default('azure'),
-  // Tavily API key (console.tavily.com, prefixed `tvly-`). SIGNUP STEP (human, one-time, no
-  // AWS/Azure involvement): create a free Tavily account at https://www.tavily.com (no credit card
-  // required for the free tier -- 1,000 credits/month, verified 2026-08-16 at tavily.com/pricing),
-  // generate an API key in the dashboard, store it as this secret. PRICING (verified 2026-08-16,
+  // Tavily API key (dashboard at https://app.tavily.com, prefixed `tvly-`). SIGNUP STEP (human,
+  // one-time, no AWS/Azure involvement): create a free Tavily account at https://www.tavily.com or
+  // directly at https://app.tavily.com (no credit card required for the free tier -- 1,000
+  // credits/month, verified 2026-08-16 at tavily.com/pricing), copy the API key shown on the
+  // dashboard's main page, store it as this secret. PRICING (verified 2026-08-16,
   // docs.tavily.com/documentation/api-credits + tavily.com/pricing): pay-as-you-go $0.008/credit, a
   // basic search costs 1 credit and `include_answer` adds NO extra credits, so this is $0.008/query
   // flat once past the free 1,000/month; a $30/mo plan bundles 4,000 credits/mo (~$0.0075/credit
