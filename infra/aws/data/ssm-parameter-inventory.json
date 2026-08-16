@@ -1,0 +1,3554 @@
+[
+  {
+    "name": "/otchealth/acr-admin-password",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665456.986,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/acr-admin-user",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665457.485,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/acr-login-server",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665457.882,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/acrotc55c84f6bef-admin-password",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665458.123,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/agent-inbox-storage-account",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665458.364,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/agent-inbox-storage-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665458.582,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/agent-memory-aoai-chat-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665458.806,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/agent-memory-aoai-embedding-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665459.036,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/agent-memory-aoai-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665459.261,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/agent-memory-appinsights-connstring",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665459.488,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/agent-memory-changefeed-checkpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786842719.204,
+    "version": 3,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/amzn-lwa-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665459.941,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/amzn-lwa-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665460.16,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/amzn-seller-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665460.379,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/amzn-sp-refresh-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665460.599,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/anthropic-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665460.838,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/apple-apns-key-p8",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665461.08,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/asc-api-key-p8",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665461.306,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/asc-issuer-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665461.524,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/asc-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665461.723,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/asc-team-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665461.948,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/assemblyai-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665462.169,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-bedrock-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665462.398,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-cto-access-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665462.624,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-cto-secret-access-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665462.845,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-dr-access-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665463.065,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-dr-region",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665463.282,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-dr-s3-bucket",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665463.513,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-dr-secret-access-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665463.741,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-ecs-cluster",
+    "type": "String",
+    "tier": "Standard",
+    "lastModifiedDate": 1786677930.966,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-opensearch-endpoint",
+    "type": "String",
+    "tier": "Standard",
+    "lastModifiedDate": 1786677930.76,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-pg-host",
+    "type": "String",
+    "tier": "Standard",
+    "lastModifiedDate": 1786677930.342,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-pg-master-password",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786677044.794,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-pg-master-user",
+    "type": "String",
+    "tier": "Standard",
+    "lastModifiedDate": 1786677044.913,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-pg-port",
+    "type": "String",
+    "tier": "Standard",
+    "lastModifiedDate": 1786677930.553,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/aws-region",
+    "type": "String",
+    "tier": "Standard",
+    "lastModifiedDate": 1786677931.195,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-aoai-realtime-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665463.96,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-aoai-realtime-model",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665464.187,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-backup-storage-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665465.275,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-cfo-storage-account",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665465.495,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-cfo-storage-container",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665465.718,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-cfo-storage-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665465.951,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-commerce-storage-account",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665466.172,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-commerce-storage-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665466.397,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-commons-storage-account",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665466.623,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-commons-storage-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665466.845,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-contentsafety-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665467.063,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-contentsafety-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665467.291,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-docintel-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665467.513,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-docintel-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665467.76,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-foundry-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665468.811,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-foundry-gen-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665469.038,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-foundry-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665469.261,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-foundry-openai-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665469.483,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-keyvault-name",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665469.726,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-legal-storage-account",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665469.925,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-legal-storage-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665470.137,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-openai-api-version",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665470.361,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-openai-embedding-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665471.454,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-openai-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665471.654,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-openai-image-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665471.868,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-openai-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665472.167,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-openai-video-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665472.392,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-openai-vision-deployment",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665472.66,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-pg-nonphi-admin-password",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665472.952,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-pg-nonphi-admin-user",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665473.167,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-pg-nonphi-dumpro-password",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665473.389,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-pg-nonphi-server",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665473.61,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-pg-phi-admin-password",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665473.83,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-pg-phi-admin-user",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665474.062,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-pg-phi-server",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665474.285,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-router-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665474.508,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-router-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665474.742,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-search-admin-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665474.965,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-search-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665475.202,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-search-query-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665475.414,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-sp-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665475.629,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-sp-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665475.878,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-sp-tenant-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665476.098,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-speech-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665476.321,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-speech-region",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665476.543,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-storage-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665479.254,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/azure-subscription-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665479.457,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/backblaze-b2-account-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665480.524,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/backblaze-b2-application-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665480.745,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/backblaze-b2-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665480.97,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/backblaze-b2-master-application-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665481.197,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/brain-search-admin-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665481.421,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/brain-search-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665481.645,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/brain-search-query-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665481.877,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-aware",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665482.968,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-companion",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665483.187,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-fictionary",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665483.423,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-flatstick",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665483.646,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-fourvault",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665483.873,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-iheartest",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665484.1,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-innerease",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665484.326,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-plantid",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665484.554,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-signing-key-plantid-pub",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665484.79,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/capgo-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665485.007,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cf-access-webdemo-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665485.227,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cf-access-webdemo-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665485.45,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cfo-blob-account-name",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665485.668,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cfo-blob-container-name",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665485.869,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cfo-blob-sas-expiry",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665486.101,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cfo-blob-sas-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665486.326,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cfo-legal-store-sas-ro",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665486.552,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cfo-source-bucket",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665486.774,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cio-app-api-bearer",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665486.999,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cio-fly-service-account-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665487.228,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cio-site-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665487.459,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cio-track-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665487.681,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/claude-code-oauth-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665487.922,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cloudflare-api-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665488.15,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cloudflare-pages-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665488.378,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/companion-azure-database-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665488.61,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/companion-database-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665488.83,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/context7-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665489.076,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/copilot-agent-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665489.296,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/copilot-dev-agent-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665489.519,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/copilot-studio-spn-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665489.754,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cosmos-agent-state-db",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665489.952,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cosmos-agent-state-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665491.036,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cosmos-agent-state-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665492.112,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cosmos-db",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665492.329,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cosmos-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665492.545,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cosmos-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665492.761,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/cron-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665492.992,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/datadog-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665493.209,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/datadog-api-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665493.427,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/datadog-app-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665493.656,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/datadog-app-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665493.873,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/datadog-site",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665494.094,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/daytona-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665494.316,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/daytona-api-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665494.543,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/depot-project-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665494.777,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/depot-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665495.856,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-cco-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665496.079,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-cfo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665496.304,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-clo-personal-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665497.376,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-clo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665497.593,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-coo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665497.818,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-cpo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665498.037,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-cro-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665498.254,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-cto-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665498.477,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-inbound-app-developer-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665498.698,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-mgmt-access-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665498.913,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-mgmt-access-key-secret-b64",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665499.146,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-mgmt-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665499.37,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/descope-mgmt-key-secret-b64",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665500.424,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/ebay-app-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665500.618,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/ebay-cert-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665500.86,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/ebay-dev-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665501.146,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/ediscovery-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665501.366,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/ediscovery-refresh-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665501.818,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/ediscovery-tenant-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665502.041,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/elevenlabs-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665502.262,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/elevenlabs-postcall-webhook-secret-v2",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665502.488,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/elevenlabs-taylor-frontdesk-tool-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665502.709,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/exo-app-only-cert-pfx-base64",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665502.929,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/exo-app-only-cert-thumbprint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665503.145,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fingerprint-hmac-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665503.366,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/flatstick-apple-signin-key-p8",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665503.59,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/flatstick-azure-database-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665503.799,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/flatstick-iap-subscription-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665504.034,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/flatstick-iap-subscription-key-p8",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665506.769,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-azure-database-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665507.84,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-azure-database-url-direct",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665508.078,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-azure-storage-sas",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665508.296,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-b2-application-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665508.511,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-b2-bucket-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665508.736,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-b2-bucket-name",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665508.978,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-b2-cdn-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665509.182,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-b2-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665509.405,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-ebay-app-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665509.626,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-ebay-cert-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665509.851,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-ebay-dev-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665510.078,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-ebay-verification-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665510.299,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-gemini-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665510.513,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-jwt-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665510.737,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-neon-database-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665510.965,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-neon-database-url-direct",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665511.208,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-revenuecat-hmac-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665511.423,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-revenuecat-secret-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665511.672,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/fourvault-revenuecat-webhook-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665512.755,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-admin-revoke-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665512.972,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-bearer-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665513.17,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-connector-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665513.394,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-n8n-webhook-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665514.483,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-oauth-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665514.677,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-oauth-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665514.894,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-oauth-clients",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786842719.542,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gateway-oauth-token-signing-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665515.343,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/github-app-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665515.57,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/github-app-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665515.777,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/github-app-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665515.994,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/github-app-installation-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665516.212,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/github-app-private-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665516.424,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/github-user-pat",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665516.638,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/github-webhook-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665516.865,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gmail-oauth-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665517.948,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gmail-oauth-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665518.61,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gmail-refresh-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665519.188,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/govinfo-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665519.533,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-drive-user",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665520.61,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-mail-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665520.825,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-mail-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665521.046,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-mail-ro-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665521.291,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-mail-ro-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665521.492,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-mail-ro-tenant-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665521.736,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-mail-tenant-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665521.943,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-onedrive-refresh-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786842720.178,
+    "version": 3,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-onedrive-refresh-token-mark",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665522.375,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-sites-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665522.576,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/graph-sites-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665522.795,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/greptile-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665523.018,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/ADMIN_REVOKE_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682397.618,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AGENT_INBOX_STORAGE_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682405.969,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/APPLICATIONINSIGHTS_CONNECTION_STRING",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682404.019,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AWS_AGENTCORE_ACCESS_KEY_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682414.638,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AWS_AGENTCORE_SECRET_ACCESS_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682414.856,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AZURE_CFO_STORAGE_ACCOUNT",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682409.651,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AZURE_CFO_STORAGE_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682409.886,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AZURE_COMMONS_STORAGE_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682399.024,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AZURE_LEGAL_STORAGE_ACCOUNT",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682407.076,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AZURE_LEGAL_STORAGE_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682407.284,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/AZURE_SEARCH_QUERY_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682399.912,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/CIO_APP_API_BEARER",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682397.173,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/CIO_FLY_SERVICE_ACCOUNT_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682413.531,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/CIO_SITE_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682396.718,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/CIO_TRACK_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682396.953,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/CLOUDFLARE_API_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682398.268,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/CONTENT_SAFETY_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682401.857,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/COPILOT_AGENT_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682403.374,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/COPILOT_DEV_AGENT_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682413.327,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/COSMOS_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682405.76,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/DD_API_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682406.627,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/DD_METRICS_API_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682406.403,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/DEPOT_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682401.002,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/DOCINTEL_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682402.084,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/FOUNDRY_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682402.306,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/FOUNDRY_ROUTER_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682403.803,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/GITHUB_APP_PRIVATE_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682401.218,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/GITHUB_WEBHOOK_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682403.589,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/GRAPH_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682398.535,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/HEYGEN_APPROVAL_CALLBACK_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682414.407,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/HEYGEN_APPROVAL_CONTEXT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682413.966,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/HEYGEN_APPROVAL_HANDLE_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682414.179,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/HEYGEN_OWNER_APPROVAL_PUBLIC_JWK",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682413.747,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/M365_CFO_MCP_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682412.469,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/M365_CLO_MCP_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682412.69,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/M365_COO_MCP_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682412.91,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/M365_CRO_MCP_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682413.121,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/M365_CTO_MCP_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682411.395,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/M365_DEVELOPER_MCP_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682410.325,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/MAIL_ARCHIVE_EWS_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682410.107,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/MIRO_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682404.455,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/N8N_API_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682398.048,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/N8N_WEBHOOK_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682397.83,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/NETLIFY_AUTH_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682398.754,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/OAUTH_CLIENT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682399.247,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/OAUTH_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682399.472,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/OAUTH_CLIENTS",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682400.127,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/OAUTH_TOKEN_SIGNING_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682399.693,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/PERPLEXITY_CONNECTOR_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682397.396,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/POSTHOG_GATEWAYOPS_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682406.187,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/POSTHOG_PERSONAL_API_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682400.792,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/REVENUECAT_API_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682400.566,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/SENTRY_AUTH_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682400.345,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/SHOPIFY_ACCESS_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682404.233,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/STRIPE_SECRET_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682405.541,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/TWILIO_ACCOUNT_SID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682401.426,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/TWILIO_AUTH_TOKEN",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682401.636,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/WEBSEARCH_SP_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682406.861,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/XERO_CLIENT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682407.494,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/XERO_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682408.561,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/XERO_RT_HEARINGASSIST",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682409.218,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/XERO_RT_INND",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682408.995,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/XERO_RT_OTCHEALTH",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682408.775,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/gw/XERO_RT_PERSONAL",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786682409.435,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/heygen-approval-callback-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665523.238,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/heygen-approval-context-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665523.466,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/heygen-approval-handle-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665523.684,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/heygen-approval-private-jwk",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665523.903,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/heygen-approval-public-jwk",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665524.116,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/iheartest-posthog-project-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665524.345,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/iheartest-sentry-dsn",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665524.567,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/intercom-access-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665524.781,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/intercom-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665524.996,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/intercom-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665526.053,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/docintel-ocr-sweep/AZURE_SP_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683308.502,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/docintel-ocr-sweep/GCP_CLAUDE_DRIVER_SA_JSON",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683308.256,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/innd-stock-daily/AZURE_STORAGE_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683302.341,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/innd-stock-daily/MASSIVE_API_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683302.557,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/innd-stock-daily/MASSIVE_API_KEY_2",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683302.777,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/innd-stock-daily/SKILL_EVENTS_B64",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683303.014,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-anomaly-watch/GATEWAY_LANE_CLIENT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683313.635,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-anomaly-watch/GATEWAY_LANE_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683313.842,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-healthz-monitor/GATEWAY_LANE_CLIENT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683312.426,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-healthz-monitor/GATEWAY_LANE_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683312.63,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-healthz-monitor/SCRIPT_B64",
+    "type": "SecureString",
+    "tier": "Advanced",
+    "lastModifiedDate": 1786683312.227,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-morning-brief/GATEWAY_LANE_CLIENT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683312.988,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-morning-brief/GATEWAY_LANE_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683313.197,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-reflective-memory/GATEWAY_LANE_CLIENT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683306.819,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/os-reflective-memory/GATEWAY_LANE_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683307.032,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/otchealth-mcp-eval/GATEWAY_BEARER",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683307.487,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/AUTH_B64",
+    "type": "SecureString",
+    "tier": "Advanced",
+    "lastModifiedDate": 1786683311.319,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/AZURE_SP_CLIENT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683310.241,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/AZURE_SP_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683310.452,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/AZURE_SP_TENANT_ID",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683310.034,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/CANARY_B64",
+    "type": "SecureString",
+    "tier": "Advanced",
+    "lastModifiedDate": 1786683310.878,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/HTTPCLIENT_B64",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683311.533,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/MULTISAMPLE_B64",
+    "type": "SecureString",
+    "tier": "Advanced",
+    "lastModifiedDate": 1786683311.103,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/OS_ACCESS_CODE",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683310.664,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/sentinel-os-eval/POSTHOG_API_KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683311.742,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/token-keeper/GCP_CLAUDE_DRIVER_SA_JSON",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683307.88,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/xero-health/AZURE_SP_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683309.669,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/xero-health/GCP_CLAUDE_DRIVER_SA_JSON",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683309.448,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/xero-run/AZURE_SP_CLIENT_SECRET",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683309.085,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/job/xero-run/GCP_CLAUDE_DRIVER_SA_JSON",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786683308.869,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/legal-courtlistener-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665526.279,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/lightsail-cs-n8n-basic-auth-password",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665527.354,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/lightsail-cs-n8n-basic-auth-user",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665527.579,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/m365-cfo-mcp-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665527.798,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/m365-clo-mcp-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665528.019,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/m365-coo-mcp-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665528.266,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/m365-cro-mcp-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665528.501,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/m365-cto-mcp-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665528.71,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/m365-developer-mcp-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665528.926,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/make-api-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665529.146,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/massive-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665530.217,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/massive-api-key-2",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665531.285,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/massive-s3-access-key-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665531.509,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/massive-s3-bucket",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665531.741,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/massive-s3-endpoint",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665531.958,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/massive-s3-secret-access-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665532.277,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/matthew-innd-graph-cli-refresh-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665532.504,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/medreview-asc-api-key-p8",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665532.707,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/medreview-azure-database-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665532.933,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/medreview-iap-key-p8",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665533.172,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/miro-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665533.407,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/miro-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665533.636,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/miro-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665533.865,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/n8n-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665534.093,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/n8n-base-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665534.327,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/neon-database-url",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665534.55,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/netlify-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665534.776,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/NOTEBOOK-MASTER-KEY",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665535.012,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/notion-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665535.243,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/notion-vault-db-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665535.481,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-clients",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786842719.866,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cco-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665535.938,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cco-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665536.171,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cfo-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665536.399,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cfo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665536.63,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-clo-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665536.862,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-clo-personal-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665537.084,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-clo-personal-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665537.301,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-clo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665537.525,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-coo-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665537.75,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-coo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665537.976,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cpo-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665543.979,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cpo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665544.216,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cro-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665544.444,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cro-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665544.669,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cto-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665544.898,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-cto-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665545.119,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-developer-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665545.344,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-connector-developer-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665545.573,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-cfo-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665545.797,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-cfo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665546.03,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-clo-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665546.255,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-clo-personal-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665546.473,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-clo-personal-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665546.695,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-clo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665546.92,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-coo-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665547.149,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-coo-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665547.393,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-cro-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665547.616,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-cro-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665547.849,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-cto-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665548.074,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-cto-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665548.318,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-developer-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665548.546,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/oauth-lane-developer-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665548.766,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/openai-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665549.013,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/otc-copilot-agent-app-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665549.249,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/otc-copilot-agent-app-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665549.474,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/otchealth-foundry-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665549.7,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-access-token-brex-hearingassist",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665549.928,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-access-token-brex-innerscope",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665550.161,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-access-token-chase-amazon",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665550.368,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-access-token-mercury-innerscope",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665550.604,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-access-token-mercury-otchealth",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665550.848,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-access-token-schwab",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665551.057,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-access-token-wellsfargo",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665551.293,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665551.512,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-env",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665551.744,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665552.828,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plaid-secret-sandbox",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665553.057,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/plantid-client-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665553.287,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/posthog-fleet-ingest-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665553.516,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/posthog-fleet-project-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665553.744,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/posthog-gatewayops-ingest-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665553.973,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/posthog-gatewayops-project-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665554.194,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/posthog-host",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665554.423,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/posthog-personal-api-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665554.646,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665554.875,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665555.107,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-env",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665555.348,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-realm-hearingassist",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665555.572,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-realm-innd",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665555.802,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-realm-otchealth",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665556.032,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-realm-personal",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665556.26,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-refresh-hearingassist",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665556.489,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-refresh-innd",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665557.583,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-refresh-otchealth",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665557.821,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/qbo-refresh-personal",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786842720.82,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/railway-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665559.132,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/replicate-api-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665559.368,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/revenuecat-flatstick-ios-public-sdk-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665559.59,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/revenuecat-flatstick-secret-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665559.833,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/revenuecat-flatstick-test-sdk-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665560.093,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/revenuecat-secret-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665560.343,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/sentry-auth-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665560.597,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/set-secret-roundtrip-test-1785205279366-4782ae8f",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665560.808,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/shopify-access-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665561.038,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/stripe-secret-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665561.272,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/stripe-webhook-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665561.502,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/tidb-cloud-private-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665561.726,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/tidb-cloud-public-key",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665561.974,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/token-keeper-meta-quickbooks",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786842720.512,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/twilio-account-sid",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665562.549,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/twilio-auth-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665562.782,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/twilio-verify-service-sid",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665563.007,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/voicerag-access-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665563.258,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-cc-hearingassist-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665566.015,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-cc-hearingassist-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665566.251,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-client-id",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665566.48,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-client-secret",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665566.705,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-refresh-token",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665566.936,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-refresh-token-hearingassist",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665567.169,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-refresh-token-innd",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665567.399,
+    "version": 2,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-refresh-token-otchealth",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665567.611,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-refresh-token-personal",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665567.846,
+    "version": 1,
+    "dataType": "text"
+  },
+  {
+    "name": "/otchealth/xero-tenant-map",
+    "type": "SecureString",
+    "tier": "Standard",
+    "lastModifiedDate": 1786665568.074,
+    "version": 1,
+    "dataType": "text"
+  }
+]

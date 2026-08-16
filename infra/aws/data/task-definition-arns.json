@@ -1,0 +1,110 @@
+{
+  "otchealth-agentstate-load": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-agentstate-load:1",
+    "revision": 1
+  },
+  "otchealth-agentstate-schema": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-agentstate-schema:1",
+    "revision": 1
+  },
+  "otchealth-gateway": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-gateway:5",
+    "revision": 5
+  },
+  "otchealth-job-brain-reindex": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-brain-reindex:2",
+    "revision": 2
+  },
+  "otchealth-job-daily-digest": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-daily-digest:2",
+    "revision": 2
+  },
+  "otchealth-job-deep-finance": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-deep-finance:2",
+    "revision": 2
+  },
+  "otchealth-job-deep-legal-company": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-deep-legal-company:2",
+    "revision": 2
+  },
+  "otchealth-job-deep-legal-personal": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-deep-legal-personal:2",
+    "revision": 2
+  },
+  "otchealth-job-docintel-ocr-sweep": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-docintel-ocr-sweep:2",
+    "revision": 2
+  },
+  "otchealth-job-fleet-backup": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-fleet-backup:2",
+    "revision": 2
+  },
+  "otchealth-job-fleet-secret-custodian": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-fleet-secret-custodian:2",
+    "revision": 2
+  },
+  "otchealth-job-innd-stock-daily": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-innd-stock-daily:2",
+    "revision": 2
+  },
+  "otchealth-job-librarian-commerce": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-librarian-commerce:2",
+    "revision": 2
+  },
+  "otchealth-job-librarian-finance": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-librarian-finance:2",
+    "revision": 2
+  },
+  "otchealth-job-librarian-legal-company": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-librarian-legal-company:2",
+    "revision": 2
+  },
+  "otchealth-job-librarian-legal-personal": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-librarian-legal-personal:2",
+    "revision": 2
+  },
+  "otchealth-job-os-anomaly-watch": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-os-anomaly-watch:2",
+    "revision": 2
+  },
+  "otchealth-job-os-healthz-monitor": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-os-healthz-monitor:2",
+    "revision": 2
+  },
+  "otchealth-job-os-morning-brief": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-os-morning-brief:2",
+    "revision": 2
+  },
+  "otchealth-job-os-reflective-memory": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-os-reflective-memory:2",
+    "revision": 2
+  },
+  "otchealth-job-otchealth-mcp-eval": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-otchealth-mcp-eval:2",
+    "revision": 2
+  },
+  "otchealth-job-sentinel-os-eval": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-sentinel-os-eval:2",
+    "revision": 2
+  },
+  "otchealth-job-token-keeper": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-token-keeper:2",
+    "revision": 2
+  },
+  "otchealth-job-xero-health": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-xero-health:2",
+    "revision": 2
+  },
+  "otchealth-job-xero-run": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-xero-run:2",
+    "revision": 2
+  },
+  "otchealth-jobenv-probe": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-jobenv-probe:2",
+    "revision": 2
+  },
+  "otchealth-pgrestore": {
+    "arn": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-pgrestore:1",
+    "revision": 1
+  }
+}

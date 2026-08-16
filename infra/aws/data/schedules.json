@@ -1,0 +1,530 @@
+{
+  "otchealth-fleet-secret-custodian": {
+    "scheduleExpression": "cron(0 7 ? * MON *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-fleet-secret-custodian",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-librarian-commerce": {
+    "scheduleExpression": "cron(15 * * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-librarian-commerce",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-otchealth-mcp-eval": {
+    "scheduleExpression": "cron(0 7 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-otchealth-mcp-eval",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-xero-run": {
+    "scheduleExpression": "cron(0 7 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-xero-run",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-deep-finance": {
+    "scheduleExpression": "cron(0 5 1 1 ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-deep-finance",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-fleet-backup": {
+    "scheduleExpression": "cron(0 6 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-fleet-backup",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-librarian-finance": {
+    "scheduleExpression": "cron(0 */6 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-librarian-finance",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-os-reflective-memory": {
+    "scheduleExpression": "cron(30 13 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-os-reflective-memory",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-os-morning-brief": {
+    "scheduleExpression": "cron(0 12 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-os-morning-brief",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-sentinel-os-eval": {
+    "scheduleExpression": "cron(0 6 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-sentinel-os-eval",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-innd-stock-daily": {
+    "scheduleExpression": "cron(30 22 ? * MON-FRI *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-innd-stock-daily",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-librarian-legal-company": {
+    "scheduleExpression": "cron(20 */6 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-librarian-legal-company",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-brain-reindex": {
+    "scheduleExpression": "cron(50 */6 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-brain-reindex",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-daily-digest": {
+    "scheduleExpression": "cron(59 23 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-daily-digest",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-docintel-ocr-sweep": {
+    "scheduleExpression": "cron(0 */2 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-docintel-ocr-sweep",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-os-healthz-monitor": {
+    "scheduleExpression": "cron(*/5 * * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-os-healthz-monitor",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-deep-legal-company": {
+    "scheduleExpression": "cron(0 5 1 1 ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-deep-legal-company",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-xero-health": {
+    "scheduleExpression": "cron(0 * * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-xero-health",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-deep-legal-personal": {
+    "scheduleExpression": "cron(0 5 1 1 ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-deep-legal-personal",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-os-anomaly-watch": {
+    "scheduleExpression": "cron(0 */6 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-os-anomaly-watch",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-librarian-legal-personal": {
+    "scheduleExpression": "cron(40 */6 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-librarian-legal-personal",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  },
+  "otchealth-token-keeper": {
+    "scheduleExpression": "cron(0 9 * * ? *)",
+    "scheduleExpressionTimezone": "UTC",
+    "state": "DISABLED",
+    "flexibleTimeWindowMode": "OFF",
+    "target": {
+      "clusterArn": "arn:aws:ecs:us-east-1:900915535335:cluster/otchealth",
+      "roleArn": "arn:aws:iam::900915535335:role/otchealthSchedulerRole",
+      "taskDefinitionFamily": "otchealth-job-token-keeper",
+      "taskCount": 1,
+      "launchType": "FARGATE",
+      "subnets": [
+        "subnet-0a94aaba3ce6e2623",
+        "subnet-0e39a2049aa73ab50",
+        "subnet-09695b3527b656f4a"
+      ],
+      "securityGroups": [
+        "sg-0a5d44b67befc3bbe"
+      ],
+      "assignPublicIp": "ENABLED",
+      "maxRetryAttempts": 1,
+      "maxEventAgeSeconds": 3600
+    }
+  }
+}
