@@ -27,7 +27,7 @@ import { isConfigured } from '../../agentstate/store.js';
 import { writeMemory } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';
-import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
+import { chat, chatConfigured, type ChatMessage } from '../../azure/foundry.js';
 import { buildEpisodeText } from '../../safety/journal.js';
 import { recordCheckpoint } from '../../safety/capture-pressure.js';
 import { captureGatewayEvent } from '../../telemetry/gateway-ops.js';
@@ -210,9 +210,9 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         }
 
         // (b) server-side distillation of the summary, best-effort. A distillation failure (LLM
-        // down, malformed reply, Foundry unconfigured) must never fail the checkpoint -- it just
-        // distills 0 memories.
-        if (input.summary && input.summary.trim() && foundryConfigured()) {
+        // down, malformed reply, the chat provider unconfigured) must never fail the checkpoint --
+        // it just distills 0 memories.
+        if (input.summary && input.summary.trim() && chatConfigured()) {
           try {
             const items = await distillSummary(input.summary);
             for (const dm of items) {

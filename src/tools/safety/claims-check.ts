@@ -12,16 +12,19 @@
  * "hearing aid" or "medical device". OTC hearing-aid claims are a separate, gated
  * (Matt + clinical) regime and are out of scope here.
  *
- * Judgment runs on credit-funded Azure Foundry (FLEET COST PROTOCOL) — high tier for
- * a quality-critical compliance call — and returns a structured, logged verdict.
+ * Judgment runs on a credit-funded/lower-cost chat provider (FLEET COST PROTOCOL: Azure Foundry
+ * by default, or OpenAI-direct when LLM_PROVIDER=openai) — high tier for a quality-critical
+ * compliance call — and returns a structured, logged verdict.
  *
- * Env: FOUNDRY_OPENAI_ENDPOINT + FOUNDRY_KEY (+ FOUNDRY_HIGH_DEPLOYMENT). Read-only;
- * mutates nothing. Advisory gate — callers (and humans) must honor a 'block'/'revise'.
+ * Env: LLM_PROVIDER (foundry default | openai); see src/azure/foundry.ts's chatTarget() for the
+ * full var list per provider. Read-only; mutates nothing. Advisory gate — callers (and humans)
+ * must honor a 'block'/'revise'.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
+import { chat, chatConfigured, type ChatMessage } from '../../azure/foundry.js';
+import { loadEnv } from '../../config/env.js';
 
 const PSAP_RULESET = `
 OTCHealth claims-compliance ruleset (PSAP / general-wellness marketing).
@@ -92,10 +95,19 @@ export function registerClaimsCheck(server: McpServer, callerHash: CallerHashPro
       handler: async (input) => {
         const channel = input.channel ?? 'other';
         const productClass = input.productClass ?? 'PSAP';
-        if (!foundryConfigured()) {
+        if (!chatConfigured()) {
+          const provider = loadEnv().LLM_PROVIDER;
           return {
-            data: { verdict: 'error', risk: 100, violations: [], compliant_rewrite: '', notes: '', channel, productClass, model: '', error: 'foundry_unconfigured' },
-            summary: 'claims_check unavailable: Foundry endpoint/key not configured on the gateway.',
+            data: {
+              verdict: 'error', risk: 100, violations: [], compliant_rewrite: '', notes: '', channel, productClass, model: '',
+              // Kept as 'foundry_unconfigured' on the default provider for byte-identical
+              // backward-compat with anything keyed on this exact string.
+              error: provider === 'openai' ? 'openai_unconfigured' : 'foundry_unconfigured',
+            },
+            summary:
+              provider === 'openai'
+                ? 'claims_check unavailable: LLM_PROVIDER=openai but OPENAI_API_KEY not configured on the gateway.'
+                : 'claims_check unavailable: Foundry endpoint/key not configured on the gateway.',
           };
         }
         if (productClass === 'OTC_hearing_aid') {
