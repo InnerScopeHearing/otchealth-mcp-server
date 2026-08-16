@@ -54,3 +54,4 @@ coverage/
 .eslintcache
 .cache/
 tmp/
+infra-aws/alert-fanout-lambda/function.zip
