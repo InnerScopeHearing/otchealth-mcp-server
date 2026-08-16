@@ -59,6 +59,80 @@ export class FoundryError extends Error {
 // network blip / 429 / 5xx (see src/util/fetch-budget.ts). The retry is fully contained inside
 // fetchWithBudget; post() below still sees exactly one final Response and preserves its existing
 // error shape (FoundryError with the LAST observed status) whether or not a retry happened.
+/**
+ * ================== EMBEDDINGS PROVIDER (the Azure-exit escape hatch) ==================
+ *
+ * Vector search embeds EVERY query here, so as long as this points at Azure Foundry, the brain
+ * cannot survive an Azure suspension no matter where the search engine or the documents live. This
+ * was the last runtime dependency in the read path.
+ *
+ * THE CONSTRAINT THAT DECIDES THE PROVIDER: an index's vectors are only comparable to query vectors
+ * from THE SAME MODEL. The 492,557 documents in OpenSearch were embedded with text-embedding-3-large
+ * at 3072 dimensions. Point queries at a different model -- AWS Bedrock Titan or Cohere, the
+ * "obvious" AWS-native choice -- and every similarity score becomes meaningless. It does not error;
+ * relevance just quietly collapses, and the only repair is re-embedding all 492k documents.
+ *
+ * OpenAI's own API serves the IDENTICAL text-embedding-3-large. So switching Azure OpenAI ->
+ * OpenAI-direct keeps the exact vector space and needs no re-embedding at all: it is a change of
+ * URL and auth header, not a migration. That is why this is a provider branch rather than a project.
+ *
+ *   EMBEDDINGS_PROVIDER=foundry  (default)  Azure Foundry. Byte-identical to every prior deploy.
+ *   EMBEDDINGS_PROVIDER=openai              api.openai.com, same model, same vectors.
+ *
+ * Deliberately NOT sending a `dimensions` parameter on either path: text-embedding-3-large returns
+ * 3072 natively, and passing `dimensions` would truncate the vector into a space the index does not
+ * share -- the same silent-relevance-collapse failure by a different route.
+ */
+export interface EmbeddingsTarget {
+  url: string;
+  headers: Record<string, string>;
+  /** Body field naming differs: Azure addresses the model by URL deployment, OpenAI by `model`. */
+  model: string | null;
+}
+
+export function embeddingsTarget(): EmbeddingsTarget | null {
+  const e = loadEnv();
+  if (e.EMBEDDINGS_PROVIDER === 'openai') {
+    const key = e.OPENAI_API_KEY || '';
+    if (!key) return null;
+    return {
+      url: 'https://api.openai.com/v1/embeddings',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      // Pinned, not configurable: it MUST match the model the index was built with.
+      model: 'text-embedding-3-large',
+    };
+  }
+  const c = cfg();
+  if (!c) return null;
+  return {
+    url: `${c.ep}/openai/deployments/${c.embed}/embeddings?api-version=${API_VERSION}`,
+    headers: { 'Content-Type': 'application/json', 'api-key': c.key },
+    model: null,
+  };
+}
+
+/** POST to a fully-formed embeddings target. Shares post()'s error shape so callers are unchanged. */
+async function postEmbeddings<T>(target: EmbeddingsTarget, body: Record<string, unknown>): Promise<T> {
+  const payload = target.model ? { ...body, model: target.model } : body;
+  const res = await fetchWithBudget(target.url, {
+    method: 'POST',
+    headers: target.headers,
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+  if (res.status >= 400) {
+    const msg = (data as { error?: { message?: string } })?.error?.message ?? `HTTP ${res.status}`;
+    throw new FoundryError(res.status, msg);
+  }
+  return data as T;
+}
+
 async function post<T>(url: string, key: string, body: unknown): Promise<T> {
   const res = await fetchWithBudget(url, {
     method: 'POST',
@@ -81,10 +155,9 @@ async function post<T>(url: string, key: string, body: unknown): Promise<T> {
 
 /** Embed a single string with text-embedding-3-large. Returns the vector, or null when unconfigured. */
 export async function embed(text: string): Promise<number[] | null> {
-  const c = cfg();
-  if (!c) return null;
-  const url = `${c.ep}/openai/deployments/${c.embed}/embeddings?api-version=${API_VERSION}`;
-  const j = await post<{ data?: Array<{ embedding: number[] }> }>(url, c.key, { input: text });
+  const target = embeddingsTarget();
+  if (!target) return null;
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }> }>(target, { input: text });
   return j.data?.[0]?.embedding ?? null;
 }
 
@@ -100,11 +173,10 @@ export async function embed(text: string): Promise<number[] | null> {
  * existing per-call `embed()` sites already do.
  */
 export async function embedBatch(texts: string[]): Promise<number[][] | null> {
-  const c = cfg();
-  if (!c) return null;
+  const target = embeddingsTarget();
+  if (!target) return null;
   if (texts.length === 0) return [];
-  const url = `${c.ep}/openai/deployments/${c.embed}/embeddings?api-version=${API_VERSION}`;
-  const j = await post<{ data?: Array<{ embedding: number[]; index?: number }> }>(url, c.key, {
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[]; index?: number }> }>(target, {
     input: texts,
   });
   const data = j.data ?? [];

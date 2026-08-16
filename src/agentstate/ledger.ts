@@ -34,7 +34,7 @@
  * claim again will not be swept into dead_letter by this alone).
  */
 
-import { createDoc, readDoc, replaceDoc, queryDocs, newId } from './cosmos.js';
+import { createDoc, readDoc, replaceDoc, queryDocs, newId } from './store.js';
 import { resolveArtifact } from './resolver.js';
 import { normalizeAgent, type TaskStatus } from './agents.js';
 

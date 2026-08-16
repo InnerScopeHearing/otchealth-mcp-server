@@ -7,7 +7,7 @@
  * runs a single replica, so codes survive their TTL within one instance.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { isConfigured as cosmosConfigured, createDoc, readDoc, deleteDoc } from '../agentstate/cosmos.js';
+import { isConfigured as cosmosConfigured, createDoc, readDoc, deleteDoc } from '../agentstate/store.js';
 
 const AUD = 'otchealth-mcp';
 

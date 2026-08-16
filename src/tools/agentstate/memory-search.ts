@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured } from '../../agentstate/cosmos.js';
+import { isConfigured } from '../../agentstate/store.js';
 import { searchMemory, type MemoryRecord } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
 import { EXEC_RING, PERSONAL_LEGAL_RING, isExecRingLane } from '../kb/search-privileged.js';

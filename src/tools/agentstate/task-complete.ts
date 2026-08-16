@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured } from '../../agentstate/cosmos.js';
+import { isConfigured } from '../../agentstate/store.js';
 import { completeTask } from '../../agentstate/ledger.js';
 
 export function registerTaskComplete(server: McpServer, callerHash: CallerHashProvider): void {

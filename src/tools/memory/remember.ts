@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { appendShared, isConfigured, normalizeAgent, type MemoryEntry } from '../../memory/store.js';
-import { indexMemoryNow } from '../../azure/search-write.js';
+import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { embed } from '../../azure/foundry.js';
 import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';

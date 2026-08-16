@@ -54,7 +54,7 @@
  *     through to a real model call rather than getting the wrong canned answer.
  */
 
-import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../../agentstate/cosmos.js';
+import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../../agentstate/store.js';
 import { embed as foundryEmbed } from '../../azure/foundry.js';
 
 const FAQ_CONTAINER = 'cache';

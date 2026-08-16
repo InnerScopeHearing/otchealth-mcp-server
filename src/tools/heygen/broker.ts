@@ -50,7 +50,7 @@ import {
   isConfigured as cosmosConfigured,
   readDoc,
   replaceDoc,
-} from '../../agentstate/cosmos.js';
+} from '../../agentstate/store.js';
 
 // Verified against the official heygen-cli source at commit
 // 7a698ba72e828a233df87bd9526f343fa1b3ee29 (oauth/oauth.go, client/client.go, gen/*.go).

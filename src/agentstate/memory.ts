@@ -9,7 +9,7 @@
  * Recall here is deterministic keyword/field filtering. Semantic recall stays in company-brain.
  */
 
-import { createDoc, readDoc, queryDocs, newId } from './cosmos.js';
+import { createDoc, readDoc, queryDocs, newId } from './store.js';
 import { normalizeAgent, type MemoryKind } from './agents.js';
 
 const MEMORY = 'memory';

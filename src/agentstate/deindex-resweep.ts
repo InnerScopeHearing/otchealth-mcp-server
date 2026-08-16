@@ -81,7 +81,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { createDoc, deleteDoc, queryDocs, readDoc, replaceDoc, isConfigured as cosmosConfigured } from './cosmos.js';
+import { createDoc, deleteDoc, queryDocs, readDoc, replaceDoc, isConfigured as cosmosConfigured } from './store.js';
 import { prepareDeindexAuth, deindexChunkedPathWithAuth } from '../azure/search-write.js';
 import { blobExistsWithTimeout, type LegalContainer } from '../legal/blob-store.js';
 

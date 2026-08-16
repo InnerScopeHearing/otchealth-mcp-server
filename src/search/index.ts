@@ -24,6 +24,8 @@
 import { loadEnv } from '../config/env.js';
 import * as azureSearch from '../azure/search.js';
 import * as openSearchBackend from './opensearch.js';
+import * as azureWrite from '../azure/search-write.js';
+import * as openSearchWrite from './opensearch-write.js';
 import type { KbHit, FetchedDocument, HybridSearchOptions } from '../azure/search.js';
 
 export type { KbHit, FetchedDocument, HybridSearchOptions } from '../azure/search.js';
@@ -58,4 +60,78 @@ export async function getDocumentByKey(index: string, key: string): Promise<Fetc
   return activeBackend() === 'opensearch'
     ? openSearchBackend.getDocumentByKey(index, key)
     : azureSearch.getDocumentByKey(index, key);
+}
+
+/**
+ * ===================== THE WRITE HALF (2026-08-15) =====================
+ *
+ * Until this existed, this dispatcher exported READS ONLY. Every memory write went directly to
+ * `src/azure/search-write.ts` from six production call sites, so setting `SEARCH_BACKEND=opensearch`
+ * produced a system that READ from OpenSearch and WROTE to Azure: an agent saves a memory, the save
+ * reports success, and nothing can ever recall it. Because the writer is deliberately fail-open,
+ * that surfaced as fleet-wide amnesia rather than as an error. This was the blocking defect for the
+ * AWS cutover.
+ *
+ * DUAL-WRITE is the migration primitive, controlled by `SEARCH_DUAL_WRITE`:
+ *
+ *   off (default)      write to whichever backend SEARCH_BACKEND selects. Pre-existing behavior.
+ *   on                 write to BOTH. Reads still come from SEARCH_BACKEND alone.
+ *
+ * Dual-write exists so the cutover has no lossy instant. Turn it on BEFORE flipping reads and both
+ * copies stay current, so the read flip carries no data gap and rolling back does not strand the
+ * memories written while on the new backend. Turn it off only once the old backend is genuinely
+ * retired. Without it, every memory written between the last bulk copy and the switch is lost to
+ * whichever side you end up on -- and `memory-exec` is written continuously, so that window is
+ * never empty.
+ *
+ * FAIL-OPEN AND NON-BLOCKING BY CONSTRUCTION. Both writers already swallow their own failures and
+ * return `{indexed:false, reason}`. The two writes run CONCURRENTLY rather than in sequence so a
+ * slow or unreachable secondary cannot add its latency to every memory write. The result reports
+ * the PRIMARY backend's outcome, so no caller's success/failure semantics change; the secondary's
+ * outcome rides along in `secondary` for observability. A secondary failure must never fail a write
+ * the primary accepted.
+ */
+export interface DualIndexResult extends azureWrite.IndexResult {
+  /** Which backend produced the returned outcome. */
+  primary: 'azure' | 'opensearch';
+  /** Present only when dual-write is on: the other backend's independent outcome. */
+  secondary?: azureWrite.IndexResult & { backend: 'azure' | 'opensearch' };
+}
+
+export function dualWriteEnabled(): boolean {
+  return loadEnv().SEARCH_DUAL_WRITE === true;
+}
+
+export async function indexMemory(input: {
+  agent: string;
+  id: string;
+  type?: string;
+  ts?: string;
+  tags?: string[];
+  text: string;
+  index?: string;
+  vector?: number[] | null;
+}): Promise<DualIndexResult> {
+  const primary = activeBackend();
+  const writeTo = (backend: 'azure' | 'opensearch') =>
+    backend === 'opensearch' ? openSearchWrite.indexMemoryNowOpenSearch(input) : azureWrite.indexMemoryNow(input);
+
+  if (!dualWriteEnabled()) {
+    return { ...(await writeTo(primary)), primary };
+  }
+
+  const other: 'azure' | 'opensearch' = primary === 'opensearch' ? 'azure' : 'opensearch';
+  // Concurrent, not sequential: the secondary must not add latency to the primary's path.
+  // allSettled rather than all, so a thrown (rather than returned) failure in either writer still
+  // cannot reject this call -- the fail-open contract has to hold even if a writer regresses.
+  const [primaryOutcome, secondaryOutcome] = await Promise.allSettled([writeTo(primary), writeTo(other)]);
+  const base: azureWrite.IndexResult =
+    primaryOutcome.status === 'fulfilled'
+      ? primaryOutcome.value
+      : { indexed: false, reason: `primary write threw: ${String(primaryOutcome.reason)}` };
+  const secondary: azureWrite.IndexResult =
+    secondaryOutcome.status === 'fulfilled'
+      ? secondaryOutcome.value
+      : { indexed: false, reason: `secondary write threw: ${String(secondaryOutcome.reason)}` };
+  return { ...base, primary, secondary: { ...secondary, backend: other } };
 }

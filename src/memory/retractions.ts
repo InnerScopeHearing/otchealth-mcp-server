@@ -25,7 +25,7 @@
  * better than degrading to "returns no results at all".
  */
 import { readSharedAll } from './store.js';
-import { queryDocs } from '../agentstate/cosmos.js';
+import { queryDocs } from '../agentstate/store.js';
 
 const TTL_MS = 120_000;
 let cache: { at: number; ids: Set<string>; byAgent: Map<string, Set<string>> } | null = null;

@@ -85,8 +85,8 @@
  * capture), and `captureShadowComparison` repeats the same check as defense in depth.
  */
 import { writeMemory } from '../agentstate/memory.js';
-import { indexMemoryNow } from '../azure/search-write.js';
-import { isConfigured as cosmosConfigured } from '../agentstate/cosmos.js';
+import { indexMemory as indexMemoryNow } from '../search/index.js';
+import { isConfigured as cosmosConfigured } from '../agentstate/store.js';
 import { looksLikeSecretValue } from './journal.js';
 
 // ---- pure core: mode / sample-rate parsing --------------------------------------------------

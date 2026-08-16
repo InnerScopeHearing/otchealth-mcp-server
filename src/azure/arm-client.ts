@@ -277,6 +277,25 @@ export function mergeEnv(
 /** Admin key for a Search service via ARM listAdminKeys (Search Service Contributor). Needed for index/
  *  indexer management (query keys cannot manage). Held in memory for one call; never returned/logged. */
 export async function searchAdminKey(serviceName: string): Promise<string> {
+  // DIRECT-KEY ESCAPE HATCH (2026-08-15, required for the AWS cutover).
+  //
+  // Everything below this block reaches the admin key via ARM, and ARM auth here is managed
+  // identity ONLY (miToken needs IDENTITY_ENDPOINT, injected exclusively into Azure Container Apps
+  // replicas). There is no service-principal fallback. So from ECS on AWS this function always
+  // throws, and every Azure Search WRITE is impossible -- including the dual-write that is supposed
+  // to keep both brains in sync during the migration.
+  //
+  // That failure is quiet in the worst way: search-write.ts is fail-open, so the write returns
+  // {indexed:false} and nothing surfaces. The consequence is that ROLLBACK BECOMES ONE-WAY -- cut
+  // over to AWS, run for a day, roll back, and every memory written in that day is stranded in
+  // OpenSearch and invisible to an Azure-reading gateway.
+  //
+  // When AZURE_SEARCH_ADMIN_KEY is provided (an SSM SecureString on the AWS task, exactly like the
+  // other 64 secrets), use it directly and skip ARM entirely. Unset, behavior is byte-identical to
+  // before: Azure-hosted replicas keep using managed identity and never hold a long-lived key.
+  const directKey = (process.env.AZURE_SEARCH_ADMIN_KEY || '').trim();
+  if (directKey) return directKey;
+
   const { subscriptionId } = azureConfig();
   const rg = process.env.AZURE_SEARCH_RG || 'otchealth-automation-rg';
   const path =

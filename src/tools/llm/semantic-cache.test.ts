@@ -12,7 +12,7 @@ import {
   type LlmCacheDeps,
   type LlmCacheEntry,
 } from './semantic-cache.js';
-import type { VectorMatch } from '../../agentstate/cosmos.js';
+import type { VectorMatch } from '../../agentstate/store.js';
 
 // Pure, no-network: every Cosmos/Foundry call is faked via the injectable deps bag, mirroring
 // memory/hot-cache.test.ts (this repo's ESM build does not allow node:test's mock.method() to

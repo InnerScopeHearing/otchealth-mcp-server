@@ -261,11 +261,78 @@ const EnvSchema = z.object({
   // SEARCH BACKEND SWITCH (src/search/index.ts dispatcher). Default 'azure' is BYTE-IDENTICAL to
   // every deploy before this variable existed: every dispatched caller keeps calling
   // src/azure/search.ts exactly as before. Flip to 'opensearch' to route those same callers at
-  // Amazon OpenSearch instead (src/search/opensearch.ts). kb_search_privileged (the ring-gated
-  // privileged path in src/tools/kb/search-privileged.ts) is DELIBERATELY NOT wired to this
-  // dispatcher and always uses Azure regardless of this value -- see that file's own header and
-  // the PR description for why.
+  // Amazon OpenSearch instead (src/search/opensearch.ts).
+  //
+  // CORRECTED 2026-08-15: this comment previously said kb_search_privileged was "DELIBERATELY NOT
+  // wired to this dispatcher and always uses Azure regardless of this value". That is no longer
+  // true -- src/tools/kb/search-privileged.ts imports the dispatcher and therefore honours this
+  // variable like every other caller (see src/search/index.ts's header for why the repoint is
+  // ring-NEUTRAL: isLaneAllowed runs BEFORE the search call and depends only on index + caller).
+  // Leaving the stale text would have told a cutover reader that the privileged legal/finance rooms
+  // stay on Azure when they do not, which is exactly the belief that gets a ring boundary
+  // misjudged during a migration.
   SEARCH_BACKEND: z.enum(['azure', 'opensearch']).default('azure'),
+
+  // Where query embeddings come from (src/azure/foundry.ts embeddingsTarget). Vector search embeds
+  // every query, so while this points at Azure the brain cannot outlive an Azure suspension no
+  // matter where search or the documents live.
+  //   foundry (default)  Azure Foundry. Byte-identical to every prior deploy.
+  //   openai             api.openai.com, using OPENAI_API_KEY.
+  // The MODEL is pinned to text-embedding-3-large on both paths and is NOT configurable: the
+  // OpenSearch index's 492k vectors were built with it, and query vectors from any other model are
+  // not comparable to them. That failure is silent -- relevance collapses, nothing errors -- and
+  // the only repair is re-embedding every document. It is also exactly why the AWS-native choice
+  // (Bedrock Titan/Cohere) is the WRONG one here despite the destination being AWS.
+  EMBEDDINGS_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
+  OPENAI_API_KEY: z.string().optional().default(''),
+
+  // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars).
+  //   azure (default)  Azure Blob, via src/legal/blob-store.ts. Byte-identical to every prior deploy.
+  //   s3               the S3 mirror, via src/legal/s3-blob-store.ts.
+  // Search finding a document is useless if its CONTENTS still come from Azure -- that is what kept
+  // the gateway Azure-dependent after the search backend moved. Flipping this is what actually
+  // removes the dependency. Reads only; document WRITES continue to go to Azure (the mirror has no
+  // reconciliation path, so writing to it directly would silently diverge it from the source).
+  BLOB_BACKEND: z.enum(['azure', 's3']).default('azure'),
+
+  // Which store holds the AGENT STATE PLANE: the work-ledger (tasks), the memory-of-record
+  // (memory), the transition log (events), OAuth codes/tokens, and the LLM/FAQ caches.
+  //   cosmos (default)  Azure Cosmos DB, via src/agentstate/cosmos.ts. Byte-identical to prior deploys.
+  //   postgres          RDS Postgres, via src/agentstate/postgres.ts.
+  //
+  // This is the LAST Azure runtime dependency and the one with the worst failure mode. Search and
+  // documents degrade to "cannot read" if Azure goes away; state degrades to "cannot WRITE" --
+  // writeMemory() and memory-write.ts both await their create with no catch, so an Azure
+  // suspension does not make the fleet forgetful, it makes it unable to record anything at all.
+  // Consumers must therefore import from src/agentstate/store.ts (the dispatcher), never from
+  // cosmos.ts or postgres.ts directly; agentstate-dependency-guard.test.ts enforces that in CI.
+  STATE_BACKEND: z.enum(['cosmos', 'postgres']).default('cosmos'),
+
+  // RDS Postgres connection for STATE_BACKEND=postgres. Inert unless PG_HOST is set, so a
+  // deployment that never sets these behaves exactly as before this flag existed.
+  // NOTE the instance is PubliclyAccessible=false by design: it is reachable only from inside the
+  // VPC, which is why schema work runs as a Fargate task rather than from an operator shell.
+  PG_HOST: z.string().optional().default(''),
+  PG_PORT: z.coerce.number().int().positive().default(5432),
+  PG_DATABASE: z.string().optional().default('agentstate'),
+  PG_USER: z.string().optional().default(''),
+  PG_PASSWORD: z.string().optional().default(''),
+  // RDS terminates TLS with an Amazon-issued cert. Verification needs the RDS CA bundle in the
+  // image; until that is baked in, encrypt-without-verify is still strictly better than plaintext
+  // and the traffic never leaves the VPC. Set true once the bundle ships.
+  PG_SSL_VERIFY: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+
+  // Dual-write the memory index to BOTH backends (see src/search/index.ts indexMemory). Reads still
+  // come from SEARCH_BACKEND alone; this only widens WRITES. Turn ON before flipping reads so the
+  // cutover has no lossy instant, and OFF only once the old backend is retired. Default false =
+  // byte-identical to the single-backend behavior that existed before dual-write.
+  SEARCH_DUAL_WRITE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 
   // Amazon OpenSearch (SigV4-signed, service 'es'), the alternate backend behind
   // SEARCH_BACKEND=opensearch. Inert (searchConfigured() -> false) unless OPENSEARCH_ENDPOINT is
