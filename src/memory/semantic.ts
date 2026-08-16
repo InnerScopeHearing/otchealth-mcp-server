@@ -1,16 +1,44 @@
 /**
  * Semantic recall over the `memory-exec` Azure AI Search index (the write-through-indexed
- * shared exec brain). Read-only: uses a QUERY key, never the admin key. Ring-safe by
- * construction — memory-exec only ever contains the shared (non-PHI/non-MNPI/non-privileged)
- * exec feed, the same surface the gateway already exposes via the blob store.
+ * shared exec brain). Read-only. Ring-safe by construction — memory-exec only ever contains the
+ * shared (non-PHI/non-MNPI/non-privileged) exec feed, the same surface the gateway already exposes
+ * via the blob store.
  *
- * Inert without AZURE_SEARCH_ENDPOINT + AZURE_SEARCH_QUERY_KEY (callers fall back to keyword).
+ * FIXED 2026-08-16 (the AWS-exit "memory_recall Azure bypass"): this file used to read
+ * AZURE_SEARCH_ENDPOINT/AZURE_SEARCH_QUERY_KEY directly and fetchWithBudget() the Azure REST
+ * surface inline, byte-identically regardless of SEARCH_BACKEND. That was invisible to both
+ * dependency guards (they only scanned for an IMPORT of a concrete backend module; this file
+ * imported neither azure/search.js nor search/opensearch.js, it just read env vars and rolled its
+ * own fetch) — see src/search/azure-dependency-guard.test.ts's widened env-var-read scan. So
+ * `memory_recall`'s SECOND-tier fallback (recall.ts tries agentic.ts's agentic-hybrid tier first,
+ * this module second, keyword-over-blob last) would have kept calling a decommissioned Azure
+ * endpoint after a SEARCH_BACKEND cutover, throwing/timing out on every call instead of answering
+ * from whichever backend is actually active. (agentic.ts's agenticRecall — the FIRST-tier path —
+ * had the identical defect and is fixed the same way, in the same change.)
+ *
+ * Now routes through the shared search dispatcher (src/search/index.ts), the exact seam every
+ * other reader (kb_search, brain_search, kb_search_privileged, incident_match, deep-retrieval,
+ * auto-supersede) already funnels through, so this honours SEARCH_BACKEND without a second
+ * hand-rolled HTTP client. A welcome side effect: every query is now genuinely vector+semantic
+ * hybrid (hybridSearch() calls embed() internally, honouring EMBEDDINGS_PROVIDER — see
+ * azure/foundry.ts) rather than this file's previous queryType:'simple' keyword-only body, which
+ * never sent a vector at all despite the module's name.
+ *
+ * KbHit (src/search/index.ts) is the dispatcher's deliberately room-agnostic hit shape and does
+ * not carry memory-exec's own `ts`/`tags` fields (stripped for every room kind — see
+ * azure/search.ts's runHybridSearch, "Strip the internal dedup + re-rank signal keys"). Rather
+ * than pay for a second per-hit fetch just to backfill two cosmetic fields, SemanticHit reports
+ * them as '' / [] here. `agent` IS recoverable losslessly without an extra round trip: the write
+ * path encodes it as the `{agent}__{entryId}` doc-id prefix (azure/search-write.ts memoryDocId),
+ * so this reuses agentFromDocId — the same parser auto-supersede-runtime.ts and incident-match.ts
+ * already rely on for the identical recovery — instead of a third reimplementation.
+ *
+ * Inert unless the ACTIVE backend (SEARCH_BACKEND) is configured (callers fall back to keyword).
  */
-import { loadEnv } from '../config/env.js';
-import { fetchWithBudget } from '../util/fetch-budget.js';
+import { hybridSearch, searchConfigured } from '../search/index.js';
+import { agentFromDocId } from './auto-supersede-runtime.js';
 
 const INDEX = 'memory-exec';
-const API_VERSION = '2023-11-01';
 
 export interface SemanticHit {
   id: string;
@@ -22,20 +50,22 @@ export interface SemanticHit {
   score: number;
 }
 
-function cfg(): { ep: string; key: string } | null {
-  const e = loadEnv();
-  const ep = (e.AZURE_SEARCH_ENDPOINT || '').replace(/\/$/, '');
-  const key = e.AZURE_SEARCH_QUERY_KEY || '';
-  return ep && key ? { ep, key } : null;
-}
-
+/** True when the ACTIVE search backend (SEARCH_BACKEND: azure or opensearch) is reachable —
+ *  mirrors the dispatcher's own config check rather than a hard-coded Azure-only one, so this no
+ *  longer reports "unconfigured" the moment Azure's own vars go empty on cutover. */
 export function semanticConfigured(): boolean {
-  return cfg() !== null;
+  return searchConfigured();
 }
 
 /**
  * Search the shared brain by meaning. Returns up to `limit` hits, optionally filtered to one
- * agent lane (filtered client-side so we never depend on the field being marked filterable).
+ * agent lane (filtered CLIENT-SIDE, exactly as before this fix — the memory-exec `agent` field is
+ * not guaranteed filterable server-side on every backend, and a rejected server-side filter fails
+ * the WHOLE query open to an unfiltered, lower-quality keyword-only result on Azure, or is simply
+ * dropped un-applied by the OpenSearch adapter's OData translator for a single `eq` clause — either
+ * way, trusting a server-side filter here would silently widen the result set instead of narrowing
+ * it. See auto-supersede-runtime.ts's own "never trust the $filter alone" note for the same
+ * reasoning applied to a sibling caller.).
  * Returns null when not configured so the caller can fall back to keyword search.
  */
 export async function semanticSearch(
@@ -43,27 +73,22 @@ export async function semanticSearch(
   agent: string | null,
   limit: number,
 ): Promise<SemanticHit[] | null> {
-  const c = cfg();
-  if (!c) return null;
+  if (!searchConfigured()) return null;
   const top = agent ? Math.max(limit * 4, 40) : limit;
-  // Bounded + one retry: search-by-POST is read-only, safe to repeat once on a network blip /
-  // 429 / 5xx (see src/util/fetch-budget.ts).
-  const r = await fetchWithBudget(`${c.ep}/indexes/${INDEX}/docs/search?api-version=${API_VERSION}`, {
-    method: 'POST',
-    headers: { 'api-key': c.key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ search: query, top, queryType: 'simple', searchMode: 'any' }),
+  const result = await hybridSearch(INDEX, query, top);
+  if (!result) return null;
+  let hits: SemanticHit[] = result.matches.map((h) => {
+    const id = String(h.id ?? '');
+    return {
+      id,
+      ts: '',
+      type: h.type ?? '',
+      text: h.text ?? '',
+      tags: [],
+      agent: agentFromDocId(id),
+      score: h.score ?? 0,
+    };
   });
-  if (!r.ok) throw new Error(`memory-exec search ${r.status}`);
-  const j = (await r.json()) as { value?: Array<Record<string, unknown>> };
-  let hits = (j.value || []).map((h) => ({
-    id: String(h.id ?? ''),
-    ts: String(h.ts ?? ''),
-    type: String(h.type ?? ''),
-    text: String(h.text ?? ''),
-    tags: Array.isArray(h.tags) ? (h.tags as string[]) : [],
-    agent: String(h.agent ?? ''),
-    score: typeof h['@search.score'] === 'number' ? (h['@search.score'] as number) : 0,
-  }));
   if (agent) hits = hits.filter((h) => h.agent === agent);
   return hits.slice(0, limit);
 }

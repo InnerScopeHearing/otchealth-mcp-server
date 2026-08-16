@@ -19,8 +19,8 @@ const { agenticRecall } = await import('./agentic.js');
 
 // Pure network mocking via globalThis.fetch (a genuine global, not a module export). This
 // repo's ESM build does not let node:test's mock.method() redefine another module's live named
-// export, so agentic.ts's own `embed`/`embedBatch` imports from foundry.js cannot be stubbed
-// directly; stubbing the shared transport they both ultimately call is the viable seam here,
+// export, so agentic.ts's own dispatcher import from search/index.js cannot be stubbed
+// directly; stubbing the shared transport it ultimately calls is the viable seam here,
 // the same approach as src/util/fetch-budget.test.ts and src/azure/foundry.test.ts.
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -40,24 +40,26 @@ function isSearchUrl(url: string): boolean {
   return url.includes('/indexes/') && url.includes('/docs/search');
 }
 
-test('agenticRecall: embeds ALL sub-queries in ONE batched Foundry call, not one embed() call per sub-query', async () => {
+test('agenticRecall: routes each sub-query through the shared search dispatcher (one embed() + one search per sub-query)', async () => {
+  // FIXED 2026-08-16: agentic.ts used to batch-embed every sub-query in ONE Foundry call (via its
+  // own hand-rolled fetch client that read AZURE_SEARCH_ENDPOINT directly), which is exactly the
+  // kind of Azure-only bypass this change closes. Routing through src/search/index.ts's shared
+  // hybridSearch() means each sub-query embeds independently (the dispatcher has no parameter to
+  // accept a precomputed vector) -- a deliberate, documented, bounded tradeoff (agentic.ts's file
+  // header) in exchange for SEARCH_BACKEND actually being honoured. This test pins the NEW shape
+  // so a future change is forced to re-justify it rather than silently drifting.
   let embeddingsCallCount = 0;
   let searchCallCount = 0;
-  let capturedEmbeddingsInput: string[] | undefined;
 
   await withStubbedFetch(
     (async (url: string | URL, init?: RequestInit) => {
       const u = String(url);
       if (isEmbeddingsUrl(u)) {
         embeddingsCallCount++;
-        const body = init?.body ? (JSON.parse(init.body as string) as { input: string[] }) : { input: [] };
-        capturedEmbeddingsInput = body.input;
-        return new Response(
-          JSON.stringify({
-            data: body.input.map((_t, i) => ({ index: i, embedding: [i, i, i] })),
-          }),
-          { status: 200 },
-        );
+        const body = init?.body ? (JSON.parse(init.body as string) as { input: string | string[] }) : { input: '' };
+        // The dispatcher's embed() sends a single string per call now, not a batched array.
+        assert.equal(typeof body.input, 'string', 'each sub-query must be embedded in its own call, not a shared batch');
+        return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }), { status: 200 });
       }
       if (isSearchUrl(u)) {
         searchCallCount++;
@@ -70,31 +72,22 @@ test('agenticRecall: embeds ALL sub-queries in ONE batched Foundry call, not one
       const result = await agenticRecall('deploy status and PostHog usage');
       assert.equal(result.mode, 'agentic-hybrid');
       assert.equal(result.subQueries.length, 3, 'sanity check: this query should plan 3 sub-queries');
-      assert.equal(
-        embeddingsCallCount,
-        1,
-        'the whole batch of sub-queries must be embedded in exactly one Foundry call',
-      );
+      assert.equal(embeddingsCallCount, 3, 'each of the 3 sub-queries embeds independently through the dispatcher');
       assert.equal(searchCallCount, 3, 'each sub-query still runs its own AI Search hybrid call');
-      assert.deepEqual(
-        capturedEmbeddingsInput,
-        result.subQueries,
-        'the batched embeddings call must carry every sub-query as one array input',
-      );
     },
   );
 });
 
-test('agenticRecall: a persistently-failing embeddings endpoint still returns hybrid results (falls back to per-sub-query embed(), no crash)', async () => {
+test('agenticRecall: a persistently-failing embeddings endpoint still returns hybrid results (falls back to keyword-only per sub-query, no crash)', async () => {
   let searchCallCount = 0;
 
   await withStubbedFetch(
     (async (url: string | URL) => {
       const u = String(url);
       if (isEmbeddingsUrl(u)) {
-        // Every embeddings call (the one batch attempt AND each sub-query's individual embed()
-        // fallback) fails, proving the safety net holds even when the whole embeddings path is
-        // down, not just the batch call.
+        // Every embeddings call fails, proving the dispatcher's own fail-open (embed() throws ->
+        // caught inside azure/search.ts's runHybridSearch -> vector stays null -> keyword+semantic
+        // search still runs) holds when reached through agentic.ts.
         return new Response('internal error', { status: 500 });
       }
       if (isSearchUrl(u)) {
@@ -111,6 +104,41 @@ test('agenticRecall: a persistently-failing embeddings endpoint still returns hy
         3,
         'each of the 3 sub-queries must still run its own AI Search (keyword+semantic, no vector) call',
       );
+    },
+  );
+});
+
+test('agenticRecall: recovers `agent` from the {agent}__{id} doc-id prefix and applies the client-side agent filter', async () => {
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) {
+        return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200 });
+      }
+      if (isSearchUrl(u)) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              { id: 'cto__1', text: 'cto fact', type: 'fact', '@search.rerankerScore': 3 },
+              { id: 'cfo__2', text: 'cfo fact', type: 'fact', '@search.rerankerScore': 2 },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const unfiltered = await agenticRecall('status update');
+      assert.ok(unfiltered.results.length > 0);
+      assert.ok(
+        unfiltered.results.some((h) => h.agent === 'cto') && unfiltered.results.some((h) => h.agent === 'cfo'),
+        'agent must be recovered from the doc-id prefix for every hit',
+      );
+
+      const filtered = await agenticRecall('status update', { agent: 'cto' });
+      assert.ok(filtered.results.length > 0);
+      assert.ok(filtered.results.every((h) => h.agent === 'cto'), 'the agent option must filter client-side on the recovered agent');
     },
   );
 });
