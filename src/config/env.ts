@@ -319,6 +319,59 @@ const EnvSchema = z.object({
   // if a real OpenAI routing model id is confirmed later.
   OPENAI_ROUTER_MODEL: z.string().optional().default(''),
 
+  // WEB SEARCH PROVIDER SWITCH (src/tools/web/web-search.ts dispatcher, Wave A item A5,
+  // runbooks/azure-full-retirement.md). Mirrors SEARCH_BACKEND / BLOB_BACKEND / EMBEDDINGS_PROVIDER's
+  // shape exactly, but closes a DIFFERENT class of gap than those three: web_search had NO dispatcher,
+  // NO env flag, and NO fallback branch of any kind before this -- it called Azure AI Foundry
+  // (Grounding-with-Bing) directly, Azure-only BY CONSTRUCTION, unlike every other Azure dependency in
+  // this gateway (which at least had a single-provider function that could be branched). Used by every
+  // agent's ground-first protocol for external/public-world queries, so going dark on an Azure
+  // suspension was a fleet-wide capability loss, not a degraded corner.
+  //
+  //   azure (default)  Azure AI Foundry project + Grounding-with-Bing (WEBSEARCH_SP_TENANT_ID/
+  //                     CLIENT_ID/SECRET/PROJECT_ENDPOINT/MODEL, still read directly from process.env
+  //                     in src/tools/web/providers/azure-web-search.ts, NOT through this schema --
+  //                     preserves the file's original "self-contained, touches nothing else" property
+  //                     for this one provider, since it predates this dispatcher and its behavior must
+  //                     stay byte-identical). Default is a pure passthrough: every caller keeps hitting
+  //                     the exact same Azure endpoint exactly as before this flag existed.
+  //   tavily            Tavily's Search API (api.tavily.com/search, TAVILY_API_KEY below), the chosen
+  //                     Azure-exit replacement -- see src/tools/web/providers/tavily-web-search.ts's
+  //                     header for why Tavily over Brave/Serper/Exa/Bedrock (short version: Amazon
+  //                     Bedrock does not support Anthropic's web_search server tool AT ALL -- confirmed
+  //                     live against platform.claude.com/docs 2026-08-16 -- and the one AWS-billed
+  //                     product that does, "Claude Platform on AWS", needs a brand-new AWS Marketplace
+  //                     subscription plus a fully separate Anthropic organization, disproportionate to
+  //                     replacing one read-only tool; Tavily's `include_answer` returns a synthesized
+  //                     answer AND source citations in the SAME call at the SAME per-credit price as a
+  //                     plain search, the closest functional match to what Grounding-with-Bing did).
+  //
+  // FAILURE MODE: exactly like every provider path in this file, an unconfigured active provider
+  // returns a clearly-labeled {mode:'unconfigured'} result (never a silent empty {mode:'web'} that
+  // reads as "searched and found nothing" -- that specific silent-empty-success shape is a failure
+  // class this fleet has hit before). A request/network failure returns {mode:'error', error:<msg>}.
+  // Neither ever throws out of the tool handler.
+  WEB_SEARCH_PROVIDER: z.enum(['azure', 'tavily']).default('azure'),
+  // Tavily API key (console.tavily.com, prefixed `tvly-`). SIGNUP STEP (human, one-time, no
+  // AWS/Azure involvement): create a free Tavily account at https://www.tavily.com (no credit card
+  // required for the free tier -- 1,000 credits/month, verified 2026-08-16 at tavily.com/pricing),
+  // generate an API key in the dashboard, store it as this secret. PRICING (verified 2026-08-16,
+  // docs.tavily.com/documentation/api-credits + tavily.com/pricing): pay-as-you-go $0.008/credit, a
+  // basic search costs 1 credit and `include_answer` adds NO extra credits, so this is $0.008/query
+  // flat once past the free 1,000/month; a $30/mo plan bundles 4,000 credits/mo (~$0.0075/credit
+  // effective) if usage grows past the free tier. At any realistic volume for an internal agent
+  // research tool (dozens to low hundreds of queries/day across the whole fleet, not a customer-facing
+  // feature), this stays inside the free tier or low single-digit dollars/month -- trivial against the
+  // ~$362/mo of headroom under the $625/mo AWS spend ceiling (~$263/mo current run rate), and it is
+  // not even AWS spend: Tavily is a third-party SaaS vendor, billed independently of the AWS account,
+  // same as Brave/Serper/Exa would be. Inert (WEB_SEARCH_PROVIDER=tavily resolves to
+  // {mode:'unconfigured'}) until this is set. Rotate-before-launch.
+  TAVILY_API_KEY: z
+    .string()
+    .optional()
+    .default('')
+    .refine((value) => value === '' || value.startsWith('tvly-'), 'TAVILY_API_KEY must be a Tavily tvly- key'),
+
   // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars).
   //   azure (default)  Azure Blob, via src/legal/blob-store.ts. Byte-identical to every prior deploy.
   //   s3               the S3 mirror, via src/legal/s3-blob-store.ts.
