@@ -1,32 +1,69 @@
 /**
- * web_search — open-web research for gateway-connected agents. Self-contained + additive.
- * Calls the Azure AI Foundry project Responses API with Microsoft-managed Grounding-with-Bing
- * (`{type:'web_search'}`), using an Entra (AAD) token minted from a dedicated service principal.
- * Reads its own env only (WEBSEARCH_*) — touches nothing else; inert (returns 'unconfigured') when unset.
- * Company/PHI queries must stay on brain_search (web search leaves the compliance boundary).
+ * web_search — open-web research for gateway-connected agents. Additive; each provider module it
+ * dispatches to is self-contained and reads only its own env.
+ *
+ * PROVIDER DISPATCHER (WEB_SEARCH_PROVIDER, src/config/env.ts; mirrors SEARCH_BACKEND / BLOB_BACKEND
+ * / EMBEDDINGS_PROVIDER's shape exactly -- see that schema entry for the full write-up). This tool
+ * was Azure-only BY CONSTRUCTION until 2026-08-16 (Wave A item A5, runbooks/azure-full-retirement.md)
+ * -- no dispatcher, no env flag, no fallback branch of any kind, unlike every other Azure dependency
+ * in this gateway. Default `'azure'` still resolves to providers/azure-web-search.ts, byte-identical
+ * (for the search behavior itself) to every deploy before this dispatcher existed. `'tavily'`
+ * resolves to providers/tavily-web-search.ts, the chosen non-Azure replacement -- see that file's
+ * header for why Tavily over Brave/Serper/Exa/Bedrock, with real per-query pricing for each.
+ *
+ * The MNPI pre-share gate below runs BEFORE either provider is even selected -- it is a hard,
+ * provider-agnostic safety boundary (safety/mnpi-gate.ts), not part of any provider's own contract.
+ * Company/PHI queries must stay on brain_search (web search leaves the compliance boundary), on
+ * EVERY provider equally, present or future.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { fetchWithBudget } from '../../util/fetch-budget.js';
+import { loadEnv } from '../../config/env.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
+import { azureWebSearch } from './providers/azure-web-search.js';
+import { tavilyWebSearch } from './providers/tavily-web-search.js';
+import type { WebSearchResult } from './providers/types.js';
 
-let tok: { v: string; exp: number } = { v: '', exp: 0 };
-async function aad(): Promise<string> {
-  const now = Date.now();
-  if (tok.v && tok.exp - now > 60_000) return tok.v;
-  const tid = process.env.WEBSEARCH_SP_TENANT_ID || '';
-  const cid = process.env.WEBSEARCH_SP_CLIENT_ID || '';
-  const sec = process.env.WEBSEARCH_SP_SECRET || '';
-  const r = await fetchWithBudget(`https://login.microsoftonline.com/${tid}/oauth2/v2.0/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: cid, client_secret: sec, grant_type: 'client_credentials', scope: 'https://ai.azure.com/.default' }),
-  });
-  const j = (await r.json()) as { access_token?: string; expires_in?: number; error?: string };
-  if (!j.access_token) throw new Error(`aad token: ${j.error || r.status}`);
-  tok = { v: j.access_token, exp: now + (j.expires_in || 3600) * 1000 };
-  return tok.v;
+export type WebSearchProvider = 'azure' | 'tavily';
+
+/** Which provider serves THIS call. Resolved fresh per call (not cached at module scope) -- matches
+ *  every other *_PROVIDER/*_BACKEND dispatcher in this codebase (e.g. src/search/index.ts's
+ *  activeBackend(), src/azure/foundry.ts's chatTarget()), all of which re-read loadEnv() per call
+ *  rather than pin the provider at import time. loadEnv() itself is cached after its first parse, so
+ *  this is not a repeated env-parse cost, just consistent style. Exported (mirrors foundry.ts's
+ *  chatTarget()) so provider SELECTION is unit-testable on its own. */
+export function resolveWebSearchProvider(): WebSearchProvider {
+  return loadEnv().WEB_SEARCH_PROVIDER;
+}
+
+/** Dispatch to the resolved provider's implementation. Both providers return the SAME
+ *  WebSearchResult shape (providers/types.ts) with no reshaping needed here -- that shared contract
+ *  is what makes this a genuine drop-in switch rather than a per-provider special case. */
+async function dispatchToProvider(provider: WebSearchProvider, query: string): Promise<WebSearchResult> {
+  return provider === 'tavily' ? tavilyWebSearch(query, loadEnv().TAVILY_API_KEY) : azureWebSearch(query);
+}
+
+/**
+ * Resolve the active provider and run the search against it -- the same two steps the tool handler
+ * performs, minus the MNPI gate (a provider-agnostic safety check that belongs to the handler, not
+ * to "which provider answers a query"). Exported (mirrors foundry.ts's chatTarget()/chat() split) so
+ * the dispatch logic itself -- provider selection AND the drop-in response shape -- is unit-testable
+ * without a full MCP/registerTool harness.
+ */
+export async function runWebSearch(query: string): Promise<WebSearchResult> {
+  const provider = resolveWebSearchProvider();
+  return dispatchToProvider(provider, query);
+}
+
+/** Build the tool's free-text `summary` generically from the normalized result, so adding a THIRD
+ *  provider later needs no changes here -- only a new branch in dispatchToProvider above. Names the
+ *  active provider in every branch (a small observability upgrade over the pre-dispatcher tool,
+ *  which had exactly one provider so never needed to say which one answered). */
+function summarize(provider: WebSearchProvider, result: WebSearchResult): string {
+  if (result.mode === 'unconfigured') return `Web search not configured (WEB_SEARCH_PROVIDER=${provider}).`;
+  if (result.mode === 'error') return `Web search (${provider}) failed: ${result.error || 'unknown error'}`;
+  return `Web search (${provider}): ${result.citations.length} source(s).`;
 }
 
 export function registerWebSearch(server: McpServer, callerHash: CallerHashProvider): void {
@@ -36,9 +73,9 @@ export function registerWebSearch(server: McpServer, callerHash: CallerHashProvi
       name: 'web_search',
       category: 'read',
       annotations: {
-        title: 'Open-web research (Grounding with Bing, read-only)',
+        title: 'Open-web research (read-only)',
         description:
-          'Search the public web and return a grounded answer with source citations. Use for external/public-world topics only (news, market/competitor data, regulations, general research). NEVER pass company-confidential, personal, legal, customer, or PHI content here — use brain_search for those. Read-only. MNPI GATE (hard, code-level): the query is scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the request leaves the gateway; a match is refused for every caller, no exception (the public web is never a legitimate destination for that content).',
+          'Search the public web and return a grounded answer with source citations. Use for external/public-world topics only (news, market/competitor data, regulations, general research). NEVER pass company-confidential, personal, legal, customer, or PHI content here — use brain_search for those. Read-only. MNPI GATE (hard, code-level): the query is scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the request leaves the gateway; a match is refused for every caller, no exception (the public web is never a legitimate destination for that content). The underlying search provider is operator-selected (WEB_SEARCH_PROVIDER) and may change; the query always leaves the gateway to a third-party search API regardless of which one is active.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: false,
@@ -48,59 +85,16 @@ export function registerWebSearch(server: McpServer, callerHash: CallerHashProvi
       outputShape: { answer: z.string(), citations: z.array(z.unknown()), mode: z.string(), error: z.string().optional() },
       handler: async (input) => {
         // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE the
-        // query ever leaves the gateway. The public web is, by construction, always external/non-
-        // privileged: a match is a HARD BLOCK for every caller, no EXEC_RING exception.
+        // query ever leaves the gateway, and BEFORE a provider is even selected. The public web is,
+        // by construction, always external/non-privileged: a match is a HARD BLOCK for every caller,
+        // no EXEC_RING exception, regardless of which provider WEB_SEARCH_PROVIDER points at.
         const mnpiGate = evaluateBroadcastMnpiGate({ query: input.query });
         if (mnpiGate.blocked) {
           return { data: { answer: '', citations: [], mode: 'blocked', error: mnpiGate.reason }, summary: `Refused: ${mnpiGate.reason}` };
         }
-        const ep = (process.env.WEBSEARCH_PROJECT_ENDPOINT || '').replace(/\/+$/, '');
-        const model = process.env.WEBSEARCH_MODEL || 'gpt-5.4';
-        if (!ep || !process.env.WEBSEARCH_SP_CLIENT_ID || !process.env.WEBSEARCH_SP_SECRET) {
-          return { data: { answer: '', citations: [], mode: 'unconfigured' }, summary: 'Web search not configured.' };
-        }
-        let token: string;
-        try { token = await aad(); } catch (e) {
-          return { data: { answer: '', citations: [], mode: 'error', error: String((e as Error).message) }, summary: 'Web search auth failed.' };
-        }
-        const ac = new AbortController();
-        const to = setTimeout(() => ac.abort(), 60_000); // web search legitimately takes 20-40s
-        let r: Response;
-        try {
-          r = await fetch(`${ep}/openai/v1/responses`, {
-          method: 'POST',
-          signal: ac.signal,
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model,
-            instructions: 'Search the public web and answer concisely with inline source citations (include source URLs). Public-world information only.',
-            input: input.query,
-            tools: [{ type: 'web_search' }],
-            tool_choice: 'auto',
-            stream: false,
-          }),
-          });
-        } catch (e) {
-          return { data: { answer: '', citations: [], mode: 'error', error: 'web_search timeout' }, summary: 'Web search timed out.' };
-        } finally { clearTimeout(to); }
-        if (!r.ok) {
-          const t = await r.text().catch(() => '');
-          return { data: { answer: '', citations: [], mode: 'error', error: `responses ${r.status}` }, summary: `Web search failed: ${r.status} ${t.slice(0, 120)}` };
-        }
-        const j = (await r.json()) as any;
-        let answer = typeof j.output_text === 'string' ? j.output_text : '';
-        const citations: unknown[] = [];
-        for (const item of j.output || []) {
-          if (item.type === 'message') {
-            for (const c of item.content || []) {
-              if (c.type === 'output_text') {
-                if (!answer) answer += c.text || '';
-                for (const a of c.annotations || []) if (a.url || a.title) citations.push({ title: a.title, url: a.url });
-              }
-            }
-          }
-        }
-        return { data: { answer: answer.slice(0, 4000), citations, mode: 'web' }, summary: `Web search: ${citations.length} source(s).` };
+        const provider = resolveWebSearchProvider();
+        const result = await dispatchToProvider(provider, input.query);
+        return { data: result, summary: summarize(provider, result) };
       },
     },
     callerHash,
