@@ -34,6 +34,25 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
   }
 }
 
+/**
+ * Does this URL actually target that host? Parses the URL and compares the HOST, rather than asking
+ * whether the host string appears anywhere in the URL -- `url.includes('login.microsoftonline.com')`
+ * is also true for an attacker-shaped URL like `https://evil.com/?x=login.microsoftonline.com`, which
+ * is exactly what CodeQL's js/incomplete-url-substring-sanitization rule (high severity) flags. Same
+ * fix already established in this repo for the identical pattern -- see src/search/dual-write.test.ts's
+ * own isHost() and its doc comment for the full rationale (a substring check is also a genuinely
+ * weaker TEST: it would still pass if a routing bug sent a call to the wrong host with the right one
+ * merely mentioned in a query string).
+ */
+function isHost(u: string, host: string): boolean {
+  try {
+    const h = new URL(u).host;
+    return h === host || h.endsWith(`.${host}`);
+  } catch {
+    return false;
+  }
+}
+
 test('azureWebSearchConfigured() is false with no WEBSEARCH_* env set', () => {
   clearAzureEnv();
   assert.equal(azureWebSearchConfigured(), false);
@@ -61,7 +80,7 @@ test('a successful search mints an AAD token, then parses output_text + annotati
   const result = await withStubbedFetch(
     (async (url: string) => {
       calls.push(String(url));
-      if (String(url).includes('login.microsoftonline.com')) {
+      if (isHost(String(url), 'login.microsoftonline.com')) {
         return new Response(JSON.stringify({ access_token: 'fake-aad-token', expires_in: 3600 }), { status: 200 });
       }
       return new Response(
@@ -88,7 +107,7 @@ test('a successful search mints an AAD token, then parses output_text + annotati
   assert.equal(result.mode, 'web');
   assert.equal(result.answer, 'AAPL closed at $250.');
   assert.deepEqual(result.citations, [{ title: 'AAPL quote', url: 'https://example.com/aapl' }]);
-  assert.equal(calls.some((u) => u.includes('login.microsoftonline.com')), true);
+  assert.equal(calls.some((u) => isHost(u, 'login.microsoftonline.com')), true);
   assert.equal(calls.some((u) => u.includes('/openai/v1/responses')), true);
   clearAzureEnv();
 });
@@ -146,7 +165,7 @@ test('the answer is capped at 4000 characters', async () => {
   const longText = 'x'.repeat(5000);
   const result = await withStubbedFetch(
     (async (url: string) => {
-      if (String(url).includes('login.microsoftonline.com')) {
+      if (isHost(String(url), 'login.microsoftonline.com')) {
         return new Response(JSON.stringify({ access_token: 'tok', expires_in: 3600 }), { status: 200 });
       }
       return new Response(JSON.stringify({ output_text: longText, output: [] }), { status: 200 });

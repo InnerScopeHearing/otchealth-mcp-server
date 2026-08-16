@@ -35,6 +35,18 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
   }
 }
 
+/** Does this URL actually target that host? Parses the URL and compares the HOST, rather than
+ *  substring-matching (CodeQL js/incomplete-url-substring-sanitization, high) -- see the identical
+ *  helper + full rationale in src/search/dual-write.test.ts and providers/azure-web-search.test.ts. */
+function isHost(u: string, host: string): boolean {
+  try {
+    const h = new URL(u).host;
+    return h === host || h.endsWith(`.${host}`);
+  } catch {
+    return false;
+  }
+}
+
 test('WEB_SEARCH_PROVIDER unset resolves to the documented default, "azure"', () => {
   assert.equal(resolveWebSearchProvider(), 'azure');
 });
@@ -45,7 +57,7 @@ test('runWebSearch() hits the Azure Foundry endpoint, never Tavily, even though 
   const result = await withStubbedFetch(
     (async (url: string) => {
       calls.push(String(url));
-      if (String(url).includes('login.microsoftonline.com')) {
+      if (isHost(String(url), 'login.microsoftonline.com')) {
         return new Response(JSON.stringify({ access_token: 'tok', expires_in: 3600 }), { status: 200 });
       }
       return new Response(JSON.stringify({ output_text: 'answer from azure', output: [] }), { status: 200 });
@@ -54,6 +66,6 @@ test('runWebSearch() hits the Azure Foundry endpoint, never Tavily, even though 
   );
   assert.equal(result.mode, 'web');
   assert.equal(result.answer, 'answer from azure');
-  assert.equal(calls.some((u) => u.includes('api.tavily.com')), false, 'must never call Tavily while WEB_SEARCH_PROVIDER=azure (the default)');
+  assert.equal(calls.some((u) => isHost(u, 'api.tavily.com')), false, 'must never call Tavily while WEB_SEARCH_PROVIDER=azure (the default)');
   assert.equal(calls.some((u) => u.includes('/openai/v1/responses')), true);
 });

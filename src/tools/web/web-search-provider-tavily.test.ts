@@ -31,6 +31,18 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
   }
 }
 
+/** Does this URL actually target that host? Parses the URL and compares the HOST, rather than
+ *  substring-matching (CodeQL js/incomplete-url-substring-sanitization, high) -- see the identical
+ *  helper + full rationale in src/search/dual-write.test.ts and providers/azure-web-search.test.ts. */
+function isHost(u: string, host: string): boolean {
+  try {
+    const h = new URL(u).host;
+    return h === host || h.endsWith(`.${host}`);
+  } catch {
+    return false;
+  }
+}
+
 test('WEB_SEARCH_PROVIDER=tavily resolves to "tavily"', () => {
   assert.equal(resolveWebSearchProvider(), 'tavily');
 });
@@ -53,7 +65,7 @@ test('runWebSearch() hits Tavily, never Azure, even though Azure is fully config
   assert.equal(calls.length, 1);
   assert.equal(calls[0], 'https://api.tavily.com/search');
   assert.equal(
-    calls.some((u) => u.includes('microsoftonline.com') || u.includes('openai/v1/responses')),
+    calls.some((u) => isHost(u, 'microsoftonline.com') || u.includes('openai/v1/responses')),
     false,
     'must never call Azure while WEB_SEARCH_PROVIDER=tavily',
   );
