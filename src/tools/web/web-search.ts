@@ -25,29 +25,42 @@ import { azureWebSearch } from './providers/azure-web-search.js';
 import { tavilyWebSearch } from './providers/tavily-web-search.js';
 import type { WebSearchResult } from './providers/types.js';
 
-type Provider = 'azure' | 'tavily';
+export type WebSearchProvider = 'azure' | 'tavily';
 
 /** Which provider serves THIS call. Resolved fresh per call (not cached at module scope) -- matches
  *  every other *_PROVIDER/*_BACKEND dispatcher in this codebase (e.g. src/search/index.ts's
  *  activeBackend(), src/azure/foundry.ts's chatTarget()), all of which re-read loadEnv() per call
  *  rather than pin the provider at import time. loadEnv() itself is cached after its first parse, so
- *  this is not a repeated env-parse cost, just consistent style. */
-function activeProvider(): Provider {
+ *  this is not a repeated env-parse cost, just consistent style. Exported (mirrors foundry.ts's
+ *  chatTarget()) so provider SELECTION is unit-testable on its own. */
+export function resolveWebSearchProvider(): WebSearchProvider {
   return loadEnv().WEB_SEARCH_PROVIDER;
 }
 
 /** Dispatch to the resolved provider's implementation. Both providers return the SAME
  *  WebSearchResult shape (providers/types.ts) with no reshaping needed here -- that shared contract
  *  is what makes this a genuine drop-in switch rather than a per-provider special case. */
-async function runProviderSearch(provider: Provider, query: string): Promise<WebSearchResult> {
+async function dispatchToProvider(provider: WebSearchProvider, query: string): Promise<WebSearchResult> {
   return provider === 'tavily' ? tavilyWebSearch(query, loadEnv().TAVILY_API_KEY) : azureWebSearch(query);
 }
 
+/**
+ * Resolve the active provider and run the search against it -- the same two steps the tool handler
+ * performs, minus the MNPI gate (a provider-agnostic safety check that belongs to the handler, not
+ * to "which provider answers a query"). Exported (mirrors foundry.ts's chatTarget()/chat() split) so
+ * the dispatch logic itself -- provider selection AND the drop-in response shape -- is unit-testable
+ * without a full MCP/registerTool harness.
+ */
+export async function runWebSearch(query: string): Promise<WebSearchResult> {
+  const provider = resolveWebSearchProvider();
+  return dispatchToProvider(provider, query);
+}
+
 /** Build the tool's free-text `summary` generically from the normalized result, so adding a THIRD
- *  provider later needs no changes here -- only a new branch in runProviderSearch above. Names the
+ *  provider later needs no changes here -- only a new branch in dispatchToProvider above. Names the
  *  active provider in every branch (a small observability upgrade over the pre-dispatcher tool,
  *  which had exactly one provider so never needed to say which one answered). */
-function summarize(provider: Provider, result: WebSearchResult): string {
+function summarize(provider: WebSearchProvider, result: WebSearchResult): string {
   if (result.mode === 'unconfigured') return `Web search not configured (WEB_SEARCH_PROVIDER=${provider}).`;
   if (result.mode === 'error') return `Web search (${provider}) failed: ${result.error || 'unknown error'}`;
   return `Web search (${provider}): ${result.citations.length} source(s).`;
@@ -79,8 +92,8 @@ export function registerWebSearch(server: McpServer, callerHash: CallerHashProvi
         if (mnpiGate.blocked) {
           return { data: { answer: '', citations: [], mode: 'blocked', error: mnpiGate.reason }, summary: `Refused: ${mnpiGate.reason}` };
         }
-        const provider = activeProvider();
-        const result = await runProviderSearch(provider, input.query);
+        const provider = resolveWebSearchProvider();
+        const result = await dispatchToProvider(provider, input.query);
         return { data: result, summary: summarize(provider, result) };
       },
     },
