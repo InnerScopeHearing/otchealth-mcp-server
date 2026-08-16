@@ -161,9 +161,13 @@ export interface ChatTarget extends ProviderTarget {
 const OPENAI_CHAT_API_URL = 'https://api.openai.com/v1/chat/completions';
 
 /** Tier -> OpenAI-direct model id. See this section's header for why these defaults are a
- *  judgement call, not a verified fact, and why 'router' collapses to 'standard'. */
+ *  judgement call, not a verified fact, and why 'router' collapses to 'standard'. Mirrors cfg()'s
+ *  own chat/high fallback chain above exactly (high falls back to the STANDARD model before the
+ *  hardcoded literal, same as FOUNDRY_HIGH_DEPLOYMENT falls back to FOUNDRY_CHAT_DEPLOYMENT) --
+ *  the hardcoded high-tier literal is 'gpt-5.4', NOT 'gpt-5.1', or a caller asking for tier:'high'
+ *  with neither override set would silently get the standard-tier model instead. */
 function openaiModelForTier(e: ReturnType<typeof loadEnv>, tier?: 'standard' | 'high' | 'router'): string {
-  if (tier === 'high') return e.OPENAI_HIGH_MODEL || e.OPENAI_CHAT_MODEL || 'gpt-5.1';
+  if (tier === 'high') return e.OPENAI_HIGH_MODEL || e.OPENAI_CHAT_MODEL || 'gpt-5.4';
   if (tier === 'router') return e.OPENAI_ROUTER_MODEL || e.OPENAI_CHAT_MODEL || 'gpt-5.1';
   return e.OPENAI_CHAT_MODEL || 'gpt-5.1';
 }
