@@ -286,6 +286,39 @@ const EnvSchema = z.object({
   EMBEDDINGS_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
   OPENAI_API_KEY: z.string().optional().default(''),
 
+  // WHICH PROVIDER SERVES CHAT COMPLETIONS (src/azure/foundry.ts chatTarget()). Mirrors
+  // EMBEDDINGS_PROVIDER's shape exactly, but is a SEPARATE flag: the embeddings model is pinned
+  // (any provider must return the identical text-embedding-3-large vector space or the 492k-doc
+  // index silently stops matching), while chat has no such constraint -- a different provider can
+  // legitimately answer with a different underlying model, so this is free to move independently
+  // of EMBEDDINGS_PROVIDER (e.g. embeddings could stay on Foundry while chat moves to OpenAI, or
+  // vice versa, during a staged cutover).
+  //   foundry (default)  Azure Foundry (FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT/
+  //                       FOUNDRY_ROUTER_*). Byte-identical to every prior deploy.
+  //   openai              api.openai.com, using OPENAI_API_KEY. See OPENAI_CHAT_MODEL/
+  //                       OPENAI_HIGH_MODEL/OPENAI_ROUTER_MODEL below for the tier -> model id
+  //                       mapping and why those defaults are a JUDGEMENT CALL, not a verified fact.
+  LLM_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
+  // Tier -> OpenAI-direct model id overrides for the LLM_PROVIDER=openai path (src/azure/foundry.ts
+  // openaiModelForTier()). FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT ('gpt-5.1'/'gpt-5.4') are
+  // AZURE DEPLOYMENT NAMES -- an operator-chosen alias, not necessarily a real, callable
+  // api.openai.com model id. Unlike EMBEDDINGS_PROVIDER's model (verified byte-identical across both
+  // providers 2026-08-15), there is no equivalent live verification for chat here. Defaulting these
+  // to the SAME strings as the Foundry deployment names is a bet that the operator named the Azure
+  // deployment after its real underlying model (a common, not universal, Azure OpenAI convention).
+  // If the bet is wrong, api.openai.com returns a fast, loud 404 model_not_found -- never a silent
+  // wrong-model answer -- so the failure mode is safe even when the default guess is wrong. Set
+  // these the moment the real ids are confirmed; do not treat the defaults as verified fact.
+  OPENAI_CHAT_MODEL: z.string().optional().default(''),
+  OPENAI_HIGH_MODEL: z.string().optional().default(''),
+  // tier:'router' (Azure Model Router, an auto-pick-the-cheapest-sufficient-model PRODUCT) has NO
+  // documented api.openai.com counterpart. Rather than invent one, an unset OPENAI_ROUTER_MODEL
+  // makes tier:'router' fall back to the SAME model as tier:'standard' on the OpenAI path -- the
+  // identical fallback chat() already performs today when FOUNDRY_ROUTER_ENDPOINT/KEY are unset, so
+  // LLM_PROVIDER=openai simply behaves as if the router were permanently unconfigured. Set this only
+  // if a real OpenAI routing model id is confirmed later.
+  OPENAI_ROUTER_MODEL: z.string().optional().default(''),
+
   // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars).
   //   azure (default)  Azure Blob, via src/legal/blob-store.ts. Byte-identical to every prior deploy.
   //   s3               the S3 mirror, via src/legal/s3-blob-store.ts.

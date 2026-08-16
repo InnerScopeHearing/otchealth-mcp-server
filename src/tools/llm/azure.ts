@@ -1,20 +1,22 @@
 /**
  * llm_azure — the FLEET COST PROTOCOL escape hatch. Routes COMMODITY + mid-tier LLM work
- * (summarize, classify, extract, synthesize, complete) onto credit-funded Azure OpenAI on
- * Foundry, instead of burning metered Claude tokens. Available to every agent on every
- * platform via one gateway call.
+ * (summarize, classify, extract, synthesize, complete) onto a credit-funded/lower-cost provider
+ * (Azure Foundry by default, or OpenAI-direct when LLM_PROVIDER=openai), instead of burning
+ * metered Claude tokens. Available to every agent on every platform via one gateway call.
  *
  * QUALITY TIERS (Matt directive 2026-06-26: gpt-4.1-mini is bad — never default to it):
- *   tier 'standard' (default) -> gpt-4.1  (the GOOD model; use for real summarization/synthesis)
- *   tier 'high'               -> the strongest deployed model (FOUNDRY_HIGH_DEPLOYMENT)
+ *   tier 'standard' (default) -> the well-rounded deployment (FOUNDRY_CHAT_DEPLOYMENT / OPENAI_CHAT_MODEL)
+ *   tier 'high'               -> the strongest deployed model (FOUNDRY_HIGH_DEPLOYMENT / OPENAI_HIGH_MODEL)
  * Reserve Claude (this agent) for the hardest reasoning; use this for everything commodity.
  *
- * Env: FOUNDRY_OPENAI_ENDPOINT + FOUNDRY_KEY (+ FOUNDRY_CHAT_DEPLOYMENT / FOUNDRY_HIGH_DEPLOYMENT).
+ * Env: LLM_PROVIDER (foundry default | openai) selects the backend; see src/azure/foundry.ts's
+ * chatTarget() for the full var list per provider and the tier -> model mapping.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { chat, foundryConfigured, type ChatMessage } from '../../azure/foundry.js';
+import { chat, chatConfigured, type ChatMessage } from '../../azure/foundry.js';
+import { loadEnv } from '../../config/env.js';
 import { captureGatewayEvent, summarizeUsage, overSoftBudget, buildLatencyFields, type LatencyClass } from '../../telemetry/gateway-ops.js';
 import { emitLlmMetrics } from '../../telemetry/datadog-metrics.js';
 import { checkLlmCache, writeLlmCache } from './semantic-cache.js';
@@ -73,10 +75,23 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         // W1-6 SPEED INSTRUMENTATION: caller-passed telemetry bucket (see buildLatencyFields in
         // telemetry/gateway-ops.ts). Purely a dashboard tag -- never changes execution.
         const latencyClass: LatencyClass = input.latencyClass ?? 'normal';
-        if (!foundryConfigured()) {
+        if (!chatConfigured()) {
+          const provider = loadEnv().LLM_PROVIDER;
           return {
-            data: { task: input.task, tier, output: '', model: '', error: 'foundry_unconfigured' },
-            summary: 'llm_azure unavailable: Foundry endpoint/key not configured on the gateway.',
+            data: {
+              task: input.task,
+              tier,
+              output: '',
+              model: '',
+              // Kept as 'foundry_unconfigured' on the default provider for byte-identical
+              // backward-compat with anything keyed on this exact string; the openai case gets its
+              // own accurate code rather than a misleading Foundry-flavoured one.
+              error: provider === 'openai' ? 'openai_unconfigured' : 'foundry_unconfigured',
+            },
+            summary:
+              provider === 'openai'
+                ? 'llm_azure unavailable: LLM_PROVIDER=openai but OPENAI_API_KEY not configured on the gateway.'
+                : 'llm_azure unavailable: Foundry endpoint/key not configured on the gateway.',
           };
         }
 

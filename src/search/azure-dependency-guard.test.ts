@@ -126,6 +126,59 @@ test('query embeddings resolve through the provider, not a hard-coded Azure URL'
   );
 });
 
+test('chat completions resolve through chatTarget(), not a hard-coded Azure URL built inline in chat()', () => {
+  // Mirrors the embeddings test above, for the LLM_PROVIDER escape hatch (src/azure/foundry.ts
+  // chat()/chatTarget()). chat() must delegate ALL endpoint/header/model resolution to
+  // chatTarget(); a regression that re-inlines the Azure deployment URL construction directly into
+  // chat() would silently re-pin every chat caller (llm_azure, checkpoint distillation,
+  // claims-check, deep-retrieval plan/refine/synth) to Azure regardless of LLM_PROVIDER.
+  const foundry = FILES.find((f) => f.path === 'azure/foundry.ts');
+  assert.ok(foundry);
+  const chatBody = foundry!.text.split(/export async function chat\(/).slice(1).join('\n');
+  assert.match(chatBody, /chatTarget\(/, 'chat() must resolve its endpoint/headers/model through chatTarget()');
+  assert.equal(
+    /\$\{[^}]+\}\/openai\/deployments\/\$\{[^}]+\}\/chat\/completions/.test(chatBody),
+    false,
+    'an inline Azure chat-completions URL re-constructed inside chat() re-pins every caller to Azure',
+  );
+});
+
+test('no file other than azure/foundry.ts builds an Azure chat-completions URL directly', () => {
+  // The 5 real chat-completions call sites (llm_azure tool, checkpoint distillation, claims-check,
+  // deep-retrieval's plan/refine/synth) must all route through azure/foundry.ts's chat(), the ONLY
+  // place LLM_PROVIDER is consulted. A caller that builds its own fetch to an Azure deployment URL
+  // would silently bypass the provider switch, exactly the shape of bug this whole file exists to
+  // catch (see the file header).
+  const offenders = FILES.filter(
+    (f) =>
+      f.path !== 'azure/foundry.ts' &&
+      /\$\{[^}]+\}\/openai\/deployments\/\$\{[^}]+\}\/chat\/completions/.test(f.text),
+  ).map((f) => f.path);
+  assert.deepEqual(offenders, [], 'route chat completions through azure/foundry.ts chat(), which honours LLM_PROVIDER');
+});
+
+test('every real chat() caller imports it from azure/foundry.js, so LLM_PROVIDER actually governs it', () => {
+  // Positive assertion (mirrors "the memory write tools go through the dispatcher" above): these
+  // are the entire chat-completions surface today. A caller added later that forgets this import
+  // could still compile (chat/foundryConfigured/chatConfigured are easy names to reimplement badly
+  // by hand) without ever being routed through the provider switch.
+  const callers = [
+    'tools/llm/azure.ts',
+    'tools/memory/checkpoint.ts',
+    'tools/safety/claims-check.ts',
+    'memory/deep-retrieval.ts',
+  ];
+  for (const path of callers) {
+    const f = FILES.find((x) => x.path === path);
+    assert.ok(f, `expected chat() caller missing: ${path}`);
+    assert.match(
+      f!.text,
+      /import \{[^}]*\bchat\b[^}]*\} from '.*azure\/foundry\.js'/,
+      `${path} must import chat() from azure/foundry.js to stay governed by LLM_PROVIDER`,
+    );
+  }
+});
+
 test('the pinned embedding model is not silently made configurable', () => {
   // Query vectors must come from the SAME model the 492,557 indexed vectors were built with.
   // A configurable model reads as flexibility and behaves as a silent relevance collapse.

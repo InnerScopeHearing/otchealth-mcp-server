@@ -11,7 +11,7 @@ process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
 process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 
-const { embedBatch, foundryConfigured, promptCacheKey } = await import('./foundry.js');
+const { embedBatch, foundryConfigured, chatTarget, chatConfigured, promptCacheKey } = await import('./foundry.js');
 
 test('promptCacheKey: stable across calls sharing a system prefix, and independent of user content', () => {
   const sys = { role: 'system' as const, content: 'You are a precise summarizer.' };
@@ -33,7 +33,8 @@ test('promptCacheKey: differs by deployment and by system prefix', () => {
 // Pure network mocking via a direct globalThis.fetch reassignment (a genuine global, not another
 // module's live named export, so node:test's inability to redefine module exports does not apply
 // here). See src/memory/hot-cache.test.ts for that limitation and src/util/fetch-budget.test.ts
-// for the same stubbing pattern used against fetchWithBudget, which post() now calls internally.
+// for the same stubbing pattern used against fetchWithBudget, which postToTarget() now calls
+// internally.
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
   globalThis.fetch = stub;
@@ -46,6 +47,32 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
 
 test('foundry: is considered configured once endpoint + key are set', () => {
   assert.equal(foundryConfigured(), true);
+});
+
+// ── chatTarget()/chatConfigured() DEFAULT scenario: LLM_PROVIDER is unset here, so this file also
+// covers "byte-identical to every prior deploy" for the chat path (see chat-provider.test.ts and
+// chat-provider-overrides.test.ts for the LLM_PROVIDER=openai scenarios, in their own processes). ──
+
+test('chatConfigured() is true by default (LLM_PROVIDER unset -> foundry) once Foundry endpoint + key are set', () => {
+  assert.equal(chatConfigured(), true);
+});
+
+test('chatTarget() defaults to the Azure deployment URL shape, addressing the model via the URL (not the body)', () => {
+  const t = chatTarget('standard');
+  assert.equal(t?.url, 'https://otchealth-foundry.example.invalid/openai/deployments/gpt-5.1/chat/completions?api-version=2024-08-01-preview');
+  assert.equal(t?.headers['api-key'], 'test-foundry-key');
+  assert.equal(t?.headers.Authorization, undefined, 'the OpenAI-direct auth header must not ride along');
+  assert.equal(t?.model, null, 'Azure addresses the model via the URL deployment segment, not the body');
+  assert.equal(t?.resolvedLabel, 'gpt-5.1');
+});
+
+test('chatTarget() tier "high" resolves the high deployment', () => {
+  assert.equal(chatTarget('high')?.resolvedLabel, 'gpt-5.4');
+});
+
+test('chatTarget() tier "router" falls back to standard when the router endpoint/key are unset (byte-identical to the pre-chatTarget() chat() behavior)', () => {
+  assert.equal(chatTarget('router')?.resolvedLabel, 'gpt-5.1');
+  assert.equal(chatTarget('router')?.url.includes('otchealth-foundry.example.invalid'), true);
 });
 
 test('embedBatch: preserves input order so vector[i] corresponds to texts[i], even when the API returns data out of order', async () => {

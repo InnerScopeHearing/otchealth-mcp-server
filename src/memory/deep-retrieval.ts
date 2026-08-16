@@ -58,7 +58,7 @@
  * a redeploy. When off, brain-search.ts never calls into this module at all for mode:'deep' — it
  * just runs the fast path, so 'deep' behaves EXACTLY like 'fast'.
  */
-import { chat, foundryConfigured, type ChatMessage } from '../azure/foundry.js';
+import { chat, chatConfigured, type ChatMessage } from '../azure/foundry.js';
 import { hybridSearch, searchConfigured, type KbHit } from '../search/index.js';
 import { rrfFuse, type FusedHit } from './rrf.js';
 import { retractedIds, filterRetracted } from './retractions.js';
@@ -329,10 +329,10 @@ export function buildSynthesisMessages(query: string, hits: FusedHit[]): ChatMes
 
 // ---- IO: LLM calls (each individually fail-open) ─────────────────────────────────────────────
 
-/** FAIL-OPEN: Foundry unconfigured or a chat() failure degrades to a trivial one-sub-query plan
- *  over every allowed room — never throws. */
+/** FAIL-OPEN: the chat provider unconfigured or a chat() failure degrades to a trivial
+ *  one-sub-query plan over every allowed room — never throws. */
 async function planQuery(query: string, allowedRooms: string[]): Promise<QueryPlan> {
-  if (!foundryConfigured()) return { subQueries: [query], rooms: allowedRooms };
+  if (!chatConfigured()) return { subQueries: [query], rooms: allowedRooms };
   try {
     const res = await chat(buildPlanMessages(query, allowedRooms), { maxTokens: 500, jsonMode: true, tier: 'standard' });
     return parseQueryPlan(res.text, query, allowedRooms);
@@ -341,11 +341,11 @@ async function planQuery(query: string, allowedRooms: string[]): Promise<QueryPl
   }
 }
 
-/** FAIL-OPEN: Foundry unconfigured or a chat() failure yields no refinement (the caller keeps
- *  round 1's hits rather than spending a round on a query set that failed to even plan) — never
- *  throws. */
+/** FAIL-OPEN: the chat provider unconfigured or a chat() failure yields no refinement (the caller
+ *  keeps round 1's hits rather than spending a round on a query set that failed to even plan) —
+ *  never throws. */
 async function refineSubQueries(query: string, triedSubQueries: string[], resultsSoFar: number): Promise<string[]> {
-  if (!foundryConfigured()) return [];
+  if (!chatConfigured()) return [];
   try {
     const res = await chat(buildRefineMessages(query, triedSubQueries, resultsSoFar), {
       maxTokens: 300,
@@ -358,13 +358,13 @@ async function refineSubQueries(query: string, triedSubQueries: string[], result
   }
 }
 
-/** FAIL-OPEN: no hits -> a plain "nothing retrieved" note (no LLM call spent). Foundry unconfigured
- *  or a chat() failure -> a clear "synthesis unavailable" note, with the retrieved hits still
- *  returned by the caller. Never throws. Runs on tier 'high': this is the user-facing answer, the
- *  one step in the pipeline worth the better-quality deployment. */
+/** FAIL-OPEN: no hits -> a plain "nothing retrieved" note (no LLM call spent). The chat provider
+ *  unconfigured or a chat() failure -> a clear "synthesis unavailable" note, with the retrieved
+ *  hits still returned by the caller. Never throws. Runs on tier 'high': this is the user-facing
+ *  answer, the one step in the pipeline worth the better-quality deployment. */
 async function synthesizeAnswer(query: string, hits: FusedHit[]): Promise<string> {
   if (hits.length === 0) return NO_CONTEXT_ANSWER;
-  if (!foundryConfigured()) return SYNTH_UNAVAILABLE_ANSWER;
+  if (!chatConfigured()) return SYNTH_UNAVAILABLE_ANSWER;
   try {
     const res = await chat(buildSynthesisMessages(query, hits.slice(0, MAX_SYNTH_HITS)), {
       maxTokens: 900,
