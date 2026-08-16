@@ -1,0 +1,49 @@
+[
+  {
+    "command": [
+      "mkdir -p /app && echo \"$SCRIPT_B64\" | base64 -d > /app/watch.mjs && cd /app && node watch.mjs"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh",
+      "-c"
+    ],
+    "environment": [
+      {
+        "name": "POSTHOG_PROJECT_ID",
+        "value": "468397"
+      }
+    ],
+    "environmentFiles": [
+      {
+        "type": "s3",
+        "value": "arn:aws:s3:::otchealth-build-55c84f6b/jobenv/os-anomaly-watch.env"
+      }
+    ],
+    "essential": true,
+    "image": "node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "os-anomaly-watch"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [
+      {
+        "name": "GATEWAY_LANE_CLIENT_ID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/os-anomaly-watch/GATEWAY_LANE_CLIENT_ID"
+      },
+      {
+        "name": "GATEWAY_LANE_CLIENT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/os-anomaly-watch/GATEWAY_LANE_CLIENT_SECRET"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

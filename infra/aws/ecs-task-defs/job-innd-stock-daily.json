@@ -1,0 +1,65 @@
+[
+  {
+    "command": [
+      "-c",
+      "set -e; mkdir -p /app && printf %s \"$SKILL_MJS_B64\" | base64 -d > /app/innd-stock.mjs && printf %s \"$SKILL_EVENTS_B64\" | base64 -d > /app/innd-events.json && cd /app && npm i xlsx --no-audit --no-fund --silent && node innd-stock.mjs update"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh"
+    ],
+    "environment": [
+      {
+        "name": "STORAGE_BACKEND",
+        "value": "azure"
+      },
+      {
+        "name": "AZURE_STORAGE_CONTAINER",
+        "value": "innd-stock"
+      },
+      {
+        "name": "AZURE_STORAGE_ACCOUNT",
+        "value": "otchealthcfodata"
+      }
+    ],
+    "environmentFiles": [
+      {
+        "type": "s3",
+        "value": "arn:aws:s3:::otchealth-build-55c84f6b/jobenv/innd-stock-daily.env"
+      }
+    ],
+    "essential": true,
+    "image": "node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "innd-stock-daily"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [
+      {
+        "name": "AZURE_STORAGE_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/innd-stock-daily/AZURE_STORAGE_KEY"
+      },
+      {
+        "name": "MASSIVE_API_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/innd-stock-daily/MASSIVE_API_KEY"
+      },
+      {
+        "name": "MASSIVE_API_KEY_2",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/innd-stock-daily/MASSIVE_API_KEY_2"
+      },
+      {
+        "name": "SKILL_EVENTS_B64",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/innd-stock-daily/SKILL_EVENTS_B64"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

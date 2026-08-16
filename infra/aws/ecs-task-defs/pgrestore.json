@@ -1,0 +1,51 @@
+[
+  {
+    "command": [
+      "set -e\napt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1\nexport PGPASSWORD=\"$PGPASSWORD_IN\"\npsql -h \"$PGHOST\" -U \"$PGUSER\" -d postgres -tAc \"SELECT 'conn_ok'\"\nfor pair in \"flatstick:$URL_FLATSTICK\" \"fourvault:$URL_FOURVAULT\"; do\n  db=${pair%%:*}; url=${pair#*:}\n  echo \"=== $db ===\"\n  curl -sSf \"$url\" -o /tmp/$db.dump\n  ls -l /tmp/$db.dump\n  psql -h \"$PGHOST\" -U \"$PGUSER\" -d postgres -c \"DROP DATABASE IF EXISTS $db\"\n  psql -h \"$PGHOST\" -U \"$PGUSER\" -d postgres -c \"CREATE DATABASE $db\"\n  psql -h \"$PGHOST\" -U \"$PGUSER\" -d $db -c \"CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS \\\"uuid-ossp\\\"; CREATE EXTENSION IF NOT EXISTS pgcrypto;\" || true\n  pg_restore --no-owner --no-acl -h \"$PGHOST\" -U \"$PGUSER\" -d $db /tmp/$db.dump || echo \"pg_restore returned non-zero (checking real state below)\"\n  n=$(psql -h \"$PGHOST\" -U \"$PGUSER\" -d $db -tAc \"SELECT count(*) FROM information_schema.tables WHERE table_schema='public'\")\n  echo \"RESULT $db public_tables=$n\"\n  psql -h \"$PGHOST\" -U \"$PGUSER\" -d $db -tAc \"SELECT relname||'='||n_live_tup FROM pg_stat_user_tables ORDER BY relname\" | head -40\ndone\necho RESTORE_DONE"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh",
+      "-c"
+    ],
+    "environment": [
+      {
+        "name": "URL_FLATSTICK",
+        "value": "REDACTED-PRESIGNED-URL-see-README (was a short-lived S3 presigned URL for flatstick.dump, regenerate at restore time)"
+      },
+      {
+        "name": "URL_FOURVAULT",
+        "value": "REDACTED-PRESIGNED-URL-see-README (was a short-lived S3 presigned URL for fourvault.dump, regenerate at restore time)"
+      }
+    ],
+    "essential": true,
+    "image": "postgres:16",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "pgrestore"
+      }
+    },
+    "mountPoints": [],
+    "name": "pg",
+    "portMappings": [],
+    "secrets": [
+      {
+        "name": "PGHOST",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/aws-pg-host"
+      },
+      {
+        "name": "PGUSER",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/aws-pg-master-user"
+      },
+      {
+        "name": "PGPASSWORD_IN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/aws-pg-master-password"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

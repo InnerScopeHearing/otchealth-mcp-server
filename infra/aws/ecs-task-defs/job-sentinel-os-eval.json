@@ -1,0 +1,93 @@
+[
+  {
+    "command": [
+      "mkdir -p /app /tmp/upgrades/sentinel && cd /app && npm init -y >/dev/null 2>&1 && echo \"$RUNMULTI_B64\" | base64 -d > /app/run-multi.mjs && echo \"$RUNNER_B64\" | base64 -d > /app/eval-runner-app.v3-http.mjs && echo \"$BATTERY_B64\" | base64 -d > /app/battery_v2.json && echo \"$JUDGE_B64\" | base64 -d > /app/judge_v1.json && echo \"$CANARY_B64\" | base64 -d > /app/canary.json && echo \"$RAGAS_B64\" | base64 -d > /app/ragas-metrics.mjs && echo \"$MULTISAMPLE_B64\" | base64 -d > /app/multisample.mjs && echo \"$AUTH_B64\" | base64 -d > /app/auth.mjs && echo \"$HTTPCLIENT_B64\" | base64 -d > /app/http_client.mjs && echo \"$OS_ACCESS_CODE\" > /tmp/upgrades/sentinel/.os_access_code && node run-multi.mjs 3"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh",
+      "-c"
+    ],
+    "environment": [
+      {
+        "name": "BATTERY_FILE",
+        "value": "battery_v2.json"
+      },
+      {
+        "name": "JUDGE_K",
+        "value": "5"
+      },
+      {
+        "name": "RUN_COUNT",
+        "value": "3"
+      },
+      {
+        "name": "RESULT_SINK",
+        "value": "posthog"
+      },
+      {
+        "name": "POSTHOG_HOST",
+        "value": "https://us.posthog.com"
+      }
+    ],
+    "environmentFiles": [
+      {
+        "type": "s3",
+        "value": "arn:aws:s3:::otchealth-build-55c84f6b/jobenv/sentinel-os-eval.env"
+      }
+    ],
+    "essential": true,
+    "image": "node@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "sentinel-os-eval"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [
+      {
+        "name": "AZURE_SP_TENANT_ID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/AZURE_SP_TENANT_ID"
+      },
+      {
+        "name": "AZURE_SP_CLIENT_ID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/AZURE_SP_CLIENT_ID"
+      },
+      {
+        "name": "AZURE_SP_CLIENT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/AZURE_SP_CLIENT_SECRET"
+      },
+      {
+        "name": "OS_ACCESS_CODE",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/OS_ACCESS_CODE"
+      },
+      {
+        "name": "CANARY_B64",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/CANARY_B64"
+      },
+      {
+        "name": "MULTISAMPLE_B64",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/MULTISAMPLE_B64"
+      },
+      {
+        "name": "AUTH_B64",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/AUTH_B64"
+      },
+      {
+        "name": "HTTPCLIENT_B64",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/HTTPCLIENT_B64"
+      },
+      {
+        "name": "POSTHOG_API_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/sentinel-os-eval/POSTHOG_API_KEY"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

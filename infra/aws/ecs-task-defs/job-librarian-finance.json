@@ -1,0 +1,50 @@
+[
+  {
+    "command": [
+      "/app/setup/with-heartbeat.sh",
+      "librarian-finance",
+      "--",
+      "/bin/sh",
+      "/app/skills/doc-indexer/job/librarian.sh",
+      "finance"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh"
+    ],
+    "environment": [
+      {
+        "name": "SKIP_PUSH_SEARCH",
+        "value": "1"
+      },
+      {
+        "name": "AZURE_KEYVAULT_NAME",
+        "value": "kv-otc-55c84f6bef"
+      },
+      {
+        "name": "CU_MAX_MINUTES",
+        "value": "110"
+      },
+      {
+        "name": "AZURE_UAMI_CLIENT_ID",
+        "value": "01b82248-86b1-4237-a8f3-8317cf9d5f33"
+      }
+    ],
+    "essential": true,
+    "image": "900915535335.dkr.ecr.us-east-1.amazonaws.com/doc-indexer:latest",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "librarian-finance"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

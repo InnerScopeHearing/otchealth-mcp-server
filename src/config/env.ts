@@ -286,6 +286,31 @@ const EnvSchema = z.object({
   EMBEDDINGS_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
   OPENAI_API_KEY: z.string().optional().default(''),
 
+  // LLM CHAT PROVIDER SWITCH (src/azure/foundry.ts chatTarget). The counterpart to
+  // EMBEDDINGS_PROVIDER above, but for CHAT completions rather than embeddings -- the other live
+  // Azure inference dependency (llm_azure, deep-retrieval's plan/refine/synthesis, checkpoint's
+  // summary distillation, claims-check's compliance verdicts, and auto-supersede's contradiction
+  // classifier all resolve their model through chat(), so they all move together with this flag).
+  //   foundry (default)  Azure Foundry. Byte-identical to every prior deploy.
+  //   openai             api.openai.com, using OPENAI_API_KEY (already present above).
+  // UNLIKE embeddings, a chat completion is never compared against a precomputed store, so a
+  // provider switch cannot silently corrupt an index the way a wrong embedding model would -- the
+  // risk here is narrower and different: MODEL EQUIVALENCE. Read chatTarget()'s header before
+  // flipping this: 'standard'/'high' map to OPENAI_CHAT_MODEL/OPENAI_HIGH_MODEL below (defaults
+  // 'gpt-5.1'/'gpt-5.4', mirroring FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT); 'router' has NO
+  // OpenAI equivalent (the Azure Model Router is an Azure-only product) and falls back to
+  // 'standard' using this file's own pre-existing "router not configured" behavior, not an invented
+  // substitute. That mapping is a judgement call, not an independently verified equivalence the way
+  // the embeddings model was cosine-similarity-checked -- confirm with the CTO before relying on it.
+  LLM_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
+  // OpenAI-direct model ids for the 'standard'/'high' tiers (see LLM_PROVIDER above). Configurable,
+  // unlike the pinned embeddings model, because a chat model swap cannot silently corrupt anything
+  // the way an embedding model swap can -- there is no shared vector space to fall out of sync with.
+  // Defaults mirror FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT so a flip changes only the
+  // endpoint/auth, not the model, until someone deliberately retunes it.
+  OPENAI_CHAT_MODEL: z.string().optional().default('gpt-5.1'),
+  OPENAI_HIGH_MODEL: z.string().optional().default('gpt-5.4'),
+
   // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars).
   //   azure (default)  Azure Blob, via src/legal/blob-store.ts. Byte-identical to every prior deploy.
   //   s3               the S3 mirror, via src/legal/s3-blob-store.ts.

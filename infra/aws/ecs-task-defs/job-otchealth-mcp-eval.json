@@ -1,0 +1,46 @@
+[
+  {
+    "command": [
+      "eval/eval-runner.mjs"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "node"
+    ],
+    "environment": [
+      {
+        "name": "GATEWAY_BASE_URL",
+        "value": "https://otchealth-mcp-gateway.wonderfulpond-a1ddc412.eastus2.azurecontainerapps.io"
+      },
+      {
+        "name": "BASELINE_THRESHOLD",
+        "value": "0.7"
+      },
+      {
+        "name": "EVAL_TIMEOUT_MS",
+        "value": "20000"
+      }
+    ],
+    "essential": true,
+    "image": "900915535335.dkr.ecr.us-east-1.amazonaws.com/otchealth-mcp-gateway:28f3d25",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "otchealth-mcp-eval"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [
+      {
+        "name": "GATEWAY_BEARER",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/otchealth-mcp-eval/GATEWAY_BEARER"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

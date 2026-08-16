@@ -1,0 +1,40 @@
+[
+  {
+    "command": [
+      "const want=['SCRIPT_B64','GATEWAY_LANE_CLIENT_SECRET','OS_ENDPOINT','AOAI_KEY'];for(const k of Object.keys(process.env).sort()){const v=process.env[k]||'';if(v.length>200||want.includes(k))console.log(k+' len='+v.length);}console.log('TOTAL_ENV_VARS='+Object.keys(process.env).length);console.log('PROBE_OK');"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "node",
+      "-e"
+    ],
+    "environment": [],
+    "environmentFiles": [
+      {
+        "type": "s3",
+        "value": "arn:aws:s3:::otchealth-build-55c84f6b/jobenv/os-anomaly-watch.env"
+      }
+    ],
+    "essential": true,
+    "image": "node:22-slim",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "jobenvprobe"
+      }
+    },
+    "mountPoints": [],
+    "name": "probe",
+    "portMappings": [],
+    "secrets": [
+      {
+        "name": "GATEWAY_LANE_CLIENT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/os-anomaly-watch/GATEWAY_LANE_CLIENT_SECRET"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

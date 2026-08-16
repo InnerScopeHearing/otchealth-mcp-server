@@ -1,0 +1,616 @@
+[
+  {
+    "cpu": 0,
+    "environment": [
+      {
+        "name": "FOUNDRY_ROUTER_DEPLOYMENT",
+        "value": "model-router"
+      },
+      {
+        "name": "MAIL_ARCHIVE_EWS_CLIENT_ID",
+        "value": "53e739d9-9b8c-4004-a389-703e46213710"
+      },
+      {
+        "name": "DD_AZURE_SUBSCRIPTION_ID",
+        "value": "55c84f6b-ef90-4259-a58b-50835cc4cab4"
+      },
+      {
+        "name": "AGENT_INBOX_STORAGE_ACCOUNT",
+        "value": "stotc55c84f6bef"
+      },
+      {
+        "name": "DD_VERSION",
+        "value": "g28f3d250r31769600682a1"
+      },
+      {
+        "name": "HEYGEN_OWNER_APPROVAL_AUDIENCE",
+        "value": "otchealth-heygen"
+      },
+      {
+        "name": "ENABLE_AGENTCORE_WEFUNDER_PUBLIC_READONLY",
+        "value": "true"
+      },
+      {
+        "name": "HEYGEN_APPROVAL_CALLBACK_URL",
+        "value": "https://mcp.otchealth.app/heygen/approval/callback"
+      },
+      {
+        "name": "SENTRY_ORG",
+        "value": "otchealth-inc"
+      },
+      {
+        "name": "WEBSEARCH_PROJECT_ENDPOINT",
+        "value": "https://otchealth-foundry.services.ai.azure.com/api/projects/otchealth-os"
+      },
+      {
+        "name": "SHOPIFY_SHOP",
+        "value": "hearingassist.myshopify.com"
+      },
+      {
+        "name": "FOUNDRY_EMBED_DEPLOYMENT",
+        "value": "text-embedding-3-large"
+      },
+      {
+        "name": "OPENSEARCH_ENDPOINT",
+        "value": "search-otchealth-brain-uqmq2jw23cv4yjnnxblxzb7nny.us-east-1.es.amazonaws.com"
+      },
+      {
+        "name": "RETRIEVAL_SHIELD_MODE",
+        "value": "report"
+      },
+      {
+        "name": "AWS_AGENTCORE_REGION",
+        "value": "us-east-1"
+      },
+      {
+        "name": "SHOPIFY_API_VERSION",
+        "value": "2026-04"
+      },
+      {
+        "name": "GRAPH_TENANT_ID",
+        "value": "9acb23d0-2448-4cd3-b26d-7eafecb76eaf"
+      },
+      {
+        "name": "DD_SERVICE",
+        "value": "gateway-mcp"
+      },
+      {
+        "name": "WEBSEARCH_SP_CLIENT_ID",
+        "value": "34a7326b-5ed0-4f6c-b5b4-483772a15a69"
+      },
+      {
+        "name": "DD_AZURE_RESOURCE_GROUP",
+        "value": "rg-otchealth-apps-prod"
+      },
+      {
+        "name": "LOG_LEVEL",
+        "value": "info"
+      },
+      {
+        "name": "ENABLE_HEYGEN_REFERENCE_LOOK_WRITES",
+        "value": "false"
+      },
+      {
+        "name": "DRY_RUN_DEFAULT",
+        "value": "true"
+      },
+      {
+        "name": "GRAPH_SENDER_EMAIL",
+        "value": "coo@otchealthmart.com"
+      },
+      {
+        "name": "AZURE_SEARCH_ENDPOINT",
+        "value": "https://otchealth-dataroom-s1.search.windows.net"
+      },
+      {
+        "name": "PORT",
+        "value": "8080"
+      },
+      {
+        "name": "READ_ONLY_MODE",
+        "value": "false"
+      },
+      {
+        "name": "ENABLE_WRITE_TOOLS",
+        "value": "true"
+      },
+      {
+        "name": "ENABLE_HIGH_RISK_TOOLS",
+        "value": "true"
+      },
+      {
+        "name": "GITHUB_APP_ID",
+        "value": "4072301"
+      },
+      {
+        "name": "ENABLE_HEYGEN_PROVIDER_WRITES",
+        "value": "true"
+      },
+      {
+        "name": "FOUNDRY_CHAT_DEPLOYMENT",
+        "value": "gpt-5.1"
+      },
+      {
+        "name": "FOUNDRY_ROUTER_ENDPOINT",
+        "value": "https://otchealth-router.cognitiveservices.azure.com/"
+      },
+      {
+        "name": "ENABLE_HEYGEN_VIDEO_AGENT_GENERATION",
+        "value": "false"
+      },
+      {
+        "name": "REVISION_STAMP",
+        "value": "phase5-1782869735927"
+      },
+      {
+        "name": "DD_SITE",
+        "value": "us3.datadoghq.com"
+      },
+      {
+        "name": "ENABLE_HEYGEN_METADATA_WRITES",
+        "value": "false"
+      },
+      {
+        "name": "DESCOPE_SCOPE_LANE_MAP",
+        "value": "{\"mcp:legal.read\": \"clo\", \"mcp:legal.personal.read\": \"clo-personal\", \"mcp:infra.admin\": \"cto\", \"mcp:finance.read\": \"cfo\", \"mcp:ops.admin\": \"coo\", \"mcp:revenue.read\": \"cro\", \"mcp:product.admin\": \"cpo\", \"mcp:compliance.read\": \"cco\", \"mcp:dev.write\": \"developer\"}"
+      },
+      {
+        "name": "NODE_ENV",
+        "value": "production"
+      },
+      {
+        "name": "FAQ_DEFLECT_MODE",
+        "value": "on"
+      },
+      {
+        "name": "CONTENT_SAFETY_ENDPOINT",
+        "value": "https://cs-otchealth.cognitiveservices.azure.com/"
+      },
+      {
+        "name": "COMPLIANCE_MODE",
+        "value": "off"
+      },
+      {
+        "name": "ENABLE_HEYGEN_VIDEO_AGENT_CHAT_WRITES",
+        "value": "false"
+      },
+      {
+        "name": "AZURE_COMMONS_STORAGE_ACCOUNT",
+        "value": "otchealthcommons"
+      },
+      {
+        "name": "COSMOS_DB",
+        "value": "agent-state"
+      },
+      {
+        "name": "WEBSEARCH_SP_TENANT_ID",
+        "value": "4ab58580-cc9c-49f7-b5c7-a77f84fdc270"
+      },
+      {
+        "name": "POSTHOG_HOST",
+        "value": "https://us.posthog.com"
+      },
+      {
+        "name": "GROUNDEDNESS_MODE",
+        "value": "report"
+      },
+      {
+        "name": "HEYGEN_APPROVAL_BROKER_URL",
+        "value": "https://otchealth-approval-broker.wonderfulpond-a1ddc412.eastus2.azurecontainerapps.io"
+      },
+      {
+        "name": "FOUNDRY_OPENAI_ENDPOINT",
+        "value": "https://otchealth-foundry.openai.azure.com/"
+      },
+      {
+        "name": "OAUTH_REDIRECT_URIS",
+        "value": "https://hyperagent.com/api/mcp-servers/callback,https://global.consent.azure-apim.net/redirect/cre2b-5fotchealth-20developer-20gateway-5f56b0585e3b24ea3a,https://global.consent.azure-apim.net/redirect/cre2b-5fotchealth-20gateway-20cfo-5f56b0585e3b24ea3a"
+      },
+      {
+        "name": "ENABLE_HEYGEN_TRANSLATION_WRITES",
+        "value": "false"
+      },
+      {
+        "name": "HEYGEN_OWNER_APPROVAL_SUBJECT",
+        "value": "matthew@otchealthmart.com"
+      },
+      {
+        "name": "OAUTH_DEFAULT_AGENT",
+        "value": "cto"
+      },
+      {
+        "name": "GOVERNANCE_MODE",
+        "value": "off"
+      },
+      {
+        "name": "ENABLE_HEYGEN_ASSET_WRITES",
+        "value": "false"
+      },
+      {
+        "name": "FLEET_MEDIC_AUTOMERGE",
+        "value": "true"
+      },
+      {
+        "name": "DOCINTEL_ENDPOINT",
+        "value": "https://otchealth-docintel-02e36.cognitiveservices.azure.com/"
+      },
+      {
+        "name": "FOUNDRY_HIGH_DEPLOYMENT",
+        "value": "gpt-5.4"
+      },
+      {
+        "name": "TOOL_CATALOG_CURATION_MODE",
+        "value": "curate-m365-only"
+      },
+      {
+        "name": "OPENSEARCH_REGION",
+        "value": "us-east-1"
+      },
+      {
+        "name": "N8N_BASE_URL",
+        "value": "https://automation.otchealth.app"
+      },
+      {
+        "name": "DESCOPE_PILOT_LANES",
+        "value": "clo,clo-personal,cto,cfo,coo,cro,cpo,cco,developer"
+      },
+      {
+        "name": "MAIL_ARCHIVE_EWS_TENANT_ID",
+        "value": "9acb23d0-2448-4cd3-b26d-7eafecb76eaf"
+      },
+      {
+        "name": "PUBLIC_BASE_URL",
+        "value": "https://mcp.otchealth.app"
+      },
+      {
+        "name": "ENABLE_HEYGEN_TTS_WRITES",
+        "value": "false"
+      },
+      {
+        "name": "GRAPH_DRIVE_USER",
+        "value": "matthew@innd.com"
+      },
+      {
+        "name": "MEMORY_AUTOSUPERSEDE_MODE",
+        "value": "suggest"
+      },
+      {
+        "name": "LLM_CACHE_MODE",
+        "value": "on"
+      },
+      {
+        "name": "GRAPH_CLIENT_ID",
+        "value": "6bc3b470-1ccd-46f2-a8ef-ab7ff039ef39"
+      },
+      {
+        "name": "ENABLE_HEYGEN_AVATAR_VIDEO_WRITES",
+        "value": "true"
+      },
+      {
+        "name": "SEARCH_BACKEND",
+        "value": "opensearch"
+      },
+      {
+        "name": "DESCOPE_PROJECT_ID",
+        "value": "P3G94xD2P1fl2GxusxmIsGIg6gRM"
+      },
+      {
+        "name": "HEYGEN_OWNER_APPROVAL_ISSUER",
+        "value": "https://approval.otchealth.app"
+      },
+      {
+        "name": "COSMOS_ENDPOINT",
+        "value": "https://cosmos-otc-agentstate-55c84.documents.azure.com:443/"
+      },
+      {
+        "name": "DD_ENV",
+        "value": "production"
+      },
+      {
+        "name": "WEBSEARCH_MODEL",
+        "value": "gpt-5.4"
+      },
+      {
+        "name": "SHIELD_MODE",
+        "value": "report"
+      },
+      {
+        "name": "GITHUB_APP_INSTALLATION_ID",
+        "value": "140764066"
+      },
+      {
+        "name": "CIO_WORKSPACE_ID",
+        "value": "193366"
+      }
+    ],
+    "essential": true,
+    "healthCheck": {
+      "command": [
+        "CMD-SHELL",
+        "curl -fsS http://127.0.0.1:8080/health || exit 1"
+      ],
+      "interval": 30,
+      "retries": 3,
+      "startPeriod": 30,
+      "timeout": 5
+    },
+    "image": "900915535335.dkr.ecr.us-east-1.amazonaws.com/otchealth-mcp-gateway:9642fe0918ed8f17aa2a47cba2bdc19f85af127c",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "gateway"
+      }
+    },
+    "mountPoints": [],
+    "name": "gateway",
+    "portMappings": [
+      {
+        "containerPort": 8080,
+        "hostPort": 8080,
+        "protocol": "tcp"
+      }
+    ],
+    "secrets": [
+      {
+        "name": "CIO_SITE_ID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/CIO_SITE_ID"
+      },
+      {
+        "name": "CIO_TRACK_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/CIO_TRACK_KEY"
+      },
+      {
+        "name": "CIO_APP_API_BEARER",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/CIO_APP_API_BEARER"
+      },
+      {
+        "name": "PERPLEXITY_CONNECTOR_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/PERPLEXITY_CONNECTOR_TOKEN"
+      },
+      {
+        "name": "ADMIN_REVOKE_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/ADMIN_REVOKE_TOKEN"
+      },
+      {
+        "name": "N8N_WEBHOOK_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/N8N_WEBHOOK_SECRET"
+      },
+      {
+        "name": "N8N_API_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/N8N_API_KEY"
+      },
+      {
+        "name": "CLOUDFLARE_API_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/CLOUDFLARE_API_TOKEN"
+      },
+      {
+        "name": "GRAPH_CLIENT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/GRAPH_CLIENT_SECRET"
+      },
+      {
+        "name": "NETLIFY_AUTH_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/NETLIFY_AUTH_TOKEN"
+      },
+      {
+        "name": "AZURE_COMMONS_STORAGE_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AZURE_COMMONS_STORAGE_KEY"
+      },
+      {
+        "name": "OAUTH_CLIENT_ID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/OAUTH_CLIENT_ID"
+      },
+      {
+        "name": "OAUTH_CLIENT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/OAUTH_CLIENT_SECRET"
+      },
+      {
+        "name": "OAUTH_TOKEN_SIGNING_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/OAUTH_TOKEN_SIGNING_SECRET"
+      },
+      {
+        "name": "AZURE_SEARCH_QUERY_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AZURE_SEARCH_QUERY_KEY"
+      },
+      {
+        "name": "OAUTH_CLIENTS",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/OAUTH_CLIENTS"
+      },
+      {
+        "name": "SENTRY_AUTH_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/SENTRY_AUTH_TOKEN"
+      },
+      {
+        "name": "REVENUECAT_API_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/REVENUECAT_API_KEY"
+      },
+      {
+        "name": "POSTHOG_PERSONAL_API_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/POSTHOG_PERSONAL_API_KEY"
+      },
+      {
+        "name": "DEPOT_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/DEPOT_TOKEN"
+      },
+      {
+        "name": "GITHUB_APP_PRIVATE_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/GITHUB_APP_PRIVATE_KEY"
+      },
+      {
+        "name": "TWILIO_ACCOUNT_SID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/TWILIO_ACCOUNT_SID"
+      },
+      {
+        "name": "TWILIO_AUTH_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/TWILIO_AUTH_TOKEN"
+      },
+      {
+        "name": "CONTENT_SAFETY_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/CONTENT_SAFETY_KEY"
+      },
+      {
+        "name": "DOCINTEL_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/DOCINTEL_KEY"
+      },
+      {
+        "name": "FOUNDRY_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/FOUNDRY_KEY"
+      },
+      {
+        "name": "COPILOT_AGENT_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/COPILOT_AGENT_TOKEN"
+      },
+      {
+        "name": "GITHUB_WEBHOOK_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/GITHUB_WEBHOOK_SECRET"
+      },
+      {
+        "name": "FOUNDRY_ROUTER_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/FOUNDRY_ROUTER_KEY"
+      },
+      {
+        "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/APPLICATIONINSIGHTS_CONNECTION_STRING"
+      },
+      {
+        "name": "SHOPIFY_ACCESS_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/SHOPIFY_ACCESS_TOKEN"
+      },
+      {
+        "name": "MIRO_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/MIRO_TOKEN"
+      },
+      {
+        "name": "STRIPE_SECRET_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/STRIPE_SECRET_KEY"
+      },
+      {
+        "name": "COSMOS_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/COSMOS_KEY"
+      },
+      {
+        "name": "AGENT_INBOX_STORAGE_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AGENT_INBOX_STORAGE_KEY"
+      },
+      {
+        "name": "POSTHOG_GATEWAYOPS_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/POSTHOG_GATEWAYOPS_KEY"
+      },
+      {
+        "name": "DD_METRICS_API_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/DD_METRICS_API_KEY"
+      },
+      {
+        "name": "DD_API_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/DD_API_KEY"
+      },
+      {
+        "name": "WEBSEARCH_SP_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/WEBSEARCH_SP_SECRET"
+      },
+      {
+        "name": "AZURE_LEGAL_STORAGE_ACCOUNT",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AZURE_LEGAL_STORAGE_ACCOUNT"
+      },
+      {
+        "name": "AZURE_LEGAL_STORAGE_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AZURE_LEGAL_STORAGE_KEY"
+      },
+      {
+        "name": "XERO_CLIENT_ID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/XERO_CLIENT_ID"
+      },
+      {
+        "name": "XERO_CLIENT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/XERO_CLIENT_SECRET"
+      },
+      {
+        "name": "XERO_RT_OTCHEALTH",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/XERO_RT_OTCHEALTH"
+      },
+      {
+        "name": "XERO_RT_INND",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/XERO_RT_INND"
+      },
+      {
+        "name": "XERO_RT_HEARINGASSIST",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/XERO_RT_HEARINGASSIST"
+      },
+      {
+        "name": "XERO_RT_PERSONAL",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/XERO_RT_PERSONAL"
+      },
+      {
+        "name": "AZURE_CFO_STORAGE_ACCOUNT",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AZURE_CFO_STORAGE_ACCOUNT"
+      },
+      {
+        "name": "AZURE_CFO_STORAGE_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AZURE_CFO_STORAGE_KEY"
+      },
+      {
+        "name": "MAIL_ARCHIVE_EWS_CLIENT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/MAIL_ARCHIVE_EWS_CLIENT_SECRET"
+      },
+      {
+        "name": "M365_DEVELOPER_MCP_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/M365_DEVELOPER_MCP_TOKEN"
+      },
+      {
+        "name": "M365_CTO_MCP_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/M365_CTO_MCP_TOKEN"
+      },
+      {
+        "name": "M365_CFO_MCP_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/M365_CFO_MCP_TOKEN"
+      },
+      {
+        "name": "M365_CLO_MCP_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/M365_CLO_MCP_TOKEN"
+      },
+      {
+        "name": "M365_COO_MCP_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/M365_COO_MCP_TOKEN"
+      },
+      {
+        "name": "M365_CRO_MCP_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/M365_CRO_MCP_TOKEN"
+      },
+      {
+        "name": "COPILOT_DEV_AGENT_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/COPILOT_DEV_AGENT_TOKEN"
+      },
+      {
+        "name": "CIO_FLY_SERVICE_ACCOUNT_TOKEN",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/CIO_FLY_SERVICE_ACCOUNT_TOKEN"
+      },
+      {
+        "name": "HEYGEN_OWNER_APPROVAL_PUBLIC_JWK",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/HEYGEN_OWNER_APPROVAL_PUBLIC_JWK"
+      },
+      {
+        "name": "HEYGEN_APPROVAL_CONTEXT_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/HEYGEN_APPROVAL_CONTEXT_SECRET"
+      },
+      {
+        "name": "HEYGEN_APPROVAL_HANDLE_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/HEYGEN_APPROVAL_HANDLE_SECRET"
+      },
+      {
+        "name": "HEYGEN_APPROVAL_CALLBACK_SECRET",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/HEYGEN_APPROVAL_CALLBACK_SECRET"
+      },
+      {
+        "name": "AWS_AGENTCORE_ACCESS_KEY_ID",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AWS_AGENTCORE_ACCESS_KEY_ID"
+      },
+      {
+        "name": "AWS_AGENTCORE_SECRET_ACCESS_KEY",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/gw/AWS_AGENTCORE_SECRET_ACCESS_KEY"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

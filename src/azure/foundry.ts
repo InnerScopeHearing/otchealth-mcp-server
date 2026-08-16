@@ -57,8 +57,9 @@ export class FoundryError extends Error {
 // Bounded + one retry: Foundry chat/embeddings calls are read-only inference requests (no
 // server-side state mutated by re-sending the same prompt/input), safe to repeat once on a
 // network blip / 429 / 5xx (see src/util/fetch-budget.ts). The retry is fully contained inside
-// fetchWithBudget; post() below still sees exactly one final Response and preserves its existing
-// error shape (FoundryError with the LAST observed status) whether or not a retry happened.
+// fetchWithBudget; postEmbeddings/postChat below still see exactly one final Response each and
+// preserve their existing error shape (FoundryError with the LAST observed status) whether or not
+// a retry happened.
 /**
  * ================== EMBEDDINGS PROVIDER (the Azure-exit escape hatch) ==================
  *
@@ -133,26 +134,6 @@ async function postEmbeddings<T>(target: EmbeddingsTarget, body: Record<string, 
   return data as T;
 }
 
-async function post<T>(url: string, key: string, body: unknown): Promise<T> {
-  const res = await fetchWithBudget(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'api-key': key },
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
-  }
-  if (res.status >= 400) {
-    const msg = (data as any)?.error?.message ?? `HTTP ${res.status}`;
-    throw new FoundryError(res.status, msg);
-  }
-  return data as T;
-}
-
 /** Embed a single string with text-embedding-3-large. Returns the vector, or null when unconfigured. */
 export async function embed(text: string): Promise<number[] | null> {
   const target = embeddingsTarget();
@@ -212,7 +193,133 @@ export function routerConfigured(): boolean {
 }
 
 /**
- * Chat completion on a credit-funded Foundry deployment (default gpt-5.1), or the Model Router.
+ * ================== CHAT PROVIDER (the second Azure-exit escape hatch) ==================
+ *
+ * The counterpart to embeddingsTarget() above, but for CHAT completions rather than embeddings --
+ * the other live Azure inference dependency. Every chat() caller in the gateway (llm_azure,
+ * deep-retrieval's plan/refine/synthesis, checkpoint's summary distillation, claims-check's
+ * compliance verdicts, auto-supersede's contradiction classifier) goes through this ONE function, so
+ * routing chat() itself through a provider switch moves every caller at once, with none of them
+ * needing to change.
+ *
+ * UNLIKE embeddings, there is no shared-vector-space constraint here: a chat completion is never
+ * compared against a precomputed store, so a provider switch cannot silently corrupt an index the
+ * way a wrong embedding model would. The risk here is narrower and different: MODEL EQUIVALENCE.
+ *
+ *   LLM_PROVIDER=foundry (default)  Azure Foundry. Byte-identical to every prior deploy.
+ *   LLM_PROVIDER=openai             api.openai.com, using OPENAI_API_KEY (already present above).
+ *
+ * THE TIER MAPPING (read before flipping this -- see the LLM_PROVIDER env comment for the summary):
+ *   'standard' -> OPENAI_CHAT_MODEL (default 'gpt-5.1')
+ *   'high'     -> OPENAI_HIGH_MODEL (default 'gpt-5.4')
+ *  These defaults treat FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT as the REAL underlying model
+ *  ids, not arbitrary Azure deployment labels -- the SAME assumption the embeddings path already
+ *  relies on for text-embedding-3-large (FOUNDRY_EMBED_DEPLOYMENT's value is sent verbatim as the
+ *  literal OpenAI `model` field in embeddingsTarget() above). That precedent is why the default
+ *  mapping is a same-model swap of endpoint + auth rather than an invented substitute. It has NOT,
+ *  however, been independently verified the way the embeddings model was (a live cosine-similarity
+ *  check proved the SAME vector space on both providers); no equivalent check exists for chat output
+ *  quality. Confirm the model ids are actually callable on api.openai.com, and spot-check output
+ *  quality, before trusting cost/quality parity after a flip.
+ *
+ *   'router'   -> NO CLEAN EQUIVALENT. The Azure Model Router (FOUNDRY_ROUTER_DEPLOYMENT) is an
+ *  Azure-only product: a proxy that dynamically picks the cheapest-sufficient backing model per
+ *  request. OpenAI's public API has no matching endpoint or concept, so chatTarget() does not invent
+ *  one. Instead it reuses THIS FILE'S OWN pre-existing "router not configured" fallback -- drop to
+ *  the 'standard' model -- the exact fallback chat() already applied before this change whenever
+ *  FOUNDRY_ROUTER_ENDPOINT/KEY were unset, regardless of provider. On LLM_PROVIDER=openai that
+ *  fallback is unconditional (there is no OpenAI router to ever "become configured"). This is a
+ *  judgement call, not a proven equivalence -- flag it to the CTO rather than treating router-tier
+ *  cost/quality behavior as settled after a flip.
+ *
+ * OPENAI_CHAT_MODEL/OPENAI_HIGH_MODEL are configurable (unlike the pinned embeddings model): a chat
+ * model swap cannot silently corrupt anything the way an embedding model swap can, so there is no
+ * reason to hard-pin it in code the way text-embedding-3-large is pinned above.
+ */
+export interface ChatTarget {
+  url: string;
+  headers: Record<string, string>;
+  /** Body field naming differs: Azure addresses the model by URL deployment, OpenAI by `model`. */
+  model: string | null;
+  /**
+   * The resolved model/deployment NAME on either path. Always populated (unlike `model`, which is
+   * body-only and null on the Azure path) -- used for the chat() response's `model` fallback and
+   * for the cache-affinity key, so a caller can always identify what was actually targeted.
+   */
+  resolvedName: string;
+}
+
+/**
+ * Resolve WHERE a chat() call for the given tier should go, honouring LLM_PROVIDER. Mirrors
+ * embeddingsTarget()'s shape and fail-open discipline: returns null when the active provider is
+ * unconfigured (missing endpoint/key), never throws.
+ */
+export function chatTarget(opts?: { tier?: 'standard' | 'high' | 'router'; deployment?: string }): ChatTarget | null {
+  const e = loadEnv();
+  const tier = opts?.tier;
+  if (e.LLM_PROVIDER === 'openai') {
+    const key = e.OPENAI_API_KEY || '';
+    if (!key) return null;
+    // No OpenAI equivalent for 'router' (see the section comment above) -- every tier here resolves
+    // to a concrete model, so an explicit opts.deployment override always applies. This differs from
+    // the Azure branch below, where the router step can still supersede an opts.deployment override
+    // once the router is reachable (pre-existing behavior, preserved as-is for that path).
+    const model = opts?.deployment || (tier === 'high' ? e.OPENAI_HIGH_MODEL : e.OPENAI_CHAT_MODEL);
+    return {
+      url: 'https://api.openai.com/v1/chat/completions',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      model,
+      resolvedName: model,
+    };
+  }
+  const c = cfg();
+  if (!c) return null;
+  // Verbatim pre-existing Azure resolution, moved here unchanged from chat() so the default
+  // (LLM_PROVIDER=foundry) path is byte-identical to every prior deploy. 'router' uses the Azure
+  // Model Router (auto-picks the cheapest-sufficient model); falls back to Foundry standard if the
+  // router isn't configured.
+  let ep = c.ep, key = c.key, deployment = opts?.deployment || (tier === 'high' ? c.high : c.chat);
+  if (tier === 'router') {
+    if (e.FOUNDRY_ROUTER_ENDPOINT && e.FOUNDRY_ROUTER_KEY) {
+      ep = e.FOUNDRY_ROUTER_ENDPOINT.replace(/\/+$/, '');
+      key = e.FOUNDRY_ROUTER_KEY;
+      deployment = e.FOUNDRY_ROUTER_DEPLOYMENT || 'model-router';
+    }
+  }
+  return {
+    url: `${ep}/openai/deployments/${deployment}/chat/completions?api-version=${API_VERSION}`,
+    headers: { 'Content-Type': 'application/json', 'api-key': key },
+    model: null,
+    resolvedName: deployment,
+  };
+}
+
+/** POST to a fully-formed chat target. Mirrors postEmbeddings's shape/error handling exactly. */
+async function postChat<T>(target: ChatTarget, body: Record<string, unknown>): Promise<T> {
+  const payload = target.model ? { ...body, model: target.model } : body;
+  const res = await fetchWithBudget(target.url, {
+    method: 'POST',
+    headers: target.headers,
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+  if (res.status >= 400) {
+    const msg = (data as { error?: { message?: string } })?.error?.message ?? `HTTP ${res.status}`;
+    throw new FoundryError(res.status, msg);
+  }
+  return data as T;
+}
+
+/**
+ * Chat completion, on whichever provider LLM_PROVIDER selects (see the section comment above):
+ * Foundry (default gpt-5.1 standard / gpt-5.4 high, or the Model Router) or OpenAI-direct. Callers
+ * are unaffected by which provider is active -- same signature, same return shape, same errors.
  * Non-streaming (a single awaited fetch -> full JSON body): callers can time the whole call
  * wall-clock (duration_ms), but can never derive a genuine time-to-first-token from this path. See
  * telemetry/gateway-ops.ts buildLatencyFields, which omits ttft_ms rather than faking it for
@@ -222,23 +329,20 @@ export async function chat(
   messages: ChatMessage[],
   opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean; deployment?: string; tier?: 'standard' | 'high' | 'router'; cacheKey?: string },
 ): Promise<{ text: string; usage?: unknown; model: string }> {
-  const c = cfg();
-  if (!c) throw new FoundryError(0, 'Foundry not configured (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY unset)');
-  // Resolve endpoint/key/deployment by tier. 'router' uses the Azure Model Router (auto-picks the
-  // cheapest-sufficient model); falls back to Foundry standard if the router isn't configured.
-  let ep = c.ep, key = c.key, deployment = opts?.deployment || (opts?.tier === 'high' ? c.high : c.chat);
-  if (opts?.tier === 'router') {
+  const target = chatTarget({ tier: opts?.tier, deployment: opts?.deployment });
+  if (!target) {
     const e = loadEnv();
-    if (e.FOUNDRY_ROUTER_ENDPOINT && e.FOUNDRY_ROUTER_KEY) {
-      ep = e.FOUNDRY_ROUTER_ENDPOINT.replace(/\/+$/, '');
-      key = e.FOUNDRY_ROUTER_KEY;
-      deployment = e.FOUNDRY_ROUTER_DEPLOYMENT || 'model-router';
-    }
+    throw new FoundryError(
+      0,
+      e.LLM_PROVIDER === 'openai'
+        ? 'OpenAI chat not configured (OPENAI_API_KEY unset)'
+        : 'Foundry not configured (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY unset)',
+    );
   }
-  const url = `${ep}/openai/deployments/${deployment}/chat/completions?api-version=${API_VERSION}`;
   // gpt-5 / o-series reasoning models require max_completion_tokens (not max_tokens) and reject a
   // custom temperature (only the default is allowed). Use the new param and only pass temperature
-  // when a caller explicitly sets it (kept for older gpt-4.x deployments).
+  // when a caller explicitly sets it (kept for older gpt-4.x deployments, and for whatever model
+  // OPENAI_CHAT_MODEL/OPENAI_HIGH_MODEL name on the OpenAI path).
   const body: Record<string, unknown> = {
     messages,
     max_completion_tokens: opts?.maxTokens ?? 1024,
@@ -246,9 +350,10 @@ export async function chat(
   if (typeof opts?.temperature === 'number') body.temperature = opts.temperature;
   if (opts?.jsonMode) body.response_format = { type: 'json_object' };
   // Cache-affinity routing for Azure OpenAI automatic prompt caching (see promptCacheKey). Additive
-  // and safe: `user` is ignored where unsupported and never changes the completion.
-  body.user = opts?.cacheKey || promptCacheKey(deployment, messages);
-  const j = await post<{ choices?: Array<{ message?: { content?: string } }>; usage?: unknown; model?: string }>(url, key, body);
-  // The router echoes which underlying model it picked in `model`; surface that.
-  return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: j.model || deployment };
+  // and safe on both providers: `user` is ignored where unsupported and never changes the completion.
+  body.user = opts?.cacheKey || promptCacheKey(target.resolvedName, messages);
+  const j = await postChat<{ choices?: Array<{ message?: { content?: string } }>; usage?: unknown; model?: string }>(target, body);
+  // The router (or the API) echoes which underlying model actually answered in `model`; surface
+  // that, falling back to the resolved name (Azure deployment or OpenAI model id) when it is absent.
+  return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: j.model || target.resolvedName };
 }

@@ -1,0 +1,46 @@
+[
+  {
+    "command": [
+      "apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1; git clone --depth 1 https://github.com/innerscopehearing/otchealth-claude-tools /app && cd /app && node skills/fleet-backup/backup.mjs run"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh",
+      "-c"
+    ],
+    "environment": [
+      {
+        "name": "BACKUP_STORAGE_ACCOUNT",
+        "value": "stotc55c84f6bef"
+      },
+      {
+        "name": "BACKUP_CONTAINER",
+        "value": "ledger-backup"
+      },
+      {
+        "name": "GATEWAY_BASE_URL",
+        "value": "https://mcp.otchealth.app"
+      },
+      {
+        "name": "AZURE_KEYVAULT_NAME",
+        "value": "kv-otc-55c84f6bef"
+      }
+    ],
+    "essential": true,
+    "image": "node:20-bookworm-slim",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "fleet-backup"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

@@ -1,0 +1,39 @@
+[
+  {
+    "command": [
+      "git clone --depth 1 https://github.com/innerscopehearing/otchealth-claude-tools /app && cd /app && for p in $KEEPER_PROVIDERS; do echo \"== refresh $p ==\"; node skills/token-keeper/keeper.mjs refresh --provider $p --force || true; done; echo '== cred-health =='; node skills/datadog/cred-health.mjs || true"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh",
+      "-c"
+    ],
+    "environment": [
+      {
+        "name": "KEEPER_PROVIDERS",
+        "value": "quickbooks mercury plaid"
+      }
+    ],
+    "essential": true,
+    "image": "node@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "token-keeper"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [
+      {
+        "name": "GCP_CLAUDE_DRIVER_SA_JSON",
+        "valueFrom": "arn:aws:ssm:us-east-1:900915535335:parameter/otchealth/job/token-keeper/GCP_CLAUDE_DRIVER_SA_JSON"
+      }
+    ],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

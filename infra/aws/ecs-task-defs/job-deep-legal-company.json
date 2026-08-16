@@ -1,0 +1,46 @@
+[
+  {
+    "command": [
+      "/app/setup/with-heartbeat.sh",
+      "deep-legal-company",
+      "--",
+      "/bin/sh",
+      "/app/skills/doc-indexer/job/deep-pass.sh",
+      "legal",
+      "--concurrency",
+      "16",
+      "--max-minutes",
+      "230"
+    ],
+    "cpu": 0,
+    "entryPoint": [
+      "/bin/sh"
+    ],
+    "environment": [
+      {
+        "name": "AZURE_UAMI_CLIENT_ID",
+        "value": "01b82248-86b1-4237-a8f3-8317cf9d5f33"
+      },
+      {
+        "name": "AZURE_KEYVAULT_NAME",
+        "value": "kv-otc-55c84f6bef"
+      }
+    ],
+    "essential": true,
+    "image": "900915535335.dkr.ecr.us-east-1.amazonaws.com/doc-indexer:latest",
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/otchealth",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "deep-legal-company"
+      }
+    },
+    "mountPoints": [],
+    "name": "job",
+    "portMappings": [],
+    "secrets": [],
+    "systemControls": [],
+    "volumesFrom": []
+  }
+]

@@ -11,7 +11,7 @@ process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
 process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 
-const { embedBatch, foundryConfigured, promptCacheKey } = await import('./foundry.js');
+const { embedBatch, foundryConfigured, promptCacheKey, chat, chatTarget } = await import('./foundry.js');
 
 test('promptCacheKey: stable across calls sharing a system prefix, and independent of user content', () => {
   const sys = { role: 'system' as const, content: 'You are a precise summarizer.' };
