@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { revisionInfo } from './revision.js';
 import { getRevocationState } from '../auth/revocation-store.js';
 import { toolCount } from '../catalog/catalog.js';
 import { validateAdminToken } from '../auth/bearer.js';
@@ -63,7 +64,10 @@ export function buildHealthPayload() {
 }
 
 export function registerHealth(app: FastifyInstance): void {
-  app.get('/health', async () => buildHealthPayload());
+  // The revision block answers "which image is serving this call?" -- see revision.ts. It is
+  // awaited here rather than in buildHealthPayload() so every existing synchronous caller of that
+  // function (tests, the deep-health route) keeps its current signature.
+  app.get('/health', async () => ({ ...buildHealthPayload(), revision: await revisionInfo() }));
 
   // GET /health/deep: bounded reachability probe of every CONFIGURED downstream dependency
   // (Cosmos, Azure AI Search, Foundry). Distinct from /health: this route

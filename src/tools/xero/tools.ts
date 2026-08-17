@@ -1259,6 +1259,10 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         body: z.unknown(),
         day_limit_remaining: z.string().nullable().optional(),
         error: z.string().optional(),
+        // Declared so zod does not STRIP them: an undeclared field never reaches the caller, which
+        // would silently recreate the exact "bare error code, no detail" problem these fields fix.
+        refusal_detail: z.string().optional(),
+        missing: z.array(z.object({ item: z.number(), missing: z.array(z.string()) })).optional(),
       },
       handler: async (input, ctx) => {
         if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_request', ctx.callerAgent);
@@ -1320,7 +1324,23 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
                   'Every create on this collection needs a natural key so existence can be checked first. ' +
                   'Add a Reference, or pass allow_duplicate:true to record a deliberate second object.';
               return {
-                data: { org: input.org, method: input.method, api, path, body: null, error: 'unverifiable_create' },
+                // `refusal_detail` and `missing` are in the STRUCTURED payload, not only in the prose
+                // summary (2026-08-17). The CFO ran a correct A/B test -- a complete key versus one
+                // missing its Narration -- and reported both as "byte-identical bare
+                // unverifiable_create with no field named". They were reading `data`, where the two
+                // ARE identical; the discriminator existed only in `summary`, which their client does
+                // not surface. A refusal that cannot be told apart from a different refusal by the
+                // client receiving it is not actionable, however good the prose is.
+                data: {
+                  org: input.org,
+                  method: input.method,
+                  api,
+                  path,
+                  body: null,
+                  error: 'unverifiable_create',
+                  refusal_detail: detail,
+                  missing: mjGaps.length ? mjGaps.map((g) => ({ item: g.i, missing: g.gaps })) : undefined,
+                },
                 summary: `REFUSED (cannot verify this create is not a duplicate): ${detail}`,
               };
             }
@@ -1355,7 +1375,17 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
             }
             if (found.length) {
               return {
-                data: { org: input.org, method: input.method, api, path, body: null, error: 'duplicate_create_blocked' },
+                data: {
+                  org: input.org,
+                  method: input.method,
+                  api,
+                  path,
+                  body: null,
+                  error: 'duplicate_create_blocked',
+                  // Same reasoning as unverifiable_create above: the existing object IDs are the
+                  // actionable part of this refusal and must not live only in prose.
+                  refusal_detail: found.join(' | '),
+                },
                 summary:
                   `REFUSED (would create duplicate object(s) in ${input.org}): ${found.join(' | ')}. ` +
                   'VOIDED and DELETED objects still block: re-creating against a voided copy is exactly how one ' +
