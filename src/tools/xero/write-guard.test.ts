@@ -235,3 +235,55 @@ test('readExisting surfaces the total for manualjournals and leaves it null else
   const inv = { Invoices: [{ InvoiceID: 'inv-1', Status: 'AUTHORISED' }] };
   assert.deepEqual(readExisting('invoices', inv), [{ id: 'inv-1', status: 'AUTHORISED', total: null }]);
 });
+
+// ── unwrapItems: a bare entity is not a wrapper (2026-08-17, CFO reproduction) ───────────────────
+// The old implementation returned the FIRST array-valued property, so a manual journal sent bare as
+// `{Narration, Date, JournalLines:[...]}` had its LINE ITEMS unwrapped as if they were the journals.
+// The key check then looked for a Narration on each LINE, found none, and refused a valid create as
+// `unverifiable_create`. This was never manual-journal-specific: any bare entity with a nested array
+// (an invoice's LineItems, for instance) hit it.
+test('unwrapItems: a bare entity with a nested array is ONE item, not its line items', () => {
+  const bare = { Narration: 'n', Date: '2022-01-31', JournalLines: [{ LineAmount: 1 }, { LineAmount: -1 }] };
+  const items = unwrapItems(bare, 'manualjournals');
+  assert.equal(items.length, 1, 'the journal itself, not its two lines');
+  assert.equal(items[0].Narration, 'n');
+  // And the key must therefore build, which is the behaviour the CFO could not get.
+  assert.equal(naturalKeyOf(items[0], 'manualjournals')?.kind, 'manual_journal');
+});
+
+test('unwrapItems: the collection-named wrapper still wins, and so does a single-key wrapper', () => {
+  const wrapped = { ManualJournals: [{ Narration: 'a' }, { Narration: 'b' }] };
+  assert.equal(unwrapItems(wrapped, 'manualjournals').length, 2);
+  // Same shape with the collection NOT supplied: a single-key object is still a wrapper.
+  assert.equal(unwrapItems(wrapped).length, 2);
+  // An invoice carrying LineItems must not unwrap to its lines either.
+  const inv = { Reference: 'QBO-Bill-1', LineItems: [{ LineAmount: 5 }] };
+  assert.deepEqual(unwrapItems(inv, 'invoices'), [inv]);
+});
+
+test('unwrapItems: a bare ARRAY body is accepted', () => {
+  assert.equal(unwrapItems([{ Narration: 'a' }, { Narration: 'b' }], 'manualjournals').length, 2);
+});
+
+// ── parseXeroDate: accept the unambiguous forms, REFUSE the ambiguous one ────────────────────────
+test('parseXeroDate accepts unpadded ISO, Date instances and epoch numbers', () => {
+  assert.deepEqual(parseXeroDate('2022-1-31'), { y: 2022, m: 1, d: 31 }, 'a leading zero is not a safety property');
+  assert.deepEqual(parseXeroDate(new Date(Date.UTC(2022, 0, 31))), { y: 2022, m: 1, d: 31 });
+  assert.deepEqual(parseXeroDate(Date.UTC(2022, 0, 31)), { y: 2022, m: 1, d: 31 });
+});
+
+test('parseXeroDate REFUSES a slash date, deliberately, because it is ambiguous', () => {
+  // 01/02/2022 is 2 January in the US and 1 February elsewhere. This value is half a
+  // duplicate-detection key, so guessing means probing for the WRONG journal, finding nothing, and
+  // letting a duplicate through -- the exact failure the guard exists to prevent. Refusing loudly
+  // and naming the accepted format is the safer trade.
+  assert.equal(parseXeroDate('01/02/2022'), null);
+  assert.equal(parseXeroDate('01/31/2022'), null);
+});
+
+test('the refusal NAMES the accepted date formats, so a slash date is self-diagnosable', () => {
+  const gaps = manualJournalKeyGaps({ Narration: 'n', Date: '01/31/2022', JournalLines: [{ LineAmount: 1 }] });
+  assert.equal(gaps.length, 1);
+  assert.match(gaps[0], /YYYY-MM-DD/);
+  assert.match(gaps[0], /slash date/, 'the caller cannot guess the cause from "missing Date"');
+});
