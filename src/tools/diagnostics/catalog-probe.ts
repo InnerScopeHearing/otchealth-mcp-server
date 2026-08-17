@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { revisionInfo } from '../../server/revision.js';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { allTools } from '../../catalog/catalog.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../../server/request-context.js';
@@ -39,6 +40,20 @@ export function registerCatalogProbe(server: McpServer, callerHash: CallerHashPr
       inputShape: {},
       outputShape: {
         build_tag: z.string(),
+        // THE REVISION DISCRIMINATOR (2026-08-17). `build_tag` above is a HAND-EDITED constant and
+        // `tool_registry_count` does not move for a bug fix, so neither can answer "which image is
+        // serving this call?". Two cycles were lost to a dispute where each side's test disagreed
+        // and nobody could prove they were hitting the same build. These fields are derived from the
+        // container's own metadata at runtime and cannot drift. See server/revision.ts.
+        revision: z.object({
+          image: z.string().nullable(),
+          image_tag: z.string().nullable(),
+          image_digest: z.string().nullable(),
+          task_definition: z.string().nullable(),
+          started_at: z.string(),
+          uptime_seconds: z.number(),
+          source_error: z.string().nullable(),
+        }),
         tool_registry_count: z.number(),
         known_tools_present: z.record(z.boolean()),
         request_context: z.object({
@@ -68,6 +83,7 @@ export function registerCatalogProbe(server: McpServer, callerHash: CallerHashPr
 
         const data = {
           build_tag: BUILD_TAG,
+          revision: await revisionInfo(),
           tool_registry_count: registered.length,
           known_tools_present: knownToolsPresent,
           request_context: {
