@@ -331,7 +331,22 @@ export async function getOrgAccess(org: XeroOrg, opts: { forceRefresh?: boolean;
         bootstrapHash: bHash,
       });
       dead.status = 'dead';
-      dead.deadReason = `invalid_grant (chain consumed elsewhere or expired)`;
+      // REPORT THE VENDOR'S ERROR, NOT A GUESS ABOUT ITS CAUSE.
+      //
+      // This line used to read `invalid_grant (chain consumed elsewhere or expired)`. Xero returns a
+      // bare `invalid_grant`; the parenthetical was OUR hypothesis, baked into a log message years
+      // before the incident it was read during. On 2026-08-17 the CFO reasonably took it as a
+      // finding and escalated a second-consumer-burning-tokens root cause -- then had to retract it.
+      // `invalid_grant` is generic: it covers rotation-consumption, 60-day idle expiry, org-side
+      // disconnection, revocation, and the app falling out of good standing. The cause CANNOT be
+      // read off the error code, so a tool that states one manufactures a false lead, and a false
+      // lead costs more than no lead.
+      //
+      // What actually distinguished the causes was evidence this string could never carry: ALL FOUR
+      // orgs died at once, including one that had been idle. That is an app-level event, not four
+      // independent token races. The remediation is identical either way, so nothing is lost by
+      // dropping the causal claim -- only the wrong inference is.
+      dead.deadReason = `invalid_grant (as returned by Xero; cause not determinable from this code)`;
       try {
         if (etag) {
           const res = await deps.replace(CACHE_COLL, id, id, dead, etag);

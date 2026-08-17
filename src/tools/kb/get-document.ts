@@ -58,6 +58,41 @@ export function sidecarPathFor(path: string): string {
 }
 
 /**
+ * Accept the path form the SEARCH TOOLS EMIT, not only the container-relative form this store wants.
+ *
+ * THE DEFECT THIS CLOSES (CFO escalation 2026-08-17: "10 of 10 attempts failed"). The finance search
+ * indexes store each document's path FULLY QUALIFIED, as `<account>/<container>/<blob path>` --
+ * e.g. `otchealthcfodata/cfo-source-docs/mail-archive-attachments/.../TrialBalance_2019.xlsx`.
+ * fetchBlobRaw takes a path RELATIVE TO THE CONTAINER. So a path copied verbatim out of a
+ * kb_search_privileged hit -- the single most natural thing a caller can do, and exactly what the
+ * two tools' descriptions invite -- resolved to
+ * `cfo-source-docs/otchealthcfodata/cfo-source-docs/...` and could NEVER be found.
+ *
+ * That is why the failure was 10-of-10 rather than intermittent: the two tools speak different path
+ * dialects, so the round-trip is broken by construction. It is not a caller guessing paths.
+ *
+ * The cost was not a missing feature. The documents were present and readable the whole time --
+ * verified live: stripping the prefix returns the file with pages=1. The CFO recorded FY2022 figures
+ * as "characterised" rather than derived BECAUSE the evidence appeared unreachable. A retrieval tool
+ * that answers `found:false` for a document that exists produces false negatives, and a false
+ * negative in a fiscal close reads as a finding.
+ *
+ * Deliberately an EXACT-PREFIX strip, not "drop the first two segments": a blindly-positional strip
+ * would silently mangle a legitimately container-relative path whose first two segments happen to
+ * look like an account and container. Only the known `<account>/<container>/` for THIS store is
+ * removed, so every path that already worked keeps working byte-identically.
+ */
+export function toContainerRelative(path: string, account: string, container: string): string {
+  const qualified = `${account}/${container}/`;
+  if (path.startsWith(qualified)) return path.slice(qualified.length);
+  // Also tolerate a container-qualified path with the account omitted, which is how some callers
+  // and older index rows shorten it.
+  const containerOnly = `${container}/`;
+  if (path.startsWith(containerOnly)) return path.slice(containerOnly.length);
+  return path;
+}
+
+/**
  * Is this buffer a binary file rather than readable text?
  *
  * THE DEFECT THIS CLOSES: the handler used to do `res.buf.toString('utf8')` unconditionally. Handing
@@ -157,10 +192,14 @@ export function registerKbGetDocument(server: McpServer, callerHash: CallerHashP
         if (!env.AZURE_CFO_STORAGE_KEY) {
           return { data: { ...empty, error: 'unconfigured' }, summary: 'Finance store not configured (AZURE_CFO_STORAGE_KEY unset).' };
         }
+        // Normalise the SEARCH-EMITTED form (<account>/<container>/<blob path>) to the
+        // container-relative form this store takes. See toContainerRelative: without this, a path
+        // copied verbatim out of a kb_search_privileged hit can never resolve.
+        const relPath = toContainerRelative(path, env.AZURE_CFO_STORAGE_ACCOUNT, CONTAINER);
         try {
-          const res = await fetchBlobRaw(env.AZURE_CFO_STORAGE_ACCOUNT, env.AZURE_CFO_STORAGE_KEY, CONTAINER, path);
+          const res = await fetchBlobRaw(env.AZURE_CFO_STORAGE_ACCOUNT, env.AZURE_CFO_STORAGE_KEY, CONTAINER, relPath);
           if (!res.found || !res.buf) {
-            return { data: empty, summary: `No blob at ${CONTAINER}/${path}. Tip: text sidecars live under _TEXT/ and end in .txt.` };
+            return { data: empty, summary: `No blob at ${CONTAINER}/${relPath}. Tip: text sidecars live under _TEXT/ and end in .txt.` };
           }
           if (res.buf.length > MAX_BYTES) {
             return {
@@ -171,10 +210,10 @@ export function registerKbGetDocument(server: McpServer, callerHash: CallerHashP
           // A binary source blob (PDF/DOCX/scanned statement) is NOT readable content. Serve its
           // extracted-text sidecar instead of decoding the bytes as UTF-8 and calling it a document.
           let buf = res.buf;
-          let servedPath = path;
+          let servedPath = relPath;
           let viaSidecar = false;
           if (looksBinary(buf) && !path.startsWith(TEXT_PREFIX)) {
-            const sidecar = sidecarPathFor(path);
+            const sidecar = sidecarPathFor(relPath);
             const alt = await fetchBlobRaw(env.AZURE_CFO_STORAGE_ACCOUNT, env.AZURE_CFO_STORAGE_KEY, CONTAINER, sidecar);
             if (alt.found && alt.buf && !looksBinary(alt.buf)) {
               buf = alt.buf;
