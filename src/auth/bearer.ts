@@ -29,10 +29,31 @@ export interface AuthContext {
   m365_static_auth: boolean;
 }
 
+/**
+ * Extract the token from an `Authorization: Bearer <token>` header.
+ *
+ * DELIBERATELY REGEX-FREE (2026-08-17, CodeQL js/polynomial-redos, high). The previous form was
+ * `/^Bearer\s+(.+)$/i`, where `\s+` and `(.+)` can BOTH match a space. That ambiguity makes the
+ * match polynomial: `"Bearer " + " ".repeat(n)` forces the engine to try every split point before
+ * failing. This runs on a fully UNAUTHENTICATED path against a header an attacker controls
+ * completely, so it is a real (if modest) DoS vector rather than a theoretical one -- and the
+ * auth_rejected diagnostics in this same change call extractBearer a SECOND time per rejected
+ * request, which doubled the cost and is what surfaced the alert.
+ *
+ * The character-wise form below is linear and preserves the old semantics exactly: the literal
+ * "Bearer" (case-insensitive), then one or more whitespace characters, then the token, trimmed.
+ * The only regex left is a single-character test, which cannot backtrack.
+ */
 function extractBearer(authHeader: string | undefined): string | null {
   if (!authHeader) return null;
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  return m && m[1] ? m[1].trim() : null;
+  const SCHEME = 'bearer';
+  if (authHeader.length <= SCHEME.length) return null;
+  if (authHeader.slice(0, SCHEME.length).toLowerCase() !== SCHEME) return null;
+  const rest = authHeader.slice(SCHEME.length);
+  // The scheme must be followed by whitespace, or "BearerXYZ" would parse as the token "XYZ".
+  if (!/^\s/.test(rest)) return null;
+  const token = rest.trim();
+  return token || null;
 }
 
 /**
