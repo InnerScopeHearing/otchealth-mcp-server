@@ -66,6 +66,8 @@ import {
   isCreate,
   unwrapItems,
   naturalKeyOf,
+  manualJournalKeyGaps,
+  manualJournalMatches,
   findAccountCodeViolations,
   existsFilterFor,
   readExisting,
@@ -1296,15 +1298,30 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
           if (isCreate(input.method, path) && !input.allow_duplicate) {
             const collection = collectionOf(path);
             const items = unwrapItems(input.body);
-            const keys = items.map(naturalKeyOf);
+            const keys = items.map((item) => naturalKeyOf(item, collection));
             if (!items.length || keys.some((k) => k === null)) {
-              return {
-                data: { org: input.org, method: input.method, api, path, body: null, error: 'unverifiable_create' },
-                summary:
-                  `REFUSED (cannot verify this create is not a duplicate): ${items.length} item(s), ` +
+              // A ManualJournal has no Reference/InvoiceNumber/CreditNoteNumber and never can, so
+              // the generic "add a Reference" advice is unactionable there. Name the missing parts
+              // of the Narration+Date+Total key instead -- a refusal the caller can actually fix.
+              const mjGaps =
+                collection === 'manualjournals'
+                  ? items
+                      .map((item, i) => ({ i, gaps: manualJournalKeyGaps(item) }))
+                      .filter((g) => g.gaps.length)
+                  : [];
+              const detail = mjGaps.length
+                ? `${mjGaps.length} manual journal(s) lack a complete Narration+Date+Total key: ` +
+                  mjGaps.map((g) => `item[${g.i}] missing ${g.gaps.join(' + ')}`).join('; ') +
+                  '. A ManualJournal has no Reference field, so Narration + Date + Total IS its natural key ' +
+                  '(the same key our duplicate census grouped on when it found 17 duplicate journal groups). ' +
+                  'Supply all three and resend.'
+                : `${items.length} item(s), ` +
                   `${keys.filter((k) => k === null).length} without a Reference/InvoiceNumber/CreditNoteNumber. ` +
                   'Every create on this collection needs a natural key so existence can be checked first. ' +
-                  'Add a Reference, or pass allow_duplicate:true to record a deliberate second object.',
+                  'Add a Reference, or pass allow_duplicate:true to record a deliberate second object.';
+              return {
+                data: { org: input.org, method: input.method, api, path, body: null, error: 'unverifiable_create' },
+                summary: `REFUSED (cannot verify this create is not a duplicate): ${detail}`,
               };
             }
             const found: string[] = [];
@@ -1322,7 +1339,13 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
                     'unverifiable write is refused rather than risked. Retry, or pass allow_duplicate:true.',
                 };
               }
-              const existing = readExisting(collection, probe.body);
+              // Narration+Date narrowed the candidates server-side; Total decides. Without this
+              // refine, two legitimately distinct journals sharing a narration on the same date
+              // (a recurring accrual, say) would block each other.
+              const existing =
+                key.kind === 'manual_journal'
+                  ? readExisting(collection, probe.body).filter((x) => manualJournalMatches(x.total, key.total))
+                  : readExisting(collection, probe.body);
               if (blocksCreate(existing.map((x) => x.status))) {
                 found.push(
                   `${key.field}="${key.value}" already exists as ${existing.length} object(s): ` +

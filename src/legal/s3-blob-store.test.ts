@@ -185,3 +185,49 @@ test('S3 requires x-amz-content-sha256, and it must be SIGNED', async () => {
   assert.ok(lower['x-amz-content-sha256'], 'header present');
   assert.match(String(lower['authorization']), /SignedHeaders=[^,]*x-amz-content-sha256/, 'and signed');
 });
+
+// ── Key encoding: exactly once, and via the signer's own canonicaliser ───────────────────────────
+// THE BUG THIS PINS (2026-08-17): the path was pre-encoded with encodeURIComponent and the result
+// was ALSO handed to signRequest, which canonicalises internally. A space therefore travelled as
+// `%20` on the wire but `%2520` inside the signed canonical request. S3 rejected the signature with
+// 403, and the 403 branch reports `found:false` -- so every object key containing a space was
+// silently unreadable while reporting as ABSENT. ~11 finance documents were written up as a "data
+// coverage gap" on that basis; all of them existed. Keys needing no encoding were unaffected, which
+// is why it survived so long.
+//
+// encodeURIComponent was also the wrong encoder even applied once: it leaves `!*'()` raw, while
+// AWS's canonical form requires them percent-encoded, and real filenames here contain parentheses.
+async function urlFor(path: string): Promise<string> {
+  let seen = '';
+  await withStubbedFetch(
+    (async (url: string | URL | Request) => {
+      seen = String(url);
+      return new Response('x', { status: 200, headers: { 'content-type': 'application/octet-stream' } });
+    }) as unknown as typeof fetch,
+    () => fetchBlobFromS3('otchealthcfodata', 'cfo-source-docs', path),
+  );
+  return seen;
+}
+
+test('a key containing SPACES is encoded once (%20), never double-encoded (%2520)', async () => {
+  const url = await urlFor('INND/FinanceTeam/Accounts Payable/INND/INND BANK BREAKDOWN.xlsx');
+  assert.equal(url.includes('%2520'), false, 'double-encoded: the signature will not match and S3 answers 403');
+  assert.ok(url.includes('Accounts%20Payable'), 'space should be a single %20');
+  assert.ok(url.includes('INND%20BANK%20BREAKDOWN.xlsx'));
+  // '/' stays a separator -- encoding it would look for a key with a literal %2F in its name.
+  assert.ok(url.includes('/otchealthcfodata/cfo-source-docs/INND/FinanceTeam/'));
+});
+
+test('AWS-reserved characters encodeURIComponent leaves raw are encoded too', async () => {
+  // Parentheses appear in real keys ("... (002) ..."), and '#' in the audit-item filenames.
+  const url = await urlFor('INND/x (002) y/#5.2 HA incomplete.xlsx');
+  assert.ok(url.includes('%28002%29'), 'parentheses must be percent-encoded for the canonical form');
+  assert.ok(url.includes('%235.2'), "'#' must be percent-encoded or it truncates the URL as a fragment");
+  assert.equal(url.includes('%2523'), false, 'still exactly once');
+});
+
+test('a key needing no encoding is unchanged (the case that always worked, kept working)', async () => {
+  const url = await urlFor('INND/_KNOWLEDGE-BASE/CFO_PROJECT_MEMORY.md');
+  assert.ok(url.endsWith('/otchealthcfodata/cfo-source-docs/INND/_KNOWLEDGE-BASE/CFO_PROJECT_MEMORY.md'));
+  assert.equal(url.includes('%'), false);
+});

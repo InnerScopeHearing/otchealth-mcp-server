@@ -121,7 +121,22 @@ async function listShared(): Promise<string[]> {
     let u = `https://${c.account}.blob.core.windows.net/${CONTAINER}?restype=container&comp=list&prefix=${encodeURIComponent(SHARED_PREFIX)}&${sas}`;
     if (marker) u += `&marker=${encodeURIComponent(marker)}`;
     const r = await fetch(u);
-    if (!r.ok) break;
+    // A 404 means the container genuinely does not exist yet -- an empty shared feed is the correct
+    // answer. ANY OTHER failure is not: `break` here used to return the accumulator as a normal,
+    // successful result, so an expired SAS (these are minted for 1 hour), a rotated storage key, or
+    // a transient 5xx produced a confident "no agent has recorded anything" instead of an error.
+    //
+    // That answer is consumed by memory_team, wake, memory_recall, memory_pack, entity-lookup and
+    // the RETRACTION filter -- so the failure mode was an agent starting a session believing the
+    // rest of the fleet had recorded nothing, and retracted beliefs resurfacing as current truth.
+    // putText() 20 lines above already throws on !r.ok; this is the same store and gets the same
+    // treatment. Failing loudly is strictly better than a false empty here.
+    if (r.status === 404) break;
+    if (!r.ok) {
+      throw new Error(
+        `commons list ${r.status} (refusing to report an empty shared feed as success): ${(await r.text()).slice(0, 160)}`,
+      );
+    }
     const xml = await r.text();
     for (const m of xml.matchAll(/<Name>([^<]+)<\/Name>/g)) out.push(m[1]);
     marker = (xml.match(/<NextMarker>([^<]+)<\/NextMarker>/) || [])[1] || '';

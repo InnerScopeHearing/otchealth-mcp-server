@@ -29,10 +29,31 @@ export interface AuthContext {
   m365_static_auth: boolean;
 }
 
+/**
+ * Extract the token from an `Authorization: Bearer <token>` header.
+ *
+ * DELIBERATELY REGEX-FREE (2026-08-17, CodeQL js/polynomial-redos, high). The previous form was
+ * `/^Bearer\s+(.+)$/i`, where `\s+` and `(.+)` can BOTH match a space. That ambiguity makes the
+ * match polynomial: `"Bearer " + " ".repeat(n)` forces the engine to try every split point before
+ * failing. This runs on a fully UNAUTHENTICATED path against a header an attacker controls
+ * completely, so it is a real (if modest) DoS vector rather than a theoretical one -- and the
+ * auth_rejected diagnostics in this same change call extractBearer a SECOND time per rejected
+ * request, which doubled the cost and is what surfaced the alert.
+ *
+ * The character-wise form below is linear and preserves the old semantics exactly: the literal
+ * "Bearer" (case-insensitive), then one or more whitespace characters, then the token, trimmed.
+ * The only regex left is a single-character test, which cannot backtrack.
+ */
 function extractBearer(authHeader: string | undefined): string | null {
   if (!authHeader) return null;
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  return m && m[1] ? m[1].trim() : null;
+  const SCHEME = 'bearer';
+  if (authHeader.length <= SCHEME.length) return null;
+  if (authHeader.slice(0, SCHEME.length).toLowerCase() !== SCHEME) return null;
+  const rest = authHeader.slice(SCHEME.length);
+  // The scheme must be followed by whitespace, or "BearerXYZ" would parse as the token "XYZ".
+  if (!/^\s/.test(rest)) return null;
+  const token = rest.trim();
+  return token || null;
 }
 
 /**
@@ -168,6 +189,49 @@ export function validateAdminToken(authHeader: string | undefined): boolean {
   return safeEqual(token, env.ADMIN_REVOKE_TOKEN);
 }
 
+/**
+ * Build the structured payload for an `auth_rejected` log line.
+ *
+ * WHY THIS IS A SEPARATE, EXPORTED FUNCTION (2026-08-17): for months this log carried only route +
+ * ip, so a background internet scanner and a real fleet client sending a stale credential produced
+ * byte-identical lines. That ambiguity cost an hour of log archaeology during the Hyperagent
+ * connection outage -- the logs could not answer "is anyone failing auth, and who." Extracting the
+ * payload makes it a value a test can assert on directly; capturing pino's real output is not
+ * viable here because it writes to fd 1 via sonic-boom, bypassing `process.stdout.write`, so a
+ * stdout spy silently observes nothing.
+ *
+ *   reason      separates "sent no credential at all" (an MCP client's normal pre-discovery probe,
+ *               and every unauthenticated scanner -- benign, expect a steady trickle) from "sent
+ *               something we do not recognise" (a REAL misconfiguration: a stale or wrong
+ *               credential) and from "revoked" (a known-killed token still in use). A revoked token
+ *               also emits its own auth_revoked line in validateBearer; restating it here lets a
+ *               single query over auth_rejected classify every failure without a join.
+ *   client      the User-Agent, which is what actually names the calling platform. Not sensitive.
+ *   caller_hash the SHA256 of the presented credential, NEVER the credential -- exactly the
+ *               treatment auth_revoked has always used -- so repeated failures can be correlated as
+ *               "the same stale token" without the value ever reaching a log. OMITTED entirely when
+ *               nothing was presented, so its presence alone means a credential was actually sent.
+ *
+ * This runs on an UNAUTHENTICATED path, so every field here is attacker-influenced content landing
+ * in retained logs. That is why the credential is hashed rather than echoed.
+ */
+export function authRejectionLogFields(request: FastifyRequest): Record<string, unknown> {
+  const presented = extractBearer(request.headers['authorization']) ?? extractQueryToken(request);
+  const reason = !presented
+    ? 'no_credential'
+    : isRevoked(presented)
+      ? 'revoked'
+      : 'unrecognized_credential';
+  return {
+    type: 'auth_rejected',
+    route: request.routeOptions?.url ?? request.url,
+    ip: request.ip,
+    reason,
+    client: request.headers['user-agent'] ?? null,
+    ...(presented ? { caller_hash: hashToken(presented) } : {}),
+  };
+}
+
 /** Fastify pre-handler enforcing connector-bearer auth on a route. */
 export async function requireConnectorAuth(
   request: FastifyRequest,
@@ -183,14 +247,24 @@ export async function requireConnectorAuth(
     if (queryToken) ctx = await validateBearer(`Bearer ${queryToken}`);
   }
   if (!ctx) {
-    logger.warn(
-      {
-        type: 'auth_rejected',
-        route: request.routeOptions?.url ?? request.url,
-        ip: request.ip,
-      },
-      'connector auth rejected',
-    );
+    // WHY THESE THREE EXTRA FIELDS (2026-08-17): for months this log carried only route + ip, which
+    // cannot tell a background internet scanner apart from a real fleet client that is misconfigured
+    // -- on the reject path both look identical. Diagnosing the Hyperagent connection outage meant
+    // an hour of log archaeology that these fields would have answered in one query, so the gap is
+    // paid for once here instead of every future incident.
+    //
+    //   reason      separates "sent no credential at all" (an MCP client's normal pre-discovery
+    //               probe, and every unauthenticated scanner -- benign, expect a steady trickle)
+    //               from "sent something we do not recognise" (a REAL misconfiguration: a stale or
+    //               wrong credential) and from "revoked" (a known-killed token still in use). Note a
+    //               revoked token also emits its own auth_revoked line in validateBearer; this
+    //               restates it here so a single query over auth_rejected classifies every failure.
+    //   client      the User-Agent, which is what actually names the calling platform. Not sensitive.
+    //   caller_hash the SHA256 of the presented credential, NEVER the credential -- exactly the
+    //               treatment auth_revoked has always used -- so repeated failures can be correlated
+    //               as "the same stale token" without the value ever reaching a log. Omitted entirely
+    //               when nothing was presented, so its presence alone means a credential was sent.
+    logger.warn(authRejectionLogFields(request), 'connector auth rejected');
     // RFC 9728: point spec-compliant MCP clients at the protected-resource metadata endpoint so they
     // can discover the authorization server instead of failing silently on a bare 401. Uses the same
     // base-url derivation as the OAuth metadata routes (oauth.ts's baseUrlOf), so this always names

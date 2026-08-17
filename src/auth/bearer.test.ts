@@ -92,3 +92,95 @@ test('a VALID bearer token succeeds and carries no WWW-Authenticate header (head
 
   await app.close();
 });
+
+// ── auth_rejected diagnosability (2026-08-17) ────────────────────────────────────────────────────
+// The reject log used to carry only route + ip, so a background internet scanner and a real fleet
+// client sending a stale credential produced byte-identical lines. That ambiguity cost an hour of
+// log archaeology during the Hyperagent connection outage. These pin the three fields that resolve
+// it -- and, more importantly, pin that adding them did NOT put a credential into a log.
+//
+// Asserting on authRejectionLogFields' return value rather than on pino's output is deliberate:
+// pino writes to fd 1 via sonic-boom, so a `process.stdout.write` spy observes nothing and a test
+// built on one passes vacuously. The payload is the part this module actually controls.
+function fakeRequest(headers: Record<string, string>, url = '/mcp'): never {
+  return { headers, url, ip: '203.0.113.9', routeOptions: { url } } as never;
+}
+
+test('auth_rejected: no credential at all is classified no_credential and carries NO caller_hash', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const f = authRejectionLogFields(fakeRequest({ 'user-agent': 'SomeScanner/1.0' }));
+  assert.equal(f.reason, 'no_credential');
+  assert.equal(f.client, 'SomeScanner/1.0');
+  // Absence is load-bearing: "caller_hash present" must mean "a credential was actually sent", so a
+  // reader can separate benign unauthenticated probes from real misconfigurations at a glance.
+  assert.equal('caller_hash' in f, false, 'no credential was sent, so none should be hashed');
+});
+
+test('auth_rejected: an unrecognized credential is classified unrecognized_credential and hashed', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const f = authRejectionLogFields(
+    fakeRequest({ authorization: 'Bearer ' + 'z'.repeat(40), 'user-agent': 'Hyperagent/2.1' }),
+  );
+  assert.equal(f.reason, 'unrecognized_credential');
+  assert.equal(f.client, 'Hyperagent/2.1');
+  assert.match(String(f.caller_hash), /^[0-9a-f]{64}$/, 'expected a SHA256 hex digest');
+});
+
+test('auth_rejected: a missing User-Agent degrades to null rather than throwing', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const f = authRejectionLogFields(fakeRequest({}));
+  assert.equal(f.client, null);
+  assert.equal(f.reason, 'no_credential');
+});
+
+test('SAFETY-CRITICAL: the rejected credential VALUE never appears anywhere in the logged payload', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const secret = 'q7' + 'w'.repeat(38);
+  const f = authRejectionLogFields(fakeRequest({ authorization: `Bearer ${secret}`, 'user-agent': 'x' }));
+  // Assert over the SERIALIZED payload, not one field: a leak could hide in any key, including one
+  // added later. This is the regression that matters -- the log runs on an unauthenticated path.
+  assert.equal(JSON.stringify(f).includes(secret), false, 'raw credential leaked into the log payload');
+  const { createHash } = await import('node:crypto');
+  assert.equal(f.caller_hash, createHash('sha256').update(secret).digest('hex'));
+});
+
+// ── extractBearer: linear-time parsing (CodeQL js/polynomial-redos, high) ────────────────────────
+// The old /^Bearer\s+(.+)$/i let `\s+` and `(.+)` both match a space, so a header of "Bearer " plus
+// many spaces forced the engine through every split point. This path is UNAUTHENTICATED and the
+// header is fully attacker-controlled, so the parse must be linear. Exercised through
+// authRejectionLogFields because extractBearer is module-private.
+function req(authorization?: string): never {
+  const headers: Record<string, string> = authorization ? { authorization } : {};
+  return { headers, url: '/mcp', ip: '203.0.113.9', routeOptions: { url: '/mcp' } } as never;
+}
+
+test('extractBearer parity: the scheme is case-insensitive, whitespace-separated, and trims', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const hash = (h: string) => authRejectionLogFields(req(h)).caller_hash;
+
+  // The same token reached by different spellings must hash identically -- that proves the rewrite
+  // preserved the old semantics rather than merely being faster.
+  const canonical = hash('Bearer tok123');
+  assert.equal(hash('bearer tok123'), canonical, 'scheme should be case-insensitive');
+  assert.equal(hash('BEARER \t  tok123  '), canonical, 'multiple whitespace + trailing trim');
+  // "BearerTok123" with no separator is not a bearer credential.
+  assert.equal(
+    'caller_hash' in authRejectionLogFields(req('BearerTok123')),
+    false,
+    'scheme must be followed by whitespace',
+  );
+});
+
+test('SECURITY: a pathological all-whitespace bearer header parses in linear time', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  // This is the input class that blows up under the old polynomial regex.
+  const evil = 'Bearer ' + ' '.repeat(200_000);
+  const started = process.hrtime.bigint();
+  const f = authRejectionLogFields(req(evil));
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  // All whitespace after the scheme trims to empty, i.e. no credential was really presented.
+  assert.equal(f.reason, 'no_credential');
+  // Generous bound: the assertion is "not catastrophic", not a microbenchmark, so it stays stable
+  // on a loaded CI box while still failing loudly if quadratic behaviour ever returns.
+  assert.ok(ms < 1000, `expected linear-time parse, took ${ms.toFixed(1)}ms`);
+});
