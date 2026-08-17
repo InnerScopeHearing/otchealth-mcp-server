@@ -187,3 +187,126 @@ export async function fetchBlobFromS3(
     buf: Buffer.from(await r.arrayBuffer()),
   };
 }
+
+/**
+ * LIST objects under a prefix, from the mirror.
+ *
+ * WHY THIS EXISTS (2026-08-17): `BLOB_BACKEND=s3` was honoured in exactly ONE place -- the raw byte
+ * fetch. Every other legal document operation went straight to Azure regardless, so the CLO's
+ * `legal_blob_list` / `legal_blob_get` surface stayed hard-bound to Azure while the CFO's finance
+ * document reads had already moved. If Azure went dark, legal documents stopped and finance
+ * documents kept working, and no preflight caught it because the preflight only ever exercised the
+ * finance path.
+ *
+ * Returns keys RELATIVE to the mirror prefix, so the shape matches Azure's listing exactly and
+ * callers need no branch. Read-only, like the rest of this module.
+ */
+export async function listBlobsFromS3(
+  account: string,
+  container: string,
+  prefix?: string,
+): Promise<Array<{ name: string; size: number | null; lastModified: string | null; etag: string | null }>> {
+  const loc = s3LocationFor(account, container);
+  if (!loc) throw new Error(`no S3 mirror mapping for ${account}/${container} (refusing to guess a bucket)`);
+  const credentials = await resolveAwsCredentials();
+  if (!credentials) throw new Error('S3 credentials unavailable');
+
+  const region = loadEnv().OPENSEARCH_REGION || 'us-east-1';
+  const host = `${loc.bucket}.s3.${region}.amazonaws.com`;
+  const out: Array<{ name: string; size: number | null; lastModified: string | null; etag: string | null }> = [];
+  let token: string | null = null;
+
+  // Bounded like the Azure listing it replaces (200 pages x 1000 keys). A prefix that would exceed
+  // that is a caller error, not something to silently truncate.
+  for (let page = 0; page < 200; page++) {
+    const query: Record<string, string> = {
+      'list-type': '2',
+      'max-keys': '1000',
+      prefix: `${loc.keyPrefix}${prefix ?? ''}`,
+    };
+    if (token) query['continuation-token'] = token;
+    // signRequest canonicalises the query itself; pass it raw, exactly as the path is passed raw.
+    const signed = signRequest({
+      method: 'GET',
+      host,
+      path: '/',
+      query,
+      region,
+      service: 's3',
+      credentials,
+      extraHeaders: { 'x-amz-content-sha256': EMPTY_SHA256 },
+    });
+    const qs = Object.keys(query)
+      .sort()
+      .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(query[k])}`)
+      .join('&');
+    const r = await fetchWithBudget(`https://${host}/?${qs}`, { method: 'GET', headers: signed.headers });
+    if (r.status === 404) break;
+    // NOT folded into "empty": a 403 here is a credential or signature failure, and reporting it as
+    // an empty container is exactly the false-absence bug this store already shipped once.
+    if (!r.ok) throw new Error(`s3 blob list ${r.status}: ${(await r.text()).slice(0, 160)}`);
+    const xml = await r.text();
+    for (const block of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+      const b = block[1];
+      const key = (b.match(/<Key>([^<]*)<\/Key>/) || [])[1];
+      if (!key) continue;
+      const size = (b.match(/<Size>(\d+)<\/Size>/) || [])[1];
+      const lm = (b.match(/<LastModified>([^<]*)<\/LastModified>/) || [])[1];
+      const etag = (b.match(/<ETag>([^<]*)<\/ETag>/) || [])[1];
+      out.push({
+        // Strip the mirror prefix so the name matches what Azure would have returned.
+        name: unescapeXml(key.startsWith(loc.keyPrefix) ? key.slice(loc.keyPrefix.length) : key),
+        size: size ? Number.parseInt(size, 10) : null,
+        lastModified: lm ?? null,
+        etag: etag ? unescapeXml(etag) : null,
+      });
+    }
+    token = (xml.match(/<NextContinuationToken>([^<]*)<\/NextContinuationToken>/) || [])[1] || null;
+    if (!token) break;
+  }
+  return out;
+}
+
+/** S3 object keys are XML-escaped in a ListObjectsV2 body; real filenames here contain `&`. */
+function unescapeXml(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/** HEAD one mirrored object: existence + ETag + size, without downloading it. */
+export async function headBlobFromS3(
+  account: string,
+  container: string,
+  path: string,
+): Promise<{ exists: boolean; etag: string | null; size: number | null }> {
+  const loc = s3LocationFor(account, container);
+  if (!loc) throw new Error(`no S3 mirror mapping for ${account}/${container} (refusing to guess a bucket)`);
+  const credentials = await resolveAwsCredentials();
+  if (!credentials) throw new Error('S3 credentials unavailable');
+
+  const region = loadEnv().OPENSEARCH_REGION || 'us-east-1';
+  const host = `${loc.bucket}.s3.${region}.amazonaws.com`;
+  // Same single-encode discipline as fetchBlobFromS3: sign the RAW path, send canonicalUri(raw).
+  const rawPath = `/${loc.keyPrefix}${path}`;
+  const signed = signRequest({
+    method: 'HEAD',
+    host,
+    path: rawPath,
+    region,
+    service: 's3',
+    credentials,
+    extraHeaders: { 'x-amz-content-sha256': EMPTY_SHA256 },
+  });
+  const r = await fetchWithBudget(`https://${host}${canonicalUri(rawPath)}`, {
+    method: 'HEAD',
+    headers: signed.headers,
+  });
+  if (r.status === 404 || r.status === 403) return { exists: false, etag: null, size: null };
+  if (!r.ok) throw new Error(`s3 blob head ${r.status}`);
+  const cl = r.headers.get('content-length');
+  return { exists: true, etag: r.headers.get('etag'), size: cl ? Number.parseInt(cl, 10) : null };
+}

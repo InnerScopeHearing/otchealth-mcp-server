@@ -22,7 +22,7 @@
 
 import crypto from 'node:crypto';
 import { loadEnv } from '../config/env.js';
-import { s3BlobBackendActive, fetchBlobFromS3 } from './s3-blob-store.js';
+import { s3BlobBackendActive, fetchBlobFromS3, listBlobsFromS3, headBlobFromS3 } from './s3-blob-store.js';
 
 /** x-ms-version, matching skills/legal/legal.mjs exactly. */
 const AVER = '2021-06-08';
@@ -40,6 +40,25 @@ function creds(): LegalCreds | null {
   const key = env.AZURE_LEGAL_STORAGE_KEY;
   if (!account || !key) return null;
   return { account, key };
+}
+
+/**
+ * Credentials for a READ, which under BLOB_BACKEND=s3 do not require the Azure storage KEY.
+ *
+ * The account NAME is still needed -- it is half the (account, container) lookup into the S3 mirror
+ * allow-list -- but the Azure secret is not, because no Azure call is made. Without this, every
+ * legal READ threw "legal store not configured" the moment AZURE_LEGAL_STORAGE_KEY was removed,
+ * which would have turned the final step of the Azure exit into an outage of the CLO's entire
+ * document surface. Writes still go through creds(): they remain Azure-only by design (see the
+ * module header on s3-blob-store.ts -- the mirror is read-only, and writing to it directly would
+ * silently diverge it from the source of truth).
+ */
+function readCreds(): LegalCreds | null {
+  const env = loadEnv();
+  const account = env.AZURE_LEGAL_STORAGE_ACCOUNT;
+  if (!account) return null;
+  if (s3BlobBackendActive()) return { account, key: '' };
+  return creds();
 }
 
 /** True when the SharedKey credentials are present. */
@@ -149,8 +168,15 @@ export interface BlobListItem {
  * marker, never expected to bind in practice.
  */
 export async function listBlobs(container: LegalContainer, prefix?: string): Promise<BlobListItem[]> {
-  const c = creds();
-  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
+  const c = readCreds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_ACCOUNT unset)');
+  // BLOB_BACKEND=s3: serve the listing from the mirror. S3's ListObjectsV2 carries no Content-Type,
+  // so that field is null here where Azure would populate it -- name/size/lastModified/etag, which
+  // is everything the bulk callers key on, are identical.
+  if (s3BlobBackendActive()) {
+    const rows = await listBlobsFromS3(c.account, container, prefix);
+    return rows.map((r) => ({ name: r.name, size: r.size, lastModified: r.lastModified, contentType: null, etag: r.etag }));
+  }
   const items: BlobListItem[] = [];
   let marker: string | undefined;
   for (let page = 0; page < 200; page++) {
@@ -247,17 +273,16 @@ export async function getBlob(
   path: string,
   forceBase64 = false,
 ): Promise<BlobGetResult> {
-  const c = creds();
-  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
-  const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
-  const auth = azSig(c.account, c.key, 'GET', container, encPath(path), xms, null, '', '');
-  const r = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(path)}`, {
-    headers: { ...xms, Authorization: auth },
-  });
-  if (r.status === 404) return { found: false, contentType: null, size: null, text: null, base64: null };
-  if (!r.ok) throw new Error(`legal blob get ${r.status}: ${(await r.text()).slice(0, 160)}`);
-  const contentType = r.headers.get('content-type');
-  const buf = Buffer.from(await r.arrayBuffer());
+  const c = readCreds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_ACCOUNT unset)');
+  // Delegate the BYTES to fetchBlobRaw, the one function that already honours BLOB_BACKEND. Before
+  // this, getBlob hand-rolled its own Azure call and ignored the switch entirely, so legal document
+  // reads stayed pinned to Azure while finance reads had already moved to S3. The text-vs-base64
+  // shaping below is unchanged and now applies identically whichever store served the bytes.
+  const res = await fetchBlobRaw(c.account, c.key, container, path);
+  if (!res.found || !res.buf) return { found: false, contentType: null, size: null, text: null, base64: null };
+  const contentType = res.contentType;
+  const buf = res.buf;
   if (!forceBase64 && looksTextual(contentType)) {
     return { found: true, contentType, size: buf.length, text: buf.toString('utf8'), base64: null };
   }
@@ -280,8 +305,9 @@ export interface BlobHeadResult {
  * (2026-08-04, PR #190 review — the original copy-then-delete had no such guard at all).
  */
 export async function headBlob(container: LegalContainer, path: string): Promise<BlobHeadResult> {
-  const c = creds();
-  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
+  const c = readCreds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_ACCOUNT unset)');
+  if (s3BlobBackendActive()) return headBlobFromS3(c.account, container, path);
   const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };
   const auth = azSig(c.account, c.key, 'HEAD', container, encPath(path), xms, null, '', '');
   const r = await fetch(`https://${c.account}.blob.core.windows.net/${container}/${encPath(path)}`, {
