@@ -28,7 +28,18 @@ import { readSharedAll } from './store.js';
 import { queryDocs } from '../agentstate/store.js';
 
 const TTL_MS = 120_000;
-let cache: { at: number; ids: Set<string>; byAgent: Map<string, Set<string>> } | null = null;
+/**
+ * How long a DEGRADED cache is trusted before we try again. Much shorter than TTL_MS: a degraded
+ * cache is one built while a source was unreachable, so it is a stopgap, not an answer.
+ */
+const DEGRADED_RETRY_MS = 20_000;
+let cache: {
+  at: number;
+  ids: Set<string>;
+  byAgent: Map<string, Set<string>>;
+  /** True when at least one source failed to load, so this cache may be MISSING retractions. */
+  degraded: boolean;
+} | null = null;
 
 /** doc ids are `{agent}__{entryId}` (semantic.mjs docId). Recover the entry id. Pure. */
 export function entryIdFromDocId(docId: unknown): string {
@@ -126,7 +137,9 @@ export async function retractedIdsForAgent(agent: string): Promise<Set<string>> 
  * whatever was already collected (possibly nothing) rather than throwing. */
 async function refreshCache(): Promise<void> {
   const now = Date.now();
-  if (cache && now - cache.at < TTL_MS) return;
+  // A degraded cache expires far sooner: it was built while a source was down and may be missing
+  // retractions, so we retry rather than trusting it for the full TTL.
+  if (cache && now - cache.at < (cache.degraded ? DEGRADED_RETRY_MS : TTL_MS)) return;
 
   const ids = new Set<string>();
   const byAgent = new Map<string, Set<string>>();
@@ -138,12 +151,17 @@ async function refreshCache(): Promise<void> {
     }
   };
   // Shared blob feed (where the ledger corrections live). Each MemoryEntry already carries `agent`.
+  // Track per-source success. Fail-open on the FETCH is correct (a retraction lookup must never
+  // block a search), but caching the RESULT of a failure as authoritative is not: an empty
+  // retraction set means "nothing has been retracted", which is the strongest possible claim this
+  // module can make, and it would be made on the basis of a network error. See the cache write below.
+  let degraded = false;
   try {
     const rows = await readSharedAll();
     for (const id of collectRetracted(rows)) ids.add(id);
     merge(collectRetractedByAgent(rows));
   } catch {
-    /* fail-open */
+    degraded = true;
   }
   // Cosmos memory-of-record (memory_write can declare supersedes since 2026-07-13).
   try {
@@ -163,10 +181,27 @@ async function refreshCache(): Promise<void> {
     for (const id of collectRetracted(typed)) ids.add(id);
     merge(collectRetractedByAgent(typed));
   } catch {
-    /* fail-open */
+    degraded = true;
   }
 
-  cache = { at: now, ids, byAgent };
+  // NEVER let a failed load DROP a retraction we already knew about.
+  //
+  // Before this, a transient failure on either source still installed the resulting (empty or
+  // partial) set as the authoritative cache for the full TTL. "Nothing has been retracted" is the
+  // strongest claim this module can make, and it was being made on the strength of a network error
+  // -- during which a belief the fleet had explicitly corrected would sail back through
+  // brain_search's fast path as current truth, with no retracted_dropped disclosure, because that
+  // filter had simply been emptied. That is the precise "rumour mill" failure this module exists to
+  // prevent, so the union below is a correctness requirement, not an optimisation.
+  //
+  // Union, never replace: anything newly learned is added, and everything previously known is kept.
+  // Over-retracting (holding a stale retraction slightly too long) merely hides a belief;
+  // under-retracting resurfaces a known-false one. The asymmetry is deliberate.
+  if (degraded && cache) {
+    for (const id of cache.ids) ids.add(id);
+    merge(cache.byAgent);
+  }
+  cache = { at: now, ids, byAgent, degraded };
 }
 
 /** Test seam: drop the cache so one test never sees another test's retractions. */

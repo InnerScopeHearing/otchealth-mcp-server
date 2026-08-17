@@ -152,6 +152,14 @@ export async function fetchBlobFromS3(
   //
   // Signing the RAW path and sending canonicalUri(raw) makes both sides use one encoder by
   // construction, so they cannot drift apart again.
+  //
+  // ⚠ DO NOT COPY THIS PATTERN ONTO THE OpenSearch CALL SITES. It is correct HERE only because S3
+  // is AWS's one exception: "Each path segment must be URI-encoded twice (except for Amazon S3,
+  // which only gets URI-encoded once)." The 'es' sites in src/search/ deliberately pre-encode and
+  // then let canonicalUri encode again, which is the required DOUBLE pass for a non-S3 service --
+  // see the worked example in src/search/sigv4.test.ts. "Fixing" them to match this file would
+  // under-encode and break OpenSearch signing, i.e. the same class of failure in the opposite
+  // direction.
   const rawPath = `/${objectKey}`;
   const wirePath = canonicalUri(rawPath);
 
