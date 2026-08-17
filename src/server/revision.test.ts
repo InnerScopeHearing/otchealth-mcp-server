@@ -70,4 +70,16 @@ test('tagOf: a registry host carrying a PORT is not mistaken for an image tag', 
   assert.equal(tagOf('registry.internal:5000/gateway'), null);
   assert.equal(tagOf('gateway'), null, 'no tag at all is null, not an empty string');
   assert.equal(tagOf(null), null);
+
+  // A DIGEST-PINNED reference carries both. ECS reports some tasks this way and others not, so two
+  // replicas of the SAME service reported different image_tags on the first deploy of this module --
+  // one the tag, one 64 hex characters of digest. A discriminator that disagrees with itself across
+  // replicas would restart the very argument this exists to end.
+  assert.equal(
+    tagOf('900915535335.dkr.ecr.us-east-1.amazonaws.com/otchealth-mcp-gateway:84b9bbb@sha256:4c818a121aa273f5'),
+    '84b9bbb',
+    'the digest suffix must be stripped before looking for the tag',
+  );
+  // Digest-only, no tag: honestly null rather than the hex masquerading as a tag.
+  assert.equal(tagOf('repo/gateway@sha256:4c818a121aa273f5'), null);
 });

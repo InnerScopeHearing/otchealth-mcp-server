@@ -57,12 +57,19 @@ let cached: Pick<RevisionInfo, 'image' | 'image_tag' | 'image_digest' | 'task_de
  *  send two parties chasing a difference that does not exist. */
 export function tagOf(image: string | null): string | null {
   if (!image) return null;
-  // Split on the LAST ':' so a registry host carrying a port is not mistaken for a tag.
-  const at = image.lastIndexOf(':');
+  // STRIP THE DIGEST FIRST. ECS reports some tasks as "repo:tag@sha256:<hex>" and others as plain
+  // "repo:tag", so the last ':' can land INSIDE the digest and return 64 hex characters as though
+  // they were the tag. That is not theoretical: the first deploy of this module had two replicas of
+  // the SAME service reporting image_tag "84b9bbb" and "4c818a12..." respectively. A discriminator
+  // that disagrees with itself across replicas is worse than no discriminator at all -- it would
+  // have restarted exactly the argument this module exists to end.
+  const ref = image.split('@')[0];
+  // Then split on the LAST ':' so a registry host carrying a port is not mistaken for a tag.
+  const at = ref.lastIndexOf(':');
   if (at < 0) return null;
-  const tag = image.slice(at + 1);
+  const tag = ref.slice(at + 1);
   // A '/' after the colon means that colon belonged to a host:port, not a tag.
-  return tag.includes('/') ? null : tag;
+  return tag.includes('/') || !tag ? null : tag;
 }
 
 async function loadContainerMetadata(): Promise<NonNullable<typeof cached>> {
