@@ -92,3 +92,54 @@ test('a VALID bearer token succeeds and carries no WWW-Authenticate header (head
 
   await app.close();
 });
+
+// ── auth_rejected diagnosability (2026-08-17) ────────────────────────────────────────────────────
+// The reject log used to carry only route + ip, so a background internet scanner and a real fleet
+// client sending a stale credential produced byte-identical lines. That ambiguity cost an hour of
+// log archaeology during the Hyperagent connection outage. These pin the three fields that resolve
+// it -- and, more importantly, pin that adding them did NOT put a credential into a log.
+//
+// Asserting on authRejectionLogFields' return value rather than on pino's output is deliberate:
+// pino writes to fd 1 via sonic-boom, so a `process.stdout.write` spy observes nothing and a test
+// built on one passes vacuously. The payload is the part this module actually controls.
+function fakeRequest(headers: Record<string, string>, url = '/mcp'): never {
+  return { headers, url, ip: '203.0.113.9', routeOptions: { url } } as never;
+}
+
+test('auth_rejected: no credential at all is classified no_credential and carries NO caller_hash', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const f = authRejectionLogFields(fakeRequest({ 'user-agent': 'SomeScanner/1.0' }));
+  assert.equal(f.reason, 'no_credential');
+  assert.equal(f.client, 'SomeScanner/1.0');
+  // Absence is load-bearing: "caller_hash present" must mean "a credential was actually sent", so a
+  // reader can separate benign unauthenticated probes from real misconfigurations at a glance.
+  assert.equal('caller_hash' in f, false, 'no credential was sent, so none should be hashed');
+});
+
+test('auth_rejected: an unrecognized credential is classified unrecognized_credential and hashed', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const f = authRejectionLogFields(
+    fakeRequest({ authorization: 'Bearer ' + 'z'.repeat(40), 'user-agent': 'Hyperagent/2.1' }),
+  );
+  assert.equal(f.reason, 'unrecognized_credential');
+  assert.equal(f.client, 'Hyperagent/2.1');
+  assert.match(String(f.caller_hash), /^[0-9a-f]{64}$/, 'expected a SHA256 hex digest');
+});
+
+test('auth_rejected: a missing User-Agent degrades to null rather than throwing', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const f = authRejectionLogFields(fakeRequest({}));
+  assert.equal(f.client, null);
+  assert.equal(f.reason, 'no_credential');
+});
+
+test('SAFETY-CRITICAL: the rejected credential VALUE never appears anywhere in the logged payload', async () => {
+  const { authRejectionLogFields } = await import('./bearer.js');
+  const secret = 'q7' + 'w'.repeat(38);
+  const f = authRejectionLogFields(fakeRequest({ authorization: `Bearer ${secret}`, 'user-agent': 'x' }));
+  // Assert over the SERIALIZED payload, not one field: a leak could hide in any key, including one
+  // added later. This is the regression that matters -- the log runs on an unauthenticated path.
+  assert.equal(JSON.stringify(f).includes(secret), false, 'raw credential leaked into the log payload');
+  const { createHash } = await import('node:crypto');
+  assert.equal(f.caller_hash, createHash('sha256').update(secret).digest('hex'));
+});
