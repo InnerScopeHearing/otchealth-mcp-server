@@ -231,3 +231,112 @@ test('a key needing no encoding is unchanged (the case that always worked, kept 
   assert.ok(url.endsWith('/otchealthcfodata/cfo-source-docs/INND/_KNOWLEDGE-BASE/CFO_PROJECT_MEMORY.md'));
   assert.equal(url.includes('%'), false);
 });
+
+// ── Legal READ path on the mirror (2026-08-17) ───────────────────────────────────────────────────
+// BLOB_BACKEND=s3 was honoured in exactly ONE function, the raw byte fetch. listBlobs/getBlob/
+// headBlob each hand-rolled their own Azure call and ignored the switch, so the CLO's legal document
+// surface stayed pinned to Azure while the CFO's finance reads had already moved. If Azure went
+// dark, legal documents stopped and finance documents kept working -- and no preflight caught it,
+// because the preflight only ever exercised the finance path.
+function xmlList(keys: Array<{ key: string; size: number }>, next?: string): string {
+  return (
+    '<ListBucketResult>' +
+    keys.map((k) => `<Contents><Key>${k.key}</Key><Size>${k.size}</Size><LastModified>2026-08-17T00:00:00.000Z</LastModified><ETag>"abc"</ETag></Contents>`).join('') +
+    (next ? `<NextContinuationToken>${next}</NextContinuationToken>` : '') +
+    '</ListBucketResult>'
+  );
+}
+
+test('listBlobsFromS3 strips the mirror prefix so names match what Azure would have returned', async () => {
+  const { listBlobsFromS3 } = await import('./s3-blob-store.js');
+  const rows = await withStubbedFetch(
+    (async () =>
+      new Response(
+        xmlList([
+          { key: 'otchealthlegalstore/company/01-Matters/Motion &amp; Order.pdf', size: 42 },
+          { key: 'otchealthlegalstore/company/notes.md', size: 7 },
+        ]),
+        { status: 200 },
+      )) as unknown as typeof fetch,
+    () => listBlobsFromS3('otchealthlegalstore', 'company'),
+  );
+  assert.deepEqual(
+    rows.map((r) => r.name),
+    ['01-Matters/Motion & Order.pdf', 'notes.md'],
+    'prefix stripped and &amp; decoded -- a real legal filename contains an ampersand',
+  );
+  assert.equal(rows[0].size, 42);
+});
+
+test('listBlobsFromS3 THROWS on a 403 rather than reporting an empty container', async () => {
+  const { listBlobsFromS3 } = await import('./s3-blob-store.js');
+  await withStubbedFetch(
+    (async () => new Response('AccessDenied', { status: 403 })) as unknown as typeof fetch,
+    async () => {
+      // The whole point: a credential/signature failure that reports as "no documents" is how a
+      // false-absence conclusion gets written into a legal or finance finding.
+      await assert.rejects(() => listBlobsFromS3('otchealthlegalstore', 'company'), /s3 blob list 403/);
+    },
+  );
+});
+
+test('listBlobsFromS3 follows the continuation token to exhaustion', async () => {
+  const { listBlobsFromS3 } = await import('./s3-blob-store.js');
+  let call = 0;
+  const rows = await withStubbedFetch(
+    (async () => {
+      call += 1;
+      return call === 1
+        ? new Response(xmlList([{ key: 'otchealthlegalstore/company/a.md', size: 1 }], 'TOKEN2'), { status: 200 })
+        : new Response(xmlList([{ key: 'otchealthlegalstore/company/b.md', size: 2 }]), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => listBlobsFromS3('otchealthlegalstore', 'company'),
+  );
+  assert.deepEqual(rows.map((r) => r.name), ['a.md', 'b.md'], 'a truncated first page must not be returned as the whole set');
+  assert.equal(call, 2);
+});
+
+test('RING: the new list/head verbs resolve personal to the privileged bucket, and nothing else there', async () => {
+  const { listBlobsFromS3, headBlobFromS3, PERSONAL_LEGAL_BUCKET } = await import('./s3-blob-store.js');
+  let host = '';
+  const capture = (async (url: string | URL) => {
+    host = new URL(String(url)).host;
+    return new Response(xmlList([]), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  await withStubbedFetch(capture, () => listBlobsFromS3('otchealthlegalstore', 'personal'));
+  assert.ok(host.startsWith(PERSONAL_LEGAL_BUCKET), `personal must list from the privileged bucket, got ${host}`);
+
+  await withStubbedFetch(capture, () => listBlobsFromS3('otchealthlegalstore', 'company'));
+  assert.equal(host.startsWith(PERSONAL_LEGAL_BUCKET), false, 'company must NEVER resolve to the personal bucket');
+
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      host = new URL(String(url)).host;
+      return new Response('', { status: 404 });
+    }) as unknown as typeof fetch,
+    () => headBlobFromS3('otchealthlegalstore', 'personal', 'x.md'),
+  );
+  assert.ok(host.startsWith(PERSONAL_LEGAL_BUCKET), 'headBlobFromS3 must honour the same ring mapping');
+});
+
+test('the new verbs FAIL CLOSED on an unmapped container rather than guessing a bucket', async () => {
+  const { listBlobsFromS3, headBlobFromS3 } = await import('./s3-blob-store.js');
+  await assert.rejects(() => listBlobsFromS3('otchealthlegalstore', 'not-a-container'), /no S3 mirror mapping/);
+  await assert.rejects(() => headBlobFromS3('nope', 'company', 'x'), /no S3 mirror mapping/);
+});
+
+test('headBlobFromS3 single-encodes the key (same S3 exception as the byte fetch)', async () => {
+  const { headBlobFromS3 } = await import('./s3-blob-store.js');
+  let url = '';
+  await withStubbedFetch(
+    (async (u: string | URL) => {
+      url = String(u);
+      return new Response('', { status: 200, headers: { 'content-length': '5', etag: '"e"' } });
+    }) as unknown as typeof fetch,
+    () => headBlobFromS3('otchealthlegalstore', 'company', 'a b/c (1).pdf'),
+  );
+  assert.ok(url.includes('a%20b'), 'space encoded once');
+  assert.equal(url.includes('%2520'), false, 'never double-encoded');
+  assert.ok(url.includes('%281%29'), 'parentheses encoded, as AWS canonical form requires');
+});
