@@ -51,14 +51,32 @@ export function isCreate(method: string, path: string): boolean {
 /** The items a Xero accounting write carries, unwrapped from its plural key
  *  ({"Invoices":[{...}]}). Returns [] for shapes this guard does not understand, which the caller
  *  treats as "cannot verify" rather than "nothing to check". */
-export function unwrapItems(body: unknown): Array<Record<string, unknown>> {
+export function unwrapItems(body: unknown, collection?: string): Array<Record<string, unknown>> {
   if (!body || typeof body !== 'object') return [];
+  const objects = (arr: unknown[]) => arr.filter((v) => v && typeof v === 'object') as Array<Record<string, unknown>>;
+  // A bare array body.
+  if (Array.isArray(body)) return objects(body);
   const obj = body as Record<string, unknown>;
-  for (const value of Object.values(obj)) {
-    if (Array.isArray(value)) return value.filter((v) => v && typeof v === 'object') as Array<Record<string, unknown>>;
+
+  // 1. THE COLLECTION-NAMED WRAPPER WINS. Previously this function returned the FIRST array-valued
+  //    property it found, which silently unwrapped the WRONG level for a bare entity: a manual
+  //    journal sent as `{Narration, Date, JournalLines:[...]}` had its LINE ITEMS returned as if
+  //    they were the journals, so the key check looked for a Narration on each line, found none,
+  //    and refused a perfectly valid create as `unverifiable_create`. The same shape breaks any
+  //    bare entity carrying a nested array -- an invoice's LineItems, for instance -- so this was
+  //    never a manual-journal-only defect.
+  if (collection) {
+    for (const [k, v] of Object.entries(obj)) {
+      if (k.toLowerCase() === collection.toLowerCase() && Array.isArray(v)) return objects(v);
+    }
   }
-  // A bare single object (Xero accepts this on some endpoints).
-  return Object.keys(obj).length ? [obj] : [];
+  // 2. A single-key object IS a wrapper (`{ManualJournals:[...]}`) even when the caller did not tell
+  //    us the collection. More than one key means the array is a FIELD of an entity, not a wrapper.
+  const keys = Object.keys(obj);
+  if (keys.length === 1 && Array.isArray(obj[keys[0]])) return objects(obj[keys[0]] as unknown[]);
+
+  // 3. A bare single entity (Xero accepts this on some endpoints).
+  return keys.length ? [obj] : [];
 }
 
 /**
@@ -124,10 +142,27 @@ export function manualJournalTotal(item: Record<string, unknown>): number | null
  * caller round-tripping an existing journal will hand us.
  */
 export function parseXeroDate(raw: unknown): { y: number; m: number; d: number } | null {
+  // A Date instance, or an epoch number, both of which a caller building a payload in code will
+  // produce naturally. UTC parts on purpose -- local parts shift the date across a day boundary
+  // outside UTC, and a wrong date in the key probes for the wrong journal.
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    return { y: raw.getUTCFullYear(), m: raw.getUTCMonth() + 1, d: raw.getUTCDate() };
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const dt = new Date(raw);
+    if (!Number.isNaN(dt.getTime())) return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
+  }
   if (typeof raw !== 'string' || !raw.trim()) return null;
   const s = raw.trim();
-  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  // Unpadded ISO is accepted ("2022-1-31"): it is unambiguous, and refusing it just to insist on a
+  // leading zero blocks a valid post for no safety gain.
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (iso) return { y: Number(iso[1]), m: Number(iso[2]), d: Number(iso[3]) };
+  // DELIBERATELY NOT ACCEPTED: slash dates (01/02/2022). US MM/DD and international DD/MM are
+  // indistinguishable, so accepting them means GUESSING which of two real dates the caller meant.
+  // This value is half a duplicate-detection key: a wrong date probes for the wrong journal, finds
+  // nothing, and lets a duplicate through -- the exact failure this guard exists to prevent. A loud
+  // refusal naming the accepted format is strictly better than a silent coin flip.
   const ms = s.match(/^\/Date\((-?\d+)/);
   if (ms) {
     const dt = new Date(Number(ms[1]));
@@ -176,7 +211,13 @@ export function naturalKeyOf(item: Record<string, unknown>, collection?: string)
 export function manualJournalKeyGaps(item: Record<string, unknown>): string[] {
   const gaps: string[] = [];
   if (!(typeof item['Narration'] === 'string' && item['Narration'].trim())) gaps.push('Narration (non-empty)');
-  if (!parseXeroDate(item['Date'])) gaps.push('Date (YYYY-MM-DD)');
+  if (!parseXeroDate(item['Date']))
+    gaps.push(
+      // Name the ACCEPTED forms, not just the missing field. A slash date is the common miss and the
+      // caller cannot guess from "missing Date" that MM/DD/YYYY was the problem.
+      `Date (accepted: YYYY-MM-DD, YYYY-M-D, an ISO timestamp, or Xero's /Date(ms)/ -- a slash date ` +
+        `like 01/02/2022 is REFUSED as ambiguous, not unsupported)`,
+    );
   if (manualJournalTotal(item) === null) gaps.push('JournalLines[].LineAmount (numeric)');
   return gaps;
 }

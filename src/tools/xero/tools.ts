@@ -1297,7 +1297,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
           // 2. NO DUPLICATE CREATES. Read-before-write on the natural key, fail CLOSED.
           if (isCreate(input.method, path) && !input.allow_duplicate) {
             const collection = collectionOf(path);
-            const items = unwrapItems(input.body);
+            const items = unwrapItems(input.body, collection);
             const keys = items.map((item) => naturalKeyOf(item, collection));
             if (!items.length || keys.some((k) => k === null)) {
               // A ManualJournal has no Reference/InvoiceNumber/CreditNoteNumber and never can, so
