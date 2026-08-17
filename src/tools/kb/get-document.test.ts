@@ -15,7 +15,7 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
-const { isSafeBlobPath, paginate, PAGE_CHARS, FINANCE_DOC_INDEXES } = await import('./get-document.js');
+const { isSafeBlobPath, paginate, PAGE_CHARS, FINANCE_DOC_INDEXES, toContainerRelative } = await import('./get-document.js');
 const { isLaneAllowed } = await import('./search-privileged.js');
 
 // ── Ring boundary (the load-bearing property) ────────────────────────────────────────────────────
@@ -74,4 +74,54 @@ test('paginate: out-of-range page clamps instead of erroring (page 0 -> 1, page 
   assert.equal(paginate(doc, 0).page, 1);
   assert.equal(paginate(doc, 999).page, 3);
   assert.equal(paginate(doc, 999).content.length, 10, 'last page carries the remainder');
+});
+
+// ---------------------------------------------------------------------------------------------
+// PATH-DIALECT ROUND-TRIP. CFO escalation 2026-08-17: "10 of 10 attempts failed" on paths copied
+// VERBATIM from a live kb_search_privileged hit. The finance indexes store paths fully qualified
+// (<account>/<container>/<blob path>); fetchBlobRaw wants container-relative. The round-trip was
+// broken by construction, which is why it failed every time rather than intermittently -- and a
+// retrieval tool that says found:false for a document that EXISTS manufactures false negatives.
+// Verified live before the fix: the same document returns pages=1 once the prefix is stripped.
+// ---------------------------------------------------------------------------------------------
+test('a path copied verbatim from a search hit is normalised to container-relative', () => {
+  const searchEmitted =
+    'otchealthcfodata/cfo-source-docs/mail-archive-attachments/fy2021-close-innd/email-sweep-2021-12/2021-12-10_Fruci_TrialBalance_2019.xlsx';
+  assert.equal(
+    toContainerRelative(searchEmitted, 'otchealthcfodata', 'cfo-source-docs'),
+    'mail-archive-attachments/fy2021-close-innd/email-sweep-2021-12/2021-12-10_Fruci_TrialBalance_2019.xlsx',
+  );
+});
+
+test('an already container-relative path is returned BYTE-IDENTICAL (no regression)', () => {
+  const already = '_TEXT/innd-stock/INND-daily-stock-history.xlsx.txt';
+  assert.equal(toContainerRelative(already, 'otchealthcfodata', 'cfo-source-docs'), already);
+});
+
+test('a container-qualified path without the account is also accepted', () => {
+  assert.equal(
+    toContainerRelative('cfo-source-docs/INND/OneDrive/x.docx', 'otchealthcfodata', 'cfo-source-docs'),
+    'INND/OneDrive/x.docx',
+  );
+});
+
+test('the strip is EXACT-PREFIX, not positional: a lookalike path is left alone', () => {
+  // Two leading segments that merely RESEMBLE an account/container must not be eaten. A positional
+  // "drop the first two segments" would silently corrupt this path and report found:false for a
+  // different reason -- trading one invisible failure for another.
+  const lookalike = 'otchealthcfodata-archive/cfo-source-docs-old/report.xlsx';
+  assert.equal(toContainerRelative(lookalike, 'otchealthcfodata', 'cfo-source-docs'), lookalike);
+});
+
+test('normalisation is idempotent: normalising twice equals normalising once', () => {
+  const p = 'otchealthcfodata/cfo-source-docs/a/b/c.xlsx';
+  const once = toContainerRelative(p, 'otchealthcfodata', 'cfo-source-docs');
+  assert.equal(toContainerRelative(once, 'otchealthcfodata', 'cfo-source-docs'), once);
+});
+
+test('the normalised path still passes the safety predicate', () => {
+  // Normalisation must never produce something isSafeBlobPath would reject, or the fix would turn
+  // a not-found into a refusal.
+  const p = 'otchealthcfodata/cfo-source-docs/mail-archive-attachments/2021-12-10_TB.xlsx';
+  assert.equal(isSafeBlobPath(toContainerRelative(p, 'otchealthcfodata', 'cfo-source-docs')), true);
 });
