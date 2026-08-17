@@ -1,0 +1,80 @@
+name: build-gateway-ecr
+
+# Build + push the gateway image to AWS ECR -- the registry the RUNNING production service actually
+# pulls from (ECS service otchealth-gateway, cluster otchealth, us-east-1).
+#
+# WHY THIS EXISTS ALONGSIDE deploy.yml: deploy.yml builds in AZURE ACR and releases to an Azure
+# Container App via Azure OIDC. Every part of it dies with the Azure account, and it has never once
+# updated the image the AWS service runs. Production has been served from AWS since the DNS cutover,
+# so without this workflow a merged PR could look shipped and never reach a single live replica.
+# Merged is not deployed.
+#
+# CREDENTIALS: a DEDICATED least-privilege IAM user (otchealth-ci-ecr-gateway) whose ONLY permissions
+# are ecr:GetAuthorizationToken plus push/pull on the otchealth-mcp-gateway repository. Verified at
+# provisioning time that it is correctly DENIED ssm:GetParameter, so a leak of these CI credentials
+# cannot read a single fleet secret. Deliberately NOT the broad aws-cto key.
+#
+# DEPLOY IS DELIBERATELY NOT HERE. This workflow only produces an image. Registering a task
+# definition and updating the service stays with the operator, so that triggering a workflow can
+# never reshape production -- CI's entire blast radius is "can overwrite an image tag".
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to build and push (default: the commit sha)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the tag
+        id: tag
+        env:
+          REQUESTED: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Default to the short commit sha so every image is traceable to exact source, matching
+          # how the currently-running image (267f89d) was named.
+          TAG="${REQUESTED:-$(git rev-parse --short HEAD)}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "building tag: $TAG"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.ECR_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.ECR_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker build -t "$REGISTRY/otchealth-mcp-gateway:$TAG" .
+          docker push "$REGISTRY/otchealth-mcp-gateway:$TAG"
+          echo "pushed $REGISTRY/otchealth-mcp-gateway:$TAG"
+
+      - name: Report the pushed digest
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # Print the digest so the operator can prove WHICH image they are about to deploy, rather
+          # than trusting that a push happened. Same discipline as the rest of this migration:
+          # assert on the observable result, never on the command exiting 0.
+          aws ecr describe-images --repository-name otchealth-mcp-gateway \
+            --image-ids imageTag="$TAG" \
+            --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest,pushed:imagePushedAt}' \
+            --output table
