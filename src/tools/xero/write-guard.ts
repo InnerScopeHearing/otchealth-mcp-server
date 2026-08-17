@@ -61,14 +61,124 @@ export function unwrapItems(body: unknown): Array<Record<string, unknown>> {
   return Object.keys(obj).length ? [obj] : [];
 }
 
-/** The natural key a duplicate would share. The census duplicates all carried the importer's
- *  `Reference` (QBO-Bill-NNNNN / QBO-Transfer-id), which is exactly what a dedupe should key on. */
-export function naturalKeyOf(item: Record<string, unknown>): { field: string; value: string } | null {
-  for (const field of ['Reference', 'InvoiceNumber', 'CreditNoteNumber']) {
-    const v = item[field];
-    if (typeof v === 'string' && v.trim()) return { field, value: v.trim() };
+/**
+ * A natural key the guard can probe for. Two shapes:
+ *
+ *  - `field`          a single Xero field with an exact value (Reference / InvoiceNumber /
+ *                     CreditNoteNumber). The census duplicates all carried the importer's
+ *                     `Reference` (QBO-Bill-NNNNN / QBO-Transfer-id), which is what a dedupe
+ *                     should key on.
+ *  - `manual_journal` a COMPOSITE of Narration + Date + Total, because a Xero ManualJournal has no
+ *                     Reference, InvoiceNumber or CreditNoteNumber -- Narration is its only
+ *                     descriptor. Before this existed the guard had no key to probe on a manual
+ *                     journal and refused every one as `unverifiable_create`, which blocked the
+ *                     FY2022 remediation programme outright, since nearly every correction a close
+ *                     posts IS a manual journal.
+ *
+ * `field`/`value` are carried on BOTH shapes so refusal messages and probe-failure messages can
+ * render any key uniformly without knowing its kind.
+ */
+export type NaturalKey =
+  | { kind: 'field'; field: string; value: string }
+  | {
+      kind: 'manual_journal';
+      field: string;
+      value: string;
+      narration: string;
+      date: { y: number; m: number; d: number };
+      total: number;
+    };
+
+/**
+ * Journal total = the sum of the POSITIVE line amounts, i.e. the debit side.
+ *
+ * A balanced journal has debits equal to credits, so summing the whole array yields ~0 and would
+ * make every journal look identical -- useless as a key discriminator. Summing one side gives the
+ * journal's magnitude, which is what "Total" means to an accountant reading it.
+ *
+ * Returns null when there is no usable line data, so the caller refuses rather than keying on a
+ * silently-wrong 0 (a false "no existing object" is exactly how a duplicate gets created).
+ */
+export function manualJournalTotal(item: Record<string, unknown>): number | null {
+  const lines = item['JournalLines'];
+  if (!Array.isArray(lines) || !lines.length) return null;
+  let sum = 0;
+  let sawNumber = false;
+  for (const line of lines) {
+    if (!line || typeof line !== 'object') continue;
+    const raw = (line as Record<string, unknown>)['LineAmount'];
+    // Xero returns amounts as numbers, but hand-built payloads routinely carry numeric strings.
+    const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw.trim()) : NaN;
+    if (!Number.isFinite(n)) continue;
+    sawNumber = true;
+    if (n > 0) sum += n;
+  }
+  return sawNumber ? Math.round(sum * 100) / 100 : null;
+}
+
+/**
+ * Parse a Xero date into calendar parts for a `DateTime(y,m,d)` predicate.
+ *
+ * Accepts an ISO-ish string ("2022-01-31", "2022-01-31T00:00:00") and Xero's own
+ * "/Date(1643587200000)/" serialization, which is what comes back on a read and therefore what a
+ * caller round-tripping an existing journal will hand us.
+ */
+export function parseXeroDate(raw: unknown): { y: number; m: number; d: number } | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const s = raw.trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return { y: Number(iso[1]), m: Number(iso[2]), d: Number(iso[3]) };
+  const ms = s.match(/^\/Date\((-?\d+)/);
+  if (ms) {
+    const dt = new Date(Number(ms[1]));
+    if (!Number.isNaN(dt.getTime())) {
+      // UTC parts: Xero's epoch serialization is UTC, and using local parts would shift the date
+      // across a day boundary for anyone running outside UTC -- turning a correct probe into a
+      // miss, which fails OPEN into a duplicate.
+      return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
+    }
   }
   return null;
+}
+
+/** The natural key a duplicate would share, for whichever collection is being written. */
+export function naturalKeyOf(item: Record<string, unknown>, collection?: string): NaturalKey | null {
+  for (const field of ['Reference', 'InvoiceNumber', 'CreditNoteNumber']) {
+    const v = item[field];
+    if (typeof v === 'string' && v.trim()) return { kind: 'field', field, value: v.trim() };
+  }
+  if (collection === 'manualjournals') {
+    const narration = typeof item['Narration'] === 'string' ? item['Narration'].trim() : '';
+    const date = parseXeroDate(item['Date']);
+    const total = manualJournalTotal(item);
+    // All three are required. A partial key is worse than none: it would probe on a broader
+    // predicate, match an unrelated journal, and refuse a legitimate post -- or, if the missing
+    // part is the discriminating one, miss a real duplicate.
+    if (!narration || !date || total === null) return null;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return {
+      kind: 'manual_journal',
+      field: 'Narration+Date+Total',
+      value: `${narration} @ ${date.y}-${pad(date.m)}-${pad(date.d)} total ${total.toFixed(2)}`,
+      narration,
+      date,
+      total,
+    };
+  }
+  return null;
+}
+
+/**
+ * Why a manual-journal key could not be built. Used ONLY to render an actionable refusal -- the
+ * guard's decision is already made by naturalKeyOf returning null. Kept separate so the refusal can
+ * name the missing part instead of saying "no Reference" on an object that can never have one.
+ */
+export function manualJournalKeyGaps(item: Record<string, unknown>): string[] {
+  const gaps: string[] = [];
+  if (!(typeof item['Narration'] === 'string' && item['Narration'].trim())) gaps.push('Narration (non-empty)');
+  if (!parseXeroDate(item['Date'])) gaps.push('Date (YYYY-MM-DD)');
+  if (manualJournalTotal(item) === null) gaps.push('JournalLines[].LineAmount (numeric)');
+  return gaps;
 }
 
 export interface MappingViolation {
@@ -115,9 +225,29 @@ export function findAccountCodeViolations(body: unknown): MappingViolation[] {
  * the WRONG existence answer, and a false "no existing object" is precisely how a duplicate gets
  * created — the exact defect this guard exists to prevent.
  */
-export function existsFilterFor(key: { field: string; value: string }): string {
-  const escaped = key.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  return `${key.field}=="${escaped}"`;
+export function existsFilterFor(key: NaturalKey): string {
+  const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  if (key.kind === 'manual_journal') {
+    // Narration + Date only. `Total` is NOT a Xero ManualJournal field -- the amount lives on
+    // JournalLines -- so it cannot be filtered server-side and is applied as a client-side refine
+    // in manualJournalMatches(). Filtering on the two fields Xero does expose keeps the candidate
+    // set small; the total then decides.
+    const { y, m, d } = key.date;
+    return `Narration=="${esc(key.narration)}" && Date==DateTime(${y},${String(m).padStart(2, '0')},${String(d).padStart(2, '0')})`;
+  }
+  return `${key.field}=="${esc(key.value)}"`;
+}
+
+/**
+ * Client-side half of the manual-journal key: does an existing journal carry the same total?
+ *
+ * Compared in CENTS with a 1-cent tolerance rather than by float equality, because both sides have
+ * been through JSON and a rounding step, and `0.1 + 0.2 !== 0.3` would make an identical journal
+ * look distinct -- failing OPEN into exactly the duplicate this guard exists to prevent.
+ */
+export function manualJournalMatches(existingTotal: number | null, keyTotal: number): boolean {
+  if (existingTotal === null) return false;
+  return Math.abs(Math.round(existingTotal * 100) - Math.round(keyTotal * 100)) <= 1;
 }
 
 export interface ExistingHit {
@@ -126,8 +256,18 @@ export interface ExistingHit {
   statuses: string[];
 }
 
-/** Pull (id, status) pairs out of a Xero list response for whichever collection was probed. */
-export function readExisting(collection: string, responseBody: unknown): Array<{ id: string; status: string }> {
+/**
+ * Pull (id, status) pairs out of a Xero list response for whichever collection was probed.
+ *
+ * `total` is populated for manualjournals only, computed from the returned JournalLines, because a
+ * manual journal's key is Narration + Date + Total and the Total half can only be evaluated here
+ * (Xero has no filterable Total field). It is null for every other collection and for a journal
+ * whose lines Xero did not return.
+ */
+export function readExisting(
+  collection: string,
+  responseBody: unknown,
+): Array<{ id: string; status: string; total: number | null }> {
   if (!responseBody || typeof responseBody !== 'object') return [];
   const idField: Record<string, string> = {
     invoices: 'InvoiceID',
@@ -145,6 +285,7 @@ export function readExisting(collection: string, responseBody: unknown): Array<{
         return {
           id: String(row[wanted] ?? row['ID'] ?? ''),
           status: String(row['Status'] ?? ''),
+          total: collection === 'manualjournals' ? manualJournalTotal(row) : null,
         };
       })
       .filter((r) => r.id);

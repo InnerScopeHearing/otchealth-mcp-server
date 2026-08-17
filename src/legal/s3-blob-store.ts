@@ -36,7 +36,7 @@
  * writes continue to go to Azure until the mirror becomes primary, which is a later, separate step.
  */
 import { loadEnv } from '../config/env.js';
-import { resolveAwsCredentials, signRequest } from '../search/sigv4.js';
+import { resolveAwsCredentials, signRequest, canonicalUri } from '../search/sigv4.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 
 /** SHA-256 of the empty string: the required `x-amz-content-sha256` for any bodyless S3 request. */
@@ -133,22 +133,39 @@ export async function fetchBlobFromS3(
   // it keeps a single knob rather than introducing a second one that can silently disagree.
   const region = e.OPENSEARCH_REGION || 'us-east-1';
   const host = `${loc.bucket}.s3.${region}.amazonaws.com`;
-  // Each path segment is encoded individually: object keys legitimately contain '/' as a separator,
-  // and encoding it would look for a key with a literal %2F in its name.
   const objectKey = `${loc.keyPrefix}${path}`;
-  const signPath = '/' + objectKey.split('/').map(encodeURIComponent).join('/');
+
+  // ENCODE EXACTLY ONCE, AND ONLY VIA canonicalUri (2026-08-17 fix for a silent read failure).
+  //
+  // signRequest canonicalizes the path it is given -- it calls canonicalUri() internally. The
+  // previous code ALSO pre-encoded with encodeURIComponent and passed the result in, so a space
+  // became `%20` on the wire but `%2520` inside the signed canonical request. Signature mismatch,
+  // S3 answered 403, and the 403 branch below reported `found:false`. Every object key containing a
+  // space was therefore silently unreadable while reporting as ABSENT -- which is how ~11 finance
+  // documents were written up as a "data coverage gap" when they were present the whole time.
+  // Keys with no character needing encoding were unaffected (double-encoding a no-op is a no-op),
+  // which is exactly why it hid for so long.
+  //
+  // encodeURIComponent was ALSO the wrong encoder here even once: it leaves `!*'()` unescaped,
+  // while AWS's canonical form requires them percent-encoded. Real filenames in this store contain
+  // parentheses (e.g. "... (002) ..."), so that divergence was a second latent failure.
+  //
+  // Signing the RAW path and sending canonicalUri(raw) makes both sides use one encoder by
+  // construction, so they cannot drift apart again.
+  const rawPath = `/${objectKey}`;
+  const wirePath = canonicalUri(rawPath);
 
   const signed = signRequest({
     method: 'GET',
     host,
-    path: signPath,
+    path: rawPath,
     region,
     service: 's3',
     credentials,
     // S3 rejects a request without this header (400 InvalidRequest), and it must be SIGNED.
     extraHeaders: { 'x-amz-content-sha256': EMPTY_SHA256 },
   });
-  const r = await fetchWithBudget(`https://${host}${signPath}`, { method: 'GET', headers: signed.headers });
+  const r = await fetchWithBudget(`https://${host}${wirePath}`, { method: 'GET', headers: signed.headers });
   if (r.status === 404 || r.status === 403) {
     // S3 answers 403 rather than 404 for a missing key when the caller lacks ListBucket, so both
     // mean "not there" for our purposes. Treating 403 as a hard error would turn an absent document
