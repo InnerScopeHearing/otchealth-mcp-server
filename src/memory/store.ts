@@ -189,8 +189,10 @@ async function putText(name: string, body: string): Promise<void> {
 async function listShared(): Promise<string[]> {
   // listBlobsFromS3 returns keys RELATIVE to the mirror prefix, which is exactly the shape Azure's
   // listing returns here (`_MEMORY/_exec/<agent>.jsonl`), so readSharedAll's slice() needs no branch.
-  // It also throws on any non-404 failure, preserving the loud-failure contract documented below --
-  // a 403 must never come back as "no agent has recorded anything".
+  // It also throws on ANY failure now, including a 404 (2026-08-18: a 404 on a LIST can only mean the
+  // bucket itself is missing -- see s3-blob-store.ts's listBlobsFromS3 for why), preserving the
+  // loud-failure contract documented below -- neither a 403 nor a mirror-mapping 404 may come back as
+  // "no agent has recorded anything".
   if (s3BlobBackendActive()) {
     const rows = await listBlobsFromS3(commonsAccount(), CONTAINER, SHARED_PREFIX);
     return rows.map((r) => r.name).filter((n) => n.endsWith('.jsonl'));

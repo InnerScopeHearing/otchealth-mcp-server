@@ -293,9 +293,32 @@ export async function listBlobsFromS3(
       .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(query[k])}`)
       .join('&');
     const r = await fetchWithBudget(`https://${host}/?${qs}`, { method: 'GET', headers: signed.headers });
-    if (r.status === 404) break;
-    // NOT folded into "empty": a 403 here is a credential or signature failure, and reporting it as
-    // an empty container is exactly the false-absence bug this store already shipped once.
+    // A 404 on ListObjectsV2 can ONLY mean the BUCKET does not exist -- a missing/empty *prefix*
+    // inside a bucket that does exist is not a 404 at all, it is a normal 200 with a
+    // <ListBucketResult> that simply has no <Contents> elements. So there is no legitimate "the room
+    // is just empty" reading of a 404 here, ever.
+    //
+    // THIS IS EXACTLY THE MISROUTE CLASS FROM THE 2026-08-18 INCIDENT: the commons container was
+    // pointed at the wrong bucket (one that only held a different prefix), every one of its 23 real
+    // sub-prefixes 404'd against that bucket, and the OLD code below (`if (r.status === 404) break`)
+    // turned every one of those 404s into a silent, successful, empty listing -- so the shared exec
+    // ledger read back as "1 entry" where 24 lanes of real history lived. A LIST 404 is precisely the
+    // signal that would have made that misroute loud, and folding it into "empty" is what swallowed
+    // it. So it throws, and names the bucket, so the next mapping bug is loud instead of silent.
+    //
+    // THIS IS DELIBERATELY THE OPPOSITE of fetchBlobFromS3's GET path just above, which still folds
+    // 404 (and 403) into `found:false` -- and that is CORRECT there, for a different reason: S3
+    // answers 403 rather than 404 for a GET on a missing *key* when the caller lacks ListBucket, so
+    // for a GET both status codes genuinely mean "this one object is not present", never "the bucket
+    // itself is gone". LIST and GET disagree on what a 404 can mean, so their handling must disagree
+    // too. Do not "fix" one to match the other; that would just move the bug rather than remove it.
+    if (r.status === 404) {
+      throw new Error(
+        `s3 blob list 404: bucket "${loc.bucket}" does not exist (a missing/empty prefix inside a real bucket returns 200 with an empty listing, never 404 -- refusing to report a missing bucket as an empty room)`,
+      );
+    }
+    // A 403 here is a credential or signature failure, and reporting it as an empty container is the
+    // same false-absence bug -- so it is not folded into "empty" either.
     if (!r.ok) throw new Error(`s3 blob list ${r.status}: ${(await r.text()).slice(0, 160)}`);
     const xml = await r.text();
     for (const block of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
