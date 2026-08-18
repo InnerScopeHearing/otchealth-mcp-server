@@ -18,9 +18,9 @@ resource "aws_codebuild_project" "gateway" {
   build_timeout = 40
 
   source {
-    type            = "S3"
-    location        = "${aws_s3_bucket.build.bucket}/src/gateway.zip"
-    buildspec       = <<-BUILDSPEC
+    type      = "S3"
+    location  = "${aws_s3_bucket.build.bucket}/src/gateway.zip"
+    buildspec = <<-BUILDSPEC
       version: 0.2
       phases:
         pre_build:
@@ -45,10 +45,10 @@ resource "aws_codebuild_project" "gateway" {
 
   environment {
     compute_type                = "BUILD_GENERAL1_MEDIUM"
-    image                         = "aws/codebuild/standard:7.0"
-    type                           = "LINUX_CONTAINER"
-    image_pull_credentials_type    = "CODEBUILD"
-    privileged_mode                = true
+    image                       = "aws/codebuild/standard:7.0"
+    type                        = "LINUX_CONTAINER"
+    image_pull_credentials_type = "CODEBUILD"
+    privileged_mode             = true
 
     environment_variable {
       name  = "GIT_SHA"
@@ -70,9 +70,9 @@ resource "aws_codebuild_project" "docindexer" {
   build_timeout = 40
 
   source {
-    type            = "S3"
-    location        = "${aws_s3_bucket.build.bucket}/src/tools.zip"
-    buildspec       = <<-BUILDSPEC
+    type      = "S3"
+    location  = "${aws_s3_bucket.build.bucket}/src/tools.zip"
+    buildspec = <<-BUILDSPEC
       version: 0.2
       phases:
         pre_build:
@@ -97,10 +97,10 @@ resource "aws_codebuild_project" "docindexer" {
 
   environment {
     compute_type                = "BUILD_GENERAL1_MEDIUM"
-    image                         = "aws/codebuild/standard:7.0"
-    type                           = "LINUX_CONTAINER"
-    image_pull_credentials_type    = "CODEBUILD"
-    privileged_mode                = true
+    image                       = "aws/codebuild/standard:7.0"
+    type                        = "LINUX_CONTAINER"
+    image_pull_credentials_type = "CODEBUILD"
+    privileged_mode             = true
 
     environment_variable {
       name  = "GIT_SHA"

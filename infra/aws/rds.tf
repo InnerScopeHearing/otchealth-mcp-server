@@ -31,37 +31,37 @@ resource "aws_db_instance" "otchealth_pg" {
   engine_version = "18.3"
   instance_class = "db.t4g.micro"
 
-  allocated_storage     = 20
-  storage_type            = "gp3"
-  iops                     = 3000
-  storage_throughput       = 125
-  storage_encrypted        = true
-  kms_key_id                = "arn:aws:kms:${var.aws_region}:${var.aws_account_id}:key/618df9b2-7933-41dd-8fbf-5eb29f07075a"
+  allocated_storage  = 20
+  storage_type       = "gp3"
+  iops               = 3000
+  storage_throughput = 125
+  storage_encrypted  = true
+  kms_key_id         = "arn:aws:kms:${var.aws_region}:${var.aws_account_id}:key/618df9b2-7933-41dd-8fbf-5eb29f07075a"
 
-  multi_az                  = false
-  publicly_accessible       = false
-  availability_zone          = "us-east-1c"
-  network_type                = "IPV4"
+  multi_az            = false
+  publicly_accessible = false
+  availability_zone   = "us-east-1c"
+  network_type        = "IPV4"
 
-  db_subnet_group_name    = data.aws_db_subnet_group.default.name
-  vpc_security_group_ids  = [aws_default_security_group.default.id]
-  parameter_group_name     = "default.postgres18"
-  option_group_name         = "default:postgres-18"
+  db_subnet_group_name   = data.aws_db_subnet_group.default.name
+  vpc_security_group_ids = [aws_default_security_group.default.id]
+  parameter_group_name   = "default.postgres18"
+  option_group_name      = "default:postgres-18"
 
-  username                          = "otchadmin"
+  username                            = "otchadmin"
   password                            = "CHANGEME-placeholder-never-applied-real-password-unknowable-via-api"
   iam_database_authentication_enabled = false
 
-  deletion_protection      = true
-  backup_retention_period   = 7
-  backup_window              = "09:17-09:47"
-  maintenance_window         = "sat:06:32-sat:07:02"
-  ca_cert_identifier          = "rds-ca-rsa2048-g1"
-  auto_minor_version_upgrade  = true
+  deletion_protection          = true
+  backup_retention_period      = 7
+  backup_window                = "09:17-09:47"
+  maintenance_window           = "sat:06:32-sat:07:02"
+  ca_cert_identifier           = "rds-ca-rsa2048-g1"
+  auto_minor_version_upgrade   = true
   copy_tags_to_snapshot        = false
   performance_insights_enabled = false
-  monitoring_interval           = 0
-  engine_lifecycle_support      = "open-source-rds-extended-support"
+  monitoring_interval          = 0
+  engine_lifecycle_support     = "open-source-rds-extended-support"
 
   tags = {
     purpose = "azure-migration"

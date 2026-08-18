@@ -36,10 +36,10 @@ resource "aws_ecs_task_definition" "jobs" {
   family                   = each.key
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                       = tostring(each.value.cpu)
-  memory                     = tostring(each.value.memory)
-  execution_role_arn         = aws_iam_role.ecs_execution.arn
-  task_role_arn                = aws_iam_role.task.arn
+  cpu                      = tostring(each.value.cpu)
+  memory                   = tostring(each.value.memory)
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
@@ -51,8 +51,8 @@ resource "aws_ecs_task_definition" "jobs" {
       entryPoint = each.value.container.entryPoint
 
       logConfiguration = each.value.container.logConfiguration
-      environment       = each.value.container.environment
-      secrets            = each.value.container.secrets
+      environment      = each.value.container.environment
+      secrets          = each.value.container.secrets
 
       mountPoints    = []
       volumesFrom    = []

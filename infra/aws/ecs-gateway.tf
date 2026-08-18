@@ -20,10 +20,10 @@ resource "aws_ecs_task_definition" "gateway" {
   family                   = "otchealth-gateway"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                       = "1024"
-  memory                     = "2048"
-  execution_role_arn         = aws_iam_role.ecs_execution.arn
-  task_role_arn                = aws_iam_role.task.arn
+  cpu                      = "1024"
+  memory                   = "2048"
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
@@ -68,18 +68,18 @@ resource "aws_ecs_service" "gateway" {
   launch_type   = "FARGATE"
 
   health_check_grace_period_seconds = 120
-  enable_execute_command              = false
+  enable_execute_command            = false
 
   network_configuration {
-    subnets           = local.gateway_subnet_ids
-    security_groups    = [aws_security_group.gateway_tasks.id]
-    assign_public_ip    = true
+    subnets          = local.gateway_subnet_ids
+    security_groups  = [aws_security_group.gateway_tasks.id]
+    assign_public_ip = true
   }
 
   load_balancer {
     target_group_arn = aws_lb_target_group.gateway.arn
-    container_name    = "gateway"
-    container_port     = 8080
+    container_name   = "gateway"
+    container_port   = 8080
   }
 
   deployment_controller {
@@ -87,7 +87,7 @@ resource "aws_ecs_service" "gateway" {
   }
 
   deployment_minimum_healthy_percent = 100
-  deployment_maximum_percent          = 200
+  deployment_maximum_percent         = 200
 
   deployment_circuit_breaker {
     enable   = false

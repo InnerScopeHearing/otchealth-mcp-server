@@ -42,13 +42,13 @@ resource "aws_scheduler_schedule" "jobs" {
 
     ecs_parameters {
       task_definition_arn = aws_ecs_task_definition.jobs[each.value.target.taskDefinitionFamily].arn
-      task_count            = each.value.target.taskCount
-      launch_type            = each.value.target.launchType
+      task_count          = each.value.target.taskCount
+      launch_type         = each.value.target.launchType
 
       network_configuration {
-        subnets           = each.value.target.subnets
-        security_groups    = each.value.target.securityGroups
-        assign_public_ip    = each.value.target.assignPublicIp == "ENABLED"
+        subnets          = each.value.target.subnets
+        security_groups  = each.value.target.securityGroups
+        assign_public_ip = each.value.target.assignPublicIp == "ENABLED"
       }
     }
 

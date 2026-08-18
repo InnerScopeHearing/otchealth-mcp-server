@@ -55,3 +55,17 @@ coverage/
 .cache/
 tmp/
 infra-aws/alert-fanout-lambda/function.zip
+
+# Terraform (infra/aws, infra/aws/bootstrap)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# .terraform.lock.hcl is intentionally NOT ignored -- it pins provider versions/checksums and
+# should be committed so `terraform init` is reproducible without needing to re-resolve providers.

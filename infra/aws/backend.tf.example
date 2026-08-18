@@ -1,0 +1,26 @@
+# backend.tf.example -- NOT active. Rename to `backend.tf` ONLY after `infra/aws/bootstrap/` has
+# been applied for real (see that directory's README.md for the one-time, by-hand sequence).
+#
+# Until that happens, this configuration correctly has NO backend block (see versions.tf's
+# header) and uses local state, which is fine because IT HAS NEVER BEEN APPLIED -- there is no
+# state to protect yet. Introducing this file before the bootstrap bucket/table exist would just
+# make `terraform init` fail (safely) trying to configure a backend against resources that are
+# not there.
+#
+# Fill in the two values below from `terraform output` in infra/aws/bootstrap/ after applying it:
+#
+#   terraform {
+#     backend "s3" {
+#       bucket         = "otchealth-terraform-state-900915535335"  # bootstrap output: terraform_state_bucket
+#       key            = "gateway/terraform.tfstate"
+#       region         = "us-east-1"
+#       dynamodb_table = "otchealth-terraform-locks"                # bootstrap output: terraform_lock_table
+#       encrypt        = true
+#     }
+#   }
+#
+# If the team has standardized on Terraform >= 1.10 by the time this is wired in, native S3
+# locking is a legitimate simplification (drop the bootstrap's DynamoDB table, drop
+# `dynamodb_table` above, add `use_lockfile = true` instead) -- see bootstrap/README.md's locking
+# section for the full tradeoff. Either way: after adding a real `backend.tf`, run
+# `terraform init -migrate-state` to move local state into the new backend, not a bare `init`.

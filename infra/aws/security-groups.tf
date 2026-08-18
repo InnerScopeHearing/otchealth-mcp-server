@@ -22,26 +22,26 @@ resource "aws_security_group" "alb_public" {
 
 resource "aws_vpc_security_group_ingress_rule" "alb_public_http" {
   security_group_id = aws_security_group.alb_public.id
-  description        = "Public HTTP (redirected to HTTPS by the listener, see alb.tf)"
-  ip_protocol        = "tcp"
-  from_port          = 80
-  to_port             = 80
-  cidr_ipv4          = "0.0.0.0/0"
+  description       = "Public HTTP (redirected to HTTPS by the listener, see alb.tf)"
+  ip_protocol       = "tcp"
+  from_port         = 80
+  to_port           = 80
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "alb_public_https" {
   security_group_id = aws_security_group.alb_public.id
-  description        = "Public HTTPS (mcp.otchealth.app)"
-  ip_protocol        = "tcp"
-  from_port          = 443
-  to_port             = 443
-  cidr_ipv4          = "0.0.0.0/0"
+  description       = "Public HTTPS (mcp.otchealth.app)"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 resource "aws_vpc_security_group_egress_rule" "alb_public_all" {
   security_group_id = aws_security_group.alb_public.id
-  ip_protocol        = "-1"
-  cidr_ipv4          = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 # --- otchealth-gateway-tasks: the Fargate tasks (ECS service + every scheduled job) ---
@@ -52,18 +52,18 @@ resource "aws_security_group" "gateway_tasks" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "gateway_tasks_from_alb" {
-  security_group_id           = aws_security_group.gateway_tasks.id
+  security_group_id            = aws_security_group.gateway_tasks.id
   description                  = "Gateway container port, ALB only"
   ip_protocol                  = "tcp"
   from_port                    = 8080
-  to_port                       = 8080
+  to_port                      = 8080
   referenced_security_group_id = aws_security_group.alb_public.id
 }
 
 resource "aws_vpc_security_group_egress_rule" "gateway_tasks_all" {
   security_group_id = aws_security_group.gateway_tasks.id
-  ip_protocol        = "-1"
-  cidr_ipv4          = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 # --- otchealth-dbtools: operator/tooling access path to RDS (egress-only; no inbound rule found
@@ -76,8 +76,8 @@ resource "aws_security_group" "dbtools" {
 
 resource "aws_vpc_security_group_egress_rule" "dbtools_all" {
   security_group_id = aws_security_group.dbtools.id
-  ip_protocol        = "-1"
-  cidr_ipv4          = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 # --- The VPC's own default security group, adopted (not created/destroyed) -- holds RDS's 5432

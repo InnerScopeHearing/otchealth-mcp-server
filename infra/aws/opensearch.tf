@@ -14,11 +14,11 @@ resource "aws_opensearch_domain" "brain" {
   engine_version = "OpenSearch_2.19"
 
   cluster_config {
-    instance_type            = "r6g.large.search"
-    instance_count            = 1
-    dedicated_master_enabled  = false
-    zone_awareness_enabled    = false
-    warm_enabled               = false
+    instance_type                 = "r6g.large.search"
+    instance_count                = 1
+    dedicated_master_enabled      = false
+    zone_awareness_enabled        = false
+    warm_enabled                  = false
     multi_az_with_standby_enabled = false
   }
 
@@ -49,7 +49,7 @@ resource "aws_opensearch_domain" "brain" {
   }
 
   advanced_options = {
-    "override_main_response_version"        = "false"
+    "override_main_response_version"         = "false"
     "rest.action.multi.allow_explicit_index" = "true"
   }
 
