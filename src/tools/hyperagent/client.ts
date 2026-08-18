@@ -13,108 +13,36 @@
  * cannot express "this client may only reach these agents", so the gateway expresses it instead.
  */
 
-import { loadEnv } from '../../config/env.js';
+import {
+  __resetHyperagentTokenLockForTests,
+  getAccessToken as getStoredAccessToken,
+  hyperagentConfigured as tokenStoreConfigured,
+} from './token-store.js';
 
-const TOKEN_ENDPOINT = 'https://hyperagent.com/api/oauth/token';
 const MCP_ENDPOINT = 'https://hyperagent.com/api/mcp';
 
-/** Refresh a little early so a token cannot expire between the check and the call it authorizes. */
-const EXPIRY_SKEW_MS = 60_000;
-
-interface CachedToken {
-  accessToken: string;
-  expiresAt: number;
-}
-
-let cache: CachedToken | null = null;
-
-/**
- * The refresh token currently in use. Seeded from configuration, then REPLACED IN MEMORY if the
- * provider rotates it on use.
- *
- * ROTATION IS THE SHARP EDGE HERE, so it is handled explicitly rather than hoped about. If
- * Hyperagent returns a new `refresh_token` in a refresh response, the configured one is now spent.
- * Keeping the new one in memory keeps THIS process working, but a restart would fall back to the
- * spent value and the broker would go dark — the classic "worked until it was redeployed" failure.
- * `rotationPending` records that divergence so a health surface can report it loudly instead of it
- * being discovered weeks later.
- */
-let activeRefreshToken: string | null = null;
-let rotationPending = false;
-
-/** True once the provider has handed us a refresh token that is not the configured one. */
-export function refreshTokenRotationPending(): boolean {
-  return rotationPending;
-}
-
 export function hyperagentConfigured(): boolean {
-  return Boolean(loadEnv().HYPERAGENT_CLIENT_ID && loadEnv().HYPERAGENT_REFRESH_TOKEN);
+  return tokenStoreConfigured();
 }
 
 /** Reset module state. Test-only seam; never called in production paths. */
 export function __resetHyperagentClientForTests(): void {
-  cache = null;
-  activeRefreshToken = null;
-  rotationPending = false;
+  __resetHyperagentTokenLockForTests();
 }
 
 /**
- * Mint (or reuse) an access token. Never logs, returns, or embeds the token in an error message —
- * errors carry status codes and provider error CODES only, never the bodies that might echo a
- * credential back.
+ * Mint (or reuse) an access token.
+ *
+ * ROTATION USED TO BE HANDLED HERE, IN MEMORY, AND THAT WAS WRONG. Hyperagent's refresh tokens are
+ * single-use (verified live 2026-08-18) and its access tokens last ~15 minutes, so at the live
+ * replica count each replica refreshes several times an hour. An in-memory rotation meant one
+ * replica silently invalidated the other's token, and any redeploy dropped both back to a spent
+ * value. Under reuse detection that can revoke the whole family and cost a fresh human consent.
+ * Token lifecycle now lives in token-store.ts, which persists every rotation under an ETag'd
+ * compare-and-swap before the token is used. See that file for the full reasoning.
  */
 export async function getAccessToken(): Promise<string | null> {
-  if (!hyperagentConfigured()) return null;
-
-  const now = Date.now();
-  if (cache && cache.expiresAt - EXPIRY_SKEW_MS > now) return cache.accessToken;
-
-  const refresh = activeRefreshToken ?? loadEnv().HYPERAGENT_REFRESH_TOKEN ?? '';
-  if (!refresh) return null;
-
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refresh,
-    client_id: loadEnv().HYPERAGENT_CLIENT_ID ?? '',
-  });
-  // A public client registered via DCR has no secret; a confidential one does. Send it only if set.
-  if (loadEnv().HYPERAGENT_CLIENT_SECRET) body.set('client_secret', loadEnv().HYPERAGENT_CLIENT_SECRET);
-
-  const res = await fetch(TOKEN_ENDPOINT, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-
-  if (!res.ok) {
-    // Deliberately status-only. A token endpoint's error body can contain the submitted credential.
-    throw new Error(`hyperagent token refresh failed: HTTP ${res.status}`);
-  }
-
-  const json = (await res.json().catch(() => null)) as {
-    access_token?: string;
-    expires_in?: number;
-    refresh_token?: string;
-  } | null;
-
-  if (!json?.access_token) throw new Error('hyperagent token refresh returned no access_token');
-
-  if (json.refresh_token && json.refresh_token !== refresh) {
-    activeRefreshToken = json.refresh_token;
-    if (!rotationPending) {
-      rotationPending = true;
-      // Loud, once, and without the value. Silence here is how a broker dies at the next deploy.
-      console.error(
-        '[hyperagent] ROTATION: the provider issued a NEW refresh token. It is held in memory only. ' +
-          'Persist it to the hyperagent-refresh-token secret before the next restart, or this broker ' +
-          'will go dark when this process is replaced.',
-      );
-    }
-  }
-
-  const ttlMs = (json.expires_in ?? 3600) * 1000;
-  cache = { accessToken: json.access_token, expiresAt: now + ttlMs };
-  return json.access_token;
+  return getStoredAccessToken();
 }
 
 export interface McpCallResult {
