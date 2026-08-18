@@ -78,12 +78,75 @@ const copyOk = () =>
 
 // ─────────────────────────── RING SAFETY, WRITE SIDE ───────────────────────────
 
-test('RING: the commons feed maps to the shared bucket, NEVER the privileged personal-legal one', () => {
+// THE BUCKET LOCK. This is the assertion the 2026-08-18 misroute would have failed.
+//
+// The first version of the commons row sent this feed to otchealth-finance-legal-dr-55c84f6b, and
+// this very test asserted that wrong value -- so it passed against broken code and proved nothing.
+// The bucket below is now pinned to what a read-only listing of the live estate actually found:
+// otchealth-brain-dr-55c84f6b holds the real 29 lane files (cto.jsonl ~1.2 MB, cfo.jsonl ~1.9 MB,
+// and so on), all latest, zero delete markers. Writing to the finance-legal path instead 404'd,
+// read as an empty feed, and produced a fresh 725-byte single-entry cto.jsonl there -- after which
+// memory_team reported shared_entry_count=1 against months of real history.
+//
+// Assert the literal string, never a constant imported from the module under test: a test that
+// reads its expected value out of the code it is checking agrees with that code by construction,
+// including when the code is wrong.
+test('RING: the commons feed maps to the BRAIN-DR bucket, and to no other bucket', () => {
   const loc = s3LocationFor('otchealthcommons', 'company-journal');
-  assert.ok(loc, 'the commons row must exist -- its absence WAS the outage');
-  assert.equal(loc!.bucket, 'otchealth-finance-legal-dr-55c84f6b');
+  assert.ok(loc, 'the commons row must exist -- its absence WAS the original outage');
+  assert.equal(
+    loc!.bucket,
+    'otchealth-brain-dr-55c84f6b',
+    'the shared exec brain physically lives in brain-dr; any other bucket 404s and reads as an empty feed',
+  );
   assert.equal(loc!.keyPrefix, 'otchealthcommons/company-journal/');
   assert.notEqual(loc!.bucket, PERSONAL_LEGAL_BUCKET);
+});
+
+test('RING: commons NEVER resolves to EITHER legal bucket -- it is shared, they are privileged rings', () => {
+  // Commons is the non-privileged, every-agent feed. Both legal buckets are ring-gated: the personal
+  // one is attorney-privileged (clo-personal+exec), and the finance-legal one carries company legal +
+  // CFO finance + MNPI. Putting the shared brain inside either means every agent's memory writes land
+  // in a privileged-ring bucket -- and that is not a hypothetical, it is precisely what the first
+  // version of this row did with finance-legal. Name both explicitly so neither can be reintroduced.
+  const loc = s3LocationFor('otchealthcommons', 'company-journal');
+  assert.ok(loc, 'the commons row must exist');
+  assert.notEqual(
+    loc!.bucket,
+    'otchealth-finance-legal-dr-55c84f6b',
+    'THE 2026-08-18 MISROUTE: commons must not live in the finance/company-legal bucket',
+  );
+  assert.notEqual(
+    loc!.bucket,
+    'otchealth-legal-personal-dr-55c84f6b',
+    'commons must never live in the attorney-privileged personal-legal bucket',
+  );
+});
+
+test('RING: the commons write actually addresses the brain-dr host on the wire', () => {
+  // The row is one thing; the request built from it is another. Pin the host that putObjectToS3
+  // really signs and sends to, so a correct table paired with a broken location->URL step still
+  // fails here rather than in production.
+  return capture([ok], () =>
+    putObjectToS3(
+      'otchealthcommons',
+      'company-journal',
+      '_MEMORY/_exec/cto.jsonl',
+      Buffer.from('{"a":1}\n'),
+      'application/x-ndjson',
+    ),
+  ).then(({ calls }) => {
+    const host = new URL(calls[0].url).host;
+    assert.equal(
+      host,
+      'otchealth-brain-dr-55c84f6b.s3.us-east-1.amazonaws.com',
+      `commons writes must go to brain-dr, got ${host}`,
+    );
+    assert.ok(
+      calls[0].url.endsWith('/otchealthcommons/company-journal/_MEMORY/_exec/cto.jsonl'),
+      'and land on the real exec-brain key path',
+    );
+  });
 });
 
 test('RING: every write verb FAILS CLOSED on an unmapped (account, container) pair', async () => {
