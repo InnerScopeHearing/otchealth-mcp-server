@@ -23,10 +23,23 @@ name: deploy
 # The golden-path release pipeline for the gateway. Deploys ONLY from green main, builds the
 # image ONCE and promotes it by immutable @sha256 DIGEST, brings up a GREEN revision at 0%
 # traffic, asserts health + the full tool catalog (regression guard for the 2026-07-01
-# 838->subset regression), then shifts traffic. The `production` GitHub Environment gates the
-# deploy behind a required reviewer (separation of duties). Auth is OIDC (no stored SP secret).
+# 838->subset regression), then shifts traffic. Auth is OIDC (no stored SP secret).
 #
-# AUTO-DEPLOY: runs on every push to main (i.e. every merge) AND on manual dispatch. Safe because
+# NOTE ON `environment: production` (verified live against the GitHub API on 2026-08-18): this
+# declaration is REQUIRED and load-bearing, because the Azure OIDC federated credential trusts only
+# the subject `repo:InnerScopeHearing/otchealth-mcp-server:environment:production`. Removing it
+# breaks auth. It does NOT supply a human approval gate. This repo's `production` environment has
+# `protection_rules: []` and `can_admins_bypass: true` -- no required reviewers, no self-review
+# prevention. Declaring an environment does not create protection on it; that is configured on the
+# environment itself, separately. For contrast, InnerScopeHearing/flatstick's `production` DOES have
+# a required reviewer (GBGolfMatt), which is the likely source of the belief that this one did too.
+# If the AWS successor to this workflow wants separation of duties, it must be configured, not
+# assumed -- and asserting it in a comment does not make it so.
+#
+# HISTORICAL, NO LONGER TRUE: this block used to read "AUTO-DEPLOY: runs on every push to main
+# (i.e. every merge) AND on manual dispatch." The push trigger was REMOVED by the 2026-08-18 disarm
+# above; this workflow is now workflow_dispatch only. The reasoning that followed it is kept because
+# it documents why the auto-deploy was safe, for whoever rebuilds this on AWS:
 # (1) branch protection means only build-green code reaches main, (2) the OAuth auth-code store now
 # lives in Cosmos so a blue-green revision cutover no longer drops live sessions, and (3) the health
 # + tool_count gate below refuses to shift traffic to a bad revision. Rollback = the previous
@@ -59,7 +72,8 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: production # human approval gate; reviewer must differ from the release opener
+    # Required for OIDC subject matching, NOT an approval gate -- see the note in the header.
+    environment: production
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 

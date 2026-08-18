@@ -59,19 +59,52 @@ function extractBearer(authHeader: string | undefined): string | null {
 /**
  * Extract the M365 declarative-agent static token from the request's query string.
  *
- * WHY THIS EXISTS (2026-07-25, fleet-wide MCP wiring): a Microsoft 365 declarative agent's
- * "RemoteMCPServer" runtime (ai-plugin.json schema v2.4+) supports exactly two auth modes —
- * OAuthPluginVault and None (confirmed via deep research 2026-07-25; ApiKeyPluginVault is
- * explicitly NOT supported for MCP plugins, and OAuthPluginVault's auth-config record can only be
- * created through the Teams Developer Portal UI — no Graph API or CLI path exists for it, so it's
- * not a real non-interactive option). With auth:None, Copilot's MCP runtime injects NO header of
- * any kind — the ONLY thing under our control is the static `spec.url` baked into the published
- * manifest. So the "credential" has to travel as part of that URL, and a query string is the only
- * part of a URL a JSON-RPC-over-HTTP POST reliably preserves end to end. This is a documented,
- * unrestricted pattern (no Microsoft schema rule forbids a token in spec.url) — not a workaround
- * that violates anything, just an inelegant consequence of ApiKeyPluginVault not existing for MCP.
- * Rotating a token means republishing that agent's app package (Graph POST to appCatalogs/teamsApps),
- * the same non-interactive mechanism already used to publish it in the first place.
+ * WHY THIS EXISTS (2026-07-25, fleet-wide MCP wiring; RE-VERIFIED 2026-08-18 against a HIGH
+ * security finding — a bearer credential in a URL query string is exposed anywhere URLs get
+ * recorded: proxy/gateway access logs, CDN logs, Referer headers, browser/client history, crash
+ * reports, any error message that echoes the request line): a Microsoft 365 declarative agent's
+ * "RemoteMCPServer" runtime (api_plugin.json schema v2.4). Two modes were evaluated when this
+ * design was chosen and both were ruled out. ApiKeyPluginVault is a syntactically valid enum value
+ * in the runtime authentication object, but Microsoft's docs state twice, independently — the
+ * authentication-schemes overview and the API-key-specific how-to — that "Model Context Protocol
+ * (MCP) plugins don't support API key authentication," so it is not a real option for this runtime
+ * regardless of what the schema will accept. OAuthPluginVault's auth-config record can only be
+ * created through the Teams Developer Portal UI (no Graph API or CLI path), AND is a genuine
+ * per-user interactive OAuth 2.0 authorization-code flow (a human signs in and clicks Allow) — a
+ * different, heavier authentication model than "this same static per-lane secret, delivered over a
+ * header," not a drop-in replacement for it.
+ *
+ * WHAT THIS COMMENT MUST NOT CLAIM (corrected 2026-08-18, and the correction is the point): an
+ * earlier draft of this very block concluded from the two rulings above that "no non-interactive
+ * header-capable mechanism exists for this runtime today." That does not follow, and it is false as
+ * written. Two candidates examined and rejected establishes that THOSE TWO do not work; it
+ * establishes nothing about a third. A re-fetch of the cited Microsoft Learn pages on 2026-08-18
+ * found DYNAMIC CLIENT REGISTRATION listed as supported for this runtime and described as
+ * automatic, and DCR was simply never considered when the query-string shape was picked in July.
+ * This gateway already has the RFC 9728 protected-resource-metadata and PKCE machinery DCR builds
+ * on. So the honest state is: no header-capable mechanism has been IMPLEMENTED, one documented
+ * candidate is untried, and the path is open rather than foreclosed. Do not re-derive "impossible"
+ * from this comment; an incomplete enumeration presented as an exhaustive one is exactly the defect
+ * class the 2026-08-18 sweep exists to remove, and this block shipped an instance of it.
+ *
+ * DECISION (2026-08-18): this gateway KEEPS accepting the query-string token as a deliberate,
+ * documented choice — resting on the fact that all six M365 agents are ALREADY PUBLISHED carrying
+ * that URL, so rejecting it before a replacement is built and republished is a self-inflicted
+ * outage rather than a security improvement. It does NOT rest on the alternatives being exhausted;
+ * see above, they are not. The real, shippable mitigation meanwhile lives in what this
+ * process itself controls: server/response-log.ts strips the query string from every URL this
+ * gateway writes to its OWN structured logs, closing the "gateway access logs" arm of the exposure
+ * above. It cannot close the CDN/proxy/browser-history arms — those layers are outside this
+ * process's control, and the credential is, unavoidably today, part of a URL. Any token published
+ * in this form must be treated as exposed and rotated; see build-agents.mjs (otchealth-cto) for the
+ * client-side half of this same finding and the full citation trail.
+ *
+ * With auth:None, Copilot's MCP runtime injects NO header of any kind — the ONLY thing under our
+ * control is the static `spec.url` baked into the published manifest. So the credential has to
+ * travel as part of that URL, and a query string is the only part of a URL a JSON-RPC-over-HTTP
+ * POST reliably preserves end to end. Rotating a token means republishing that agent's app package
+ * (Graph POST to appCatalogs/teamsApps), the same non-interactive mechanism already used to publish
+ * it in the first place.
  */
 function extractQueryToken(request: FastifyRequest): string | null {
   const q = request.query as Record<string, unknown> | undefined;
