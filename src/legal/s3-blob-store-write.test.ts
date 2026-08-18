@@ -232,21 +232,28 @@ test('a source ETag is sent as x-amz-copy-source-if-match, pinning the copy to t
 });
 
 test('delete with an ifMatch REFUSES when the live ETag differs, and deletes nothing', async () => {
-  // S3 has no If-Match precondition on DeleteObject, so this is a HEAD-then-delete check. Weaker
-  // than Azure's server-side guard, and honest about it -- but it must still refuse.
+  // REWRITTEN 2026-08-18. This test previously pinned a HEAD-then-delete check, on the false premise
+  // that "S3 has no If-Match precondition on DeleteObject". It does -- the AWS S3 API reference for
+  // DeleteObject states "The If-Match header is supported for both general purpose and directory
+  // buckets" (only IfMatchLastModifiedTime/IfMatchSize are directory-bucket-only). The intent below
+  // is UNCHANGED and the guarantee is STRICTLY STRONGER: "deletes nothing" is now enforced by S3
+  // itself, so there is no window between checking and acting, and no HEAD whose 403 could be
+  // misread as "already gone" and report a delete that never happened.
   const { error, calls } = await capture(
-    [() => new Response('', { status: 200, headers: { etag: '"v2"', 'content-length': '5' } })],
+    [() => new Response('<Error><Code>PreconditionFailed</Code></Error>', { status: 412 })],
     () => deleteObjectFromS3('otchealthlegalstore', 'company', 'a.pdf', '"v1"'),
   );
   assert.match(String(error), /changed since it was copied/);
-  assert.equal(calls.length, 1, 'only the HEAD ran');
-  assert.equal(calls.every((c) => c.method !== 'DELETE'), true, 'no DELETE was issued');
+  assert.equal((error as Error).name, 'BlobPreconditionFailedError', 'a refusal is its own typed outcome');
+  assert.equal(calls.length, 1, 'exactly one request: the conditional DELETE itself, no HEAD pre-check');
+  assert.equal(calls[0].method, 'DELETE');
+  assert.equal(calls[0].headers['if-match'], '"v1"', 'the precondition must travel WITH the delete');
+  // S3 rejected it, so the object is untouched -- guaranteed by the 412, not by a client-side guess.
 });
 
 test('delete with a MATCHING ifMatch proceeds to the DELETE', async () => {
   const { error, calls } = await capture(
     [
-      () => new Response('', { status: 200, headers: { etag: '"v1"', 'content-length': '5' } }),
       // 204 is what S3 really answers to DeleteObject, and the Response constructor requires a null
       // body for it -- passing '' throws before the assertion ever runs.
       () => new Response(null, { status: 204 }),
@@ -254,7 +261,9 @@ test('delete with a MATCHING ifMatch proceeds to the DELETE', async () => {
     () => deleteObjectFromS3('otchealthlegalstore', 'company', 'a.pdf', '"v1"'),
   );
   assert.equal(error, undefined);
-  assert.equal(calls[1].method, 'DELETE');
+  assert.equal(calls.length, 1, 'one conditional DELETE, no HEAD round trip');
+  assert.equal(calls[0].method, 'DELETE');
+  assert.equal(calls[0].headers['if-match'], '"v1"');
 });
 
 test('a failing delete throws rather than reporting an untouched object as removed', async () => {

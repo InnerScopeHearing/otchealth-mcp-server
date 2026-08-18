@@ -30,7 +30,12 @@ import {
   putObjectToS3,
   copyObjectInS3,
   deleteObjectFromS3,
+  BlobPreconditionFailedError,
 } from './s3-blob-store.js';
+
+/** Re-exported so callers have ONE import site for the typed refusal regardless of which backend
+ *  (Azure or the S3 mirror) actually served the delete. */
+export { BlobPreconditionFailedError } from './s3-blob-store.js';
 
 /** x-ms-version, matching skills/legal/legal.mjs exactly. */
 const AVER = '2021-06-08';
@@ -581,12 +586,12 @@ export async function copyBlob(
  * verified.
  */
 export async function deleteBlobHard(container: LegalContainer, path: string, ifMatch?: string): Promise<void> {
-  // NOTE the one genuine capability gap, stated rather than papered over: S3 DeleteObject has no
-  // If-Match precondition equivalent to Azure Blob's, so on the S3 path `ifMatch` is enforced by a
-  // HEAD-then-delete check inside deleteObjectFromS3. That still refuses a delete whose source
-  // changed, but it does not close the window between the HEAD and the DELETE the way Azure's
-  // server-side precondition does. Sending a header S3 may ignore would have been worse: it would
-  // report an unguarded delete as a guarded one.
+  // THERE IS NO CAPABILITY GAP HERE, and the comment that used to sit in this spot claiming one was
+  // factually wrong. S3 DeleteObject accepts the standard If-Match header on general purpose buckets
+  // exactly as Azure Blob does, so BOTH backends enforce `ifMatch` as a real server-side
+  // precondition and BOTH surface a refusal as the same typed BlobPreconditionFailedError. See
+  // deleteObjectFromS3's own doc comment for the full history: the HEAD-then-delete implementation
+  // that wrong belief justified could return SUCCESS having issued no DELETE request at all.
   if (s3WriteActive(container)) {
     const rc = readCreds();
     if (!rc) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_ACCOUNT unset)');
@@ -605,13 +610,10 @@ export async function deleteBlobHard(container: LegalContainer, path: string, if
     method: 'DELETE',
     headers,
   });
+  // 412 is checked BEFORE 404/!r.ok on BOTH backends: a refused precondition is neither "already
+  // gone" nor a generic transport failure, and the typed error is what lets a caller tell them apart.
+  if (r.status === 412) throw new BlobPreconditionFailedError(container, path, ifMatch ?? '');
   if (r.status === 404) return; // already gone; treat as success (idempotent)
-  if (r.status === 412) {
-    throw new Error(
-      `legal blob delete refused: the blob at ${container}/${path} changed since it was copied (ETag no ` +
-        `longer matches what was just moved to safety). Nothing was deleted; investigate and retry.`,
-    );
-  }
   if (!r.ok) throw new Error(`legal blob delete ${r.status}: ${(await r.text()).slice(0, 200)}`);
 }
 

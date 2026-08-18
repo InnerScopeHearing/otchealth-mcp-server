@@ -501,16 +501,58 @@ export async function copyObjectInS3(
 }
 
 /**
+ * Thrown when an ETag-pinned blob mutation is REFUSED by the store because the object no longer
+ * matches the expected version. S3 and Azure both answer 412 Precondition Failed, so both backends
+ * throw this one type and a caller can branch on it without sniffing message text.
+ *
+ * A DISTINCT TYPE, not a bare Error, because a copy-then-delete caller must tell three outcomes
+ * apart that a bare throw collapses: (a) the object is already gone -- nothing to do, the operation
+ * succeeded; (b) the object is THERE but CHANGED under us, so the delete was correctly refused and
+ * the caller must not claim it happened; (c) the store said no for some other reason (403, 5xx).
+ * Folding (b) or (c) into (a) is precisely the silent-success defect this file used to have.
+ */
+export class BlobPreconditionFailedError extends Error {
+  readonly container: string;
+  readonly path: string;
+  readonly expectedEtag: string;
+  constructor(container: string, path: string, expectedEtag: string) {
+    super(
+      `blob delete refused (HTTP 412 Precondition Failed): the object at ${container}/${path} ` +
+        `changed since it was copied (it no longer matches the expected ETag ${expectedEtag}). ` +
+        `Nothing was deleted; investigate and retry.`,
+    );
+    this.name = 'BlobPreconditionFailedError';
+    this.container = container;
+    this.path = path;
+    this.expectedEtag = expectedEtag;
+  }
+}
+
+/**
  * DELETE one object. Idempotent: S3 answers 204 whether or not the key existed, so "already gone"
  * is success, matching the Azure primitive's 404 handling.
  *
- * `ifMatch` NOTE, AND ITS LIMIT, STATED PLAINLY: S3 DeleteObject has no universally available
- * If-Match precondition equivalent to Azure Blob's. Rather than send a header S3 may ignore -- which
- * would report an UNGUARDED delete as a guarded one, the worst possible outcome for a
- * copy-then-delete caller -- this verifies the ETag with a HEAD first and refuses on a mismatch.
- * That is strictly weaker than a server-side precondition: a write landing between the HEAD and the
- * DELETE is not caught. It is strictly stronger than ignoring the argument, and it is honest about
- * which of the two it is.
+ * `ifMatch` IS A REAL SERVER-SIDE PRECONDITION, sent on the DELETE itself. S3 DeleteObject accepts
+ * the standard `If-Match` header on general purpose buckets and answers 412 when the ETag does not
+ * match; only `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` are directory-bucket
+ * only (AWS S3 API reference, DeleteObject: "The If-Match header is supported for both general
+ * purpose and directory buckets").
+ *
+ * AN EARLIER VERSION ASSERTED THE OPPOSITE -- that S3 had no If-Match equivalent -- and implemented
+ * the guard as HEAD-then-DELETE. That rationale was factually wrong, and the implementation it
+ * justified was worse than the gap it claimed to be honest about, in two compounding ways:
+ *   1. TOCTOU. A write landing between the HEAD and the DELETE was not caught, so the "guard" could
+ *      delete a version it had never verified.
+ *   2. SILENT SUCCESS, the serious one. `headBlobFromS3` deliberately folds BOTH 404 and 403 into
+ *      `exists:false` -- correct for a document READ, where S3 answers 403 for a missing key when
+ *      the caller lacks ListBucket -- so on a 403 the guarded path took the `already gone` branch
+ *      and RETURNED SUCCESS having issued ZERO DELETE requests. The blast radius was the primary
+ *      paths, not a corner case: legal_blob_move reported a COMPLETE move with the source document
+ *      still live at the old path, and legal_blob_delete returned executed:true and wrote an AUDIT
+ *      RECORD asserting a mutation that never happened -- on attorney-privileged, MNPI-adjacent
+ *      data.
+ * Sending the condition with the delete is strictly stronger than both: the server decides, no HEAD
+ * is involved so there is no window and no 403 to swallow, and a refusal is a loud typed 412.
  */
 export async function deleteObjectFromS3(
   account: string,
@@ -519,23 +561,19 @@ export async function deleteObjectFromS3(
   ifMatch?: string,
 ): Promise<void> {
   const ctx = await writeContext(account, container);
-  if (ifMatch) {
-    const head = await headBlobFromS3(account, container, path);
-    if (!head.exists) return; // already gone; nothing to guard, nothing to delete
-    if (head.etag !== ifMatch) {
-      throw new Error(
-        `s3 blob delete refused: the object at ${container}/${path} changed since it was copied ` +
-          `(ETag ${head.etag} no longer matches the expected ${ifMatch}). Nothing was deleted; investigate and retry.`,
-      );
-    }
-  }
   const r = await s3ObjectRequest({
     method: 'DELETE',
     loc: ctx.loc,
     path,
     credentials: ctx.credentials,
     region: ctx.region,
+    // Lowercase deliberately: signRequest sorts and canonicalises by the literal key it is handed,
+    // so a signed header must already be lowercase or the signature will not match the wire.
+    ...(ifMatch ? { extraHeaders: { 'if-match': ifMatch } } : {}),
   });
+  // BEFORE the generic !r.ok below, and before the 404 idempotency branch: a refused precondition is
+  // neither a transport failure nor "already gone", and must never be reported as either.
+  if (r.status === 412) throw new BlobPreconditionFailedError(container, path, ifMatch ?? '');
   if (r.status === 404) return; // idempotent
   if (!r.ok) throw new Error(`s3 blob delete ${r.status}: ${(await r.text()).slice(0, 200)}`);
 }
