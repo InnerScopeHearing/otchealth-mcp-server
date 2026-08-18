@@ -1,6 +1,6 @@
 /**
  * xero_* tools — full READ + WRITE for the executive ring (see client.ts header for the ring +
- * token-rotation design). 22 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
+ * token-rotation design). 23 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
  * OAuth scope surface (accounting + all reports + payroll + files + assets + projects), across all
  * four orgs, rate-governed. The CFO seat is authorized for full read+write on the books (Matt
  * directive 2026-07-16); Xero writes are bookkeeping (they post to the ledger, they do NOT move real
@@ -26,7 +26,8 @@
  *   xero_budgets            budgets (list or one by id)
  *   xero_settings           Organisation | TaxRates | TrackingCategories | Currencies | Users |
  *                           BrandingThemes | ContactGroups | Items
- *   xero_attachments        source-doc attachments on a record (list/read only — see xero_attachment_upload for writes)
+ *   xero_attachments        source-doc attachment METADATA on a record (filename/mime/size — not the bytes)
+ *   xero_attachment_content fetch an attachment's actual BYTES (base64, or text when genuinely text) — see client.ts xeroGetAttachmentContent
  *   xero_attachment_upload  upload a source-doc attachment (dry-run-first, truncation-guarded via expected_bytes/expected_sha256) — see client.ts xeroUploadAttachment
  * Other product APIs:
  *   xero_payroll            Employees | PayRuns | PayItems | PayrollCalendars | Timesheets | Settings (payroll.xro/1.0)
@@ -48,6 +49,7 @@ import {
   type XeroApi,
   type XeroOrg,
   type TokenDeps,
+  type XeroAttachmentIdentifier,
   isXeroAllowed,
   ringRefusal,
   xeroConfigured,
@@ -56,10 +58,17 @@ import {
   xeroGet,
   xeroRequest,
   xeroUploadAttachment,
+  xeroGetAttachmentContent,
+  MAX_ATTACHMENT_READ_BYTES,
   xeroConnections,
   isGrandfatheredForJournals,
   XERO_JOURNALS_GRANDFATHER_CUTOFF,
 } from './client.js';
+// Reused, not reimplemented: the SAME binary-vs-text heuristic already reviewed and trusted for the
+// finance dataroom (kb_get_document) — a NUL byte / known magic number means "do not decode this as
+// UTF-8 and call it a document" there, and the identical reasoning applies to a byte blob fetched
+// live from Xero.
+import { looksBinary } from '../kb/get-document.js';
 import { assembleGl } from './gl-assemble.js';
 import {
   collectionOf,
@@ -267,6 +276,197 @@ export async function handleXeroAttachmentUpload(
       `Xero attachment upload "${input.fileName}" (${buf.length} bytes, sha256=${actualSha256}) to ${input.endpoint}/${input.guid} for ${input.org} — HTTP ${res.status}. ` +
       `NOT independently verified yet — call xero_attachments(org:"${input.org}", endpoint:"${input.endpoint}", guid:"${input.guid}") before reporting this as successful.`,
   };
+}
+
+export interface XeroAttachmentContentInput {
+  org: XeroOrg;
+  endpoint: (typeof ATTACHMENT_ENDPOINT_ENUM)[number];
+  guid: string;
+  fileName?: string;
+  attachmentId?: string;
+  // OPTIONAL hint (FIX 3, 2026-08-18): the attachment's own mime type, as returned by a prior
+  // xero_attachments call. Passed through to xeroGetAttachmentContent's Accept header ahead of the
+  // wildcard. Never required — omitting it is byte-for-byte the same request this tool has always sent.
+  mimeType?: string;
+}
+
+/**
+ * `xero_attachment_content` handler — the READ counterpart to handleXeroAttachmentUpload above.
+ * Exported standalone for the same reason (direct unit-testability with a stubbed fetchImpl,
+ * mirroring the handleXeroAttachmentUpload / handleGraphDriveUpload pattern).
+ *
+ * Every distinct XeroAttachmentContentOutcome (client.ts) maps to its OWN named `error` code here —
+ * deliberately NOT collapsed into a single generic branch — so "not found", "forbidden", "auth
+ * failed", "too large", and "Xero returned something unexpected" can never be confused with each
+ * other by a caller reading only `error`. This is the direct fix for the failure class the task that
+ * built this tool was scoped around: a 403 silently read as "not found" cost eleven finance
+ * documents being written up as missing (a different, but structurally identical, defect fixed the
+ * same day in ../../legal/s3-blob-store.ts).
+ */
+export async function handleXeroAttachmentContent(
+  input: XeroAttachmentContentInput,
+  ctx: ToolContext,
+  // Test-only seam — see handleXeroAttachmentUpload's identical parameter for why this is always
+  // undefined in production.
+  deps?: TokenDeps,
+): Promise<ToolResultPayload> {
+  if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_attachment_content', ctx.callerAgent);
+  if (!xeroConfigured()) return unconfigured('xero_attachment_content');
+
+  const base = { org: input.org, endpoint: input.endpoint, guid: input.guid };
+  const fileName = input.fileName?.trim();
+  const attachmentId = input.attachmentId?.trim();
+  const hasFileName = Boolean(fileName);
+  const hasAttachmentId = Boolean(attachmentId);
+
+  if (!hasFileName && !hasAttachmentId) {
+    return {
+      data: { ...base, identifier: null, mimeType: null, bytes: null, sha256: null, contentBase64: null, textContent: null, error: 'identifier_required' },
+      summary:
+        'xero_attachment_content: pass exactly one of fileName or attachmentId. Prefer attachmentId when you have it ' +
+        '(it is a Xero GUID — no encoding footguns); get either from xero_attachments on the same endpoint/guid first.',
+    };
+  }
+  if (hasFileName && hasAttachmentId) {
+    return {
+      data: { ...base, identifier: null, mimeType: null, bytes: null, sha256: null, contentBase64: null, textContent: null, error: 'ambiguous_identifier' },
+      summary: 'xero_attachment_content: pass ONLY ONE of fileName or attachmentId, not both.',
+    };
+  }
+
+  const identifier: XeroAttachmentIdentifier = hasAttachmentId
+    ? { by: 'attachmentId', value: attachmentId! }
+    : { by: 'fileName', value: fileName! };
+
+  const outcome = await xeroGetAttachmentContent(input.org, input.endpoint, input.guid, identifier, {
+    deps,
+    mimeTypeHint: input.mimeType,
+  });
+  const withId = { ...base, identifier: identifier.value };
+
+  switch (outcome.kind) {
+    case 'not_found':
+      return {
+        data: { ...withId, mimeType: null, bytes: null, sha256: null, contentBase64: null, textContent: null, error: 'not_found', http_status: outcome.status },
+        summary:
+          `NOT FOUND (HTTP 404): no attachment "${identifier.value}" on ${input.endpoint}/${input.guid} (${input.org}). ` +
+          `This is DISTINCT from a permissions failure ('forbidden') — do not report the document as missing without also ` +
+          `confirming with xero_attachments(org:"${input.org}", endpoint:"${input.endpoint}", guid:"${input.guid}") first. Detail: ${outcome.detail}`,
+      };
+    case 'forbidden':
+      return {
+        data: { ...withId, mimeType: null, bytes: null, sha256: null, contentBase64: null, textContent: null, error: 'forbidden', http_status: outcome.status },
+        summary:
+          `FORBIDDEN (HTTP 403): Xero refused this request. DISTINCT from 'not_found' — never conclude the document does ` +
+          `not exist from a 403 alone. Detail: ${outcome.detail}`,
+      };
+    case 'auth_failed':
+      return {
+        data: { ...withId, mimeType: null, bytes: null, sha256: null, contentBase64: null, textContent: null, error: 'auth_failed', http_status: outcome.status },
+        summary:
+          `AUTH FAILED (HTTP 401, even after one forced token-refresh retry): an org-level token problem, not evidence ` +
+          `about this specific attachment. Check xero_orgs(probe:true). Detail: ${outcome.detail}`,
+      };
+    case 'unexpected_content_type':
+      return {
+        data: { ...withId, mimeType: outcome.contentType, bytes: null, sha256: null, contentBase64: null, textContent: null, error: 'unexpected_content_type' },
+        summary:
+          `REFUSED: Xero replied with Content-Type "${outcome.contentType}" instead of the file's real type — this looks ` +
+          `like the attachment-METADATA response, not the file itself, even though '*/*' was requested. Refusing to hand ` +
+          `back JSON mislabeled as file content. Body preview: ${outcome.bodyPreview.slice(0, 300)}`,
+      };
+    case 'too_large':
+      return {
+        data: {
+          ...withId,
+          mimeType: null,
+          bytes: outcome.actualBytes,
+          sha256: null,
+          contentBase64: null,
+          textContent: null,
+          error: 'content_too_large',
+          content_length_header: outcome.contentLengthHeader,
+          cap_bytes: outcome.cap,
+        },
+        summary:
+          `REFUSED (nothing downloaded or returned — never truncated): the attachment is ${outcome.actualBytes ?? outcome.contentLengthHeader ?? 'over'} ` +
+          `bytes, exceeding this gateway's ${outcome.cap}-byte read cap. Ask the CTO for a chunked/external channel for this file.`,
+      };
+    case 'xero_error':
+      return {
+        data: { ...withId, mimeType: null, bytes: null, sha256: null, contentBase64: null, textContent: null, error: 'xero_error', http_status: outcome.status },
+        summary: `Xero returned HTTP ${outcome.status} fetching attachment content. Detail: ${outcome.detail}`,
+      };
+    case 'ok': {
+      const sha256 = createHash('sha256').update(outcome.bytes).digest('hex');
+      // Mutually exclusive by design (never both): a genuinely text file is served as textContent
+      // (lossless — the same bytes, decoded) and NOT also duplicated as contentBase64, so a
+      // near-cap text file cannot double its own response size past the JIT auto-offload ceiling
+      // (see MAX_ATTACHMENT_READ_BYTES's comment in client.ts). A binary file gets contentBase64
+      // for fidelity and textContent stays null.
+      //
+      // FIX 2 (2026-08-18) — PROVE IT, DO NOT GUESS. This used to be `!looksBinary(outcome.bytes)`
+      // alone, which had two real failure modes for a tool that serves ANY file any Xero client ever
+      // attached (not just the finance-dataroom formats looksBinary was written for):
+      //   (a) looksBinary only recognizes 5 magic-number families (PDF/ZIP-Office/OLE2/PNG/JPEG) plus
+      //       a NUL-byte scan of the first 8KB. A TIFF/HEIC/other format with no NUL in that window
+      //       and no matching magic number was silently force-decoded as UTF-8 (lossy, U+FFFD
+      //       substitution) and the summary claimed "byte-for-byte" — a WRONG value presented as a
+      //       correct one.
+      //   (b) A genuinely-text-but-non-UTF-8 file (Windows-1252/ISO-8859-1 CSV/TXT — common in older
+      //       financial exports) passed the same NUL-byte check and was ALSO force-decoded as UTF-8,
+      //       silently mangling accented characters and currency symbols.
+      // STEP 1: use Xero's OWN Content-Type as the PRIMARY signal — it is authoritative information
+      // this handler already has and was previously ignoring. A declared text/* or explicitly-textual
+      // application/* type is trusted directly (no reason to second-guess Xero here); a generic or
+      // absent type falls back to the looksBinary heuristic (still useful there — Xero genuinely does
+      // omit/generic-type some text exports); every other CONCRETE declared type (application/pdf,
+      // image/tiff, ...) is NEVER treated as text-eligible, even if it happens to contain no NUL byte
+      // in its scanned window — this is the actual fix for failure mode (a).
+      const contentTypeBase = outcome.contentType.split(';')[0]!.trim().toLowerCase();
+      const EXPLICIT_TEXT_APPLICATION_TYPES = new Set(['application/json', 'application/xml', 'application/csv', 'application/x-ndjson']);
+      const isExplicitlyTextualType = contentTypeBase.startsWith('text/') || EXPLICIT_TEXT_APPLICATION_TYPES.has(contentTypeBase);
+      const isGenericOrAbsentType = contentTypeBase === '' || contentTypeBase === 'application/octet-stream';
+      const textEligibleByType = isExplicitlyTextualType || (isGenericOrAbsentType && !looksBinary(outcome.bytes));
+
+      // STEP 2: eligibility alone cannot PROVE a lossless decode — `Buffer.toString('utf8')` never
+      // throws, it silently substitutes U+FFFD for any invalid byte sequence. Round-tripping the
+      // decoded string back through a UTF-8 ENCODE and comparing byte-for-byte against the original
+      // is the actual proof: any U+FFFD substitution changes the byte sequence, so this catches BOTH
+      // failure mode (a) (a binary file that slipped past the type/NUL check) AND (b) (a declared-
+      // textual file whose bytes are not actually UTF-8) with the same single check. This is why
+      // "genuinely text, byte-for-byte" is only ever claimed below when this round-trip succeeds.
+      const decodedText = outcome.bytes.toString('utf8');
+      const losslessRoundTrip = Buffer.from(decodedText, 'utf8').equals(outcome.bytes);
+      const isText = textEligibleByType && losslessRoundTrip;
+      // A file that LOOKED text-eligible by its declared Content-Type but FAILED the round-trip proof
+      // is a distinct case from "never looked textual to begin with" — surfaced as a named, STRUCTURED
+      // field in `data` (not only prose in `summary`): clients in this fleet read structured fields,
+      // and a discriminator that lives only in a summary string is invisible to them.
+      const textDecodeRefused = textEligibleByType && !losslessRoundTrip;
+      return {
+        data: {
+          ...withId,
+          mimeType: outcome.contentType,
+          bytes: outcome.byteLength,
+          sha256,
+          contentBase64: isText ? null : outcome.bytes.toString('base64'),
+          textContent: isText ? decodedText : null,
+          ...(textDecodeRefused ? { textDecodeRefused: true as const } : {}),
+        },
+        summary:
+          `Fetched "${identifier.value}" on ${input.endpoint}/${input.guid} (${input.org}): ${outcome.byteLength} bytes, ` +
+          `${outcome.contentType}, sha256=${sha256}. ` +
+          (isText
+            ? 'Returned as textContent (genuinely text, byte-for-byte — proved by a UTF-8 encode/decode round-trip, not merely guessed from the declared Content-Type).'
+            : textDecodeRefused
+              ? `REFUSED TEXT DECODE: the declared Content-Type "${outcome.contentType}" looked textual, but the bytes are not valid UTF-8 (a UTF-8 round-trip failed) — returned as contentBase64 instead of a lossy U+FFFD-substituted rendering. Decode client-side with the correct charset (e.g. Windows-1252/ISO-8859-1 for an older financial export).`
+              : 'Binary content — returned as contentBase64 for fidelity. No OCR/document-text-extraction is wired into ' +
+                'this gateway for bytes fetched live from a third party; decode client-side, or route the file into the ' +
+                'finance dataroom for the existing async doc-indexer/OCR sweep to produce a _TEXT/ sidecar (kb_get_document).'),
+      };
+    }
+  }
 }
 
 function unconfigured(tool: string) {
@@ -855,7 +1055,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Xero: list attachments on a record (executive ring only)',
         description:
-          'List the attachments (source docs) on a specific accounting record, e.g. endpoint="Invoices", guid=<InvoiceID>. Returns attachment metadata (filename, mime type, url). Use this to independently VERIFY an xero_attachment_upload actually persisted — its own response is not sufficient proof. MNPI: executive-ring lanes only. Read-only.',
+          'List the attachments (source docs) on a specific accounting record, e.g. endpoint="Invoices", guid=<InvoiceID>. Returns attachment METADATA only (filename, mime type, size, url) — NOT the file content; use xero_attachment_content for the actual bytes. Use this list to independently VERIFY an xero_attachment_upload actually persisted — its own response is not sufficient proof. MNPI: executive-ring lanes only. Read-only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -875,6 +1075,69 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         const res = await xeroGet(input.org as XeroOrg, `/${input.endpoint}/${encodeURIComponent(input.guid)}/Attachments`, {});
         return { data: { org: input.org, body: res.body }, summary: `Xero attachments on ${input.endpoint}/${input.guid} (${input.org}).` };
       },
+    },
+    callerHash,
+  );
+
+  // --- Attachment CONTENT (read path: the bytes, not just the metadata list above). xero_attachments
+  // proves a document is attached; this actually fetches it. Distinct from xero_get/xeroGet, which
+  // always requests + parses JSON and would corrupt binary content or fetch the wrong representation
+  // (see xeroGetAttachmentContent's header comment in client.ts for the exact reasons). ---
+  registerTool(
+    server,
+    {
+      name: 'xero_attachment_content',
+      category: 'read',
+      annotations: {
+        title: 'Xero: fetch an attachment\'s CONTENT (executive ring only)',
+        description:
+          'Fetch the actual BYTES of a source-document attachment on a Xero accounting record — the read counterpart to xero_attachment_upload. xero_attachments only lists metadata (filename/mime type/size); this tool retrieves the file itself. ' +
+          'Identify the attachment with EXACTLY ONE of fileName or attachmentId (get either from xero_attachments on the same endpoint/guid first) — attachmentId (a Xero GUID) is the SAFER choice: fileName must match byte-for-byte including spaces/punctuation and needs URL-encoding, a GUID needs none. ' +
+          `Cap: ${MAX_ATTACHMENT_READ_BYTES} bytes (1 MiB) — smaller than xero_attachment_upload's 10MB because this response is base64-encoded and JSON-wrapped inline; an oversized attachment is REFUSED with error:"content_too_large" (never silently truncated, and never fully buffered in memory before being refused) rather than returned partially. ` +
+          'Response carries mimeType + sha256 + byte count always; content comes back as EXACTLY ONE of textContent (genuinely text — proved losslessly by a UTF-8 round-trip, not merely guessed) or contentBase64 (everything else, incl. PDF/DOCX/images, and any file whose declared type looked textual but failed that round-trip — for byte-for-byte fidelity), never both. A file that looked text-eligible by Content-Type but failed the round-trip carries textDecodeRefused:true so a caller can detect that case programmatically. ' +
+          'No OCR/document-text-extraction is wired into this gateway for bytes fetched live from Xero — a scanned PDF comes back as contentBase64 only; decode client-side, or land the file in the finance dataroom for the existing async doc-indexer/OCR sweep (then read the extracted text via kb_get_document). ' +
+          'FAILURE MODES ARE DISTINCT — never assume one means another: error:"not_found" (HTTP 404, genuinely absent) vs error:"forbidden" (HTTP 403, a permissions problem, NOT evidence of absence) vs error:"auth_failed" (401 even after a forced token-refresh retry) vs error:"content_too_large" vs error:"unexpected_content_type" (Xero replied with what looks like its metadata JSON instead of the file). ' +
+          'MNPI: executive-ring lanes only. Read-only.',
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: {
+        org: ORG_ENUM,
+        endpoint: z.enum(ATTACHMENT_ENDPOINT_ENUM).describe('Which record type the attachment hangs off.'),
+        guid: z.string().describe('The record GUID the attachment hangs off.'),
+        fileName: z.string().min(1).optional().describe('The attachment\'s exact FileName, as returned by xero_attachments. Mutually exclusive with attachmentId — pass exactly one.'),
+        attachmentId: z.string().min(1).optional().describe('The attachment\'s AttachmentID (a Xero GUID), as returned by xero_attachments. PREFERRED over fileName — a GUID has no encoding footgun. Mutually exclusive with fileName — pass exactly one.'),
+        mimeType: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            'OPTIONAL hint: the attachment\'s own mime type, as returned by a prior xero_attachments call on the same endpoint/guid. When supplied, it is sent ahead of the wildcard in the outbound Accept header (matching the public xero-node SDK\'s precedent of requesting the attachment\'s own type). Never required — omitting it sends the same request this tool has always sent.',
+          ),
+      },
+      outputShape: {
+        org: z.string(),
+        endpoint: z.string(),
+        guid: z.string(),
+        identifier: z.string().nullable(),
+        mimeType: z.string().nullable(),
+        bytes: z.number().nullable(),
+        sha256: z.string().nullable(),
+        contentBase64: z.string().nullable(),
+        textContent: z.string().nullable(),
+        error: z.string().optional(),
+        http_status: z.number().optional(),
+        content_length_header: z.string().nullable().optional(),
+        cap_bytes: z.number().optional(),
+        // TRUE only when the declared Content-Type looked text-eligible but the bytes failed the
+        // UTF-8 round-trip proof (FIX 2, 2026-08-18) — a STRUCTURED signal in `data`, not only prose
+        // in `summary`, so a caller can react to it programmatically. Absent (not merely false) on
+        // every other outcome.
+        textDecodeRefused: z.literal(true).optional(),
+      },
+      handler: handleXeroAttachmentContent,
     },
     callerHash,
   );

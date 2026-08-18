@@ -22,7 +22,7 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
-const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload } = await import('./tools.js');
+const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload, handleXeroAttachmentContent } = await import('./tools.js');
 const { buildTokenDoc, bootstrapHash } = await import('./client.js');
 
 /**
@@ -291,4 +291,220 @@ test('handleXeroAttachmentUpload: dry_run also refuses before any network call, 
   const data = result.data as { error?: string; body: unknown };
   assert.equal(data.error, 'dry_run');
   assert.equal(data.body, null);
+});
+
+// -------------------------------------------------------------------------------------------
+// handleXeroAttachmentContent -- handler-level tests, mirroring handleXeroAttachmentUpload's
+// pattern above: deps-injected (no real Cosmos or Xero), each distinct outcome asserted by name so
+// none can silently collapse into another (the failure class this tool exists to prevent).
+// -------------------------------------------------------------------------------------------
+
+test('handleXeroAttachmentContent: neither fileName nor attachmentId -> identifier_required, no network call', async () => {
+  const deps = {
+    fetchImpl: (async (url: unknown) => {
+      throw new Error(`UNEXPECTED network call to ${String(url)} -- must refuse before ever calling Xero`);
+    }) as typeof fetch,
+    read: (async () => { throw new Error('read should never be called'); }) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: unknown; textContent: unknown };
+  assert.equal(data.error, 'identifier_required');
+  assert.equal(data.contentBase64, null);
+  assert.equal(data.textContent, null);
+});
+
+test('handleXeroAttachmentContent: BOTH fileName and attachmentId -> ambiguous_identifier, no network call', async () => {
+  const deps = {
+    fetchImpl: (async (url: unknown) => {
+      throw new Error(`UNEXPECTED network call to ${String(url)} -- must refuse before ever calling Xero`);
+    }) as typeof fetch,
+    read: (async () => { throw new Error('read should never be called'); }) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', fileName: 'a.pdf', attachmentId: 'att-1' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string };
+  assert.equal(data.error, 'ambiguous_identifier');
+});
+
+test('handleXeroAttachmentContent: binary content -> contentBase64 populated, textContent null', async () => {
+  const state = liveTokenState();
+  const original = Buffer.from('%PDF-1.4 fake pdf bytes with a NUL \x00 inside');
+  const deps = {
+    fetchImpl: (async (url: unknown) => {
+      const u = new URL(String(url));
+      assert.ok(u.pathname.endsWith('/ManualJournals/journal-1/Attachments/att-1'));
+      return new Response(original, { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }) as never,
+    create: (async () => { throw new Error('create should never be called -- the seeded token is already live'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', attachmentId: 'att-1' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: string | null; textContent: string | null; mimeType: string; bytes: number; sha256: string };
+  assert.equal(data.error, undefined);
+  assert.equal(data.textContent, null, 'binary content must not be presented as text');
+  assert.equal(data.contentBase64, original.toString('base64'));
+  assert.equal(Buffer.from(data.contentBase64 as string, 'base64').equals(original), true, 'round-trips to the exact original bytes');
+  assert.equal(data.mimeType, 'application/pdf');
+  assert.equal(data.bytes, original.length);
+  assert.equal(data.sha256, createHash('sha256').update(original).digest('hex'));
+});
+
+test('handleXeroAttachmentContent: genuinely TEXT content -> textContent populated, contentBase64 null (never both, avoids doubling an already-capped payload)', async () => {
+  const state = liveTokenState();
+  const original = Buffer.from('Date,Description,Amount\n2022-01-31,Reclass,1500.50\n', 'utf8');
+  const deps = {
+    fetchImpl: (async () => new Response(original, { status: 200, headers: { 'Content-Type': 'text/csv' } })) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', fileName: 'workpaper.csv' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: string | null; textContent: string | null; textDecodeRefused?: boolean };
+  assert.equal(data.error, undefined);
+  assert.equal(data.contentBase64, null, 'a genuinely text file must not ALSO be duplicated as base64 (would double the response size near the cap)');
+  assert.equal(data.textContent, original.toString('utf8'));
+  assert.equal(data.textDecodeRefused, undefined, 'a lossless decode never carries the refusal flag');
+  // FIX 2 (2026-08-18): the "byte-for-byte" claim is only allowed once the round-trip has actually
+  // proven it -- assert the summary makes that claim, and that it names the round-trip as the proof
+  // (not merely "genuinely text" on its own, which would be the pre-fix, unproven claim).
+  assert.match(result.summary ?? '', /byte-for-byte/);
+  assert.match(result.summary ?? '', /round-trip/);
+});
+
+test('handleXeroAttachmentContent: a text/* Content-Type whose bytes are NOT valid UTF-8 (e.g. a Windows-1252 export) is returned as contentBase64, with the refusal reason STRUCTURED in `data` (not only prose in `summary`)', async () => {
+  const state = liveTokenState();
+  // "caf" + 0xE9 (Windows-1252 for e-acute) + newline. 0xE9 followed by a non-continuation byte
+  // (0x0a) is an INVALID UTF-8 sequence -- Buffer#toString('utf8') would silently substitute U+FFFD
+  // for it rather than throwing, which is exactly why eligibility-by-Content-Type alone is not proof:
+  // this is the real-world case (an older financial CSV/TXT export) the round-trip exists to catch.
+  const cp1252 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+  const deps = {
+    fetchImpl: (async () => new Response(cp1252, { status: 200, headers: { 'Content-Type': 'text/plain' } })) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', fileName: 'legacy-export.txt' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; textContent: string | null; contentBase64: string | null; textDecodeRefused?: boolean };
+  assert.equal(data.error, undefined, 'this is not one of the http-status error kinds -- it is still a successful fetch, just an unprovable text decode');
+  assert.equal(data.textContent, null, 'must NEVER hand back a lossy U+FFFD-substituted rendering as though it were the real text');
+  assert.equal(data.contentBase64, cp1252.toString('base64'), 'falls back to byte-exact base64 instead');
+  assert.equal(Buffer.from(data.contentBase64 as string, 'base64').equals(cp1252), true, 'round-trips to the exact original (undecoded) bytes');
+  assert.equal(data.textDecodeRefused, true, 'the refusal reason is a STRUCTURED field in `data` -- clients in this fleet read structured fields, a discriminator that lives only in `summary` prose is invisible to them');
+  assert.match(result.summary ?? '', /not valid UTF-8/i);
+});
+
+test('handleXeroAttachmentContent: a concrete non-textual Content-Type (e.g. image/tiff) is NEVER treated as text, even when looksBinary alone would say "not binary" -- this is failure mode (a): looksBinary only knows 5 magic-number families + a NUL scan, but this tool serves ANY Xero-attached format', async () => {
+  const state = liveTokenState();
+  // Deliberately NO NUL byte and NO magic number looksBinary recognizes anywhere in these bytes --
+  // proves the fix does not rely on looksBinary alone for a CONCRETE, declared non-textual
+  // Content-Type. (A real TIFF header actually starts 'II*\0', which DOES contain a NUL -- so this
+  // synthetic buffer is the harder case: the OLD looksBinary-only code would have wrongly classified
+  // exactly this as text, which is the point of the test.)
+  const tiffLike = Buffer.from(Array.from({ length: 200 }, (_, i) => 0x41 + (i % 26)));
+  assert.equal(tiffLike.includes(0), false, 'sanity: no NUL byte in this fixture');
+  const deps = {
+    fetchImpl: (async () => new Response(tiffLike, { status: 200, headers: { 'Content-Type': 'image/tiff' } })) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', fileName: 'scan.tiff' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { textContent: string | null; contentBase64: string | null; textDecodeRefused?: boolean };
+  assert.equal(data.textContent, null, 'a declared image/tiff Content-Type must never be decoded as text, regardless of what looksBinary alone would say');
+  assert.equal(data.contentBase64, tiffLike.toString('base64'));
+  assert.equal(data.textDecodeRefused, undefined, 'this file never LOOKED text-eligible in the first place -- textDecodeRefused is for the OTHER failure mode (declared-textual but not valid UTF-8), not this one');
+});
+
+test('handleXeroAttachmentContent: FIX 3 -- an input mimeType hint threads through to the outbound Accept header', async () => {
+  const state = liveTokenState();
+  let acceptSeen: string | null = null;
+  const deps = {
+    fetchImpl: (async (url: unknown, init?: RequestInit) => {
+      acceptSeen = (init?.headers as Record<string, string> | undefined)?.Accept ?? null;
+      return new Response(Buffer.from('ok'), { status: 200, headers: { 'Content-Type': 'text/plain' } });
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'Invoices', guid: 'inv-1', attachmentId: 'att-1', mimeType: 'application/pdf' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  assert.equal(acceptSeen, 'application/pdf, */*', 'the tool input mimeType hint must reach the wire, ahead of the wildcard');
+});
+
+test('handleXeroAttachmentContent: not_found and forbidden map to DISTINCT error codes -- never conflated', async () => {
+  const state = liveTokenState();
+  async function run(status: number) {
+    const deps = {
+      fetchImpl: (async () => new Response(JSON.stringify({ Message: 'x' }), { status })) as typeof fetch,
+      read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+      replace: (async () => { throw new Error('replace should never be called'); }) as never,
+      create: (async () => { throw new Error('create should never be called'); }) as never,
+    };
+    return handleXeroAttachmentContent(
+      { org: 'otchealth', endpoint: 'Invoices', guid: 'inv-1', attachmentId: 'att-1' },
+      fakeCtx('cfo', false),
+      deps,
+    );
+  }
+  const notFound = (await run(404)).data as { error?: string; http_status?: number };
+  const forbidden = (await run(403)).data as { error?: string; http_status?: number };
+  assert.equal(notFound.error, 'not_found');
+  assert.equal(notFound.http_status, 404);
+  assert.equal(forbidden.error, 'forbidden');
+  assert.equal(forbidden.http_status, 403);
+  assert.notEqual(notFound.error, forbidden.error, 'a 403 must never be reported the same way as a 404');
+});
+
+test('handleXeroAttachmentContent: too_large -> nothing downloaded/returned, cap + real size surfaced, distinct from every other error', async () => {
+  const state = liveTokenState();
+  const deps = {
+    fetchImpl: (async () => new Response(Buffer.alloc(10), { status: 200, headers: { 'Content-Length': '99999999', 'Content-Type': 'application/pdf' } })) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'Invoices', guid: 'inv-1', attachmentId: 'huge' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: unknown; textContent: unknown; cap_bytes?: number };
+  assert.equal(data.error, 'content_too_large');
+  assert.equal(data.contentBase64, null);
+  assert.equal(data.textContent, null);
+  assert.equal(data.cap_bytes, 1024 * 1024);
+  assert.match(result.summary ?? '', /REFUSED/);
 });

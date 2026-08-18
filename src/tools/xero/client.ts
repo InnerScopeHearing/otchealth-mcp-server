@@ -605,9 +605,21 @@ const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
  * repeat call with the same filename — safer than POST's create-a-duplicate-on-retry behavior for
  * this specific endpoint).
  */
+/** Record types an attachment can hang off, shared by the upload (write) and content (read) paths. */
+export type XeroAttachmentEndpoint =
+  | 'Invoices'
+  | 'CreditNotes'
+  | 'BankTransactions'
+  | 'BankTransfers'
+  | 'Payments'
+  | 'ManualJournals'
+  | 'Receipts'
+  | 'Contacts'
+  | 'PurchaseOrders';
+
 export async function xeroUploadAttachment(
   org: XeroOrg,
-  endpoint: 'Invoices' | 'CreditNotes' | 'BankTransactions' | 'BankTransfers' | 'Payments' | 'ManualJournals' | 'Receipts' | 'Contacts' | 'PurchaseOrders',
+  endpoint: XeroAttachmentEndpoint,
   guid: string,
   fileName: string,
   contentBytes: Buffer,
@@ -665,6 +677,300 @@ export async function xeroUploadAttachment(
     body: respBody,
     dayLimitRemaining: r.headers.get('X-DayLimit-Remaining'),
     minuteLimitRemaining: r.headers.get('X-MinLimit-Remaining'),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Attachment CONTENT (read path) — the capability that did not exist: xero_attachments lists
+// metadata (FileName/AttachmentID/MimeType/ContentLength/Url), but nothing ever fetched the bytes.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Max attachment CONTENT this gateway will read back from Xero and hand to a caller. Deliberately
+ * SMALLER than MAX_ATTACHMENT_BYTES (the 10MB upload cap, ~line 589): a read response is base64-
+ * encoded (~1.33x) and then JSON-serialized before result-store.ts's JIT auto-offload can even
+ * attempt to store it off-band -- that path only fires below JIT_RESULT_MAX_CHARS (1.6M chars,
+ * result-store.ts) and Cosmos itself caps a document at ~2MB. 1 MiB of raw bytes -> ~1.4M base64
+ * chars, comfortably inside both ceilings with headroom left for the rest of the JSON envelope
+ * (sha256, mimeType, path, etc). A payload allowed to exceed this would either fail to auto-offload
+ * (silently falling back to a multi-MB inline blob) or bloat the offloaded Cosmos doc toward its own
+ * cap -- neither is an acceptable way to learn about a large attachment, so this is refused loudly
+ * (see the 'too_large' outcome below) rather than either silently truncating the file or shipping an
+ * oversized response and hoping.
+ */
+export const MAX_ATTACHMENT_READ_BYTES = 1024 * 1024; // 1 MiB
+
+/** Which field the caller supplied to select the attachment. AttachmentID is a Xero GUID (never
+ *  needs encoding); FileName is caller-chosen text (spaces, parentheses, etc — MUST be encoded
+ *  exactly once, see the URL construction below). */
+export type XeroAttachmentIdentifier =
+  | { by: 'fileName'; value: string }
+  | { by: 'attachmentId'; value: string };
+
+/**
+ * Every distinct way this call can fail (or succeed), so the tool layer can surface each one as its
+ * own loud, named `error` code instead of collapsing them into a generic message string. This
+ * directly answers the failure class this codebase was bitten by six times on 2026-08-17/18 (see
+ * FND-20260724-68f5 and the S3 double-encoding fix above isSafeBlobPath/fetchBlobFromS3): a 403 must
+ * never be reported as "not found", a size cap must never be reported as "empty", and a corrupted /
+ * misinterpreted body must never be reported as a successful read.
+ *   'ok'                       real file bytes, verified against the response's own Content-Length
+ *                              (when present) and never truncated.
+ *   'not_found'                HTTP 404 — the record/attachment genuinely does not exist at this
+ *                              endpoint/guid/identifier. Distinct from 'forbidden': a caller must
+ *                              never treat a permissions failure as evidence a document is missing.
+ *   'forbidden'                HTTP 403 — Xero refused the request (scope/tenant/permission). NEVER
+ *                              conflated with 'not_found' (unlike the S3 mirror's 403-as-404
+ *                              convenience, which is safe there only because S3 itself conflates
+ *                              missing-vs-denied for a bucket without ListBucket — Xero does not).
+ *   'auth_failed'              still 401 after one forced token-refresh retry (the same retry
+ *                              xeroGet/xeroRequest perform) — an org-level token problem, not a
+ *                              per-file one.
+ *   'too_large'                the content exceeds MAX_ATTACHMENT_READ_BYTES. Caught EITHER before
+ *                              downloading (via a declared Content-Length header, PASS 1) or DURING
+ *                              a streaming read (PASS 2, defense in depth against a missing/lying
+ *                              header — e.g. chunked transfer-encoding or a compressing proxy that
+ *                              strips Content-Length) — never by returning a truncated prefix, and
+ *                              (2026-08-18 fix) never by first buffering the whole oversized body
+ *                              into memory before refusing it. See `truncatedEarly` below.
+ *   'unexpected_content_type'  the request asked for the wildcard Accept value (never
+ *                              'application/json' — see the header comment below) and got a 2xx,
+ *                              but the response's own
+ *                              Content-Type is application/json anyway. Per Xero's documented
+ *                              behavior that means Xero served the ATTACHMENT-METADATA
+ *                              representation, not the file — silently handing that back labeled
+ *                              as "the file" would be exactly the false-plausible-value failure
+ *                              this whole path exists to avoid.
+ *   'xero_error'                any other non-2xx status.
+ */
+export type XeroAttachmentContentOutcome =
+  | { kind: 'ok'; status: number; bytes: Buffer; contentType: string; byteLength: number }
+  | { kind: 'not_found'; status: number; detail: string }
+  | { kind: 'forbidden'; status: number; detail: string }
+  | { kind: 'auth_failed'; status: number; detail: string }
+  | {
+      kind: 'too_large';
+      contentLengthHeader: string | null;
+      actualBytes: number | null;
+      cap: number;
+      // TRUE when `actualBytes` is a LOWER BOUND (the streaming read was cancelled the instant the
+      // running total was known to exceed the cap — the rest of the body was never pulled, so the
+      // file's real total size is genuinely unknown, only "at least actualBytes"). FALSE when
+      // `actualBytes`/the header value is the exact/declared size (PASS 1's declared-Content-Length
+      // refusal, or the r.body-unavailable fallback that reads the whole body via arrayBuffer()).
+      // A caller must not treat `actualBytes` as the file's real size when this is true.
+      truncatedEarly: boolean;
+    }
+  | { kind: 'unexpected_content_type'; status: number; contentType: string; bodyPreview: string }
+  | { kind: 'xero_error'; status: number; detail: string };
+
+/**
+ * Streams a fetch Response's body, accumulating chunks only up to `limitBytes` — the actual fix for
+ * the "declared Content-Length absent -> the whole body gets buffered before being size-checked"
+ * defect (PASS 1 in xeroGetAttachmentContent only fires when Xero DECLARES a length up front; a
+ * chunked-transfer-encoding or compressing-proxy response has none, and the old code unconditionally
+ * called `r.arrayBuffer()` — fully materializing an arbitrarily large attachment in memory on a
+ * shared multi-replica gateway before ever checking its size).
+ *
+ * The moment the running total exceeds `limitBytes`, this STOPS pulling more chunks and cancels the
+ * reader (`reader.cancel()`) rather than draining the rest of the stream — bounding memory use to
+ * roughly one chunk past the limit, never the full oversized body. `cancelledEarly:true` marks
+ * exactly this case, so the caller can tell "we stopped early, this total is a lower bound" apart
+ * from "we read the whole thing and it happens to be over/under the limit".
+ *
+ * Falls back to `r.arrayBuffer()` when `r.body` has no usable Streams-API reader — some fetch mocks
+ * / older polyfills / test doubles do not implement `ReadableStream.getReader()` on `Response.body`
+ * even though they implement `arrayBuffer()`. This preserves the OLD (correct, just unbounded)
+ * behavior for those callers rather than throwing; `cancelledEarly` is always false on this path
+ * because the whole body genuinely was read (the returned length is exact, not a lower bound).
+ */
+async function readStreamBounded(r: Response, limitBytes: number): Promise<{ bytes: Buffer; exceededLimit: boolean; cancelledEarly: boolean }> {
+  // Typed straight off Response.body (no explicit ReadableStream<T> annotation needed/wanted here —
+  // this repo's tsconfig has no "dom" lib, so relying on the ambient global would be fragile; letting
+  // TS infer from the fetch-types' own Response.body declaration is the robust choice).
+  const body = r.body;
+  if (!body || typeof body.getReader !== 'function') {
+    const bytes = Buffer.from(await r.arrayBuffer());
+    return { bytes, exceededLimit: bytes.length > limitBytes, cancelledEarly: false };
+  }
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let cancelledEarly = false;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop -- a stream is inherently sequential; there is no
+    // batch of reads to parallelize here.
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = Buffer.from(value);
+    chunks.push(chunk);
+    total += chunk.length;
+    if (total > limitBytes) {
+      // STOP HERE — never call reader.read() again, never call r.arrayBuffer(). A rejected cancel()
+      // (e.g. the underlying stream already errored/closed) is harmless to swallow: this function is
+      // refusing the read regardless of whether cancel() itself succeeds cleanly.
+      cancelledEarly = true;
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+  }
+  return { bytes: Buffer.concat(chunks), exceededLimit: total > limitBytes, cancelledEarly };
+}
+
+/**
+ * A JSON-labeled 2xx response is NEVER the file (see 'unexpected_content_type' above) — so refusing
+ * it never needs the whole body, only enough bytes to build the existing ~2000-char `bodyPreview`.
+ * Deliberately generous vs. that 2000-char slice (multi-byte UTF-8 sequences can straddle a chunk
+ * boundary) while still being a tiny, fixed bound — a mislabeled multi-megabyte "JSON" response is
+ * refused just as cheaply as a genuinely small one.
+ */
+const JSON_PREVIEW_READ_BYTES = 8192;
+
+/**
+ * Fetch the RAW BYTES of one attachment. This is the actual Xero Attachments API content-retrieval
+ * contract, which is categorically different from every JSON read in this file (xeroGet):
+ *
+ *  - xeroGet (~line 473) unconditionally sends `Accept: application/json` (~line 496) and always
+ *    calls `r.text()` then `JSON.parse()` (~line 504-507). Per Xero's documented Attachments
+ *    behavior, sending `Accept: application/json` to this specific content endpoint returns the
+ *    ATTACHMENT-METADATA JSON object (AttachmentID/FileName/ContentLength/...), not the file — so
+ *    reusing xeroGet here would not even reach the bytes. And even if it somehow did, `.text()`
+ *    decodes the response as UTF-8: for a PDF/PNG/DOCX that operation is LOSSY (invalid byte
+ *    sequences are replaced with U+FFFD) and irreversible — the original bytes are gone. Neither
+ *    xeroGet nor xeroRequest is safe to route this through; hence this dedicated function, using
+ *    `r.arrayBuffer()` on the success path and never calling `.text()`/`JSON.parse()` on binary
+ *    content (mirrors the same fix already applied to the upload direction, xeroUploadAttachment
+ *    above, and to fetchBlobFromS3 in ../../legal/s3-blob-store.ts for the identical reason).
+ *
+ *  - Accept defaults to the wildcard value (any type), NEVER `'application/json'`, so Xero serves
+ *    the file's own representation (its real Content-Type) rather than the metadata JSON. A caller
+ *    that already knows the attachment's mime type (e.g. from a prior xero_attachments listing) may
+ *    supply it as `opts.mimeTypeHint` — it is then sent AHEAD of the wildcard (`Accept: <hint>,
+ *    * / *`), matching the public xero-node SDK's precedent of setting Accept to the attachment's own
+ *    type. This is an UNVERIFIED-AGAINST-LIVE-XERO improvement, not a required fix: the wildcard-only
+ *    behavior already fails safe (a JSON-labeled response is caught as 'unexpected_content_type'
+ *    below, never silently corrupted), so an absent/omitted hint changes nothing from before.
+ *
+ * ENCODING (the double-encoding footgun this repo hit today, 2026-08-17/18, in fetchBlobFromS3's
+ * S3-key case): the identifier is percent-encoded EXACTLY ONCE via encodeURIComponent when building
+ * the URL below — never pre-encoded and then encoded again. Unlike the S3/SigV4 case, Xero's REST
+ * API needs no second, service-specific encoding pass, so a single encodeURIComponent is correct and
+ * sufficient here; a FileName containing a space becomes `%20` on the wire, never `%2520`. An
+ * AttachmentID (a GUID) needs no encoding at all — encodeURIComponent is a safe no-op on it — which
+ * is exactly why AttachmentID is the SAFER identifier to prefer when the caller has one (see
+ * XeroAttachmentIdentifier / xero_attachment_content's tool description): there is no encoding
+ * footgun to get right in the first place.
+ *
+ * MEMORY (2026-08-18 fix): the actual file bytes are read via `readStreamBounded` (STREAMING, capped
+ * at MAX_ATTACHMENT_READ_BYTES), never an unconditional `r.arrayBuffer()` — see that function's
+ * header comment for why. `r.arrayBuffer()` is still used, but only for the non-2xx error-text
+ * branch immediately below (Xero's own small error body) and as readStreamBounded's own internal
+ * fallback when a fetch impl's Response.body has no usable stream reader.
+ */
+export async function xeroGetAttachmentContent(
+  org: XeroOrg,
+  endpoint: XeroAttachmentEndpoint,
+  guid: string,
+  identifier: XeroAttachmentIdentifier,
+  opts: { deps?: TokenDeps; mimeTypeHint?: string } = {},
+): Promise<XeroAttachmentContentOutcome> {
+  const deps = opts.deps ?? defaultDeps;
+  const mimeTypeHint = opts.mimeTypeHint?.trim();
+
+  const wait = MIN_SPACING_MS - (Date.now() - (lastCallAt.get(org) ?? 0));
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastCallAt.set(org, Date.now());
+
+  const url = `${XERO_API_BASES.accounting}/${endpoint}/${encodeURIComponent(guid)}/Attachments/${encodeURIComponent(identifier.value)}`;
+
+  const attempt = async (force: boolean): Promise<Response> => {
+    const { accessToken, tenantId } = await getOrgAccess(org, { forceRefresh: force, deps });
+    return deps.fetchImpl(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Xero-tenant-id': tenantId,
+        // THE ACTUAL FIX (see this function's header comment): never 'application/json' here — that
+        // is what makes Xero serve metadata instead of the file on this specific endpoint. A caller-
+        // supplied hint (when present) rides AHEAD of the wildcard; omitting it is byte-for-byte the
+        // same header this endpoint has always sent.
+        Accept: mimeTypeHint ? `${mimeTypeHint}, */*` : '*/*',
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  };
+
+  let r = await attempt(false);
+  if (r.status === 401) r = await attempt(true); // stale cached access token — refresh once and retry
+
+  if (!r.ok) {
+    // Non-2xx bodies here are Xero's own error text/JSON, never file content — safe to decode as
+    // text. This branch is reached for 401 (still, after the forced-refresh retry above), 403, 404,
+    // and everything else, and returns a DISTINCT `kind` for each so the caller can never conflate
+    // "forbidden" with "not found" with "some other failure".
+    const text = await r.text();
+    const detail = extractXeroErrorDetail(text);
+    if (r.status === 404) return { kind: 'not_found', status: r.status, detail };
+    if (r.status === 403) return { kind: 'forbidden', status: r.status, detail };
+    if (r.status === 401) return { kind: 'auth_failed', status: r.status, detail };
+    return { kind: 'xero_error', status: r.status, detail };
+  }
+
+  // SIZE CAP, PASS 1 (before consuming the body): when Xero declares Content-Length up front and it
+  // already exceeds the cap, refuse without downloading the file at all. `truncatedEarly:false` here
+  // because the declared header value is an exact number Xero itself gave us, not a partial read.
+  const declaredLength = r.headers.get('content-length');
+  const declaredNum = declaredLength ? Number(declaredLength) : NaN;
+  if (Number.isFinite(declaredNum) && declaredNum > MAX_ATTACHMENT_READ_BYTES) {
+    await r.body?.cancel?.().catch(() => undefined);
+    return { kind: 'too_large', contentLengthHeader: declaredLength, actualBytes: null, cap: MAX_ATTACHMENT_READ_BYTES, truncatedEarly: false };
+  }
+
+  const contentType = r.headers.get('content-type') || '';
+
+  if (contentType.toLowerCase().startsWith('application/json')) {
+    // A 2xx with a JSON content-type despite requesting '*/*' (or a hint) is not the documented
+    // behavior for this endpoint — treat it as a distinct anomaly rather than silently handing back
+    // JSON bytes mislabeled as "the file" (a plausible-looking wrong value is worse than a refusal
+    // here). This is NEVER the file, so only a small BOUNDED read is needed to build the preview —
+    // see JSON_PREVIEW_READ_BYTES's header comment; a large mislabeled response is refused just as
+    // cheaply as a small one, never fully buffered first.
+    const { bytes: previewBytes } = await readStreamBounded(r, JSON_PREVIEW_READ_BYTES);
+    return {
+      kind: 'unexpected_content_type',
+      status: r.status,
+      contentType,
+      bodyPreview: previewBytes.toString('utf8').slice(0, 2000),
+    };
+  }
+
+  // SIZE CAP, PASS 2 — STREAMING (2026-08-18 fix): this is the actual defense-in-depth pass for a
+  // missing/understated Content-Length (e.g. chunked transfer-encoding, a compressing proxy). The OLD
+  // code called `r.arrayBuffer()` unconditionally here, which fully materializes the entire body in
+  // memory BEFORE the size is ever checked — on a shared multi-replica gateway, an attachment with no
+  // declared length was fully downloaded even when it was going to be refused anyway.
+  // `readStreamBounded` accumulates chunks and cancels the reader the MOMENT the running total is
+  // known to exceed the cap, so an oversized body is never fully buffered. NEVER return a truncated
+  // prefix of an oversized file as though it were the whole thing — that is a silently corrupted
+  // document, exactly the "failure returned as a plausible value" pattern this whole path exists to
+  // avoid; refusing loudly (with `actualBytes` as an honest LOWER BOUND, flagged via
+  // `truncatedEarly`) is the only acceptable outcome here.
+  const { bytes, exceededLimit, cancelledEarly } = await readStreamBounded(r, MAX_ATTACHMENT_READ_BYTES);
+  if (exceededLimit) {
+    return {
+      kind: 'too_large',
+      contentLengthHeader: declaredLength,
+      actualBytes: bytes.length,
+      cap: MAX_ATTACHMENT_READ_BYTES,
+      truncatedEarly: cancelledEarly,
+    };
+  }
+
+  return {
+    kind: 'ok',
+    status: r.status,
+    bytes,
+    contentType: contentType || 'application/octet-stream',
+    byteLength: bytes.length,
   };
 }
 
