@@ -333,6 +333,11 @@ interface S3ObjectRequestOpts {
   contentType?: string;
   /** Extra headers to SIGN and send (x-amz-*, if-none-match, if-match, ...). */
   extraHeaders?: Record<string, string>;
+  /** Passed straight through to fetchWithBudget's `retries`. Omit for the default (one retry on a
+   *  network error / 429 / 5xx); pass 0 for a call where a same-request retry can land on a response
+   *  that is indistinguishable from a genuine failure -- the guarded DELETE in deleteObjectFromS3
+   *  below is the one caller that needs this; see its own doc comment for why. */
+  retries?: number;
 }
 
 /**
@@ -365,20 +370,39 @@ async function s3ObjectRequest(opts: S3ObjectRequestOpts): Promise<Response> {
     extraHeaders,
   });
 
-  return fetchWithBudget(`https://${host}${canonicalUri(rawPath)}`, {
-    method: opts.method,
-    headers: signed.headers,
-    // A Node Buffer is a Uint8Array, which fetch accepts as a body; the cast only satisfies the DOM
-    // BodyInit typing this tsconfig's lib does not expose.
-    ...(body ? { body: body as unknown as RequestInit['body'] } : {}),
-    // fetchWithBudget retries once on a network error / 429 / 5xx. Safe here: every write is
-    // idempotent by construction -- a PUT of a fixed body to a fixed key, a DELETE of a key, a copy
-    // of a pinned source version -- so none of them accumulate an effect when repeated. The one
-    // wrinkle worth naming: if a create-only write (If-None-Match: *) actually lands and THEN the
-    // response is lost to a 5xx, the retry sees 412 and surfaces as "already exists". Misleading
-    // wording, but it fails safe -- nothing is overwritten and nothing is silently reported as
-    // written that was not.
-  });
+  return fetchWithBudget(
+    `https://${host}${canonicalUri(rawPath)}`,
+    {
+      method: opts.method,
+      headers: signed.headers,
+      // A Node Buffer is a Uint8Array, which fetch accepts as a body; the cast only satisfies the DOM
+      // BodyInit typing this tsconfig's lib does not expose.
+      ...(body ? { body: body as unknown as RequestInit['body'] } : {}),
+    },
+    // fetchWithBudget retries once on a network error / 429 / 5xx BY DEFAULT (opts.retries above
+    // overrides that per call, for the one call site that cannot tolerate it). Most writes here ARE
+    // safe to retry: a PUT of a fixed body to a fixed key, a copy of a pinned source version, and an
+    // UNCONDITIONAL delete (no ifMatch -- S3 answers 204 whether or not the key already existed) all
+    // produce the identical outcome whether they run once or twice, so the default retry is a pure
+    // resilience win for them and none of them ever pass a `retries` override.
+    //
+    // The one write that is NOT safe under the default is a GUARDED (ifMatch-pinned) DELETE. If the
+    // first attempt's DELETE actually reaches S3 and succeeds, but its 204 response is what gets lost
+    // to a network error / 5xx, the key is now gone (or, on a versioned bucket, its current version is
+    // a fresh delete marker) -- and a same-If-Match retry against that state does not see "already
+    // done", it sees a precondition that no longer holds, which S3 reports as a plain 412, byte-for-
+    // byte identical to a genuine ETag mismatch caused by someone else's concurrent write. There is no
+    // way to tell the two apart from the retry's response alone, so a retry here can only ever surface
+    // as "refused", never distinguish "refused because I already deleted it" from "refused because it
+    // changed under me" -- which is exactly the ambiguity deleteObjectFromS3 exists to avoid. That
+    // call passes `retries: 0` for exactly this reason; see its own doc comment.
+    //
+    // One more wrinkle worth naming even though it fails safe rather than silently: a create-only PUT
+    // (If-None-Match: *) that actually lands and THEN loses its response to a 5xx sees 412 on retry
+    // and surfaces as "already exists". Misleading wording, but nothing is overwritten and nothing is
+    // silently reported as written that was not.
+    opts.retries !== undefined ? { retries: opts.retries } : {},
+  );
 }
 
 /** Resolve (mapping, credentials, region) or THROW. Shared preamble for every write verb, so a
@@ -510,6 +534,18 @@ export async function copyObjectInS3(
  * succeeded; (b) the object is THERE but CHANGED under us, so the delete was correctly refused and
  * the caller must not claim it happened; (c) the store said no for some other reason (403, 5xx).
  * Folding (b) or (c) into (a) is precisely the silent-success defect this file used to have.
+ *
+ * THE TWO BACKENDS DIVERGE ON WHICH OUTCOME A GUARDED "ALREADY GONE" DELETE ACTUALLY TAKES, and a
+ * caller reading only this docstring would get S3 wrong. Azure Blob only evaluates an If-Match
+ * precondition against an existing resource, so a missing blob answers 404 regardless of If-Match --
+ * deleteBlobHard's Azure branch returns on that 404 BEFORE this class is ever constructed, so
+ * outcome (a) really is a silent success there, exactly as described above. S3 DOES NOT behave the
+ * same way for a real-ETag `If-Match`: AWS's own conditional-deletes guide documents that an absent
+ * key (or a delete-marker current version) fails the precondition and answers 412, the same status a
+ * genuine ETag mismatch produces -- so on the S3 backend outcome (a) COLLAPSES INTO (b): an
+ * already-gone object throws this exact type instead of returning quietly. See
+ * deleteObjectFromS3's own doc comment for the full reasoning and why that collapse is deliberate,
+ * not a gap to be closed later.
  */
 export class BlobPreconditionFailedError extends Error {
   readonly container: string;
@@ -529,30 +565,72 @@ export class BlobPreconditionFailedError extends Error {
 }
 
 /**
- * DELETE one object. Idempotent: S3 answers 204 whether or not the key existed, so "already gone"
- * is success, matching the Azure primitive's 404 handling.
+ * DELETE one object.
  *
- * `ifMatch` IS A REAL SERVER-SIDE PRECONDITION, sent on the DELETE itself. S3 DeleteObject accepts
- * the standard `If-Match` header on general purpose buckets and answers 412 when the ETag does not
- * match; only `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` are directory-bucket
- * only (AWS S3 API reference, DeleteObject: "The If-Match header is supported for both general
- * purpose and directory buckets").
+ * UNGUARDED (no ifMatch): idempotent. S3 answers 204 whether or not the key existed, so "already
+ * gone" is success, matching the Azure primitive's 404 handling -- and because that is true whether
+ * the request runs once or twice, this path is safe under fetchWithBudget's default retry and never
+ * overrides it.
  *
- * AN EARLIER VERSION ASSERTED THE OPPOSITE -- that S3 had no If-Match equivalent -- and implemented
- * the guard as HEAD-then-DELETE. That rationale was factually wrong, and the implementation it
- * justified was worse than the gap it claimed to be honest about, in two compounding ways:
+ * GUARDED (ifMatch set): `ifMatch` IS A REAL SERVER-SIDE PRECONDITION, sent on the DELETE itself. S3
+ * DeleteObject accepts the standard `If-Match` header on general purpose buckets and answers 412
+ * when the precondition is not met; only `x-amz-if-match-last-modified-time` and
+ * `x-amz-if-match-size` are directory-bucket only (AWS S3 API reference, DeleteObject: "The If-Match
+ * header is supported for both general purpose and directory buckets"). "Not met" also covers the
+ * key not existing at all, NOT just a changed ETag: AWS's own conditional-deletes guide documents
+ * this explicitly for `If-Match: *` ("If the latest version of the object is a delete marker, the
+ * object doesn't exist and the DeleteObject API will fail and return a 412 Precondition Failed
+ * response"), and a real-ETag `If-Match` is at least as strict (it additionally requires an exact
+ * match), so an absent key answers 412 here too -- NOT 404.
+ *
+ * THAT IS A DELIBERATE DESIGN CHOICE, made explicit here rather than left implicit: this function
+ * does NOT try to tell "genuinely changed" apart from "already gone" on a guarded delete, because S3
+ * does not let it -- both collapse to the identical 412 over the wire -- and it surfaces BOTH as the
+ * same typed BlobPreconditionFailedError rather than guessing which one happened. Folding "gone"
+ * into silent success here, the way the old HEAD-based guard did, would quietly resurrect exactly
+ * the defect class this file exists to end: the guard's whole purpose is "only act if the exact
+ * expected state still holds," and an object that vanished under us broke that precondition just as
+ * much as one that changed under us. A caller that specifically wants "already gone is fine"
+ * idempotency on a GUARDED delete must decide that explicitly by catching BlobPreconditionFailedError
+ * and re-checking current state itself -- it does not get that for free from this function. The bare
+ * `r.status === 404` branch below is kept only as defensive handling for a status AWS's own docs
+ * mention can appear on a concurrent conditional-write race; it is not the path a guarded
+ * "already gone" delete is expected to take in practice.
+ *
+ * A lost-response RETRY of a guarded delete lands on exactly this same ambiguous 412 (the DELETE
+ * that actually succeeded turned the key into "no longer present", so the retry's precondition now
+ * reads as failed and is indistinguishable from a real conflict) -- so this call passes `retries: 0`
+ * below rather than taking fetchWithBudget's default; see the longer note on that default inside
+ * s3ObjectRequest.
+ *
+ * AN EARLIER VERSION ASSERTED THE OPPOSITE of the If-Match support above -- that S3 had no
+ * equivalent -- and implemented the guard as HEAD-then-DELETE. That rationale was factually wrong,
+ * and the implementation it justified was worse than the gap it claimed to be honest about, in two
+ * compounding ways:
  *   1. TOCTOU. A write landing between the HEAD and the DELETE was not caught, so the "guard" could
  *      delete a version it had never verified.
  *   2. SILENT SUCCESS, the serious one. `headBlobFromS3` deliberately folds BOTH 404 and 403 into
- *      `exists:false` -- correct for a document READ, where S3 answers 403 for a missing key when
- *      the caller lacks ListBucket -- so on a 403 the guarded path took the `already gone` branch
- *      and RETURNED SUCCESS having issued ZERO DELETE requests. The blast radius was the primary
- *      paths, not a corner case: legal_blob_move reported a COMPLETE move with the source document
- *      still live at the old path, and legal_blob_delete returned executed:true and wrote an AUDIT
- *      RECORD asserting a mutation that never happened -- on attorney-privileged, MNPI-adjacent
- *      data.
- * Sending the condition with the delete is strictly stronger than both: the server decides, no HEAD
- * is involved so there is no window and no 403 to swallow, and a refusal is a loud typed 412.
+ *      `exists:false` -- correct for a document READ, where a 403 is the EXPECTED S3 response for a
+ *      missing key when the caller lacks ListBucket. Had that HEAD ever answered 403 for a missing
+ *      key, the guarded path would have taken the `already gone` branch and RETURNED SUCCESS having
+ *      issued ZERO DELETE requests, and downstream callers would have believed a mutation that never
+ *      happened: legal_blob_move reporting a COMPLETE move with the source document still live at
+ *      the old path, legal_blob_delete returning executed:true with an AUDIT RECORD asserting a
+ *      deletion that never occurred -- on attorney-privileged, MNPI-adjacent data. That NAMED
+ *      TRIGGER, specifically, does not fire against this codebase's own IAM policy: infra/aws/iam.tf
+ *      grants ListBucket, alongside GetObject, on every one of the three buckets this store touches
+ *      (the shared `runtime-access` statement covers brain_dr + finance_legal_dr, and the
+ *      `PersonalLegalRingReadOnly` statement covers legal_personal_dr), so a missing-key HEAD 403 for
+ *      lack of ListBucket is not reachable today, and there is no evidence it was ever reached before
+ *      today either. The vulnerability class stayed LATENT regardless, because the bug was in how a
+ *      403 got INTERPRETED, not in why one occurred: revoked or expired task-role credentials, an
+ *      explicit IAM/SCP Deny added later, or a future policy edit that narrows ListBucket back off
+ *      would all reopen the identical swallow through a different door. This is why the guard was
+ *      rewritten rather than left "safe enough for now."
+ * Sending the condition with the delete is strictly stronger than both: the server decides, and for
+ * THIS function specifically no HEAD is involved, so there is no window and no 403 to swallow.
+ * (copyObjectInS3's own destination-size HEAD is a separate, still-open surface -- see its doc
+ * comment; a 403 there still folds into `bytes:0` rather than throwing.)
  */
 export async function deleteObjectFromS3(
   account: string,
@@ -570,11 +648,15 @@ export async function deleteObjectFromS3(
     // Lowercase deliberately: signRequest sorts and canonicalises by the literal key it is handed,
     // so a signed header must already be lowercase or the signature will not match the wire.
     ...(ifMatch ? { extraHeaders: { 'if-match': ifMatch } } : {}),
+    // Guarded deletes only: see this function's own doc comment for why a retry of THIS specific
+    // request can land on a false-conflict 412 rather than a genuine one. Unguarded deletes keep the
+    // default retry -- they are safe to repeat.
+    ...(ifMatch ? { retries: 0 } : {}),
   });
   // BEFORE the generic !r.ok below, and before the 404 idempotency branch: a refused precondition is
   // neither a transport failure nor "already gone", and must never be reported as either.
   if (r.status === 412) throw new BlobPreconditionFailedError(container, path, ifMatch ?? '');
-  if (r.status === 404) return; // idempotent
+  if (r.status === 404) return; // idempotent (defensive; see doc comment -- a guarded "already gone" normally surfaces as 412, not this)
   if (!r.ok) throw new Error(`s3 blob delete ${r.status}: ${(await r.text()).slice(0, 200)}`);
 }
 

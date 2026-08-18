@@ -13,11 +13,21 @@ import assert from 'node:assert/strict';
  *
  * The implementation that wrong belief justified was worse than the gap it claimed to be honest
  * about. headBlobFromS3 folds BOTH 404 and 403 into `exists:false` -- correct for a document READ,
- * where S3 answers 403 for a missing key when the caller lacks ListBucket -- so a 403 on that HEAD
- * took the "already gone, nothing to delete" branch and RESOLVED SUCCESSFULLY without ever sending
- * a DELETE. Downstream, legal_blob_move reported a COMPLETE move with the source document still
- * live at the old path, and legal_blob_delete returned executed:true and wrote an AUDIT RECORD
- * asserting a mutation that never happened -- on attorney-privileged, MNPI-adjacent data.
+ * where a 403 is the EXPECTED S3 response for a missing key when the caller lacks ListBucket. HAD
+ * that HEAD ever answered 403 for a missing key, the guarded path would have taken the "already
+ * gone, nothing to delete" branch and RESOLVED SUCCESSFULLY without ever sending a DELETE, and
+ * downstream: legal_blob_move would have reported a COMPLETE move with the source document still
+ * live at the old path, and legal_blob_delete would have returned executed:true with an AUDIT
+ * RECORD asserting a mutation that never happened -- on attorney-privileged, MNPI-adjacent data.
+ * That NAMED TRIGGER -- specifically a missing-key 403 caused by an absent ListBucket grant -- does
+ * NOT fire against this repo's own IAM policy: infra/aws/iam.tf grants ListBucket, alongside
+ * GetObject, on every one of the three buckets the store touches (the shared `runtime-access`
+ * statement for brain_dr + finance_legal_dr, and `PersonalLegalRingReadOnly` for legal_personal_dr),
+ * so this was caught and fixed as a LATENT defect, not one observed against production traffic. The
+ * swallow stays real and reachable regardless, because the bug was in how ANY 403 on that HEAD got
+ * interpreted, not in one specific cause of it: revoked or expired task-role credentials, an
+ * explicit IAM/SCP Deny added later, or a future policy edit that narrows ListBucket back off would
+ * all reopen the identical hole through a different door.
  *
  * The fix sends the condition ON the DELETE itself and deletes the HEAD pre-check entirely, which
  * is strictly stronger: no TOCTOU window between check and act, and no 403-swallowing HEAD.
@@ -161,23 +171,123 @@ test('GUARDED DELETE: a 412 surfaces as BlobPreconditionFailedError, not success
   assert.equal(deletes(calls).length, 1);
 });
 
-test('GUARDED DELETE: a 404 stays idempotent success and is NOT a precondition failure', async () => {
-  // The distinction (c) is really about: "gone" and "changed under us" must not collapse together.
+test('GUARDED DELETE: an already-gone object surfaces the SAME 412 refusal as a changed one (real S3 behaviour, not 404)', async () => {
+  // This test used to mock a 404 here and assert "already gone" is idempotent success. That was
+  // wrong about what S3 actually does: AWS's own conditional-deletes guide documents, for
+  // If-Match:*, "If the latest version of the object is a delete marker, the object doesn't exist
+  // and the DeleteObject API will fail and return a 412 Precondition Failed response" -- and a
+  // real-ETag If-Match is at least as strict (it additionally requires an exact match), so an
+  // absent key answers 412 here too, never 404. A guarded delete of an already-gone object and a
+  // guarded delete of a genuinely-changed object are therefore INDISTINGUISHABLE over the wire.
+  //
+  // THE EXPLICIT DECISION (2026-08-18, closing the FIX-FIRST gate on this branch): deleteObjectFromS3
+  // does NOT try to tell them apart and does NOT treat this as idempotent success. Both surface as
+  // the same typed BlobPreconditionFailedError. Silently folding "gone" into success here would
+  // resurrect exactly the defect class this file exists to prevent -- the guard's purpose is "only
+  // act if the exact expected state still holds," and a vanished object broke that precondition just
+  // as much as a changed one did. A caller that wants "already gone is fine" idempotency on a guarded
+  // delete must decide that explicitly (catch the error, re-check current state) -- it is not free.
+  const { error, calls } = await capture(
+    () => new Response('<Error><Code>PreconditionFailed</Code></Error>', { status: 412 }),
+    () => deleteBlobHard('company', 'cases/brief.pdf', '"v1"'),
+  );
+  assert.ok(
+    error instanceof BlobPreconditionFailedError,
+    `an already-gone guarded delete must refuse as a typed precondition failure, not resolve; ` +
+      `got ${error === undefined ? 'success' : `${(error as Error)?.name}: ${(error as Error)?.message}`}`,
+  );
+  assert.equal(deletes(calls).length, 1, 'exactly one DELETE attempt, no retry (see retries:0 on the guarded path)');
+});
+
+test('GUARDED DELETE: a literal 404 (defensive-only; not the real S3 response for this path) still resolves as idempotent success', async () => {
+  // deleteObjectFromS3 keeps an `if (r.status === 404) return` branch purely defensively -- AWS's
+  // docs mention a 404 can appear on a concurrent CONDITIONAL WRITE race, and if S3 ever answered
+  // 404 to a conditional DELETE too, treating it as "already gone" is still the correct call. This
+  // is NOT the path a real "object is already gone" guarded delete takes today (that is 412, see the
+  // test above) -- this only proves the defensive branch itself does not regress.
   const { error } = await capture(
     () => new Response(null, { status: 404 }),
     () => deleteBlobHard('company', 'cases/brief.pdf', '"v1"'),
   );
-  assert.equal(error, undefined, 'already-gone remains idempotent success');
+  assert.equal(error, undefined, 'a literal 404 remains idempotent success (defensive branch)');
+});
+
+// ───────────── (e) fix item #1: a lost-response retry must not fabricate a false 412 ─────────────
+
+test('GUARDED DELETE: a network error on the (successful, unseen) DELETE does NOT retry into a false BlobPreconditionFailedError', async () => {
+  // Regression for fix item #1 (2026-08-18 FIX-FIRST gate). Before this fix, s3ObjectRequest passed
+  // no `retries` override to fetchWithBudget for ANY write, including the conditional DELETE, so its
+  // default (one retry on a network error / 429 / 5xx) applied here too. The real-world scenario:
+  // the DELETE actually reaches S3 and succeeds server-side, but the 204 response is lost to a
+  // transient network error before the client sees it. fetchWithBudget's catch-and-retry logic then
+  // fires a SECOND request with the identical If-Match header -- except the key is now gone (or, on
+  // a versioned bucket, its current version is a fresh delete marker), so that retry gets a 412 back,
+  // and deleteObjectFromS3 throws BlobPreconditionFailedError saying "Nothing was deleted; investigate
+  // and retry." Both clauses of that message would be false: something WAS deleted, by the FIRST
+  // attempt, and no audit record exists anywhere for it -- silently swallowed by a precondition error
+  // that misdescribes what actually happened, on attorney-privileged data.
+  //
+  // Simulated here as a thrown network error on attempt 1 (mirrors "the request landed and the
+  // response never made it back," which fetch() surfaces as a rejected promise, not a Response), so
+  // this proves the fix at the actual mechanism: fetchWithBudget's retry loop for a guarded delete
+  // now runs with retries:0, so a network error on the one-and-only attempt propagates as the network
+  // error itself -- an honest "we don't know what happened," never a fabricated 412 and never a
+  // fabricated success.
+  let attempts = 0;
+  const { error, calls } = await capture(
+    () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('fetch failed: socket hang up');
+      // Never reached if retries:0 is honoured -- present only so a regression (an accidental retry)
+      // surfaces as the OLD bug (a wrongly-thrown precondition failure) rather than as a hang or an
+      // unrelated crash, making a regression here loud and specific.
+      return new Response('<Error><Code>PreconditionFailed</Code></Error>', { status: 412 });
+    },
+    () => deleteBlobHard('company', 'cases/brief.pdf', '"v1"'),
+  );
+  assert.equal(attempts, 1, 'no retry may be attempted for a guarded delete -- this is the whole fix');
+  assert.notEqual(error, undefined, 'a transport failure must not resolve as success either');
+  assert.equal(
+    error instanceof BlobPreconditionFailedError,
+    false,
+    `a network error must surface as itself, not be reinterpreted as a precondition failure ` +
+      `(got ${(error as Error)?.name}: ${(error as Error)?.message})`,
+  );
+  // No DELETE was ever recorded as having SUCCEEDED by this call's own bookkeeping (deletes(calls)
+  // only counts requests captured by the mock, both of which are the same logical attempt slot here
+  // since only one is ever issued) -- the point is there is exactly one attempt, not zero and not two.
+  assert.equal(calls.length, 1);
+});
+
+test('UNGUARDED DELETE: a network error DOES retry (unconditional delete is safe to repeat) and the retry succeeding resolves cleanly', async () => {
+  // The counterpart to the test above: an UNCONDITIONAL delete (no ifMatch) keeps the default retry,
+  // because repeating it can never produce a different real-world outcome (S3 answers 204 whether or
+  // not the key still exists). This pins that the fix is scoped to the guarded case only, not a
+  // blanket "never retry a DELETE" change that would throw away real resilience for no reason.
+  let attempts = 0;
+  const { error, calls } = await capture(
+    () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('fetch failed: socket hang up');
+      return new Response(null, { status: 204 });
+    },
+    () => deleteBlobHard('company', 'cases/brief.pdf'),
+  );
+  assert.equal(error, undefined, 'the retried unconditional delete must resolve cleanly');
+  assert.equal(attempts, 2, 'an unconditional delete keeps the default one retry');
+  assert.equal(deletes(calls).length, 2, 'both the failed first attempt and the successful retry were issued as DELETE requests');
 });
 
 // ───────────── (d) the move must not claim what it did not do ─────────────
 
 test('legal_blob_move does NOT report a completed move when the source delete never happened', async () => {
-  // Sequence: HEAD src (preflight, exists) -> HEAD dst (absent) -> PUT copy -> HEAD dst (size)
-  // -> delete src. The delete-time HEAD is denied (403) -- a transient authz failure or a
-  // permission change landing after the preflight. Under the old code that 403 read as "already
-  // gone", deleteObjectFromS3 resolved WITHOUT sending a DELETE, and the move returned a clean
-  // success while the source document was still live at src_path.
+  // Sequence today: HEAD src (preflight, exists) -> HEAD dst (absent) -> PUT copy -> HEAD dst
+  // (size) -> DELETE src, with NO delete-time HEAD in between (deleteObjectFromS3 no longer HEADs
+  // at all, see its own doc comment). The mock's "any later HEAD of the source is denied" branch
+  // below is therefore unreachable against the current code and is kept only as a regression pin:
+  // if a delete-time HEAD is ever reintroduced (reopening the exact TOCTOU-plus-403-swallow this
+  // file exists to prevent), this branch stands ready to make that regression fail loudly here
+  // instead of silently reintroducing the old bug.
   const SRC = 'cases/old.pdf';
   const DST = 'cases/new.pdf';
   let copied = false;
