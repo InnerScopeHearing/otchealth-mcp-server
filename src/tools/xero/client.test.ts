@@ -642,19 +642,106 @@ test('xeroGetAttachmentContent: TOO LARGE via a declared Content-Length — refu
     assert.equal(outcome.contentLengthHeader, String(big));
     assert.equal(outcome.actualBytes, null, 'refused from the header alone — the body was never read');
     assert.equal(outcome.cap, MAX_ATTACHMENT_READ_BYTES);
+    // Declared-header refusal knows the EXACT size Xero itself sent — never a partial/streamed
+    // observation — so truncatedEarly must be false here even though actualBytes is null.
+    assert.equal(outcome.truncatedEarly, false, 'PASS 1 (header-declared) is an exact refusal, not a lower bound');
   }
   assert.equal(bodyConsumed, false, 'must refuse BEFORE calling arrayBuffer() on an oversized declared length');
 });
 
-test('xeroGetAttachmentContent: TOO LARGE with no/understated Content-Length — caught AFTER download as defense in depth, reports the REAL size, never returns a truncated prefix', async () => {
+test('xeroGetAttachmentContent: TOO LARGE with no/understated Content-Length — caught DURING a streaming read as defense in depth, reports the size observed so far, never returns a truncated prefix', async () => {
+  // UPDATED CONTRACT (2026-08-18 fix, replaces the old assertion that this path called
+  // r.arrayBuffer()): the whole point of the fix is that a missing/understated Content-Length is now
+  // caught by STREAMING, not by first buffering the whole body via arrayBuffer() and measuring it
+  // afterward. A real (undici) Response object hands its already-in-memory body to a stream reader as
+  // ONE single chunk (verified directly against this repo's Node/undici version), so this particular
+  // fixture happens to still observe the file's exact real length — that is a property of THIS
+  // fixture (a single-chunk body), not a guarantee the implementation provides; see the dedicated
+  // multi-chunk test below for the actual "must not buffer it all" proof via a real multi-chunk
+  // stream, where the true total is provably NOT what gets observed.
   const big = Buffer.alloc(MAX_ATTACHMENT_READ_BYTES + 500, 0x41);
   const deps = liveAttachmentDeps((async () => new Response(big, { status: 200, headers: { 'Content-Type': 'application/pdf' } })) as typeof fetch);
   const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'huge2' }, { deps: deps as never });
   assert.equal(outcome.kind, 'too_large');
   if (outcome.kind === 'too_large') {
-    assert.equal(outcome.actualBytes, big.length, 'the real downloaded size, not a guess');
+    assert.equal(outcome.actualBytes, big.length, 'the size actually observed before cancelling — for this single-chunk fixture that equals the real size');
     assert.equal(outcome.cap, MAX_ATTACHMENT_READ_BYTES);
+    assert.equal(outcome.truncatedEarly, true, 'the read was cancelled via the streaming path, not drained by a full arrayBuffer() read — actualBytes is a lower bound by contract, even though it is exact for this fixture');
   }
+});
+
+test('xeroGetAttachmentContent: a chunked / no-Content-Length oversized body is refused WITHOUT ever buffering it all — the actual FIX 1 proof, via a mock multi-chunk stream that counts pulls', async () => {
+  // This is the test the old implementation could not pass: r.arrayBuffer() on a real chunked
+  // response would pull EVERY chunk before the size was ever checked. Here the mock stream yields 4
+  // chunks of 400 KiB each (1600 KiB total); the 1 MiB (1024 KiB) cap is exceeded partway through the
+  // 3rd chunk (400*3 = 1200 KiB > 1024 KiB), so the 4th chunk must NEVER be pulled — proven by
+  // counting reader.read() data-chunk calls, not by inspecting byte totals alone.
+  const chunkSize = 400 * 1024;
+  const chunks = [
+    Buffer.alloc(chunkSize, 0x41),
+    Buffer.alloc(chunkSize, 0x42),
+    Buffer.alloc(chunkSize, 0x43),
+    Buffer.alloc(chunkSize, 0x44),
+  ];
+  let pulls = 0;
+  let cancelled = false;
+  const iterator = chunks[Symbol.iterator]();
+  const reader = {
+    read: async () => {
+      const next = iterator.next();
+      if (next.done) return { done: true as const, value: undefined };
+      pulls += 1;
+      return { done: false as const, value: next.value };
+    },
+    cancel: async () => {
+      cancelled = true;
+    },
+  };
+  const fakeResponse = {
+    ok: true,
+    status: 200,
+    headers: {
+      // No content-length header at all -- PASS 1 must NOT fire, forcing the streaming PASS 2 path.
+      get: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/pdf' : null),
+    },
+    body: { getReader: () => reader },
+    arrayBuffer: async () => {
+      throw new Error('arrayBuffer() must NEVER be called when a stream reader is available — this is exactly the unbounded-buffering defect FIX 1 closes');
+    },
+    text: async () => {
+      throw new Error('text() must never be called for a 2xx binary body');
+    },
+  };
+  const deps = liveAttachmentDeps((async () => fakeResponse as unknown as Response) as typeof fetch);
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'chunked-huge' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'too_large');
+  if (outcome.kind === 'too_large') {
+    assert.equal(outcome.actualBytes, chunkSize * 3, 'observed exactly the 3 pulled chunks — NOT the real 4-chunk total (1600 KiB), proving it was not fully buffered');
+    assert.equal(outcome.cap, MAX_ATTACHMENT_READ_BYTES);
+    assert.equal(outcome.truncatedEarly, true, 'actualBytes is a lower bound, not the real total');
+  }
+  assert.equal(pulls, 3, 'must stop pulling the MOMENT the running total exceeds the cap — the 4th chunk is never read');
+  assert.equal(cancelled, true, 'the reader must be explicitly cancelled, not merely abandoned');
+});
+
+test('xeroGetAttachmentContent: an optional mimeType hint rides ahead of the wildcard in Accept; omitting it sends the unchanged plain wildcard', async () => {
+  let acceptSeen: string | null = null;
+  const deps = liveAttachmentDeps((async (url: string | URL, init?: RequestInit) => {
+    acceptSeen = (init?.headers as Record<string, string> | undefined)?.Accept ?? null;
+    return new Response(Buffer.from('ok'), { status: 200, headers: { 'Content-Type': 'text/plain' } });
+  }) as typeof fetch);
+
+  await xeroGetAttachmentContent(
+    'otchealth',
+    'Invoices',
+    'inv-1',
+    { by: 'attachmentId', value: 'x' },
+    { deps: deps as never, mimeTypeHint: 'application/pdf' },
+  );
+  assert.equal(acceptSeen, 'application/pdf, */*', 'the hint rides ahead of the wildcard, matching xero-node SDK precedent');
+
+  await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'y' }, { deps: deps as never });
+  assert.equal(acceptSeen, '*/*', 'no hint supplied -> the exact same plain wildcard this endpoint has always sent, unchanged');
 });
 
 test('xeroGetAttachmentContent: a 2xx application/json body is an unexpected_content_type anomaly, never silently handed back labeled as "the file"', async () => {
