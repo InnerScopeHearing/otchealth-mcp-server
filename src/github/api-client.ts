@@ -123,8 +123,38 @@ export async function listPullRequests(owner: string, repo: string, state = 'ope
   return Array.isArray(data) ? data : [];
 }
 
-export async function listWorkflowRuns(owner: string, repo: string): Promise<any[]> {
-  const data = await githubGet<{ workflow_runs: any[] }>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs?per_page=20`);
+/**
+ * Filters accepted by GET /repos/{owner}/{repo}/actions/runs (GitHub REST API 2022-11-28).
+ * All fields are optional; `status` is the only one GitHub restricts to a fixed enum (it folds
+ * both "check run status" AND "conclusion" values into this single query parameter for this
+ * endpoint -- there is no separate "conclusion" filter on the list-runs endpoint, unlike the
+ * single-run object shape which does expose distinct status/conclusion fields).
+ */
+export interface ListWorkflowRunsFilters {
+  status?: string;
+  branch?: string;
+  event?: string;
+  actor?: string;
+  created?: string;
+  exclude_pull_requests?: boolean;
+  check_suite_id?: number;
+  head_sha?: string;
+  per_page?: number;
+  page?: number;
+}
+
+export async function listWorkflowRuns(owner: string, repo: string, filters: ListWorkflowRunsFilters = {}): Promise<any[]> {
+  const params = new URLSearchParams({ per_page: String(filters.per_page ?? 20) });
+  if (filters.page !== undefined) params.set('page', String(filters.page));
+  if (filters.status !== undefined) params.set('status', filters.status);
+  if (filters.branch !== undefined) params.set('branch', filters.branch);
+  if (filters.event !== undefined) params.set('event', filters.event);
+  if (filters.actor !== undefined) params.set('actor', filters.actor);
+  if (filters.created !== undefined) params.set('created', filters.created);
+  if (filters.exclude_pull_requests !== undefined) params.set('exclude_pull_requests', String(filters.exclude_pull_requests));
+  if (filters.check_suite_id !== undefined) params.set('check_suite_id', String(filters.check_suite_id));
+  if (filters.head_sha !== undefined) params.set('head_sha', filters.head_sha);
+  const data = await githubGet<{ workflow_runs: any[] }>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs?${params}`);
   return Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
 }
 
