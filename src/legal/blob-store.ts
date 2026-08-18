@@ -22,7 +22,15 @@
 
 import crypto from 'node:crypto';
 import { loadEnv } from '../config/env.js';
-import { s3BlobBackendActive, fetchBlobFromS3, listBlobsFromS3, headBlobFromS3 } from './s3-blob-store.js';
+import {
+  s3BlobBackendActive,
+  fetchBlobFromS3,
+  listBlobsFromS3,
+  headBlobFromS3,
+  putObjectToS3,
+  copyObjectInS3,
+  deleteObjectFromS3,
+} from './s3-blob-store.js';
 
 /** x-ms-version, matching skills/legal/legal.mjs exactly. */
 const AVER = '2021-06-08';
@@ -61,9 +69,48 @@ function readCreds(): LegalCreds | null {
   return creds();
 }
 
-/** True when the SharedKey credentials are present. */
+/**
+ * Containers whose WRITES may be served by the S3 mirror (2026-08-18).
+ *
+ * `personal` IS ABSENT ON PURPOSE, AND MUST STAY ABSENT. The attorney-privileged personal-legal DR
+ * bucket is granted GetObject + ListBucket ONLY (infra/aws/iam.tf, the PersonalLegalRingReadOnly
+ * statement) -- read-only by deliberate design. Adding `personal` here would not merely fail at
+ * runtime, it would be a request to WIDEN that grant, and whether privileged personal legal should
+ * become writable from this runtime is a ring decision nobody has made. So personal writes keep
+ * falling through to the Azure path below, where they fail LOUDLY if Azure is unavailable rather
+ * than quietly relocating privileged documents into a bucket chosen by a code change.
+ *
+ * `exec` is listed for the same reason it has a row in the S3 mirror table: it is a real shared-ring
+ * container in the mirror. It is not currently a member of the LegalContainer union, so nothing can
+ * reach it through this file today; listing it means a future widening of that union inherits the
+ * correct routing instead of silently defaulting to the wrong side of the fence.
+ */
+const S3_WRITABLE_CONTAINERS: ReadonlySet<string> = new Set(['company', 'exec']);
+
+/** True when THIS container's writes should go to S3. Container-scoped, never global. */
+function s3WriteActive(container: string): boolean {
+  return s3BlobBackendActive() && S3_WRITABLE_CONTAINERS.has(container);
+}
+
+/**
+ * True when the store is USABLE on the currently selected backend.
+ *
+ * Was `creds() !== null` -- i.e. "is the Azure SharedKey present". That was a latent hole predating
+ * this change: `readCreds()` was introduced so READS would not need the Azure key under
+ * BLOB_BACKEND=s3, but this function was never brought along, and EVERY legal blob tool
+ * (blob-get, blob-list, blob-put, blob-copy, blob-move, blob-delete) checks it first and returns a
+ * "not configured" result before any of that routing is reached. So with the dead Azure key removed
+ * the whole legal document surface would have answered "not configured" -- reads included, despite
+ * their S3 path having worked since the cutover -- and the write routing added below would have been
+ * unreachable in exactly the scenario it exists for.
+ *
+ * Delegating to readCreds() makes this answer the question the callers are actually asking. A
+ * `personal` write still fails loudly further down with the specific
+ * "AZURE_LEGAL_STORAGE_KEY unset" message, which is the correct and informative failure, rather than
+ * the whole surface disappearing behind one generic no-op.
+ */
 export function isConfigured(): boolean {
-  return creds() !== null;
+  return readCreds() !== null;
 }
 
 /**
@@ -388,11 +435,20 @@ export async function putBlob(
   body: { text?: string; base64?: string; contentType?: string },
   overwrite = false,
 ): Promise<BlobPutResult> {
-  const c = creds();
-  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
   const buf =
     body.base64 != null ? Buffer.from(body.base64, 'base64') : Buffer.from(body.text ?? '', 'utf8');
   const ct = body.contentType || (body.base64 != null ? 'application/octet-stream' : 'application/json');
+  // Shared-ring containers write to the mirror; `personal` deliberately does not (see
+  // S3_WRITABLE_CONTAINERS). The no-silent-clobber default is preserved either way: S3's
+  // If-None-Match: * is the direct equivalent of the Azure conditional header used below.
+  if (s3WriteActive(container)) {
+    const rc = readCreds();
+    if (!rc) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_ACCOUNT unset)');
+    const res = await putObjectToS3(rc.account, container, path, buf, ct, overwrite);
+    return { path, container, bytes: res.bytes, contentType: ct };
+  }
+  const c = creds();
+  if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
   const xms: Record<string, string> = {
     'x-ms-blob-type': 'BlockBlob',
     'x-ms-date': new Date().toUTCString(),
@@ -436,6 +492,17 @@ export async function copyBlob(
   overwrite = false,
   srcEtag?: string,
 ): Promise<{ bytes: number; copyStatus: string }> {
+  // S3 CopyObject is the direct equivalent, including the source-version pin: srcEtag becomes
+  // x-amz-copy-source-if-match, exactly as it becomes x-ms-source-if-match on Azure. The S3 helper
+  // additionally inspects the response BODY, because CopyObject can report a mid-copy failure inside
+  // an HTTP 200 -- so a failed copy still surfaces as a thrown error here, never as copyStatus
+  // 'success', which is what a copy-then-delete caller depends on before it deletes the original.
+  if (s3WriteActive(container)) {
+    const rc = readCreds();
+    if (!rc) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_ACCOUNT unset)');
+    const res = await copyObjectInS3(rc.account, container, srcPath, dstPath, { overwrite, sourceEtag: srcEtag });
+    return { bytes: res.bytes, copyStatus: 'success' };
+  }
   const c = creds();
   if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
   const sourceUrl = `https://${c.account}.blob.core.windows.net/${container}/${encPath(srcPath)}`;
@@ -514,6 +581,17 @@ export async function copyBlob(
  * verified.
  */
 export async function deleteBlobHard(container: LegalContainer, path: string, ifMatch?: string): Promise<void> {
+  // NOTE the one genuine capability gap, stated rather than papered over: S3 DeleteObject has no
+  // If-Match precondition equivalent to Azure Blob's, so on the S3 path `ifMatch` is enforced by a
+  // HEAD-then-delete check inside deleteObjectFromS3. That still refuses a delete whose source
+  // changed, but it does not close the window between the HEAD and the DELETE the way Azure's
+  // server-side precondition does. Sending a header S3 may ignore would have been worse: it would
+  // report an unguarded delete as a guarded one.
+  if (s3WriteActive(container)) {
+    const rc = readCreds();
+    if (!rc) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_ACCOUNT unset)');
+    return deleteObjectFromS3(rc.account, container, path, ifMatch);
+  }
   const c = creds();
   if (!c) throw new Error('legal store not configured (AZURE_LEGAL_STORAGE_KEY unset)');
   const xms = { 'x-ms-date': new Date().toUTCString(), 'x-ms-version': AVER };

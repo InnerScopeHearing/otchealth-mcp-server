@@ -144,6 +144,49 @@ test('the Postgres adapter parameterises values and never interpolates a caller 
 });
 
 /**
+ * ============ THE OTHER WRITE PLANE: the commons memory feed (2026-08-18) ============
+ *
+ * This file's header says the state plane is guarded because it "degrades to cannot WRITE ...
+ * including the record of what broke". That description turned out to fit a file this guard never
+ * looked at. src/memory/store.ts is the gateway's OTHER write plane -- the cross-agent shared brain
+ * behind memory_remember -- and it was a hand-rolled Azure Blob client with no backend selector at
+ * all. When Azure went away it threw `commons put 403` on every write, BEFORE the OpenSearch index
+ * step, so the writes were lost outright rather than merely unindexed.
+ *
+ * It slipped between BOTH guards, and the gap was structural rather than accidental: the search
+ * guard checks legal/blob-store.ts by name for BLOB_BACKEND, this guard checks COSMOS_* and imports
+ * of cosmos.js / postgres.js, and the commons store matches none of those. Two guards, each
+ * reasonably scoped, and the single most load-bearing write path in the gateway sitting in the seam
+ * between them. It is asserted here as well as in the search guard on purpose: this is the file
+ * whose whole subject is "a write that silently stops happening", so a future author widening the
+ * write surface meets the check here too rather than only in a file about search.
+ */
+test('the commons memory WRITE path dispatches on BLOB_BACKEND, like every other write plane', () => {
+  const store = PROD_FILES.find((f) => f.path === 'memory/store.ts');
+  assert.ok(store, 'expected src/memory/store.ts to exist');
+
+  // putText is THE function that broke. Assert on its own body, not the whole file: a selector used
+  // only by the read paths would still leave writes pinned to a dead backend, which is precisely the
+  // asymmetry this guard's header calls the worst failure mode.
+  const start = store!.text.indexOf('function putText(');
+  assert.ok(start > 0, 'memory/store.ts must still have a putText -- if it was renamed, update this check');
+  const end = store!.text.indexOf('\n}', start);
+  const putTextBody = store!.text.slice(start, end < 0 ? undefined : end);
+  assert.match(
+    putTextBody,
+    /s3BlobBackendActive\(\)/,
+    'memory/store.ts putText() must branch on BLOB_BACKEND, or every memory write dies with the backend it is pinned to',
+  );
+
+  // And the write must reach a real S3 verb, not just consult the flag and fall through to Azure.
+  assert.match(
+    putTextBody,
+    /putObjectToS3\(/,
+    'the BLOB_BACKEND=s3 branch must actually WRITE to S3; consulting the selector without a write is the same outage',
+  );
+});
+
+/**
  * ===================== ENV-VAR-READ SCAN (2026-08-16) =====================
  *
  * WHY THIS SECTION EXISTS: every check above scans for an IMPORT STATEMENT naming the concrete

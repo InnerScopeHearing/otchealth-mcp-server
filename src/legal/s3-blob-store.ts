@@ -31,12 +31,25 @@
  * job is narrower and absolute: never let an already-authorised request for one container resolve
  * to another container's physical bucket.
  *
- * READ-ONLY BY CONSTRUCTION. No put/delete verb exists here. The S3 side is a mirror; writing to it
- * directly would silently diverge it from the source of truth with no reconciliation path. Document
- * writes continue to go to Azure until the mirror becomes primary, which is a later, separate step.
+ * NO LONGER READ-ONLY (2026-08-18). The original header said "READ-ONLY BY CONSTRUCTION ... Document
+ * writes continue to go to Azure until the mirror becomes primary, which is a later, separate step."
+ * That step has now happened, involuntarily: Azure subscription 55c84f6b is permanently gone, so
+ * "writes continue to go to Azure" no longer means "writes go to the source of truth", it means
+ * "writes fail". The S3 side is not a mirror of a live Azure any more; for the rooms mapped below it
+ * IS the source of truth, and the divergence risk the old paragraph guarded against cannot occur
+ * because there is nothing left to diverge FROM.
+ *
+ * The write verbs are therefore additive and deliberately narrow: putObjectToS3 / copyObjectInS3 /
+ * deleteObjectFromS3, all going through the SAME s3LocationFor allow-list as the reads, so a write
+ * inherits the identical fail-closed ring mapping. Which CALLERS are allowed to write which
+ * container remains the caller's decision (see blob-store.ts: personal legal writes are still
+ * refused here on purpose -- the personal DR bucket's IAM grant is GetObject/ListBucket only, see
+ * infra/aws/iam.tf's PersonalLegalRingReadOnly statement, and widening it is a ring decision nobody
+ * has made).
  */
 import { loadEnv } from '../config/env.js';
-import { resolveAwsCredentials, signRequest, canonicalUri } from '../search/sigv4.js';
+import { createHash } from 'node:crypto';
+import { resolveAwsCredentials, signRequest, canonicalUri, type AwsCredentials } from '../search/sigv4.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 
 /** SHA-256 of the empty string: the required `x-amz-content-sha256` for any bodyless S3 request. */
@@ -82,6 +95,22 @@ const MIRROR: Readonly<Record<string, S3Location>> = Object.freeze({
   'otchealthcfodata/innd-stock': {
     bucket: 'otchealth-finance-legal-dr-55c84f6b',
     keyPrefix: 'otchealthcfodata/innd-stock/',
+  },
+  /**
+   * The cross-agent SHARED BRAIN (src/memory/store.ts's commons feed: `_MEMORY/_exec/<agent>.jsonl`).
+   * Added 2026-08-18 because its ABSENCE was the bug: with no row here, `memory_remember` had nowhere
+   * to write once Azure went dark, and it threw `commons put 403` BEFORE the OpenSearch index step,
+   * so every memory write since was lost outright rather than merely unindexed.
+   *
+   * Bucket choice is not a new grant: the ECS task role already holds s3:PutObject on
+   * otchealth-finance-legal-dr-55c84f6b (infra/aws/iam.tf, the runtime-access statement lists
+   * GetObject + PutObject + ListBucket on that bucket and its /*), so this row needs zero IAM or
+   * Terraform change. It is emphatically NOT the personal-legal bucket -- that one is read-only by
+   * IAM and privileged by ring.
+   */
+  'otchealthcommons/company-journal': {
+    bucket: 'otchealth-finance-legal-dr-55c84f6b',
+    keyPrefix: 'otchealthcommons/company-journal/',
   },
 });
 
@@ -275,6 +304,271 @@ function unescapeXml(s: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, '&');
+}
+
+// ══════════════════════════ WRITE PATH (2026-08-18) ══════════════════════════
+//
+// Everything below writes. It shares ONE request helper with a single, non-optional encoding rule,
+// so the 2026-08-17 double-encoding bug documented at length inside fetchBlobFromS3 cannot be
+// reintroduced by a new verb: `s3ObjectRequest` is the only place a key becomes a URL, it signs the
+// RAW path and sends canonicalUri(raw), and no caller below ever touches an encoder itself.
+//
+// ⚠ THE RULE, RESTATED SO IT IS NOT RE-DERIVED WRONG: S3 percent-encodes each path segment EXACTLY
+// ONCE. Every other AWS service encodes TWICE. A double-encoded key produces a signature mismatch
+// that S3 reports as HTTP 403 -- indistinguishable, at a glance, from a permissions problem, which
+// is precisely why the read-side instance of this bug survived long enough to be written up as a
+// "data coverage gap". Do NOT pre-encode with encodeURIComponent before calling in here, and do NOT
+// copy this single-encode pattern onto the OpenSearch ('es') call sites in src/search/.
+
+/** Everything a signed S3 object-level request needs. `path` is the RAW (unencoded) object key. */
+interface S3ObjectRequestOpts {
+  method: 'GET' | 'PUT' | 'HEAD' | 'DELETE';
+  loc: S3Location;
+  /** Object key RELATIVE to loc.keyPrefix, raw and unencoded. */
+  path: string;
+  credentials: AwsCredentials;
+  region: string;
+  /** Raw request bytes. Its SHA-256 becomes the signed x-amz-content-sha256 / payload hash. */
+  body?: Buffer;
+  contentType?: string;
+  /** Extra headers to SIGN and send (x-amz-*, if-none-match, if-match, ...). */
+  extraHeaders?: Record<string, string>;
+}
+
+/**
+ * Sign and issue one object-level S3 request. The single choke point for key encoding.
+ *
+ * The payload hash is computed from the ACTUAL bytes: S3 requires x-amz-content-sha256 to be present
+ * AND signed, and it must equal the canonical request's payload hash or the signature fails. Passing
+ * the Buffer straight to signRequest keeps both derived from one value, so they cannot disagree.
+ */
+async function s3ObjectRequest(opts: S3ObjectRequestOpts): Promise<Response> {
+  const host = `${opts.loc.bucket}.s3.${opts.region}.amazonaws.com`;
+  const rawPath = `/${opts.loc.keyPrefix}${opts.path}`;
+  const body = opts.body;
+  const payloadHash = body ? createHash('sha256').update(body).digest('hex') : EMPTY_SHA256;
+
+  const extraHeaders: Record<string, string> = {
+    'x-amz-content-sha256': payloadHash,
+    ...(opts.contentType ? { 'content-type': opts.contentType } : {}),
+    ...opts.extraHeaders,
+  };
+
+  const signed = signRequest({
+    method: opts.method,
+    host,
+    path: rawPath,
+    region: opts.region,
+    service: 's3',
+    credentials: opts.credentials,
+    ...(body ? { body } : {}),
+    extraHeaders,
+  });
+
+  return fetchWithBudget(`https://${host}${canonicalUri(rawPath)}`, {
+    method: opts.method,
+    headers: signed.headers,
+    // A Node Buffer is a Uint8Array, which fetch accepts as a body; the cast only satisfies the DOM
+    // BodyInit typing this tsconfig's lib does not expose.
+    ...(body ? { body: body as unknown as RequestInit['body'] } : {}),
+    // fetchWithBudget retries once on a network error / 429 / 5xx. Safe here: every write is
+    // idempotent by construction -- a PUT of a fixed body to a fixed key, a DELETE of a key, a copy
+    // of a pinned source version -- so none of them accumulate an effect when repeated. The one
+    // wrinkle worth naming: if a create-only write (If-None-Match: *) actually lands and THEN the
+    // response is lost to a 5xx, the retry sees 412 and surfaces as "already exists". Misleading
+    // wording, but it fails safe -- nothing is overwritten and nothing is silently reported as
+    // written that was not.
+  });
+}
+
+/** Resolve (mapping, credentials, region) or THROW. Shared preamble for every write verb, so a
+ *  missing mapping fails closed identically on the write side as on the read side. */
+async function writeContext(
+  account: string,
+  container: string,
+): Promise<{ loc: S3Location; credentials: AwsCredentials; region: string }> {
+  const loc = s3LocationFor(account, container);
+  if (!loc) throw new Error(`no S3 mirror mapping for ${account}/${container} (refusing to guess a bucket)`);
+  const credentials = await resolveAwsCredentials();
+  if (!credentials) throw new Error('S3 credentials unavailable');
+  return { loc, credentials, region: loadEnv().OPENSEARCH_REGION || 'us-east-1' };
+}
+
+/**
+ * PUT one object.
+ *
+ * `overwrite=false` sends `If-None-Match: *` (S3 conditional writes), so a concurrent create between
+ * a caller's existence check and this PUT is refused server-side with 412 rather than silently
+ * clobbering. That mirrors the Azure putBlob guard exactly.
+ *
+ * FAILS LOUD on every non-2xx. There is deliberately no "treat 403 as absent" branch on the write
+ * side: the reads conflate 404/403 because S3 answers 403 for a missing key when the caller lacks
+ * ListBucket, but a 403 on a WRITE is never "the object is not there", it is "the write did not
+ * happen", and reporting that as success is the precise failure this whole change exists to end.
+ */
+export async function putObjectToS3(
+  account: string,
+  container: string,
+  path: string,
+  body: Buffer,
+  contentType: string,
+  // FAIL-CLOSED DEFAULT, matching putBlob's. A raw primitive that clobbers unless told otherwise is
+  // the wrong default for a store holding filed legal documents; every real call site passes this
+  // explicitly anyway (blob-store.ts forwards the caller's choice, the commons feed passes true
+  // because rewriting the JSONL file IS the append).
+  overwrite = false,
+): Promise<{ bytes: number; etag: string | null }> {
+  const ctx = await writeContext(account, container);
+  const r = await s3ObjectRequest({
+    method: 'PUT',
+    loc: ctx.loc,
+    path,
+    credentials: ctx.credentials,
+    region: ctx.region,
+    body,
+    contentType,
+    ...(overwrite ? {} : { extraHeaders: { 'if-none-match': '*' } }),
+  });
+  if (r.status === 409 || r.status === 412) {
+    throw new Error(
+      `s3 blob put refused: an object already exists at ${container}/${path} (HTTP ${r.status}). ` +
+        `Pass overwrite=true to intentionally replace it.`,
+    );
+  }
+  if (!r.ok) throw new Error(`s3 blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  return { bytes: body.length, etag: r.headers.get('etag') };
+}
+
+/**
+ * Server-side COPY within one bucket (S3 CopyObject: a PUT on the destination carrying
+ * `x-amz-copy-source`).
+ *
+ * `sourceEtag` pins the copy to the exact version the caller observed, via
+ * `x-amz-copy-source-if-match` -- the direct S3 equivalent of Azure's `x-ms-source-if-match`, and
+ * the same TOCTOU guard the copy-then-delete callers depend on.
+ *
+ * ⚠ S3 CopyObject CAN RETURN HTTP 200 WITH AN ERROR IN THE BODY. A long copy that fails midway
+ * answers 200 and puts `<Error>` in the payload; trusting the status code alone reports a failed
+ * copy as a success, and a copy-then-delete caller would then delete the original. So the body is
+ * parsed and a missing `<ETag>` (or a present `<Error>`) is treated as a failure.
+ */
+export async function copyObjectInS3(
+  account: string,
+  container: string,
+  srcPath: string,
+  dstPath: string,
+  opts: { overwrite?: boolean; sourceEtag?: string } = {},
+): Promise<{ bytes: number; etag: string | null }> {
+  const ctx = await writeContext(account, container);
+  // The copy-source header value is a /<bucket>/<key> reference and must be percent-encoded the same
+  // single way as a path -- canonicalUri is the same encoder used for the request line, so the two
+  // cannot drift apart.
+  const copySource = canonicalUri(`/${ctx.loc.bucket}/${ctx.loc.keyPrefix}${srcPath}`);
+  const extraHeaders: Record<string, string> = { 'x-amz-copy-source': copySource };
+  if (opts.sourceEtag) extraHeaders['x-amz-copy-source-if-match'] = opts.sourceEtag;
+  if (!opts.overwrite) extraHeaders['if-none-match'] = '*';
+
+  const r = await s3ObjectRequest({
+    method: 'PUT',
+    loc: ctx.loc,
+    path: dstPath,
+    credentials: ctx.credentials,
+    region: ctx.region,
+    extraHeaders,
+  });
+  if (r.status === 404) throw new Error(`s3 blob copy: source ${container}/${srcPath} not found.`);
+  if (r.status === 409 || r.status === 412) {
+    throw new Error(
+      `s3 blob copy refused (HTTP ${r.status}): either an object already exists at ${container}/${dstPath} ` +
+        `(pass overwrite=true to replace it), or the source at ${container}/${srcPath} changed since it was ` +
+        `last checked and no longer matches the expected version. Re-check and retry.`,
+    );
+  }
+  if (!r.ok) throw new Error(`s3 blob copy ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const xml = await r.text();
+  if (/<Error>/.test(xml) || !/<ETag>/.test(xml)) {
+    throw new Error(
+      `s3 blob copy returned HTTP 200 with a failed CopyObjectResult for ${container}/${dstPath} ` +
+        `(S3 reports a mid-copy failure in the body, not the status): ${xml.slice(0, 200)}`,
+    );
+  }
+  const etag = (xml.match(/<ETag>([^<]*)<\/ETag>/) || [])[1] ?? null;
+  // CopyObjectResult carries no size, and the PUT response's Content-Length is the response body's
+  // length, not the object's. A HEAD on the destination is the only honest source of real bytes --
+  // the same reason the Azure copyBlob ends with a HEAD.
+  const head = await headBlobFromS3(account, container, dstPath);
+  return { bytes: head.size ?? 0, etag: etag ? unescapeXml(etag) : null };
+}
+
+/**
+ * DELETE one object. Idempotent: S3 answers 204 whether or not the key existed, so "already gone"
+ * is success, matching the Azure primitive's 404 handling.
+ *
+ * `ifMatch` NOTE, AND ITS LIMIT, STATED PLAINLY: S3 DeleteObject has no universally available
+ * If-Match precondition equivalent to Azure Blob's. Rather than send a header S3 may ignore -- which
+ * would report an UNGUARDED delete as a guarded one, the worst possible outcome for a
+ * copy-then-delete caller -- this verifies the ETag with a HEAD first and refuses on a mismatch.
+ * That is strictly weaker than a server-side precondition: a write landing between the HEAD and the
+ * DELETE is not caught. It is strictly stronger than ignoring the argument, and it is honest about
+ * which of the two it is.
+ */
+export async function deleteObjectFromS3(
+  account: string,
+  container: string,
+  path: string,
+  ifMatch?: string,
+): Promise<void> {
+  const ctx = await writeContext(account, container);
+  if (ifMatch) {
+    const head = await headBlobFromS3(account, container, path);
+    if (!head.exists) return; // already gone; nothing to guard, nothing to delete
+    if (head.etag !== ifMatch) {
+      throw new Error(
+        `s3 blob delete refused: the object at ${container}/${path} changed since it was copied ` +
+          `(ETag ${head.etag} no longer matches the expected ${ifMatch}). Nothing was deleted; investigate and retry.`,
+      );
+    }
+  }
+  const r = await s3ObjectRequest({
+    method: 'DELETE',
+    loc: ctx.loc,
+    path,
+    credentials: ctx.credentials,
+    region: ctx.region,
+  });
+  if (r.status === 404) return; // idempotent
+  if (!r.ok) throw new Error(`s3 blob delete ${r.status}: ${(await r.text()).slice(0, 200)}`);
+}
+
+/**
+ * GET one object as TEXT, with the loud-failure contract the memory commons feed requires.
+ *
+ * Deliberately NOT a wrapper over fetchBlobFromS3. That function folds 403 into `found:false`, which
+ * is right for a legal DOCUMENT read (S3 answers 403 for a missing key when the caller lacks
+ * ListBucket) and WRONG here: the commons feed's readers -- memory_team, wake, memory_recall,
+ * memory_pack, entity-lookup and the RETRACTION filter -- read "no rows" as "nobody recorded
+ * anything", so a 403 folded into an empty feed resurfaces retracted beliefs as current truth. That
+ * exact false-empty was already fixed once on the Azure listing path (see listShared in
+ * src/memory/store.ts); this keeps the S3 path held to the identical standard.
+ *
+ * 404 -> null (the blob genuinely does not exist yet: a lane's first write). Anything else THROWS.
+ */
+export async function getTextFromS3(account: string, container: string, path: string): Promise<string | null> {
+  const ctx = await writeContext(account, container);
+  const r = await s3ObjectRequest({
+    method: 'GET',
+    loc: ctx.loc,
+    path,
+    credentials: ctx.credentials,
+    region: ctx.region,
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) {
+    throw new Error(
+      `s3 commons get ${r.status} (refusing to report a missing feed as empty): ${(await r.text()).slice(0, 160)}`,
+    );
+  }
+  return await r.text();
 }
 
 /** HEAD one mirrored object: existence + ETag + size, without downloading it. */
