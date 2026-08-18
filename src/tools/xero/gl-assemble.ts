@@ -312,26 +312,49 @@ export function sumLineItemsByAccount(docs: DocWithLines[]): Map<string, number>
 // ManualJournals) over a date range, in ONE fetch-and-bucket pass rather than once per month.
 // ---------------------------------------------------------------------------------------------
 
-const MAX_PAGES_PER_ENDPOINT = 20; // 100/page -> 2000 records/endpoint/call; bounded, flagged if hit.
+export const MAX_PAGES_PER_ENDPOINT = 20; // 100/page -> 2000 records/endpoint/call; bounded, flagged if hit.
 
-async function fetchAllPaged(
+/**
+ * Pages ONE endpoint to completion (or the MAX_PAGES_PER_ENDPOINT bound). `xeroGet` already throws
+ * on any non-2xx response, so within this loop a "stop" can only mean one of two THINGS THAT LOOK
+ * ALIKE BUT ARE NOT:
+ *   (a) a genuinely EMPTY array under `arrayKey` — Xero's real, well-formed "no more records" last
+ *       page. Stopping here is correct and complete; nothing to report.
+ *   (b) `arrayKey` MISSING from the body, or present but not an array at all — a 2xx response whose
+ *       shape does not match what this function expects (a vendor schema drift, a field rename, or
+ *       any other anomaly). This is NOT "no more records"; it is "the response cannot be trusted to
+ *       mean that". Silently treating it the same as (a) is exactly the failure mode `assembleGl`'s
+ *       own module doc otherwise goes to great lengths never to allow: a caller sees `truncated:
+ *       false`, no caveat, and a `variance` that LOOKS complete while actually being short. So (b)
+ *       stops paging (this function makes no attempt to guess whether a later page would be normal
+ *       again), reports exactly where it happened via `shapeAnomaly`, and marks the result
+ *       `truncated` — the same signal an actual page-cap hit uses, so a caller who only checks
+ *       `truncated` still gets warned; a caller who wants the precise reason gets `shapeAnomaly` too.
+ */
+export async function fetchAllPaged(
   org: XeroOrg,
   path: string,
   arrayKey: string,
   where: string,
   deps?: TokenDeps,
-): Promise<{ items: Record<string, unknown>[]; truncated: boolean }> {
+): Promise<{ items: Record<string, unknown>[]; truncated: boolean; shapeAnomaly?: string }> {
   const items: Record<string, unknown>[] = [];
   let truncated = false;
+  let shapeAnomaly: string | undefined;
   for (let page = 1; page <= MAX_PAGES_PER_ENDPOINT; page++) {
     const res = await xeroGet(org, path, { page: String(page), where }, { deps });
     const arr = (res.body as Record<string, unknown>)?.[arrayKey];
-    if (!Array.isArray(arr) || arr.length === 0) break;
+    if (!Array.isArray(arr)) {
+      shapeAnomaly = `${path} page ${page}: response body did not contain "${arrayKey}" as an array (got ${arr === undefined ? 'missing' : typeof arr}) — treated as a malformed/unexpected response shape, NOT an empty last page. Results from this endpoint are INCOMPLETE for this run.`;
+      truncated = true;
+      break;
+    }
+    if (arr.length === 0) break; // a real, well-formed empty array IS a legitimate last page
     items.push(...(arr as Record<string, unknown>[]));
     if (arr.length < 100) break; // short page = last page
     if (page === MAX_PAGES_PER_ENDPOINT) truncated = true;
   }
-  return { items, truncated };
+  return { items, truncated, shapeAnomaly };
 }
 
 function dateWhere(from: string, to: string): string {
@@ -442,7 +465,7 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
   // Status client-side as a second layer, in case a future caller ever bypasses this where clause.
   const mjWhere = `${effectiveWhere} && Status=="POSTED"`;
   const mjRes = await fetchAllPaged(org, '/ManualJournals', 'ManualJournals', mjWhere, deps);
-  if (mjRes.truncated) caveats.push(`ManualJournals hit the ${MAX_PAGES_PER_ENDPOINT}-page cap (${MAX_PAGES_PER_ENDPOINT * 100}+ records) — some journals in range may be missing from manualJournalNet.`);
+  if (mjRes.truncated) caveats.push(mjRes.shapeAnomaly ?? `ManualJournals hit the ${MAX_PAGES_PER_ENDPOINT}-page cap (${MAX_PAGES_PER_ENDPOINT * 100}+ records) — some journals in range may be missing from manualJournalNet.`);
   const mjByMonth = new Map<string, ManualJournal[]>();
   for (const raw of mjRes.items) {
     const mj = raw as ManualJournal;
@@ -459,11 +482,11 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
   // and burst Xero's rate limit instead of respecting the intended spacing. This tool already makes
   // many calls per invocation; it should not also be the thing that trips a 429.
   const invRes = await fetchAllPaged(org, '/Invoices', 'Invoices', effectiveWhere, deps);
-  if (invRes.truncated) caveats.push(`Invoices hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — invoicesLineGrossByAccount is incomplete for one or more months.`);
+  if (invRes.truncated) caveats.push(invRes.shapeAnomaly ?? `Invoices hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — invoicesLineGrossByAccount is incomplete for one or more months.`);
   const cnRes = await fetchAllPaged(org, '/CreditNotes', 'CreditNotes', effectiveWhere, deps);
-  if (cnRes.truncated) caveats.push(`CreditNotes hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — creditNotesLineGrossByAccount is incomplete for one or more months.`);
+  if (cnRes.truncated) caveats.push(cnRes.shapeAnomaly ?? `CreditNotes hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — creditNotesLineGrossByAccount is incomplete for one or more months.`);
   const btRes = await fetchAllPaged(org, '/BankTransactions', 'BankTransactions', effectiveWhere, deps);
-  if (btRes.truncated) caveats.push(`BankTransactions hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — bankTransactionsLineGrossByAccount is incomplete for one or more months.`);
+  if (btRes.truncated) caveats.push(btRes.shapeAnomaly ?? `BankTransactions hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — bankTransactionsLineGrossByAccount is incomplete for one or more months.`);
 
   const byMonth = <T extends { Date?: string }>(items: T[]): Map<string, T[]> => {
     const out = new Map<string, T[]>();
