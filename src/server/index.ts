@@ -12,6 +12,7 @@ import { registerHeyGenApprovalCallback } from './heygen-approval-callback.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { loadRevocations, startRevocationReloader } from '../auth/revocation-store.js';
 import { startDeindexResweepReloader } from '../agentstate/deindex-resweep.js';
+import { responseLogFields } from './response-log.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -58,18 +59,10 @@ async function main(): Promise<void> {
   });
 
   app.addHook('onResponse', async (request, reply) => {
-    const ms = reply.elapsedTime;
-    logger.debug(
-      {
-        type: 'http_response',
-        method: request.method,
-        url: request.url,
-        status: reply.statusCode,
-        latency_ms: Math.round(ms),
-        ip: request.ip,
-      },
-      'http response',
-    );
+    // See response-log.ts's doc comment: the payload is built by a separate, testable function
+    // specifically so the URL never carries a query-string secret (M365 static token, OAuth
+    // `code`/`state`) into this log line, regardless of LOG_LEVEL.
+    logger.debug(responseLogFields(request, reply, reply.elapsedTime), 'http response');
   });
 
   // Inbound rate limiting. The gateway is the keys-to-the-kingdom front door, so cap per-client
