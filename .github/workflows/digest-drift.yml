@@ -27,6 +27,18 @@ name: digest-drift
 #
 # Auth is OIDC via the id-gateway-deployer managed identity (environment: production subject).
 #
+# NOTE ON `environment: production` (verified live against the GitHub API on 2026-08-18): this
+# declaration is REQUIRED and load-bearing, because the Azure OIDC federated credential trusts only
+# the subject `repo:InnerScopeHearing/otchealth-mcp-server:environment:production`. Removing it
+# breaks auth. It does NOT supply a human approval gate. This repo's `production` environment has
+# `protection_rules: []` and `can_admins_bypass: true` -- no required reviewers, no self-review
+# prevention. Declaring an environment does not create protection on it; that is configured on the
+# environment itself, separately. For contrast, InnerScopeHearing/flatstick's `production` DOES have
+# a required reviewer (GBGolfMatt), which is the likely source of the belief that this one did too.
+# If the AWS successor to this workflow wants separation of duties, it must be configured, not
+# assumed -- and asserting it in a comment does not make it so.
+#
+#
 # 2026-08-01 fix (found during a live Copilot-fleet cold-start audit): this used to parse the
 # CONTAINER APP REVISION NAME (expecting a "g<sha>" suffix) instead of checking the image itself.
 # A same-day out-of-band `az containerapp update --set-env-vars ...` (no --revision-suffix, e.g.
