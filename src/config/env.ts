@@ -383,16 +383,25 @@ const EnvSchema = z.object({
   BLOB_BACKEND: z.enum(['azure', 's3']).default('azure'),
 
   // Which store holds the AGENT STATE PLANE: the work-ledger (tasks), the memory-of-record
-  // (memory), the transition log (events), OAuth codes/tokens, and the LLM/FAQ caches.
-  //   cosmos (default)  Azure Cosmos DB, via src/agentstate/cosmos.ts. Byte-identical to prior deploys.
-  //   postgres          RDS Postgres, via src/agentstate/postgres.ts.
+  // (memory), the transition log (events), OAuth codes/tokens, the LLM/FAQ caches, AND (as of
+  // src/agentstate/queue.ts's dispatcher) the agent inbox (agent_dispatch / inbox_read / wake).
+  //   cosmos (default)  Azure Cosmos DB + Azure Storage Queues, via src/agentstate/cosmos.ts and
+  //                     src/agentstate/queue-azure.ts. Byte-identical to prior deploys.
+  //   postgres          RDS Postgres for both, via src/agentstate/postgres.ts (documents) and
+  //                     src/agentstate/queue-postgres.ts (the inbox, its own table + atomic
+  //                     claim -- see that file's header for why it is not just another
+  //                     postgres.ts container).
   //
   // This is the LAST Azure runtime dependency and the one with the worst failure mode. Search and
   // documents degrade to "cannot read" if Azure goes away; state degrades to "cannot WRITE" --
   // writeMemory() and memory-write.ts both await their create with no catch, so an Azure
-  // suspension does not make the fleet forgetful, it makes it unable to record anything at all.
-  // Consumers must therefore import from src/agentstate/store.ts (the dispatcher), never from
-  // cosmos.ts or postgres.ts directly; agentstate-dependency-guard.test.ts enforces that in CI.
+  // suspension does not make the fleet forgetful, it makes it unable to record anything at all --
+  // and before queue-postgres.ts existed, the inbox call sites called Azure UNCONDITIONALLY,
+  // ignoring this flag entirely, so agent-to-agent dispatch would have stopped outright.
+  // Consumers must therefore import from src/agentstate/store.ts (documents) or
+  // src/agentstate/queue.ts (the inbox) -- the two dispatchers -- never from cosmos.ts,
+  // postgres.ts, queue-azure.ts, or queue-postgres.ts directly;
+  // agentstate-dependency-guard.test.ts enforces the document half in CI.
   STATE_BACKEND: z.enum(['cosmos', 'postgres']).default('cosmos'),
 
   // RDS Postgres connection for STATE_BACKEND=postgres. Inert unless PG_HOST is set, so a
