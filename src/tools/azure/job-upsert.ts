@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget, computeJobUpsertDrops } from '../../azure/arm-client.js';
 
 export function registerAzureJobUpsert(server: McpServer, callerHash: CallerHashProvider): void {
@@ -11,8 +12,10 @@ export function registerAzureJobUpsert(server: McpServer, callerHash: CallerHash
       category: 'write_orchestrated',
       annotations: {
         title: 'Azure: create/update a Container Apps Job (full declarative)',
-        description:
-          'Create or fully (re)define an Azure Container Apps Job via ARM PUT (declarative desired state). Provide the full ARM `properties` (environmentId + configuration + template) and `location`. For a NARROW change (image/cron/timeout) prefer azure_job_update -- a PUT here REPLACES the whole resource and DROPS anything the body omits. SAFETY: this tool auto-PRESERVES the job\'s existing managed identity unless you pass `identity` explicitly (silence preserves; pass identity:{type:"None"} to intentionally remove it), and its dry_run diffs the PUT body against the live job and LISTS every field the PUT would delete (identity, secrets, env vars, registries) -- the 07-05 daily-digest failure was exactly a full-PUT silently dropping the UAMI. NO delete. dry_run defaults TRUE; pass dry_run=false to apply. CTO-only, high-risk-gated.',
+        description: retiredDescription(
+          'azure_job_upsert',
+          'Create or fully (re)define an Azure Container Apps Job via ARM PUT (declarative desired state). Provide the full ARM `properties` (environmentId + configuration + template) and `location`. For a NARROW change (image/cron/timeout) prefer azure_job_update -- a PUT here REPLACES the whole resource and DROPS anything the body omits. SAFETY: this tool auto-PRESERVES the job\'s existing managed identity unless you pass `identity` explicitly (silence preserves; pass identity:{type:"None"} to intentionally remove it), and its dry_run diffs the PUT body against the live job and LISTS every field the PUT would delete (identity, secrets, env vars, registries) -- the 07-05 daily-digest failure was exactly a full-PUT silently dropping the UAMI. NO delete. dry_run defaults TRUE; pass dry_run=false to apply. CTO-only, high-risk-gated.'
+        ),
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
@@ -32,6 +35,10 @@ export function registerAzureJobUpsert(server: McpServer, callerHash: CallerHash
       },
       outputShape: { upserted: z.boolean(), name: z.string(), provisioningState: z.unknown(), dry_run: z.boolean(), drops: z.unknown().optional() },
       handler: async (input, ctx) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_job_upsert');
         const { subscriptionId } = azureConfig();
         const rg = input.resource_group || 'otchealth-automation-rg';
         assertNonPhiTarget(input.job_name, rg);

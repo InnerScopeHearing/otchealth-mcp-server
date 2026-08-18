@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import {
   armRequest,
   azureConfig,
@@ -18,8 +19,10 @@ export function registerAzureContainerappSetEnv(server: McpServer, callerHash: C
       category: 'write_orchestrated',
       annotations: {
         title: 'Azure: set env vars on a Container App (non-destructive)',
-        description:
-          'Add or update environment variables on an Azure Container App. NON-DESTRUCTIVE: it merges into the existing env (never drops other vars) by reading the app and PATCHing the full template. Provide plain `value` for config, or `secretRef` (name of an existing secret) for secret-backed vars; do NOT pass raw secret values (they are never rendered back). HARD DENY: refuses to touch the gateway\'s oauth-clients binding (incident 20260713-019). dry_run defaults TRUE; pass dry_run=false to apply. CTO-only, high-risk-gated.',
+        description: retiredDescription(
+          'azure_containerapp_set_env',
+          'Add or update environment variables on an Azure Container App. NON-DESTRUCTIVE: it merges into the existing env (never drops other vars) by reading the app and PATCHing the full template. Provide plain `value` for config, or `secretRef` (name of an existing secret) for secret-backed vars; do NOT pass raw secret values (they are never rendered back). HARD DENY: refuses to touch the gateway\'s oauth-clients binding (incident 20260713-019). dry_run defaults TRUE; pass dry_run=false to apply. CTO-only, high-risk-gated.'
+        ),
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
@@ -42,6 +45,10 @@ export function registerAzureContainerappSetEnv(server: McpServer, callerHash: C
       },
       outputShape: { updated: z.boolean(), changed: z.array(z.string()), dry_run: z.boolean() },
       handler: async (input, ctx) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_containerapp_set_env');
         const { subscriptionId } = azureConfig();
         const rg = input.resource_group || 'rg-otchealth-apps-prod';
         assertNonPhiTarget(input.name, rg);

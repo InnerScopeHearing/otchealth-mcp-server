@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { searchIndexDocCount, azureConfig, assertNonPhiTarget } from '../../azure/arm-client.js';
 
 export function registerAzureSearchIndexStats(server: McpServer, callerHash: CallerHashProvider): void {
@@ -11,8 +12,10 @@ export function registerAzureSearchIndexStats(server: McpServer, callerHash: Cal
       category: 'read',
       annotations: {
         title: 'Azure AI Search: index document count',
-        description:
-          'Exact document count for an Azure AI Search index via a read-only count query (search=*, count=true). Use it to prove an index is populated and healthy (e.g. memory-exec or finance-cfo-source-docs on otchealth-dataroom-s1, the LIVE service). Auto-detects the hosting service from the configured list if you do not name one. Read-only; never returns the API key.',
+        description: retiredDescription(
+          'azure_search_index_stats',
+          'Exact document count for an Azure AI Search index via a read-only count query (search=*, count=true). Use it to prove an index is populated and healthy (e.g. memory-exec or finance-cfo-source-docs on otchealth-dataroom-s1, the LIVE service). Auto-detects the hosting service from the configured list if you do not name one. Read-only; never returns the API key.'
+        ),
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -27,6 +30,10 @@ export function registerAzureSearchIndexStats(server: McpServer, callerHash: Cal
       },
       outputShape: { service: z.string(), index: z.string(), documentCount: z.number() },
       handler: async (input) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_search_index_stats');
         const { searchServices } = azureConfig();
         assertNonPhiTarget(input.index, input.service);
         const candidates = input.service ? [input.service] : searchServices;

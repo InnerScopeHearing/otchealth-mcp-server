@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { searchResourcePut, assertNonPhiTarget } from '../../azure/arm-client.js';
 
 export function registerAzureSearchIndexerUpsert(server: McpServer, callerHash: CallerHashProvider): void {
@@ -11,8 +12,10 @@ export function registerAzureSearchIndexerUpsert(server: McpServer, callerHash: 
       category: 'write_orchestrated',
       annotations: {
         title: 'Azure AI Search: create/update an indexer',
-        description:
-          'Create or update an Azure AI Search indexer (data-plane PUT: dataSourceName, targetIndexName, schedule, fieldMappings, skillset). Drives native indexing + integrated vectorization. NO delete. dry_run defaults TRUE; pass dry_run=false to apply. CTO-only, high-risk-gated. Never returns the API key.',
+        description: retiredDescription(
+          'azure_search_indexer_upsert',
+          'Create or update an Azure AI Search indexer (data-plane PUT: dataSourceName, targetIndexName, schedule, fieldMappings, skillset). Drives native indexing + integrated vectorization. NO delete. dry_run defaults TRUE; pass dry_run=false to apply. CTO-only, high-risk-gated. Never returns the API key.'
+        ),
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
@@ -25,6 +28,10 @@ export function registerAzureSearchIndexerUpsert(server: McpServer, callerHash: 
       },
       outputShape: { upserted: z.boolean(), indexer: z.string(), dry_run: z.boolean() },
       handler: async (input, ctx) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_search_indexer_upsert');
         assertNonPhiTarget(input.indexer_name, input.service);
         const target = (input.definition as { targetIndexName?: string }).targetIndexName;
         assertNonPhiTarget(target);

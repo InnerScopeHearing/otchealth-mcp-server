@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget, applyJobPatch, redactJob } from '../../azure/arm-client.js';
 
 export function registerAzureJobUpdate(server: McpServer, callerHash: CallerHashProvider): void {
@@ -11,8 +12,10 @@ export function registerAzureJobUpdate(server: McpServer, callerHash: CallerHash
       category: 'write_orchestrated',
       annotations: {
         title: 'Azure: update a Container Apps Job (targeted, safe)',
-        description:
-          'Change ONE OR MORE narrow fields on a Container Apps Job -- image (repoint to a new digest), cron schedule, replica timeout, or replica retry limit -- via a TARGETED PATCH, never a full-replace PUT. It reads the live job and changes only the fields you name, so identity (the UAMI), env vars, secrets, and registries are preserved by construction (this is what prevents the 07-05 "full-PUT dropped the identity -> job can no longer read Key Vault" failure). Prefer this over azure_job_upsert for routine changes like image repoints. dry_run defaults TRUE and returns the exact before->after diff + the PATCH body; pass dry_run=false to apply. After applying it re-reads the job and confirms identity + env survived. CTO-only, high-risk-gated.',
+        description: retiredDescription(
+          'azure_job_update',
+          'Change ONE OR MORE narrow fields on a Container Apps Job -- image (repoint to a new digest), cron schedule, replica timeout, or replica retry limit -- via a TARGETED PATCH, never a full-replace PUT. It reads the live job and changes only the fields you name, so identity (the UAMI), env vars, secrets, and registries are preserved by construction (this is what prevents the 07-05 "full-PUT dropped the identity -> job can no longer read Key Vault" failure). Prefer this over azure_job_upsert for routine changes like image repoints. dry_run defaults TRUE and returns the exact before->after diff + the PATCH body; pass dry_run=false to apply. After applying it re-reads the job and confirms identity + env survived. CTO-only, high-risk-gated.'
+        ),
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
@@ -34,6 +37,10 @@ export function registerAzureJobUpdate(server: McpServer, callerHash: CallerHash
         preserved: z.unknown().optional(),
       },
       handler: async (input, ctx) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_job_update');
         const { subscriptionId } = azureConfig();
         const rg = input.resource_group || 'otchealth-automation-rg';
         assertNonPhiTarget(input.job_name, rg, input.image);

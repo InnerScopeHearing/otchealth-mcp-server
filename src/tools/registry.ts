@@ -121,12 +121,16 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'task_list', 'task_get', 'task_create', 'task_claim', 'task_update', 'task_complete', 'task_heartbeat', 'inbox_read', 'agent_dispatch',
   'posthog_query_hogql', 'posthog_insight_list',
   'github_get_file_contents', 'github_list_pull_requests', 'github_issue_list', 'sentry_list_issues',
-  // ITEM #2 Azure control-plane READ lane (Phase A). MUST be on the connector surface or the
-  // Claude Chat CTO cannot SEE them (execution stays cto-gated in governance.ts either way).
+  // ITEM #2 Azure control plane. RETIRED as of 2026-08-18 (src/azure/retired.ts): Azure subscription
+  // 55c84f6b is gone and this gateway runs on AWS ECS, so every one of these now refuses immediately
+  // with a named error naming its AWS replacement. They stay ON this list DELIBERATELY. Dropping
+  // them here would only hide them from DCR/occ_ connector callers -- an internal client_credentials
+  // lane (Claude Code, Hyperagent) bypasses connector curation entirely and could still call them --
+  // and a caller who does reach one would get a bare "Tool not found" for a name plenty of agents
+  // have memorised, which is a dead end carrying no pointer. Advertised so the RETIRED description
+  // and the actionable refusal are what a caller meets instead.
   'azure_jobs_list', 'azure_job_executions', 'azure_logs_query', 'azure_search_index_stats',
   'azure_containerapp_get', 'azure_resource_list',
-  // ITEM #2 Phase B write tools -- MUST be on the connector surface or the Chat CTO cannot CALL
-  // them (execution stays cto + high-risk gated; dry_run defaults TRUE; oauth-clients denied).
   'azure_job_execute', 'azure_job_upsert', 'azure_containerapp_set_env',
   'azure_search_index_upsert', 'azure_search_indexer_upsert',
   // CTO SHIP-LANE (2026-07-12, widened 2026-07-13): the connector surface must carry the COMPLETE
@@ -396,7 +400,12 @@ function parseUpstreamToolError(err: unknown): { code: string; nextStep: string;
   const candidate = err as Record<string, unknown>;
   if (typeof candidate.code !== 'string') return null;
   if (typeof candidate.nextStep !== 'string') return null;
-  if (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError')) {
+  // RetiredAzureToolError (src/azure/retired.ts) rides this same path deliberately: without it a
+  // retired azure_* tool surfaces as the generic `tool_error` + "Check server logs for the
+  // correlation_id.", which reads like a transient auth problem and points nowhere. See that file's
+  // header for why the tools stay registered rather than being deleted.
+  const RECOGNIZED = ['CustomerIoApiError', 'N8nWebhookError', 'RetiredAzureToolError'];
+  if (typeof candidate.name !== 'string' || !RECOGNIZED.includes(candidate.name)) {
     return null;
   }
   return {

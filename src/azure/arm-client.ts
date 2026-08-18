@@ -274,6 +274,16 @@ export function mergeEnv(
   return { merged, changed };
 }
 
+/**
+ * True when the AZURE_SEARCH_ADMIN_KEY direct-key escape hatch below is configured. Lives HERE, next
+ * to the only code that uses that key, because this file is the designated Azure adapter allowed to
+ * read AZURE_SEARCH_* directly (see search/azure-dependency-guard.test.ts's ENV_VAR_READ_ALLOWED);
+ * src/azure/retired.ts asks this instead of reading the variable itself.
+ */
+export function searchAdminKeyConfigured(): boolean {
+  return Boolean((process.env.AZURE_SEARCH_ADMIN_KEY || '').trim());
+}
+
 /** Admin key for a Search service via ARM listAdminKeys (Search Service Contributor). Needed for index/
  *  indexer management (query keys cannot manage). Held in memory for one call; never returned/logged. */
 export async function searchAdminKey(serviceName: string): Promise<string> {

@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget, redactJob } from '../../azure/arm-client.js';
 
 export function registerAzureJobGet(server: McpServer, callerHash: CallerHashProvider): void {
@@ -11,8 +12,10 @@ export function registerAzureJobGet(server: McpServer, callerHash: CallerHashPro
       category: 'read',
       annotations: {
         title: 'Azure: get a Container Apps Job (values-stripped)',
-        description:
-          'Get one Azure Container Apps Job in full: running image (+ digest), the managed IDENTITY (type + user-assigned identity ids -- this is how you SEE whether a job still has the UAMI it needs to read Key Vault, the exact field the 07-05 daily-digest failure lost), trigger type + cron, replica timeout/retry policy, env-var NAMES ONLY, and secret/registry NAMES ONLY. It NEVER returns an env-var value or secret value. Use it before azure_job_update to confirm current state, or to diagnose a job that is failing to read secrets. Read-only.',
+        description: retiredDescription(
+          'azure_job_get',
+          'Get one Azure Container Apps Job in full: running image (+ digest), the managed IDENTITY (type + user-assigned identity ids -- this is how you SEE whether a job still has the UAMI it needs to read Key Vault, the exact field the 07-05 daily-digest failure lost), trigger type + cron, replica timeout/retry policy, env-var NAMES ONLY, and secret/registry NAMES ONLY. It NEVER returns an env-var value or secret value. Use it before azure_job_update to confirm current state, or to diagnose a job that is failing to read secrets. Read-only.'
+        ),
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -24,6 +27,10 @@ export function registerAzureJobGet(server: McpServer, callerHash: CallerHashPro
       },
       outputShape: { job: z.unknown() },
       handler: async (input) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_job_get');
         const { subscriptionId } = azureConfig();
         const rg = input.resource_group || 'otchealth-automation-rg';
         assertNonPhiTarget(input.job_name, rg);

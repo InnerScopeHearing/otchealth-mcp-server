@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget } from '../../azure/arm-client.js';
 
 export function registerAzureJobExecute(server: McpServer, callerHash: CallerHashProvider): void {
@@ -11,8 +12,10 @@ export function registerAzureJobExecute(server: McpServer, callerHash: CallerHas
       category: 'write_orchestrated',
       annotations: {
         title: 'Azure: start a Container Apps Job',
-        description:
-          'Manually trigger an existing Azure Container Apps Job (runs already-deployed code, e.g. re-run a librarian or brain-reindex on demand). Low risk. dry_run defaults TRUE (returns the plan); pass dry_run=false to actually start it. CTO-only, high-risk-gated.',
+        description: retiredDescription(
+          'azure_job_execute',
+          'Manually trigger an existing Azure Container Apps Job (runs already-deployed code, e.g. re-run a librarian or brain-reindex on demand). Low risk. dry_run defaults TRUE (returns the plan); pass dry_run=false to actually start it. CTO-only, high-risk-gated.'
+        ),
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -24,6 +27,10 @@ export function registerAzureJobExecute(server: McpServer, callerHash: CallerHas
       },
       outputShape: { started: z.boolean(), execution: z.unknown(), dry_run: z.boolean() },
       handler: async (input, ctx) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_job_execute');
         const { subscriptionId } = azureConfig();
         const rg = input.resource_group || 'otchealth-automation-rg';
         assertNonPhiTarget(input.job_name, rg);

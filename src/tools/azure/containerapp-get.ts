@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget, redactContainerApp } from '../../azure/arm-client.js';
 
 export function registerAzureContainerappGet(server: McpServer, callerHash: CallerHashProvider): void {
@@ -11,8 +12,10 @@ export function registerAzureContainerappGet(server: McpServer, callerHash: Call
       category: 'read',
       annotations: {
         title: 'Azure: get a Container App (values-stripped)',
-        description:
-          'Get an Azure Container App: revision names, running image (+ digest), scale rules, ingress FQDN, and env-var NAMES ONLY. It deliberately NEVER returns env-var values or secret values (names/references only) so it is safe to call on the gateway itself. Use it to confirm what image/scale/config a Container App is actually running. Read-only.',
+        description: retiredDescription(
+          'azure_containerapp_get',
+          'Get an Azure Container App: revision names, running image (+ digest), scale rules, ingress FQDN, and env-var NAMES ONLY. It deliberately NEVER returns env-var values or secret values (names/references only) so it is safe to call on the gateway itself. Use it to confirm what image/scale/config a Container App is actually running. Read-only.'
+        ),
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -24,6 +27,10 @@ export function registerAzureContainerappGet(server: McpServer, callerHash: Call
       },
       outputShape: { app: z.unknown() },
       handler: async (input) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_containerapp_get');
         const { subscriptionId } = azureConfig();
         const rg = input.resource_group || 'rg-otchealth-apps-prod';
         assertNonPhiTarget(input.name, rg);

@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget } from '../../azure/arm-client.js';
 
 interface ArmResource {
@@ -18,8 +19,10 @@ export function registerAzureResourceList(server: McpServer, callerHash: CallerH
       category: 'read',
       annotations: {
         title: 'Azure: list resources in a resource group',
-        description:
-          'List Azure resources (name, type, location) in the resource groups the gateway can read (rg-otchealth-apps-prod + otchealth-automation-rg by default). Optional resourceType filter, e.g. Microsoft.App/containerApps, Microsoft.Search/searchServices. Use it to inventory what actually exists in the estate. Read-only.',
+        description: retiredDescription(
+          'azure_resource_list',
+          'List Azure resources (name, type, location) in the resource groups the gateway can read (rg-otchealth-apps-prod + otchealth-automation-rg by default). Optional resourceType filter, e.g. Microsoft.App/containerApps, Microsoft.Search/searchServices. Use it to inventory what actually exists in the estate. Read-only.'
+        ),
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -37,6 +40,10 @@ export function registerAzureResourceList(server: McpServer, callerHash: CallerH
       },
       outputShape: { count: z.number(), resources: z.array(z.unknown()) },
       handler: async (input) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_resource_list');
         const { subscriptionId, readerResourceGroups } = azureConfig();
         const rgs = input.resource_group ? [input.resource_group] : readerResourceGroups;
         for (const rg of rgs) assertNonPhiTarget(rg);

@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget } from '../../azure/arm-client.js';
 
 interface ArmExecution {
@@ -16,8 +17,10 @@ export function registerAzureJobExecutions(server: McpServer, callerHash: Caller
       category: 'read',
       annotations: {
         title: 'Azure: list a job\'s execution history',
-        description:
-          'List recent executions of an Azure Container Apps Job (status Succeeded/Failed/Running, start/end times). This is how you tell whether a cron job (e.g. daily-digest, a librarian, brain-reindex) is actually running green or silently failing. Read-only.',
+        description: retiredDescription(
+          'azure_job_executions',
+          'List recent executions of an Azure Container Apps Job (status Succeeded/Failed/Running, start/end times). This is how you tell whether a cron job (e.g. daily-digest, a librarian, brain-reindex) is actually running green or silently failing. Read-only.'
+        ),
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -30,6 +33,10 @@ export function registerAzureJobExecutions(server: McpServer, callerHash: Caller
       },
       outputShape: { count: z.number(), executions: z.array(z.unknown()) },
       handler: async (input) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_job_executions');
         const { subscriptionId } = azureConfig();
         const rg = input.resource_group || 'otchealth-automation-rg';
         const top = input.top ?? 20;

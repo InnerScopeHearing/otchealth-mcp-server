@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { assertAzureToolLive, retiredDescription } from '../../azure/retired.js';
 import { armRequest, azureConfig, assertNonPhiTarget } from '../../azure/arm-client.js';
 
 interface ArmJob {
@@ -25,8 +26,10 @@ export function registerAzureJobsList(server: McpServer, callerHash: CallerHashP
       category: 'read',
       annotations: {
         title: 'Azure: list Container Apps Jobs',
-        description:
-          'List Azure Container Apps Jobs (the cron/manual fleet: librarians, daily-digest, brain-reindex, deep-* passes, pg-migrate, innd-stock-daily) with trigger type, cron schedule, image, and provisioning state. Defaults across the RGs the gateway can read (rg-otchealth-apps-prod + otchealth-automation-rg). Read-only.',
+        description: retiredDescription(
+          'azure_jobs_list',
+          'List Azure Container Apps Jobs (the cron/manual fleet: librarians, daily-digest, brain-reindex, deep-* passes, pg-migrate, innd-stock-daily) with trigger type, cron schedule, image, and provisioning state. Defaults across the RGs the gateway can read (rg-otchealth-apps-prod + otchealth-automation-rg). Read-only.'
+        ),
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -40,6 +43,10 @@ export function registerAzureJobsList(server: McpServer, callerHash: CallerHashP
       },
       outputShape: { count: z.number(), jobs: z.array(z.unknown()) },
       handler: async (input) => {
+        // RETIRED (see src/azure/retired.ts). Fails immediately -- before input handling,
+        // before the dry-run branch, before any auth or network attempt -- with a named,
+        // actionable error rather than a vague auth failure or a plausible dry-run plan.
+        assertAzureToolLive('azure_jobs_list');
         const { subscriptionId, readerResourceGroups } = azureConfig();
         const rgs = input.resource_group ? [input.resource_group] : readerResourceGroups;
         for (const rg of rgs) assertNonPhiTarget(rg);
