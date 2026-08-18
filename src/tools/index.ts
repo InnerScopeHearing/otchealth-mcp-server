@@ -954,6 +954,7 @@ import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
 import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
 import { registerXeroTools } from './xero/tools.js';
 import { registerHeyGenTools } from './heygen/index.js';
+import { registerHyperagentTools } from './hyperagent/tools.js';
 import { registerMailArchiveTools } from './mail/tools.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
@@ -1929,6 +1930,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerXeroTools(server, callerHash);
   // HeyGen (durable subscription OAuth + Phase 0 discovery/reconciliation + bounded idempotent direct video/ingestion writes; every handler lane-gated).
   registerHeyGenTools(server, callerHash);
+
+  // Hyperagent broker: one delegated account credential, ring-gated per lane (hyperagent/ring.ts).
+  registerHyperagentTools(server, callerHash);
   // AgentCore Browser (legacy Wefunder bridge retained during broker migration).
   registerBrowserAgentcoreTools(server, callerHash);
   // General Browser broker: per-agent capability enrollments, beginning with Wefunder Campaign Director.
