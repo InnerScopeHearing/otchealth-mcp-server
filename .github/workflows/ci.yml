@@ -29,6 +29,37 @@ jobs:
           cache: 'npm'
       - name: Install (frozen lockfile)
         run: npm ci --include=dev
+      # The agentstate Postgres inbox tests (src/agentstate/queue-postgres*.test.ts) exercise a REAL
+      # database on purpose: atomic claim semantics (FOR UPDATE SKIP LOCKED), self-provisioning DDL,
+      # and the DDL-denied refusal cannot be proven against a mock, and mocking them would leave the
+      # one property that actually matters -- "a broken inbox never reads as an empty inbox" --
+      # unverified. Without this step those tests fail on the runner while passing locally.
+      #
+      # Uses the runner image's PREINSTALLED PostgreSQL rather than a `services:` container, for one
+      # specific reason: getPool() always connects with TLS (`ssl: { rejectUnauthorized: ... }`),
+      # because production is RDS. Ubuntu's packaged Postgres enables SSL out of the box with the
+      # snakeoil cert, which is exactly how the developer machines are configured; the official
+      # postgres:N Docker image does NOT enable SSL, so a service container would fail TLS
+      # negotiation and "fix" the failure into a different failure.
+      #
+      # Fails LOUDLY if Postgres is absent from the image rather than skipping the tests. A suite
+      # that silently stops covering its riskiest path is worse than a red build -- it is the same
+      # "looks healthy, proves nothing" shape these very tests exist to prevent.
+      - name: Start PostgreSQL (for the agentstate inbox tests)
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "::error::PostgreSQL is not present on this runner image. The agentstate inbox tests require a real database; refusing to run the suite without it rather than silently skipping them."
+            exit 1
+          fi
+          sudo systemctl start postgresql.service
+          for i in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5432 && break || sleep 1; done
+          pg_isready -h 127.0.0.1 -p 5432
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+          sudo -u postgres psql -c "CREATE DATABASE agentstate_test;"
+          # Proves TLS is actually available, since that is the specific reason this is not a
+          # service container. A plain "it started" check would not catch an SSL-less build.
+          test "$(PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres -tAc 'show ssl')" = "on"
       - name: Typecheck
         run: npm run typecheck
       - name: Build
