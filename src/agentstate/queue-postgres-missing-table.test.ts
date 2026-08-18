@@ -1,7 +1,18 @@
-// A reachable Postgres with the WRONG (or not-yet-provisioned) schema must also throw, never
-// resolve to an empty-looking result -- the "provisioned out of band" design in queue-postgres.ts
-// means a database that is up but hasn't had the migration run against it is a real, distinct
-// failure mode from "no messages", and this pins that it surfaces as one.
+// A reachable Postgres with NO agentstate_queue table must PROVISION it and work (2026-08-18, CTO
+// review). The original design provisioned "out of band" and threw here. That was changed
+// deliberately, because this repo has NO committed migration mechanism -- no .sql files, no
+// scripts/migrate*, no DDL in Terraform; the existing agentstate_* tables were applied by hand and
+// never captured in git -- while the dispatcher selects on STATE_BACKEND, which is ALREADY
+// `postgres` in production. Shipping a throw-on-missing-table would therefore have armed a
+// fleet-wide break of agent_dispatch / inbox_read / wake's inbox peek at the next deploy, waiting
+// on a manual step this codebase has already demonstrated it does not remember.
+//
+// The safety property the original tests protected is NOT abandoned, it is relocated: a missing
+// table is no longer a failure (it is provisioned), but a failure that REMAINS a failure -- the DB
+// role lacking DDL rights -- must still surface loudly and must never look like an empty inbox.
+// That is pinned by queue-postgres-ddl-denied.test.ts, which is a SEPARATE file because
+// loadEnv() memoizes PG_USER on first call and cannot be re-pointed at a restricted role
+// once these tests have connected as the superuser.
 //
 // Own file (own `node --test` child process) for the same loadEnv()-memoization reason as
 // queue-postgres.test.ts / queue-postgres-unreachable.test.ts: this one points PG_DATABASE at a
@@ -47,21 +58,26 @@ after(async () => {
   await admin.end();
 });
 
-test('readMessages against a reachable DB with no agentstate_queue table THROWS, never resolves to []', async () => {
-  await assert.rejects(
-    () => readMessages('cto', { max: 8, ack: true }),
-    (err: Error) => {
-      assert.ok(err instanceof Error);
-      assert.ok(/relation .*agentstate_queue.* does not exist/i.test(err.message), `expected a missing-relation error, got: ${err.message}`);
-      return true;
-    },
-  );
+test('a reachable DB with NO table is PROVISIONED on first use, not refused', async () => {
+  const q = await import('./queue-postgres.js');
+  await q.enqueue('cfo', { from: 'cto', kind: 'note', body: 'provisioned on demand' });
+  const got = await q.readMessages('cfo', { max: 5 });
+  assert.equal(got.length, 1, 'the message must survive the provisioning round trip');
+  // And the table really exists now, not just "the call did not throw".
+  const pg = (await import('pg')).default;
+  const admin = new pg.Pool({ host: '127.0.0.1', port: 5432, database: DB, user: 'postgres', password: process.env.PG_PASSWORD });
+  const r = await admin.query("SELECT to_regclass('agentstate_queue') AS t");
+  await admin.end();
+  assert.equal(r.rows[0].t, 'agentstate_queue');
 });
 
-test('readMessages (peek mode) against a missing table also THROWS', async () => {
-  await assert.rejects(() => readMessages('cto', { max: 8, ack: false }));
-});
-
-test('enqueue against a missing table THROWS, never silently no-ops', async () => {
-  await assert.rejects(() => enqueue('cto', { to: 'cto', from: 'matt', subject: 's', body: 'b', ts: new Date().toISOString() }));
+test('provisioning is idempotent across repeated calls and concurrent callers', async () => {
+  const q = await import('./queue-postgres.js');
+  // Two concurrent first-uses race CREATE TABLE IF NOT EXISTS; both must succeed.
+  await Promise.all([
+    q.enqueue('cto', { from: 'cfo', kind: 'note', body: 'a' }),
+    q.enqueue('cto', { from: 'cfo', kind: 'note', body: 'b' }),
+  ]);
+  const got = await q.readMessages('cto', { max: 10 });
+  assert.equal(got.length, 2, 'neither concurrent enqueue may be lost to a provisioning race');
 });

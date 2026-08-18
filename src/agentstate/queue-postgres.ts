@@ -13,9 +13,15 @@
  * agentstate-dependency-guard.test.ts: parallel, independently-auditable adapters rather than a
  * shared base that would let one file's mistake reach two backends).
  *
- * SCHEMA (provisioned out of band -- see the header of the sibling load-agentstate.mjs / this
- * change's PR description for exactly how the existing agentstate_* tables were provisioned; the
- * same mechanism provisions this one):
+ * SCHEMA (SELF-PROVISIONED on first use by ensureSchema(), memoized per process). This is
+ * deliberate and was a correction during review: this repo has NO committed migration mechanism --
+ * no .sql files, no scripts/migrate*, no DDL in Terraform -- and the existing agentstate_* tables
+ * were applied by hand and never captured in git. Meanwhile the dispatcher already selects on
+ * STATE_BACKEND, which is ALREADY `postgres` in production. A "provisioned out of band" design
+ * would therefore have armed a fleet-wide break of agent_dispatch / inbox_read / wake at the next
+ * deploy, waiting on a manual step this codebase has demonstrably forgotten before. The DDL is
+ * idempotent (IF NOT EXISTS) and safe to race between replicas; a FAILED provision is never cached,
+ * so a transient error cannot permanently convince a process the schema is unavailable:
  *
  *   CREATE TABLE IF NOT EXISTS agentstate_queue (
  *     seq           bigserial PRIMARY KEY,
@@ -118,23 +124,81 @@ function getPool(): pg.Pool {
   return pool;
 }
 
+/**
+ * Create the table on first use, idempotently, once per process.
+ *
+ * WHY THIS IS HERE RATHER THAN IN A MIGRATION (2026-08-18, CTO review of this change). This repo has
+ * NO committed migration mechanism -- searched exhaustively: no .sql files, no scripts/migrate*, no
+ * DDL in Terraform. The existing agentstate_* tables were applied by hand and never captured in git.
+ * So "provision it out of band first" is not a process here; it is an instruction someone has to
+ * remember, and this codebase has already demonstrated it does not.
+ *
+ * That matters because the dispatcher selects on STATE_BACKEND, which is ALREADY `postgres` in
+ * production. Shipping this without the table would have switched agent_dispatch / inbox_read /
+ * wake's inbox peek onto a table that does not exist, breaking agent-to-agent dispatch fleet-wide at
+ * the next deploy -- a landmine armed by merging, not by any later decision.
+ *
+ * CREATE TABLE IF NOT EXISTS is idempotent and concurrency-safe here: two replicas racing it both
+ * succeed. Memoized so it costs one round trip per process, not one per message. If the database
+ * role lacks DDL rights this THROWS, loudly and diagnosably, which is the correct failure -- far
+ * better than an inbox that silently reads as empty.
+ */
+let schemaReady: Promise<void> | null = null;
+async function ensureSchema(): Promise<void> {
+  if (schemaReady) return schemaReady;
+  schemaReady = (async () => {
+    await getPool().query(`
+      CREATE TABLE IF NOT EXISTS ${TABLE} (
+        seq           bigserial PRIMARY KEY,
+        queue         text NOT NULL,
+        message_id    text NOT NULL,
+        payload       jsonb NOT NULL,
+        enqueued_at   timestamptz NOT NULL DEFAULT now(),
+        visible_at    timestamptz NOT NULL DEFAULT now(),
+        expires_at    timestamptz NOT NULL,
+        dequeue_count integer NOT NULL DEFAULT 0
+      )`);
+    await getPool().query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${TABLE}_message_id_idx ON ${TABLE} (message_id)`,
+    );
+    await getPool().query(
+      `CREATE INDEX IF NOT EXISTS ${TABLE}_ready_idx ON ${TABLE} (queue, visible_at, seq)`,
+    );
+  })().catch((e) => {
+    // Do NOT cache a failure: a transient connection error must not permanently convince this
+    // process the schema is unavailable. Same reasoning as the retraction cache in memory/.
+    schemaReady = null;
+    throw e;
+  });
+  return schemaReady;
+}
+
 /** Test seam: drop the cached pool so a test can point at a different instance. */
 export async function resetPoolForTests(): Promise<void> {
   const p = pool;
   pool = null;
+  schemaReady = null;
   if (p) await p.end();
 }
 
 /**
- * No-op by design. Unlike Azure Storage Queues, there is no per-agent physical queue to create --
- * every agent's messages are rows in the one shared `agentstate_queue` table, distinguished by the
- * `queue` column. The table itself is provisioned out of band (see the module header). This
- * function still enforces the "must be configured" contract the Azure client's ensureQueue has,
- * so a caller that only ever calls ensureQueue() still gets a loud failure when unconfigured.
+ * Provisions the shared table, matching the Azure peer's contract. There is no PER-AGENT physical
+ * queue to create -- every agent's messages are rows in the one `agentstate_queue` table,
+ * distinguished by the `queue` column -- but the Azure client's ensureQueue (queue-azure.ts:51)
+ * really does create storage and really does throw when it cannot, so this one does too.
+ *
+ * CONSEQUENCE, deliberate: against an unreachable or DDL-denied database this REJECTS rather than
+ * resolving. An ensureQueue that resolves means "the inbox is ready"; returning that when it is
+ * not is a plausible value returned on failure, which is the one thing this whole subsystem is
+ * written to prevent. Pinned by queue-postgres-unreachable.test.ts and
+ * queue-postgres-ddl-denied.test.ts.
  */
 export async function ensureQueue(agent: string): Promise<void> {
   if (!isConfigured()) throw new Error('Postgres agent inbox not configured (PG_HOST unset).');
   queueName(agent); // validates/normalizes; throws on a bad agent id exactly like the Azure path.
+  // The Azure peer CREATES the queue here. Match that contract rather than only validating, so a
+  // caller that provisions up front gets the same guarantee from either backend.
+  await ensureSchema();
 }
 
 /** Coerce one claimed row into the caller-facing ReadMessage shape, defensively (see module header:
@@ -154,6 +218,7 @@ function toReadMessage(agent: string, row: { message_id: string; payload: unknow
 export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604800): Promise<void> {
   if (!isConfigured()) throw new Error('Postgres agent inbox not configured (PG_HOST unset).');
   const q = queueName(agent);
+  await ensureSchema();
   const messageId = crypto.randomUUID();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + Math.max(1, ttlSeconds) * 1000);
@@ -174,6 +239,7 @@ export async function readMessages(agent: string, opts: ReadMessagesOptions = {}
   const { max = 16, ack = true, visibilitySec = 60 } = opts;
   if (!isConfigured()) throw new Error('Postgres agent inbox not configured (PG_HOST unset).');
   const q = queueName(agent);
+  await ensureSchema();
   const n = Math.min(32, Math.max(1, max));
   const vis = Math.max(1, Math.floor(visibilitySec));
   const p = getPool();
