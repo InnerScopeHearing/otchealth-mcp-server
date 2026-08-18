@@ -1,3 +1,27 @@
+# DISARMED 2026-08-18 -- this workflow targets Azure, and Azure is GONE.
+#
+# It was MISSED by the 2026-08-18 disarm sweep (#247), which caught deploy.yml, digest-drift.yml and
+# revision-gc.yml but not this file. That miss matters more here than it would elsewhere: this is the
+# workflow that mints a live OAuth client into the gateway's OAUTH_CLIENTS registry, i.e. it creates
+# lane credentials. A privileged-credential workflow that still presents as live is exactly the thing
+# that should not be left ambiguous.
+#
+# Subscription 55c84f6b-ef90-4259-a58b-50835cc4cab4 was permanently deleted, so the Container App
+# this reads and PATCHes no longer exists. Left as-is it would fail at `Azure/login` -- obscurely,
+# several steps in, after the dispatcher already believes a client is being created. The first step
+# below therefore refuses BY CONSTRUCTION, naming the reason, rather than letting an absent target
+# surface as a confusing auth error.
+#
+# WHY DISARMED RATHER THAN DELETED: the stale-assumption guard in this file (read the LIVE array,
+# refuse if the count does not match what the dispatcher expected -- incident 20260713-019) is real,
+# hard-won logic that the AWS successor needs. It is kept readable for whoever builds that.
+#
+# NOTE ON `environment: production` (verified live against the GitHub API on 2026-08-18): it is
+# required for OIDC subject matching and is NOT an approval gate. This repo's `production`
+# environment has `protection_rules: []` and `can_admins_bypass: true` -- no required reviewers, no
+# self-review prevention. Do not carry an assumed approval gate into the AWS successor of a workflow
+# that mints credentials; configure one deliberately.
+
 name: add-oauth-client
 
 # One-shot, human-triggered utility to onboard a new connector-surface OAuth client (occ_...) into
@@ -54,6 +78,21 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - name: Refuse -- disarmed, the Azure target no longer exists
+        run: |
+          set -euo pipefail
+          echo "::error::DISARMED. This workflow mints a live OAuth client into the gateway's"
+          echo "::error::OAUTH_CLIENTS registry on Azure Container Apps. Azure subscription"
+          echo "::error::55c84f6b-ef90-4259-a58b-50835cc4cab4 was permanently deleted, so the target"
+          echo "::error::Container App does not exist and this can only fail. Failing here, by name,"
+          echo "::error::instead of obscurely at Azure/login several steps later."
+          echo "::error::"
+          echo "::error::The gateway now runs on AWS ECS. Whoever builds the AWS equivalent must"
+          echo "::error::carry over the stale-assumption guard below (incident 20260713-019) and must"
+          echo "::error::NOT assume the 'production' GitHub Environment supplies an approval gate: it"
+          echo "::error::has protection_rules: [] as of 2026-08-18."
+          exit 1
+
       - uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         with:
           client-id: 0918788a-f290-4a25-b4cd-2cf3a6faaf57 # id-gateway-deployer (UAMI), same identity deploy.yml uses
