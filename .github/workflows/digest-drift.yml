@@ -1,3 +1,23 @@
+# ⛔ DISARMED 2026-08-18 -- this workflow targets Azure, and Azure is GONE.
+#
+# Subscription 55c84f6b-ef90-4259-a58b-50835cc4cab4 was disabled (credit exhaustion) and is not
+# coming back. Every Azure resource this workflow touches -- the ACR it builds in, the Container App
+# it releases to, the revisions it inspects -- no longer exists. It therefore CANNOT succeed again,
+# and it was failing on every single push to main.
+#
+# WHY DISARMED RATHER THAN DELETED. A red X on every merge is worse than no signal at all: it trains
+# everyone to ignore the check, and the next REAL failure hides inside that noise. But the file also
+# encodes real, hard-won release logic (immutable digest promotion, green-at-zero-traffic, the health
+# + tool-count gate that guards the 2026-07-01 catalog regression), and that logic is worth having in
+# front of whoever builds the equivalent AWS path. So the automatic triggers are removed and the file
+# stays, readable, as a reference. workflow_dispatch is left in place so it can still be run by hand
+# if some part of Azure ever returns.
+#
+# THE LIVE PATH IS ELSEWHERE:
+#   image build   -> .github/workflows/build-gateway-ecr.yml   (AWS ECR, the registry prod pulls from)
+#   deploy / ops  -> InnerScopeHearing/otchealth-cto .github/workflows/aws-recovery-console.yml
+# See runbooks/DAY-2026-08-18-CTO-RECOVERY.md in otchealth-cto for the full picture.
+
 name: digest-drift
 
 # Guards against out-of-band / hand deploys. The live gateway revision MUST run an immutable
@@ -19,8 +39,6 @@ name: digest-drift
 # pushing), regardless of what the Container App happened to name that revision.
 
 on:
-  schedule:
-    - cron: '23 */6 * * *' # every 6h at :23
   workflow_dispatch:
 
 permissions:
