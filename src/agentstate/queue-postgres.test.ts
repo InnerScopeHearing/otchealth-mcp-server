@@ -64,7 +64,12 @@ test('isConfigured is true once PG_HOST is set', () => {
   assert.equal(isConfigured(), true);
 });
 
-test('ensureQueue resolves without throwing when configured (no-op: no per-agent object to create)', async () => {
+test('ensureQueue resolves against a reachable DB (it provisions the shared table; there is no per-agent object)', async () => {
+  // Not a no-op: ensureQueue runs the idempotent schema DDL, matching queue-azure.ts's ensureQueue,
+  // which really does create storage. What it does NOT do is create anything per-agent -- every
+  // agent's messages are rows in the one shared table, keyed by the `queue` column. The failure
+  // side of this contract (unreachable / DDL-denied must REJECT, never resolve) is pinned in
+  // queue-postgres-unreachable.test.ts and queue-postgres-ddl-denied.test.ts.
   await assert.doesNotReject(() => ensureQueue(uniqueAgent('ensure')));
 });
 

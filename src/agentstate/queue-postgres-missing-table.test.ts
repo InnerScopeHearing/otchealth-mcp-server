@@ -37,7 +37,9 @@ process.env.PG_USER = 'postgres';
 process.env.PG_PASSWORD = 'postgres';
 process.env.PG_SSL_VERIFY = 'false';
 
-const { readMessages, enqueue, resetPoolForTests } = await import('./queue-postgres.js');
+// Only resetPoolForTests is bound here (the after() hook needs it). Each test re-imports the module
+// as `q` and calls q.enqueue / q.readMessages, so binding those two at top level would be dead.
+const { resetPoolForTests } = await import('./queue-postgres.js');
 const pg = (await import('pg')).default;
 
 before(async () => {
