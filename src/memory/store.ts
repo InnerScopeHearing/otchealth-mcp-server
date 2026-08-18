@@ -56,8 +56,10 @@ import { loadEnv } from '../config/env.js';
 import {
   s3BlobBackendActive,
   getTextFromS3,
+  getTextWithEtagFromS3,
   putObjectToS3,
   listBlobsFromS3,
+  S3ConditionalWriteFailedError,
 } from '../legal/s3-blob-store.js';
 
 const CONTAINER = 'company-journal';
@@ -186,6 +188,87 @@ async function putText(name: string, body: string): Promise<void> {
   if (!r.ok) throw new Error(`commons put ${r.status}: ${(await r.text()).slice(0, 160)}`);
 }
 
+/**
+ * A conditional write to the shared feed lost the race: something else changed the object between
+ * this caller's read and its write. Distinct from every other store failure (a real credential /
+ * network / permission problem) so `appendShared` can retry ONLY this case, and only a bounded
+ * number of times, rather than either looping forever on a genuine outage or giving up and dropping
+ * an entry on a transient collision.
+ */
+export class MemoryWriteConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MemoryWriteConflictError';
+  }
+}
+
+/**
+ * Read the shared feed AND its current version token (S3 ETag / Azure ETag), so a caller can pin a
+ * later write to the exact version it read. `etag: null` means the object does not exist yet (there
+ * is nothing to pin to -- the caller's write is a CREATE, not an UPDATE).
+ */
+async function getTextWithEtag(name: string): Promise<{ text: string | null; etag: string | null }> {
+  if (s3BlobBackendActive()) return getTextWithEtagFromS3(commonsAccount(), CONTAINER, name);
+
+  const c = creds();
+  if (!c) throw new Error('commons store not configured');
+  const sas = buildSas(c.account, c.key, 'rl');
+  const r = await fetch(blobUrl(c.account, sas, name));
+  if (r.status === 404) return { text: null, etag: null };
+  if (!r.ok) throw new Error(`commons get ${r.status}`);
+  return { text: await r.text(), etag: r.headers.get('etag') };
+}
+
+/**
+ * THE FIX for lost updates under concurrency (2026-08-18). `putText` above is an unconditional
+ * whole-file overwrite: fine for a marker write, catastrophic for a read-modify-write against a
+ * service running 2+ replicas, because two concurrent appendShared() calls both read the same file,
+ * both append their own entry in memory, and the second PUT to finish simply replaces the first --
+ * the first writer's entry is gone, with no error anywhere.
+ *
+ * This sends the version token captured by getTextWithEtag as a conditional-write precondition:
+ *   - etag present (an UPDATE to an existing feed)  -> `If-Match: <etag>`.
+ *   - etag null (a CREATE -- the lane's first ever write) -> `If-None-Match: *`.
+ * Either precondition is refused by the store (S3: 409/412: Azure: 412) if the object changed
+ * between the read and this write, and that refusal is normalized to MemoryWriteConflictError so
+ * `appendShared` can catch exactly this case and retry -- never silently accepted as a normal write.
+ */
+async function putTextConditional(name: string, body: string, etag: string | null): Promise<void> {
+  if (s3BlobBackendActive()) {
+    try {
+      await putObjectToS3(
+        commonsAccount(),
+        CONTAINER,
+        name,
+        Buffer.from(body, 'utf8'),
+        'application/x-ndjson',
+        etag != null, // overwrite: irrelevant once ifMatch is set below; matters only for the CREATE case
+        etag ?? undefined, // ifMatch: pins the write to the exact version just read
+      );
+    } catch (err) {
+      if (err instanceof S3ConditionalWriteFailedError) {
+        throw new MemoryWriteConflictError(err.message);
+      }
+      throw err;
+    }
+    return;
+  }
+
+  const c = creds();
+  if (!c) throw new Error('commons store not configured');
+  const sas = buildSas(c.account, c.key, 'rwlc');
+  const headers: Record<string, string> = { 'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'application/x-ndjson' };
+  if (etag) headers['If-Match'] = etag;
+  else headers['If-None-Match'] = '*';
+  const r = await fetch(blobUrl(c.account, sas, name), { method: 'PUT', headers, body });
+  if (r.status === 409 || r.status === 412) {
+    throw new MemoryWriteConflictError(
+      `commons put refused: ${name} changed since it was read (HTTP ${r.status}). Re-read and retry.`,
+    );
+  }
+  if (!r.ok) throw new Error(`commons put ${r.status}: ${(await r.text()).slice(0, 160)}`);
+}
+
 async function listShared(): Promise<string[]> {
   // listBlobsFromS3 returns keys RELATIVE to the mirror prefix, which is exactly the shape Azure's
   // listing returns here (`_MEMORY/_exec/<agent>.jsonl`), so readSharedAll's slice() needs no branch.
@@ -268,9 +351,39 @@ function nextId(rows: MemoryEntry[]): string {
   return `${day}-${String(n).padStart(3, '0')}`;
 }
 
+/** Bounded retries for a lost-update collision. Not a knob for load -- a real collision on one
+ *  lane's feed means two writers landed within the same read-modify-write window, which is rare
+ *  even under real concurrency; this exists to survive that coincidence, not to paper over sustained
+ *  contention (sustained contention on one lane's feed is a design problem, not a retry problem). */
+const APPEND_MAX_ATTEMPTS = 5;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Small bounded exponential backoff with jitter, so a bunch of colliding writers do not immediately
+ *  re-collide in lockstep. Capped low (the write itself is a few KB and normally sub-second) so a
+ *  real collision resolves in well under a second rather than making a caller wait a long time for
+ *  something that is, by definition, a rare coincidence. */
+function backoffMs(attempt: number): number {
+  const base = Math.min(20 * 2 ** attempt, 320);
+  return base + Math.floor(Math.random() * base);
+}
+
 /** Append an entry to an agent's shared feed (the cross-agent brain). Returns the stored entry.
  * `by` is the authenticated WRITER; when by !== agent this is a CROSS-LANE note (append-only,
- * attributed) that the target sees via memory_inbound and acks via memory_reconcile on wake. */
+ * attributed) that the target sees via memory_inbound and acks via memory_reconcile on wake.
+ *
+ * CONCURRENCY (2026-08-18): this is a read-modify-write against a store with 2+ concurrent replica
+ * writers, so it is retried under an optimistic-concurrency guard rather than done as a single blind
+ * read + write. Each attempt: read the feed AND its current version token, append the new entry to
+ * what was actually read, then write back CONDITIONED on that exact token (see putTextConditional).
+ * If another writer's PUT landed in between, the condition fails, the loop re-reads the feed (which
+ * now includes that other writer's entry) and retries -- so the other writer's entry is preserved,
+ * not clobbered, and this call's own entry is still appended, not dropped. Exhausting the retries
+ * THROWS rather than returning as if the entry were saved: a lost memory that reports success is
+ * exactly the "failure returned as a plausible value" defect this exists to close.
+ */
 export async function appendShared(
   agent: string,
   type: MemoryEntry['type'],
@@ -281,21 +394,43 @@ export async function appendShared(
   supersedes?: string,
 ): Promise<MemoryEntry> {
   const a = normalizeAgent(agent);
-  const existing = parseRows(await getText(sharedKey(a)), a);
-  const entry: MemoryEntry = {
-    id: nextId(existing),
-    ts: new Date().toISOString(),
-    type,
-    text,
-    tags,
-    agent: a,
-    ...(source ? { source } : {}),
-    ...(by && by !== a ? { by } : {}),
-    ...(supersedes ? { supersedes } : {}),
-  };
-  existing.push(entry);
-  await putText(sharedKey(a), `${existing.map((r) => JSON.stringify(r)).join('\n')}\n`);
-  return entry;
+  const key = sharedKey(a);
+  let lastConflict: unknown;
+
+  for (let attempt = 0; attempt < APPEND_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) await sleep(backoffMs(attempt - 1));
+
+    const { text: raw, etag } = await getTextWithEtag(key);
+    const existing = parseRows(raw, a);
+    const entry: MemoryEntry = {
+      id: nextId(existing),
+      ts: new Date().toISOString(),
+      type,
+      text,
+      tags,
+      agent: a,
+      ...(source ? { source } : {}),
+      ...(by && by !== a ? { by } : {}),
+      ...(supersedes ? { supersedes } : {}),
+    };
+    const body = `${[...existing, entry].map((r) => JSON.stringify(r)).join('\n')}\n`;
+
+    try {
+      await putTextConditional(key, body, etag);
+      return entry;
+    } catch (err) {
+      if (!(err instanceof MemoryWriteConflictError)) throw err; // a real failure: never retry it
+      lastConflict = err;
+      // loop: re-read on the next iteration and try again
+    }
+  }
+
+  throw new Error(
+    `appendShared: lost the write race on ${key} after ${APPEND_MAX_ATTEMPTS} attempts -- concurrent ` +
+      `writers kept changing the feed faster than this call could retry. The entry was NOT saved; ` +
+      `nothing was lost from the feed itself, but this write must be retried by the caller. ` +
+      `Last conflict: ${lastConflict instanceof Error ? lastConflict.message : String(lastConflict)}`,
+  );
 }
 
 // ---- Cross-lane INBOUND + wake reconciliation (mirrors skills/kb-memory/mem.mjs) ----

@@ -55,6 +55,23 @@ import { fetchWithBudget } from '../util/fetch-budget.js';
 /** SHA-256 of the empty string: the required `x-amz-content-sha256` for any bodyless S3 request. */
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
+/**
+ * A PutObject conditional-write precondition was refused (HTTP 409 or 412): either an
+ * If-None-Match:* create collided with an object that already exists, or an If-Match:<etag> update
+ * collided with an object that has since changed. Both are "someone else won the race", which a
+ * caller may legitimately re-read-and-retry -- unlike every other write failure, which must not be
+ * retried blindly. A distinct class (rather than string-matching the message) is what lets a caller
+ * distinguish "retry me" from "something is actually broken" without parsing prose.
+ */
+export class S3ConditionalWriteFailedError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'S3ConditionalWriteFailedError';
+    this.status = status;
+  }
+}
+
 export interface S3Location {
   bucket: string;
   /** Key prefix inside the bucket. Mirror keys are `<azureAccount>/<container>/<blobPath>`. */
@@ -440,6 +457,16 @@ export async function putObjectToS3(
   // explicitly anyway (blob-store.ts forwards the caller's choice, the commons feed passes true
   // because rewriting the JSONL file IS the append).
   overwrite = false,
+  // CONDITIONAL UPDATE (2026-08-18). When set, sends `If-Match: <ifMatch>` (S3 conditional writes,
+  // GA'd August 2024, requires SigV4 -- already the only auth this module speaks) instead of the
+  // If-None-Match:* create-guard. This is what lets a read-modify-write caller (appendShared, the
+  // shared multi-replica ledger) pin its PUT to the exact version it read: a concurrent writer's PUT
+  // in between changes the ETag, so this one gets refused (412/409) instead of silently winning a
+  // last-write-wins race and erasing the other writer's entry. `overwrite` is IGNORED when `ifMatch`
+  // is set -- the two preconditions are mutually exclusive by construction (an object cannot be
+  // simultaneously "must not exist" and "must match this ETag"), and If-Match unambiguously implies
+  // the caller believes the object already exists.
+  ifMatch?: string,
 ): Promise<{ bytes: number; etag: string | null }> {
   const ctx = await writeContext(account, container);
   const r = await s3ObjectRequest({
@@ -450,12 +477,24 @@ export async function putObjectToS3(
     region: ctx.region,
     body,
     contentType,
-    ...(overwrite ? {} : { extraHeaders: { 'if-none-match': '*' } }),
+    ...(ifMatch
+      ? { extraHeaders: { 'if-match': ifMatch } }
+      : overwrite
+        ? {}
+        : { extraHeaders: { 'if-none-match': '*' } }),
   });
   if (r.status === 409 || r.status === 412) {
-    throw new Error(
+    if (ifMatch) {
+      throw new S3ConditionalWriteFailedError(
+        `s3 blob put refused: the object at ${container}/${path} changed since it was read ` +
+          `(expected ETag ${ifMatch}, HTTP ${r.status}). Re-read the object and retry with its current ETag.`,
+        r.status,
+      );
+    }
+    throw new S3ConditionalWriteFailedError(
       `s3 blob put refused: an object already exists at ${container}/${path} (HTTP ${r.status}). ` +
         `Pass overwrite=true to intentionally replace it.`,
+      r.status,
     );
   }
   if (!r.ok) throw new Error(`s3 blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
@@ -577,6 +616,21 @@ export async function deleteObjectFromS3(
  * 404 -> null (the blob genuinely does not exist yet: a lane's first write). Anything else THROWS.
  */
 export async function getTextFromS3(account: string, container: string, path: string): Promise<string | null> {
+  return (await getTextWithEtagFromS3(account, container, path)).text;
+}
+
+/**
+ * Same contract as `getTextFromS3`, plus the object's current ETag (null when the object does not
+ * exist -- there is nothing to pin a subsequent conditional PUT to). This is the read half of the
+ * read-modify-write conditional-update pattern: a caller captures the ETag here and passes it back
+ * as `ifMatch` to `putObjectToS3`, so the write is refused (not silently accepted) if anything else
+ * changed the object in between.
+ */
+export async function getTextWithEtagFromS3(
+  account: string,
+  container: string,
+  path: string,
+): Promise<{ text: string | null; etag: string | null }> {
   const ctx = await writeContext(account, container);
   const r = await s3ObjectRequest({
     method: 'GET',
@@ -585,13 +639,13 @@ export async function getTextFromS3(account: string, container: string, path: st
     credentials: ctx.credentials,
     region: ctx.region,
   });
-  if (r.status === 404) return null;
+  if (r.status === 404) return { text: null, etag: null };
   if (!r.ok) {
     throw new Error(
       `s3 commons get ${r.status} (refusing to report a missing feed as empty): ${(await r.text()).slice(0, 160)}`,
     );
   }
-  return await r.text();
+  return { text: await r.text(), etag: r.headers.get('etag') };
 }
 
 /** HEAD one mirrored object: existence + ETag + size, without downloading it. */
