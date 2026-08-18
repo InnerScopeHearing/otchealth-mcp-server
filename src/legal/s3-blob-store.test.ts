@@ -43,6 +43,10 @@ test('RING: NOTHING except personal legal may resolve to the privileged bucket',
     ['otchealthcfodata', 'cfo-source-docs'],
     ['otchealthcfodata', 'cro-from-the-chair'],
     ['otchealthcfodata', 'innd-stock'],
+    // Added with the commons row (2026-08-18). The shared exec brain is the one WRITABLE room in
+    // this table, which makes it the row where a wrong bucket would be worst: it would put every
+    // agent's memory feed into the attorney-privileged ring.
+    ['otchealthcommons', 'company-journal'],
   ] as const) {
     const loc = s3LocationFor(account, container);
     assert.ok(loc, `${account}/${container} should be mapped`);

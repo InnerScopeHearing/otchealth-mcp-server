@@ -22,15 +22,57 @@
  *   shared feed: _MEMORY/_exec/<agent>.jsonl   (one append-only JSONL file per agent)
  * Entries are line-delimited JSON: { id, ts, type, text, tags, agent, source? }.
  *
- * Inert without creds: if AZURE_COMMONS_STORAGE_ACCOUNT/KEY are unset, isConfigured()
- * is false and the tools return a clear "not configured" result instead of throwing.
+ * Inert without creds on the AZURE backend: if AZURE_COMMONS_STORAGE_ACCOUNT/KEY are unset,
+ * isConfigured() is false and the tools return a clear "not configured" result instead of throwing.
+ * (Under BLOB_BACKEND=s3 neither is required -- see isConfigured() for why answering "not
+ * configured" there would be the wrong kind of quiet.)
+ *
+ * ═══════════════ BLOB_BACKEND (added 2026-08-18) — WHY THIS FILE WAS THE OUTAGE ═══════════════
+ *
+ * Until this change there was NO backend selector in this file at all. It was a wholly separate
+ * Azure client: its own SAS builder, its own fetch calls, sharing nothing with src/legal/blob-store.ts
+ * (which had honoured BLOB_BACKEND since the cutover). When Azure subscription 55c84f6b went away,
+ * `memory_remember` -> appendShared() -> putText() threw `commons put 403` and the fleet's entire
+ * memory-write surface stopped.
+ *
+ * The damage was worse than "writes fail". putText() throws BEFORE remember.ts reaches its
+ * OpenSearch index step, so nothing landed anywhere -- not the blob, not the index. Every memory
+ * write from the moment Azure went dark was lost outright, silently, while reads kept working from
+ * OpenSearch and made the brain look healthy.
+ *
+ * It was invisible to BOTH architecture guards for the same reason: they scan for imports of a named
+ * backend module, or for reads of AZURE_SEARCH_* / AZURE_BLOB_* / COSMOS_* env vars. This file
+ * imports no backend module, and its env vars are AZURE_COMMONS_STORAGE_*, a family neither guard's
+ * regex covers. It sat outside every check while being the most load-bearing write path in the
+ * gateway. Both guards now assert on this file directly (see the BLOB_BACKEND checks in
+ * src/search/azure-dependency-guard.test.ts and src/agentstate/agentstate-dependency-guard.test.ts).
+ *
+ * The Azure path below is intentionally left INTACT behind the selector, not deleted: BLOB_BACKEND
+ * is a switch, and a one-way change would remove the rollback that makes a switch worth having.
  */
 
 import crypto from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import {
+  s3BlobBackendActive,
+  getTextFromS3,
+  putObjectToS3,
+  listBlobsFromS3,
+} from '../legal/s3-blob-store.js';
 
 const CONTAINER = 'company-journal';
 const SHARED_PREFIX = '_MEMORY/_exec/';
+
+/**
+ * The storage-account half of the (account, container) key into the S3 mirror allow-list
+ * (s3LocationFor in src/legal/s3-blob-store.ts). Hardwired for the same reason CONTAINER above is:
+ * this module's whole contract, per its header, is that it addresses exactly ONE store.
+ *
+ * Used as the fallback when AZURE_COMMONS_STORAGE_ACCOUNT is unset, so that finally deleting the
+ * dead Azure env vars cannot take the commons feed down a second time. Under BLOB_BACKEND=s3 no
+ * Azure call is made and no Azure KEY is needed -- only this name, and only as a lookup key.
+ */
+const COMMONS_ACCOUNT = 'otchealthcommons';
 
 /** A single memory ledger entry (matches the kb-memory JSONL shape). */
 export interface MemoryEntry {
@@ -62,7 +104,19 @@ function creds(): { account: string; key: string } | null {
   return { account, key };
 }
 
+/** The account NAME used for the S3 mirror lookup. No Azure secret is involved. */
+function commonsAccount(): string {
+  return loadEnv().AZURE_COMMONS_STORAGE_ACCOUNT || COMMONS_ACCOUNT;
+}
+
 export function isConfigured(): boolean {
+  // Under BLOB_BACKEND=s3 the Azure key is irrelevant, so gating on it would report the commons
+  // store as "not configured" the moment the dead Azure secrets are removed -- and every memory tool
+  // checks this first, so the whole surface would answer with a soft, plausible "not configured"
+  // no-op. The account name and container are hardwired above, so the store IS addressable; a real
+  // AWS credential failure then surfaces LOUDLY at call time ("S3 credentials unavailable") instead
+  // of masquerading as a benign unconfigured state. Loud beats plausible on this path.
+  if (s3BlobBackendActive()) return true;
   return creds() !== null;
 }
 
@@ -90,6 +144,12 @@ function blobUrl(account: string, sas: string, name: string): string {
 }
 
 async function getText(name: string): Promise<string | null> {
+  // getTextFromS3 holds the SAME contract as the Azure path below: 404 -> null, everything else
+  // throws. It is deliberately not fetchBlobFromS3, which folds 403 into "not found" -- correct for
+  // a legal document read, catastrophic here, where an empty feed reads as "nobody recorded
+  // anything" and empties the retraction set (see that function's own comment).
+  if (s3BlobBackendActive()) return getTextFromS3(commonsAccount(), CONTAINER, name);
+
   const c = creds();
   if (!c) throw new Error('commons store not configured');
   const sas = buildSas(c.account, c.key, 'rl');
@@ -100,6 +160,21 @@ async function getText(name: string): Promise<string | null> {
 }
 
 async function putText(name: string, body: string): Promise<void> {
+  // THE FIX. This one line is what `commons put 403` was: the write had no S3 branch to take.
+  // putObjectToS3 throws on every non-2xx, so a failed write stays a failed write -- it must never
+  // resolve, or appendShared() would return a fabricated entry the caller believes was persisted.
+  if (s3BlobBackendActive()) {
+    await putObjectToS3(
+      commonsAccount(),
+      CONTAINER,
+      name,
+      Buffer.from(body, 'utf8'),
+      'application/x-ndjson',
+      true, // the feed is an append-by-rewrite JSONL file; overwrite is the whole operation
+    );
+    return;
+  }
+
   const c = creds();
   if (!c) throw new Error('commons store not configured');
   const sas = buildSas(c.account, c.key, 'rwlc');
@@ -112,6 +187,15 @@ async function putText(name: string, body: string): Promise<void> {
 }
 
 async function listShared(): Promise<string[]> {
+  // listBlobsFromS3 returns keys RELATIVE to the mirror prefix, which is exactly the shape Azure's
+  // listing returns here (`_MEMORY/_exec/<agent>.jsonl`), so readSharedAll's slice() needs no branch.
+  // It also throws on any non-404 failure, preserving the loud-failure contract documented below --
+  // a 403 must never come back as "no agent has recorded anything".
+  if (s3BlobBackendActive()) {
+    const rows = await listBlobsFromS3(commonsAccount(), CONTAINER, SHARED_PREFIX);
+    return rows.map((r) => r.name).filter((n) => n.endsWith('.jsonl'));
+  }
+
   const c = creds();
   if (!c) throw new Error('commons store not configured');
   const sas = buildSas(c.account, c.key, 'rl');

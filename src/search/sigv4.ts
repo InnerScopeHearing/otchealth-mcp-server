@@ -99,7 +99,16 @@ export function signRequest(opts: {
   host: string;
   path: string;
   query?: string | Record<string, string>;
-  body?: string;
+  /**
+   * Request payload. `Buffer` is accepted alongside `string` (2026-08-18) because the S3 WRITE path
+   * signs BINARY bodies, and the payload hash on the canonical request's last line MUST be the hash
+   * of the exact bytes sent. Hashing a binary body via a JS string is not merely inelegant, it is
+   * WRONG: `createHash().update(str)` encodes as UTF-8, so any byte sequence that is not valid UTF-8
+   * hashes to something other than the bytes on the wire, and S3 answers 403 SignatureDoesNotMatch.
+   * `sha256Hex` already accepts Buffer, so widening the type is the whole change -- no branch, and
+   * every existing string caller is unaffected.
+   */
+  body?: string | Buffer;
   region: string;
   service?: string;
   credentials: AwsCredentials;

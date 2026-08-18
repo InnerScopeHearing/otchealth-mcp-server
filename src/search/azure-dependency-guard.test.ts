@@ -112,6 +112,126 @@ test('document reads dispatch on BLOB_BACKEND rather than hard-calling Azure Blo
   );
 });
 
+/**
+ * ============ BLOB_BACKEND, WIDENED TO THE COMMONS MEMORY STORE (2026-08-18) ============
+ *
+ * THE CHECK ABOVE WAS TOO NARROW AND IT COST THE FLEET ITS MEMORY. It asserts that ONE named file,
+ * legal/blob-store.ts, consults BLOB_BACKEND. src/memory/store.ts is a SECOND, entirely separate
+ * Azure Blob client -- its own SAS builder, its own fetch calls, importing nothing from blob-store.ts
+ * -- and no check in this file or its agentstate sibling looked at it. It was invisible to every
+ * guard here: it imports no backend module (so the import scans miss it) and its env vars are
+ * AZURE_COMMONS_STORAGE_*, which the ENV_VAR_READ_RE families below deliberately do not cover (the
+ * KNOWN-NEGATIVE self-test even asserts AZURE_COMMONS_STORAGE_ACCOUNT is not flagged).
+ *
+ * So when Azure went away, memory_remember -> appendShared -> putText threw `commons put 403`, and
+ * it threw BEFORE the OpenSearch index step -- meaning every memory write was lost outright, while
+ * reads kept working from OpenSearch and the brain looked healthy. Same shape as the four defects in
+ * this file's header: the data moved, the code kept pointing at Azure, nothing failed loudly.
+ *
+ * The two checks below close it in both directions: the specific one names store.ts and its three
+ * I/O functions, and the general one catches ANY file that builds an Azure Blob URL without being a
+ * declared, BLOB_BACKEND-aware store -- which would have caught store.ts on the day it was written.
+ */
+
+/** Slice one top-level function's source out of a file (body ends at a column-0 `}`). */
+function functionBody(text: string, name: string): string {
+  const start = text.indexOf(`function ${name}(`);
+  if (start < 0) return '';
+  const end = text.indexOf('\n}', start);
+  return end < 0 ? text.slice(start) : text.slice(start, end);
+}
+
+test('the commons MEMORY store dispatches on BLOB_BACKEND in every one of its I/O paths', () => {
+  const store = FILES.find((f) => f.path === 'memory/store.ts');
+  assert.ok(store, 'expected src/memory/store.ts to exist');
+  // Per-function, not merely file-wide: a single mention of the selector somewhere in the file would
+  // let putText -- the exact function that broke -- stay Azure-only while the file still "consults
+  // BLOB_BACKEND". READS going dark is bad; the WRITE going dark is what actually lost data.
+  for (const fn of ['getText', 'putText', 'listShared']) {
+    assert.match(
+      functionBody(store!.text, fn),
+      /s3BlobBackendActive\(\)/,
+      `memory/store.ts ${fn}() must branch on BLOB_BACKEND, or the commons feed is pinned to Azure`,
+    );
+  }
+});
+
+/** Stores that legitimately build an Azure Blob URL AND must dispatch on BLOB_BACKEND to do it. */
+const BLOB_BACKEND_AWARE_STORES: Readonly<Record<string, string>> = Object.freeze({
+  'legal/blob-store.ts': 'the legal/finance document store: Azure path retained as the rollback behind the selector',
+  'memory/store.ts': 'the commons shared-brain feed: Azure path retained as the rollback behind the selector',
+});
+
+/** Azure Blob callers NOT yet migrated. FLAGGED, not endorsed -- same convention as the
+ *  server/deep-health.ts entries below. Each is a real remaining Azure runtime dependency; listing
+ *  it here keeps this guard a true CI gate today without pretending the dependency is gone. */
+const AZURE_BLOB_UNMIGRATED: Readonly<Record<string, string>> = Object.freeze({
+  'agentstate/resolver.ts':
+    'FLAGGED: HEADs a pointer in the SAME commons container memory/store.ts just migrated, but via its own SAS builder and with no BLOB_BACKEND branch. Out of this change\'s scope (pointer resolution, not the memory feed); it will fail against a dead Azure. Its owner should route it through the same S3 path.',
+  'tools/heygen/artifact-store.ts':
+    'FLAGGED: a separate Azure Blob container for HeyGen render artifacts, with no S3 mirror row and therefore nowhere to dispatch to yet. Needs its own mirror + migration decision, not a silent repoint.',
+});
+
+test('no file builds an Azure Blob URL unless it is a declared, BLOB_BACKEND-aware store', () => {
+  // The GENERAL form of the defect. memory/store.ts would have appeared here on day one: a second
+  // hand-rolled Azure Blob client that no import-based or env-var-based scan could see.
+  const offenders = FILES.filter(
+    (f) =>
+      /blob\.core\.windows\.net/.test(stripComments(f.text)) &&
+      !(f.path in BLOB_BACKEND_AWARE_STORES) &&
+      !(f.path in AZURE_BLOB_UNMIGRATED),
+  ).map((f) => f.path);
+
+  assert.deepEqual(
+    offenders,
+    [],
+    'These files talk to Azure Blob Storage directly without dispatching on BLOB_BACKEND. Route the ' +
+      'reads AND the writes through a store that honours the selector, or add the file to ' +
+      'AZURE_BLOB_UNMIGRATED with the reason it cannot be migrated yet.',
+  );
+});
+
+test('every declared BLOB_BACKEND-aware store really does consult the selector', () => {
+  // Stops the declaration from becoming a rubber stamp: being listed as "aware" must mean the branch
+  // is actually present, not merely claimed.
+  for (const path of Object.keys(BLOB_BACKEND_AWARE_STORES)) {
+    const f = FILES.find((x) => x.path === path);
+    assert.ok(f, `declared store no longer exists: ${path}`);
+    assert.match(f!.text, /s3BlobBackendActive\(\)/, `${path} is declared BLOB_BACKEND-aware but never checks it`);
+  }
+  for (const path of Object.keys(AZURE_BLOB_UNMIGRATED)) {
+    const f = FILES.find((x) => x.path === path);
+    assert.ok(f, `flagged file no longer exists: ${path} -- remove it from AZURE_BLOB_UNMIGRATED`);
+    assert.match(
+      stripComments(f!.text),
+      /blob\.core\.windows\.net/,
+      `${path} no longer talks to Azure Blob -- remove its exemption`,
+    );
+  }
+});
+
+test('COUNTERFACTUAL: the pre-fix memory/store.ts would have been caught by BOTH new checks', () => {
+  // Direct proof the widened guard catches the actual outage, reconstructed from the pre-fix source
+  // rather than asserted from memory. Pre-fix putText had no selector and hand-built the Blob URL.
+  const preFixStore = `
+    function blobUrl(account, sas, name) {
+      return \`https://\${account}.blob.core.windows.net/\${CONTAINER}/\${encPath(name)}?\${sas}\`;
+    }
+    async function putText(name, body) {
+      const c = creds();
+      if (!c) throw new Error('commons store not configured');
+      const r = await fetch(blobUrl(c.account, buildSas(c.account, c.key, 'rwlc'), name), { method: 'PUT', body });
+      if (!r.ok) throw new Error(\`commons put \${r.status}\`);
+    }
+  `;
+  assert.equal(/s3BlobBackendActive\(\)/.test(functionBody(preFixStore, 'putText')), false, 'pre-fix putText had no selector');
+  assert.equal(/blob\.core\.windows\.net/.test(stripComments(preFixStore)), true, 'and hand-built an Azure Blob URL');
+
+  // And the real file on disk today passes both.
+  const store = FILES.find((f) => f.path === 'memory/store.ts');
+  assert.match(functionBody(store!.text, 'putText'), /s3BlobBackendActive\(\)/, 'fixed putText must branch');
+});
+
 test('query embeddings resolve through the provider, not a hard-coded Azure URL', () => {
   const foundry = FILES.find((f) => f.path === 'azure/foundry.ts');
   assert.ok(foundry);
