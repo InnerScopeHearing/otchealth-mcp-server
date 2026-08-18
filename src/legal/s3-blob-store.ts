@@ -102,14 +102,37 @@ const MIRROR: Readonly<Record<string, S3Location>> = Object.freeze({
    * to write once Azure went dark, and it threw `commons put 403` BEFORE the OpenSearch index step,
    * so every memory write since was lost outright rather than merely unindexed.
    *
-   * Bucket choice is not a new grant: the ECS task role already holds s3:PutObject on
-   * otchealth-finance-legal-dr-55c84f6b (infra/aws/iam.tf, the runtime-access statement lists
-   * GetObject + PutObject + ListBucket on that bucket and its /*), so this row needs zero IAM or
-   * Terraform change. It is emphatically NOT the personal-legal bucket -- that one is read-only by
-   * IAM and privileged by ring.
+   * THE BUCKET IS otchealth-brain-dr-55c84f6b, AND THAT IS AN OBSERVED FACT, NOT AN INFERENCE.
+   * A read-only listing of the live estate (2026-08-18) found the real shared exec brain already
+   * sitting at `otchealth-brain-dr-55c84f6b/otchealthcommons/company-journal/_MEMORY/_exec/*.jsonl`:
+   * 29 lane files, every one of them the latest version, zero delete markers -- cto.jsonl 1,236,579
+   * bytes, cfo.jsonl 1,956,515, clo.jsonl 932,806, developer.jsonl 896,103, cro.jsonl 623,446,
+   * coo.jsonl 194,935, and ~23 more. That is where months of fleet memory physically live. The
+   * keyPrefix below is that same listing's prefix verbatim, which is why only the BUCKET field of
+   * this row ever needed to change.
+   *
+   * WHAT THE FIRST VERSION OF THIS ROW GOT WRONG, written down so it is not repeated. It pointed at
+   * otchealth-finance-legal-dr-55c84f6b, justified by "the ECS task role already holds s3:PutObject
+   * on it". That reasoning cannot work, and the shape of the grant is exactly why: ONE statement in
+   * infra/aws/iam.tf's runtime-access policy lists GetObject + PutObject + ListBucket against
+   * brain_dr AND finance_legal_dr TOGETHER, in both bare-ARN and `/*` forms. A grant that covers two
+   * buckets identically is incapable of discriminating between them. IAM can only ever tell you a
+   * write is PERMITTED; it can never tell you WHERE the data is. Only a listing of the real objects
+   * answers that, and no listing had been done. The consequence was live: the gateway read the
+   * finance-legal path, got 404, treated that as an empty feed, and wrote a NEW 725-byte
+   * single-entry cto.jsonl there at 02:35:34Z -- after which memory_team reported
+   * shared_entry_count=1 where months of history belong. Nothing was destroyed (both buckets are
+   * versioned; the stray key has exactly one version and the brain-dr files were never touched), but
+   * the shared brain read as empty to every agent. Pick the bucket from observed object layout; use
+   * IAM only to confirm the access you need is already granted.
+   *
+   * IAM still needs no change for this fix: that same statement covers brain_dr for get/put/list on
+   * both ARN shapes, and src/memory/store.ts only ever does get/put/list (no delete, no copy, and a
+   * single non-multipart PUT). It remains emphatically NOT the personal-legal bucket -- that one is
+   * GetObject/ListBucket only (iam.tf's PersonalLegalRingReadOnly statement) and privileged by ring.
    */
   'otchealthcommons/company-journal': {
-    bucket: 'otchealth-finance-legal-dr-55c84f6b',
+    bucket: 'otchealth-brain-dr-55c84f6b',
     keyPrefix: 'otchealthcommons/company-journal/',
   },
 });

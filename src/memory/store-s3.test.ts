@@ -32,7 +32,23 @@ process.env.AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY';
 
 const { appendShared, readSharedAll, isConfigured } = await import('./store.js');
 
-const S3_BUCKET_HOST = 'otchealth-finance-legal-dr-55c84f6b.s3.us-east-1.amazonaws.com';
+/**
+ * The commons feed's real home, corrected 2026-08-18.
+ *
+ * This constant used to read otchealth-finance-legal-dr-55c84f6b, matching the first version of the
+ * MIRROR row in src/legal/s3-blob-store.ts -- so the three assertions below agreed with the mapping
+ * and proved only that the two were consistent, not that either was right. They were not: a
+ * read-only listing of the live estate found the shared exec brain in otchealth-brain-dr-55c84f6b
+ * (29 lane files under `otchealthcommons/company-journal/_MEMORY/_exec/`, all latest, zero delete
+ * markers). Writing to the finance-legal host 404'd, read as an empty feed, and produced a fresh
+ * 725-byte single-entry cto.jsonl there, after which memory_team reported shared_entry_count=1
+ * against months of real history.
+ *
+ * Keep this host pinned to the bucket the objects are actually in. It is deliberately a literal
+ * rather than an import from the mapping under test: a constant read out of the code being checked
+ * agrees with that code even when the code is wrong, which is precisely how the bug shipped green.
+ */
+const S3_BUCKET_HOST = 'otchealth-brain-dr-55c84f6b.s3.us-east-1.amazonaws.com';
 
 interface Seen {
   url: string;

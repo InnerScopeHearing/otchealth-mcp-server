@@ -58,6 +58,80 @@ test('RING: NOTHING except personal legal may resolve to the privileged bucket',
   }
 });
 
+// ── THE COMMONS BUCKET LOCK (2026-08-18) ─────────────────────────────────────────────────────────
+// The shared exec brain was misrouted for real, in production. The commons row was added pointing at
+// otchealth-finance-legal-dr-55c84f6b on the strength of an IAM grant, with nobody listing the actual
+// objects. A read-only listing of the live estate then showed the brain has always been in
+// otchealth-brain-dr-55c84f6b: 29 lane files under `otchealthcommons/company-journal/_MEMORY/_exec/`,
+// all latest, zero delete markers (cto.jsonl 1,236,579 bytes, cfo.jsonl 1,956,515, clo.jsonl 932,806,
+// developer.jsonl 896,103, cro.jsonl 623,446, coo.jsonl 194,935, and ~23 more). Against the wrong
+// bucket the gateway 404'd, treated that as an empty feed, and wrote a fresh 725-byte single-entry
+// cto.jsonl there at 02:35:34Z -- memory_team then reported shared_entry_count=1 where months of
+// history belong.
+//
+// The IAM reasoning could never have decided this: infra/aws/iam.tf grants GetObject + PutObject +
+// ListBucket over brain_dr and finance_legal_dr in the SAME statement, in both ARN shapes. A grant
+// covering both buckets identically cannot discriminate between them -- it proves a write is allowed,
+// never where the data is. These tests pin the observed answer instead.
+//
+// Both assert LITERAL bucket names rather than importing a constant from the module under test: a
+// test that sources its expectation from the code it is checking agrees with that code by
+// construction, including when the code is wrong. That is exactly how the original row shipped green.
+
+test('LOCK: commons resolves to the brain-dr bucket, and to NO other bucket', () => {
+  const loc = s3LocationFor('otchealthcommons', 'company-journal');
+  assert.ok(loc, 'the commons row must exist -- its absence was the original memory_remember outage');
+  assert.equal(
+    loc?.bucket,
+    'otchealth-brain-dr-55c84f6b',
+    'the real 29-lane exec brain lives here; any other bucket 404s and silently reads as an empty feed',
+  );
+  assert.equal(
+    loc?.keyPrefix,
+    'otchealthcommons/company-journal/',
+    'the prefix was already correct against the live listing -- only the bucket was ever wrong',
+  );
+});
+
+test('LOCK: commons NEVER resolves to EITHER legal bucket, because commons is not a privileged ring', () => {
+  // Commons is the shared, non-privileged, every-agent feed. Both legal buckets are ring-gated: the
+  // personal one is attorney-privileged (clo-personal + exec), the finance-legal one carries company
+  // legal, CFO finance and MNPI. Routing the shared brain into either puts every agent's memory writes
+  // inside a privileged-ring bucket. Naming both explicitly keeps the finance-legal case a NAMED
+  // regression vector rather than something this suite happens to miss.
+  const loc = s3LocationFor('otchealthcommons', 'company-journal');
+  assert.ok(loc, 'the commons row must exist');
+  assert.notEqual(
+    loc?.bucket,
+    'otchealth-finance-legal-dr-55c84f6b',
+    'THE ACTUAL 2026-08-18 MISROUTE: commons must not resolve to the finance/company-legal bucket',
+  );
+  assert.notEqual(
+    loc?.bucket,
+    PERSONAL_LEGAL_BUCKET,
+    'commons must never resolve to the attorney-privileged personal-legal bucket',
+  );
+});
+
+test('LOCK: a commons READ addresses the brain-dr host on the wire, not merely in the table', async () => {
+  // The table is one thing; the request built from it is another. If s3LocationFor were right but the
+  // location -> URL step regressed, the two tests above would still pass. This one would not.
+  let seenUrl = '';
+  await withStubbedFetch(
+    (async (u: string) => {
+      seenUrl = String(u);
+      return new Response('{"a":1}\n', { status: 200 });
+    }) as unknown as typeof fetch,
+    () => fetchBlobFromS3('otchealthcommons', 'company-journal', '_MEMORY/_exec/cto.jsonl'),
+  );
+  assert.equal(
+    new URL(seenUrl).host,
+    'otchealth-brain-dr-55c84f6b.s3.us-east-1.amazonaws.com',
+    `commons reads must hit brain-dr, got ${seenUrl}`,
+  );
+  assert.ok(seenUrl.endsWith('/otchealthcommons/company-journal/_MEMORY/_exec/cto.jsonl'));
+});
+
 test('RING: an unknown pair FAILS CLOSED rather than defaulting to a bucket', () => {
   // A default here would serve some other ring's documents. Null is the only safe answer.
   assert.equal(s3LocationFor('otchealthlegalstore', 'personal-archive'), null);
