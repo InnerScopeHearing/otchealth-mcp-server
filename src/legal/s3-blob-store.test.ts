@@ -358,6 +358,55 @@ test('listBlobsFromS3 THROWS on a 403 rather than reporting an empty container',
   );
 });
 
+// ── LIST 404 honesty (2026-08-18) ─────────────────────────────────────────────────────────────────
+// THE INCIDENT THIS PINS: the commons container was mapped to the wrong bucket. Every one of its 23
+// real sub-prefixes 404'd against that bucket, and the OLD code (`if (r.status === 404) break;`)
+// turned each of those into a normal, successful, EMPTY listing -- so the shared exec ledger read
+// back "1 entry" where 24 lanes of real history lived, with no error anywhere. A LIST 404 can only
+// mean the BUCKET itself does not exist (ListObjectsV2 answers a missing/empty *prefix* inside a
+// real bucket with 200 + an empty <ListBucketResult>, never 404) -- so it must never be read as "the
+// room is empty". This is the LIST-side counterpart to the existing 403 test above, and it is
+// DELIBERATELY THE OPPOSITE of how fetchBlobFromS3's GET path treats a 404 -- see the two tests below
+// this one, which lock both halves down so nobody "fixes" one to match the other.
+
+test('listBlobsFromS3 THROWS on a 404, naming the bucket, instead of returning an empty listing', async () => {
+  const { listBlobsFromS3 } = await import('./s3-blob-store.js');
+  await withStubbedFetch(
+    (async () => new Response('NoSuchBucket', { status: 404 })) as unknown as typeof fetch,
+    async () => {
+      await assert.rejects(
+        () => listBlobsFromS3('otchealthlegalstore', 'company'),
+        /s3 blob list 404.*otchealth-finance-legal-dr-55c84f6b/s,
+        'must throw and must name the actual bucket it tried to list, not just say "404"',
+      );
+    },
+  );
+});
+
+test('a genuinely empty prefix inside a real bucket still returns an empty list normally (no throw)', async () => {
+  // The behaviour a 404 must NEVER be confused with: S3's real "nothing here" answer is HTTP 200
+  // with a <ListBucketResult> that has zero <Contents> elements, not a 404. This must keep working
+  // exactly as before -- the fix only changes what happens on an actual 404.
+  const { listBlobsFromS3 } = await import('./s3-blob-store.js');
+  const rows = await withStubbedFetch(
+    (async () => new Response(xmlList([]), { status: 200 })) as unknown as typeof fetch,
+    () => listBlobsFromS3('otchealthlegalstore', 'company', 'no-such-prefix/'),
+  );
+  assert.deepEqual(rows, [], 'an empty prefix is a normal empty array, not an exception');
+});
+
+test('LOCK: fetchBlobFromS3 (GET) still folds a 404 into found:false -- LIST and GET must stay opposite', async () => {
+  // GET and LIST disagree on what a 404 means (see the comment in s3-blob-store.ts above the LIST
+  // 404 branch), so the GET path's existing found:false-on-404 behaviour must be untouched by this
+  // change. This test would fail if someone "fixed" fetchBlobFromS3 to throw on 404 to match LIST.
+  const res = await withStubbedFetch(
+    (async () => new Response('', { status: 404 })) as unknown as typeof fetch,
+    () => fetchBlobFromS3('otchealthlegalstore', 'company', 'missing.pdf'),
+  );
+  assert.equal(res.found, false, 'GET on a missing key must still read as not-found, never throw');
+  assert.equal(res.buf, null);
+});
+
 test('listBlobsFromS3 follows the continuation token to exhaustion', async () => {
   const { listBlobsFromS3 } = await import('./s3-blob-store.js');
   let call = 0;
