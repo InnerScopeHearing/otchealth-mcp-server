@@ -70,7 +70,7 @@ export interface S3Location {
  * at the wrong bucket makes it readable from the wrong ring (silent), which is why rows are never
  * added speculatively.
  */
-const MIRROR: Readonly<Record<string, S3Location>> = Object.freeze({
+export const MIRROR: Readonly<Record<string, S3Location>> = Object.freeze({
   // PRIVILEGED. Its own bucket, and nothing else may resolve there.
   'otchealthlegalstore/personal': {
     bucket: 'otchealth-legal-personal-dr-55c84f6b',
@@ -140,6 +140,113 @@ const MIRROR: Readonly<Record<string, S3Location>> = Object.freeze({
 /** The bucket holding attorney-privileged personal legal. Exported so tests can assert that nothing
  *  else in the table resolves to it, and that personal never resolves anywhere else. */
 export const PERSONAL_LEGAL_BUCKET = 'otchealth-legal-personal-dr-55c84f6b';
+
+/** Company legal, CFO finance, exec, and MNPI. Still privileged (exec ring), but a different
+ *  bucket/ring than personal legal. Named so the invariant checker (and its tests) can refer to it
+ *  without a copy-pasted string literal drifting from the table above. */
+export const FINANCE_LEGAL_BUCKET = 'otchealth-finance-legal-dr-55c84f6b';
+
+/** The shared, non-privileged cross-agent exec brain. THE 2026-08-18 misroute pointed the commons
+ *  row at FINANCE_LEGAL_BUCKET instead of this one. */
+export const BRAIN_DR_BUCKET = 'otchealth-brain-dr-55c84f6b';
+
+/** Every bucket a MIRROR row is allowed to name. A row whose bucket is not in this set is either a
+ *  typo or a bucket nobody has classified into a ring yet -- either way it is refused, not guessed
+ *  at, by `assertMirrorRingInvariants` below. */
+export const KNOWN_DR_BUCKETS: ReadonlySet<string> = new Set([
+  PERSONAL_LEGAL_BUCKET,
+  FINANCE_LEGAL_BUCKET,
+  BRAIN_DR_BUCKET,
+]);
+
+/**
+ * The ring every MIRROR row belongs to, keyed by the SAME `<account>/<container>` string used as a
+ * MIRROR key. This is the piece that makes a bad row impossible to ship unnoticed: `s3LocationFor`
+ * only ever needs a row to *exist*, so a new row with no entry here would previously pass every test
+ * silently (the old inverse-ring test looped a hand-copied array of keys, not `Object.keys(MIRROR)`,
+ * so a key present in neither list was simply never checked -- precisely the gap that let the
+ * 2026-08-18 commons row ship pointed at the wrong bucket). `assertMirrorRingInvariants` iterates
+ * `Object.keys(MIRROR)` and THROWS on any key missing here, so adding a MIRROR row without adding a
+ * matching line in this table now fails loudly instead of shipping unnoticed.
+ */
+export type MirrorRing = 'personal-legal-privileged' | 'finance-legal-privileged' | 'shared-non-privileged';
+
+export const RING_CLASSIFICATION: Readonly<Record<string, MirrorRing>> = Object.freeze({
+  'otchealthlegalstore/personal': 'personal-legal-privileged',
+  'otchealthlegalstore/company': 'finance-legal-privileged',
+  'otchealthlegalstore/exec': 'finance-legal-privileged',
+  'otchealthcfodata/cfo-source-docs': 'finance-legal-privileged',
+  'otchealthcfodata/cro-from-the-chair': 'finance-legal-privileged',
+  'otchealthcfodata/innd-stock': 'finance-legal-privileged',
+  'otchealthcommons/company-journal': 'shared-non-privileged',
+});
+
+/**
+ * Verify the ring invariants for every row of `mirror`, classified by `classification`. Pure and
+ * table-driven (no import of the live MIRROR baked in) specifically so tests can run it against a
+ * SYNTHETIC table -- a copy of the real one with one row deliberately corrupted -- and prove the
+ * checker actually catches a bad row, not merely that today's table happens to be clean.
+ *
+ * Throws (does not return a boolean) on the first violation found, because a caller that forgets to
+ * check a boolean return is exactly the "failure returned as a plausible value" defect class this
+ * fix exists to close. Checks, in order:
+ *
+ *   1. every row's bucket is one of KNOWN_DR_BUCKETS (catches a typo'd bucket name);
+ *   2. every row has a ring classification (catches a NEW row shipped with no classification --
+ *      the load-bearing property: this is what makes an unclassified row fail instead of pass);
+ *   3. only a 'personal-legal-privileged' row may resolve to PERSONAL_LEGAL_BUCKET, and every
+ *      'personal-legal-privileged' row must resolve there (the inverse-of-the-inverse, both
+ *      directions, derived from the table rather than a hand-maintained list);
+ *   4. a 'shared-non-privileged' row may never resolve to FINANCE_LEGAL_BUCKET (the exact
+ *      2026-08-18 misroute: commons pointed at the finance/company-legal bucket).
+ */
+export function assertMirrorRingInvariants(
+  mirror: Readonly<Record<string, S3Location>>,
+  classification: Readonly<Record<string, MirrorRing>> = RING_CLASSIFICATION,
+): void {
+  for (const key of Object.keys(mirror)) {
+    const loc = mirror[key];
+    if (!loc) continue;
+
+    if (!KNOWN_DR_BUCKETS.has(loc.bucket)) {
+      throw new Error(
+        `MIRROR ring invariant violated: "${key}" resolves to "${loc.bucket}", which is not one of ` +
+          `KNOWN_DR_BUCKETS. Likely a typo'd bucket name -- add it to KNOWN_DR_BUCKETS only if it is ` +
+          `genuinely a new, verified DR bucket.`,
+      );
+    }
+
+    const ring = classification[key];
+    if (!ring) {
+      throw new Error(
+        `MIRROR ring invariant violated: "${key}" has no entry in RING_CLASSIFICATION. Every MIRROR ` +
+          `row must be classified before it can ship -- add "${key}" to RING_CLASSIFICATION in ` +
+          `src/legal/s3-blob-store.ts with the ring it actually belongs to.`,
+      );
+    }
+
+    if (ring === 'personal-legal-privileged') {
+      if (loc.bucket !== PERSONAL_LEGAL_BUCKET) {
+        throw new Error(
+          `MIRROR ring invariant violated: "${key}" is classified personal-legal-privileged but ` +
+            `resolves to "${loc.bucket}", not PERSONAL_LEGAL_BUCKET.`,
+        );
+      }
+    } else if (loc.bucket === PERSONAL_LEGAL_BUCKET) {
+      throw new Error(
+        `MIRROR ring invariant violated: "${key}" is classified "${ring}" but resolves to the ` +
+          `attorney-privileged PERSONAL_LEGAL_BUCKET. Only a personal-legal-privileged row may do that.`,
+      );
+    }
+
+    if (ring === 'shared-non-privileged' && loc.bucket === FINANCE_LEGAL_BUCKET) {
+      throw new Error(
+        `MIRROR ring invariant violated: "${key}" is classified shared-non-privileged but resolves ` +
+          `to FINANCE_LEGAL_BUCKET -- this is the exact 2026-08-18 commons misroute.`,
+      );
+    }
+  }
+}
 
 /**
  * Resolve a storage account + container to its mirror location. Returns null for anything not

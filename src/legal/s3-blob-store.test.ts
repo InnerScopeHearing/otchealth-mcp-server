@@ -13,7 +13,19 @@ process.env.OPENSEARCH_REGION = 'us-east-1';
 process.env.AWS_ACCESS_KEY_ID = 'AKIDEXAMPLE';
 process.env.AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY';
 
-const { s3LocationFor, fetchBlobFromS3, s3BlobBackendActive, PERSONAL_LEGAL_BUCKET } = await import('./s3-blob-store.js');
+const {
+  s3LocationFor,
+  fetchBlobFromS3,
+  s3BlobBackendActive,
+  PERSONAL_LEGAL_BUCKET,
+  FINANCE_LEGAL_BUCKET,
+  BRAIN_DR_BUCKET,
+  KNOWN_DR_BUCKETS,
+  MIRROR,
+  RING_CLASSIFICATION,
+  assertMirrorRingInvariants,
+} = await import('./s3-blob-store.js');
+type S3Location = { bucket: string; keyPrefix: string };
 
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -36,26 +48,125 @@ test('RING: attorney-privileged personal legal resolves ONLY to its own bucket',
 });
 
 test('RING: NOTHING except personal legal may resolve to the privileged bucket', () => {
-  // The inverse of the test above, and the one that actually catches a bad row being added later.
-  for (const [account, container] of [
-    ['otchealthlegalstore', 'company'],
-    ['otchealthlegalstore', 'exec'],
-    ['otchealthcfodata', 'cfo-source-docs'],
-    ['otchealthcfodata', 'cro-from-the-chair'],
-    ['otchealthcfodata', 'innd-stock'],
-    // Added with the commons row (2026-08-18). The shared exec brain is the one WRITABLE room in
-    // this table, which makes it the row where a wrong bucket would be worst: it would put every
-    // agent's memory feed into the attorney-privileged ring.
-    ['otchealthcommons', 'company-journal'],
-  ] as const) {
-    const loc = s3LocationFor(account, container);
-    assert.ok(loc, `${account}/${container} should be mapped`);
+  // The inverse of the test above -- and now driven by Object.keys(MIRROR) rather than a
+  // hand-maintained literal array. THIS is the fix for the gap that let the 2026-08-18 commons row
+  // ship unnoticed: the old version of this test iterated a copy-pasted list of keys, so a row
+  // that existed in MIRROR but was never added to that list was simply never checked here. A row
+  // is now covered the moment it exists in MIRROR, by construction, with no second list to remember.
+  for (const key of Object.keys(MIRROR)) {
+    if (key === 'otchealthlegalstore/personal') continue; // the one row that's SUPPOSED to be there
+    const loc = MIRROR[key];
+    assert.ok(loc, `${key} should be mapped`);
     assert.notEqual(
       loc?.bucket,
       PERSONAL_LEGAL_BUCKET,
-      `${account}/${container} must NEVER resolve to the privileged personal-legal bucket`,
+      `${key} must NEVER resolve to the privileged personal-legal bucket`,
     );
   }
+  // And the positive form: every row this suite is aware of today is still present, so the loop
+  // above can't pass merely because MIRROR is empty or missing rows.
+  for (const key of [
+    'otchealthlegalstore/company',
+    'otchealthlegalstore/exec',
+    'otchealthcfodata/cfo-source-docs',
+    'otchealthcfodata/cro-from-the-chair',
+    'otchealthcfodata/innd-stock',
+    'otchealthcommons/company-journal',
+  ]) {
+    assert.ok(Object.keys(MIRROR).includes(key), `expected MIRROR row "${key}" to still exist`);
+  }
+});
+
+// ── THE INVARIANT ITSELF, tested against SYNTHETIC tables ──────────────────────────────────────
+// These tests do not touch the real (frozen) MIRROR. They build small stand-in tables -- one
+// correct, one deliberately corrupted the exact way the 2026-08-18 incident corrupted the real one
+// -- and run assertMirrorRingInvariants against them, so the CHECKER's behaviour is proven directly
+// rather than inferred from today's table happening to be clean.
+
+test('INVARIANT: every real MIRROR row is classified into a ring, and the classification holds', () => {
+  // No throw == every row in the live table passes. If this throws, the failure message names
+  // exactly which row and which rule -- see the two failing-checker tests below for what that
+  // looks like in practice.
+  assert.doesNotThrow(() => assertMirrorRingInvariants(MIRROR, RING_CLASSIFICATION));
+});
+
+test('INVARIANT: a NEW row with no ring classification is refused, not silently allowed', () => {
+  // Simulates adding a MIRROR row (e.g. a hypothetical new data room) without also adding a line to
+  // RING_CLASSIFICATION -- the exact shape of gap that let the 2026-08-18 row ship unclassified
+  // against the old hand-maintained-list test. This is the load-bearing property of this whole fix:
+  // an unclassified row must FAIL, never pass unnoticed.
+  const syntheticMirror: Record<string, S3Location> = {
+    ...MIRROR,
+    'otchealthexample/new-room': { bucket: BRAIN_DR_BUCKET, keyPrefix: 'otchealthexample/new-room/' },
+  };
+  assert.throws(
+    () => assertMirrorRingInvariants(syntheticMirror, RING_CLASSIFICATION),
+    /no entry in RING_CLASSIFICATION/,
+  );
+});
+
+test('INVARIANT: a row pointing at an unknown bucket (a typo) is refused', () => {
+  const syntheticMirror: Record<string, S3Location> = {
+    ...MIRROR,
+    'otchealthcommons/company-journal': {
+      bucket: 'otchealth-brain-dr-55c84f6b-typo',
+      keyPrefix: 'otchealthcommons/company-journal/',
+    },
+  };
+  assert.throws(
+    () => assertMirrorRingInvariants(syntheticMirror, RING_CLASSIFICATION),
+    /not one of KNOWN_DR_BUCKETS/,
+  );
+});
+
+test('INVARIANT: a synthetic commons-into-personal-legal row is CAUGHT (confirms the checker actually catches a bad row, not just that today\'s table is clean)', () => {
+  // Insert a synthetic row pointing the shared, non-privileged commons container at the
+  // ATTORNEY-PRIVILEGED personal-legal bucket -- worse than either real incident, and the clearest
+  // possible proof the checker is live.
+  const badMirror: Record<string, S3Location> = {
+    ...MIRROR,
+    'otchealthcommons/company-journal': {
+      bucket: PERSONAL_LEGAL_BUCKET,
+      keyPrefix: 'otchealthcommons/company-journal/',
+    },
+  };
+  // RED: the corrupted table throws.
+  assert.throws(
+    () => assertMirrorRingInvariants(badMirror, RING_CLASSIFICATION),
+    /attorney-privileged PERSONAL_LEGAL_BUCKET/,
+  );
+  // Remove the bad row (i.e. go back to the real, uncorrupted table) and confirm GREEN.
+  assert.doesNotThrow(() => assertMirrorRingInvariants(MIRROR, RING_CLASSIFICATION));
+});
+
+test('INVARIANT: the ACTUAL 2026-08-18 case (commons pointed at finance-legal) is caught', () => {
+  // Re-run the real incident through the new checker: commons classified shared-non-privileged, but
+  // its bucket set to FINANCE_LEGAL_BUCKET instead of BRAIN_DR_BUCKET -- exactly what shipped before
+  // the same-day fix. Confirms the new invariant would have caught THIS specific incident, not just
+  // a hypothetical worse one.
+  assert.notEqual(
+    MIRROR['otchealthcommons/company-journal']?.bucket,
+    FINANCE_LEGAL_BUCKET,
+    'sanity: the live table must already be fixed before this regression test means anything',
+  );
+  const tonightsBadMirror: Record<string, S3Location> = {
+    ...MIRROR,
+    'otchealthcommons/company-journal': {
+      bucket: FINANCE_LEGAL_BUCKET,
+      keyPrefix: 'otchealthcommons/company-journal/',
+    },
+  };
+  assert.throws(
+    () => assertMirrorRingInvariants(tonightsBadMirror, RING_CLASSIFICATION),
+    /2026-08-18 commons misroute/,
+  );
+});
+
+test('INVARIANT: every row in KNOWN_DR_BUCKETS is a real, distinct bucket name (sanity)', () => {
+  assert.ok(KNOWN_DR_BUCKETS.has(PERSONAL_LEGAL_BUCKET));
+  assert.ok(KNOWN_DR_BUCKETS.has(FINANCE_LEGAL_BUCKET));
+  assert.ok(KNOWN_DR_BUCKETS.has(BRAIN_DR_BUCKET));
+  assert.equal(KNOWN_DR_BUCKETS.size, 3);
 });
 
 // ── THE COMMONS BUCKET LOCK (2026-08-18) ─────────────────────────────────────────────────────────
