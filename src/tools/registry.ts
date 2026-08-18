@@ -89,6 +89,13 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // into the catalog but never added it here, so it stayed invisible on every exec DCR connector (the
   // CFO reported "102 tools, kb_get_document absent"). VISIBILITY only; the ring gate stays in-handler.
   'kb_get_document',
+  // kb_get_sheet (2026-08-18, CFO escalation): reads REAL cell values out of an XLSX in the finance
+  // dataroom (formula cached results, dates, merges — never the _TEXT/ text-extraction sidecar
+  // kb_get_document falls back to for binary files). Added here in the SAME change that registers it
+  // — see registry.ts's own comment a few lines below on legal_blob_move/copy/delete: a tool built and
+  // registered but left off this allowlist is invisible on every connector, a repeat-offender omission
+  // class (kb_get_document/catalog_probe/xero_attachment_upload/mail_archive_* all hit it once each).
+  'kb_get_sheet',
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract (search/fetch — see
   // kb/openai-search.ts). Non-privileged by construction even on this lane: the tools re-derive
   // and re-check the ring per call, they are not widened just because cto/exec can see them here.

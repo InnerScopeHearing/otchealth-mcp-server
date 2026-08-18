@@ -49,6 +49,10 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   // Regression guard (2026-07-17): the CFO reported kb_get_document was invisible on its DCR
   // connector because #130 shipped the tool into the catalog but never added it to this ship set.
   assert.ok(set.has('kb_get_document'), 'ship lane must expose whole-doc retrieval (the CFO census gap)');
+  // Regression guard (2026-08-18): kb_get_sheet -- reads real XLSX cell values (formula cached
+  // results, dates, merges) instead of the _TEXT/ sidecar. Same omission class as every tool above;
+  // pinned by name so a future edit here can't silently drop it and make it connector-invisible again.
+  assert.ok(set.has('kb_get_sheet'), 'ship lane must expose XLSX cell-value retrieval (the CFO numeric-data gap)');
   // Regression guard (2026-07-30, P0-1): the CFO reported xero_attachment_upload was invisible on
   // its connector even though it was fully built, registered, and reachable via a direct minted-
   // token MCP call -- it was simply never added to this ship set (its read-side sibling
@@ -148,7 +152,7 @@ test("(f) 'external-read' lane set is EXACTLY the 11 read tools (incl. Phase 6 s
   assert.ok(set.has('search'), 'external-read must see the OpenAI connector search tool');
   assert.ok(set.has('fetch'), 'external-read must see the OpenAI connector fetch tool');
   for (const forbidden of [
-    'kb_search_privileged', 'kb_get_document',
+    'kb_search_privileged', 'kb_get_document', 'kb_get_sheet',
     'legal_blob_list', 'legal_blob_get', 'legal_blob_put',
     'memory_write', 'memory_remember',
     'github_push_files', 'github_merge_pull_request', 'github_create_pull_request',
