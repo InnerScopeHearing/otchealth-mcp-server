@@ -1,0 +1,246 @@
+name: aws-recovery-ops
+
+# Operator console for the post-Azure recovery, run in CI ON PURPOSE.
+#
+# WHY THIS EXISTS. The Azure subscription 55c84f6b is permanently gone. Two recovery actions the
+# fleet needs are pure AWS control-plane calls -- flipping the gateway's LLM provider, and enabling
+# the EventBridge job schedules -- and both were blocked because no operator seat has usable AWS
+# credentials any more: the sandbox has none, and `aws-bootstrap.mjs` resolves its AWS keys FROM
+# Azure Key Vault, so the fallback died with the thing it was meant to fall back from. That circular
+# dependency is documented in runbooks/DAY-2026-08-18-CTO-RECOVERY.md.
+#
+# GitHub Actions is the one place that already holds working AWS credentials independent of Azure
+# (build-gateway-ecr.yml has proven this daily). Running these operations here means the credentials
+# NEVER enter a chat session, a sandbox, or an agent's context -- and every run leaves an immutable
+# audit log with an actor attached. That is strictly better than an operator holding keys, so this is
+# the permanent home for these actions, not a stopgap.
+#
+# SAFETY MODEL, in order:
+#   1. Every operation defaults to REPORT (read-only). Mutating requires apply=true, explicitly.
+#   2. Schedule enabling is opt-IN by name. There is no "enable everything" switch, deliberately:
+#      one of the 32 schedules (xero-run) posts to a real accounting ledger and its AWS cron is a
+#      real daily fire where the Azure original was effectively dead. A bulk enable would silently
+#      start new financial automation. It is hard-blocked below and needs its own decision.
+#   3. The task-definition edit CLONES the live definition and changes ONLY the named variable, then
+#      diffs before and after so a reviewer can see exactly what moved.
+#   4. Untrusted input never reaches a shell directly: every `${{ inputs.* }}` is passed via `env:`,
+#      per the workflow-injection guidance.
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'What to do'
+        required: true
+        type: choice
+        options:
+          - report-only
+          - set-llm-provider
+          - smoke-test-job
+          - enable-schedules
+      apply:
+        description: 'Actually mutate (unchecked = dry run, prints the plan)'
+        required: false
+        type: boolean
+        default: false
+      schedules:
+        description: 'enable-schedules: comma-separated schedule names. No wildcards.'
+        required: false
+        default: ''
+      smoke_job:
+        description: 'smoke-test-job: task-definition family to RunTask once'
+        required: false
+        default: 'otchealth-job-librarian-commerce'
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER: otchealth
+  SERVICE: otchealth-gateway
+  # xero-run posts to a live accounting ledger and its AWS cron differs from the (dead) Azure one.
+  # Enabling it is a CFO/owner decision, never a recovery step. Hard-blocked below.
+  FORBIDDEN_SCHEDULES: 'otchealth-job-xero-run,xero-run'
+
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Set these two repo secrets from the break-glass file. They need ECS + EventBridge
+          # Scheduler permissions -- deliberately NOT the ECR-only CI user, which is scoped to image
+          # push and is verified to be DENIED ssm:GetParameter.
+          aws-access-key-id: ${{ secrets.AWS_RECOVERY_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_RECOVERY_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Who am I (fail loudly if the credential is wrong or absent)
+        run: |
+          set -euo pipefail
+          # A missing secret yields an empty credential, which otherwise surfaces much later as a
+          # confusing AccessDenied on the real operation. Fail here instead, naming the cause.
+          aws sts get-caller-identity --output json
+
+      - name: REPORT — current gateway providers and schedule states
+        run: |
+          set -euo pipefail
+          echo "=== live gateway task definition: provider selectors ==="
+          TD=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+                 --query 'services[0].taskDefinition' --output text)
+          echo "task definition in service: $TD"
+          aws ecs describe-task-definition --task-definition "$TD" \
+            --query 'taskDefinition.containerDefinitions[0].environment[?name==`LLM_PROVIDER`||name==`EMBEDDINGS_PROVIDER`||name==`SEARCH_BACKEND`||name==`BLOB_BACKEND`||name==`STATE_BACKEND`||name==`SECRET_BACKEND`||name==`WEB_SEARCH_PROVIDER`]' \
+            --output table
+          echo
+          echo "NOTE: a selector ABSENT from that table is unset, and unset means it falls back to"
+          echo "its code default -- which for LLM_PROVIDER and WEB_SEARCH_PROVIDER is the dead Azure"
+          echo "option. Absence here is the defect, not a formatting artifact."
+          echo
+          echo "=== EventBridge schedules: name -> state ==="
+          aws scheduler list-schedules --max-results 100 \
+            --query 'Schedules[].{name:Name,state:State,group:GroupName}' --output table
+
+      - name: ITEM 1 — set LLM_PROVIDER=openai on the gateway
+        if: ${{ inputs.operation == 'set-llm-provider' }}
+        env:
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          # WHY: LLM_PROVIDER is unset, so src/azure/foundry.ts's chatTarget() defaults to `foundry`
+          # -- the dead Azure resource. Every chat-dependent enhancement (deep-mode synthesis,
+          # checkpoint distillation, auto-supersede contradiction detection, llm_azure, claims_check)
+          # is wrapped in fail-open catch blocks, so they currently report success while doing
+          # nothing. This is the fleet's recurring "failure returned as a plausible value" class,
+          # live in production right now. OPENAI_API_KEY is ALREADY wired as a secret on this task
+          # definition (embeddings use it), so this is a one-variable change with no new credential.
+          TD_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+                     --query 'services[0].taskDefinition' --output text)
+          echo "live task definition: $TD_ARN"
+          aws ecs describe-task-definition --task-definition "$TD_ARN" \
+            --query 'taskDefinition' --output json > /tmp/td.json
+
+          # Clone, changing ONLY LLM_PROVIDER. Strip the read-only fields the register call rejects.
+          jq '
+            .containerDefinitions[0].environment |= (
+              map(select(.name != "LLM_PROVIDER")) + [{name:"LLM_PROVIDER", value:"openai"}]
+            )
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+          ' /tmp/td.json > /tmp/td-new.json
+
+          echo "=== environment diff (before -> after) ==="
+          diff <(jq -S '.containerDefinitions[0].environment|sort_by(.name)' /tmp/td.json) \
+               <(jq -S '.containerDefinitions[0].environment|sort_by(.name)' /tmp/td-new.json) \
+            || true
+
+          if [ "$APPLY" != "true" ]; then
+            echo "DRY RUN -- nothing registered. Re-run with apply=true to make it live."
+            exit 0
+          fi
+
+          NEW_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/td-new.json \
+                      --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "registered: $NEW_ARN"
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --task-definition "$NEW_ARN" --output json > /dev/null
+          echo "service updated; waiting for it to stabilise..."
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          echo "STABLE. Verifying the value actually landed on the running definition:"
+          aws ecs describe-task-definition --task-definition "$NEW_ARN" \
+            --query 'taskDefinition.containerDefinitions[0].environment[?name==`LLM_PROVIDER`]' \
+            --output table
+          # Deployment reaching STABLE is not proof the app is healthy -- check the app itself.
+          echo "=== gateway /health after cutover ==="
+          curl -sS --max-time 20 https://mcp.otchealth.app/health | jq '{status, revision}'
+
+      - name: ITEM 4a — smoke-test ONE job before enabling any schedule
+        if: ${{ inputs.operation == 'smoke-test-job' }}
+        env:
+          APPLY: ${{ inputs.apply }}
+          JOB: ${{ inputs.smoke_job }}
+        run: |
+          set -euo pipefail
+          # WHY A SMOKE TEST FIRST: all 32 schedules are DISABLED, and the open question is whether
+          # the jobs can authenticate at all now that Key Vault is dead. kvSecret() gained an SSM
+          # fallback, and ECS tasks get AWS credentials from the task role with no Azure involvement,
+          # so they SHOULD work -- but "should" is exactly the word that precedes an outage. Run one
+          # cheap, idempotent job by hand and read its logs before turning on a fleet of crons.
+          case "$JOB" in
+            *xero-run*) echo "::error::refusing: xero-run posts to a live ledger"; exit 1 ;;
+          esac
+          echo "smoke target: $JOB"
+          aws ecs describe-task-definition --task-definition "$JOB" \
+            --query 'taskDefinition.{family:family,image:containerDefinitions[0].image}' --output table
+
+          if [ "$APPLY" != "true" ]; then
+            echo "DRY RUN -- no task started. Re-run with apply=true to actually run it once."
+            exit 0
+          fi
+
+          NET=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+                  --query 'services[0].networkConfiguration' --output json)
+          TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$JOB" \
+                   --launch-type FARGATE --network-configuration "$NET" \
+                   --query 'tasks[0].taskArn' --output text)
+          echo "started: $TASK"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK"
+          echo "=== exit code and stop reason ==="
+          aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" \
+            --query 'tasks[0].{exit:containers[0].exitCode,reason:stoppedReason,detail:containers[0].reason}' \
+            --output table
+          # Exit 0 is NOT proof of real work -- the fleet has shipped jobs that "Succeeded" nightly
+          # while producing nothing. Read the log for the SSM-fallback line before trusting it.
+          echo "=== last 60 log lines (look for: serving secrets from the AWS SSM mirror) ==="
+          LG=$(aws ecs describe-task-definition --task-definition "$JOB" \
+                 --query 'taskDefinition.containerDefinitions[0].logConfiguration.options."awslogs-group"' \
+                 --output text)
+          STREAM=$(aws logs describe-log-streams --log-group-name "$LG" \
+                     --order-by LastEventTime --descending --max-items 1 \
+                     --query 'logStreams[0].logStreamName' --output text)
+          aws logs get-log-events --log-group-name "$LG" --log-stream-name "$STREAM" \
+            --limit 60 --query 'events[].message' --output text
+
+      - name: ITEM 4b — enable named schedules
+        if: ${{ inputs.operation == 'enable-schedules' }}
+        env:
+          APPLY: ${{ inputs.apply }}
+          NAMES: ${{ inputs.schedules }}
+        run: |
+          set -euo pipefail
+          # Opt-in by name only. See FORBIDDEN_SCHEDULES and the header for why there is no
+          # enable-everything switch.
+          if [ -z "$NAMES" ]; then
+            echo "::error::no schedule names given. This operation is opt-in by name; there is no wildcard."
+            exit 1
+          fi
+          IFS=',' read -ra WANT <<< "$NAMES"
+          for raw in "${WANT[@]}"; do
+            NAME="$(echo "$raw" | xargs)"
+            [ -z "$NAME" ] && continue
+            case ",$FORBIDDEN_SCHEDULES," in
+              *",$NAME,"*)
+                echo "::error::refusing '$NAME': it posts to a live accounting ledger and its AWS cron"
+                echo "::error::is a REAL daily fire where the Azure original effectively never fired."
+                echo "::error::Enabling it is new financial automation and needs an owner decision."
+                exit 1 ;;
+            esac
+            CUR=$(aws scheduler get-schedule --name "$NAME" --query 'State' --output text)
+            echo "$NAME: currently $CUR"
+            if [ "$APPLY" != "true" ]; then
+              echo "  DRY RUN -- would set ENABLED"
+              continue
+            fi
+            # update-schedule is a full replace: read the whole definition, change only State, and
+            # write it back. Passing a partial body here silently drops the target and the cron.
+            aws scheduler get-schedule --name "$NAME" --output json > /tmp/s.json
+            jq 'del(.Arn, .CreationDate, .LastModificationDate) | .State = "ENABLED"' /tmp/s.json > /tmp/s-new.json
+            aws scheduler update-schedule --cli-input-json file:///tmp/s-new.json --output json > /dev/null
+            NOW=$(aws scheduler get-schedule --name "$NAME" --query 'State' --output text)
+            echo "  -> now $NOW"
+            [ "$NOW" = "ENABLED" ] || { echo "::error::$NAME did not reach ENABLED"; exit 1; }
+          done
