@@ -22,7 +22,7 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
-const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload } = await import('./tools.js');
+const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload, handleXeroAttachmentContent } = await import('./tools.js');
 const { buildTokenDoc, bootstrapHash } = await import('./client.js');
 
 /**
@@ -291,4 +291,141 @@ test('handleXeroAttachmentUpload: dry_run also refuses before any network call, 
   const data = result.data as { error?: string; body: unknown };
   assert.equal(data.error, 'dry_run');
   assert.equal(data.body, null);
+});
+
+// -------------------------------------------------------------------------------------------
+// handleXeroAttachmentContent -- handler-level tests, mirroring handleXeroAttachmentUpload's
+// pattern above: deps-injected (no real Cosmos or Xero), each distinct outcome asserted by name so
+// none can silently collapse into another (the failure class this tool exists to prevent).
+// -------------------------------------------------------------------------------------------
+
+test('handleXeroAttachmentContent: neither fileName nor attachmentId -> identifier_required, no network call', async () => {
+  const deps = {
+    fetchImpl: (async (url: unknown) => {
+      throw new Error(`UNEXPECTED network call to ${String(url)} -- must refuse before ever calling Xero`);
+    }) as typeof fetch,
+    read: (async () => { throw new Error('read should never be called'); }) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: unknown; textContent: unknown };
+  assert.equal(data.error, 'identifier_required');
+  assert.equal(data.contentBase64, null);
+  assert.equal(data.textContent, null);
+});
+
+test('handleXeroAttachmentContent: BOTH fileName and attachmentId -> ambiguous_identifier, no network call', async () => {
+  const deps = {
+    fetchImpl: (async (url: unknown) => {
+      throw new Error(`UNEXPECTED network call to ${String(url)} -- must refuse before ever calling Xero`);
+    }) as typeof fetch,
+    read: (async () => { throw new Error('read should never be called'); }) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', fileName: 'a.pdf', attachmentId: 'att-1' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string };
+  assert.equal(data.error, 'ambiguous_identifier');
+});
+
+test('handleXeroAttachmentContent: binary content -> contentBase64 populated, textContent null', async () => {
+  const state = liveTokenState();
+  const original = Buffer.from('%PDF-1.4 fake pdf bytes with a NUL \x00 inside');
+  const deps = {
+    fetchImpl: (async (url: unknown) => {
+      const u = new URL(String(url));
+      assert.ok(u.pathname.endsWith('/ManualJournals/journal-1/Attachments/att-1'));
+      return new Response(original, { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }) as never,
+    create: (async () => { throw new Error('create should never be called -- the seeded token is already live'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', attachmentId: 'att-1' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: string | null; textContent: string | null; mimeType: string; bytes: number; sha256: string };
+  assert.equal(data.error, undefined);
+  assert.equal(data.textContent, null, 'binary content must not be presented as text');
+  assert.equal(data.contentBase64, original.toString('base64'));
+  assert.equal(Buffer.from(data.contentBase64 as string, 'base64').equals(original), true, 'round-trips to the exact original bytes');
+  assert.equal(data.mimeType, 'application/pdf');
+  assert.equal(data.bytes, original.length);
+  assert.equal(data.sha256, createHash('sha256').update(original).digest('hex'));
+});
+
+test('handleXeroAttachmentContent: genuinely TEXT content -> textContent populated, contentBase64 null (never both, avoids doubling an already-capped payload)', async () => {
+  const state = liveTokenState();
+  const original = Buffer.from('Date,Description,Amount\n2022-01-31,Reclass,1500.50\n', 'utf8');
+  const deps = {
+    fetchImpl: (async () => new Response(original, { status: 200, headers: { 'Content-Type': 'text/csv' } })) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'ManualJournals', guid: 'journal-1', fileName: 'workpaper.csv' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: string | null; textContent: string | null };
+  assert.equal(data.error, undefined);
+  assert.equal(data.contentBase64, null, 'a genuinely text file must not ALSO be duplicated as base64 (would double the response size near the cap)');
+  assert.equal(data.textContent, original.toString('utf8'));
+});
+
+test('handleXeroAttachmentContent: not_found and forbidden map to DISTINCT error codes -- never conflated', async () => {
+  const state = liveTokenState();
+  async function run(status: number) {
+    const deps = {
+      fetchImpl: (async () => new Response(JSON.stringify({ Message: 'x' }), { status })) as typeof fetch,
+      read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+      replace: (async () => { throw new Error('replace should never be called'); }) as never,
+      create: (async () => { throw new Error('create should never be called'); }) as never,
+    };
+    return handleXeroAttachmentContent(
+      { org: 'otchealth', endpoint: 'Invoices', guid: 'inv-1', attachmentId: 'att-1' },
+      fakeCtx('cfo', false),
+      deps,
+    );
+  }
+  const notFound = (await run(404)).data as { error?: string; http_status?: number };
+  const forbidden = (await run(403)).data as { error?: string; http_status?: number };
+  assert.equal(notFound.error, 'not_found');
+  assert.equal(notFound.http_status, 404);
+  assert.equal(forbidden.error, 'forbidden');
+  assert.equal(forbidden.http_status, 403);
+  assert.notEqual(notFound.error, forbidden.error, 'a 403 must never be reported the same way as a 404');
+});
+
+test('handleXeroAttachmentContent: too_large -> nothing downloaded/returned, cap + real size surfaced, distinct from every other error', async () => {
+  const state = liveTokenState();
+  const deps = {
+    fetchImpl: (async () => new Response(Buffer.alloc(10), { status: 200, headers: { 'Content-Length': '99999999', 'Content-Type': 'application/pdf' } })) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroAttachmentContent(
+    { org: 'otchealth', endpoint: 'Invoices', guid: 'inv-1', attachmentId: 'huge' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  const data = result.data as { error?: string; contentBase64: unknown; textContent: unknown; cap_bytes?: number };
+  assert.equal(data.error, 'content_too_large');
+  assert.equal(data.contentBase64, null);
+  assert.equal(data.textContent, null);
+  assert.equal(data.cap_bytes, 1024 * 1024);
+  assert.match(result.summary ?? '', /REFUSED/);
 });

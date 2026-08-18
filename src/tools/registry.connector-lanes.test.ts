@@ -58,6 +58,12 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   for (const xeroTool of ['xero_attachments', 'xero_request', 'xero_accounts', 'xero_get']) {
     assert.ok(set.has(xeroTool), `ship lane must still expose ${xeroTool}`);
   }
+  // Regression guard (this build): xero_attachment_content -- the READ counterpart to
+  // xero_attachment_upload above. xero_attachments only ever listed metadata; before this tool no
+  // path could fetch an attachment's actual bytes at all. Pinned by name, added in the SAME change
+  // that registers the tool, so it can never repeat the exact omission class every guard on this
+  // page already documents.
+  assert.ok(set.has('xero_attachment_content'), 'ship lane must expose xero_attachment_content (fetching real attachment bytes, not just metadata)');
   // Regression guard (2026-07-30, CFO round-2 mega-prompt): a Copilot review caught xero_gl_assemble
   // and xero_connections repeating the EXACT SAME omission class as xero_attachment_upload above --
   // both were built, registered, and EXEC_RING-gated, but never added here, so the CFO connector

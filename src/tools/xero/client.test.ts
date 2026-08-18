@@ -25,6 +25,8 @@ const {
   getOrgAccess,
   XERO_ORGS,
   isGrandfatheredForJournals,
+  xeroGetAttachmentContent,
+  MAX_ATTACHMENT_READ_BYTES,
 } = await import('./client.js');
 const { EXEC_RING } = await import('../kb/search-privileged.js');
 
@@ -425,11 +427,14 @@ test('SAFETY-CRITICAL (S2): every registered xero tool has its OWN in-handler ri
   // pagination/date-filter shim — Xero's /BankTransfers endpoint ignores both server-side), which no
   // longer counts against the helper's shared occurrence. Every registerTool call-site MUST keep its
   // own gate; this count is the trip-wire that forces that discipline on the next addition too.
+  // Bumped 20->21: +1 xero_attachment_content (the attachment-content READ path; its gate lives in
+  // handleXeroAttachmentContent, the same standalone-exported-handler pattern the count already
+  // relies on for xero_attachment_upload / handleXeroAttachmentUpload).
   const src = readFileSync(new URL('./tools.ts', import.meta.url), 'utf8');
   const tools = (src.match(/registerTool\(/g) || []).length;
   const gates = (src.match(/isXeroAllowed\(ctx\.callerAgent\)/g) || []).length;
   const refusals = (src.match(/return ringRefusal\(/g) || []).length;
-  assert.equal(tools, 20, 'expected exactly 20 registerTool call-sites (19 explicit + 1 shared helper)');
+  assert.equal(tools, 21, 'expected exactly 21 registerTool call-sites (20 explicit + 1 shared helper)');
   assert.equal(gates, tools, 'every registerTool call-site MUST call isXeroAllowed(ctx.callerAgent)');
   assert.equal(refusals, tools, 'every gate MUST return ringRefusal on a non-exec caller');
 });
@@ -459,4 +464,213 @@ test('a persist FAILURE never returns an unpersisted chain (fail-closed on durab
     /NOT returning an unpersisted chain/,
     'returning a token whose rotated refresh token was not saved would orphan the chain',
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// xeroGetAttachmentContent — the attachment CONTENT read path (the actual file bytes; this did not
+// exist before this change). Every distinct failure mode gets its OWN test so a future edit cannot
+// silently collapse two of them into the same outcome — the exact "a 403 read as not_found" failure
+// class that cost eleven finance documents being written up as missing elsewhere in this repo today
+// (see fetchBlobFromS3 in ../../legal/s3-blob-store.ts).
+// ---------------------------------------------------------------------------------------------
+
+function liveAttachmentDeps(fetchImpl: typeof fetch) {
+  const doc = buildTokenDoc({
+    org: 'otchealth',
+    refreshToken: 'rt-live',
+    accessToken: 'at-live',
+    expiresInSeconds: 1800,
+    tenantId: 'tenant-1',
+    tenantName: 'OTCHealth Inc.',
+    bootstrapHash: bootstrapHash(process.env.XERO_RT_OTCHEALTH as string),
+  });
+  return {
+    fetchImpl,
+    read: (async () => ({ doc, etag: 'etag-1' })) as never,
+    replace: (async () => { throw new Error('replace should never be called — the seeded token is already live'); }) as never,
+    create: (async () => { throw new Error('create should never be called — the seeded token is already live'); }) as never,
+  };
+}
+
+test('xeroGetAttachmentContent: BINARY INTEGRITY — bytes round-trip EXACTLY, including a NUL byte and invalid-UTF-8 sequences a .text()-based path would corrupt', async () => {
+  // 0x00 never appears in valid UTF-8 text; 0xff/0xfe are invalid UTF-8 continuation bytes that get
+  // replaced with U+FFFD by any text-decoding path. If this function ever regressed to routing
+  // through xeroGet's .text()-then-JSON.parse (see xeroGetAttachmentContent's header comment in
+  // client.ts), this exact buffer would come back different from what was sent.
+  const original = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0xff, 0xfe, 0x01, 0x02, 0x03, 0x7f, 0x80]);
+  let requestedUrl: string | null = null;
+  let requestedAccept: string | null = null;
+  const deps = liveAttachmentDeps((async (url: string | URL, init?: RequestInit) => {
+    requestedUrl = String(url);
+    requestedAccept = (init?.headers as Record<string, string> | undefined)?.Accept ?? null;
+    return new Response(original, {
+      status: 200,
+      headers: { 'Content-Type': 'application/pdf', 'Content-Length': String(original.length) },
+    });
+  }) as typeof fetch);
+
+  const outcome = await xeroGetAttachmentContent(
+    'otchealth',
+    'ManualJournals',
+    'journal-1',
+    { by: 'fileName', value: 'statement.pdf' },
+    { deps: deps as never },
+  );
+
+  assert.equal(outcome.kind, 'ok');
+  if (outcome.kind !== 'ok') return;
+  assert.deepEqual(outcome.bytes, original, 'every byte must round-trip identically — no UTF-8 re-encoding');
+  assert.equal(outcome.byteLength, original.length);
+  assert.equal(outcome.contentType, 'application/pdf');
+  // Never asks for JSON — that would get Xero's metadata response instead of the file (see the
+  // 'unexpected_content_type' outcome + xeroGetAttachmentContent's header comment).
+  assert.equal(requestedAccept, '*/*');
+  assert.ok(requestedUrl?.endsWith('/ManualJournals/journal-1/Attachments/statement.pdf'));
+});
+
+test('xeroGetAttachmentContent: ENCODING — a fileName with spaces and parentheses is encoded EXACTLY ONCE, never double-encoded (%2520)', async () => {
+  let requestedUrl: string | null = null;
+  const deps = liveAttachmentDeps((async (url: string | URL) => {
+    requestedUrl = String(url);
+    return new Response(Buffer.from('ok'), { status: 200, headers: { 'Content-Type': 'text/plain' } });
+  }) as typeof fetch);
+
+  await xeroGetAttachmentContent(
+    'otchealth',
+    'Invoices',
+    'inv-1',
+    { by: 'fileName', value: 'Signed Order (002).pdf' },
+    { deps: deps as never },
+  );
+
+  // encodeURIComponent leaves ( ) unescaped and turns the space into %20 — exactly once.
+  assert.ok(requestedUrl?.includes('/Attachments/Signed%20Order%20(002).pdf'), `unexpected URL: ${requestedUrl}`);
+  assert.equal(requestedUrl?.includes('%2520'), false, 'double-encoded: a real Xero server answers this with a silent 403');
+});
+
+test('xeroGetAttachmentContent: an attachmentId (a GUID) needs no encoding and passes through unchanged — the SAFER identifier', async () => {
+  let requestedUrl: string | null = null;
+  const deps = liveAttachmentDeps((async (url: string | URL) => {
+    requestedUrl = String(url);
+    return new Response(Buffer.from('ok'), { status: 200, headers: { 'Content-Type': 'text/plain' } });
+  }) as typeof fetch);
+
+  await xeroGetAttachmentContent(
+    'otchealth',
+    'Invoices',
+    'inv-1',
+    { by: 'attachmentId', value: 'b3d5e801-7d26-41cd-8128-39e88e96f713' },
+    { deps: deps as never },
+  );
+  assert.ok(requestedUrl?.endsWith('/Invoices/inv-1/Attachments/b3d5e801-7d26-41cd-8128-39e88e96f713'));
+});
+
+test('xeroGetAttachmentContent: 404 -> not_found, and it is a DISTINCT kind from 403', async () => {
+  const deps = liveAttachmentDeps((async () => new Response(JSON.stringify({ Message: 'Attachment not found' }), { status: 404 })) as typeof fetch);
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'missing' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'not_found');
+  if (outcome.kind === 'not_found') {
+    assert.equal(outcome.status, 404);
+    assert.match(outcome.detail, /not found/i);
+  }
+});
+
+test('xeroGetAttachmentContent: 403 -> forbidden, NEVER reported as not_found (the exact failure class this tool exists to prevent)', async () => {
+  const deps = liveAttachmentDeps((async () => new Response(JSON.stringify({ Message: 'Forbidden' }), { status: 403 })) as typeof fetch);
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'denied' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'forbidden');
+  assert.notEqual(outcome.kind, 'not_found');
+  if (outcome.kind === 'forbidden') assert.equal(outcome.status, 403);
+});
+
+test('xeroGetAttachmentContent: a 401 that persists after one forced-refresh retry is auth_failed, distinct from forbidden/not_found', async () => {
+  // Realistic shape: the TOKEN REFRESH itself succeeds (identity.xero.com is healthy — that failure
+  // mode belongs to getOrgAccess/refreshGrant and already propagates as a generic thrown error,
+  // exactly like every other client.ts caller), but the attachment-content endpoint keeps refusing
+  // with 401 even after the retry picks up a fresh access token. Two counters distinguish "did we
+  // actually retry" (contentAttempts) from "did we actually refresh" (grantAttempts).
+  let contentAttempts = 0;
+  let grantAttempts = 0;
+  const liveDoc = buildTokenDoc({
+    org: 'otchealth',
+    refreshToken: 'rt-live',
+    accessToken: 'at-live',
+    expiresInSeconds: 1800,
+    tenantId: 'tenant-1',
+    tenantName: 'OTCHealth Inc.',
+    bootstrapHash: bootstrapHash(process.env.XERO_RT_OTCHEALTH as string),
+  });
+  // Unlike liveAttachmentDeps, forceRefresh:true DOES persist here (that's the whole point of this
+  // test) — so replace must actually succeed, not throw.
+  const deps = {
+    fetchImpl: (async (url: string | URL) => {
+      if (isHost(url, 'identity.xero.com')) {
+        grantAttempts += 1;
+        return grantResponse(grantAttempts);
+      }
+      contentAttempts += 1;
+      return new Response(JSON.stringify({ Message: 'Unauthorized' }), { status: 401 });
+    }) as typeof fetch,
+    read: (async () => ({ doc: liveDoc, etag: 'etag-1' })) as never,
+    replace: (async () => ({ ok: true, status: 200, body: {}, etag: 'etag-2' })) as never,
+    create: (async () => { throw new Error('create should never be called — a doc already exists'); }) as never,
+  };
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'x' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'auth_failed');
+  assert.equal(contentAttempts, 2, 'exactly one forced-refresh retry against the content endpoint, matching xeroGet/xeroRequest');
+  assert.equal(grantAttempts, 1, 'the retry actually forced a fresh token refresh, not a second no-op attempt with the same stale token');
+});
+
+test('xeroGetAttachmentContent: TOO LARGE via a declared Content-Length — refuses BEFORE downloading, never truncates', async () => {
+  let bodyConsumed = false;
+  const big = MAX_ATTACHMENT_READ_BYTES + 1;
+  const deps = liveAttachmentDeps((async () => {
+    const r = new Response(Buffer.alloc(10), {
+      status: 200,
+      headers: { 'Content-Length': String(big), 'Content-Type': 'application/pdf' },
+    });
+    const realArrayBuffer = r.arrayBuffer.bind(r);
+    r.arrayBuffer = async () => {
+      bodyConsumed = true;
+      return realArrayBuffer();
+    };
+    return r;
+  }) as typeof fetch);
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'huge' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'too_large');
+  if (outcome.kind === 'too_large') {
+    assert.equal(outcome.contentLengthHeader, String(big));
+    assert.equal(outcome.actualBytes, null, 'refused from the header alone — the body was never read');
+    assert.equal(outcome.cap, MAX_ATTACHMENT_READ_BYTES);
+  }
+  assert.equal(bodyConsumed, false, 'must refuse BEFORE calling arrayBuffer() on an oversized declared length');
+});
+
+test('xeroGetAttachmentContent: TOO LARGE with no/understated Content-Length — caught AFTER download as defense in depth, reports the REAL size, never returns a truncated prefix', async () => {
+  const big = Buffer.alloc(MAX_ATTACHMENT_READ_BYTES + 500, 0x41);
+  const deps = liveAttachmentDeps((async () => new Response(big, { status: 200, headers: { 'Content-Type': 'application/pdf' } })) as typeof fetch);
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'huge2' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'too_large');
+  if (outcome.kind === 'too_large') {
+    assert.equal(outcome.actualBytes, big.length, 'the real downloaded size, not a guess');
+    assert.equal(outcome.cap, MAX_ATTACHMENT_READ_BYTES);
+  }
+});
+
+test('xeroGetAttachmentContent: a 2xx application/json body is an unexpected_content_type anomaly, never silently handed back labeled as "the file"', async () => {
+  const jsonBody = JSON.stringify({ AttachmentID: 'att-1', FileName: 'statement.pdf', ContentLength: 12345 });
+  const deps = liveAttachmentDeps((async () => new Response(jsonBody, { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } })) as typeof fetch);
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'weird' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'unexpected_content_type');
+  if (outcome.kind === 'unexpected_content_type') {
+    assert.match(outcome.contentType, /application\/json/);
+    assert.match(outcome.bodyPreview, /AttachmentID/);
+  }
+});
+
+test('xeroGetAttachmentContent: any other non-2xx status is xero_error, distinct from every named case above', async () => {
+  const deps = liveAttachmentDeps((async () => new Response('Internal Server Error', { status: 500 })) as typeof fetch);
+  const outcome = await xeroGetAttachmentContent('otchealth', 'Invoices', 'inv-1', { by: 'attachmentId', value: 'x' }, { deps: deps as never });
+  assert.equal(outcome.kind, 'xero_error');
+  if (outcome.kind === 'xero_error') assert.equal(outcome.status, 500);
 });

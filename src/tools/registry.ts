@@ -200,6 +200,13 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'xero_orgs', 'xero_report', 'xero_accounts', 'xero_manual_journals', 'xero_bank_transactions', 'xero_invoices',
   'xero_get', 'xero_contacts', 'xero_payments', 'xero_credit_notes', 'xero_bank_transfers', 'xero_budgets',
   'xero_settings', 'xero_attachments', 'xero_payroll', 'xero_assets', 'xero_projects', 'xero_files',
+  // xero_attachment_content (this build): the READ counterpart to xero_attachment_upload below —
+  // xero_attachments only ever listed metadata; this fetches the actual bytes. Added in the SAME
+  // change that registers the tool, deliberately, to not repeat the omission class documented right
+  // below (xero_attachment_upload/catalog_probe/kb_get_document/mail_archive_* were all built,
+  // registered, and EXEC_RING-gated, but invisible on this connector surface until a later PR added
+  // them here too).
+  'xero_attachment_content',
   'xero_request', // the write lane (POST/PUT/DELETE); execution stays EXEC_RING-gated in-handler
   // xero_attachment_upload (P0-1, 2026-07-30): a real production gap found by the CFO agent -- the
   // tool was fully built, registered, and reachable via a direct minted-token MCP call, but was
