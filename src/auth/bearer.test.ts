@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 // reply object carry the right header," which only exists at the HTTP-reply layer.
 
 const CONNECTOR_TOKEN = 'a'.repeat(32);
+const M365_CTO_TOKEN = 'm'.repeat(40);
 
 before(() => {
   const required: Record<string, string> = {
@@ -22,6 +23,10 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: CONNECTOR_TOKEN,
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    // Set before the FIRST dynamic import of bearer.js in this file, since bearer.ts's
+    // `m365StaticAgentTokens()` reads `env.M365_CTO_MCP_TOKEN` via the module-level `loadEnv()`
+    // call, which only ever runs once per process.
+    M365_CTO_MCP_TOKEN: M365_CTO_TOKEN,
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
@@ -183,4 +188,122 @@ test('SECURITY: a pathological all-whitespace bearer header parses in linear tim
   // Generous bound: the assertion is "not catastrophic", not a microbenchmark, so it stays stable
   // on a loaded CI box while still failing loudly if quadratic behaviour ever returns.
   assert.ok(ms < 1000, `expected linear-time parse, took ${ms.toFixed(1)}ms`);
+});
+
+// ── M365 static per-lane token: header path (2026-08-18, HIGH security finding) ──────────────────
+// build-agents.mjs currently ships this token as a `?m365_dev_token=<token>` query parameter on
+// spec.url, because the M365 declarative-agent RemoteMCPServer runtime (schema v2.4) genuinely has
+// no way to deliver a static, non-interactive credential over a header: `auth.type: "None"` sends
+// no header of any kind (confirmed: no headers field exists on the MCP server spec object, and
+// Microsoft's own docs at
+// https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication and
+// https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication-api-key
+// state explicitly, twice, that MCP plugins do not support API-key authentication --
+// `ApiKeyPluginVault` is a valid enum value in the schema but is not functionally wired up for a
+// RemoteMCPServer runtime); `auth.type: "OAuthPluginVault"`, the one MCP-supported scheme that DOES
+// deliver a header, is a real per-user interactive OAuth 2.0 authorization-code flow requiring
+// manual Teams Developer Portal registration per agent -- a materially different mechanism from "the
+// same shared secret, just in a header," and a separate Matt-gated architecture decision, not a
+// drop-in fix here.
+//
+// What THIS repo controls is the server side: validateBearer already treats the M365 static tokens
+// identically regardless of how they arrive (a real `Authorization: Bearer` header, or the
+// synthetic one requireConnectorAuth builds from the query-string fallback) -- these tests turn
+// that from an incidental consequence of shared code into an explicitly pinned, tested contract, so
+// the moment build-agents.mjs (or any other M365 caller) CAN send a real header, the server side
+// needs zero further change to accept it. They also pin the deliberate, explicit decision to KEEP
+// accepting the query-string fallback: rejecting it outright would lock out all six already-
+// published M365 agents with no replacement mechanism available today.
+test('M365: a static per-lane token presented via a REAL Authorization header authenticates, with m365_static_auth true', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply);
+    if (!ctx) return;
+    return reply.send({ caller_agent: ctx.caller_agent, m365_static_auth: ctx.m365_static_auth });
+  });
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/mcp',
+    headers: { authorization: `Bearer ${M365_CTO_TOKEN}` },
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.caller_agent, 'cto');
+  assert.equal(body.m365_static_auth, true);
+
+  await app.close();
+});
+
+test('M365: the SAME token via the ?m365_dev_token= query-parameter fallback still authenticates (deliberate transition decision, pinned)', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply);
+    if (!ctx) return;
+    return reply.send({ caller_agent: ctx.caller_agent, m365_static_auth: ctx.m365_static_auth });
+  });
+
+  const res = await app.inject({ method: 'POST', url: `/mcp?m365_dev_token=${M365_CTO_TOKEN}` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.caller_agent, 'cto');
+  assert.equal(body.m365_static_auth, true);
+
+  await app.close();
+});
+
+test('M365: a real Authorization header takes precedence over a mismatched query-parameter token', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply);
+    if (!ctx) return;
+    return reply.send({ caller_agent: ctx.caller_agent });
+  });
+
+  // A valid header token alongside a garbage query token must still succeed on the header's
+  // identity -- requireConnectorAuth checks the header first and only falls back to the query
+  // string when the header itself did not authenticate.
+  const res = await app.inject({
+    method: 'POST',
+    url: '/mcp?m365_dev_token=not-a-real-token-at-all',
+    headers: { authorization: `Bearer ${M365_CTO_TOKEN}` },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().caller_agent, 'cto');
+
+  await app.close();
+});
+
+test('M365: a forged token is rejected on both the header path and the query-parameter path', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply);
+    if (!ctx) return;
+    return reply.send({ ok: true });
+  });
+
+  const forged = 'x'.repeat(40);
+  const viaHeader = await app.inject({
+    method: 'POST',
+    url: '/mcp',
+    headers: { authorization: `Bearer ${forged}` },
+  });
+  assert.equal(viaHeader.statusCode, 401);
+
+  const viaQuery = await app.inject({ method: 'POST', url: `/mcp?m365_dev_token=${forged}` });
+  assert.equal(viaQuery.statusCode, 401);
+
+  await app.close();
 });
