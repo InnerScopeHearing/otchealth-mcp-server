@@ -527,6 +527,22 @@ const EnvSchema = z.object({
   // Phase 2: Intercom
   INTERCOM_ACCESS_TOKEN: z.string().optional().default(''),
 
+  // Hyperagent broker. ONE account-wide delegated credential, brokered per lane by
+  // src/tools/hyperagent/ring.ts, because Hyperagent's own MCP has no per-agent authorization
+  // ("a connected client ... can only reach the agents you can") and no client_credentials grant,
+  // so a server cannot self-authenticate and per-agent connections would be N keys to one building.
+  HYPERAGENT_CLIENT_ID: z.string().optional().default(''),
+  HYPERAGENT_CLIENT_SECRET: z.string().optional().default(''),
+  // Captured once from a browser consent with the offline_access scope. Same shape as the OneDrive
+  // delegated token. If the provider rotates it on use, client.ts warns loudly (see rotationPending).
+  HYPERAGENT_REFRESH_TOKEN: z.string().optional().default(''),
+  // Allowlist: 'lane=agentId,agentId;lane=agentId'. A lane absent here reaches NOTHING.
+  HYPERAGENT_LANE_AGENTS: z.string().optional().default(''),
+  // Classification: 'agentId=personal-legal|exec|general;...'. An agent absent here is `unknown`,
+  // which every lane is refused — deny-by-default, because the real agent ids live on Matt's
+  // account and guessing toward permissive is how a privileged thread leaks.
+  HYPERAGENT_AGENT_CLASSES: z.string().optional().default(''),
+
   // Phase 3: Netlify (INND site + portfolio deploy visibility, read-only)
   NETLIFY_AUTH_TOKEN: z.string().optional().default(''),
 
