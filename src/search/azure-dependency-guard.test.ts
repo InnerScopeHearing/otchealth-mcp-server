@@ -407,8 +407,12 @@ const ENV_VAR_READ_ALLOWED: Readonly<Record<string, string>> = Object.freeze({
   'azure/foundry.ts': 'the designated Foundry adapter -- embeddingsTarget()/chatTarget() ARE the EMBEDDINGS_PROVIDER/LLM_PROVIDER switch; every other caller reaches Azure OpenAI only through this file',
   'azure/arm-client.ts':
     'Azure Resource Manager CONTROL-PLANE client (search-SERVICE administration: listing/minting admin+query keys, resource-group-scoped operations). Inherently Azure-specific infrastructure management with no SEARCH_BACKEND-equivalent concept -- there is no "AWS ARM" to dispatch to -- so this is a different kind of dependency than the query-time data-path this file otherwise guards, not an unreviewed exception.',
-  'server/deep-health.ts':
-    'FLAGGED, not endorsed -- outside this fix\'s ownership (src/server/), reported separately rather than fixed here. A deploy-gate live-reachability probe that deliberately reads process.env directly (documented in its own header, for freshness -- loadEnv() caches for the process lifetime) but hardcodes Azure\'s own endpoints regardless of SEARCH_BACKEND/STATE_BACKEND, so post-cutover it will probe dead Azure endpoints instead of the backend actually in use. Allow-listed so this guard stays a true CI gate today; its owner should repoint it at searchConfigured()/hybridSearch() (or an equivalent STATE_BACKEND-aware probe) rather than raw Azure env vars.',
+  // 'server/deep-health.ts' REMOVED 2026-08-18: it was flagged here as a known, un-endorsed
+  // violation (a deploy-gate probe that hardcoded Azure endpoints regardless of SEARCH_BACKEND/
+  // BLOB_BACKEND/EMBEDDINGS_PROVIDER/LLM_PROVIDER). It has been rewritten to read those selectors
+  // directly and route only to the ACTIVE backend (OpenSearch/S3/OpenAI), and no longer reads a
+  // single AZURE_SEARCH_*/AZURE_BLOB_*/FOUNDRY_*/AZURE_OPENAI_* env var -- see its own header. The
+  // exemption is gone because the violation it excused is gone, not because the file was deleted.
 });
 
 test('no file outside the designated adapters reads a search/blob/embeddings/chat backend env var directly', () => {

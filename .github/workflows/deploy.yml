@@ -187,13 +187,28 @@ jobs:
         id: health
 
       # Deep dependency gate: /health status + tool_count alone say nothing about whether the
-      # GREEN revision can actually REACH Cosmos / Azure AI Search / Foundry, a build with a dead
-      # downstream endpoint still returns /health status "ok". /health/deep runs one bounded
-      # (2s-timeout) reachability probe per CONFIGURED dependency; an unconfigured optional
-      # dependency reports 'unconfigured' and never fails this gate, only a real 'down' does.
-      # Requires the ADMIN_REVOKE_TOKEN repo secret (the same bearer already documented in
-      # README.md's env-var table and used against POST /admin/revoke); it is never printed.
-      - name: Assert GREEN deep-health (Cosmos / Search / Foundry reachability)
+      # GREEN revision can actually REACH its ACTIVE dependencies (RDS state plane + agent inbox,
+      # OpenSearch, S3, OpenAI embeddings/chat, the active web-search provider, SSM, OAuth
+      # identity), a build with a dead downstream endpoint still returns /health status "ok".
+      # /health/deep runs one bounded (~2.5s-timeout) reachability probe per dependency, reading
+      # the SAME *_BACKEND/*_PROVIDER selectors the running code itself dispatches on (see
+      # deep-health.ts's own header) -- 2026-08-18 rewrite: the previous version of this step
+      # parsed a fixed {cosmos, search, foundry} shape that hardcoded three Azure endpoints
+      # regardless of which backend was actually selected; those fields no longer exist in the
+      # response at all post-cutover, so the old parser's `down` filter would always find zero
+      # matches and this gate would report "GREEN deep-health ok" unconditionally -- a gate that
+      # always passes is worse than no gate, because it looks like real coverage. The new response
+      # is `{ok: boolean, probes: {name: {status, required, ran, backend, error?}}}`; `ok` is
+      # derived server-side purely from each probe's structured `required`/`status` fields (see
+      # deep-health.ts), and this step re-derives the identical verdict independently from
+      # `probes` rather than trusting `ok` alone, so a mismatch between the two (the exact
+      # structured-vs-summary drift class flagged as a recorded fleet pitfall) fails loudly instead
+      # of silently trusting whichever field happens to be checked. A probe with `required: false`
+      # (currently only `sentry`, clearly optional observability) never fails this gate regardless
+      # of its status. Requires the ADMIN_REVOKE_TOKEN repo secret (the same bearer already
+      # documented in README.md's env-var table and used against POST /admin/revoke); it is never
+      # printed.
+      - name: Assert GREEN deep-health (active-backend reachability)
         env:
           ADMIN_REVOKE_TOKEN: ${{ secrets.ADMIN_REVOKE_TOKEN }}
         run: |
@@ -209,17 +224,30 @@ jobs:
           cat /tmp/hd.json
           node -e '
             const h = require("/tmp/hd.json");
-            const deps = { cosmos: h.cosmos, search: h.search, foundry: h.foundry };
-            const down = Object.entries(deps).filter(([, v]) => v === "down");
-            if (down.length > 0) {
-              console.error(`REGRESSION: dependency DOWN on GREEN: ${down.map(([k]) => k).join(", ")}`);
-              console.error(JSON.stringify(deps));
+            const probes = h.probes;
+            if (typeof h.ok !== "boolean" || !probes || typeof probes !== "object") {
+              console.error("REGRESSION: /health/deep response is missing the expected {ok, probes} shape -- cannot verify dependency health at all.");
+              console.error(JSON.stringify(h).slice(0, 2000));
               process.exit(1);
             }
-            console.log(`GREEN deep-health ok: ${JSON.stringify(deps)} (governance_mode=${h.governance_mode})`);
+            const entries = Object.entries(probes);
+            const failing = entries.filter(([, p]) => p && p.required && p.status !== "ok");
+            const derivedOk = failing.length === 0;
+            if (derivedOk !== h.ok) {
+              console.error(`REGRESSION: server-reported ok=${h.ok} disagrees with the independently-derived verdict (${derivedOk}) from the same probes -- structured/summary drift, treat as a failure.`);
+              console.error(JSON.stringify(probes));
+              process.exit(1);
+            }
+            if (failing.length > 0) {
+              console.error(`REGRESSION: required dependency probe(s) failed on GREEN: ${failing.map(([k, p]) => `${k}=${p.status}${p.backend ? ` (backend=${p.backend})` : ""}${p.error ? `: ${p.error}` : ""}`).join(" | ")}`);
+              console.error(JSON.stringify(probes));
+              process.exit(1);
+            }
+            const summary = Object.fromEntries(entries.map(([k, p]) => [k, `${p.status}${p.required ? "" : "(optional)"}`]));
+            console.log(`GREEN deep-health ok: ${JSON.stringify(summary)}`);
           '
           if [ "$code" != "200" ] && [ "$code" != "503" ]; then
-            echo "::error::/health/deep returned unexpected HTTP ${code} (expected 200 all-ok or 503 with a dependency down, both parsed above)."
+            echo "::error::/health/deep returned unexpected HTTP ${code} (expected 200 all-ok or 503 with a required dependency down, both parsed above)."
             exit 1
           fi
 

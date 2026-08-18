@@ -69,13 +69,19 @@ export function registerHealth(app: FastifyInstance): void {
   // function (tests, the deep-health route) keeps its current signature.
   app.get('/health', async () => ({ ...buildHealthPayload(), revision: await revisionInfo() }));
 
-  // GET /health/deep: bounded reachability probe of every CONFIGURED downstream dependency
-  // (Cosmos, Azure AI Search, Foundry). Distinct from /health: this route
-  // is intentionally NOT on the fast path (it makes real network calls, each capped at 2s), so it
-  // is gated to internal/CI callers via the existing ADMIN_REVOKE_TOKEN bearer (the same pattern
-  // /admin/* already uses) rather than left open to public polling, which would let an outside
-  // caller hammer Cosmos/Search/Foundry for free. It is NOT in the /health rate-limit allowList,
-  // so it stays subject to the global inbound limit too.
+  // GET /health/deep: bounded, BACKEND-AWARE reachability probe of every ACTIVE downstream
+  // dependency (RDS state plane + agent inbox, OpenSearch, S3, OpenAI embeddings/chat, the active
+  // web-search provider, SSM, OAuth identity, plus optional services) -- see deep-health.ts's own
+  // header for the full four-state contract and why it reads the *_BACKEND/*_PROVIDER selectors
+  // rather than hardcoding a provider. Distinct from /health: this route is intentionally NOT on
+  // the fast path (it makes real network calls, each capped at ~2.5s), so it is gated to
+  // internal/CI callers via the existing ADMIN_REVOKE_TOKEN bearer (the same pattern /admin/*
+  // already uses) rather than left open to public polling, which would let an outside caller
+  // hammer these dependencies for free. It is NOT in the /health rate-limit allowList, so it stays
+  // subject to the global inbound limit too. The response's top-level `ok` boolean (derived purely
+  // from each probe's structured `required`/`status` fields) is the only field a caller needs to
+  // gate on; the HTTP status code mirrors it 1:1 so a client that reads only the status code sees
+  // the identical verdict as one that parses the body.
   app.get('/health/deep', async (request, reply) => {
     if (!validateAdminToken(request.headers['authorization'])) {
       return reply.code(401).send({
@@ -83,10 +89,7 @@ export function registerHealth(app: FastifyInstance): void {
         message: 'Missing or invalid admin token. Provide Authorization: Bearer <ADMIN_REVOKE_TOKEN>.',
       });
     }
-    const deps = await probeDependencies();
-    const anyDown = Object.values(deps).some((v) => v === 'down');
-    return reply.code(anyDown ? 503 : 200).send({
-      ...deps,
-    });
+    const report = await probeDependencies();
+    return reply.code(report.ok ? 200 : 503).send(report);
   });
 }

@@ -244,8 +244,12 @@ const COSMOS_ENV_VAR_READ_RE = /\.(COSMOS_\w+)\b|\[['"](COSMOS_\w+)['"]\]/;
  *  every entry is a place STATE_BACKEND cannot reach. */
 const COSMOS_ENV_VAR_READ_ALLOWED: Readonly<Record<string, string>> = Object.freeze({
   'agentstate/cosmos.ts': 'the designated Cosmos adapter -- agentstate/store.ts (the dispatcher) reaches Azure only through this file',
-  'server/deep-health.ts':
-    'FLAGGED, not endorsed -- outside this fix\'s ownership (src/server/), reported separately rather than fixed here. Same file as the identical allow-list entry in search/azure-dependency-guard.test.ts: a deploy-gate live-reachability probe that deliberately reads process.env directly (documented in its own header, for freshness) but hardcodes Azure\'s own COSMOS_ENDPOINT/COSMOS_KEY regardless of STATE_BACKEND, so post-cutover it will probe a dependency that may no longer be the one in use. Allow-listed so this guard stays a true CI gate today; its owner should repoint it at agentstate/store.ts\'s isConfigured()/dispatch surface (or an equivalent STATE_BACKEND-aware probe) rather than raw Cosmos env vars.',
+  // 'server/deep-health.ts' REMOVED 2026-08-18: it was flagged here as a known, un-endorsed
+  // violation (a deploy-gate probe that hardcoded COSMOS_ENDPOINT/COSMOS_KEY regardless of
+  // STATE_BACKEND). It has been rewritten to read STATE_BACKEND directly and route only to the
+  // ACTIVE backend (RDS Postgres), and no longer reads a single COSMOS_* env var -- see its own
+  // header. The exemption is gone because the violation it excused is gone, not because the file
+  // was deleted.
 });
 
 test('no production file outside the designated Cosmos adapter reads COSMOS_* directly', () => {
