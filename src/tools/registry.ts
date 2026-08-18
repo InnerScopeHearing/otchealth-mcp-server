@@ -40,6 +40,7 @@ import { evaluateJitDoctrine } from '../safety/jit-doctrine.js';
 import { captureGatewayEvent } from '../telemetry/gateway-ops.js';
 import {
   parseToolCatalogCurationMode,
+  parseCurateLaneOverrides,
   evaluateCatalogCuration,
   recordLaneToolUsage,
 } from '../safety/tool-catalog-curation.js';
@@ -612,12 +613,17 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // (auth/bearer.ts). DEFAULT (TOOL_CATALOG_CURATION_MODE unset, or 'report', or 'off') NEVER filters
   // here -- evaluateCatalogCuration()'s advertise is only ever false when the mode is explicitly
   // 'curate' AND the lane is a KNOWN internal lane AND the tool is outside that lane's seed allowlist
-  // (config/lane-toolsets.ts). See safety/tool-catalog-curation.ts for the full mode contract.
+  // (config/lane-toolsets.ts), OR when mode='curate-m365-only' AND (the caller is M365-authenticated
+  // OR its lane is named in TOOL_CATALOG_CURATE_LANES). See safety/tool-catalog-curation.ts for the
+  // full mode contract, and its header for why "coo's tools/list is small, cro's is not" is NOT this
+  // gate treating cro inconsistently -- coo's narrow figure comes from the UNRELATED connector-surface
+  // path just above (EXTERNAL_READONLY_TOOLSET), never from this mode at all.
   const catalogCurationMode = parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE);
+  const curateLaneOverrides = parseCurateLaneOverrides(process.env.TOOL_CATALOG_CURATE_LANES);
   const laneForThisTool = currentCallerAgent();
   const catalogCuration = connectorSurfaceForThisTool
     ? null
-    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth());
+    : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth(), curateLaneOverrides);
   if (catalogCuration && !catalogCuration.advertise) return;
   // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
   // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
@@ -741,6 +747,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             callerAgent,
             canonicalName,
             isM365StaticAuth(),
+            parseCurateLaneOverrides(process.env.TOOL_CATALOG_CURATE_LANES),
           ),
           callerAgent,
           canonicalName,

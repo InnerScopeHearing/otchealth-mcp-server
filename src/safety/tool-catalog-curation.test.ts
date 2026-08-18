@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseToolCatalogCurationMode,
+  parseCurateLaneOverrides,
   evaluateCatalogCuration,
   recordLaneToolUsage,
 } from './tool-catalog-curation.js';
@@ -99,6 +100,79 @@ test('evaluateCatalogCuration: isM365 defaults to false when omitted (back-compa
 test('evaluateCatalogCuration: mode=curate (the unscoped mode) still curates a caller even when isM365=false -- curate-m365-only is the ONLY mode conditioned on isM365', () => {
   const d = evaluateCatalogCuration('curate', 'developer', 'azure_job_execute', false);
   assert.equal(d.advertise, false, 'plain curate mode must remain unconditional on isM365, unchanged from before this feature');
+});
+
+// parseCurateLaneOverrides / evaluateCatalogCuration's laneOverrides parameter (2026-08-18, "cro
+// advertises tools it can never use" finding -- see this file's header for the full root-cause
+// writeup of why coo's tools/list is small while cro's is not, and why that is NOT this decision
+// core treating cro inconsistently).
+
+test('parseCurateLaneOverrides: unset/empty input yields an empty set (default: zero behavior change)', () => {
+  assert.deepEqual(parseCurateLaneOverrides(undefined), new Set());
+  assert.deepEqual(parseCurateLaneOverrides(''), new Set());
+  assert.deepEqual(parseCurateLaneOverrides('   '), new Set());
+});
+
+test('parseCurateLaneOverrides: a single known lane is recognized, trimmed and lower-cased', () => {
+  assert.deepEqual(parseCurateLaneOverrides('cro'), new Set(['cro']));
+  assert.deepEqual(parseCurateLaneOverrides(' CRO '), new Set(['cro']));
+});
+
+test('parseCurateLaneOverrides: multiple comma-separated known lanes are all collected', () => {
+  assert.deepEqual(parseCurateLaneOverrides('cro,cfo, clo-personal'), new Set(['cro', 'cfo', 'clo-personal']));
+});
+
+test('parseCurateLaneOverrides: an unknown lane name is silently dropped, not thrown, and does not poison the rest of the list', () => {
+  assert.deepEqual(parseCurateLaneOverrides('cro,not-a-real-lane,cfo'), new Set(['cro', 'cfo']));
+  assert.deepEqual(parseCurateLaneOverrides('totally-bogus'), new Set());
+});
+
+test('parseCurateLaneOverrides: stray commas / blank entries are ignored', () => {
+  assert.deepEqual(parseCurateLaneOverrides('cro,,cfo,'), new Set(['cro', 'cfo']));
+});
+
+test('evaluateCatalogCuration: laneOverrides defaults to an empty set when omitted -- every pre-existing call site (5-arg or fewer) is unaffected', () => {
+  const d = evaluateCatalogCuration('curate-m365-only', 'cro', 'azure_job_execute', false);
+  assert.equal(d.advertise, true, 'no laneOverrides argument at all must behave exactly as before this parameter existed');
+});
+
+test('evaluateCatalogCuration: curate-m365-only + non-M365 + the lane IS in laneOverrides -- now curated, THE FIX', () => {
+  const d = evaluateCatalogCuration('curate-m365-only', 'cro', 'azure_job_execute', false, new Set(['cro']));
+  assert.equal(d.advertise, false, 'an out-of-seed tool must be withheld once cro is explicitly opted in, even for a non-M365 caller');
+  assert.equal(d.inSeedAllowlist, false);
+});
+
+test('evaluateCatalogCuration: curate-m365-only + non-M365 + the lane is NOT in laneOverrides -- still fully uncurated (no blast radius to a lane the operator did not name)', () => {
+  const d = evaluateCatalogCuration('curate-m365-only', 'cfo', 'azure_job_execute', false, new Set(['cro']));
+  assert.equal(d.advertise, true, 'opting in cro must not silently opt in cfo too');
+});
+
+test('evaluateCatalogCuration: curate-m365-only + isM365=true is UNCHANGED by laneOverrides -- the M365 gate alone is still sufficient, exactly as before', () => {
+  const withEmptyOverrides = evaluateCatalogCuration('curate-m365-only', 'developer', 'azure_job_execute', true, new Set());
+  const withUnrelatedOverride = evaluateCatalogCuration('curate-m365-only', 'developer', 'azure_job_execute', true, new Set(['cro']));
+  assert.equal(withEmptyOverrides.advertise, false);
+  assert.equal(withUnrelatedOverride.advertise, false);
+  assert.deepEqual(withEmptyOverrides, withUnrelatedOverride, 'an M365 caller curates identically regardless of laneOverrides content');
+});
+
+test('evaluateCatalogCuration: an in-seed tool on an opted-in lane still advertises (laneOverrides narrows to the seed list, it does not blank it)', () => {
+  const d = evaluateCatalogCuration('curate-m365-only', 'cro', 'brain_search', false, new Set(['cro']));
+  assert.equal(d.advertise, true);
+  assert.equal(d.inSeedAllowlist, true);
+});
+
+test('evaluateCatalogCuration: laneOverrides has NO effect under mode=curate (already unconditional) or mode=off/report (never curate)', () => {
+  for (const mode of ['off', 'report', 'curate'] as const) {
+    const withOverride = evaluateCatalogCuration(mode, 'cro', 'azure_job_execute', false, new Set(['cro']));
+    const withoutOverride = evaluateCatalogCuration(mode, 'cro', 'azure_job_execute', false, new Set());
+    assert.deepEqual(withOverride, withoutOverride, `mode=${mode}: laneOverrides must not change the outcome`);
+  }
+});
+
+test('evaluateCatalogCuration: laneOverrides never widens an UNKNOWN lane -- fail-open still holds', () => {
+  const d = evaluateCatalogCuration('curate-m365-only', 'some-unscoped-lane', 'azure_job_execute', false, new Set(['some-unscoped-lane']));
+  assert.equal(d.advertise, true, 'an unknown lane is never curated in any mode, even if named in laneOverrides (isKnownInternalLane gates first)');
+  assert.equal(d.inSeedAllowlist, null);
 });
 
 test('recordLaneToolUsage: mode=off never throws and is inert (nothing to assert on the network side, covered by gateway-ops tests)', () => {

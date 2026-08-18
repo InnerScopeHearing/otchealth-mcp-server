@@ -29,6 +29,7 @@ before(() => {
 
 afterEach(() => {
   delete process.env.TOOL_CATALOG_CURATION_MODE;
+  delete process.env.TOOL_CATALOG_CURATE_LANES;
 });
 
 async function registeredToolCount(lane: string, isM365 = false): Promise<number> {
@@ -139,6 +140,86 @@ test('TOOL_CATALOG_CURATION_MODE=curate-m365-only -- THE CORE SAFETY PROPERTY: a
     'a non-M365 caller (e.g. a live Claude Code exec session) on the developer lane must see the FULL catalog even while curate-m365-only is active -- this is the entire reason this mode exists over plain curate',
   );
   assert.ok(developerNonM365Count >= 800);
+});
+
+// TOOL_CATALOG_CURATE_LANES (2026-08-18, "cro advertises tools it can never use" finding): the
+// real-registration lock for the per-lane opt-in that lets curate-m365-only narrow a specific lane's
+// PLAIN client_credentials (non-M365) traffic too, without touching any other lane's behavior --
+// i.e. without flipping the deployed mode to plain 'curate', which would narrow every lane at once.
+
+test('TOOL_CATALOG_CURATE_LANES: a non-M365 caller on a lane NAMED in the override IS narrowed under curate-m365-only', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  process.env.TOOL_CATALOG_CURATE_LANES = 'developer';
+  const fullCount = await registeredToolCount('some-unscoped-lane', false);
+  const narrowedCount = await registeredToolCount('developer', false);
+  assert.ok(
+    narrowedCount < fullCount,
+    `a non-M365 'developer' caller should be narrowed once 'developer' is named in TOOL_CATALOG_CURATE_LANES (got ${narrowedCount} vs ${fullCount})`,
+  );
+  assert.ok(narrowedCount > 0, 'the opted-in lane should still see a non-empty toolset');
+});
+
+test('TOOL_CATALOG_CURATE_LANES: naming ONE lane does not narrow any OTHER known lane (no blast radius beyond the named lane)', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  process.env.TOOL_CATALOG_CURATE_LANES = 'developer';
+  const fullCount = await registeredToolCount('some-unscoped-lane', false);
+  const cfoCount = await registeredToolCount('cfo', false); // known internal lane, NOT named in the override
+  assert.equal(
+    cfoCount,
+    fullCount,
+    `naming 'developer' in TOOL_CATALOG_CURATE_LANES must not narrow 'cfo' too -- a non-M365 cfo caller should stay fully uncurated (got ${cfoCount} vs ${fullCount})`,
+  );
+});
+
+test('TOOL_CATALOG_CURATE_LANES: multiple comma-separated lanes are ALL honored', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  process.env.TOOL_CATALOG_CURATE_LANES = 'developer,cfo';
+  const fullCount = await registeredToolCount('some-unscoped-lane', false);
+  const developerCount = await registeredToolCount('developer', false);
+  const cfoCount = await registeredToolCount('cfo', false);
+  assert.ok(developerCount < fullCount, 'developer must be narrowed');
+  assert.ok(cfoCount < fullCount, 'cfo must be narrowed too -- both names in the csv take effect');
+});
+
+test('TOOL_CATALOG_CURATE_LANES: unset (the default) changes nothing -- byte-identical to curate-m365-only before this feature existed', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  delete process.env.TOOL_CATALOG_CURATE_LANES;
+  const fullCount = await registeredToolCount('some-unscoped-lane', false);
+  const developerCount = await registeredToolCount('developer', false);
+  assert.equal(
+    developerCount,
+    fullCount,
+    'with no override configured, a non-M365 developer caller must still see the full catalog under curate-m365-only, exactly as before this feature',
+  );
+});
+
+test('TOOL_CATALOG_CURATE_LANES: an unknown/garbage lane name in the csv is silently ignored (fail-open), never crashes registration', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  process.env.TOOL_CATALOG_CURATE_LANES = 'not-a-real-lane, ,cro-typo';
+  const fullCount = await registeredToolCount('some-unscoped-lane', false);
+  const developerCount = await registeredToolCount('developer', false);
+  assert.equal(developerCount, fullCount, 'a garbage override list must behave identically to no override at all');
+});
+
+test('TOOL_CATALOG_CURATE_LANES: has no effect under mode=curate (already unconditional) or mode=report/off (never curate)', async () => {
+  process.env.TOOL_CATALOG_CURATE_LANES = 'developer';
+  const fullCount = await registeredToolCount('some-unscoped-lane', false);
+
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate';
+  const curateWithOverride = await registeredToolCount('developer', false);
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate';
+  delete process.env.TOOL_CATALOG_CURATE_LANES;
+  const curateWithoutOverride = await registeredToolCount('developer', false);
+  assert.equal(curateWithOverride, curateWithoutOverride, 'plain curate mode already curates unconditionally; the lane override changes nothing');
+
+  process.env.TOOL_CATALOG_CURATE_LANES = 'developer';
+  process.env.TOOL_CATALOG_CURATION_MODE = 'report';
+  const reportWithOverride = await registeredToolCount('developer', false);
+  assert.equal(reportWithOverride, fullCount, 'report mode never curates, override or not');
+
+  process.env.TOOL_CATALOG_CURATION_MODE = 'off';
+  const offWithOverride = await registeredToolCount('developer', false);
+  assert.equal(offWithOverride, fullCount, 'off mode never curates, override or not');
 });
 
 // DEDUP FIX (2026-08-02): this test used to LOCK IN the doubling bug as expected behavior ("roughly

@@ -27,6 +27,8 @@ const {
   parseTrialBalanceRows,
   sumManualJournalsByAccount,
   sumLineItemsByAccount,
+  fetchAllPaged,
+  MAX_PAGES_PER_ENDPOINT,
   assembleGl,
 } = await import('./gl-assemble.js');
 const { buildTokenDoc, bootstrapHash } = await import('./client.js');
@@ -231,6 +233,122 @@ function liveTokenState() {
   });
   return { doc, etag: 'etag-1' };
 }
+
+// -------------------------------------------------------------------------------------------
+// fetchAllPaged -- the shape-anomaly-vs-legitimate-empty-page distinction (silent-truncation fix)
+// -------------------------------------------------------------------------------------------
+
+/** Stubs one xeroGet-backed endpoint: `pages[i]` is the raw JSON body returned for `page=i+1`.
+ * Reuses the same live-token bootstrapping as the assembleGl integration tests below. */
+function makePagedDeps(pages: unknown[]) {
+  const state = liveTokenState();
+  return {
+    fetchImpl: (async (url: string | URL) => {
+      const u = new URL(String(url));
+      const page = Number(u.searchParams.get('page'));
+      const body = pages[page - 1];
+      if (body === undefined) throw new Error(`no stub for page ${page}`);
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }) as never,
+    create: (async () => { throw new Error('create should never be called -- the seeded token is already live'); }) as never,
+  };
+}
+
+test('fetchAllPaged: a genuinely empty array is a legitimate last page -- no shapeAnomaly, not truncated', async () => {
+  const deps = makePagedDeps([{ ManualJournals: [] }]);
+  const res = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', deps);
+  assert.deepEqual(res.items, []);
+  assert.equal(res.truncated, false);
+  assert.equal(res.shapeAnomaly, undefined);
+});
+
+// --- THE HEADLINE REGRESSION: the bare `if (!Array.isArray(arr) || arr.length === 0) break;`
+// treated a MISSING/malformed array key exactly like a legitimate empty last page: same silent
+// `break`, `truncated` never set, no caveat raised anywhere up the call chain. assembleGl would
+// then report a clean, complete-looking result (caveats: []) that was actually silently short --
+// on a general-ledger reconciliation for a public company. These two tests are the counterfactual
+// proof: reverting fetchAllPaged's shape check back to the old bare `break` makes BOTH of them fail
+// (shapeAnomaly would be undefined and truncated would be false in both cases). Verified by hand
+// against the pre-fix code during this change.
+
+test('REGRESSION: the arrayKey is entirely MISSING from an otherwise-2xx body -- a shape anomaly, NOT an empty last page', async () => {
+  const deps = makePagedDeps([{ SomeUnexpectedField: [] }]); // no "ManualJournals" key at all
+  const res = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', deps);
+  assert.equal(res.truncated, true, 'a shape anomaly must mark the result incomplete, the same signal a real page-cap hit uses');
+  assert.ok(res.shapeAnomaly, 'the anomaly must be surfaced, not silently swallowed');
+  assert.match(res.shapeAnomaly!, /\/ManualJournals page 1/, 'the caveat must name the endpoint and the exact page it happened on');
+  assert.match(res.shapeAnomaly!, /got missing/);
+  assert.deepEqual(res.items, [], 'no items were ever seen under the expected key');
+});
+
+test('REGRESSION: the arrayKey is present but NOT an array -- also a shape anomaly, not treated as empty', async () => {
+  const deps = makePagedDeps([{ ManualJournals: 'not-an-array' }]);
+  const res = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', deps);
+  assert.equal(res.truncated, true);
+  assert.ok(res.shapeAnomaly);
+  assert.match(res.shapeAnomaly!, /got string/, 'the caveat should name the actual (wrong) type it found');
+});
+
+test('fetchAllPaged: a shape anomaly on a LATER page still keeps the well-formed items already collected', async () => {
+  const fullPage = { ManualJournals: Array.from({ length: 100 }, (_, i) => ({ ManualJournalID: `mj-${i}` })) };
+  const deps = makePagedDeps([fullPage, { ManualJournals: null }]); // page 1 real+full, page 2 malformed
+  const res = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', deps);
+  assert.equal(res.items.length, 100, 'page 1\'s real items are kept even though page 2 was anomalous');
+  assert.equal(res.truncated, true);
+  assert.match(res.shapeAnomaly!, /page 2/);
+});
+
+test('fetchAllPaged: hitting the real page cap with well-formed data on every page sets truncated with NO shapeAnomaly', async () => {
+  const fullPage = () => ({ ManualJournals: Array.from({ length: 100 }, (_, i) => ({ ManualJournalID: `mj-${i}` })) });
+  const pages = Array.from({ length: MAX_PAGES_PER_ENDPOINT }, fullPage);
+  const deps = makePagedDeps(pages);
+  const res = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', deps);
+  assert.equal(res.items.length, MAX_PAGES_PER_ENDPOINT * 100);
+  assert.equal(res.truncated, true, 'a genuine page-cap hit is still reported as truncated');
+  assert.equal(res.shapeAnomaly, undefined, 'a real page-cap hit is not a shape anomaly -- the caller keeps its own page-cap wording for this case');
+});
+
+test('assembleGl: a shape-anomaly caveat from fetchAllPaged surfaces verbatim in the result caveats (not the generic page-cap wording)', async () => {
+  const state = liveTokenState();
+  const tbByDate = new Map([['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])]]);
+  const deps = {
+    fetchImpl: (async (url: string | URL) => {
+      const u = new URL(String(url));
+      if (u.pathname === '/api.xro/2.0/Reports/TrialBalance') {
+        const date = u.searchParams.get('date');
+        const body = date ? tbByDate.get(date) : undefined;
+        if (!body) throw new Error(`no TrialBalance stub for date=${date}`);
+        return new Response(JSON.stringify(body), { status: 200 });
+      }
+      if (u.pathname === '/api.xro/2.0/ManualJournals') {
+        // Malformed: the key is present but not an array -- the shape anomaly under test.
+        return new Response(JSON.stringify({ ManualJournals: 'not-an-array' }), { status: 200 });
+      }
+      const arrayKeyByPath: Record<string, string> = {
+        '/api.xro/2.0/Invoices': 'Invoices',
+        '/api.xro/2.0/CreditNotes': 'CreditNotes',
+        '/api.xro/2.0/BankTransactions': 'BankTransactions',
+      };
+      const key = arrayKeyByPath[u.pathname];
+      if (!key) throw new Error(`unexpected fetch path ${u.pathname}`);
+      return new Response(JSON.stringify({ [key]: [] }), { status: 200 });
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called -- the seeded token is already live'); }) as never,
+    create: (async () => { throw new Error('create should never be called -- the seeded token is already live'); }) as never,
+  };
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps);
+  assert.ok(
+    result.caveats.some((c) => c.includes('/ManualJournals page 1') && c.includes('malformed')),
+    'the precise shape-anomaly caveat must reach the caller, not a generic "hit the page cap" message that would misstate the cause',
+  );
+  assert.ok(
+    !result.caveats.some((c) => c.includes('hit the 20-page cap')),
+    'the generic page-cap wording must NOT also fire for a shape anomaly (that would misreport why the result is short)',
+  );
+});
 
 /** A single account's row for one TrialBalance snapshot. debit/credit are THAT MONTH's period
  * movement (read directly, never diffed); ytdDebit/ytdCredit default to the SAME as debit/credit
