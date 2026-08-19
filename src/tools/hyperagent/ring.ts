@@ -45,7 +45,13 @@ export type HyperagentClass = 'personal-legal' | 'exec' | 'general' | 'unknown';
  * meaningless. Each entry here names a real privileged surface in this fleet.
  */
 const FORCED_PERSONAL_LEGAL = ['clo-personal', 'clo_personal', 'personal-legal', 'personal_legal'];
-const FORCED_EXEC = ['cfo', 'clo', 'capital', 'finance', 'legal', 'mnpi'];
+// `wefunder`, `investor` and `reg-cf` were added on 2026-08-18 after reading the REAL agent list for
+// the first time. The account holds "Wefunder Campaign Director" and "Wefunder Investor Focus
+// Group", and neither matched any pattern above — both would have been reachable by every lane.
+// That is Reg CF securities material, where the fleet's standing rule is attorney-and-owner gated,
+// so a broadly-readable default was exactly wrong. The general lesson is worth keeping: this
+// backstop could only be calibrated against the actual names, never guessed from the design.
+const FORCED_EXEC = ['cfo', 'clo', 'capital', 'finance', 'mnpi', 'legal', 'wefunder', 'investor', 'reg-cf', 'reg cf'];
 
 /**
  * Parse the runtime lane→agent map.

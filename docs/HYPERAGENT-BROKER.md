@@ -90,8 +90,19 @@ coerced to `general`. A typo must never widen access.
 
 ### The forced-pattern backstop
 
-Name fragments (`clo-personal`, `cfo`, `legal`, `mnpi`, …) force a classification regardless of the
-configured map, so mapping a CFO agent to `general` by mistake still refuses it.
+Name fragments (`clo-personal`, `cfo`, `legal`, `mnpi`, `wefunder`, `investor`, …) force a
+classification regardless of the configured map, so mapping a CFO agent to `general` by mistake still
+refuses it.
+
+**`wefunder` / `investor` / `reg-cf` were added only after reading the real agent list.** The account
+holds "Wefunder Campaign Director" and "Wefunder Investor Focus Group", and neither matched any
+original pattern — both would have defaulted to reachable by every lane. That is Reg CF securities
+material, where the standing rule is attorney-and-owner gated, so a broadly readable default was
+exactly wrong.
+
+The general lesson is worth more than the two names: **this backstop can only be calibrated against
+the actual agent list, never guessed from the design.** Re-run `hyperagent_list_agents` and re-check
+the classification whenever agents are added.
 
 **Ordering matters and is pinned by a test:** `clo-personal` is checked *before* `clo`, because
 "clo-personal" also contains "clo". Reversing those two blocks would silently downgrade the most
@@ -135,15 +146,37 @@ content in front of readers it does not control, which is at least as bad as rea
 Unset ⇒ every tool returns `mode: unconfigured` and explains what is missing. The broker is inert,
 not broken, until the consent lands.
 
-### Refresh-token rotation is the sharp edge
+### Refresh-token rotation: confirmed real, and now handled durably
 
-If Hyperagent rotates the refresh token on use, the configured value is spent. The client keeps the
-new one **in memory** so the running process survives, logs a loud one-time warning, and exposes
-`rotation_pending: true` on `hyperagent_list_agents`.
+This was written as a conditional ("if Hyperagent rotates…"). On 2026-08-18 it was tested against the
+live service and **it rotates on every use**. Access tokens last ~15 minutes, so at the live replica
+count each replica refreshes several times an hour.
 
-**That is a warning, not a fix.** A restart would fall back to the spent value and the broker would
-go dark — the classic "worked until it was redeployed" failure. If `rotation_pending` is ever true,
-persist the new token to the `hyperagent-refresh-token` secret before the next deploy.
+The original design kept the rotated token **in memory**, which fails two ways:
+
+1. Replica A rotates; replica B is still holding the token A just consumed.
+2. Any redeploy drops both replicas back to the configured value, which is spent.
+
+And the penalty is not a retry. Under RFC 9700 reuse detection, presenting a consumed token can
+revoke the **entire token family**, which costs a fresh human browser consent.
+
+So rotation moved to `src/tools/hyperagent/token-store.ts`, which persists every rotation to the
+shared agent-state store under an **ETag'd compare-and-swap, before the token is used**:
+
+- an in-process mutex serializes refreshes *within* a replica; the ETag covers *across* replicas
+- a 412 loser **adopts the winner's chain** and never persists its fork
+- a failed persist **refuses to return the token** rather than let the next caller reuse a spent one
+- `invalid_grant` writes an ETag'd tombstone (which can never clobber a live winner) and raises
+  `HyperagentNeedsConsentError`, naming the human step
+- the stored chain is stamped with a hash of the configured bootstrap token, so storing a fresh
+  consent supersedes a dead chain automatically, with no redeploy
+
+This is deliberately **the same shape as `src/tools/xero/client.ts`**, whose refresh tokens are
+single-use for the same reason and which has already been through the incidents this one has not. A
+second, subtly different rotation implementation would be strictly worse than a familiar one.
+
+**Fail-closed:** if the shared store is unconfigured, the broker refuses to run rather than rotating
+unsynchronized. Losing the Hyperagent tools for a while is far cheaper than burning the token family.
 
 ## Layer 2: defense in depth
 

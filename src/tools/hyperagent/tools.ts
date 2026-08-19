@@ -15,7 +15,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { loadEnv } from '../../config/env.js';
-import { callHyperagentTool, hyperagentConfigured, refreshTokenRotationPending } from './client.js';
+import { callHyperagentTool, hyperagentConfigured } from './client.js';
 import {
   isHyperagentAgentAllowed,
   parseAgentClassMap,
@@ -88,7 +88,6 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
         agents: z.array(z.unknown()),
         count: z.number(),
         total_upstream: z.number().optional(),
-        rotation_pending: z.boolean().optional(),
         error: z.string().optional(),
       },
       handler: async (_input, ctx) => {
@@ -109,7 +108,6 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
             agents: visible,
             count: visible.length,
             total_upstream: all.length,
-            rotation_pending: refreshTokenRotationPending(),
           },
           summary:
             `${visible.length} of ${all.length} Hyperagent agent(s) are addressable by lane "${caller || '(none)'}". ` +
