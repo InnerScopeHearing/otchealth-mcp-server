@@ -40,6 +40,37 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'heygen_speech_preview_create_preflight', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'Approved internal lanes may validate bounded TTS preview; live synthesis remains CTO-only and owner-grant gated.' },
   { pattern: 'heygen_avatar_video_create', requiredRole: ['cto', 'cro'], reason: 'Owner-delegated direct HeyGen video creation is CTO/CRO only, idempotent, and bound to exact owner grant, live billing, conservative cap, reserve, consent, and no-retry checks.' },
   { pattern: 'heygen_existing_video_ingest_qa', requiredRole: ['cto', 'cro'], reason: 'Existing-video secure ingestion writes only private bounded QA artifacts and is available to CTO/CRO.' },
+  // Hyperagent broker writes (Matt's 2026-08-19 decision: "open it up for all agents, and if we see
+  // issues we can bring it back"). Without these two rules the write_orchestrated default made them
+  // CTO-only, which left every lane able to READ its Hyperagent counterpart but unable to ask it for
+  // anything -- every cross-engine task funnelling back through one seat, i.e. the exact bottleneck
+  // the broker exists to remove.
+  //
+  // WHY OPENING THIS IS SAFE, and where the real boundary actually lives: the lane list below is NOT
+  // the access control. Authorization is decided in src/tools/hyperagent/ring.ts, which requires BOTH
+  // that the lane is assigned the agent AND that the lane is inside the agent's classification ring.
+  // That was verified live on 2026-08-19: the cto lane is refused CFO, CLO and both Wefunder agents
+  // with `forbidden_ring`, and cannot even see their names. Widening this rule cannot widen the ring.
+  //
+  // WHAT THIS DOES CHANGE, and it is not a database write: sending a Hyperagent agent a message makes
+  // an autonomous agent RUN, with its own tools and its own permissions, spending account credits.
+  // The ring bounds WHICH agent is invoked; it has no say in what that agent then does. That residual
+  // risk is bounded by a per-lane thread-creation cap in tools.ts, not by this table.
+  //
+  // DELIBERATELY ABSENT: Hyperagent's `resolve_approval` (approves actions queued for a human) is not
+  // exposed by the broker at all, at any role. Routing it through an agent lane would convert a
+  // deliberate human checkpoint into an automated one, which is a different class of decision from
+  // "let a lane talk to its counterpart" and is not covered by this approval.
+  {
+    pattern: 'hyperagent_create_thread',
+    requiredRole: ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'developer'],
+    reason: 'Approved internal lanes may start a thread on a Hyperagent agent; ring.ts independently enforces which agents each lane may address, and a per-lane rate cap bounds spend.',
+  },
+  {
+    pattern: 'hyperagent_send_message',
+    requiredRole: ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'developer'],
+    reason: 'Approved internal lanes may message a Hyperagent thread they are permitted to address; the owning agent is resolved and ring-checked before the write.',
+  },
   { pattern: 'heygen_video_wait_ingest_qa', requiredRole: ['cto', 'cro'], reason: 'Operation-bound HeyGen polling/private artifact ingestion is available to CTO/CRO and leaves visual approval manual.' },
   // Data reads and semantic voice search are centrally constrained to the same exact internal lanes
   // every handler re-checks. Exact names keep pairing/creation strictly narrower than this surface.

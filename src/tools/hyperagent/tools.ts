@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { loadEnv } from '../../config/env.js';
 import { callHyperagentTool, hyperagentConfigured } from './client.js';
+import { checkInvocationBudget } from './rate-limit.js';
 import {
   isHyperagentAgentAllowed,
   parseAgentClassMap,
@@ -153,6 +154,19 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
             summary: `Refused (${verdict.reason}): lane "${caller || '(none)'}" may not address agent "${input.agentId}" (classified ${verdict.cls}).`,
           };
         }
+        // AFTER the ring check, so a refused call never consumes budget, and BEFORE the provider
+        // call, because the spend happens the moment the agent starts running.
+        const budget = checkInvocationBudget(caller);
+        if (!budget.allowed) {
+          return {
+            data: { ok: false, error: 'rate_limited' },
+            summary:
+              `Refused (rate_limited): lane "${caller || '(none)'}" has started ${budget.used} Hyperagent ` +
+              `runs in the last hour (limit ${budget.limit}). Each run spends account credits, so this ` +
+              `bounds a loop rather than throttling real work. Retry in ~${budget.retryAfterSeconds}s, ` +
+              `or raise HYPERAGENT_MAX_INVOCATIONS_PER_HOUR.`,
+          };
+        }
         const res = await callHyperagentTool('create_thread', { agentId: input.agentId, message: input.message });
         if (!res.ok) return { data: { ok: false, error: res.error ?? 'provider_error' }, summary: `create_thread failed: ${res.error}.` };
         const tid = (res.data as { threadId?: string } | null)?.threadId;
@@ -257,6 +271,18 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
           return {
             data: { ok: false, error: verdict.reason },
             summary: `Refused (${verdict.reason}): thread ${input.threadId} belongs to agent "${ownerId}" (classified ${verdict.cls}); lane "${caller || '(none)'}" may not write to it.`,
+          };
+        }
+        // Budgeted like create_thread: a follow-up message also makes the agent RUN, so it spends
+        // exactly the same way a new thread does. Charged only after the ring check passes.
+        const budget = checkInvocationBudget(caller);
+        if (!budget.allowed) {
+          return {
+            data: { ok: false, error: 'rate_limited' },
+            summary:
+              `Refused (rate_limited): lane "${caller || '(none)'}" has triggered ${budget.used} Hyperagent ` +
+              `runs in the last hour (limit ${budget.limit}). Retry in ~${budget.retryAfterSeconds}s, ` +
+              `or raise HYPERAGENT_MAX_INVOCATIONS_PER_HOUR.`,
           };
         }
         const res = await callHyperagentTool('send_message', { threadId: input.threadId, message: input.message });
