@@ -186,6 +186,11 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
         // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
         // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
         staticAgent = 'copilot-agent';
+      } else if (env.EVAL_AGENT_TOKEN && env.EVAL_AGENT_TOKEN.length >= 32 && safeEqual(token, env.EVAL_AGENT_TOKEN)) {
+        // The scheduled eval harness (src/eval/eval-runner.mjs). Same low-priv lane as
+        // copilot-agent -- see EVAL_AGENT_TOKEN's own comment in config/env.ts for why this token
+        // exists as a dedicated credential rather than reusing PERPLEXITY_CONNECTOR_TOKEN.
+        staticAgent = 'copilot-agent';
       } else if (env.COPILOT_DEV_AGENT_TOKEN && env.COPILOT_DEV_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_DEV_AGENT_TOKEN)) {
         // 'otchealth-dev' (.github-private/agents/otchealth-dev.agent.md) -- a user-invocable
         // GitHub Copilot custom agent with a real app-build job, a different trust profile than
