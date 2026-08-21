@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 
 const CONNECTOR_TOKEN = 'a'.repeat(32);
 const M365_CTO_TOKEN = 'm'.repeat(40);
+const EVAL_TOKEN = 'e'.repeat(40);
 
 before(() => {
   const required: Record<string, string> = {
@@ -27,6 +28,10 @@ before(() => {
     // `m365StaticAgentTokens()` reads `env.M365_CTO_MCP_TOKEN` via the module-level `loadEnv()`
     // call, which only ever runs once per process.
     M365_CTO_MCP_TOKEN: M365_CTO_TOKEN,
+    // Deliberately a DIFFERENT string from CONNECTOR_TOKEN -- the tests below rely on that
+    // difference to prove EVAL_AGENT_TOKEN is checked as its own variable, not aliased to
+    // PERPLEXITY_CONNECTOR_TOKEN (the exact bug this token was added to stop recurring).
+    EVAL_AGENT_TOKEN: EVAL_TOKEN,
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
@@ -96,6 +101,36 @@ test('a VALID bearer token succeeds and carries no WWW-Authenticate header (head
   assert.equal(res.headers['www-authenticate'], undefined);
 
   await app.close();
+});
+
+// ── EVAL_AGENT_TOKEN (2026-08-21) ────────────────────────────────────────────────────────────────
+// Added after the scheduled eval harness (src/eval/eval-runner.mjs) was found authenticating with
+// PERPLEXITY_CONNECTOR_TOKEN's literal value -- an undocumented shared-secret shortcut, not a
+// deliberate design -- and then leaking that shared value into CloudWatch on every failing case.
+// The leak exposed the REAL Perplexity connector's live production credential, not just an
+// eval-scoped one. These tests pin that the two tokens are genuinely independent variables in the
+// auth chain, not two names for the same check, so a future eval-side leak can never again expose
+// an unrelated integration's credential.
+test('EVAL_AGENT_TOKEN authenticates on its own, as caller_agent copilot-agent', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  const ctx = await validateBearer(`Bearer ${EVAL_TOKEN}`);
+  assert.ok(ctx);
+  assert.equal(ctx?.caller_agent, 'copilot-agent');
+});
+
+test('EVAL_AGENT_TOKEN and PERPLEXITY_CONNECTOR_TOKEN are independent: each authenticates, neither accepts the other\'s value', async () => {
+  const { validateBearer } = await import('./bearer.js');
+
+  const perplexityCtx = await validateBearer(`Bearer ${CONNECTOR_TOKEN}`);
+  assert.ok(perplexityCtx, 'PERPLEXITY_CONNECTOR_TOKEN must still authenticate on its own');
+
+  const evalCtx = await validateBearer(`Bearer ${EVAL_TOKEN}`);
+  assert.ok(evalCtx, 'EVAL_AGENT_TOKEN must authenticate on its own');
+
+  // The two configured values are different (see `before()`); this is only meaningful proof of
+  // independence because of that difference -- if they were equal this assertion would pass
+  // vacuously regardless of whether the code checks one variable or two.
+  assert.notEqual(CONNECTOR_TOKEN, EVAL_TOKEN);
 });
 
 // ── auth_rejected diagnosability (2026-08-17) ────────────────────────────────────────────────────

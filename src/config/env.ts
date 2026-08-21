@@ -30,6 +30,20 @@ const EnvSchema = z.object({
   // NO GitHub writes, NO builds). Inert when unset. Rotate-before-launch.
   COPILOT_AGENT_TOKEN: z.string().optional().default(''),
 
+  // Long-lived low-privilege token for the scheduled eval harness (src/eval/eval-runner.mjs) only.
+  // Maps to caller_agent='copilot-agent' -- deliberately reused rather than a new lane, since the
+  // harness only ever calls memory_recall (read-only) and needs no broader access than that lane
+  // already has ("a second front door to the SAME lane, not a new/wider privilege grant" -- this
+  // file's existing convention). Added 2026-08-21 after eval-runner.mjs was found reusing
+  // PERPLEXITY_CONNECTOR_TOKEN's literal value as its own bearer (an undocumented shared-secret
+  // shortcut, not a deliberate design) and then leaking that shared value into CloudWatch on every
+  // failing case -- exposing the real Perplexity connector's live credential, not just the eval
+  // job's own. This token exists so the eval job's blast radius is its own from now on: a future
+  // leak here can never again expose a different, unrelated production integration. Inert when
+  // unset (falls through to no static match, same as every other token in this chain).
+  // Rotate-before-launch.
+  EVAL_AGENT_TOKEN: z.string().optional().default(''),
+
   // Long-lived token for the 'otchealth-dev' GitHub Copilot CUSTOM AGENT's MCP header
   // (.github-private/agents/otchealth-dev.agent.md, target: github-copilot, tools: ["*"]).
   // Maps to caller_agent='developer' -- the SAME lane the Hyperagent "OTCHealth Gateway (Developer)"

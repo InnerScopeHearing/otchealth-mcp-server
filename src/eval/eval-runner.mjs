@@ -20,6 +20,7 @@ import { promisify } from 'node:util';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { redactSecrets } from './redact.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -71,7 +72,7 @@ async function curlJson(url, opts = {}) {
 
   if (stderr && stderr.trim()) {
     // curl writes connection errors to stderr; surface them but don't throw yet
-    console.warn(`[eval] curl stderr: ${stderr.trim()}`);
+    console.warn(`[eval] curl stderr: ${redactSecrets(stderr.trim())}`);
   }
 
   // Extract status appended by --write-out
@@ -206,12 +207,12 @@ async function runCase(c) {
       note = `Unknown kind: ${c.kind}`;
     }
   } catch (err) {
-    note = `Error: ${err.message}`;
+    note = `Error: ${redactSecrets(err)}`;
     // For guardrail cases, a thrown error (auth rejection, timeout) counts as
     // neutralizing the attack because the content never returned.
     if (c.kind === 'guardrail') {
       pass = true;
-      note = `Attack blocked (exception): ${err.message}`;
+      note = `Attack blocked (exception): ${redactSecrets(err)}`;
     }
   }
 
@@ -232,7 +233,7 @@ async function main() {
   try {
     cases = JSON.parse(readFileSync(EVAL_CASES_PATH, 'utf8'));
   } catch (err) {
-    console.error(`[eval] Cannot read cases file: ${err.message}`);
+    console.error(`[eval] Cannot read cases file: ${redactSecrets(err)}`);
     process.exit(2);
   }
 
@@ -292,6 +293,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('[eval] Unexpected fatal error:', err);
+  // Never pass the raw error object here: printing an Error renders its stack AND message, and the
+  // message can carry the curl command line with the bearer token in it.
+  console.error('[eval] Unexpected fatal error:', redactSecrets(err));
   process.exit(2);
 });
