@@ -15,6 +15,10 @@ before(() => {
     XERO_CLIENT_ID: 'test-client-id',
     XERO_CLIENT_SECRET: 'test-client-secret',
     XERO_RT_OTCHEALTH: 'bootstrap-rt-otchealth',
+    // STATE_BACKEND pinned to 'cosmos' (2026-08-28): this file's Cosmos fixtures below are only
+    // reachable while the agent-state dispatcher is actually pointed at cosmos.ts -- STATE_BACKEND's
+    // schema default flipped to 'postgres' the same day, and this file predates that flip.
+    STATE_BACKEND: 'cosmos',
     COSMOS_ENDPOINT: 'https://test.documents.azure.com',
     COSMOS_DB: 'test',
     COSMOS_KEY: Buffer.from('test-key').toString('base64'),

@@ -1,5 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+
+// Required-var preamble, added 2026-08-28: heyGenArtifactUri (used directly below) now calls
+// loadEnv() internally (to read BLOB_BACKEND, so it can pick the azure:// vs s3:// scheme) where it
+// previously was a pure string-formatting function with no env access at all. BLOB_BACKEND pinned
+// to 'azure' explicitly (its schema default flipped to 's3' the same day) because this file's
+// existing assertion below expects the azure:// URI shape specifically; artifact-store.test.ts
+// covers the s3:// shape.
+process.env.CIO_SITE_ID ||= 'test';
+process.env.CIO_TRACK_KEY ||= 'test';
+process.env.CIO_APP_API_BEARER ||= 'test';
+process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
+process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
+process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
+process.env.BLOB_BACKEND ||= 'azure';
+
 import {
   ingestHeyGenVideoArtifacts,
   validateSrt,

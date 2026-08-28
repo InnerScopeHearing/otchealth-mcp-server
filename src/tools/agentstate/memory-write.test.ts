@@ -17,7 +17,9 @@ before(() => {
     N8N_WEBHOOK_SECRET: 'x'.repeat(32),
     // isConfigured() is checked BEFORE ctx.dryRun in handleMemoryWrite -- without these, every
     // handler-level test below would stop at "Cosmos not configured" rather than exercising the
-    // gate/branch each test actually targets.
+    // gate/branch each test actually targets. STATE_BACKEND pinned to 'cosmos' (2026-08-28): its
+    // schema default flipped to 'postgres' the same day, and this file predates that flip.
+    STATE_BACKEND: 'cosmos',
     COSMOS_ENDPOINT: 'https://test.documents.azure.com',
     COSMOS_DB: 'test',
     COSMOS_KEY: Buffer.from('test-key').toString('base64'),

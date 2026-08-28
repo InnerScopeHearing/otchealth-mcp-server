@@ -3,11 +3,95 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { getPullRequest, mergePullRequest, createIssueComment } from '../github/api-client.js';
+import { resolveAwsCredentials, signRequest } from '../search/sigv4.js';
 
 const env = loadEnv();
 
-/** Route a fleet-medic alert to the central, human+agent-visible log issue (App token). */
-async function postAlert(body: string): Promise<void> {
+/** Extract the region embedded in an SNS topic ARN (`arn:aws:sns:{region}:{account}:{name}`), so
+ *  the fallback below needs no separate region config -- the ARN is self-describing. Returns null
+ *  for a malformed value so the caller can skip rather than sign a request against a wrong host. */
+function snsRegionFromArn(arn: string): string | null {
+  const m = /^arn:aws:sns:([a-z0-9-]+):\d+:.+$/.exec(arn);
+  return m ? m[1] : null;
+}
+
+/**
+ * SNS-publish fallback for postAlert(), added 2026-08-28. Fires ONLY from postAlert's catch block,
+ * i.e. only when createIssueComment() ITSELF fails (the exact failure mode that made every
+ * CI-failure/auto-merge alert since ~2026-08-10 vanish silently once issue #21 hit GitHub's hard
+ * 2500-comment cap) -- and only when SNS_ALERT_TOPIC_ARN is configured; inert otherwise. NEVER
+ * throws: an alerting path that can itself take down webhook ingestion would be worse than the
+ * silent-drop bug it exists to fix, so every failure mode here is a warn-log, not a rejection.
+ * Fans out through the already-deployed 4-channel otchealth-aws-alert-fanout Lambda (GitHub issue
+ * #226 + Datadog + PostHog + Graph email; see infra-aws/alert-fanout-lambda/README.md), so a
+ * capped/renamed/deleted GitHub issue can never again silently eat every fleet-medic alert -- this
+ * does NOT replace the issue-comment route (still the primary, human-readable channel), only
+ * backstops its failure.
+ */
+async function publishToSnsFallback(message: string): Promise<void> {
+  const topicArn = env.SNS_ALERT_TOPIC_ARN;
+  if (!topicArn) return;
+  const region = snsRegionFromArn(topicArn);
+  if (!region) {
+    logger.warn(
+      { type: 'fleet_medic_sns_fallback_failed', reason: 'malformed_topic_arn' },
+      'SNS_ALERT_TOPIC_ARN is not a valid SNS topic ARN, skipping the alert fallback',
+    );
+    return;
+  }
+  try {
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) {
+      logger.warn(
+        { type: 'fleet_medic_sns_fallback_failed', reason: 'no_aws_credentials' },
+        'could not resolve AWS credentials for the SNS alert fallback',
+      );
+      return;
+    }
+    const host = `sns.${region}.amazonaws.com`;
+    // SNS's query-protocol Publish action: parameters as a form-encoded POST body, not a query
+    // string. TopicArn/Message are sent verbatim; URLSearchParams handles the encoding.
+    const body = new URLSearchParams({
+      Action: 'Publish',
+      Version: '2010-03-31',
+      TopicArn: topicArn,
+      Message: message,
+    }).toString();
+    const signed = signRequest({
+      method: 'POST',
+      host,
+      path: '/',
+      body,
+      region,
+      service: 'sns',
+      credentials,
+      extraHeaders: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    const res = await fetch(`https://${host}/`, {
+      method: 'POST',
+      headers: signed.headers,
+      body,
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      logger.warn(
+        { type: 'fleet_medic_sns_fallback_failed', reason: 'sns_non_2xx', status: res.status },
+        'SNS publish for the fleet-medic alert fallback returned a non-2xx status',
+      );
+    }
+  } catch (e) {
+    logger.warn(
+      { type: 'fleet_medic_sns_fallback_failed', reason: 'exception', error: (e as Error).message },
+      'SNS publish for the fleet-medic alert fallback threw',
+    );
+  }
+}
+
+/** Route a fleet-medic alert to the central, human+agent-visible log issue (App token). Exported
+ *  (2026-08-28) so webhooks.test.ts can drive the SNS fallback directly -- this file had no test
+ *  coverage at all before that PR; see that file's header for why the failure trigger it uses is
+ *  "GitHub App not configured" rather than a mocked 403 from GitHub itself. */
+export async function postAlert(body: string): Promise<void> {
   const target = env.FLEET_MEDIC_LOG_REPO;
   const issue = parseInt(env.FLEET_MEDIC_LOG_ISSUE || '0', 10);
   if (!target || !issue) return;
@@ -17,6 +101,7 @@ async function postAlert(body: string): Promise<void> {
     await createIssueComment(owner, repo, issue, body);
   } catch (e) {
     logger.warn({ type: 'fleet_medic_alert_route_failed', error: (e as Error).message }, 'could not post fleet-medic alert to log issue');
+    await publishToSnsFallback(body);
   }
 }
 

@@ -42,10 +42,18 @@
  * The write verbs are therefore additive and deliberately narrow: putObjectToS3 / copyObjectInS3 /
  * deleteObjectFromS3, all going through the SAME s3LocationFor allow-list as the reads, so a write
  * inherits the identical fail-closed ring mapping. Which CALLERS are allowed to write which
- * container remains the caller's decision (see blob-store.ts: personal legal writes are still
- * refused here on purpose -- the personal DR bucket's IAM grant is GetObject/ListBucket only, see
- * infra/aws/iam.tf's PersonalLegalRingReadOnly statement, and widening it is a ring decision nobody
- * has made).
+ * container remains the caller's decision (see blob-store.ts's S3_WRITABLE_CONTAINERS): as of
+ * 2026-08-28 that PROPOSES adding `personal` -- widening the personal DR bucket's IAM grant to
+ * GetObject/ListBucket/PutObject/DeleteObject (infra/aws/iam.tf's PersonalLegalRingReadWrite
+ * statement, formerly PersonalLegalRingReadOnly). Built and presented here because Azure's permanent
+ * deletion turned "personal writes fall through to Azure" from a safety rail into a permanent outage
+ * of the CLO's personal-legal write surface, but the decision to actually grant it is an explicit
+ * owner (Matt) approval gate, not something this PR asserts on its own authority -- see
+ * blob-store.ts's own S3_WRITABLE_CONTAINERS comment and the PR description's approval-gate list.
+ * The RING that decides WHETHER a caller may reach `personal` at all (PERSONAL_LEGAL_RING in
+ * src/tools/kb/search-privileged.ts, enforced by src/tools/legal/ring.ts before any store call) is
+ * completely untouched by this either way -- this module's job is still only "never let an
+ * authorised request resolve to the wrong bucket", never "decide who is authorised".
  */
 import { loadEnv } from '../config/env.js';
 import { createHash } from 'node:crypto';
@@ -128,12 +136,32 @@ const MIRROR: Readonly<Record<string, S3Location>> = Object.freeze({
    *
    * IAM still needs no change for this fix: that same statement covers brain_dr for get/put/list on
    * both ARN shapes, and src/memory/store.ts only ever does get/put/list (no delete, no copy, and a
-   * single non-multipart PUT). It remains emphatically NOT the personal-legal bucket -- that one is
-   * GetObject/ListBucket only (iam.tf's PersonalLegalRingReadOnly statement) and privileged by ring.
+   * single non-multipart PUT). It remains emphatically NOT the personal-legal bucket -- that one was
+   * GetObject/ListBucket only as of this 2026-08-18 writeup (iam.tf's PersonalLegalRingReadOnly
+   * statement) and privileged by ring. [2026-08-28 update, kept here rather than edited into the
+   * historical account above: a separate PR PROPOSES widening that grant and renaming the statement
+   * to PersonalLegalRingReadWrite, pending explicit owner approval -- see this file's own header and
+   * blob-store.ts's S3_WRITABLE_CONTAINERS comment for the current state and the approval gate. The
+   * ring that decides WHO may reach `personal` is unaffected either way.]
    */
   'otchealthcommons/company-journal': {
     bucket: 'otchealth-brain-dr-55c84f6b',
     keyPrefix: 'otchealthcommons/company-journal/',
+  },
+  /**
+   * HeyGen production-control artifacts (downloaded video/thumbnail/gif/subtitle assets + QA
+   * manifests), added 2026-08-28 -- the Azure-exit port of src/tools/heygen/artifact-store.ts, whose
+   * ONLY prior backend was a hand-rolled Azure account-SAS writer against
+   * AZURE_COMMONS_STORAGE_ACCOUNT/KEY. `otchealthcommons` here is a SYNTHETIC account key, not a real
+   * Azure Storage account row -- HeyGen artifacts never had one; it is chosen only so this table's
+   * uniform (account, container) lookup shape covers them too, using the same account name the real
+   * commons feed above already uses. Lands in the SAME commons DR bucket the shared exec brain uses:
+   * the gateway task role already holds Get/Put/List on this bucket (see that row's header), so
+   * routing artifacts here is a pure code change with NO new IAM grant required.
+   */
+  'otchealthcommons/heygen-artifacts': {
+    bucket: 'otchealth-brain-dr-55c84f6b',
+    keyPrefix: '_ARTIFACTS/heygen/',
   },
 });
 

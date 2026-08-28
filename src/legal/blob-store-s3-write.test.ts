@@ -7,12 +7,19 @@ import assert from 'node:assert/strict';
  * putBlob / copyBlob / deleteBlobHard called creds() unconditionally, so they were Azure-only no
  * matter what BLOB_BACKEND said. Shared-ring containers now write to the mirror.
  *
- * `personal` DOES NOT, and the tests that matter most in this file are the ones proving it. The
- * attorney-privileged personal-legal DR bucket is granted GetObject + ListBucket only
- * (infra/aws/iam.tf, PersonalLegalRingReadOnly). Routing personal writes there would not be a bug
- * fix, it would be a request to widen a privileged ring's IAM — a decision nobody has made. So a
- * personal write must keep going to Azure and fail LOUDLY if Azure is unavailable, never quietly
- * relocate privileged documents into a bucket picked by a code change.
+ * `personal` NOW DOES TOO (2026-08-28) — this repo's code and tests are built to that target state
+ * ahead of an explicit owner (Matt) approval decision, not asserting that approval as already
+ * granted; see blob-store.ts's S3_WRITABLE_CONTAINERS header and s3-blob-store.ts's MIRROR table
+ * header for the full reasoning and the approval-gate pointer: Azure's permanent deletion turned
+ * "personal writes fall through to Azure and fail loudly" from a safety rail into a permanent
+ * outage of the CLO's entire personal-legal write surface. The tests that matter most in this file
+ * are STILL the ring-safety ones, but the
+ * invariant they prove has flipped from "personal never reaches S3" to "personal reaches its OWN
+ * privileged bucket (otchealth-legal-personal-dr-55c84f6b) and never the shared one
+ * (otchealth-finance-legal-dr-55c84f6b), and vice versa" — a cross-bucket mixup, not S3-vs-Azure, is
+ * the actual danger once both containers are S3-writable. The RING that decides whether a caller
+ * may reach `personal` at all (PERSONAL_LEGAL_RING, enforced by src/tools/legal/ring.ts before any
+ * store call) is completely untouched by this file or by the 2026-08-28 change; see ring.test.ts.
  *
  * Own file: BLOB_BACKEND=s3 must be set before loadEnv() caches, and blob-store.test.ts covers the
  * Azure default.
@@ -103,43 +110,58 @@ test('a company COPY goes to the shared S3 bucket and reports real bytes from a 
 });
 
 // ─────────────────── personal: the ring line. These are the load-bearing tests. ───────────────────
+// INVERTED 2026-08-28 (see file header): personal now writes to S3 too. What must hold is that it
+// lands in its OWN privileged bucket, never the shared one, and the shared containers never land in
+// the privileged bucket either -- a cross-bucket mixup is the actual danger now, not S3-vs-Azure.
 
-test('RING: a personal PUT stays on Azure and never touches ANY S3 bucket', async () => {
-  const { error, calls } = await capture(() => new Response('', { status: 201 }), () =>
-    putBlob('personal', 'divorce/exhibit.pdf', { text: 'x' }, true),
+test('RING: a personal PUT goes to the PRIVILEGED S3 bucket, never the shared one, never Azure', async () => {
+  const { error, calls } = await capture(alwaysOk, () =>
+    putBlob('personal', 'divorce/exhibit.pdf', { text: 'x', contentType: 'application/pdf' }, true),
   );
   assert.equal(error, undefined);
-  assert.match(calls[0].url, /otchealthlegalstore\.blob\.core\.windows\.net\/personal\/divorce\/exhibit\.pdf/);
-  assert.equal(calls.some((c) => c.url.includes('amazonaws.com')), false, 'no S3 call whatsoever');
-  assert.equal(calls.some((c) => c.url.includes(PERSONAL_LEGAL_BUCKET)), false);
+  assert.ok(calls[0].url.startsWith(`https://${PERSONAL_LEGAL_BUCKET}.s3.`), calls[0].url);
+  assert.ok(calls[0].url.endsWith('/otchealthlegalstore/personal/divorce/exhibit.pdf'));
+  assert.equal(calls[0].method, 'PUT');
+  assert.equal(calls.some((c) => c.url.includes('blob.core.windows.net')), false, 'no Azure call');
+  assert.equal(calls.some((c) => c.url.includes(SHARED_BUCKET_HOST)), false, 'must never land in the shared bucket');
 });
 
-test('RING: a personal DELETE stays on Azure', async () => {
-  const { calls } = await capture(() => new Response('', { status: 202 }), () =>
+test('RING: a personal DELETE goes to the PRIVILEGED S3 bucket', async () => {
+  const { error, calls } = await capture(() => new Response(null, { status: 204 }), () =>
     deleteBlobHard('personal', 'divorce/exhibit.pdf'),
   );
-  assert.match(calls[0].url, /blob\.core\.windows\.net\/personal\//);
-  assert.equal(calls.some((c) => c.url.includes('amazonaws.com')), false);
+  assert.equal(error, undefined);
+  assert.equal(calls[0].method, 'DELETE');
+  assert.ok(calls[0].url.startsWith(`https://${PERSONAL_LEGAL_BUCKET}.s3.`));
+  assert.equal(calls.some((c) => c.url.includes(SHARED_BUCKET_HOST)), false);
 });
 
-test('RING: a personal COPY stays on Azure', async () => {
-  const { calls } = await capture(
-    () => new Response('', { status: 202, headers: { 'x-ms-copy-status': 'success', 'content-length': '9' } }),
+test('RING: a personal COPY goes to the PRIVILEGED S3 bucket and reports real bytes from a HEAD', async () => {
+  const { error, calls } = await capture(
+    (call) =>
+      call.method === 'HEAD'
+        ? new Response('', { status: 200, headers: { 'content-length': '4242', etag: '"e"' } })
+        : new Response('<CopyObjectResult><ETag>&quot;e&quot;</ETag></CopyObjectResult>', { status: 200 }),
     () => copyBlob('personal', 'a.pdf', 'b.pdf', true),
   );
+  assert.equal(error, undefined);
   assert.ok(calls.length > 0);
-  assert.equal(calls.some((c) => c.url.includes('amazonaws.com')), false, 'privileged documents must not be written to S3');
-  assert.match(calls[0].url, /blob\.core\.windows\.net\/personal\//);
+  assert.equal(calls.some((c) => c.url.includes('blob.core.windows.net')), false, 'no Azure call');
+  assert.equal(calls.some((c) => c.url.includes(SHARED_BUCKET_HOST)), false, 'privileged documents must not land in the shared bucket');
+  assert.ok(calls[0].url.startsWith(`https://${PERSONAL_LEGAL_BUCKET}.s3.`));
 });
 
-test('RING: with Azure gone, a personal write FAILS LOUDLY instead of falling back to S3', async () => {
-  // The honest failure. A silent S3 fallback here would relocate attorney-privileged documents into
-  // a bucket whose ring nobody signed off on -- strictly worse than an error the CLO can see.
-  const { error, calls } = await capture(() => new Response('host not found', { status: 503 }), () =>
-    putBlob('personal', 'divorce/exhibit.pdf', { text: 'x' }, true),
-  );
-  assert.match(String(error), /legal blob put 503/);
-  assert.equal(calls.some((c) => c.url.includes('amazonaws.com')), false);
+test('RING: company and personal writes made in the same test run land in DIFFERENT buckets', async () => {
+  // The cross-bucket-mixup regression this whole file exists to catch, made explicit: run both
+  // writes back to back and assert their destination hosts differ. This is the one property a
+  // shared/wrong mapping row could silently violate while every other test above still passes.
+  const companyRun = await capture(alwaysOk, () => putBlob('company', 'x.pdf', { text: 'x' }, true));
+  const personalRun = await capture(alwaysOk, () => putBlob('personal', 'y.pdf', { text: 'y' }, true));
+  assert.equal(companyRun.error, undefined);
+  assert.equal(personalRun.error, undefined);
+  assert.ok(companyRun.calls[0].url.startsWith(`https://${SHARED_BUCKET_HOST}/`));
+  assert.ok(personalRun.calls[0].url.startsWith(`https://${PERSONAL_LEGAL_BUCKET}.s3.`));
+  assert.notEqual(new URL(companyRun.calls[0].url).host, new URL(personalRun.calls[0].url).host);
 });
 
 // ─────────────────── the no-silent-clobber default survives the backend change ───────────────────

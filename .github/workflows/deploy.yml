@@ -67,7 +67,7 @@ env:
   APPROVAL_APP: otchealth-approval-broker
   APP_RG: rg-otchealth-apps-prod
   IMAGE_REPO: otchealth-mcp-server
-  MIN_TOOLS: '1003' # fixed gateway catalog floor after adding owner-approval status read
+  MIN_TOOLS: '990' # fixed gateway catalog floor; was 1003, -13 for the 2026-08-28 azure_* tool deletion
 
 jobs:
   deploy:

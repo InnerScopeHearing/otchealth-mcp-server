@@ -68,32 +68,19 @@ export interface JitDoctrineBinding {
  * (e.g. every n8n_* tool) with one entry instead of one per tool.
  */
 export const JIT_DOCTRINE_BINDINGS: JitDoctrineBinding[] = [
-  {
-    match: 'azure_containerapp_set_env',
-    kind: 'exact',
-    pitfalls: [
-      'Overwriting the gateway inline oauth-clients secret with a partial registry silently drops all connector clients and causes a fleet-wide connector outage. Reconcile against the live inline secret first; never replace it wholesale.',
-    ],
-  },
-  {
-    match: 'azure_job_execute',
-    kind: 'exact',
-    pitfalls: [
-      'Run doc-indexer jobs only on the fully skew-proof image. Concurrent jobs on an older image do non-additive writes and corrupt the index.',
-    ],
-  },
-  {
-    match: 'azure_job_upsert',
-    kind: 'exact',
-    pitfalls: [
-      'Container Apps Job args must be a proper array, not one comma-joined token, or /bin/sh cannot find the script and the run fails instantly.',
-    ],
-  },
+  // The three azure_containerapp_set_env / azure_job_execute / azure_job_upsert exact bindings that
+  // lived here were removed 2026-08-28: those tools were deleted outright (the Azure subscription
+  // behind them, 55c84f6b, is permanently deleted), and doc-indexer's jobs moved to AWS ECS, so the
+  // Container Apps Job/image-skew/args-array lessons they carried can never fire again -- unlike
+  // every other binding in this table, there is no future call this could ever attach to. See
+  // arm-client.ts's header for the parallel "keep it, but know why it's dead" note on the CODE this
+  // pairs with; a doctrine binding for a tool that no longer exists is not "kept inert", it is
+  // simply gone, since jitDoctrineFor() only ever matches a real incoming tool name.
   {
     match: 'n8n_',
     kind: 'prefix',
     pitfalls: [
-      'n8n Cloud (otchealth.app.n8n.cloud) is decommissioned. Target the self-host automation.otchealth.app only. PHI flows run ONLY on the self-host.',
+      'n8n Cloud (otchealth.app.n8n.cloud) AND the old Azure self-host (automation.otchealth.app) are both permanently gone. Target the AWS Lightsail recovery lane (cs-n8n.otchealthmart.com) only; the n8nReachable() gate returns n8n_degraded until recovery lands. PHI flows run ONLY on a self-host with an AWS BAA in place.',
     ],
   },
   {

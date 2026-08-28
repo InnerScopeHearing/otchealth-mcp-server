@@ -15,8 +15,42 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
-const { isSafeBlobPath, paginate, PAGE_CHARS, FINANCE_DOC_INDEXES, toContainerRelative } = await import('./get-document.js');
+const { isSafeBlobPath, paginate, PAGE_CHARS, FINANCE_DOC_INDEXES, toContainerRelative, financeStoreConfigError } =
+  await import('./get-document.js');
 const { isLaneAllowed } = await import('./search-privileged.js');
+
+// ── Finance store config gate (2026-08-28: BLOB_BACKEND=s3 no longer needs the Azure key) ─────────
+
+test('financeStoreConfigError: BLOB_BACKEND=azure still requires the Azure key (no regression)', () => {
+  assert.equal(
+    financeStoreConfigError({ BLOB_BACKEND: 'azure', AZURE_CFO_STORAGE_ACCOUNT: 'otchealthcfodata', AZURE_CFO_STORAGE_KEY: '' }),
+    'Finance store not configured (AZURE_CFO_STORAGE_KEY unset).',
+  );
+  assert.equal(
+    financeStoreConfigError({ BLOB_BACKEND: 'azure', AZURE_CFO_STORAGE_ACCOUNT: 'otchealthcfodata', AZURE_CFO_STORAGE_KEY: 'k' }),
+    null,
+  );
+});
+
+test('financeStoreConfigError: BLOB_BACKEND=s3 with NO Azure key present is still CONFIGURED', () => {
+  // The whole point of the fix: pruning AZURE_CFO_STORAGE_KEY from the task def must not silently
+  // kill kb_get_document once fetchBlobRaw is routing to S3 anyway.
+  assert.equal(
+    financeStoreConfigError({ BLOB_BACKEND: 's3', AZURE_CFO_STORAGE_ACCOUNT: 'otchealthcfodata', AZURE_CFO_STORAGE_KEY: '' }),
+    null,
+  );
+});
+
+test('financeStoreConfigError: the account name is load-bearing on EITHER backend', () => {
+  assert.equal(
+    financeStoreConfigError({ BLOB_BACKEND: 's3', AZURE_CFO_STORAGE_ACCOUNT: '', AZURE_CFO_STORAGE_KEY: '' }),
+    'Finance store not configured (AZURE_CFO_STORAGE_ACCOUNT unset).',
+  );
+  assert.equal(
+    financeStoreConfigError({ BLOB_BACKEND: 'azure', AZURE_CFO_STORAGE_ACCOUNT: '', AZURE_CFO_STORAGE_KEY: 'k' }),
+    'Finance store not configured (AZURE_CFO_STORAGE_ACCOUNT unset).',
+  );
+});
 
 // ── Ring boundary (the load-bearing property) ────────────────────────────────────────────────────
 

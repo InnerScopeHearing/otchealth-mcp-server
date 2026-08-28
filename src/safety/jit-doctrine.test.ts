@@ -28,15 +28,18 @@ test('parseJitDoctrineMode: unset, garbage, or "enforce" all default to warn (no
 // ---- jitDoctrineFor (pure decision core) -----------------------------------------------------------
 
 test('jitDoctrineFor: an exact-match tool name returns its bound pitfall(s)', () => {
-  const out = jitDoctrineFor('azure_containerapp_set_env');
+  const out = jitDoctrineFor('llm_azure');
   assert.equal(out.length, 1);
-  assert.match(out[0], /inline oauth-clients secret/);
+  assert.match(out[0], /gpt-4\.1-mini is banned/);
 });
 
 test('jitDoctrineFor: a prefix binding matches a tool that starts with it', () => {
   const out = jitDoctrineFor('n8n_create_workflow');
   assert.equal(out.length, 1);
   assert.match(out[0], /n8n Cloud/);
+  // 2026-08-28: the old self-host is now ALSO gone; the binding must name today's real target, not
+  // just historically point at whichever host was live when this pitfall was first written.
+  assert.match(out[0], /cs-n8n\.otchealthmart\.com/);
 });
 
 test('jitDoctrineFor: prefix binding matches every tool under that service surface', () => {
@@ -94,10 +97,11 @@ test('jitDoctrineFor: depot_trigger_build and shopify_create_product exact bindi
   assert.match(jitDoctrineFor('shopify_create_product')[0], /PSAP/);
 });
 
-test('jitDoctrineFor: azure_job_execute and azure_job_upsert are distinct exact bindings', () => {
-  assert.match(jitDoctrineFor('azure_job_execute')[0], /skew-proof image/);
-  assert.match(jitDoctrineFor('azure_job_upsert')[0], /proper array/);
-});
+// (The former "azure_job_execute and azure_job_upsert are distinct exact bindings" test lived here.
+// Removed 2026-08-28 along with the two bindings it exercised -- see jit-doctrine.ts's header note
+// on why those tools can never be called again. The assertion it made (two distinct exact bindings
+// never bleed into each other's content) is already covered by "memory_write and memory_remember
+// are distinct exact bindings" above, so no coverage is lost.)
 
 // ---- shouldSurfaceDoctrine (IO shell throttle) ------------------------------------------------------
 
@@ -146,24 +150,24 @@ test('evaluateJitDoctrine: default mode (unset env) is warn', () => {
   __resetJitDoctrineState();
   const prev = process.env.JIT_DOCTRINE_MODE;
   delete process.env.JIT_DOCTRINE_MODE;
-  const out = evaluateJitDoctrine('caller-default-mode', 'azure_containerapp_set_env');
+  const out = evaluateJitDoctrine('caller-default-mode', 'depot_trigger_build');
   assert.equal(out.mode, 'warn');
   if (prev !== undefined) process.env.JIT_DOCTRINE_MODE = prev;
 });
 
 test('evaluateJitDoctrine: a bound tool on its first call for this caller returns the pitfall(s)', () => {
   __resetJitDoctrineState();
-  const out = evaluateJitDoctrine('caller-evalA', 'azure_job_upsert');
+  const out = evaluateJitDoctrine('caller-evalA', 'shopify_create_product');
   assert.equal(out.pitfalls.length, 1);
-  assert.match(out.pitfalls[0], /proper array/);
+  assert.match(out.pitfalls[0], /PSAP/);
   assert.equal(out.mode, 'warn');
 });
 
 test('evaluateJitDoctrine: the SAME (caller, tool) pair is throttled on the second call, even though the binding still exists', () => {
   __resetJitDoctrineState();
-  const first = evaluateJitDoctrine('caller-evalB', 'azure_job_upsert');
+  const first = evaluateJitDoctrine('caller-evalB', 'shopify_create_product');
   assert.equal(first.pitfalls.length, 1, 'sanity: first call surfaces it');
-  const second = evaluateJitDoctrine('caller-evalB', 'azure_job_upsert');
+  const second = evaluateJitDoctrine('caller-evalB', 'shopify_create_product');
   assert.deepEqual(second.pitfalls, [], 'second call for the same pair is throttled to empty');
   assert.equal(second.mode, 'warn', 'mode is still reported even when throttled');
 });
@@ -178,7 +182,7 @@ test('evaluateJitDoctrine: mode off returns empty pitfalls even for a freshly-bo
   __resetJitDoctrineState();
   const prev = process.env.JIT_DOCTRINE_MODE;
   process.env.JIT_DOCTRINE_MODE = 'off';
-  const out = evaluateJitDoctrine('caller-evalD', 'azure_containerapp_set_env');
+  const out = evaluateJitDoctrine('caller-evalD', 'memory_write');
   assert.deepEqual(out, { pitfalls: [], mode: 'off' });
   if (prev !== undefined) process.env.JIT_DOCTRINE_MODE = prev; else delete process.env.JIT_DOCTRINE_MODE;
 });
@@ -208,7 +212,7 @@ test('evaluateJitDoctrine: the throttle is scoped per (caller, tool) -- a differ
 test('FAIL-OPEN: evaluateJitDoctrine never throws on empty callerHash or toolName', () => {
   __resetJitDoctrineState();
   assert.doesNotThrow(() => evaluateJitDoctrine('', ''));
-  assert.doesNotThrow(() => evaluateJitDoctrine('', 'azure_job_upsert'));
+  assert.doesNotThrow(() => evaluateJitDoctrine('', 'memory_remember'));
   assert.doesNotThrow(() => evaluateJitDoctrine('some-caller', ''));
 });
 
@@ -229,8 +233,10 @@ test('JIT_DOCTRINE_BINDINGS: every binding has at least one non-empty pitfall st
   }
 });
 
-test('JIT_DOCTRINE_BINDINGS: seeded with the 12 real ledgered bindings', () => {
-  assert.equal(JIT_DOCTRINE_BINDINGS.length, 12);
+test('JIT_DOCTRINE_BINDINGS: seeded with the 9 real ledgered bindings', () => {
+  // Was 12: the azure_containerapp_set_env / azure_job_execute / azure_job_upsert bindings were
+  // removed 2026-08-28 (those tools were deleted outright; see jit-doctrine.ts's header note).
+  assert.equal(JIT_DOCTRINE_BINDINGS.length, 9);
 });
 
 test('JIT_DOCTRINE_BINDINGS: no pitfall string anywhere in the table contains an em or en dash (published-string rule)', () => {

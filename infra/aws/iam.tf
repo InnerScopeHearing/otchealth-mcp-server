@@ -52,6 +52,18 @@ resource "aws_iam_role_policy" "task_runtime_access" {
           "${aws_s3_bucket.finance_legal_dr.arn}/*",
         ]
       },
+      # 2026-08-28: adjacent gap closed alongside the PersonalLegalRingReadWrite edit below (same
+      # underlying cause -- Azure's permanent deletion made every S3-mirror write path load-bearing
+      # instead of best-effort). `company` is already in S3_WRITABLE_CONTAINERS
+      # (src/legal/blob-store.ts), so a company-container legal_blob_move/delete already lands its
+      # copy-to-_TRASH step then 403s on the delete-original step, silently leaving a duplicate
+      # rather than completing the move -- the statement above never granted s3:DeleteObject on
+      # finance_legal_dr. Object-level only (`/*`); no bucket-level delete action is needed.
+      {
+        Effect   = "Allow"
+        Action   = ["s3:DeleteObject"]
+        Resource = ["${aws_s3_bucket.finance_legal_dr.arn}/*"]
+      },
       {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
@@ -74,9 +86,54 @@ resource "aws_iam_role_policy" "task_runtime_access" {
         Resource = "${aws_opensearch_domain.brain.arn}/*"
       },
       {
-        Sid      = "PersonalLegalRingReadOnly"
+        # 2026-08-28: DOCUMENTATION-ONLY EDIT (same "never applied" caveat as the block below --
+        # this Terraform has no live state, see versions.tf/imports.tf/import.sh; the real grant, if
+        # this lands, is a read-modify-write `aws iam get-role-policy`/`put-role-policy` against the
+        # live `otchealthTaskRole`/`runtime-access` policy, never `terraform apply`). Unlike the
+        # PersonalLegalRingReadWrite statement below, this is NOT a Matt-approval-gated ring
+        # decision -- it grants publish on one specific, already-Matt-approved-and-deployed
+        # monitoring topic (see infra-aws/alert-fanout-lambda/README.md), the same low-risk class as
+        # every other read/observability grant in this policy.
+        #
+        # Backs server/webhooks.ts's postAlert() SNS fallback (SNS_ALERT_TOPIC_ARN env, inert when
+        # unset): when the primary GitHub-issue-comment alert route itself fails (as it silently has
+        # since issue #21 hit GitHub's 2500-comment cap ~2026-08-10), the alert is ALSO published to
+        # this topic, which already fans out to GitHub issue #226 + Datadog + PostHog + Graph email
+        # via the deployed otchealth-aws-alert-fanout Lambda -- so a capped/renamed/deleted issue can
+        # never again silently eat every fleet-medic alert. Scoped to the single topic ARN, not `*`.
+        Sid      = "FleetMedicSnsAlertFallback"
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Action   = ["sns:Publish"]
+        Resource = "arn:aws:sns:${var.aws_region}:${var.aws_account_id}:otchealth-aws-alerts"
+      },
+      {
+        # 2026-08-28: DOCUMENTATION-ONLY EDIT, PENDING EXPLICIT OWNER (Matt) APPROVAL -- this
+        # Terraform has never been applied to real state (see versions.tf/imports.tf/import.sh's own
+        # "never applied" headers), so this Sid rename + widened Action list records the PROPOSED
+        # target state for the gateway-tail PR; it is NOT itself the mechanism that grants anything.
+        # If approved, the live grant is applied out-of-band via a read-modify-write
+        # `aws iam get-role-policy` / `put-role-policy` against the real `otchealthTaskRole` /
+        # `runtime-access` policy (the same discipline as the CIO secret change), NEVER
+        # `terraform apply` -- a first apply here would evaluate every import block estate-wide
+        # against 10+ days of unrelated live drift (task-def rev 22, EVAL_AGENT_TOKEN, the
+        # deliberately-uncaptured alert-fanout role/Lambda/SNS per this file's own header) and, far
+        # worse, rds.tf's `password = "CHANGEME-placeholder-never-applied-real-password-unknowable-
+        # via-api"` would attempt to reset the LIVE RDS master password to that literal placeholder.
+        #
+        # Was Sid "PersonalLegalRingReadOnly" / Action ["s3:GetObject","s3:ListBucket"]. Adds
+        # PutObject + DeleteObject so `legal_blob_put`/`legal_blob_delete`/`legal_blob_move` on the
+        # `personal` container (src/legal/blob-store.ts's S3_WRITABLE_CONTAINERS, that file's own
+        # comment carries the full rationale + approval-gate pointer) can actually write instead of
+        # falling through to permanently-dead Azure. DeleteObject is safe to grant alongside PutObject
+        # because legal_blob_delete/legal_blob_move are copy-to-_TRASH/copy-then-delete flows, never a
+        # direct unrecoverable removal, and the bucket is versioned (s3.tf:136-139; live-read
+        # 2026-08-28 confirms Status=Enabled -- re-verify immediately before granting, not just at
+        # PR-authoring time). This does NOT touch who may reach `personal` at all: that ring
+        # (PERSONAL_LEGAL_RING = ['clo-personal','exec'], src/tools/kb/search-privileged.ts, enforced
+        # by src/tools/legal/ring.ts before any store call) is untouched by this statement.
+        Sid      = "PersonalLegalRingReadWrite"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:ListBucket", "s3:PutObject", "s3:DeleteObject"]
         Resource = [aws_s3_bucket.legal_personal_dr.arn, "${aws_s3_bucket.legal_personal_dr.arn}/*"]
       },
     ]

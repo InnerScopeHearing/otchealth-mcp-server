@@ -290,7 +290,11 @@ test('TOOL_CATALOG_CURATION_MODE=curate-m365-only -- an M365 developer caller se
 // registerAllTools() -> McpServer._registeredTools path as the developer test above, locking a concrete
 // upper bound (not just "< full catalog") and asserting representative required tools survive.
 for (const [lane, upperBound, mustInclude] of [
-  ['cto', 240, ['brain_search', 'azure_jobs_list', 'github_branch_get', 'cio_admin_read_workspace_health']],
+  // 'azure_jobs_list' was the original representative tool here; replaced 2026-08-28 with
+  // 'checkpoint' when the 13 azure_* tools (and their CTO_M365_CURATED entries) were deleted
+  // outright -- both are real, still-registered CTO_M365_CURATED members, so this proves the same
+  // thing.
+  ['cto', 240, ['brain_search', 'checkpoint', 'github_branch_get', 'cio_admin_read_workspace_health']],
   ['cro', 240, ['brain_search', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
   // 2026-08-02: developer_wake_lite was silently excluded from the developer lane's M365-curated
   // registration (no wildcard/exact match in LANE_TOOLSETS.developer covered it) -- invisible to

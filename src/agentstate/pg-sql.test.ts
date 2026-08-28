@@ -141,6 +141,52 @@ test('INJECTION: a hostile field name is rejected, never interpolated', () => {
   );
 });
 
+// ---------------------------------------------------------------------------------------------
+// TABLE_RE (2026-08-28): the module's own header calls the table/field split "THE INJECTION
+// BOUNDARY", but until now only field() was enforced in code -- table trusted TranslateInput's
+// doc comment ("Caller must have validated it") alone. The `T` helper above hardcodes
+// `table: 'agentstate_memory'` for every other test in this file, so these call translate()
+// directly to vary it. Not exploitable via the one real caller today (agentstate/postgres.ts's
+// tableFor() already only emits `agentstate_<container>`) -- this is the guard against a second
+// caller ever being trusted to re-derive that same discipline correctly.
+// ---------------------------------------------------------------------------------------------
+
+test('TABLE_RE: accepts the real production table name', () => {
+  const r = translate({ table: 'agentstate_memory', query: 'SELECT * FROM c', parameters: [], max: 10 });
+  assert.match(r.text, /FROM agentstate_memory /);
+});
+
+test('TABLE_RE: REJECTS a table name with an injected statement terminator', () => {
+  assert.throws(
+    () => translate({ table: 'agentstate_memory; DROP TABLE x', query: 'SELECT * FROM c', parameters: [], max: 10 }),
+    /unsupported table name/i,
+  );
+});
+
+test('TABLE_RE: REJECTS a quoted identifier (no quoting/escaping accepted)', () => {
+  assert.throws(
+    () => translate({ table: '"agentstate_memory"', query: 'SELECT * FROM c', parameters: [], max: 10 }),
+    /unsupported table name/i,
+  );
+});
+
+test('TABLE_RE: REJECTS mixed-case (Postgres identifiers are folded to lowercase unless quoted, so this table\'s real name is not what it looks like)', () => {
+  assert.throws(
+    () => translate({ table: 'Agentstate_Memory', query: 'SELECT * FROM c', parameters: [], max: 10 }),
+    /unsupported table name/i,
+  );
+});
+
+test('TABLE_RE: REJECTS an identifier over 63 bytes (Postgres\'s own NAMEDATALEN-1 identifier limit)', () => {
+  assert.throws(
+    () => translate({ table: 'a'.repeat(64), query: 'SELECT * FROM c', parameters: [], max: 10 }),
+    /unsupported table name/i,
+  );
+  // A 63-char identifier (the boundary itself) is still accepted.
+  const r = translate({ table: 'a'.repeat(63), query: 'SELECT * FROM c', parameters: [], max: 10 });
+  assert.match(r.text, new RegExp(`FROM ${'a'.repeat(63)} `));
+});
+
 test('INJECTION: a hostile VALUE is harmless because it binds', () => {
   const r = T('SELECT * FROM c WHERE c.agent = @a', [{ name: '@a', value: "x'; DROP TABLE agentstate_memory; --" }]);
   assert.match(r.text, /doc->>'agent' = \$1/);

@@ -6,7 +6,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 // before the first session the capability catalog is empty and toolCount() (exposed on /health)
 // reads 0, which trips the deploy pipeline's tool_count regression guard on a perfectly good image.
 // registerMcpRoutes now warms the catalog at startup; this proves registerAllTools populates it to
-// the full tool surface (>= the pipeline's post-HeyGen-expansion MIN_TOOLS floor of 1003).
+// the full tool surface (>= the pipeline's MIN_TOOLS floor, 990 as of 2026-08-28 -- was 1003 before
+// the 13 azure_* tools were deleted outright; see deploy.yml's MIN_TOOLS and this PR's other
+// azure-removal touch points). This is a FLOOR, not the exact live count -- the live catalog can
+// (and does) sit above it as new tools are added; a deploy-time check should assert the exact
+// pre-deploy-measured count minus any tools this specific deploy removes, not this test's floor.
 before(() => {
   const required: Record<string, string> = {
     CIO_SITE_ID: 'test',
@@ -35,5 +39,5 @@ test('registerAllTools warms the capability catalog to the full tool surface (de
   );
 
   const n = toolCount();
-  assert.ok(n >= 1003, `expected the warmed catalog to expose >= 1003 tools (the deploy MIN_TOOLS floor), got ${n}`);
+  assert.ok(n >= 990, `expected the warmed catalog to expose >= 990 tools (the deploy MIN_TOOLS floor), got ${n}`);
 });

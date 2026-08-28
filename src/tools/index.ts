@@ -936,22 +936,18 @@ import { registerMemoryWrite } from './agentstate/memory-write.js';
 import { registerMemorySearch } from './agentstate/memory-search.js';
 import { registerAgentDispatch } from './agentstate/agent-dispatch.js';
 import { registerInboxRead } from './agentstate/inbox-read.js';
-// ITEM #2 Azure control-plane READ tools (Phase A). MI-authenticated, least-privilege, cto-gated.
-import { registerAzureJobsList } from './azure/jobs-list.js';
-import { registerAzureJobExecutions } from './azure/job-executions.js';
-import { registerAzureJobGet } from './azure/job-get.js';
-import { registerAzureLogsQuery } from './azure/logs-query.js';
-import { registerAzureSearchIndexStats } from './azure/search-index-stats.js';
-import { registerAzureContainerappGet } from './azure/containerapp-get.js';
-import { registerAzureResourceList } from './azure/resource-list.js';
-// ITEM #2 Azure control-plane WRITE tools (Phase B). write_orchestrated, cto-gated, dry_run-default,
-// guarded (oauth-clients deny / PHI deny / non-destructive merge / no delete / no shell-out).
-import { registerAzureJobExecute } from './azure/job-execute.js';
-import { registerAzureJobUpsert } from './azure/job-upsert.js';
-import { registerAzureJobUpdate } from './azure/job-update.js';
-import { registerAzureContainerappSetEnv } from './azure/containerapp-set-env.js';
-import { registerAzureSearchIndexUpsert } from './azure/search-index-upsert.js';
-import { registerAzureSearchIndexerUpsert } from './azure/search-indexer-upsert.js';
+// ITEM #2 Azure control-plane tools (Phase A read + Phase B write) were REMOVED outright 2026-08-28:
+// the Azure subscription behind them (55c84f6b) is permanently deleted, so unlike every other
+// inert-but-present Azure code path in this repo (cosmos.ts, azure/search.ts, queue-azure.ts --
+// still reachable via their BLOB_BACKEND/SEARCH_BACKEND/STATE_BACKEND switches, kept for a future
+// that never arrives but is at least conceivable), a Managed-Identity ARM client authenticated
+// against a subscription that no longer exists has no such future -- there is no switch that could
+// ever make it answer again. src/azure/arm-client.ts (the shared ARM REST client these 13 tools
+// called into) is KEPT: src/agentstate/cosmos.ts and src/azure/search-write.ts still import
+// miToken/searchAdminKey from it for their own (also inert-but-present) Azure paths, so deleting
+// the file would be a build break unrelated to this cleanup. See catalog/governance.ts and
+// config/lane-toolsets.ts for the corresponding rule/allowlist removals, and
+// search/azure-dependency-guard.test.ts for the updated inert-file matrix.
 import { registerXeroTools } from './xero/tools.js';
 import { registerHeyGenTools } from './heygen/index.js';
 import { registerHyperagentTools } from './hyperagent/tools.js';
@@ -1900,32 +1896,14 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerInboxRead(server, callerHash);
   registerAgentDispatch(server, callerHash);
 
-  // ===== ITEM #2: Azure control-plane READ tools (Phase A) =====
-  // The Claude Chat CTO can SEE Azure without a human: list jobs + their executions, query Log
-  // Analytics (KQL), read AI Search index doc counts, read a Container App (values-stripped), and
-  // inventory resources. Authenticated by the gateway's SYSTEM-ASSIGNED MANAGED IDENTITY (no stored
-  // SP secret), which holds ONLY least-privilege roles (Reader on 2 RGs, Log Analytics Reader on the
-  // shared workspace, Search Service Contributor on the 2 search services). All are cto-gated for
-  // EXECUTION (governance.ts azure_*) and every write path (Phase B) is deliberately absent here.
-  registerAzureJobsList(server, callerHash);
-  registerAzureJobExecutions(server, callerHash);
-  registerAzureLogsQuery(server, callerHash);
-  registerAzureSearchIndexStats(server, callerHash);
-  registerAzureContainerappGet(server, callerHash);
-  registerAzureJobGet(server, callerHash);
-  registerAzureResourceList(server, callerHash);
-
-  // ===== ITEM #2: Azure control-plane WRITE tools (Phase B) =====
-  // The Chat CTO can now CHANGE Azure without a human: start a job, upsert a job, set container-app env
-  // (non-destructively; the gateway oauth-clients binding is hard-denied), and upsert AI Search indexes/
-  // indexers. All write_orchestrated (CTO-only + ENABLE_HIGH_RISK_TOOLS-gated), dry_run defaults TRUE,
-  // PHI-denied, typed ARM REST (no az shell-out), NO delete tools, NO Key Vault secret-value tool.
-  registerAzureJobExecute(server, callerHash);
-  registerAzureJobUpsert(server, callerHash);
-  registerAzureJobUpdate(server, callerHash);
-  registerAzureContainerappSetEnv(server, callerHash);
-  registerAzureSearchIndexUpsert(server, callerHash);
-  registerAzureSearchIndexerUpsert(server, callerHash);
+  // ===== ITEM #2: Azure control-plane tools (Phase A read + Phase B write) =====
+  // REMOVED outright 2026-08-28 (13 tools: azure_jobs_list, azure_job_executions, azure_logs_query,
+  // azure_search_index_stats, azure_containerapp_get, azure_job_get, azure_resource_list,
+  // azure_job_execute, azure_job_upsert, azure_job_update, azure_containerapp_set_env,
+  // azure_search_index_upsert, azure_search_indexer_upsert) -- see the import-site comment above for
+  // why this is a deletion, not the usual inert-but-present treatment: the Azure subscription these
+  // authenticated against (55c84f6b) is permanently deleted, so there is no future state in which a
+  // health-gate could ever reopen them the way n8n_*'s gate below can for n8n.
   // Xero (read-only, executive-ring gated in-handler; MNPI — see tools/xero/client.ts).
   registerXeroTools(server, callerHash);
   // HeyGen (durable subscription OAuth + Phase 0 discovery/reconciliation + bounded idempotent direct video/ingestion writes; every handler lane-gated).

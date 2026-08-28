@@ -8,12 +8,23 @@ process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
+// Pin the pre-2026-08-28 backend defaults (env.ts's SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
+// LLM_PROVIDER/WEB_SEARCH_PROVIDER/BLOB_BACKEND/STATE_BACKEND now default to their AWS-native
+// replacements) so this file keeps exercising exactly the Azure/Foundry/Cosmos code path it was
+// written for -- those paths stay inert-but-present and still need this coverage.
+process.env.STATE_BACKEND ||= 'cosmos';
+process.env.BLOB_BACKEND ||= 'azure';
+process.env.SEARCH_BACKEND ||= 'azure';
+process.env.LLM_PROVIDER ||= 'foundry';
+process.env.EMBEDDINGS_PROVIDER ||= 'foundry';
+process.env.WEB_SEARCH_PROVIDER ||= 'azure';
 process.env.AZURE_COMMONS_STORAGE_ACCOUNT ||= 'teststore';
 process.env.AZURE_COMMONS_STORAGE_KEY ||= Buffer.from('k'.repeat(32)).toString('base64');
 
-// BLOB_BACKEND is deliberately left UNSET, so this file exercises the Azure path. The S3 path has
-// its own file (store-s3.test.ts) because loadEnv() caches and each test file gets its own process.
-delete process.env.BLOB_BACKEND;
+// BLOB_BACKEND is explicitly pinned to 'azure' above (2026-08-28: its schema default flipped to
+// 's3' the same day, so leaving it unset no longer exercises this file's target path), so this file
+// exercises the Azure path. The S3 path has its own file (store-s3.test.ts) because loadEnv() caches
+// and each test file gets its own process.
 
 const { normalizeAgent, readSharedAll, appendShared, isConfigured } = await import('./store.js');
 

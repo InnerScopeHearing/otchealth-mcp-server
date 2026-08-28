@@ -160,6 +160,8 @@ test('the commons MEMORY store dispatches on BLOB_BACKEND in every one of its I/
 const BLOB_BACKEND_AWARE_STORES: Readonly<Record<string, string>> = Object.freeze({
   'legal/blob-store.ts': 'the legal/finance document store: Azure path retained as the rollback behind the selector',
   'memory/store.ts': 'the commons shared-brain feed: Azure path retained as the rollback behind the selector',
+  'tools/heygen/artifact-store.ts':
+    'HeyGen render-artifact store: migrated 2026-08-28 (mirror row otchealthcommons/heygen-artifacts in s3-blob-store.ts; Azure path retained as the rollback behind the selector, same pattern as the other two entries here). Was previously listed in AZURE_BLOB_UNMIGRATED as having no mirror row and nowhere to dispatch to; that is no longer true.',
 });
 
 /** Azure Blob callers NOT yet migrated. FLAGGED, not endorsed -- same convention as the
@@ -168,8 +170,6 @@ const BLOB_BACKEND_AWARE_STORES: Readonly<Record<string, string>> = Object.freez
 const AZURE_BLOB_UNMIGRATED: Readonly<Record<string, string>> = Object.freeze({
   'agentstate/resolver.ts':
     'FLAGGED: HEADs a pointer in the SAME commons container memory/store.ts just migrated, but via its own SAS builder and with no BLOB_BACKEND branch. Out of this change\'s scope (pointer resolution, not the memory feed); it will fail against a dead Azure. Its owner should route it through the same S3 path.',
-  'tools/heygen/artifact-store.ts':
-    'FLAGGED: a separate Azure Blob container for HeyGen render artifacts, with no S3 mirror row and therefore nowhere to dispatch to yet. Needs its own mirror + migration decision, not a silent repoint.',
 });
 
 test('no file builds an Azure Blob URL unless it is a declared, BLOB_BACKEND-aware store', () => {

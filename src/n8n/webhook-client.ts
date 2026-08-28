@@ -11,6 +11,7 @@ import { createHmac } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { n8nReachable, N8N_DEGRADED } from './reachability.js';
 
 const env = loadEnv();
 
@@ -48,7 +49,14 @@ function signBody(body: string): string {
   return createHmac('sha256', env.N8N_WEBHOOK_SECRET).update(body, 'utf8').digest('hex');
 }
 
+/** Throws N8nWebhookError('n8n_degraded') when n8n itself is unreachable (see reachability.ts). */
+async function assertN8nReachable(): Promise<void> {
+  if (await n8nReachable()) return;
+  throw new N8nWebhookError({ ...N8N_DEGRADED });
+}
+
 export async function callN8nWebhook(args: N8nWebhookCallArgs): Promise<N8nWebhookResponse> {
+  await assertN8nReachable();
   const url = `${env.N8N_BASE_URL.replace(/\/$/, '')}${args.webhookPath}`;
   const bodyString = JSON.stringify(args.payload);
   const signature = signBody(bodyString);

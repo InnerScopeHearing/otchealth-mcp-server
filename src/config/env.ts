@@ -83,10 +83,18 @@ const EnvSchema = z.object({
   M365_CRO_MCP_TOKEN: z.string().optional().default(''),
 
   // n8n
+  //
+  // CORRECTED 2026-08-28: automation.otchealth.app was the Azure self-host; it died with the
+  // permanently deleted Azure subscription 55c84f6b (2026-08-13) and its dangling DNS record was
+  // removed 2026-08-27 (now NXDOMAIN). The AWS Lightsail recovery lane
+  // (cs-n8n.otchealthmart.com, otchealth-cto/.github/workflows/aws-n8n-recovery.yml) is the
+  // successor and is now the default -- it answers fast with a 502 (proxy up / n8n not yet
+  // recovered) rather than hanging or DNS-failing, which is exactly the shape n8nReachable()
+  // below is built to detect and gate on.
   N8N_BASE_URL: z
     .string()
     .url()
-    .default('https://automation.otchealth.app'),
+    .default('https://cs-n8n.otchealthmart.com'),
   N8N_API_KEY: z.string().optional().default(''),
   N8N_WEBHOOK_SECRET: z
     .string()
@@ -102,6 +110,18 @@ const EnvSchema = z.object({
   // Where the webhook routes human+agent-visible fleet-medic alerts (issue comments).
   FLEET_MEDIC_LOG_REPO: z.string().optional().default('InnerScopeHearing/otchealth-mcp-server'),
   FLEET_MEDIC_LOG_ISSUE: z.string().optional().default('21'),
+  // 2026-08-28: durability fallback for postAlert() (server/webhooks.ts). Issue #21 hit GitHub's
+  // hard 2500-comment cap ~2026-08-10 (403 "Commenting is disabled on issues with more than 2500
+  // comments"), and createIssueComment()'s only failure handling was a warn-log -- so every
+  // CI-failure/auto-merge alert since has been silently dropped, not merely delayed. When set,
+  // postAlert() ALSO publishes to this SNS topic (SigV4, task-role credentials, no aws-sdk
+  // dependency -- see search/sigv4.ts) on any createIssueComment failure, fanning out through the
+  // already-deployed 4-channel otchealth-aws-alert-fanout Lambda (GitHub + Datadog + PostHog +
+  // Graph email; see infra-aws/alert-fanout-lambda/README.md) so a capped/renamed/deleted issue
+  // can never again silently eat every alert. Inert (no publish attempted) when unset -- this does
+  // NOT replace the issue-comment route, only backstops its failure. Bumping FLEET_MEDIC_LOG_ISSUE
+  // itself (the #21 replacement) needs an operator-created successor issue first; out of scope here.
+  SNS_ALERT_TOPIC_ARN: z.string().optional().default(''),
 
   // Cloudflare
   CLOUDFLARE_API_TOKEN: z.string().optional().default(''),
@@ -285,32 +305,45 @@ const EnvSchema = z.object({
   AZURE_SEARCH_ENDPOINT: z.string().optional().default(''),
   AZURE_SEARCH_QUERY_KEY: z.string().optional().default(''),
 
-  // SEARCH BACKEND SWITCH (src/search/index.ts dispatcher). Default 'azure' is BYTE-IDENTICAL to
-  // every deploy before this variable existed: every dispatched caller keeps calling
-  // src/azure/search.ts exactly as before. Flip to 'opensearch' to route those same callers at
-  // Amazon OpenSearch instead (src/search/opensearch.ts).
+  // SEARCH BACKEND SWITCH (src/search/index.ts dispatcher). Every dispatched caller routes to
+  // Amazon OpenSearch (src/search/opensearch.ts) by default. 'azure' remains selectable and the
+  // Azure code path (src/azure/search.ts) stays inert-but-present -- see that file and
+  // src/azure/arm-client.ts's header -- but it can never actually run in production again: the
+  // Azure subscription behind it (55c84f6b) was permanently deleted 2026-08-13.
   //
-  // CORRECTED 2026-08-15: this comment previously said kb_search_privileged was "DELIBERATELY NOT
-  // wired to this dispatcher and always uses Azure regardless of this value". That is no longer
-  // true -- src/tools/kb/search-privileged.ts imports the dispatcher and therefore honours this
-  // variable like every other caller (see src/search/index.ts's header for why the repoint is
-  // ring-NEUTRAL: isLaneAllowed runs BEFORE the search call and depends only on index + caller).
-  // Leaving the stale text would have told a cutover reader that the privileged legal/finance rooms
-  // stay on Azure when they do not, which is exactly the belief that gets a ring boundary
-  // misjudged during a migration.
-  SEARCH_BACKEND: z.enum(['azure', 'opensearch']).default('azure'),
+  // CORRECTED 2026-08-28: default flipped 'azure' -> 'opensearch'. Every live deploy has carried
+  // an explicit SEARCH_BACKEND=opensearch task-def value since the 2026-07 cutover, so this is a
+  // safety-net change, not a behavior change -- but leaving the default pointed at a permanently
+  // dead cloud meant a task def that ever lost this ONE env var would fail toward Azure instead of
+  // toward the backend that actually works. See env.ts's other backend switches (EMBEDDINGS_
+  // PROVIDER, LLM_PROVIDER, WEB_SEARCH_PROVIDER, BLOB_BACKEND, STATE_BACKEND) for the same fix,
+  // same day, same reasoning.
+  //
+  // CORRECTED 2026-08-15 (preserved): this comment previously said kb_search_privileged was
+  // "DELIBERATELY NOT wired to this dispatcher and always uses Azure regardless of this value".
+  // That is no longer true -- src/tools/kb/search-privileged.ts imports the dispatcher and
+  // therefore honours this variable like every other caller (see src/search/index.ts's header for
+  // why the repoint is ring-NEUTRAL: isLaneAllowed runs BEFORE the search call and depends only on
+  // index + caller).
+  SEARCH_BACKEND: z.enum(['azure', 'opensearch']).default('opensearch'),
 
   // Where query embeddings come from (src/azure/foundry.ts embeddingsTarget). Vector search embeds
   // every query, so while this points at Azure the brain cannot outlive an Azure suspension no
   // matter where search or the documents live.
-  //   foundry (default)  Azure Foundry. Byte-identical to every prior deploy.
-  //   openai             api.openai.com, using OPENAI_API_KEY.
+  //   foundry            Azure Foundry -- PERMANENTLY UNREACHABLE (subscription 55c84f6b deleted
+  //                      2026-08-13). Kept selectable only because src/azure/foundry.ts stays
+  //                      inert-but-present in this pass (see arm-client.ts's header).
+  //   openai (default)   api.openai.com, using OPENAI_API_KEY.
   // The MODEL is pinned to text-embedding-3-large on both paths and is NOT configurable: the
   // OpenSearch index's 492k vectors were built with it, and query vectors from any other model are
   // not comparable to them. That failure is silent -- relevance collapses, nothing errors -- and
   // the only repair is re-embedding every document. It is also exactly why the AWS-native choice
   // (Bedrock Titan/Cohere) is the WRONG one here despite the destination being AWS.
-  EMBEDDINGS_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
+  //
+  // CORRECTED 2026-08-28: default flipped 'foundry' -> 'openai'. Every live deploy has carried an
+  // explicit EMBEDDINGS_PROVIDER=openai task-def value for some time (verified against the live
+  // revision 22 task def), so this is a safety-net change, matching the SEARCH_BACKEND fix above.
+  EMBEDDINGS_PROVIDER: z.enum(['foundry', 'openai']).default('openai'),
   OPENAI_API_KEY: z.string().optional().default(''),
 
   // WHICH PROVIDER SERVES CHAT COMPLETIONS (src/azure/foundry.ts chatTarget()). Mirrors
@@ -320,12 +353,17 @@ const EnvSchema = z.object({
   // legitimately answer with a different underlying model, so this is free to move independently
   // of EMBEDDINGS_PROVIDER (e.g. embeddings could stay on Foundry while chat moves to OpenAI, or
   // vice versa, during a staged cutover).
-  //   foundry (default)  Azure Foundry (FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT/
-  //                       FOUNDRY_ROUTER_*). Byte-identical to every prior deploy.
-  //   openai              api.openai.com, using OPENAI_API_KEY. See OPENAI_CHAT_MODEL/
+  //   foundry             Azure Foundry (FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT/
+  //                       FOUNDRY_ROUTER_*) -- PERMANENTLY UNREACHABLE (subscription 55c84f6b
+  //                       deleted 2026-08-13). Kept selectable only because src/azure/foundry.ts
+  //                       stays inert-but-present in this pass (see arm-client.ts's header).
+  //   openai (default)    api.openai.com, using OPENAI_API_KEY. See OPENAI_CHAT_MODEL/
   //                       OPENAI_HIGH_MODEL/OPENAI_ROUTER_MODEL below for the tier -> model id
   //                       mapping and why those defaults are a JUDGEMENT CALL, not a verified fact.
-  LLM_PROVIDER: z.enum(['foundry', 'openai']).default('foundry'),
+  //
+  // CORRECTED 2026-08-28: default flipped 'foundry' -> 'openai', same reasoning and same live-value
+  // verification as EMBEDDINGS_PROVIDER/SEARCH_BACKEND above.
+  LLM_PROVIDER: z.enum(['foundry', 'openai']).default('openai'),
   // Tier -> OpenAI-direct model id overrides for the LLM_PROVIDER=openai path (src/azure/foundry.ts
   // openaiModelForTier()). FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT ('gpt-5.1'/'gpt-5.4') are
   // AZURE DEPLOYMENT NAMES -- an operator-chosen alias, not necessarily a real, callable
@@ -355,14 +393,14 @@ const EnvSchema = z.object({
   // agent's ground-first protocol for external/public-world queries, so going dark on an Azure
   // suspension was a fleet-wide capability loss, not a degraded corner.
   //
-  //   azure (default)  Azure AI Foundry project + Grounding-with-Bing (WEBSEARCH_SP_TENANT_ID/
+  //   azure            Azure AI Foundry project + Grounding-with-Bing (WEBSEARCH_SP_TENANT_ID/
   //                     CLIENT_ID/SECRET/PROJECT_ENDPOINT/MODEL, still read directly from process.env
   //                     in src/tools/web/providers/azure-web-search.ts, NOT through this schema --
   //                     preserves the file's original "self-contained, touches nothing else" property
-  //                     for this one provider, since it predates this dispatcher and its behavior must
-  //                     stay byte-identical). Default is a pure passthrough: every caller keeps hitting
-  //                     the exact same Azure endpoint exactly as before this flag existed.
-  //   tavily            Tavily's Search API (api.tavily.com/search, TAVILY_API_KEY below), the chosen
+  //                     for this one provider, since it predates this dispatcher). PERMANENTLY
+  //                     UNREACHABLE (subscription 55c84f6b deleted 2026-08-13); kept selectable only
+  //                     because the provider file stays inert-but-present in this pass.
+  //   tavily (default) Tavily's Search API (api.tavily.com/search, TAVILY_API_KEY below), the chosen
   //                     Azure-exit replacement -- see src/tools/web/providers/tavily-web-search.ts's
   //                     header for why Tavily over Brave/Serper/Exa/Bedrock (short version: Amazon
   //                     Bedrock does not support Anthropic's web_search server tool AT ALL -- confirmed
@@ -378,7 +416,10 @@ const EnvSchema = z.object({
   // reads as "searched and found nothing" -- that specific silent-empty-success shape is a failure
   // class this fleet has hit before). A request/network failure returns {mode:'error', error:<msg>}.
   // Neither ever throws out of the tool handler.
-  WEB_SEARCH_PROVIDER: z.enum(['azure', 'tavily']).default('azure'),
+  //
+  // CORRECTED 2026-08-28: default flipped 'azure' -> 'tavily', same reasoning and same live-value
+  // verification as the other backend switches in this file.
+  WEB_SEARCH_PROVIDER: z.enum(['azure', 'tavily']).default('tavily'),
   // Tavily API key (dashboard at https://app.tavily.com, prefixed `tvly-`). SIGNUP STEP (human,
   // one-time, no AWS/Azure involvement): create a free Tavily account at https://www.tavily.com or
   // directly at https://app.tavily.com (no credit card required for the free tier -- 1,000
@@ -400,36 +441,52 @@ const EnvSchema = z.object({
     .default('')
     .refine((value) => value === '' || value.startsWith('tvly-'), 'TAVILY_API_KEY must be a Tavily tvly- key'),
 
-  // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars).
-  //   azure (default)  Azure Blob, via src/legal/blob-store.ts. Byte-identical to every prior deploy.
-  //   s3               the S3 mirror, via src/legal/s3-blob-store.ts.
+  // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars) AND, for
+  // the containers listed in blob-store.ts's S3_WRITABLE_CONTAINERS, writes too.
+  //   azure            Azure Blob, via src/legal/blob-store.ts. PERMANENTLY UNREACHABLE
+  //                     (subscription 55c84f6b deleted 2026-08-13); kept selectable only because
+  //                     that code path stays inert-but-present in this pass.
+  //   s3 (default)     the S3 mirror, via src/legal/s3-blob-store.ts -- for the rooms mapped in its
+  //                     MIRROR table this IS the source of truth now, not a mirror of a live Azure
+  //                     (see that file's header).
   // Search finding a document is useless if its CONTENTS still come from Azure -- that is what kept
   // the gateway Azure-dependent after the search backend moved. Flipping this is what actually
-  // removes the dependency. Reads only; document WRITES continue to go to Azure (the mirror has no
-  // reconciliation path, so writing to it directly would silently diverge it from the source).
-  BLOB_BACKEND: z.enum(['azure', 's3']).default('azure'),
+  // removes the dependency.
+  //
+  // CORRECTED 2026-08-28: default flipped 'azure' -> 's3', same reasoning and same live-value
+  // verification as the other backend switches in this file. Also no longer accurate as written:
+  // "document WRITES continue to go to Azure" was true when this comment was first written, but
+  // s3-blob-store.ts grew write verbs 2026-08-18 (see S3_WRITABLE_CONTAINERS in blob-store.ts) --
+  // writes for `company`/`exec` (and, as of 2026-08-28, `personal`) already go to S3, not Azure.
+  BLOB_BACKEND: z.enum(['azure', 's3']).default('s3'),
 
   // Which store holds the AGENT STATE PLANE: the work-ledger (tasks), the memory-of-record
   // (memory), the transition log (events), OAuth codes/tokens, the LLM/FAQ caches, AND (as of
   // src/agentstate/queue.ts's dispatcher) the agent inbox (agent_dispatch / inbox_read / wake).
-  //   cosmos (default)  Azure Cosmos DB + Azure Storage Queues, via src/agentstate/cosmos.ts and
-  //                     src/agentstate/queue-azure.ts. Byte-identical to prior deploys.
-  //   postgres          RDS Postgres for both, via src/agentstate/postgres.ts (documents) and
+  //   cosmos            Azure Cosmos DB + Azure Storage Queues, via src/agentstate/cosmos.ts and
+  //                     src/agentstate/queue-azure.ts. PERMANENTLY UNREACHABLE (subscription
+  //                     55c84f6b deleted 2026-08-13); kept selectable only because those code
+  //                     paths stay inert-but-present in this pass (see arm-client.ts's header --
+  //                     cosmos.ts imports miToken from it for the COSMOS_AUTH_MODE=aad path).
+  //   postgres (default) RDS Postgres for both, via src/agentstate/postgres.ts (documents) and
   //                     src/agentstate/queue-postgres.ts (the inbox, its own table + atomic
   //                     claim -- see that file's header for why it is not just another
   //                     postgres.ts container).
   //
-  // This is the LAST Azure runtime dependency and the one with the worst failure mode. Search and
-  // documents degrade to "cannot read" if Azure goes away; state degrades to "cannot WRITE" --
-  // writeMemory() and memory-write.ts both await their create with no catch, so an Azure
-  // suspension does not make the fleet forgetful, it makes it unable to record anything at all --
-  // and before queue-postgres.ts existed, the inbox call sites called Azure UNCONDITIONALLY,
-  // ignoring this flag entirely, so agent-to-agent dispatch would have stopped outright.
-  // Consumers must therefore import from src/agentstate/store.ts (documents) or
+  // This was the LAST Azure runtime dependency and, while it pointed at Azure, the one with the
+  // worst failure mode: search and documents degrade to "cannot read" if Azure goes away; state
+  // degrades to "cannot WRITE" -- writeMemory() and memory-write.ts both await their create with no
+  // catch, so an Azure suspension does not make the fleet forgetful, it makes it unable to record
+  // anything at all -- and before queue-postgres.ts existed, the inbox call sites called Azure
+  // UNCONDITIONALLY, ignoring this flag entirely, so agent-to-agent dispatch would have stopped
+  // outright. Consumers must therefore import from src/agentstate/store.ts (documents) or
   // src/agentstate/queue.ts (the inbox) -- the two dispatchers -- never from cosmos.ts,
   // postgres.ts, queue-azure.ts, or queue-postgres.ts directly;
   // agentstate-dependency-guard.test.ts enforces the document half in CI.
-  STATE_BACKEND: z.enum(['cosmos', 'postgres']).default('cosmos'),
+  //
+  // CORRECTED 2026-08-28: default flipped 'cosmos' -> 'postgres', same reasoning and same
+  // live-value verification as the other backend switches in this file.
+  STATE_BACKEND: z.enum(['cosmos', 'postgres']).default('postgres'),
 
   // RDS Postgres connection for STATE_BACKEND=postgres. Inert unless PG_HOST is set, so a
   // deployment that never sets these behaves exactly as before this flag existed.
@@ -440,12 +497,15 @@ const EnvSchema = z.object({
   PG_DATABASE: z.string().optional().default('agentstate'),
   PG_USER: z.string().optional().default(''),
   PG_PASSWORD: z.string().optional().default(''),
-  // RDS terminates TLS with an Amazon-issued cert. Verification needs the RDS CA bundle in the
-  // image; until that is baked in, encrypt-without-verify is still strictly better than plaintext
-  // and the traffic never leaves the VPC. Set true once the bundle ships.
+  // RDS terminates TLS with an Amazon-issued cert. The RDS CA bundle is now baked into the image
+  // (Dockerfile ADDs https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem to
+  // /etc/ssl/certs and sets NODE_EXTRA_CA_CERTS -- ported verbatim from flatstick/Dockerfile,
+  // which proves the pattern in production), so verification is on by default. Set to 'false' as
+  // an instant, image-rebuild-free rollback if verification ever fails at cutover -- fix the trust
+  // store, not this flag; do not relax to encrypt-without-verify as a durable answer.
   PG_SSL_VERIFY: z
     .enum(['true', 'false'])
-    .default('false')
+    .default('true')
     .transform((v) => v === 'true'),
 
   // Dual-write the memory index to BOTH backends (see src/search/index.ts indexMemory). Reads still

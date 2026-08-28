@@ -74,8 +74,13 @@ const SAFETY_CHECKS = ['shield_check', 'groundedness_check', 'claims_check'] as 
 const HEYGEN = ['heygen_*'] as const;
 // The CTO's full infra/build/observability surface, reused verbatim by 'exec' (the unified chief
 // wears the CTO hat too, per the "solo operator" note in kb/search-privileged.ts).
+// 'azure_*' was dropped from this list 2026-08-28: the 13 azure_* tools were deleted outright (not
+// merely darkened) -- the Azure subscription behind them (55c84f6b) is permanently deleted, so
+// unlike every other prefix here there is no future state in which they answer again. Leaving a
+// dead wildcard in a seed allowlist is harmless (it simply matches nothing), but a live one that
+// used to advertise real tools reads as a stale claim about this lane's actual capability.
 const CTO_INFRA = [
-  'azure_*', 'github_*', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
+  'github_*', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
   'posthog_*', 'sentry_*', 'gumroad_*', 'docintel_*', 'graph_*', 'cio_*', 'stripe_*', 'twilio_*',
   'elevenlabs_*', 'xero_*', 'legal_blob_*', 'shopify_*', 'intercom_*', 'revenuecat_*',
   ...HEYGEN,
@@ -120,10 +125,12 @@ const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_message_ge
  * caveat). To refresh: rerun build-agents.mjs, extract each file's `.map(t => t.name)`, and replace
  * the array body below.
  */
+// The 13 azure_* names below this list once carried were removed 2026-08-28 (tools deleted outright,
+// see CTO_INFRA's comment above for why); this snapshot is otherwise unchanged from the 2026-08-02
+// build-agents.mjs export, so it is no longer byte-identical to that generated file until the next
+// refresh removes the same names there too.
 const CTO_M365_CURATED = [
-  'agent_dispatch', 'azure_containerapp_get', 'azure_containerapp_set_env', 'azure_job_execute', 'azure_job_executions',
-  'azure_job_get', 'azure_job_update', 'azure_job_upsert', 'azure_jobs_list', 'azure_logs_query',
-  'azure_resource_list', 'azure_search_index_stats', 'azure_search_index_upsert', 'azure_search_indexer_upsert',
+  'agent_dispatch',
   'brain_search', 'catalog_audit_unused', 'catalog_list_tools', 'catalog_master', 'catalog_probe',
   'cio_admin_read_*', 'cio_admin_write_*',
   'catalog_service_capabilities', 'catalog_skill', 'checkpoint', 'cloudflare_add_email_destination',

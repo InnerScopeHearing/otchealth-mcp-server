@@ -42,6 +42,34 @@ export const PAGE_CHARS = 60_000;
  *  video/binary must not OOM the gateway). */
 const MAX_BYTES = 50 * 1024 * 1024;
 
+/**
+ * Whether the finance dataroom store is usable, and the exact reason when it is not. Pure +
+ * exported so the S3-vs-Azure gating is directly testable, mirroring isSafeBlobPath/
+ * toContainerRelative below rather than needing a full MCP handler harness or a live network call.
+ *
+ * Under BLOB_BACKEND=s3, fetchBlobRaw routes to the S3 mirror before it ever touches
+ * AZURE_CFO_STORAGE_KEY (see blob-store.ts's fetchBlobRaw) -- so requiring that key here
+ * unconditionally was wrong the moment that switch flipped: it would silently kill kb_get_document
+ * the instant the key is pruned from the task def, even though every actual read no longer needs
+ * it. Mirrors blob-store.ts's readCreds() fix for the identical class of gap on the legal store
+ * (2026-08-18). Only the account NAME is load-bearing under S3 (it is half the (account, container)
+ * lookup into the mirror allow-list); it carries a schema default ('otchealthcfodata') so in
+ * practice it is never genuinely unset.
+ */
+export function financeStoreConfigError(env: {
+  BLOB_BACKEND: string;
+  AZURE_CFO_STORAGE_ACCOUNT: string;
+  AZURE_CFO_STORAGE_KEY: string;
+}): string | null {
+  if (!env.AZURE_CFO_STORAGE_ACCOUNT) {
+    return 'Finance store not configured (AZURE_CFO_STORAGE_ACCOUNT unset).';
+  }
+  if (env.BLOB_BACKEND !== 's3' && !env.AZURE_CFO_STORAGE_KEY) {
+    return 'Finance store not configured (AZURE_CFO_STORAGE_KEY unset).';
+  }
+  return null;
+}
+
 /** Path hygiene: container-relative, no traversal, no absolute/URL forms. Pure + exported for tests. */
 export function isSafeBlobPath(path: string): boolean {
   if (!path || path.length > 1024) return false;
@@ -189,8 +217,9 @@ export function registerKbGetDocument(server: McpServer, callerHash: CallerHashP
           return { data: { ...empty, error: 'invalid_path' }, summary: 'Refused: path must be container-relative with no traversal.' };
         }
         const env = loadEnv();
-        if (!env.AZURE_CFO_STORAGE_KEY) {
-          return { data: { ...empty, error: 'unconfigured' }, summary: 'Finance store not configured (AZURE_CFO_STORAGE_KEY unset).' };
+        const configError = financeStoreConfigError(env);
+        if (configError) {
+          return { data: { ...empty, error: 'unconfigured' }, summary: configError };
         }
         // Normalise the SEARCH-EMITTED form (<account>/<container>/<blob path>) to the
         // container-relative form this store takes. See toContainerRelative: without this, a path

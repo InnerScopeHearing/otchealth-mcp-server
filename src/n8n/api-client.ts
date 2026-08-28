@@ -6,6 +6,7 @@
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { n8nReachable, N8N_DEGRADED } from './reachability.js';
 
 const env = loadEnv();
 
@@ -32,10 +33,18 @@ function requireKey(): string {
       status: 0,
       message: 'n8n public API is not configured.',
       nextStep:
-        'Set N8N_API_KEY in Railway env vars. Value is in Matt\'s Notion Token Vault under n8n section.',
+        "Set N8N_API_KEY as a gateway secret. Value is in Matt's Notion Token Vault under n8n section.",
     });
   }
   return env.N8N_API_KEY;
+}
+
+/** Throws N8nApiError('n8n_degraded') when n8n itself is unreachable (see reachability.ts).
+ *  Checked AFTER requireKey() so a genuinely unconfigured key still reports that specific,
+ *  more actionable error rather than being masked behind a network-reachability message. */
+async function assertN8nReachable(): Promise<void> {
+  if (await n8nReachable()) return;
+  throw new N8nApiError({ ...N8N_DEGRADED });
 }
 
 function buildQuery(q?: Record<string, string | number | undefined>): string {
@@ -57,6 +66,7 @@ export interface N8nGetOptions {
 
 export async function n8nGet<T = unknown>(path: string, opts: N8nGetOptions = {}): Promise<T> {
   const key = requireKey();
+  await assertN8nReachable();
   const base = env.N8N_BASE_URL.replace(/\/$/, '');
   const url = `${base}/api/v1${path}${buildQuery(opts.query)}`;
   const started = Date.now();
@@ -85,7 +95,7 @@ export async function n8nGet<T = unknown>(path: string, opts: N8nGetOptions = {}
       code: 'n8n_network_error',
       status: 0,
       message: `Network error calling n8n API at ${path}: ${(err as Error).message}`,
-      nextStep: `Verify ${env.N8N_BASE_URL} is reachable. Check Railway logs.`,
+      nextStep: `Verify ${env.N8N_BASE_URL} is reachable (see reachability.ts's n8nReachable() gate above).`,
       upstream: err,
     });
   }
@@ -99,7 +109,7 @@ function mapError(status: number, path: string, body: string): N8nApiError {
       code: 'n8n_auth_failed',
       status,
       message: `n8n API rejected auth on ${path}.`,
-      nextStep: 'Confirm N8N_API_KEY in Railway matches the Notion vault value. Note: n8n uses X-N8N-API-KEY header, not bearer.',
+      nextStep: 'Confirm N8N_API_KEY (a gateway secret) matches the Notion vault value. Note: n8n uses X-N8N-API-KEY header, not bearer.',
       upstream,
     });
   }
@@ -116,7 +126,7 @@ function mapError(status: number, path: string, body: string): N8nApiError {
     code: status >= 500 ? 'n8n_upstream_error' : 'n8n_request_error',
     status,
     message: `n8n returned ${status} for ${path}.`,
-    nextStep: 'Check n8n.cloud status or your Hetzner instance.',
+    nextStep: 'Check the AWS Lightsail recovery lane (cs-n8n.otchealthmart.com) instance health.',
     upstream,
   });
 }
