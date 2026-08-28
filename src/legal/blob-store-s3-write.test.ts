@@ -7,11 +7,13 @@ import assert from 'node:assert/strict';
  * putBlob / copyBlob / deleteBlobHard called creds() unconditionally, so they were Azure-only no
  * matter what BLOB_BACKEND said. Shared-ring containers now write to the mirror.
  *
- * `personal` NOW DOES TOO (2026-08-28, a deliberate Matt-approved ring decision, not a default —
- * see blob-store.ts's S3_WRITABLE_CONTAINERS header and s3-blob-store.ts's MIRROR table header for
- * the full reasoning: Azure's permanent deletion turned "personal writes fall through to Azure and
- * fail loudly" from a safety rail into a permanent outage of the CLO's entire personal-legal write
- * surface). The tests that matter most in this file are STILL the ring-safety ones, but the
+ * `personal` NOW DOES TOO (2026-08-28) — this repo's code and tests are built to that target state
+ * ahead of an explicit owner (Matt) approval decision, not asserting that approval as already
+ * granted; see blob-store.ts's S3_WRITABLE_CONTAINERS header and s3-blob-store.ts's MIRROR table
+ * header for the full reasoning and the approval-gate pointer: Azure's permanent deletion turned
+ * "personal writes fall through to Azure and fail loudly" from a safety rail into a permanent
+ * outage of the CLO's entire personal-legal write surface. The tests that matter most in this file
+ * are STILL the ring-safety ones, but the
  * invariant they prove has flipped from "personal never reaches S3" to "personal reaches its OWN
  * privileged bucket (otchealth-legal-personal-dr-55c84f6b) and never the shared one
  * (otchealth-finance-legal-dr-55c84f6b), and vice versa" — a cross-bucket mixup, not S3-vs-Azure, is
