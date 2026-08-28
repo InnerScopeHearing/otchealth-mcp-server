@@ -188,19 +188,22 @@ test('SCOPE: no alias is generated at all with no request context (e.g. the cata
 });
 
 // GOVERNANCE FIX (round 1, the security one): an alias must enforce the SAME role restriction as
-// the canonical tool it stands in for. azure_* is a real governance rule (CTO-only, see
+// the canonical tool it stands in for. build_* is a real governance rule (CTO-only, see
 // catalog/governance.ts) -- this exercises the ACTUAL handler, not just presence of the name.
+// (This test originally used azure_containerapp_get / azure_* as its example; swapped 2026-08-28
+// when the 13 azure_* tools and their governance rule were deleted outright -- build_* is CTO-only
+// via the identical single-string 'cto' requiredRole shape, so it proves the same regression class.)
 test('SECURITY: an alias of a role-gated tool still enforces the canonical tool\'s role restriction (regression for the governance-bypass finding)', async () => {
   const { server, handlers } = fakeServer();
   withM365('cto', () => {
-    registerTool(server, fakeDef('azure_containerapp_get'), hashProvider);
+    registerTool(server, fakeDef('build_dispatch_trigger'), hashProvider);
     finalizeM365Aliases(server, hashProvider);
   });
-  const aliasHandler = handlers.get('containerapp_get');
-  assert.ok(aliasHandler, 'the "containerapp_get" alias must have registered (unambiguous -- only one candidate)');
+  const aliasHandler = handlers.get('dispatch_trigger');
+  assert.ok(aliasHandler, 'the "dispatch_trigger" alias must have registered (unambiguous -- only one candidate)');
 
   // A NON-cto lane calling the alias must be rejected exactly like it would be calling
-  // "azure_containerapp_get" directly -- not silently allowed through under the stripped name.
+  // "build_dispatch_trigger" directly -- not silently allowed through under the stripped name.
   const rejected = await withM365('clo', () => aliasHandler!({}));
   const rejectedText = rejected.content?.[0]?.text ?? '';
   assert.ok(

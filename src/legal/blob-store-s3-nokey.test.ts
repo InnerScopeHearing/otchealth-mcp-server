@@ -56,23 +56,25 @@ test('a company write still completes with no Azure key present', async () => {
   assert.ok(urls[0].includes('otchealth-finance-legal-dr-55c84f6b.s3.'), urls[0]);
 });
 
-test('a PERSONAL write with no Azure key fails LOUDLY and namefully, it does not fall back to S3', async () => {
-  // The ring line under the harshest condition. isConfigured() is now true, so the tool layer lets
-  // the call through -- and it must still refuse to write privileged documents to S3, surfacing the
-  // specific missing-key error rather than quietly relocating them.
+test('a PERSONAL write with no Azure key now completes via S3 (2026-08-28 ring decision)', async () => {
+  // INVERTED 2026-08-28: personal joined S3_WRITABLE_CONTAINERS (blob-store.ts) once the personal
+  // DR bucket's IAM grant was widened to include PutObject/DeleteObject (infra/aws/iam.tf's
+  // PersonalLegalRingReadWrite statement). This is a storage-routing change only -- the RING that
+  // decides whether a caller may reach `personal` at all is untouched (ring.test.ts pins that). A
+  // write with no Azure key at all must now SUCCEED against the personal DR bucket, the exact
+  // opposite of this test's pre-2026-08-28 assertion (preserved in git history), because falling
+  // through to a permanently-dead Azure is no longer the correct failure mode for this container.
   const original = globalThis.fetch;
   const urls: string[] = [];
   globalThis.fetch = (async (u: string | URL | Request) => {
     urls.push(String(u));
-    return new Response('', { status: 201 });
+    return new Response('', { status: 200, headers: { etag: '"e"' } });
   }) as unknown as typeof fetch;
   try {
-    await assert.rejects(
-      () => putBlob('personal', 'divorce/exhibit.pdf', { text: 'x' }, true),
-      /AZURE_LEGAL_STORAGE_KEY unset/,
-    );
+    const res = await putBlob('personal', 'divorce/exhibit.pdf', { text: 'x', contentType: 'application/pdf' }, true);
+    assert.equal(res.bytes, 1);
   } finally {
     globalThis.fetch = original;
   }
-  assert.deepEqual(urls, [], 'no request was made at all -- least of all to an S3 bucket');
+  assert.ok(urls.length === 1 && urls[0].includes('otchealth-legal-personal-dr-55c84f6b.s3.'), urls[0]);
 });

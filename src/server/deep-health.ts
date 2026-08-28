@@ -26,6 +26,8 @@
  */
 
 import crypto from 'node:crypto';
+import pg from 'pg';
+import { resolveAwsCredentials, signRequest } from '../search/sigv4.js';
 
 export type DependencyStatus = 'ok' | 'down' | 'unconfigured';
 
@@ -33,6 +35,27 @@ export interface DeepHealthDeps {
   cosmos: DependencyStatus;
   search: DependencyStatus;
   foundry: DependencyStatus;
+  /** AWS-native counterparts, added 2026-08-28 alongside the SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
+   *  STATE_BACKEND default flips (env.ts) -- cosmos/search/foundry above now report 'unconfigured'
+   *  on a fresh deploy that never sets their (permanently dead) Azure env vars, so this gate
+   *  previously verified nothing real once a deploy actually moved to AWS. */
+  postgres: DependencyStatus;
+  opensearch: DependencyStatus;
+  openai: DependencyStatus;
+  /**
+   * Whether the live postgres connection actually VERIFIED the server certificate (rejectUnauthorized
+   * true), read fresh from process.env exactly like every other field here -- never from
+   * config/env.ts's cached PG_SSL_VERIFY, which reflects the value at PROCESS START, not necessarily
+   * what a live task-def override carries if the schema default and the deployed value ever
+   * disagree. Exists so a deploy script can assert TLS verification directly (`jq .postgres_tls_verify
+   * == true`) instead of inferring it from `postgres:'ok'` alone, which proves only connectivity --
+   * a connection that merely ENCRYPTED without verifying would ALSO report 'ok'. `false` here with
+   * `postgres:'ok'` is not itself a failure (PG_SSL_VERIFY=false is a valid, documented instant
+   * rollback, see env.ts), but a deploy asserting the NEW verified-by-default posture must check
+   * this field, not just reachability. `null` when PG_HOST is unconfigured (the field is meaningless
+   * without a connection attempt at all).
+   */
+  postgres_tls_verify: boolean | null;
 }
 
 const PROBE_TIMEOUT_MS = 2000;
@@ -156,9 +179,98 @@ async function probeFoundry(): Promise<DependencyStatus> {
   }
 }
 
-/** Runs all three dependency probes in parallel (each independently timeout-capped, so one slow
+/**
+ * A one-off Postgres CONNECTION (never the live agentstate/postgres.ts pool -- this file's header
+ * explains why: a probe is read-only, out of scope for that module's own in-flight write path, and
+ * must never share a client that could pick up a probe's connection error as if it were a real
+ * caller's). SELECT 1 proves reachability + auth; the connection's own tls-verify effective state
+ * (`connection.ssl` on node-postgres's Client after connect) is what postgres_tls_verify reports,
+ * not a re-read of PG_SSL_VERIFY -- so a live task-def override that disagrees with the schema
+ * default is caught rather than assumed.
+ */
+async function probePostgres(): Promise<{ status: DependencyStatus; tlsVerify: boolean | null }> {
+  const host = process.env.PG_HOST;
+  if (!host) return { status: 'unconfigured', tlsVerify: null };
+  const rejectUnauthorized = process.env.PG_SSL_VERIFY !== 'false';
+  const client = new pg.Client({
+    host,
+    port: process.env.PG_PORT ? Number.parseInt(process.env.PG_PORT, 10) : 5432,
+    database: process.env.PG_DATABASE || 'agentstate',
+    user: process.env.PG_USER,
+    password: process.env.PG_PASSWORD,
+    ssl: { rejectUnauthorized },
+    connectionTimeoutMillis: PROBE_TIMEOUT_MS,
+  });
+  try {
+    await client.connect();
+    await client.query('SELECT 1');
+    return { status: 'ok', tlsVerify: rejectUnauthorized };
+  } catch {
+    return { status: 'down', tlsVerify: rejectUnauthorized };
+  } finally {
+    // Never let a probe connection linger in the server process; end() is safe to call even if
+    // connect() itself failed (node-postgres tolerates ending a never-connected client).
+    await client.end().catch(() => {});
+  }
+}
+
+async function probeOpensearch(): Promise<DependencyStatus> {
+  const endpoint = process.env.OPENSEARCH_ENDPOINT;
+  if (!endpoint) return 'unconfigured';
+  try {
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) return 'down';
+    const region = process.env.OPENSEARCH_REGION || 'us-east-1';
+    // A bare GET on the domain root returns cluster/version info and needs no index to exist --
+    // the cheapest real reachability + auth check, same "prove it, spend nothing" shape as the
+    // Cosmos/Search/Foundry probes above.
+    const signed = signRequest({ method: 'GET', host: endpoint, path: '/', region, service: 'es', credentials });
+    const res = await fetch(`https://${endpoint}/`, {
+      method: 'GET',
+      headers: signed.headers,
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    return res.ok ? 'ok' : 'down';
+  } catch {
+    return 'down';
+  }
+}
+
+async function probeOpenai(): Promise<DependencyStatus> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) return 'unconfigured';
+  try {
+    // A plain models list: cheap, unbilled, and proves the key authenticates without a chat/
+    // embedding call (same "never a billed call" rule as probeFoundry() above).
+    const res = await fetch('https://api.openai.com/v1/models', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    return res.ok ? 'ok' : 'down';
+  } catch {
+    return 'down';
+  }
+}
+
+/** Runs every dependency probe in parallel (each independently timeout-capped, so one slow
  *  dependency never delays the others), and never rejects. */
 export async function probeDependencies(): Promise<DeepHealthDeps> {
-  const [cosmos, search, foundry] = await Promise.all([probeCosmos(), probeSearch(), probeFoundry()]);
-  return { cosmos, search, foundry };
+  const [cosmos, search, foundry, postgres, opensearch, openai] = await Promise.all([
+    probeCosmos(),
+    probeSearch(),
+    probeFoundry(),
+    probePostgres(),
+    probeOpensearch(),
+    probeOpenai(),
+  ]);
+  return {
+    cosmos,
+    search,
+    foundry,
+    postgres: postgres.status,
+    opensearch,
+    openai,
+    postgres_tls_verify: postgres.tlsVerify,
+  };
 }

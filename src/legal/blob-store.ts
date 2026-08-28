@@ -70,22 +70,38 @@ function readCreds(): LegalCreds | null {
 }
 
 /**
- * Containers whose WRITES may be served by the S3 mirror (2026-08-18).
+ * Containers whose WRITES may be served by the S3 mirror (2026-08-18; `personal` added 2026-08-28).
  *
- * `personal` IS ABSENT ON PURPOSE, AND MUST STAY ABSENT. The attorney-privileged personal-legal DR
- * bucket is granted GetObject + ListBucket ONLY (infra/aws/iam.tf, the PersonalLegalRingReadOnly
- * statement) -- read-only by deliberate design. Adding `personal` here would not merely fail at
- * runtime, it would be a request to WIDEN that grant, and whether privileged personal legal should
- * become writable from this runtime is a ring decision nobody has made. So personal writes keep
- * falling through to the Azure path below, where they fail LOUDLY if Azure is unavailable rather
- * than quietly relocating privileged documents into a bucket chosen by a code change.
+ * `personal` IS PRESENT AS OF 2026-08-28 -- built as a PROPOSED ring decision, presented here for
+ * explicit owner (Matt) approval before this lands on `main`, not something this PR asserts on its
+ * own authority. See the design doc's own framing ("ring decision required, Matt gate, present it,
+ * don't bury it") and the PR description's approval-gate list. If merged, the change is: the
+ * attorney-privileged personal-legal DR bucket's IAM grant widens from GetObject+ListBucket to
+ * GetObject+ListBucket+PutObject+DeleteObject (infra/aws/iam.tf, the PersonalLegalRingReadWrite
+ * statement, formerly PersonalLegalRingReadOnly -- that tf edit is documentation-only, see its own
+ * header; the live grant is applied out-of-band via `aws iam put-role-policy`, never `terraform
+ * apply`, because this Terraform has never been applied to real state). Motivation: Azure is now
+ * permanently gone (subscription 55c84f6b deleted 2026-08-13), so "personal writes fall through to
+ * Azure and fail loudly" no longer describes a safety rail, it describes a PERMANENT OUTAGE of the
+ * CLO's entire personal-legal write surface (delete, move, copy -- the bucket has held the evacuated
+ * corpus, ~21k keys, since the evacuation and there is no live Azure to eventually restore). The
+ * ring itself does NOT widen: access to the `personal` container is still exactly
+ * `PERSONAL_LEGAL_RING = ['clo-personal', 'exec']` (src/tools/kb/search-privileged.ts) enforced by
+ * src/tools/legal/ring.ts's lanesForContainer() BEFORE any store call is reached -- this set
+ * controls STORAGE BACKEND ROUTING ONLY, for a request the ring has already authorised. Delete is
+ * safe to grant alongside Put because legal_blob_delete/legal_blob_move are copy-to-`_TRASH`/
+ * copy-then-delete flows (never a direct unrecoverable removal), the personal DR bucket is versioned
+ * (infra/aws/s3.tf:136-139; live-read 2026-08-28: otchealth-legal-personal-dr-55c84f6b reports
+ * Status=Enabled -- re-verify this immediately before the live IAM grant, not just at PR-authoring
+ * time, in case of drift), and LEGAL_PROTECTED_PREFIXES + ETag pinning both still apply unchanged on
+ * top.
  *
  * `exec` is listed for the same reason it has a row in the S3 mirror table: it is a real shared-ring
  * container in the mirror. It is not currently a member of the LegalContainer union, so nothing can
  * reach it through this file today; listing it means a future widening of that union inherits the
  * correct routing instead of silently defaulting to the wrong side of the fence.
  */
-const S3_WRITABLE_CONTAINERS: ReadonlySet<string> = new Set(['company', 'exec']);
+const S3_WRITABLE_CONTAINERS: ReadonlySet<string> = new Set(['company', 'exec', 'personal']);
 
 /** True when THIS container's writes should go to S3. Container-scoped, never global. */
 function s3WriteActive(container: string): boolean {

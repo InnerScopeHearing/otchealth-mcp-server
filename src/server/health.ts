@@ -70,12 +70,14 @@ export function registerHealth(app: FastifyInstance): void {
   app.get('/health', async () => ({ ...buildHealthPayload(), revision: await revisionInfo() }));
 
   // GET /health/deep: bounded reachability probe of every CONFIGURED downstream dependency
-  // (Cosmos, Azure AI Search, Foundry). Distinct from /health: this route
+  // (Cosmos, Azure AI Search, Foundry -- permanently unreachable but still probed, see
+  // deep-health.ts's header on why they stay inert-but-present -- plus, added 2026-08-28, their
+  // AWS-native counterparts postgres/opensearch/openai). Distinct from /health: this route
   // is intentionally NOT on the fast path (it makes real network calls, each capped at 2s), so it
   // is gated to internal/CI callers via the existing ADMIN_REVOKE_TOKEN bearer (the same pattern
   // /admin/* already uses) rather than left open to public polling, which would let an outside
-  // caller hammer Cosmos/Search/Foundry for free. It is NOT in the /health rate-limit allowList,
-  // so it stays subject to the global inbound limit too.
+  // caller hammer any of these dependencies for free. It is NOT in the /health rate-limit
+  // allowList, so it stays subject to the global inbound limit too.
   app.get('/health/deep', async (request, reply) => {
     if (!validateAdminToken(request.headers['authorization'])) {
       return reply.code(401).send({

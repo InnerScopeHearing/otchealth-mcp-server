@@ -24,7 +24,7 @@ export function registerN8nListWorkflows(server: McpServer, callerHash: CallerHa
       annotations: {
         title: 'List n8n workflows',
         description:
-          'List workflows on otchealth.app.n8n.cloud. Returns id, name, active flag, tags, and timestamps. Useful for ops debugging and finding workflow IDs.',
+          'List workflows on the n8n instance (cs-n8n.otchealthmart.com, AWS Lightsail recovery lane). Returns id, name, active flag, tags, and timestamps. Useful for ops debugging and finding workflow IDs.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

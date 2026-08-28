@@ -18,7 +18,22 @@ async function findLogIssue() {
   return (s.items || [])[0];
 }
 async function logLine(issueNumber, body) {
-  await fetch(`${API}/repos/${REPO}/issues/${issueNumber}/comments`, { method: 'POST', headers: H, body: JSON.stringify({ body }) });
+  // 2026-08-28: this POST had no response check at all -- issue #21 ("Nightly Medic Log") hit
+  // GitHub's hard 2500-comment cap around 2026-08-10 (403 "Commenting is disabled on issues with
+  // more than 2500 comments"), and every comment since has 403'd silently while this script still
+  // exited 0, so the Actions run stayed GREEN while actually failing to log a single word. Checking
+  // res.ok and flipping the run RED (via exitCode, not a hard exit -- see below) is what turns that
+  // back into a signal a human/agent would actually notice.
+  const res = await fetch(`${API}/repos/${REPO}/issues/${issueNumber}/comments`, { method: 'POST', headers: H, body: JSON.stringify({ body }) });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.error(`nightly-medic: failed to post log comment to issue #${issueNumber} (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    // process.exitCode (not process.exit()): logLine is called mid-script, sometimes followed by a
+    // bare `return` in the SAME branch that called it -- setting exitCode lets that branch finish
+    // normally (any log line already printed to stdout stays visible) while still making the whole
+    // run exit non-zero once the script naturally ends, rather than truncating it here.
+    process.exitCode = 1;
+  }
 }
 
 // Best-effort: today's Copilot/AI spend from the org metered-billing usage API.

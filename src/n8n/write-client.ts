@@ -13,6 +13,7 @@ import { createHmac } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { n8nReachable, N8N_DEGRADED } from './reachability.js';
 
 const env = loadEnv();
 
@@ -42,10 +43,18 @@ function requireKey(): string {
       code: 'n8n_not_configured',
       status: 0,
       message: 'n8n public API is not configured.',
-      nextStep: "Set N8N_API_KEY in Railway env vars. Value is in Matt's Notion Token Vault under n8n section.",
+      nextStep: "Set N8N_API_KEY as a gateway secret. Value is in Matt's Notion Token Vault under n8n section.",
     });
   }
   return env.N8N_API_KEY;
+}
+
+/** Throws N8nWriteError('n8n_degraded') when n8n itself is unreachable (see reachability.ts).
+ *  Checked AFTER requireKey() so a genuinely unconfigured key still reports that specific,
+ *  more actionable error rather than being masked behind a network-reachability message. */
+async function assertN8nReachable(): Promise<void> {
+  if (await n8nReachable()) return;
+  throw new N8nWriteError({ ...N8N_DEGRADED });
 }
 
 function baseUrl(): string {
@@ -62,7 +71,7 @@ function mapError(status: number, path: string, body: string): N8nWriteError {
       code: 'n8n_auth_failed',
       status,
       message: `n8n API rejected auth on ${path}.`,
-      nextStep: 'Confirm N8N_API_KEY in Railway matches the Notion vault value. Note: n8n uses X-N8N-API-KEY header, not bearer.',
+      nextStep: 'Confirm N8N_API_KEY (a gateway secret) matches the Notion vault value. Note: n8n uses X-N8N-API-KEY header, not bearer.',
       upstream,
     });
   }
@@ -88,7 +97,7 @@ function mapError(status: number, path: string, body: string): N8nWriteError {
     code: status >= 500 ? 'n8n_upstream_error' : 'n8n_request_error',
     status,
     message: `n8n returned ${status} for ${path}.`,
-    nextStep: 'Check n8n instance health or your Hetzner/Railway n8n deployment.',
+    nextStep: 'Check the AWS Lightsail recovery lane (cs-n8n.otchealthmart.com) instance health.',
     upstream,
   });
 }
@@ -101,6 +110,7 @@ async function n8nWrite<T = unknown>(
   opts?: { body?: unknown; correlationId?: string; timeoutMs?: number },
 ): Promise<T> {
   const key = requireKey();
+  await assertN8nReachable();
   const url = `${baseUrl()}/api/v1${path}`;
   const started = Date.now();
   try {
@@ -131,7 +141,7 @@ async function n8nWrite<T = unknown>(
       code: 'n8n_network_error',
       status: 0,
       message: `Network error calling n8n API at ${path}: ${(err as Error).message}`,
-      nextStep: `Verify ${env.N8N_BASE_URL} is reachable. Check Railway logs.`,
+      nextStep: `Verify ${env.N8N_BASE_URL} is reachable (see reachability.ts's n8nReachable() gate above).`,
       upstream: err,
     });
   }
@@ -230,6 +240,7 @@ export async function runWorkflow(args: RunWorkflowArgs): Promise<RunWorkflowRes
       nextStep: 'Add N8N_WEBHOOK_SECRET to the MCP server environment.',
     });
   }
+  await assertN8nReachable();
 
   const url = `${baseUrl()}${args.webhookPath}`;
   const bodyString = JSON.stringify(args.payload);

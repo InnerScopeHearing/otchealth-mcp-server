@@ -35,6 +35,22 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# ── RDS TLS verification (2026-08-28) ─────────────────────────────────────────
+# RDS terminates TLS with an Amazon-issued cert (ca_cert_identifier =
+# "rds-ca-rsa2048-g1", infra/aws/rds.tf); Node has no reason to already trust it.
+# Ported verbatim from flatstick/.../Dockerfile, which proves this pattern in production
+# against the same RDS CA family: NODE_EXTRA_CA_CERTS APPENDS to Node's built-in roots
+# rather than replacing them, so this grants trust to the RDS CAs and changes nothing
+# else -- no code change is needed beyond flipping PG_SSL_VERIFY's default to 'true'
+# (src/config/env.ts), now that the bundle it was waiting on is baked in here.
+# Fetched at build time from AWS's official truststore rather than committed, so it
+# stays current as AWS adds regional CAs; the trade-off is a build-time network
+# dependency on an AWS-operated HTTPS endpoint, which is the same trade-off Flatstick
+# already accepted for the identical reason.
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/certs/rds-global-bundle.pem
+RUN chmod 0644 /etc/ssl/certs/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem
+
 RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app
 
 COPY --from=build --chown=app:app /app/node_modules ./node_modules

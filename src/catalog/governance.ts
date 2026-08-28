@@ -104,12 +104,12 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'heygen_avatar_video_operation_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen operation state is limited to approved internal lanes.' },
   { pattern: 'heygen_owner_approval_status_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen owner-approval availability is limited to approved internal lanes and exposes no grant material.' },
   { pattern: 'heygen_reference_look_operation_get', requiredRole: ['cto', 'exec', 'coo', 'cro', 'cpo', 'developer'], reason: 'HeyGen reference-Look operation state is limited to approved internal lanes.' },
-  // Azure control-plane tools (ITEM #2) are CTO-only: infra is CTO-owned. Covers the Phase A read
-  // tools (azure_jobs_list / azure_job_executions / azure_logs_query / azure_search_index_stats /
-  // azure_containerapp_get / azure_resource_list) AND every future Phase B write tool (azure_job_* /
-  // azure_containerapp_set_env / azure_search_*_upsert) by the same prefix, so a write tool can never
-  // ship un-gated by omission. Visible to all agents; executable only by the cto lane.
-  { pattern: 'azure_*', requiredRole: 'cto', reason: 'Azure control-plane (infra) is CTO-owned; read + write both CTO-only.' },
+  // Azure control-plane tools (formerly ITEM #2, CTO-only: infra is CTO-owned) were REMOVED outright
+  // 2026-08-28, this rule along with them -- the 13 azure_* tools (azure_jobs_list /
+  // azure_job_executions / azure_logs_query / azure_search_index_stats / azure_containerapp_get /
+  // azure_resource_list / azure_job_* / azure_containerapp_set_env / azure_search_*_upsert) no
+  // longer exist as registered tools at all (the Azure subscription behind them, 55c84f6b, is
+  // permanently deleted), so there is nothing left for a 'azure_*' governance pattern to match.
   // Builds / CI (Depot) -- widened 2026-07-26 (Matt/CEO direct directive): the 'otchealth-dev'
   // Copilot custom agent (caller_agent='developer') needs full read+write Depot capability to
   // actually build the apps it's responsible for, not just observe. Previously CTO-only
@@ -117,8 +117,8 @@ export const GOVERNANCE: GovRule[] = [
   // including destructive ops (project-delete, registry-images-delete, token-delete,
   // workflow-cancel, job-cancel, run-cancel, project-reset) as well as trigger-build -- deliberately
   // "full capable" per the directive, not narrowed to trigger-build alone. cto remains the only
-  // role for every OTHER infra surface (azure_*, netlify_*, cloudflare_*, stripe_*) -- those were
-  // not part of this directive and stay single-initiator.
+  // role for every OTHER infra surface (netlify_*, cloudflare_*, stripe_*) -- those were not part
+  // of this directive and stay single-initiator.
   { pattern: 'depot_*', requiredRole: ['cto', 'developer'], reason: 'iOS/CI builds + TestFlight uploads are cto/developer-only (developer widened to full Depot read+write 2026-07-26 per Matt/CEO directive; previously CTO-only single-initiator).' },
   { pattern: 'build_*', requiredRole: 'cto', reason: 'Build/release dispatch is CTO-only.' },
   { pattern: 'release_*', requiredRole: 'cto', reason: 'Release cutovers are CTO-only.' },

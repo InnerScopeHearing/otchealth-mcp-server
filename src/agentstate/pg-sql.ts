@@ -34,6 +34,24 @@ function field(name: string): string {
   return name;
 }
 
+/**
+ * 2026-08-28. `table` is interpolated raw into the final SELECT (below, `FROM ${table}`) on the
+ * strength of TranslateInput.table's own doc comment ("Caller must have validated it against the
+ * container allow-list") -- this file's header already names that exact split as "THE INJECTION
+ * BOUNDARY", yet until now only field() enforced it in code; table trusted the comment alone.
+ *
+ * Honest framing: not exploitable TODAY. The single production caller
+ * (agentstate/postgres.ts's tableFor()) throws on anything outside its own CONTAINERS allow-list
+ * and only ever emits `agentstate_<container>`, so this never fires in the live call path. This
+ * is the module-local invariant that keeps it that way if a SECOND caller is ever added --
+ * enforced here, at the one place every caller must pass through, rather than trusted to be
+ * re-derived correctly by every future tableFor()-alike.
+ *
+ * A lowercase Postgres identifier, no quoting/escaping accepted (an identifier requiring double
+ * quotes, e.g. one containing a space or a semicolon, is refused outright rather than quoted).
+ */
+const TABLE_RE = /^[a-z_][a-z0-9_]{0,62}$/;
+
 export interface TranslateInput {
   /** Physical table name. Caller must have validated it against the container allow-list. */
   table: string;
@@ -90,6 +108,7 @@ function comparison(fieldName: string, op: string, value: unknown, placeholder: 
  */
 export function translate(input: TranslateInput): TranslateResult {
   const { table, parameters, pk, max } = input;
+  if (!TABLE_RE.test(table)) throw new Error(`unsupported table name: ${JSON.stringify(table)}`);
   // Collapse whitespace so multi-line template literals parse identically to single-line ones.
   const sql = input.query.replace(/\s+/g, ' ').trim();
 

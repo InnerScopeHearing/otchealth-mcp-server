@@ -64,7 +64,11 @@ test('depot_* is role-gated to cto/developer only (2026-07-26 widen -- full Depo
 });
 
 test('infra/money tools outside the 2026-07-26 directive remain cto-exclusive', () => {
-  const stillCtoOnly = ['azure_job_execute', 'netlify_trigger_deploy', 'cloudflare_delete_dns_record', 'stripe_create_refund'];
+  // 'azure_job_execute' was the original example here; replaced 2026-08-28 with 'release_cutover'
+  // (the release_* prefix, "Release cutovers are CTO-only") when the 13 azure_* tools were deleted
+  // outright and their GovRule removed -- requiredRoleFor is a pure pattern match against GOVERNANCE
+  // (see its implementation), so this proves the SAME thing the azure_ example did.
+  const stillCtoOnly = ['release_cutover', 'netlify_trigger_deploy', 'cloudflare_delete_dns_record', 'stripe_create_refund'];
   for (const name of stillCtoOnly) {
     const gov = requiredRoleFor(name);
     assert.ok(gov, `${name} must have a governance rule`);
