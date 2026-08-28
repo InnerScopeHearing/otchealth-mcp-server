@@ -14,6 +14,8 @@ import {
   existsFilterFor,
   readExisting,
   blocksCreate,
+  isAttachmentPath,
+  attachmentWriteRefusal,
 } from './write-guard.js';
 
 // Cases below are taken from the real 2026-08-14 CFO census, not invented shapes.
@@ -286,4 +288,69 @@ test('the refusal NAMES the accepted date formats, so a slash date is self-diagn
   assert.equal(gaps.length, 1);
   assert.match(gaps[0], /YYYY-MM-DD/);
   assert.match(gaps[0], /slash date/, 'the caller cannot guess the cause from "missing Date"');
+});
+
+// ── isAttachmentPath / attachmentWriteRefusal: the residual FND-20260724-f6df gap ────────────────
+//
+// The original finding fixed xero_attachment_upload (xeroUploadAttachment sends the file's real
+// bytes with its real Content-Type). It did NOT stop xero_request from reaching the exact same
+// Attachments sub-resource with a JSON body -- xeroRequest() (client.ts) always JSON.stringify()s
+// its body and always sends Content-Type: application/json, regardless of path. Before this guard,
+// a caller could POST/PUT "/ManualJournals/{guid}/Attachments/{fileName}" through xero_request and
+// silently reproduce the identical false-success defect (a plausible 200 + AttachmentID with
+// nothing actually persisted) that xero_attachment_upload was built to fix. These tests pin the
+// detection logic; tools.test.ts pins that the handler actually consults it before any network I/O.
+
+test('isAttachmentPath: recognizes the real Xero Attachments URL shape, with and without a filename', () => {
+  assert.equal(isAttachmentPath('/ManualJournals/journal-1/Attachments/statement.pdf'), true);
+  assert.equal(isAttachmentPath('/Invoices/inv-1/Attachments'), true, 'the listing shape (no filename) still targets the sub-resource');
+  assert.equal(isAttachmentPath('ManualJournals/journal-1/Attachments/statement.pdf'), true, 'a missing leading slash does not defeat detection');
+});
+
+test('isAttachmentPath: case-insensitive, so a casing slip cannot fall through to a live write', () => {
+  assert.equal(isAttachmentPath('/Invoices/inv-1/attachments/statement.pdf'), true);
+  assert.equal(isAttachmentPath('/Invoices/inv-1/ATTACHMENTS/statement.pdf'), true);
+});
+
+test('isAttachmentPath: ordinary accounting paths (no Attachments segment) are NOT flagged', () => {
+  assert.equal(isAttachmentPath('/Invoices'), false);
+  assert.equal(isAttachmentPath('/Invoices/inv-1'), false);
+  assert.equal(isAttachmentPath('/ManualJournals'), false);
+  assert.equal(isAttachmentPath('/Contacts/contact-1'), false);
+});
+
+test('isAttachmentPath: a filename that merely CONTAINS "attachments" does not falsely match a whole segment', () => {
+  // Guards against a naive substring check -- only a path SEGMENT exactly equal to "attachments"
+  // (case-insensitively) counts; "my-attachments-log.pdf" is an ordinary filename on some other
+  // endpoint's sub-resource, not the Attachments API itself.
+  assert.equal(isAttachmentPath('/Invoices/inv-1/Notes/my-attachments-log.pdf'), false);
+});
+
+test('attachmentWriteRefusal: POST to an Attachments sub-resource is refused with the actionable error code', () => {
+  const result = attachmentWriteRefusal('POST', '/ManualJournals/journal-1/Attachments/statement.pdf');
+  assert.ok(result, 'a POST to an Attachments path must be refused, not allowed through');
+  assert.equal(result?.error, 'use_xero_attachment_upload');
+  assert.match(result!.summary, /REFUSED/);
+  assert.match(result!.summary, /xero_attachment_upload/);
+  assert.match(result!.summary, /FND-20260724-f6df/);
+});
+
+test('attachmentWriteRefusal: PUT to an Attachments sub-resource is refused the same way (Xero documents PUT for attachment upload)', () => {
+  const result = attachmentWriteRefusal('PUT', '/Invoices/inv-1/Attachments/receipt.png');
+  assert.equal(result?.error, 'use_xero_attachment_upload');
+});
+
+test('attachmentWriteRefusal: method comparison is case-insensitive, matching isCreate\'s existing convention', () => {
+  const result = attachmentWriteRefusal('post', '/Invoices/inv-1/Attachments/receipt.png');
+  assert.equal(result?.error, 'use_xero_attachment_upload');
+});
+
+test('attachmentWriteRefusal: DELETE is NOT gated -- it carries no body, so it cannot trigger the JSON-vs-bytes mismatch', () => {
+  assert.equal(attachmentWriteRefusal('DELETE', '/Invoices/inv-1/Attachments/receipt.png'), null);
+});
+
+test('attachmentWriteRefusal: an ordinary (non-Attachments) POST/PUT/DELETE is never refused by this guard', () => {
+  assert.equal(attachmentWriteRefusal('POST', '/Invoices'), null);
+  assert.equal(attachmentWriteRefusal('PUT', '/Invoices/inv-1'), null);
+  assert.equal(attachmentWriteRefusal('DELETE', '/ManualJournals/journal-1'), null);
 });

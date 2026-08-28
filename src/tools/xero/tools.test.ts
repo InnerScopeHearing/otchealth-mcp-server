@@ -26,7 +26,7 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
-const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload, handleXeroAttachmentContent } = await import('./tools.js');
+const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload, handleXeroAttachmentContent, handleXeroRequest } = await import('./tools.js');
 const { buildTokenDoc, bootstrapHash } = await import('./client.js');
 
 /**
@@ -511,4 +511,158 @@ test('handleXeroAttachmentContent: too_large -> nothing downloaded/returned, cap
   assert.equal(data.textContent, null);
   assert.equal(data.cap_bytes, 1024 * 1024);
   assert.match(result.summary ?? '', /REFUSED/);
+});
+
+// -------------------------------------------------------------------------------------------
+// handleXeroRequest -- handler-level tests for the RESIDUAL half of FND-20260724-f6df (found
+// 2026-08-28): the dedicated xero_attachment_upload tool was fixed to send raw file bytes, but the
+// UNIVERSAL xero_request tool could still reach the identical Attachments sub-resource with a JSON
+// body -- xeroRequest() (client.ts) always JSON.stringify()s its body and always sends
+// Content-Type: application/json, with zero awareness of the path. See
+// client.test.ts's "xeroRequest: MECHANISM" test for proof of that underlying behavior, and
+// write-guard.test.ts's attachmentWriteRefusal tests for the pure detection logic this handler now
+// consults. handleXeroRequest itself was extracted standalone from an inline registerTool handler
+// specifically so this wiring is directly provable -- mirroring handleXeroAttachmentUpload's own
+// extraction rationale (a stubbed fetch that throws on ANY call demonstrates the refusal path makes
+// zero network I/O).
+// -------------------------------------------------------------------------------------------
+
+function throwingFetchDeps(state: ReturnType<typeof liveTokenState>) {
+  return {
+    fetchImpl: (async (url: unknown) => {
+      throw new Error(`UNEXPECTED network call to ${String(url)} -- the Attachments guard must refuse before xeroRequest is ever reached`);
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+}
+
+test('handleXeroRequest: a POST to an Attachments sub-resource is REFUSED before any network call (dry_run:false)', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    {
+      org: 'otchealth',
+      method: 'POST',
+      path: '/ManualJournals/journal-1/Attachments/statement.pdf',
+      body: { notTheRealFileBytes: true },
+    },
+    fakeCtx('cfo', false),
+    throwingFetchDeps(state),
+  );
+  const data = result.data as { error?: string; body: unknown };
+  assert.equal(data.error, 'use_xero_attachment_upload');
+  assert.equal(data.body, null);
+  assert.match(result.summary ?? '', /REFUSED/);
+  assert.match(result.summary ?? '', /xero_attachment_upload/);
+});
+
+test('handleXeroRequest: a PUT to an Attachments sub-resource is REFUSED the same way', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    { org: 'otchealth', method: 'PUT', path: '/Invoices/inv-1/Attachments/receipt.png', body: { x: 1 } },
+    fakeCtx('cfo', false),
+    throwingFetchDeps(state),
+  );
+  const data = result.data as { error?: string };
+  assert.equal(data.error, 'use_xero_attachment_upload');
+});
+
+test('handleXeroRequest: the Attachments refusal fires under dry_run:true TOO -- a dry run must report the REAL refusal, not a misleading "would write"', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    { org: 'otchealth', method: 'POST', path: '/ManualJournals/journal-1/Attachments/statement.pdf', body: {} },
+    fakeCtx('cfo', true), // dry_run:true
+    throwingFetchDeps(state),
+  );
+  const data = result.data as { error?: string };
+  assert.equal(data.error, 'use_xero_attachment_upload', 'must NOT be the generic "dry_run" code -- the attachment guard runs first and is the real reason this call would fail');
+});
+
+test('handleXeroRequest: a DELETE to an Attachments sub-resource is NOT gated by the attachment guard (no body is sent, so the JSON-vs-bytes mismatch cannot occur) and proceeds to the normal write path', async () => {
+  const state = liveTokenState();
+  let deleteCalled = false;
+  const deps = {
+    fetchImpl: (async (url: unknown, init?: RequestInit) => {
+      const u = new URL(String(url));
+      assert.ok(u.pathname.endsWith('/Invoices/inv-1/Attachments/old-file.pdf'));
+      assert.equal(init?.method, 'DELETE');
+      deleteCalled = true;
+      return new Response(null, { status: 204 });
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroRequest(
+    { org: 'otchealth', method: 'DELETE', path: '/Invoices/inv-1/Attachments/old-file.pdf' },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  assert.ok(deleteCalled, 'a DELETE against an Attachments path must still reach xeroRequest -- only POST/PUT are gated');
+  const data = result.data as { error?: string };
+  assert.equal(data.error, undefined);
+});
+
+test('handleXeroRequest: an ORDINARY (non-Attachments) write is UNCHANGED by the extraction -- dry_run still previews without any network call', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    { org: 'otchealth', method: 'POST', path: '/Contacts', body: { Contacts: [{ Name: 'Test Co' }] } },
+    fakeCtx('cfo', true),
+    throwingFetchDeps(state),
+  );
+  const data = result.data as { error?: string };
+  assert.equal(data.error, 'dry_run');
+});
+
+test('handleXeroRequest: an ORDINARY (non-Attachments) write still enforces the pre-existing account-code write-guard', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    {
+      org: 'otchealth',
+      method: 'POST',
+      path: '/Invoices',
+      // LineItems (not ManualJournals' JournalLines) is the field findAccountCodeViolations checks --
+      // this must be refused BEFORE the duplicate-create probe even runs, so throwingFetchDeps (which
+      // throws on any network call) proves it never reached that far.
+      body: { Invoices: [{ Reference: 'INV-1', LineItems: [{ LineAmount: 5, AccountCode: '1251' }] }] },
+    },
+    fakeCtx('cfo', false),
+    throwingFetchDeps(state),
+  );
+  const data = result.data as { error?: string };
+  assert.equal(data.error, 'account_code_not_permitted', 'the pre-existing cross-org account-code guard must survive the extraction unchanged');
+});
+
+test('handleXeroRequest: an ORDINARY (non-Attachments) write with no duplicate-detection blockers reaches xeroRequest and returns its response', async () => {
+  const state = liveTokenState();
+  let requestCalled = false;
+  const deps = {
+    fetchImpl: (async (url: unknown, init?: RequestInit) => {
+      const u = new URL(String(url));
+      if (u.pathname.endsWith('/ManualJournals') && init?.method === 'POST') {
+        requestCalled = true;
+        return new Response(JSON.stringify({ ManualJournals: [{ ManualJournalID: 'mj-1' }] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroRequest(
+    {
+      org: 'otchealth',
+      method: 'POST',
+      path: '/ManualJournals',
+      allow_duplicate: true, // skips the existence-probe network call so this test isolates the Attachments guard from write-guard's OWN (already covered) probe logic
+      body: { ManualJournals: [{ Narration: 'n', Date: '2026-01-01', JournalLines: [{ LineAmount: 5 }] }] },
+    },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  assert.ok(requestCalled, 'a clean, non-Attachments write must still reach xeroRequest');
+  const data = result.data as { error?: string; body: unknown };
+  assert.equal(data.error, undefined);
+  assert.deepEqual(data.body, { ManualJournals: [{ ManualJournalID: 'mj-1' }] });
 });
