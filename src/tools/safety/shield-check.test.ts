@@ -27,7 +27,7 @@ test('summarizeShieldResult: configured:false is reported as NOT RUN, never as "
   const summary = summarizeShieldResult(retired());
   assert.match(summary, /NOT RUN/);
   assert.doesNotMatch(summary, /clean/i);
-  assert.match(summary, new RegExp(CONTENT_SAFETY_PROVIDER_NONE.replace(/[().]/g, '\\$&')));
+  assert.ok(summary.includes(CONTENT_SAFETY_PROVIDER_NONE), `summary must carry the honest provider label verbatim: ${summary}`);
 });
 
 test('summarizeShieldResult: configured:false stays NOT RUN even if attackDetected were somehow true (defensive -- a verdict without a scan is never trustworthy)', () => {

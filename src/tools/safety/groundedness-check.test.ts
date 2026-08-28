@@ -27,7 +27,7 @@ test('summarizeGroundednessResult: configured:false is reported as NOT RUN, neve
   const summary = summarizeGroundednessResult(retired());
   assert.match(summary, /NOT RUN/);
   assert.doesNotMatch(summary, /fully grounded/i);
-  assert.match(summary, new RegExp(CONTENT_SAFETY_PROVIDER_NONE.replace(/[().]/g, '\\$&')));
+  assert.ok(summary.includes(CONTENT_SAFETY_PROVIDER_NONE), `summary must carry the honest provider label verbatim: ${summary}`);
 });
 
 test('summarizeGroundednessResult: configured:false stays NOT RUN even if ungroundedDetected were somehow true (defensive -- a verdict without a check is never trustworthy)', () => {
