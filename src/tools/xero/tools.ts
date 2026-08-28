@@ -81,6 +81,7 @@ import {
   existsFilterFor,
   readExisting,
   blocksCreate,
+  attachmentWriteRefusal,
 } from './write-guard.js';
 
 const ORG_ENUM = z.enum(XERO_ORGS).describe('Which org: otchealth | innd | hearingassist | personal.');
@@ -467,6 +468,203 @@ export async function handleXeroAttachmentContent(
       };
     }
   }
+}
+
+export interface XeroRequestInput {
+  org: XeroOrg;
+  method: 'POST' | 'PUT' | 'DELETE';
+  path: string;
+  api?: XeroApi;
+  body?: unknown;
+  params?: Record<string, string | undefined>;
+  allow_duplicate?: boolean;
+}
+
+/**
+ * `xero_request` handler -- extracted standalone (2026-08-28, closing the residual half of
+ * FND-20260724-f6df: see attachmentWriteRefusal's header comment in write-guard.ts for the defect).
+ * Exported for the same reason as handleXeroAttachmentUpload/handleXeroAttachmentContent above: an
+ * un-exported, inline registerTool handler cannot be exercised with a stubbed fetch, so nothing
+ * proved the Attachments guard below actually runs, nor that it runs BEFORE any network call. This
+ * is a mechanical extraction of the previously-inline handler -- no behavior changes beyond the new
+ * guard block and threading `deps` through to xeroGet/xeroRequest (both already accept it; the
+ * inline handler simply never had anywhere to receive one). See tools.test.ts's "handleXeroRequest"
+ * tests for the proof (a stubbed fetch that throws on ANY call demonstrates the refusal path makes
+ * zero network I/O for an Attachments-shaped path).
+ */
+export async function handleXeroRequest(
+  input: XeroRequestInput,
+  ctx: ToolContext,
+  // Test-only seam, identical in spirit to handleXeroAttachmentUpload's -- production (registerTool
+  // always calls handler(input, ctx), exactly 2 args) never supplies this, so it is always
+  // undefined in production and every xeroGet/xeroRequest call below falls through to each
+  // function's own defaultDeps, unchanged behavior.
+  deps?: TokenDeps,
+): Promise<ToolResultPayload> {
+  if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_request', ctx.callerAgent);
+  if (!xeroConfigured()) return unconfigured('xero_request');
+  const path = input.path.startsWith('/') ? input.path : `/${input.path}`;
+  const api = (input.api ?? 'accounting') as XeroApi;
+  if (path.includes('..')) {
+    return {
+      data: { org: input.org, method: input.method, api, path, body: null, error: 'bad_path' },
+      summary: 'xero_request: path must not contain "..".',
+    };
+  }
+
+  // --- ATTACHMENTS GUARD (2026-08-28, FND-20260724-f6df residual gap). Runs BEFORE the accounting
+  // write-guard and BEFORE the dry-run return below, same reasoning as both: a dry run must report
+  // the REAL refusal, not a misleading "would write" for a call that would actually be refused on
+  // dry_run:false. See attachmentWriteRefusal's header comment in write-guard.ts for the full defect
+  // this closes -- xero_request could otherwise reach the exact same Attachments sub-resource
+  // xero_attachment_upload exists to guard, with a JSON body Xero silently mishandles.
+  const attachmentRefusal = attachmentWriteRefusal(input.method, path);
+  if (attachmentRefusal) {
+    return {
+      data: { org: input.org, method: input.method, api, path, body: null, error: attachmentRefusal.error },
+      summary: attachmentRefusal.summary,
+    };
+  }
+
+  // --- WRITE GUARD (2026-08-14 duplicate-object incident). Runs BEFORE the dry-run return so
+  // a dry run also reports what the guard would do, making it a real preview. See
+  // write-guard.ts for the census that motivated each check.
+  if (api === 'accounting') {
+    // 1. MAP BY IDENTITY, NOT BY CODE. Account codes are per-org and Xero silently
+    //    re-resolves them in the destination org, which is how one document landed in both
+    //    the INND and HearingAssist ledgers.
+    const violations = findAccountCodeViolations(input.body);
+    if (violations.length) {
+      const where = violations
+        .slice(0, 5)
+        .map((v) => `item[${v.itemIndex}].LineItems[${v.lineIndex}] AccountCode=${v.accountCode}`)
+        .join('; ');
+      return {
+        data: { org: input.org, method: input.method, api, path, body: null, error: 'account_code_not_permitted' },
+        summary:
+          `REFUSED (${violations.length} line item(s) identify the account by CODE, not AccountID): ${where}. ` +
+          'Account codes are per-org and Xero re-resolves them locally, so the same code reaches an unrelated ' +
+          'account in another org (1251 is "Due from HearingAssist Inc" in INND but "Star Funding - AR" in ' +
+          'HearingAssist). Resolve each account to its AccountID in the DESTINATION org and resend.',
+      };
+    }
+
+    // 2. NO DUPLICATE CREATES. Read-before-write on the natural key, fail CLOSED.
+    if (isCreate(input.method, path) && !input.allow_duplicate) {
+      const collection = collectionOf(path);
+      const items = unwrapItems(input.body, collection);
+      const keys = items.map((item) => naturalKeyOf(item, collection));
+      if (!items.length || keys.some((k) => k === null)) {
+        // A ManualJournal has no Reference/InvoiceNumber/CreditNoteNumber and never can, so
+        // the generic "add a Reference" advice is unactionable there. Name the missing parts
+        // of the Narration+Date+Total key instead -- a refusal the caller can actually fix.
+        const mjGaps =
+          collection === 'manualjournals'
+            ? items
+                .map((item, i) => ({ i, gaps: manualJournalKeyGaps(item) }))
+                .filter((g) => g.gaps.length)
+            : [];
+        const detail = mjGaps.length
+          ? `${mjGaps.length} manual journal(s) lack a complete Narration+Date+Total key: ` +
+            mjGaps.map((g) => `item[${g.i}] missing ${g.gaps.join(' + ')}`).join('; ') +
+            '. A ManualJournal has no Reference field, so Narration + Date + Total IS its natural key ' +
+            '(the same key our duplicate census grouped on when it found 17 duplicate journal groups). ' +
+            'Supply all three and resend.'
+          : `${items.length} item(s), ` +
+            `${keys.filter((k) => k === null).length} without a Reference/InvoiceNumber/CreditNoteNumber. ` +
+            'Every create on this collection needs a natural key so existence can be checked first. ' +
+            'Add a Reference, or pass allow_duplicate:true to record a deliberate second object.';
+        return {
+          // `refusal_detail` and `missing` are in the STRUCTURED payload, not only in the prose
+          // summary (2026-08-17). The CFO ran a correct A/B test -- a complete key versus one
+          // missing its Narration -- and reported both as "byte-identical bare
+          // unverifiable_create with no field named". They were reading `data`, where the two
+          // ARE identical; the discriminator existed only in `summary`, which their client does
+          // not surface. A refusal that cannot be told apart from a different refusal by the
+          // client receiving it is not actionable, however good the prose is.
+          data: {
+            org: input.org,
+            method: input.method,
+            api,
+            path,
+            body: null,
+            error: 'unverifiable_create',
+            refusal_detail: detail,
+            missing: mjGaps.length ? mjGaps.map((g) => ({ item: g.i, missing: g.gaps })) : undefined,
+          },
+          summary: `REFUSED (cannot verify this create is not a duplicate): ${detail}`,
+        };
+      }
+      const found: string[] = [];
+      for (const key of keys) {
+        if (!key) continue;
+        let probe;
+        try {
+          probe = await xeroGet(input.org as XeroOrg, `/${collection}`, { where: existsFilterFor(key) }, { api, deps });
+        } catch (e) {
+          return {
+            data: { org: input.org, method: input.method, api, path, body: null, error: 'probe_failed' },
+            summary:
+              `REFUSED (existence probe failed, failing closed): ${key.field}="${key.value}" — ` +
+              `${e instanceof Error ? e.message : String(e)}. During a duplicate-object incident an ` +
+              'unverifiable write is refused rather than risked. Retry, or pass allow_duplicate:true.',
+          };
+        }
+        // Narration+Date narrowed the candidates server-side; Total decides. Without this
+        // refine, two legitimately distinct journals sharing a narration on the same date
+        // (a recurring accrual, say) would block each other.
+        const existing =
+          key.kind === 'manual_journal'
+            ? readExisting(collection, probe.body).filter((x) => manualJournalMatches(x.total, key.total))
+            : readExisting(collection, probe.body);
+        if (blocksCreate(existing.map((x) => x.status))) {
+          found.push(
+            `${key.field}="${key.value}" already exists as ${existing.length} object(s): ` +
+              existing.map((x) => `${x.id}${x.status ? ` (${x.status})` : ''}`).join(', '),
+          );
+        }
+      }
+      if (found.length) {
+        return {
+          data: {
+            org: input.org,
+            method: input.method,
+            api,
+            path,
+            body: null,
+            error: 'duplicate_create_blocked',
+            // Same reasoning as unverifiable_create above: the existing object IDs are the
+            // actionable part of this refusal and must not live only in prose.
+            refusal_detail: found.join(' | '),
+          },
+          summary:
+            `REFUSED (would create duplicate object(s) in ${input.org}): ${found.join(' | ')}. ` +
+            'VOIDED and DELETED objects still block: re-creating against a voided copy is exactly how one ' +
+            'bill reached four objects. To reverse an object use a reversing entry, never a re-create. ' +
+            'Pass allow_duplicate:true only for a deliberate, reviewed second object.',
+        };
+      }
+    }
+  }
+
+  if (ctx.dryRun) {
+    return {
+      data: { org: input.org, method: input.method, api, path, body: null, error: 'dry_run' },
+      summary: `DRY RUN (nothing written): ${input.method} ${api} ${path} for ${input.org}. Write guard passed. Re-call with dry_run:false to execute.`,
+    };
+  }
+  const res = await xeroRequest(
+    input.org as XeroOrg,
+    input.method,
+    path,
+    input.body,
+    (input.params ?? {}) as Record<string, string | undefined>,
+    { api, deps },
+  );
+  return {
+    data: { org: input.org, method: input.method, api, path, body: res.body, day_limit_remaining: res.dayLimitRemaining },
+    summary: `Xero ${input.method} ${api} ${path} for ${input.org} — HTTP ${res.status}.${res.dayLimitRemaining ? ` Day-limit remaining: ${res.dayLimitRemaining}.` : ''}`,
+  };
 }
 
 function unconfigured(tool: string) {
@@ -1492,7 +1690,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Xero: write — POST/PUT/DELETE any scoped endpoint (executive ring only)',
         description:
-          'Create / update / void on any Xero API the tokens are scoped for (the CFO write lane). method = POST | PUT | DELETE. api = accounting (default) | payroll | assets | projects | files. path starts with "/", e.g. "/Invoices", "/Contacts", "/Payments", "/ManualJournals", "/BankTransactions", "/CreditNotes", "/Accounts". body is the JSON payload — for accounting collections wrap in the plural key, e.g. {"Invoices":[{...}]}. Xero writes are BOOKKEEPING (they post to the ledger, they do NOT move real money). dry_run defaults TRUE and previews without sending; pass dry_run:false to actually write. Do NOT use this for attachment uploads — the Xero Attachments API needs raw file bytes with the file\'s Content-Type, which this JSON-only tool cannot send; use xero_attachment_upload instead. MNPI: executive-ring lanes only.',
+          'Create / update / void on any Xero API the tokens are scoped for (the CFO write lane). method = POST | PUT | DELETE. api = accounting (default) | payroll | assets | projects | files. path starts with "/", e.g. "/Invoices", "/Contacts", "/Payments", "/ManualJournals", "/BankTransactions", "/CreditNotes", "/Accounts". body is the JSON payload — for accounting collections wrap in the plural key, e.g. {"Invoices":[{...}]}. Xero writes are BOOKKEEPING (they post to the ledger, they do NOT move real money). dry_run defaults TRUE and previews without sending; pass dry_run:false to actually write. REFUSED (error:"use_xero_attachment_upload", before any network call) for a POST/PUT whose path targets an Attachments sub-resource — the Xero Attachments API needs raw file bytes with the file\'s Content-Type, which this JSON-only tool cannot send; use xero_attachment_upload instead. MNPI: executive-ring lanes only.',
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
@@ -1527,157 +1725,7 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         refusal_detail: z.string().optional(),
         missing: z.array(z.object({ item: z.number(), missing: z.array(z.string()) })).optional(),
       },
-      handler: async (input, ctx) => {
-        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_request', ctx.callerAgent);
-        if (!xeroConfigured()) return unconfigured('xero_request');
-        const path = input.path.startsWith('/') ? input.path : `/${input.path}`;
-        const api = (input.api ?? 'accounting') as XeroApi;
-        if (path.includes('..')) {
-          return {
-            data: { org: input.org, method: input.method, api, path, body: null, error: 'bad_path' },
-            summary: 'xero_request: path must not contain "..".',
-          };
-        }
-        // --- WRITE GUARD (2026-08-14 duplicate-object incident). Runs BEFORE the dry-run return so
-        // a dry run also reports what the guard would do, making it a real preview. See
-        // write-guard.ts for the census that motivated each check.
-        if (api === 'accounting') {
-          // 1. MAP BY IDENTITY, NOT BY CODE. Account codes are per-org and Xero silently
-          //    re-resolves them in the destination org, which is how one document landed in both
-          //    the INND and HearingAssist ledgers.
-          const violations = findAccountCodeViolations(input.body);
-          if (violations.length) {
-            const where = violations
-              .slice(0, 5)
-              .map((v) => `item[${v.itemIndex}].LineItems[${v.lineIndex}] AccountCode=${v.accountCode}`)
-              .join('; ');
-            return {
-              data: { org: input.org, method: input.method, api, path, body: null, error: 'account_code_not_permitted' },
-              summary:
-                `REFUSED (${violations.length} line item(s) identify the account by CODE, not AccountID): ${where}. ` +
-                'Account codes are per-org and Xero re-resolves them locally, so the same code reaches an unrelated ' +
-                'account in another org (1251 is "Due from HearingAssist Inc" in INND but "Star Funding - AR" in ' +
-                'HearingAssist). Resolve each account to its AccountID in the DESTINATION org and resend.',
-            };
-          }
-
-          // 2. NO DUPLICATE CREATES. Read-before-write on the natural key, fail CLOSED.
-          if (isCreate(input.method, path) && !input.allow_duplicate) {
-            const collection = collectionOf(path);
-            const items = unwrapItems(input.body, collection);
-            const keys = items.map((item) => naturalKeyOf(item, collection));
-            if (!items.length || keys.some((k) => k === null)) {
-              // A ManualJournal has no Reference/InvoiceNumber/CreditNoteNumber and never can, so
-              // the generic "add a Reference" advice is unactionable there. Name the missing parts
-              // of the Narration+Date+Total key instead -- a refusal the caller can actually fix.
-              const mjGaps =
-                collection === 'manualjournals'
-                  ? items
-                      .map((item, i) => ({ i, gaps: manualJournalKeyGaps(item) }))
-                      .filter((g) => g.gaps.length)
-                  : [];
-              const detail = mjGaps.length
-                ? `${mjGaps.length} manual journal(s) lack a complete Narration+Date+Total key: ` +
-                  mjGaps.map((g) => `item[${g.i}] missing ${g.gaps.join(' + ')}`).join('; ') +
-                  '. A ManualJournal has no Reference field, so Narration + Date + Total IS its natural key ' +
-                  '(the same key our duplicate census grouped on when it found 17 duplicate journal groups). ' +
-                  'Supply all three and resend.'
-                : `${items.length} item(s), ` +
-                  `${keys.filter((k) => k === null).length} without a Reference/InvoiceNumber/CreditNoteNumber. ` +
-                  'Every create on this collection needs a natural key so existence can be checked first. ' +
-                  'Add a Reference, or pass allow_duplicate:true to record a deliberate second object.';
-              return {
-                // `refusal_detail` and `missing` are in the STRUCTURED payload, not only in the prose
-                // summary (2026-08-17). The CFO ran a correct A/B test -- a complete key versus one
-                // missing its Narration -- and reported both as "byte-identical bare
-                // unverifiable_create with no field named". They were reading `data`, where the two
-                // ARE identical; the discriminator existed only in `summary`, which their client does
-                // not surface. A refusal that cannot be told apart from a different refusal by the
-                // client receiving it is not actionable, however good the prose is.
-                data: {
-                  org: input.org,
-                  method: input.method,
-                  api,
-                  path,
-                  body: null,
-                  error: 'unverifiable_create',
-                  refusal_detail: detail,
-                  missing: mjGaps.length ? mjGaps.map((g) => ({ item: g.i, missing: g.gaps })) : undefined,
-                },
-                summary: `REFUSED (cannot verify this create is not a duplicate): ${detail}`,
-              };
-            }
-            const found: string[] = [];
-            for (const key of keys) {
-              if (!key) continue;
-              let probe;
-              try {
-                probe = await xeroGet(input.org as XeroOrg, `/${collection}`, { where: existsFilterFor(key) }, { api });
-              } catch (e) {
-                return {
-                  data: { org: input.org, method: input.method, api, path, body: null, error: 'probe_failed' },
-                  summary:
-                    `REFUSED (existence probe failed, failing closed): ${key.field}="${key.value}" — ` +
-                    `${e instanceof Error ? e.message : String(e)}. During a duplicate-object incident an ` +
-                    'unverifiable write is refused rather than risked. Retry, or pass allow_duplicate:true.',
-                };
-              }
-              // Narration+Date narrowed the candidates server-side; Total decides. Without this
-              // refine, two legitimately distinct journals sharing a narration on the same date
-              // (a recurring accrual, say) would block each other.
-              const existing =
-                key.kind === 'manual_journal'
-                  ? readExisting(collection, probe.body).filter((x) => manualJournalMatches(x.total, key.total))
-                  : readExisting(collection, probe.body);
-              if (blocksCreate(existing.map((x) => x.status))) {
-                found.push(
-                  `${key.field}="${key.value}" already exists as ${existing.length} object(s): ` +
-                    existing.map((x) => `${x.id}${x.status ? ` (${x.status})` : ''}`).join(', '),
-                );
-              }
-            }
-            if (found.length) {
-              return {
-                data: {
-                  org: input.org,
-                  method: input.method,
-                  api,
-                  path,
-                  body: null,
-                  error: 'duplicate_create_blocked',
-                  // Same reasoning as unverifiable_create above: the existing object IDs are the
-                  // actionable part of this refusal and must not live only in prose.
-                  refusal_detail: found.join(' | '),
-                },
-                summary:
-                  `REFUSED (would create duplicate object(s) in ${input.org}): ${found.join(' | ')}. ` +
-                  'VOIDED and DELETED objects still block: re-creating against a voided copy is exactly how one ' +
-                  'bill reached four objects. To reverse an object use a reversing entry, never a re-create. ' +
-                  'Pass allow_duplicate:true only for a deliberate, reviewed second object.',
-              };
-            }
-          }
-        }
-
-        if (ctx.dryRun) {
-          return {
-            data: { org: input.org, method: input.method, api, path, body: null, error: 'dry_run' },
-            summary: `DRY RUN (nothing written): ${input.method} ${api} ${path} for ${input.org}. Write guard passed. Re-call with dry_run:false to execute.`,
-          };
-        }
-        const res = await xeroRequest(
-          input.org as XeroOrg,
-          input.method,
-          path,
-          input.body,
-          (input.params ?? {}) as Record<string, string | undefined>,
-          { api },
-        );
-        return {
-          data: { org: input.org, method: input.method, api, path, body: res.body, day_limit_remaining: res.dayLimitRemaining },
-          summary: `Xero ${input.method} ${api} ${path} for ${input.org} — HTTP ${res.status}.${res.dayLimitRemaining ? ` Day-limit remaining: ${res.dayLimitRemaining}.` : ''}`,
-        };
-      },
+      handler: handleXeroRequest,
     },
     callerHash,
   );
