@@ -430,6 +430,23 @@ export interface XeroGetResult {
 }
 
 /**
+ * Default bound for extractXeroErrorDetail's return value, in characters. Applies to EVERY branch
+ * (not only the raw-text fallback) so the function has one simple output-size contract: never
+ * unbounded (defends against a pathological huge body), but generous enough that real Xero
+ * ValidationException detail — realistically well under 1KB — never gets anywhere near it.
+ *
+ * (FND-20260724-68f5 residual, 2026-08-28: this was 2000 until a live CFO chart-of-accounts
+ * incident — 5 varied POST /Accounts payloads — showed a Xero error body whose useful detail sat
+ * past the old 2000-char raw-text-fallback boundary, cut off right before the actual cause. The
+ * "clean shape" branch (Elements[].ValidationErrors[].Message) was already unbounded and NOT the
+ * culprit; the fallback used for anything that doesn't match that exact shape was. 16KB is a
+ * deliberately generous, still-bounded ceiling: real Xero bodies are one to a few KB even for a
+ * multi-item batch create, so this practically never truncates a genuine response, while a
+ * malformed or oversized body still cannot balloon a thrown Error.message without limit.)
+ */
+export const XERO_ERROR_DETAIL_MAX_CHARS = 16 * 1024;
+
+/**
  * Extract the actual human-readable cause from a Xero error response body, when the body is a
  * Xero-shaped JSON error object. Xero's ValidationException shape nests the real reason inside
  * Elements[].ValidationErrors[].Message — the top-level Message is always the generic
@@ -438,8 +455,22 @@ export interface XeroGetResult {
  * the failure. Falls back to a longer raw-text slice when the body isn't the expected shape, so
  * this never throws and never returns less information than before.
  * (FND-20260724-68f5: the previous fixed-length slice cut the response off before this detail.)
+ *
+ * THREE tiers, in order, each bounded by `maxChars` (default XERO_ERROR_DETAIL_MAX_CHARS):
+ *   1. The expected shape (Elements[].ValidationErrors[].Message present) — the common case for a
+ *      real ValidationException. Flattened into one readable string.
+ *   2. JSON parses and carries a top-level Message but no per-element ValidationErrors text —
+ *      returns that Message.
+ *   3a. JSON parses, has a non-empty Elements array, but neither of the above yielded anything
+ *       (e.g. a shape this function doesn't specifically know, or ValidationErrors present but
+ *       empty on every element) — rather than silently discarding that structure into the SAME
+ *       raw-text fallback used for genuinely non-JSON bodies, this preserves it VERBATIM via
+ *       JSON.stringify(parsed.Elements): a caller (or an agent reading the tool result) can still
+ *       see the real Elements array Xero returned, not nothing.
+ *   3b. Anything else (not JSON, or JSON with no recognizable Xero error fields at all) — the
+ *       original raw-text slice, now bounded at the wider ceiling above instead of 2000.
  */
-export function extractXeroErrorDetail(rawText: string, maxRawFallbackChars = 2000): string {
+export function extractXeroErrorDetail(rawText: string, maxChars = XERO_ERROR_DETAIL_MAX_CHARS): string {
   try {
     const parsed = JSON.parse(rawText) as {
       Type?: string;
@@ -456,13 +487,19 @@ export function extractXeroErrorDetail(rawText: string, maxRawFallbackChars = 20
     }
     if (messages.length) {
       const top = parsed.Message ? `${parsed.Message}: ` : '';
-      return `${top}${messages.join(' | ')}`;
+      return `${top}${messages.join(' | ')}`.slice(0, maxChars);
     }
-    if (parsed.Message) return parsed.Message;
+    if (parsed.Message) return parsed.Message.slice(0, maxChars);
+    if (Array.isArray(parsed.Elements) && parsed.Elements.length) {
+      // Xero-shaped JSON (has a Type/Elements envelope), but none of the fields this function
+      // knows how to flatten were populated. Preserve the real structure rather than dropping to
+      // the raw-text fallback below, which would treat perfectly good JSON as opaque text.
+      return JSON.stringify(parsed.Elements).slice(0, maxChars);
+    }
   } catch {
     /* not JSON (or not Xero's error shape) — fall through to the raw-text fallback below */
   }
-  return rawText.slice(0, maxRawFallbackChars);
+  return rawText.slice(0, maxChars);
 }
 
 /**

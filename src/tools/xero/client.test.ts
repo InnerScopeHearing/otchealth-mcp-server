@@ -27,6 +27,9 @@ const {
   isGrandfatheredForJournals,
   xeroGetAttachmentContent,
   MAX_ATTACHMENT_READ_BYTES,
+  xeroRequest,
+  extractXeroErrorDetail,
+  XERO_ERROR_DETAIL_MAX_CHARS,
 } = await import('./client.js');
 const { EXEC_RING } = await import('../kb/search-privileged.js');
 
@@ -491,6 +494,143 @@ function liveAttachmentDeps(fetchImpl: typeof fetch) {
     create: (async () => { throw new Error('create should never be called — the seeded token is already live'); }) as never,
   };
 }
+
+// ---------------------------------------------------------------------------------------------
+// extractXeroErrorDetail — FND-20260724-68f5 RESIDUAL (2026-08-28): a live CFO chart-of-accounts
+// incident (5 varied POST /Accounts payloads) hit a Xero error body whose real cause sat past the
+// OLD 2000-char raw-text-fallback boundary, cut off right before the actual text. The "clean
+// shape" (Elements[].ValidationErrors[].Message) tier was ALREADY unbounded and not the culprit;
+// the fallback used for anything that doesn't match that exact shape was. These tests pin all
+// three tiers plus the new, wider (16KB) bound they share.
+// ---------------------------------------------------------------------------------------------
+
+test('extractXeroErrorDetail: a realistic, LONG Xero ValidationException body (chart-of-accounts create) survives intact -- the actual cause is not truncated even with a large echoed object ahead of it', () => {
+  // Mirrors Xero's real documented shape: Elements echoes the submitted object's fields (which can
+  // be sizeable for a multi-field Account/Invoice) BEFORE the nested ValidationErrors. The needle
+  // sits well past the OLD 2000-char raw-text-fallback boundary to prove this is not a coincidence
+  // of a short body.
+  const needle = 'Account code "200" already exists as a BANK account (AccountID a1b2c3d4-...)';
+  const echoedAccountObject = {
+    AccountID: '00000000-0000-0000-0000-000000000000',
+    Code: '200',
+    Name: 'Business Checking Account, Reserve, and Escrow — Padding Field '.repeat(30),
+    Type: 'BANK',
+    TaxType: 'NONE',
+    Description: 'A very long description field a real Xero echo can plausibly contain. '.repeat(20),
+  };
+  const xeroBody = {
+    ErrorNumber: 10,
+    Type: 'ValidationException',
+    Message: 'A validation exception occurred',
+    Elements: [{ ...echoedAccountObject, ValidationErrors: [{ Message: needle }] }],
+  };
+  const rawText = JSON.stringify(xeroBody);
+  assert.ok(rawText.length > 2000, 'the fixture must actually exceed the OLD cap to prove anything');
+
+  const detail = extractXeroErrorDetail(rawText);
+  assert.match(detail, /A validation exception occurred/);
+  assert.ok(detail.includes(needle), `the real cause must survive intact; got: ${detail}`);
+  // Regression proof: slicing the RAW text at the old 2000-char bound would have missed the needle
+  // entirely -- so this is testing the actual defect, not a scenario that always happened to pass.
+  assert.equal(rawText.slice(0, 2000).includes(needle), false, 'fixture sanity: the needle must sit past the OLD cap');
+});
+
+test('extractXeroErrorDetail: multiple Elements/ValidationErrors are all preserved, unbounded by the old 2000-char cap', () => {
+  const elements = Array.from({ length: 20 }, (_, i) => ({
+    Code: String(100 + i),
+    Name: 'Padding '.repeat(20),
+    ValidationErrors: [{ Message: `element-${i}-cause` }],
+  }));
+  const rawText = JSON.stringify({ Type: 'ValidationException', Message: 'A validation exception occurred', Elements: elements });
+  assert.ok(rawText.length > 2000);
+  const detail = extractXeroErrorDetail(rawText);
+  for (let i = 0; i < 20; i++) assert.ok(detail.includes(`element-${i}-cause`), `element-${i}-cause missing from: ${detail}`);
+});
+
+test('extractXeroErrorDetail: Elements present but no ValidationErrors[].Message anywhere -- preserves the real Elements structure VERBATIM instead of falling to the raw-text slice', () => {
+  const rawText = JSON.stringify({
+    Type: 'ValidationException',
+    Elements: [{ Code: '200', SomeUnrecognizedField: 'the real cause lives here, not under Message' }],
+  });
+  const detail = extractXeroErrorDetail(rawText);
+  // Verbatim means it round-trips back to the exact structure Xero sent, not a lossy string.
+  const roundTripped = JSON.parse(detail);
+  assert.deepEqual(roundTripped, [{ Code: '200', SomeUnrecognizedField: 'the real cause lives here, not under Message' }]);
+});
+
+test('extractXeroErrorDetail: a genuinely non-JSON body now gets the WIDER 16KB raw-text fallback, not the old 2000-char one', () => {
+  const needle = 'THE_REAL_CAUSE_PAST_THE_OLD_2000_CHAR_CAP';
+  const rawText = `Upstream gateway error (not Xero-shaped JSON). ${'X'.repeat(2100)} ${needle}`;
+  assert.equal(rawText.slice(0, 2000).includes(needle), false, 'fixture sanity: the needle must sit past the OLD cap');
+  const detail = extractXeroErrorDetail(rawText);
+  assert.ok(detail.includes(needle), `the raw-text fallback must reach the wider bound; got tail: ${detail.slice(-80)}`);
+});
+
+test('extractXeroErrorDetail: still genuinely bounded -- a pathological huge body never produces an unbounded string', () => {
+  const rawText = 'Z'.repeat(200000);
+  const detail = extractXeroErrorDetail(rawText);
+  assert.equal(detail.length, XERO_ERROR_DETAIL_MAX_CHARS);
+});
+
+test('extractXeroErrorDetail: XERO_ERROR_DETAIL_MAX_CHARS is the new, wider bound (16KB), not the old 2000', () => {
+  assert.equal(XERO_ERROR_DETAIL_MAX_CHARS, 16 * 1024);
+});
+
+test('xeroRequest: END TO END — a real Xero ValidationException on POST /Accounts (the live CFO chart-of-accounts incident) reaches the thrown error intact, not cut off before the actual cause', async () => {
+  // This is the full client.ts boundary a caller (the xero_request tool handler) actually sees:
+  // xeroGet/xeroRequest are the ONLY two places that construct the thrown Error from a Xero 4xx/5xx
+  // body, and registry.ts's generic tool-error handler relays a thrown Error's `.message` verbatim
+  // into both the MCP tool result's structuredContent.error.message and its content[0].text (no
+  // further truncation there) -- so what xeroRequest throws here IS what the calling agent receives.
+  const liveDoc = buildTokenDoc({
+    org: 'otchealth',
+    refreshToken: 'rt-live',
+    accessToken: 'at-live',
+    expiresInSeconds: 1800,
+    tenantId: 'tenant-1',
+    tenantName: 'OTCHealth Inc.',
+    bootstrapHash: bootstrapHash(process.env.XERO_RT_OTCHEALTH as string),
+  });
+  const needle = 'Account code "200" is already assigned to another BANK account';
+  const xeroBody = {
+    ErrorNumber: 10,
+    Type: 'ValidationException',
+    Message: 'A validation exception occurred',
+    Elements: [
+      {
+        AccountID: '00000000-0000-0000-0000-000000000000',
+        Code: '200',
+        Name: 'Padding-heavy echoed account field. '.repeat(60),
+        Type: 'BANK',
+        ValidationErrors: [{ Message: needle }],
+      },
+    ],
+  };
+  const bodyText = JSON.stringify(xeroBody);
+  assert.ok(bodyText.length > 2000, 'fixture sanity: must actually exceed the old cap to prove anything');
+
+  const deps = {
+    fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+      const u = new URL(String(url));
+      if (u.pathname.endsWith('/Accounts') && init?.method === 'POST') {
+        return new Response(bodyText, { status: 400 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    read: (async () => ({ doc: liveDoc, etag: 'etag-1' })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+
+  await assert.rejects(
+    () => xeroRequest('otchealth', 'POST', '/Accounts', { Accounts: [{ Code: '200', Name: 'Test Bank Account', Type: 'BANK' }] }, {}, { deps: deps as never }),
+    (err: Error) => {
+      assert.ok(err.message.includes(needle), `the real Xero ValidationException detail must survive; got: ${err.message}`);
+      assert.match(err.message, /HTTP 400/);
+      return true;
+    },
+  );
+});
 
 test('xeroGetAttachmentContent: BINARY INTEGRITY — bytes round-trip EXACTLY, including a NUL byte and invalid-UTF-8 sequences a .text()-based path would corrupt', async () => {
   // 0x00 never appears in valid UTF-8 text; 0xff/0xfe are invalid UTF-8 continuation bytes that get
