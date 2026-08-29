@@ -100,6 +100,15 @@ export interface AuthCodeRecord {
   codeChallenge: string;
   codeChallengeMethod: 'S256';
   expiresAt: number;
+  /**
+   * Set ONLY by the OAuth consent interstitial (server/oauth-consent.ts's resolveElevateChoice)
+   * after a genuine owner-held setup code was atomically consumed (auth/setup-codes.ts) -- never by
+   * the ordinary GET /oauth/authorize auto-issue path, which omits this field entirely (optional,
+   * so every existing call site is unaffected). oauth.ts's /oauth/token authorization_code branch
+   * uses it, when present, in place of the resolved client's baked-in lane for a PUBLIC (DCR)
+   * client only; a confidential client's rec never carries it and its behavior is untouched.
+   */
+  elevatedAgent?: string;
 }
 
 const authCodes = new Map<string, AuthCodeRecord>();
@@ -149,6 +158,11 @@ export async function consumeAuthCode(code: string): Promise<AuthCodeRecord | nu
       codeChallenge: d.codeChallenge,
       codeChallengeMethod: d.codeChallengeMethod,
       expiresAt: d.expiresAt,
+      // Explicit field-by-field reconstruction (not a spread) is this branch's existing convention
+      // -- elevatedAgent must be listed here too, or the durable (Cosmos/Postgres) backend silently
+      // drops it on every code exchange while the in-memory fallback (a plain Map.get, no
+      // reconstruction) would not, a divergence that would only show up once STATE_BACKEND is live.
+      ...(d.elevatedAgent ? { elevatedAgent: d.elevatedAgent } : {}),
     };
   }
   const rec = authCodes.get(code);

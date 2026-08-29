@@ -156,6 +156,11 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'stripe_cancel_subscription', requiredRole: 'cto', reason: 'Cancelling a subscription terminates recurring revenue.' },
   { pattern: 'stripe_create_payment_link', requiredRole: 'cto', reason: 'Payment links are public charge instruments.' },
   { pattern: 'stripe_create_invoice', requiredRole: 'cto', reason: 'Invoices with auto_advance can trigger collection.' },
+  // Connector setup-code role elevation (URL-only ChatGPT/Claude connect + owner-code elevation at
+  // consent, server/oauth-consent.ts). Minting a code that redeems for a privileged agent lane is
+  // itself a privileged action; duplicated in-handler in tools/oauth/setup-code-create.ts, matching
+  // this repo's existing convention (see the cio_admin_* rows above + tools/cio/admin-access.ts).
+  { pattern: 'connector_setup_code_create', requiredRole: ['cto', 'exec'], reason: 'Minting an owner setup code that elevates a connector to a privileged agent lane is limited to cto/exec.' },
 ];
 
 /** Return the required role(s) for a tool name, or null if unrestricted. */
