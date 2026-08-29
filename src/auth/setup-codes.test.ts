@@ -137,21 +137,35 @@ test('mintSetupCode refuses to mint when the shared store is not configured', as
 // Mint shape: entropy, alphabet, normalization.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-test('generateSetupCodePlaintext uses only the safe alphabet (no 0/O/1/I/L) and is grouped in 4s', () => {
+test('generateSetupCodePlaintext uses the exact 32-symbol Crockford alphabet (no I/L/O/U), grouped in 4s, unbiased', () => {
   const bytes = (n: number) => Buffer.from(Array.from({ length: n }, (_, i) => (i * 61) & 0xff));
   const code = generateSetupCodePlaintext(bytes);
   assert.match(code, /^[A-Z0-9]{4}(-[A-Z0-9]{4}){3}$/);
-  for (const ambiguous of ['0', 'O', '1', 'I', 'L']) {
-    assert.equal(code.includes(ambiguous), false, `code must never contain ambiguous character "${ambiguous}": ${code}`);
+  for (const excluded of ['I', 'L', 'O', 'U']) {
+    assert.equal(code.includes(excluded), false, `code must never contain excluded character "${excluded}": ${code}`);
   }
+  // Bias regression lock (the CodeQL js/biased-cryptographic-random finding on this PR): with a
+  // full 0..255 byte sweep, an EXACTLY-32-symbol alphabet indexed by `b & 31` must select every
+  // symbol exactly 8 times (256 / 32). The pre-fix 31-character alphabet cannot pass this: its
+  // `% 31` mapping selects the first 8 symbols 9 times each.
+  const counts = new Map<string, number>();
+  for (let start = 0; start < 256; start += 16) {
+    const chunk = generateSetupCodePlaintext(() => Buffer.from(Array.from({ length: 16 }, (_, i) => start + i)));
+    for (const ch of chunk.replace(/-/g, '')) counts.set(ch, (counts.get(ch) || 0) + 1);
+  }
+  assert.equal(counts.size, 32, 'a 0..255 sweep must reach all 32 symbols');
+  for (const [ch, n] of counts) assert.equal(n, 8, `symbol "${ch}" selected ${n} times; an unbiased power-of-two mapping selects each exactly 8 times`);
 });
 
-test('normalizeSetupCode is case-insensitive and hyphen/space/punctuation-tolerant', () => {
+test('normalizeSetupCode is case-insensitive, punctuation-tolerant, and maps Crockford confusables (O->0, I/L->1)', () => {
   const canonical = 'ABCD-EFGH-JKMN-PQRS';
   const messy = ` ${canonical.toLowerCase().replace(/-/g, ' ')} `;
   assert.equal(normalizeSetupCode(messy), normalizeSetupCode(canonical));
   assert.equal(normalizeSetupCode('ab-CD 12'), 'ABCD12');
   assert.equal(normalizeSetupCode('AB!!CD??12'), 'ABCD12');
+  // A human who misreads 0 as O, or 1 as I or l, still produces the identical hash input.
+  assert.equal(normalizeSetupCode('O1IL-oQR2'), '0111-0QR2'.replace('-', ''));
+  assert.equal(normalizeSetupCode('COOL-CAT1'), normalizeSetupCode('C00L-CAT1'.replace('L', '1')));
 });
 
 test('hashSetupCode is deterministic and produces a 64-hex-char sha256 digest', () => {

@@ -103,24 +103,35 @@ export function assertMintableRole(role: string): asserts role is ElevationRole 
   }
 }
 
-// 32 symbols, excludes 0/O/1/I/L so a human reading/typing the code cannot confuse characters.
-// 256 % 32 === 0, so `byte % 32` is an EXACTLY uniform pick per byte (no modulo bias) -- 16 bytes -> 16
-// symbols * 5 bits = 80 bits of entropy, grouped for readability as four four-character blocks.
-const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+// Crockford base32: digits 0-9 plus the letters minus I, L, O, U (the confusable ones). EXACTLY 32
+// symbols -- the previous alphabet here claimed 32 but actually contained 31 (caught by CodeQL
+// js/biased-cryptographic-random on this PR: `byte % 31` IS modulo-biased, since 256 % 31 !== 0).
+// With a true power-of-two alphabet, `byte & 31` is an exactly uniform pick per byte with no
+// modulo at all -- 16 bytes -> 16 symbols * 5 bits = a real 80 bits of entropy, grouped for
+// readability as four four-character blocks. Generated codes never contain I/L/O/U; a human who
+// MISREADS one back (O for 0, I or L for 1) is silently corrected by normalizeSetupCode below,
+// which is Crockford's own decode rule.
+const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const CODE_SYMBOLS = 16;
 
 export function generateSetupCodePlaintext(randomBytesImpl: (size: number) => Buffer = randomBytes): string {
   const bytes = randomBytesImpl(CODE_SYMBOLS);
   let out = '';
-  for (const b of bytes) out += CODE_ALPHABET[b % CODE_ALPHABET.length];
+  for (const b of bytes) out += CODE_ALPHABET[b & 31];
   return out.match(/.{1,4}/g)!.join('-');
 }
 
-/** Normalize a user-typed code before hashing: uppercase, then drop everything that is not
- *  [A-Z0-9] (hyphens, spaces, stray punctuation a phone keyboard/autocorrect might add). So
- *  "abcd-EFGH ijkl-mnop" and "ABCDEFGHIJKLMNOP" hash identically. */
+/** Normalize a user-typed code before hashing: uppercase, drop everything that is not [A-Z0-9]
+ *  (hyphens, spaces, stray punctuation a phone keyboard/autocorrect might add), then apply
+ *  Crockford base32's confusion mapping (O -> 0, I/L -> 1) so a human who misread an ambiguous
+ *  glyph still types a code that hashes identically. Generated codes never contain I/L/O/U, so
+ *  for a correctly-copied code the mapping is a no-op. */
 export function normalizeSetupCode(raw: string): string {
-  return raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return raw
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .replace(/O/g, '0')
+    .replace(/[IL]/g, '1');
 }
 
 export function hashSetupCode(normalizedCode: string): string {
