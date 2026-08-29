@@ -119,6 +119,10 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // role gate (catalog/governance.ts), no secrets in its output; safe on every ship lane.
   'catalog_probe',
   'task_list', 'task_get', 'task_create', 'task_claim', 'task_update', 'task_complete', 'task_heartbeat', 'inbox_read', 'agent_dispatch',
+  // Owner setup-code minting for the URL-only connector elevation flow (2026-08-29). Advertised to
+  // ship lanes so the ChatGPT CTO seat can hand the owner the next agent's code conversationally;
+  // the handler + governance both hard-gate execution to cto/exec regardless of who can SEE it.
+  'connector_setup_code_create',
   'posthog_query_hogql', 'posthog_insight_list',
   'github_get_file_contents', 'github_list_pull_requests', 'github_issue_list', 'sentry_list_issues',
   // ITEM #2 Azure control-plane READ lane (Phase A). MUST be on the connector surface or the

@@ -243,3 +243,11 @@ test('the seat additions never leak into the plain external/unknown lane', () =>
     assert.equal(set.has(seatOnly), false, `external lane must NOT gain ${seatOnly}`);
   }
 });
+
+test('ship lanes advertise connector_setup_code_create (execution stays cto/exec-gated in-handler)', () => {
+  const set = connectorToolset(testEnv(), 'cto');
+  assert.ok(set.has('connector_setup_code_create'));
+  for (const lane of ['coo', 'cro', 'totally-unknown-lane']) {
+    assert.equal(connectorToolset(testEnv(), lane).has('connector_setup_code_create'), false, `${lane} must not advertise setup-code minting`);
+  }
+});
