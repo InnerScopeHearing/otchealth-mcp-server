@@ -33,6 +33,19 @@ import {
   registerStatelessClient,
   parseStatelessClient,
 } from '../auth/oauth-tokens.js';
+import { defaultSetupCodeDeps, isElevationRole, type SetupCodeDeps } from '../auth/setup-codes.js';
+import {
+  applyConsentPageHeaders,
+  buildAuthorizeRedirectUrl,
+  createPendingAuth,
+  defaultOAuthConsentDeps,
+  isValidPendingAuthId,
+  renderConsentPage,
+  renderDeadEndPage,
+  resolveElevateChoice,
+  resolveReadOnlyChoice,
+  type OAuthConsentDeps,
+} from './oauth-consent.js';
 import { EXEC_RING } from '../tools/kb/search-privileged.js';
 
 const env = loadEnv();
@@ -117,7 +130,21 @@ export function isPrivilegedDefaultAgent(agent: string | undefined | null): bool
   return (EXEC_RING as readonly string[]).includes((agent || '').toLowerCase());
 }
 
-export function registerOAuthRoutes(app: FastifyInstance): void {
+/**
+ * Storage deps for the consent interstitial, injectable so a hermetic test can exercise the REAL
+ * Fastify routes (via app.inject()) end to end with a fake in-memory store instead of a live
+ * Postgres/Cosmos instance -- mirroring server/heygen-pairing.ts's registerHeyGenPairingRoute(app,
+ * deps) convention. Both fields default to the real agentstate/store.ts-backed implementations, so
+ * every existing call site (server/index.ts's plain `registerOAuthRoutes(app)`) is unaffected.
+ */
+export interface OAuthRouteDeps {
+  consent?: OAuthConsentDeps;
+  setupCode?: SetupCodeDeps;
+}
+
+export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteDeps = {}): void {
+  const consentDeps = routeDeps.consent ?? defaultOAuthConsentDeps;
+  const setupCodeDeps = routeDeps.setupCode ?? defaultSetupCodeDeps;
   // STARTUP GUARD (Phase 6 reviewer nit): OAUTH_DEFAULT_AGENT is the lane bound to the static
   // PERPLEXITY_CONNECTOR_TOKEN and to the single confidential OAUTH_CLIENT_ID connection. Those are
   // broadly-held, long-lived credentials, so if OAUTH_DEFAULT_AGENT is ever set to a privileged
@@ -207,8 +234,14 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       return reply.status(400).send({ error: 'invalid_request', error_description: 'redirect_uri not allowed' });
     }
 
+    // Hoisted so the interstitial branch below (which runs AFTER every validation check in this
+    // block, unchanged) can read what client this request resolved to. Declaring it here changes
+    // only its SCOPE, not its value or the checks performed on it -- the confidential-client and
+    // legacy (!oauthConfigured()) branches immediately below are otherwise byte-for-byte identical
+    // to before this feature.
+    let ac: ResolvedAnyClient | null = null;
     if (oauthConfigured()) {
-      const ac = client_id ? resolveAnyClient(client_id) : null;
+      ac = client_id ? resolveAnyClient(client_id) : null;
       if (!ac) {
         return reply.status(400).send({ error: 'invalid_client' });
       }
@@ -229,6 +262,42 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       }
     }
 
+    // ── Consent interstitial (owner-code role elevation), PUBLIC/DCR clients ONLY ───────────────
+    // Confidential clients (occ_/OAUTH_CLIENTS, ac.isPublic === false) and the legacy
+    // (!oauthConfigured()) fallback fall straight through to the unchanged auto-issue below --
+    // BYTE-FOR-BYTE, per the guard on this very branch. A public DCR client carries NO identity
+    // proof (see /register's Part 6 comment above) and is hard-bound to external-read; this is the
+    // ONLY place such a client can ever reach a privileged lane, and doing so requires a genuine
+    // owner-minted setup code (connector_setup_code_create, cto/exec-gated) typed into THIS page by
+    // a human in their own browser -- the connecting client itself never sees it.
+    if (oauthConfigured() && ac && ac.isPublic) {
+      let pending: { id: string };
+      try {
+        pending = await createPendingAuth(
+          {
+            clientId: client_id,
+            redirectUri: redirect_uri,
+            state,
+            codeChallenge: code_challenge,
+            codeChallengeMethod: 'S256',
+          },
+          consentDeps,
+        );
+      } catch (e) {
+        // FAIL LOUD: a storage error here must never fall through to the auto-issue below, which
+        // would silently disable the whole consent step (and grant external-read with no owner
+        // visibility at all) rather than surfacing an obvious failure.
+        logger.error(
+          { type: 'oauth_authorize_pending_error', error: (e as Error).message },
+          'failed to create pending-auth record for the consent interstitial',
+        );
+        applyConsentPageHeaders(reply);
+        return reply.status(500).send(renderDeadEndPage('server_error'));
+      }
+      applyConsentPageHeaders(reply);
+      return reply.status(200).send(renderConsentPage(pending.id));
+    }
+
     const code = await createAuthCode({
       clientId: client_id,
       redirectUri: redirect_uri,
@@ -242,6 +311,74 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     if (state) url.searchParams.set('state', state);
     logger.info({ type: 'oauth_authorize', redirect_uri }, 'issued auth code');
     return reply.status(302).redirect(url.toString());
+  });
+
+  // ── Consent submission: the interstitial's form posts back HERE ────────────────────────────────
+  // Carries ONLY pending_id + the owner's choice (+ the code, if elevating) -- NEVER redirect_uri/
+  // state/PKCE, which are resolved server-side from the stored pending-auth record (see
+  // oauth-consent.ts's header). Same brute-force-surface posture as /oauth/authorize itself: a
+  // strict per-route rate limit, in addition to the setup code's own 80 bits of entropy and the
+  // pending record's independent 5-wrong-guess budget.
+  app.post('/oauth/authorize/consent', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
+    try {
+      const body =
+        typeof req.body === 'string'
+          ? (Object.fromEntries(new URLSearchParams(req.body)) as Record<string, string>)
+          : ((req.body ?? {}) as Record<string, string>);
+      const pendingId = typeof body.pending_id === 'string' ? body.pending_id : '';
+      const action = body.action === 'elevate' ? 'elevate' : body.action === 'readonly' ? 'readonly' : '';
+
+      if (!isValidPendingAuthId(pendingId) || !action) {
+        applyConsentPageHeaders(reply);
+        return reply.status(400).send(renderDeadEndPage('expired'));
+      }
+
+      const resolved =
+        action === 'readonly'
+          ? await resolveReadOnlyChoice(pendingId, consentDeps)
+          : await resolveElevateChoice(pendingId, body.code || '', consentDeps, setupCodeDeps);
+
+      if (resolved.outcome === 'store_error') {
+        applyConsentPageHeaders(reply);
+        return reply.status(500).send(renderDeadEndPage('server_error'));
+      }
+      if (resolved.outcome === 'burned') {
+        applyConsentPageHeaders(reply);
+        return reply.status(400).send(renderDeadEndPage('expired'));
+      }
+      if (resolved.outcome === 'retry') {
+        applyConsentPageHeaders(reply);
+        return reply.status(200).send(renderConsentPage(pendingId, resolved.message));
+      }
+
+      // resolved.outcome === 'issue'. SECURITY (hostile-reviewer check): agentOverride here is
+      // EITHER null (the explicit read-only choice, never touched auth/setup-codes.ts) OR a role
+      // that auth/setup-codes.ts's consumeSetupCode() itself resolved from a durable doc -- never
+      // anything this request's own body could name directly. There is no field in `body` that
+      // selects a role.
+      const code = await createAuthCode({
+        clientId: resolved.clientId,
+        redirectUri: resolved.redirectUri,
+        scope: 'mcp',
+        codeChallenge: resolved.codeChallenge,
+        codeChallengeMethod: resolved.codeChallengeMethod,
+        ...(resolved.agentOverride ? { elevatedAgent: resolved.agentOverride } : {}),
+      });
+      const url = buildAuthorizeRedirectUrl(resolved.redirectUri, code, resolved.state);
+      logger.info(
+        { type: 'oauth_authorize_consent', elevated: Boolean(resolved.agentOverride) },
+        'issued auth code via the consent interstitial',
+      );
+      reply.header('cache-control', 'no-store');
+      return reply.status(302).redirect(url);
+    } catch (e) {
+      // Same fail-loud posture as the GET handler above: an unexpected throw anywhere in this
+      // handler must never escape as Fastify's default error page (which could leak internals) and
+      // must never be mistaken for a completed flow.
+      logger.error({ type: 'oauth_authorize_consent_error', error: (e as Error).message }, 'consent submission handler failed');
+      applyConsentPageHeaders(reply);
+      return reply.status(500).send(renderDeadEndPage('server_error'));
+    }
   });
 
   // ── Token endpoint ─────────────────────────────────────────────────────────
@@ -284,15 +421,32 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       const rc = resolveAnyClient(claims.sub);
       if (!rc) return reply.status(401).send({ error: 'invalid_client' });
       if (!rc.isPublic && client_secret !== rc.secret) return reply.status(401).send({ error: 'invalid_client' });
+      // ELEVATION (owner-code role elevation, connector setup codes): for a PUBLIC (DCR) client,
+      // resolveAnyClient()/parseStatelessClient() ALWAYS decodes the STATIC blob baked into the
+      // client_id at /register time, which is ALWAYS 'external-read' -- it has no way to know an
+      // elevation ever happened. The refresh token being refreshed here, however, is a credential
+      // THIS SERVER minted, with `agent` in its own signed claims set to whatever the authorization_
+      // code grant decided at issuance (either rc.agent, for an ordinary completion, or the
+      // elevated role, for a consent-interstitial elevation -- see that branch below). Trusting
+      // claims.agent for a public client is not a new trust decision: auth/bearer.ts's issuedAgent()
+      // already treats a verified access token's own `agent` claim as authoritative everywhere else
+      // in the system; this makes the refresh grant consistent with that, instead of silently
+      // discarding an elevated role back to external-read on every refresh (the exact bug this
+      // comment exists to prevent — a refreshed connector would otherwise quietly lose its granted
+      // role a few hours after connecting). A CONFIDENTIAL client (rc.isPublic === false) is
+      // UNCHANGED: it always re-derives rc.agent from OAUTH_CLIENTS, byte-for-byte as before, since
+      // an operator-driven lane reassignment taking effect on that client's next refresh is an
+      // existing, deliberate, and unrelated behavior this feature must not touch.
+      const agent = rc.isPublic ? claims.agent || rc.agent : rc.agent;
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // Same 24h TTL as client_credentials (OAUTH_CC_TTL_SECONDS). The 2026-07-16 TTL fix only
         // covered the CC grant; Chat/Cowork connectors (authorization_code + refresh) kept the old
         // hardcoded 1h and dropped mid-session — the recurring "brain went offline" experience.
-        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS),
+        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
-        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_REFRESH_TTL_SECONDS),
+        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS),
         scope: claims.scope,
       });
     }
@@ -327,13 +481,28 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
       if (!rec.codeChallenge || !code_verifier || !verifyPkceS256(code_verifier, rec.codeChallenge)) {
         return reply.status(400).send({ error: 'invalid_grant', error_description: 'PKCE verification failed' });
       }
+      // ELEVATION (owner-code role elevation): rec.elevatedAgent is set ONLY by the consent
+      // interstitial's resolveElevateChoice (server/oauth-consent.ts), and ONLY after
+      // auth/setup-codes.ts's consumeSetupCode() atomically confirmed a genuine owner-minted code.
+      // Two independent guards before this value is ever trusted to pick the token's agent:
+      //   (1) rc.isPublic -- a CONFIDENTIAL client's rec can never carry elevatedAgent in practice
+      //       (only the DCR interstitial branch in oauth.ts's GET handler sets it), but this makes
+      //       that explicit rather than implicit: a confidential client's token is ALWAYS rc.agent,
+      //       full stop, regardless of what a record might contain.
+      //   (2) isElevationRole -- re-validates against the SAME allow-list auth/setup-codes.ts's
+      //       assertMintableRole() enforced at mint time (cto/cfo/clo/coo/cro/developer; NEVER
+      //       clo-personal). A future bug that somehow let a bad value into an AuthCodeRecord still
+      //       could not be honored here -- it silently falls back to rc.agent (external-read for a
+      //       DCR client) rather than granting an unvalidated string as a privileged identity.
+      const agent =
+        rc.isPublic && rec.elevatedAgent && isElevationRole(rec.elevatedAgent) ? rec.elevatedAgent : rc.agent;
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // 24h, matching the CC grant (see the refresh_token grant note above).
-        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS),
+        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
-        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_REFRESH_TTL_SECONDS),
+        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS),
         scope: rec.scope,
       });
     }

@@ -952,6 +952,9 @@ import { registerXeroTools } from './xero/tools.js';
 import { registerHeyGenTools } from './heygen/index.js';
 import { registerHyperagentTools } from './hyperagent/tools.js';
 import { registerMailArchiveTools } from './mail/tools.js';
+// Connector setup-code role elevation (URL-only ChatGPT/Claude connect + owner-code elevation at
+// consent -- see server/oauth-consent.ts + auth/setup-codes.ts).
+import { registerConnectorSetupCodeCreate } from './oauth/setup-code-create.js';
 
 export function registerAllTools(server: McpServer, callerHash: CallerHashProvider): void {
   // ===== Phase 1: Customer.io (ADR Section 4) =====
@@ -1918,6 +1921,12 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).
   registerMailArchiveTools(server, callerHash);
+
+  // ===== Connector setup-code role elevation (URL-only ChatGPT/Claude connect + owner-code
+  // elevation at consent) =====
+  // write_simple: mints a single-use owner setup code (cto/exec only, governance.ts + in-handler).
+  // Redeemed by the consent interstitial (server/oauth-consent.ts) at GET/POST /oauth/authorize.
+  registerConnectorSetupCodeCreate(server, callerHash);
 
   // M365 PREFIX-STRIP COMPAT SHIM finalization (2026-07-28): MUST run last, after every real tool
   // above has registered, so the full alias-candidate set (and the full set of real primary tool
