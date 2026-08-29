@@ -760,6 +760,22 @@ const EnvSchema = z.object({
   // outbound: read-only tools only; retrieval: the synthesis step only). All fail-open + inert until
   // CONTENT_SAFETY_* above is set.
 
+  // Wave B (2026-08-29): Amazon Bedrock Guardrails -- a REAL provider for shield_check /
+  // groundedness_check, restoring a live safety check behind Wave A's permanent Azure retirement
+  // above. Declared here for documentation/typing only, like CONTENT_SAFETY_* above: actually read
+  // FRESH from process.env by src/safety/bedrock-guardrails.ts (same reasoning as the AUTO-GUARD
+  // modes below -- an operator can flip GUARDRAIL_PROVIDER without a redeploy):
+  //   GUARDRAIL_PROVIDER        must be exactly 'bedrock' to select this provider at all.
+  //   BEDROCK_GUARDRAIL_ID      the guardrail's short id or ARN. Required to select 'bedrock'.
+  //   BEDROCK_GUARDRAIL_VERSION defaults to 'DRAFT' when unset/blank.
+  //   BEDROCK_REGION            defaults to 'us-east-1' when unset/blank.
+  // When GUARDRAIL_PROVIDER isn't 'bedrock', or BEDROCK_GUARDRAIL_ID is unset/blank, shield_check /
+  // groundedness_check fall through to content-safety.ts's Azure-retired NOT-RUN path unchanged.
+  GUARDRAIL_PROVIDER: z.string().optional().default(''),
+  BEDROCK_GUARDRAIL_ID: z.string().optional().default(''),
+  BEDROCK_GUARDRAIL_VERSION: z.string().optional().default(''),
+  BEDROCK_REGION: z.string().optional().default(''),
+
   // llm_azure SEMANTIC RESPONSE CACHE (src/tools/llm/semantic-cache.ts). Also NOT in this schema on
   // purpose, same reasoning as SHIELD_MODE/GROUNDEDNESS_MODE above — read fresh per call so it can be
   // flipped without a redeploy:

@@ -57,3 +57,54 @@ test('summarizeGroundednessResult: configured:true + ungroundedDetected:true rep
   });
   assert.equal(summary, 'Groundedness: ungrounded content DETECTED (62.0% ungrounded)');
 });
+
+// ---------------------------------------------------------------------------------------------
+// 2026-08-29: Amazon Bedrock Guardrails restores a REAL provider (see ../../safety/
+// bedrock-guardrails.ts). Its fail-loud contract adds a THIRD state -- configured:true, ran:false,
+// error:<detail> -- for when a configured provider was called but the call itself failed. These
+// tests pin that summarizeGroundednessResult treats an error exactly like "not a verdict": never
+// rendered as fully grounded, never as ungrounded DETECTED, distinct wording from NOT RUN.
+// ---------------------------------------------------------------------------------------------
+
+test('summarizeGroundednessResult: configured:true + error set is reported as an explicit ERROR, never as fully grounded', () => {
+  const summary = summarizeGroundednessResult({
+    configured: true,
+    ran: false,
+    ungroundedDetected: false,
+    ungroundedPercentage: 0,
+    provider: 'bedrock',
+    error: 'Bedrock ApplyGuardrail failed: HTTP 403',
+    raw: undefined,
+  });
+  assert.match(summary, /ERROR/);
+  assert.doesNotMatch(summary, /fully grounded/i);
+  assert.doesNotMatch(summary, /NOT RUN/);
+  assert.ok(summary.includes('bedrock'), `summary must carry the provider label: ${summary}`);
+  assert.ok(summary.includes('HTTP 403'), `summary must carry the error detail: ${summary}`);
+});
+
+test('summarizeGroundednessResult: configured:true + error set stays ERROR even if ungroundedDetected were somehow true (a failed call is never a verdict)', () => {
+  const summary = summarizeGroundednessResult({
+    configured: true,
+    ran: false,
+    ungroundedDetected: true,
+    ungroundedPercentage: 0.9,
+    provider: 'bedrock',
+    error: 'network error',
+    raw: undefined,
+  });
+  assert.match(summary, /ERROR/);
+  assert.doesNotMatch(summary, /DETECTED/);
+});
+
+test('summarizeGroundednessResult: a real Bedrock fully-grounded verdict (ran:true, no error) reports the percentage, same wording as the legacy provider', () => {
+  const summary = summarizeGroundednessResult({
+    configured: true,
+    ran: true,
+    ungroundedDetected: false,
+    ungroundedPercentage: 0.03,
+    provider: 'bedrock',
+    raw: { action: 'NONE', assessments: [{}] },
+  });
+  assert.equal(summary, 'Groundedness: fully grounded (3.0% ungrounded)');
+});
