@@ -46,6 +46,30 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "building tag: $TAG"
 
+      # ── Multi-arch (Graviton prep) ──────────────────────────────────────────────
+      # Audited 2026-08-29: every base image in this Dockerfile (node:22, node:22-slim,
+      # datadog/serverless-init:1.9.16) already publishes a linux/arm64/v8 manifest, the apt
+      # packages (curl, ca-certificates) are ordinary multi-arch Debian bookworm packages, the
+      # RDS cert ADD is a plain-text PEM (architecture-independent), and dd-trace's only native
+      # transitive deps (@datadog/native-appsec, -native-iast-taint-tracking, -native-metrics,
+      # -pprof, -libdatadog) ship prebuildify binaries for linuxglibc-arm64 bundled in the SAME
+      # npm tarball (confirmed by downloading and inspecting each tgz), so npm ci's normal
+      # per-platform selection at require-time handles arm64 with zero Dockerfile changes. No
+      # --platform pin or arch-conditional logic exists anywhere in this Dockerfile.
+      # So the ONLY change needed is here: emulate + build for both platforms and push ONE
+      # multi-arch manifest under the same tag. ECS/Fargate already resolves the correct
+      # platform-specific manifest from a multi-arch tag at pull time based on each task
+      # definition's runtimePlatform, so this is safe to land and push before any task
+      # definition is touched -- the currently-running amd64 service keeps pulling amd64 from
+      # this exact tag until a task definition is deliberately switched to ARM64/Graviton.
+      - name: Set up QEMU (arm64 emulation on the amd64 runner)
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -57,24 +81,54 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push
+      - name: Build and push (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/otchealth-mcp-gateway:${{ steps.tag.outputs.tag }}
+          # GHA layer cache keeps the added arm64 leg from doubling wall-clock time on every run.
+          # There was no cache config before this (a plain `docker build`), so this is new, not
+          # a preserved setting.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Keep the pushed artifact a plain two-platform manifest list, matching today's shape
+          # (one manifest per tag) just widened to two platforms. Provenance/SBOM attestations
+          # add extra referrer manifests to the index that nothing downstream has ever had to
+          # parse before; that is a real, separate supply-chain hardening step worth doing
+          # deliberately later, not as a side effect of a Graviton-prep PR on the production
+          # gateway's registry.
+          provenance: false
+          sbom: false
+
+      - name: Report the pushed digest + confirm both platforms landed
         env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          docker build -t "$REGISTRY/otchealth-mcp-gateway:$TAG" .
-          docker push "$REGISTRY/otchealth-mcp-gateway:$TAG"
-          echo "pushed $REGISTRY/otchealth-mcp-gateway:$TAG"
-
-      - name: Report the pushed digest
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
           # Print the digest so the operator can prove WHICH image they are about to deploy, rather
           # than trusting that a push happened. Same discipline as the rest of this migration:
           # assert on the observable result, never on the command exiting 0.
           aws ecr describe-images --repository-name otchealth-mcp-gateway \
             --image-ids imageTag="$TAG" \
-            --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest,pushed:imagePushedAt}' \
+            --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest,pushed:imagePushedAt,mediaType:imageManifestMediaType}' \
             --output table
+
+          # A multi-platform build-push-action run can still silently degrade to one platform
+          # (a QEMU hiccup, a platform-specific build failure buildx doesn't hard-fail on in some
+          # configurations, etc.) -- so don't just trust that the step exited 0. Pull the actual
+          # manifest list back from ECR and assert BOTH platforms are really in it before this
+          # workflow is allowed to report success.
+          aws ecr batch-get-image --repository-name otchealth-mcp-gateway \
+            --image-ids imageTag="$TAG" \
+            --query 'images[0].imageManifest' --output text > /tmp/manifest.json
+
+          echo "Platforms present under tag $TAG:"
+          jq -r '.manifests[]? | "  " + .platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end) + "  " + .digest' /tmp/manifest.json
+
+          for want in "linux/amd64" "linux/arm64"; do
+            jq -e --arg want "$want" '.manifests[]? | select((.platform.os + "/" + .platform.architecture) == $want)' /tmp/manifest.json > /dev/null \
+              || { echo "MISSING platform $want under tag $TAG -- multi-arch push did not complete as expected"; exit 1; }
+          done
+          echo "Confirmed: both linux/amd64 and linux/arm64 are present under otchealth-mcp-gateway:$TAG"
