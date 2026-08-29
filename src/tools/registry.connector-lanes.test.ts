@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET, WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET } from './registry.js';
+import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, COO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET, WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET } from './registry.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
 
@@ -206,4 +206,40 @@ test('EXTERNAL_READONLY_TOOLSET env override overrides the external set', () => 
   const env = { ...testEnv(), EXTERNAL_READONLY_TOOLSET: 'brain_search' } as Env;
   const set = connectorToolset(env, 'external-read');
   assert.deepEqual([...set], ['brain_search']);
+});
+
+// ── 2026-08-29: role-elevated connector seat curation (COO + CRO), found by LIVE tools/list probe ──
+// After the URL-only owner-code elevation shipped, a live probe showed an elevated coo connector
+// advertising only the 11-tool external read set -- its instruction block's own verbs (memory_team,
+// memory_remember, checkpoint) were unfindable, and cro's surface carried HeyGen but none of the
+// commerce families its charter names. These tests lock the fixed seat surfaces AND their ceilings.
+
+test('coo lane: seat-memory + ledger coordination, and nothing privileged', () => {
+  const set = connectorToolset(testEnv(), 'coo');
+  assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET].sort());
+  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_update', 'agent_dispatch', 'inbox_read', 'brain_search', 'search', 'fetch']) {
+    assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
+  }
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'graph_send_email']) {
+    assert.equal(set.has(excluded), false, `coo connector must NOT advertise ${excluded}`);
+  }
+});
+
+test('cro lane: commerce curation present, engineering/legal/finance/privileged absent, destructive commerce absent', () => {
+  const set = connectorToolset(testEnv(), 'cro');
+  assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET].sort());
+  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'heygen_videos_list']) {
+    assert.ok(set.has(needed), `cro connector must advertise ${needed} (its charter names this family)`);
+  }
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'github_merge_pull_request', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
+    assert.equal(set.has(excluded), false, `cro connector must NOT advertise ${excluded}`);
+  }
+});
+
+test('the seat additions never leak into the plain external/unknown lane', () => {
+  const set = connectorToolset(testEnv(), 'totally-unknown-lane');
+  assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
+  for (const seatOnly of ['memory_team', 'memory_remember', 'checkpoint', 'task_create', 'shopify_list_products', 'cio_track_event']) {
+    assert.equal(set.has(seatOnly), false, `external lane must NOT gain ${seatOnly}`);
+  }
 });
