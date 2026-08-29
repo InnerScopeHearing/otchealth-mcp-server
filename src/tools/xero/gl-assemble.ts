@@ -315,9 +315,26 @@ export function sumLineItemsByAccount(docs: DocWithLines[]): Map<string, number>
 export const MAX_PAGES_PER_ENDPOINT = 20; // 100/page -> 2000 records/endpoint/call; bounded, flagged if hit.
 
 /**
- * Pages ONE endpoint to completion (or the MAX_PAGES_PER_ENDPOINT bound). `xeroGet` already throws
- * on any non-2xx response, so within this loop a "stop" can only mean one of two THINGS THAT LOOK
- * ALIKE BUT ARE NOT:
+ * Wall-clock budget (FND-20260829-e454): xeroGet's own rate-limit spacing (MIN_SPACING_MS = 1100ms
+ * in client.ts) means EVERY Xero call costs at least ~1.1s regardless of latency, and assembleGl
+ * makes one such call per requested month PLUS up to MAX_PAGES_PER_ENDPOINT (20) sequential calls
+ * for EACH of 4 endpoints -- up to ~200 sequential, individually-rate-limited calls in the
+ * documented worst case ("call for one org over one full year" is this tool's OWN acceptance
+ * test), which can exceed even a 60s budget, let alone ChatGPT's 45-second-per-call hard timeout.
+ * `deadline`/`now` are threaded through both the per-month TrialBalance loop and fetchAllPaged
+ * (below) from ONE shared clock, so the two phases share a single wall-clock ceiling rather than
+ * each independently risking the full budget. Optional, defaulting to "no bound" (Infinity) so
+ * every existing direct caller/test of fetchAllPaged/assembleGl is completely unaffected. */
+export interface GlBudget {
+  deadline: number;
+  now: () => number;
+}
+const NO_BUDGET: GlBudget = { deadline: Infinity, now: Date.now };
+
+/**
+ * Pages ONE endpoint to completion (or the MAX_PAGES_PER_ENDPOINT bound, or the shared wall-clock
+ * budget, whichever comes first). `xeroGet` already throws on any non-2xx response, so within this
+ * loop a "stop" can only mean one of three THINGS THAT LOOK ALIKE BUT ARE NOT:
  *   (a) a genuinely EMPTY array under `arrayKey` — Xero's real, well-formed "no more records" last
  *       page. Stopping here is correct and complete; nothing to report.
  *   (b) `arrayKey` MISSING from the body, or present but not an array at all — a 2xx response whose
@@ -330,6 +347,10 @@ export const MAX_PAGES_PER_ENDPOINT = 20; // 100/page -> 2000 records/endpoint/c
  *       again), reports exactly where it happened via `shapeAnomaly`, and marks the result
  *       `truncated` — the same signal an actual page-cap hit uses, so a caller who only checks
  *       `truncated` still gets warned; a caller who wants the precise reason gets `shapeAnomaly` too.
+ *   (c) the shared wall-clock budget was exhausted before this page could be requested (checked
+ *       BEFORE the fetch, never mid-fetch) — reported via the SAME `truncated`+`shapeAnomaly`
+ *       mechanism as (b), since both mean "results from this endpoint are incomplete for this run"
+ *       to any caller that only checks `truncated`; `shapeAnomaly`'s text distinguishes the reason.
  */
 export async function fetchAllPaged(
   org: XeroOrg,
@@ -337,11 +358,17 @@ export async function fetchAllPaged(
   arrayKey: string,
   where: string,
   deps?: TokenDeps,
+  budget: GlBudget = NO_BUDGET,
 ): Promise<{ items: Record<string, unknown>[]; truncated: boolean; shapeAnomaly?: string }> {
   const items: Record<string, unknown>[] = [];
   let truncated = false;
   let shapeAnomaly: string | undefined;
   for (let page = 1; page <= MAX_PAGES_PER_ENDPOINT; page++) {
+    if (budget.now() >= budget.deadline) {
+      shapeAnomaly = `${path}: bounded wall-clock budget exhausted before page ${page} could be requested — results from this endpoint are INCOMPLETE for this run (not a page-cap hit; the caller's overall time budget ran out).`;
+      truncated = true;
+      break;
+    }
     const res = await xeroGet(org, path, { page: String(page), where }, { deps });
     const arr = (res.body as Record<string, unknown>)?.[arrayKey];
     if (!Array.isArray(arr)) {
@@ -405,6 +432,15 @@ export interface GlAssembleMonth {
   };
 }
 
+/** Resume shape (FND-20260829-e454): identical to the tool's own from/to input, deliberately --
+ *  call xero_gl_assemble again with these exact from/to (or assembleGl directly) to assemble the
+ *  remainder under a fresh budget. No separate continuation-consuming code path is needed on this
+ *  tool, unlike brain_search's deep mode: a "next chunk" of this range is just a normal call. */
+export interface GlAssembleContinuation {
+  from: string;
+  to: string;
+}
+
 export interface GlAssembleResult {
   org: XeroOrg;
   from: string;
@@ -412,6 +448,29 @@ export interface GlAssembleResult {
   months: GlAssembleMonth[];
   caveats: string[];
   methodology_note: string;
+  /** True ONLY when the wall-clock budget was exhausted before every requested month could be
+   *  assembled and/or before a full page-set of ManualJournals/Invoices/CreditNotes/
+   *  BankTransactions could be fetched. `months` still contains every FULLY assembled month up to
+   *  that point -- nothing already computed is discarded. Absent (not merely false) when the whole
+   *  requested range completed, so a normal result's shape is unchanged by this fix. */
+  partial?: true;
+  /** Present only when partial is true. */
+  continuation?: GlAssembleContinuation;
+}
+
+/** Wall-clock budget default for the WHOLE assembleGl call (TrialBalance loop + all four
+ *  ManualJournals/Invoices/CreditNotes/BankTransactions page fetches). Safely under both the 40s
+ *  target and ChatGPT's 45s hard cutoff even accounting for xeroGet's mandatory ~1.1s per-call rate
+ *  spacing. Read fresh from process.env at the call site (same convention as brain_search's
+ *  DEEP_RETRIEVAL_BUDGET_MS), so it can be tuned without a redeploy; always clamped to a hard
+ *  ceiling so a misconfiguration can never defeat the point of this bound. */
+const DEFAULT_GL_ASSEMBLE_BUDGET_MS = 32_000;
+const MAX_GL_ASSEMBLE_BUDGET_MS = 40_000;
+
+export function resolveGlAssembleBudgetMs(value: string | undefined): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_GL_ASSEMBLE_BUDGET_MS;
+  return Math.min(n, MAX_GL_ASSEMBLE_BUDGET_MS);
 }
 
 const METHODOLOGY_NOTE =
@@ -431,22 +490,43 @@ const METHODOLOGY_NOTE =
  * against ManualJournals, plus supporting Invoices/CreditNotes/BankTransactions detail, bucketed
  * per month. One call replaces what would otherwise be ~12 separate TrialBalance reads a year,
  * done client-side, every time (see module doc comment). Read-only; makes no writes.
+ *
+ * WALL-CLOCK BUDGETED (FND-20260829-e454, `opts`): xeroGet's mandatory ~1.1s per-call rate spacing
+ * means the documented "one full year" acceptance test alone issues 12 sequential TrialBalance
+ * calls, and the four document-endpoint page fetches can each independently take up to
+ * MAX_PAGES_PER_ENDPOINT more -- easily exceeding a 45-second-class MCP client timeout. If the
+ * shared deadline (default DEFAULT_GL_ASSEMBLE_BUDGET_MS, overridable via `opts.budgetMs`/
+ * XERO_GL_ASSEMBLE_BUDGET_MS) is reached partway through the TrialBalance loop, the loop stops
+ * (never mid-fetch) and the document window narrows to just the months that DID complete, so the
+ * remaining budget is not wasted fetching documents for months that cannot be reported anyway. The
+ * result comes back `partial:true` with a `continuation` naming the unprocessed remainder --
+ * calling xero_gl_assemble again with that continuation's from/to (no special resume plumbing
+ * needed; it is the SAME from/to shape the tool already takes) assembles the rest under a fresh
+ * budget. `opts` is entirely optional and defaults to a real (Date.now-based) budget, so every
+ * EXISTING direct caller/test that passes only (org, from, to, deps) is unaffected in practice (a
+ * fast mocked test never approaches a 32s real-clock deadline).
  */
-export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: TokenDeps): Promise<GlAssembleResult> {
+export async function assembleGl(
+  org: XeroOrg,
+  from: string,
+  to: string,
+  deps?: TokenDeps,
+  opts?: { budgetMs?: number; now?: () => number },
+): Promise<GlAssembleResult> {
+  const now = opts?.now ?? Date.now;
+  const budgetMs = opts?.budgetMs ?? resolveGlAssembleBudgetMs(process.env.XERO_GL_ASSEMBLE_BUDGET_MS);
+  const budget: GlBudget = { deadline: now() + budgetMs, now };
+
   const caveats: string[] = [];
   const allDates = monthEndDates(from, to);
   const requestedDates = allDates.slice(1); // allDates[0] is a leading boundary marker, not a month we report on
-  // The document fetches (ManualJournals/Invoices/CreditNotes/BankTransactions) still widen to
-  // whole calendar months, so a partial-month request (e.g. from=2026-03-05) never scopes its
-  // document window narrower than the month it's reporting on.
-  const effectiveFrom = firstDayOfMonth(requestedDates[0]);
-  const effectiveTo = requestedDates[requestedDates.length - 1];
-  const effectiveWhere = dateWhere(effectiveFrom, effectiveTo);
 
-  // 1. TrialBalance ONCE per requested month-end. Each month's period Debit/Credit pair IS that
+  // 1. TrialBalance ONCE per requested month-end, STOPPING EARLY if the budget runs out (checked
+  // before each date's fetch, never mid-fetch). Each month's period Debit/Credit pair IS that
   // month's movement already (see the module CORRECTED note) -- read directly, never diffed.
   const monthSnapshots: ParsedTrialBalance[] = [];
   for (const date of requestedDates) {
+    if (budget.now() >= budget.deadline) break;
     const res = await xeroGet(org, '/Reports/TrialBalance', { date }, { deps });
     const parsed = parseTrialBalanceRows(res.body);
     if (parsed.rows.length === 0) {
@@ -458,13 +538,45 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
     monthSnapshots.push(parsed);
   }
 
+  // Nothing at all could be assembled within budget -- not even the first month's TrialBalance.
+  // Skip the document fetches entirely (there is no month to attach them to yet) and hand back an
+  // honest, resumable partial rather than spending the whole call on document data for a range
+  // that cannot be reported.
+  if (monthSnapshots.length === 0 && requestedDates.length > 0) {
+    return {
+      org,
+      from,
+      to,
+      months: [],
+      caveats: [
+        ...caveats,
+        `The wall-clock budget (${budgetMs}ms) was exhausted before even the first requested month's TrialBalance could be read. Nothing was assembled this call.`,
+      ],
+      methodology_note: METHODOLOGY_NOTE,
+      partial: true,
+      continuation: { from, to },
+    };
+  }
+
+  const processedDates = requestedDates.slice(0, monthSnapshots.length);
+  const budgetTruncatedMonths = processedDates.length < requestedDates.length;
+  // The document fetches (ManualJournals/Invoices/CreditNotes/BankTransactions) still widen to
+  // whole calendar months, so a partial-month request (e.g. from=2026-03-05) never scopes its
+  // document window narrower than the month it's reporting on. When the TrialBalance loop stopped
+  // early, this window also narrows to the months that actually completed, rather than the
+  // originally requested range, so the remaining budget is not spent fetching documents for months
+  // this call cannot report on anyway.
+  const effectiveFrom = firstDayOfMonth(processedDates[0]!);
+  const effectiveTo = processedDates[processedDates.length - 1]!;
+  const effectiveWhere = dateWhere(effectiveFrom, effectiveTo);
+
   // 2. ManualJournals across the EFFECTIVE (widened) range, bucketed by month. Server-side filtered
   // to POSTED only (reviewer-caught, 2026-07-30): DRAFT and VOIDED journals never hit the Trial
   // Balance, so summing them into manualJournalNet would disagree with the real TB for reasons that
   // have nothing to do with a genuine reconciliation gap. sumManualJournalsByAccount also re-checks
   // Status client-side as a second layer, in case a future caller ever bypasses this where clause.
   const mjWhere = `${effectiveWhere} && Status=="POSTED"`;
-  const mjRes = await fetchAllPaged(org, '/ManualJournals', 'ManualJournals', mjWhere, deps);
+  const mjRes = await fetchAllPaged(org, '/ManualJournals', 'ManualJournals', mjWhere, deps, budget);
   if (mjRes.truncated) caveats.push(mjRes.shapeAnomaly ?? `ManualJournals hit the ${MAX_PAGES_PER_ENDPOINT}-page cap (${MAX_PAGES_PER_ENDPOINT * 100}+ records) — some journals in range may be missing from manualJournalNet.`);
   const mjByMonth = new Map<string, ManualJournal[]>();
   for (const raw of mjRes.items) {
@@ -481,11 +593,11 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
   // then-write on a shared lastCallAt map with no lock — concurrent calls can race past each other
   // and burst Xero's rate limit instead of respecting the intended spacing. This tool already makes
   // many calls per invocation; it should not also be the thing that trips a 429.
-  const invRes = await fetchAllPaged(org, '/Invoices', 'Invoices', effectiveWhere, deps);
+  const invRes = await fetchAllPaged(org, '/Invoices', 'Invoices', effectiveWhere, deps, budget);
   if (invRes.truncated) caveats.push(invRes.shapeAnomaly ?? `Invoices hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — invoicesLineGrossByAccount is incomplete for one or more months.`);
-  const cnRes = await fetchAllPaged(org, '/CreditNotes', 'CreditNotes', effectiveWhere, deps);
+  const cnRes = await fetchAllPaged(org, '/CreditNotes', 'CreditNotes', effectiveWhere, deps, budget);
   if (cnRes.truncated) caveats.push(cnRes.shapeAnomaly ?? `CreditNotes hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — creditNotesLineGrossByAccount is incomplete for one or more months.`);
-  const btRes = await fetchAllPaged(org, '/BankTransactions', 'BankTransactions', effectiveWhere, deps);
+  const btRes = await fetchAllPaged(org, '/BankTransactions', 'BankTransactions', effectiveWhere, deps, budget);
   if (btRes.truncated) caveats.push(btRes.shapeAnomaly ?? `BankTransactions hit the ${MAX_PAGES_PER_ENDPOINT}-page cap — bankTransactionsLineGrossByAccount is incomplete for one or more months.`);
 
   const byMonth = <T extends { Date?: string }>(items: T[]): Map<string, T[]> => {
@@ -504,11 +616,15 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
   const toRecord = (m: Map<string, number>): Record<string, number> => Object.fromEntries(m);
 
   // 4. Per-month: read TB movement directly, net ManualJournals, compute variance. Skip (omit,
-  // caveat already logged in step 1) any month whose own snapshot was invalid.
+  // caveat already logged in step 1) any month whose own snapshot was invalid. Bounded to
+  // monthSnapshots.length (== processedDates.length), NOT requestedDates.length -- when the
+  // TrialBalance loop above stopped early, monthSnapshots is SHORTER than requestedDates, and
+  // indexing past its end would read undefined. Identical to the pre-budget behavior whenever
+  // nothing was truncated (processedDates then equals requestedDates exactly).
   const months: GlAssembleMonth[] = [];
-  for (let i = 0; i < requestedDates.length; i++) {
-    const periodEnd = requestedDates[i];
-    const snapshot = monthSnapshots[i];
+  for (let i = 0; i < monthSnapshots.length; i++) {
+    const periodEnd = processedDates[i]!;
+    const snapshot = monthSnapshots[i]!;
     if (snapshot.rows.length === 0) continue;
     // firstDayOfMonth(periodEnd) is used for EVERY entry, not just i===0 (Copilot-caught, 2026-07-30,
     // round 3: using requestedDates[i-1], a prior MONTH-END date, for i>0 made that month's periodStart
@@ -588,9 +704,21 @@ export async function assembleGl(org: XeroOrg, from: string, to: string, deps?: 
       },
     });
   }
-  if (months.length === 0 && requestedDates.length > 0) {
-    caveats.push('Every requested month touched an invalid TrialBalance snapshot — months is empty. See the per-date caveats above.');
+  if (months.length === 0 && processedDates.length > 0) {
+    caveats.push('Every processed month touched an invalid TrialBalance snapshot — months is empty. See the per-date caveats above.');
   }
 
-  return { org, from, to, months, caveats, methodology_note: METHODOLOGY_NOTE };
+  const result: GlAssembleResult = { org, from, to, months, caveats, methodology_note: METHODOLOGY_NOTE };
+  if (budgetTruncatedMonths) {
+    result.partial = true;
+    // The remainder starts the calendar month AFTER the last one this call actually processed --
+    // firstDayOfMonth's own month-boundary math, applied to the NEXT requested date, keeps this
+    // exact regardless of how from/to's original days-of-month were specified.
+    result.continuation = { from: firstDayOfMonth(requestedDates[processedDates.length]!), to };
+    caveats.push(
+      `The wall-clock budget (${budgetMs}ms) was exhausted after assembling ${processedDates.length}/${requestedDates.length} requested month(s). ` +
+        `Call again with from="${result.continuation.from}" (continuation.from) to assemble the remainder.`,
+    );
+  }
+  return result;
 }

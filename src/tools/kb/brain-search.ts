@@ -130,7 +130,17 @@ export const brainSearchInputShape = {
     .optional()
     .default('fast')
     .describe(
-      'fast (default): one hybrid search pass per room, fused by rank -- the original brain_search behavior, unchanged. deep: agentic retrieval -- an LLM plans 2-4 sub-queries (and may narrow which of your permitted rooms to target), runs them, does ONE bounded evaluate-refine round if the results look thin, then synthesizes a cited answer from ONLY the retrieved passages. Slower and spends one or more Foundry calls; use it for a question fast mode answered poorly. Behaves exactly like fast when the DEEP_RETRIEVAL_MODE kill-switch is off.',
+      'fast (default): one hybrid search pass per room, fused by rank -- the original brain_search behavior, unchanged. deep: agentic retrieval -- an LLM plans 2-4 sub-queries (and may narrow which of your permitted rooms to target), runs them, does ONE bounded evaluate-refine round if the results look thin, then synthesizes a cited answer from ONLY the retrieved passages. Slower and spends one or more Foundry calls; use it for a question fast mode answered poorly. Behaves exactly like fast when the DEEP_RETRIEVAL_MODE kill-switch is off. deep mode is wall-clock budgeted (well under any 45-second-class MCP client timeout): if the budget runs out before the cited answer can be synthesized, the response comes back with partial:true, the FULL retrieved/citable hits (nothing is dropped), and a continuation -- pass that continuation straight back on your next mode:"deep" call to resume directly into synthesis under a fresh budget.',
+    ),
+  continuation: z
+    .object({
+      rooms: z.array(z.string()),
+      sub_queries: z.array(z.string()),
+      rounds_used: z.number(),
+    })
+    .optional()
+    .describe(
+      'deep mode only. Pass back the `continuation` object from a prior partial:true deep response to skip re-planning and resume straight into retrieval + synthesis under a fresh budget. Ignored in fast mode. Room names are re-validated against your OWN current permissions on every call -- a continuation can never grant access to a room you would not otherwise be allowed to search.',
     ),
 } satisfies ZodRawShape;
 
@@ -167,7 +177,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   // called, so 'fast' (the default, and every existing caller that never passes `mode` at all)
   // stays the EXACT prior code path, byte-identical output shape.
   if (input.mode === 'deep' && parseDeepRetrievalMode(process.env.DEEP_RETRIEVAL_MODE) === 'on') {
-    const deep = await deepRetrieve(input.query, { rooms, top, includeOps });
+    const deep = await deepRetrieve(input.query, { rooms, top, includeOps, continuation: input.continuation });
     // Tag each hit with a feedback_ref (pure/synchronous, see memory/retrieval-feedback.ts) so a
     // later retrieval_feedback call can report whether it was useful without re-sending content.
     const taggedHits = tagWithFeedbackRefs(deep.hits, { tool: 'brain_search', query: input.query, defaultRoom: 'federated' });
@@ -187,6 +197,14 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     // Only present when the content-level injection screen actually ran (RETRIEVAL_SHIELD_MODE != off
     // AND Content Safety configured) -- see memory/deep-retrieval.ts's runDeepFlow.
     if (deep.injection_screen) data.injection_screen = deep.injection_screen;
+    // FND-20260829-e454 (wall-clock budget): present only when the budget was actually exhausted
+    // (partial) or a stage was skipped purely for time (budget_skipped) or a continuation was
+    // consumed (resumed) -- an ordinary, fully-completed deep call carries none of these, so its
+    // shape is unchanged from before this fix.
+    if (deep.partial) data.partial = true;
+    if (deep.continuation) data.continuation = deep.continuation;
+    if (deep.resumed) data.resumed = true;
+    if (deep.budget_skipped?.length) data.budget_skipped = deep.budget_skipped;
 
     const roundWord = deep.rounds_used === 1 ? 'round' : 'rounds';
     const sqWord = deep.sub_queries.length === 1 ? 'sub-query' : 'sub-queries';
@@ -199,7 +217,11 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
         (deep.retracted_dropped?.length ? ` Dropped ${deep.retracted_dropped.length} RETRACTED belief(s).` : '') +
         (deep.injection_screen?.attackDetected
           ? ` INJECTION SCREEN flagged a retrieved passage (mode=${deep.injection_screen.mode}).`
-          : ''),
+          : '') +
+        (deep.partial
+          ? ' BUDGET: the wall-clock budget ran out before synthesis; pass back `continuation` to resume.'
+          : '') +
+        (deep.budget_skipped?.length ? ` Skipped for time: ${deep.budget_skipped.join(', ')}.` : ''),
     };
   }
 
@@ -329,6 +351,15 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         // deep mode only, and only present when the injection screen actually ran (Content Safety
         // configured AND RETRIEVAL_SHIELD_MODE != off) -- see memory/deep-retrieval.ts.
         injection_screen: z.unknown().optional(),
+        // FND-20260829-e454 (deep mode wall-clock budget) -- all four deep-mode-only, and each
+        // present only when actually true/non-empty, so a normal deep result (let alone fast mode)
+        // is unchanged by this fix. See memory/deep-retrieval.ts's budget block.
+        partial: z.boolean().optional(),
+        continuation: z
+          .object({ rooms: z.array(z.string()), sub_queries: z.array(z.string()), rounds_used: z.number() })
+          .optional(),
+        resumed: z.boolean().optional(),
+        budget_skipped: z.array(z.string()).optional(),
       },
       handler: handleBrainSearch,
     },

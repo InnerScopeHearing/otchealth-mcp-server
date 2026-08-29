@@ -30,6 +30,8 @@ const {
   fetchAllPaged,
   MAX_PAGES_PER_ENDPOINT,
   assembleGl,
+  firstDayOfMonth,
+  resolveGlAssembleBudgetMs,
 } = await import('./gl-assemble.js');
 const { buildTokenDoc, bootstrapHash } = await import('./client.js');
 
@@ -591,4 +593,98 @@ test('assembleGl: periodStart is the first day of ITS OWN month for every entry,
   const feb = result.months.find((m) => m.periodEnd === '2026-02-28')!;
   assert.equal(jan.periodStart, '2026-01-01');
   assert.equal(feb.periodStart, '2026-02-01', 'must be the first day of February, NOT January\'s periodEnd (2026-01-31), which would overlap with January\'s own reported range');
+});
+
+// ============================================================================================
+// FND-20260829-e454: wall-clock budget + continuation.
+//
+// xeroGet's own mandatory ~1.1s per-call rate spacing (client.ts, MIN_SPACING_MS) is REAL and
+// applies regardless of the FAKE `now`/`budgetMs` these tests inject -- the injected clock governs
+// only assembleGl's OWN budget decision (how many months/pages to attempt), not xeroGet's real
+// inter-call delay. So these tests still take a little real wall-clock time (consistent with this
+// file's other assembleGl tests above), just never anywhere near the real production budget.
+// ============================================================================================
+
+test('resolveGlAssembleBudgetMs: unset/garbage/non-positive -> the default; a valid value honored up to a hard ceiling that a misconfiguration can never exceed', () => {
+  const DEFAULT_MS = resolveGlAssembleBudgetMs(undefined);
+  assert.equal(resolveGlAssembleBudgetMs('not a number'), DEFAULT_MS);
+  assert.equal(resolveGlAssembleBudgetMs('0'), DEFAULT_MS);
+  assert.equal(resolveGlAssembleBudgetMs('-500'), DEFAULT_MS);
+  assert.equal(resolveGlAssembleBudgetMs('10000'), 10_000);
+  assert.ok(resolveGlAssembleBudgetMs('999999') < 45_000, 'a misconfigured huge override can never approach a 45-second-class MCP client timeout');
+});
+
+test('fetchAllPaged BUDGET: an already-exhausted shared budget stops BEFORE the first page fetch, marking truncated with a distinguishing (not page-cap) message', async () => {
+  const deps = makePagedDeps([{ ManualJournals: [{ ManualJournalID: 'should-never-be-fetched' }] }]);
+  const res = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', deps, { deadline: 0, now: () => 1 });
+  assert.deepEqual(res.items, [], 'the page was never fetched at all');
+  assert.equal(res.truncated, true);
+  assert.match(res.shapeAnomaly!, /bounded wall-clock budget exhausted/);
+  assert.doesNotMatch(res.shapeAnomaly!, /hit the.*page cap/i, 'must not be confused with an actual page-cap hit (the caller\'s own generic page-cap wording)');
+});
+
+test('fetchAllPaged BUDGET: an unexhausted (or omitted) budget behaves exactly as before -- no behavior change for every existing direct caller/test above', async () => {
+  const fullPage = { ManualJournals: [{ ManualJournalID: 'mj-1' }] };
+  const depsA = makePagedDeps([fullPage]);
+  const withoutBudget = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', depsA);
+  const depsB = makePagedDeps([fullPage]);
+  const withGenerousBudget = await fetchAllPaged('otchealth', '/ManualJournals', 'ManualJournals', 'where', depsB, { deadline: Infinity, now: Date.now });
+  assert.deepEqual(withoutBudget, withGenerousBudget);
+  assert.equal(withoutBudget.truncated, false);
+});
+
+test('assembleGl BUDGET: the TrialBalance loop stops early when the budget runs out mid-range -- already-completed months are kept, the document window narrows to just them, and the result is honestly partial with a continuation naming the exact remainder', async () => {
+  const tbByDate = new Map([
+    ['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])],
+    ['2026-02-28', tbBody([tbRow('a1', 'Cash', 300, 0)])], // must NEVER be fetched -- budget exhausted before this date
+    ['2026-03-31', tbBody([tbRow('a1', 'Cash', 100, 0)])], // must NEVER be fetched either
+  ]);
+  // A fake clock the January TrialBalance fetch itself advances -- tied to the ACTUAL network call
+  // that would realistically consume time in production, rather than a fragile call-count guess
+  // about how many times assembleGl happens to invoke now() before/around the loop.
+  let clock = 0;
+  const now = () => clock;
+  const { deps, whereByPath } = makeGlDeps(tbByDate);
+  const realFetchImpl = deps.fetchImpl;
+  deps.fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    const res = await realFetchImpl(url, init);
+    if (new URL(String(url)).searchParams.get('date') === '2026-01-31') clock += 999_999;
+    return res;
+  }) as typeof fetch;
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-03-31', deps, { now, budgetMs: 1_000 });
+
+  assert.equal(result.months.length, 1, 'only January was processed');
+  assert.equal(result.months[0]!.periodEnd, '2026-01-31');
+  assert.equal(result.partial, true);
+  assert.ok(result.continuation);
+  assert.equal(result.continuation!.from, firstDayOfMonth('2026-02-28'), 'the continuation resumes at February, the first UNPROCESSED month');
+  assert.equal(result.continuation!.to, '2026-03-31', 'the original `to` is preserved verbatim');
+  assert.ok(result.caveats.some((c) => c.includes('assembling 1/3 requested month(s)')));
+  // The SAME shared deadline that stopped the TrialBalance loop also gates the four document
+  // fetches that would otherwise follow (they share one `budget`, not independent allowances) --
+  // so no ManualJournals/Invoices/CreditNotes/BankTransactions request happens at all once the
+  // budget is already gone, rather than wastefully fetching documents for a range whose months
+  // this call cannot even report on.
+  assert.equal(whereByPath.size, 0, 'no document endpoint should be reached once the shared budget is already exhausted');
+});
+
+test('assembleGl BUDGET: when the budget is already gone before even the FIRST month, nothing is fetched beyond that one call -- an honest immediate partial with continuation = the exact original request (safe to just retry)', async () => {
+  const tbByDate = new Map([['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])]]); // must never be fetched
+  const { deps } = makeGlDeps(tbByDate);
+  let calls = 0;
+  const now = () => (calls++ === 0 ? 0 : 999_999); // over budget from the very first per-date check
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps, { now, budgetMs: 1_000 });
+  assert.deepEqual(result.months, []);
+  assert.equal(result.partial, true);
+  assert.deepEqual(result.continuation, { from: '2026-01-01', to: '2026-01-31' }, 'nothing was assembled -- resuming means simply retrying the same request');
+  assert.ok(result.caveats.some((c) => c.includes('exhausted before even the first requested month')));
+});
+
+test('assembleGl BUDGET: a normal, budget-respecting call carries neither partial nor continuation (lock: the fix is purely additive)', async () => {
+  const tbByDate = new Map([['2026-01-31', tbBody([tbRow('a1', 'Cash', 500, 0)])]]);
+  const { deps } = makeGlDeps(tbByDate);
+  const result = await assembleGl('otchealth', '2026-01-01', '2026-01-31', deps, { budgetMs: 60_000 });
+  assert.equal(result.months.length, 1);
+  assert.equal('partial' in result, false);
+  assert.equal('continuation' in result, false);
 });
