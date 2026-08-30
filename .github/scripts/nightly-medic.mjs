@@ -13,6 +13,34 @@ const j = async (r) => { const t = await r.text(); try { return JSON.parse(t); }
 async function gql(query, variables) { const r = await fetch(`${API}/graphql`, { method: 'POST', headers: H, body: JSON.stringify({ query, variables }) }); return j(r); }
 
 async function findLogIssue() {
+  // 2026-08-30: prefer an explicit FLEET_MEDIC_LOG_ISSUE override, same env var name and same
+  // rollover convention the gateway's postAlert() already uses (src/config/env.ts /
+  // src/server/webhooks.ts) -- so ONE runbook ("create the next successor issue, then bump
+  // FLEET_MEDIC_LOG_ISSUE") covers both consumers instead of only the gateway's.
+  //
+  // Root cause this fixes: issue #21 ("Nightly Medic Log") hit GitHub's hard 2500-comment cap
+  // around 2026-08-10. On 2026-08-28 the gateway side was repointed at a successor, issue #258
+  // ("fleet-medic alert log v2 (successor to #21)"), via this same env var on the live task
+  // definition -- but this script was not updated, so its title search (below) kept matching
+  // #21, which is still open (closing it was never part of the fix), and every comment attempt
+  // has 403'd since, turning the nightly workflow red every night (see logLine()'s 2026-08-28
+  // comment for why that failure is loud rather than silent).
+  //
+  // Fetching the override issue directly (not by search) sidesteps a second, latent problem: if
+  // a future successor issue's title also happened to match the "Nightly Medic Log" search below
+  // while #21 is still open, GitHub Search's result ordering, not recency, would decide which of
+  // the two the old code found -- an explicit issue number has no such ambiguity.
+  const override = process.env.FLEET_MEDIC_LOG_ISSUE;
+  if (override) {
+    const n = parseInt(override, 10);
+    if (Number.isFinite(n) && n > 0) {
+      const issue = await j(await fetch(`${API}/repos/${REPO}/issues/${n}`, { headers: H }));
+      if (issue && issue.number && issue.state === 'open') return issue;
+      console.error(`nightly-medic: FLEET_MEDIC_LOG_ISSUE=${n} is not a usable open issue (state=${issue?.state ?? issue?.message ?? 'unknown'}); falling back to title search`);
+    } else {
+      console.error(`nightly-medic: FLEET_MEDIC_LOG_ISSUE=${JSON.stringify(override)} is not a positive integer; falling back to title search`);
+    }
+  }
   const q = `repo:${REPO} in:title "Nightly Medic Log" type:issue state:open`;
   const s = await j(await fetch(`${API}/search/issues?q=${encodeURIComponent(q)}`, { headers: H }));
   return (s.items || [])[0];
@@ -56,7 +84,13 @@ async function dailySpend() {
   }
 }
 
-(async () => {
+// Guards the runtime IIFE below so `import`ing this file (nightly-medic.test.mjs does exactly
+// that, to unit-test findLogIssue() without a network call) never runs it as a side effect --
+// import.meta.url only equals the invoking file:// path when this script is the one actually
+// executed (`node medic.mjs`, the real GH Actions invocation), not when another module imports
+// it. Behavior for the real runtime path is unchanged.
+const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+if (isMain) (async () => {
   if (!PAT) { console.error('GH_PAT required'); process.exit(1); }
   const log = await findLogIssue();
   const logNo = log?.number;
@@ -98,3 +132,8 @@ async function dailySpend() {
   const msg = `🔴 ${today} — main CI ${conclusion}. Opened fix issue #${issue.number} and ${assigned}. (1/1 daily cap used.) (${spend})`;
   console.log(msg); if (logNo) await logLine(logNo, msg);
 })().catch(e => { console.error('nightly-medic error: ' + e.message); process.exit(1); });
+
+// Exported for .github/scripts/nightly-medic.test.mjs only -- inert for the curl+node runtime
+// path above (ESM named exports don't execute anything; the IIFE above still runs exactly as
+// it always has when this file is invoked directly).
+export { findLogIssue };
