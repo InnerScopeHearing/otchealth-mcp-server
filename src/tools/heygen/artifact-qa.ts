@@ -38,6 +38,16 @@ export interface HeyGenIngestResult {
     manualVisualReviewRequired: true;
     checks: string[];
   };
+  /** True ONLY when one or more OPTIONAL requested assets (subtitle/thumbnail/gif/captioned_video)
+   *  were skipped because the bounded ingest deadline was reached after the mandatory `video`
+   *  asset was already fetched (FND-20260829-e454). Never true for a video-download failure --
+   *  that is always a hard failure, since there is nothing to ingest without it. Absent (not
+   *  merely false) when every requested asset was fetched, so a normal result's shape is
+   *  unchanged. */
+  partial?: true;
+  /** Present only when partial is true: the requested-but-not-fetched asset kinds, in the order
+   *  they would otherwise have been downloaded. */
+  skippedAssets?: HeyGenArtifactKind[];
 }
 
 interface DownloadedAsset {
@@ -181,6 +191,21 @@ async function readBoundedResponseBody(
   return output;
 }
 
+/**
+ * Per-attempt download timeout (FND-20260829-e454). Was a hardcoded 45_000 -- two attempts at
+ * that ceiling alone could consume up to 90s for a SINGLE asset, before the ingest loop's own
+ * (also-fixed) deadline check ever ran again. 8s x 2 attempts = ~16s worst case for one asset,
+ * which is what INGEST_DEADLINE_MS below is sized against. Env-overridable ONLY DOWNWARD (never
+ * above the 8s safe ceiling, so a misconfiguration can never reintroduce the original bug) --
+ * same "read fresh from process.env, clamp to a hard max" convention as
+ * deep-retrieval.ts's resolveDeepBudgetMs; exists mainly so tests can prove the deadline behavior
+ * in milliseconds instead of real seconds, without weakening the production default.
+ */
+export function fetchAttemptTimeoutMs(): number {
+  const n = Number(process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 8_000) : 8_000;
+}
+
 async function fetchAsset(
   kind: HeyGenArtifactKind,
   urlValue: string,
@@ -195,7 +220,7 @@ async function fetchAsset(
         method: 'GET',
         headers: { Accept: '*/*' },
         redirect: 'manual',
-        signal: AbortSignal.timeout(45_000),
+        signal: AbortSignal.timeout(fetchAttemptTimeoutMs()),
       });
     } catch {
       response = null;
@@ -227,6 +252,20 @@ function requestedAssets(detail: HeyGenVideoDetail, options: HeyGenIngestOptions
   return requested;
 }
 
+/**
+ * Overall ingest deadline (FND-20260829-e454). Was a hardcoded 120_000 (2 minutes) -- on its own,
+ * that alone could make heygen_video_wait_ingest_qa block for minutes, far past ChatGPT's
+ * 45-second-per-call hard timeout, stacked on top of the poll loop that runs before it. Sized to
+ * comfortably cover one worst-case mandatory `video` fetch (see fetchAttemptTimeoutMs above: ~16s)
+ * with a little headroom, since requestedAssets() always orders `video` first and it is the one
+ * asset this function may never skip. Env-overridable ONLY DOWNWARD, same reasoning and same
+ * purpose (fast, deterministic tests) as fetchAttemptTimeoutMs above.
+ */
+export function ingestDeadlineMs(): number {
+  const n = Number(process.env.HEYGEN_INGEST_DEADLINE_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 16_000) : 16_000;
+}
+
 export async function ingestHeyGenVideoArtifacts(
   detail: HeyGenVideoDetail,
   options: HeyGenIngestOptions,
@@ -242,11 +281,24 @@ export async function ingestHeyGenVideoArtifacts(
   if (!store.configured()) throw new Error('HeyGen artifact storage is not configured.');
 
   const downloads: DownloadedAsset[] = [];
+  const skippedAssets: HeyGenArtifactKind[] = [];
   const aggregateLimit = Math.min(104_857_600, options.maxAssetBytes * 2);
   let aggregateBytes = 0;
-  const deadline = Date.now() + 120_000;
-  for (const [kind, url] of requestedAssets(detail, options)) {
-    if (Date.now() >= deadline) throw new Error('HeyGen artifact ingestion exceeded its overall deadline.');
+  const deadline = Date.now() + ingestDeadlineMs();
+  const requested = requestedAssets(detail, options);
+  for (let i = 0; i < requested.length; i++) {
+    const [kind, url] = requested[i]!;
+    if (Date.now() >= deadline) {
+      if (kind === 'video') {
+        // The one asset this function may never skip -- there is nothing to ingest without it.
+        throw new Error('HeyGen artifact ingestion exceeded its bounded deadline before the mandatory video asset could be fetched.');
+      }
+      // Every remaining requested asset is optional: skip gracefully (never discard the video --
+      // or any other asset -- already downloaded) rather than throwing away a completed ingest
+      // over a caption/thumbnail/gif that ran out of time.
+      skippedAssets.push(kind, ...requested.slice(i + 1).map(([k]) => k));
+      break;
+    }
     const downloaded = await fetchAsset(kind, url, options.maxAssetBytes, fetchImpl);
     aggregateBytes += downloaded.bytes.length;
     if (aggregateBytes > aggregateLimit) {
@@ -300,6 +352,9 @@ export async function ingestHeyGenVideoArtifacts(
       srt_cue_count: asset.srtCueCount,
     })),
     qa: { technical_pass: true, manual_visual_review_required: true, checks },
+    // FND-20260829-e454: recorded on the durable manifest too, not just the tool response, so the
+    // audit trail itself discloses when the bounded ingest deadline skipped an optional asset.
+    ...(skippedAssets.length ? { skipped_assets: skippedAssets } : {}),
   };
   const manifestBytes = new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`);
   const manifestStored = await store.put(
@@ -315,5 +370,6 @@ export async function ingestHeyGenVideoArtifacts(
     duration: detail.duration,
     assets,
     qa: { technicalPass: true, manualVisualReviewRequired: true, checks },
+    ...(skippedAssets.length ? { partial: true as const, skippedAssets } : {}),
   };
 }

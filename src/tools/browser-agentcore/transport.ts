@@ -4,8 +4,22 @@ import { request as httpsRequest } from 'node:https';
 import type { RedactedReceipt } from './policy.js';
 import { redactedReceipt, validatePublicTargets } from './policy.js';
 
+/**
+ * FND-20260829-e454: `maxSeconds` is now an OVERALL wall-clock deadline for the whole inspect()
+ * call (session start through the last successful step), not merely the per-target navigation
+ * loop as before. `partial:true` means the bounded deadline was reached before every target could
+ * be inspected -- `receipts` still holds every target that DID complete (nothing already gathered
+ * is discarded), and `skipped_targets` names the ones that were never reached. Never true when
+ * every requested target was inspected within budget.
+ */
+export interface InspectResult {
+  receipts: RedactedReceipt[];
+  partial: boolean;
+  skipped_targets?: string[];
+}
+
 export interface AgentCoreBrowserTransport {
-  inspect(targets: URL[], maxSeconds: number): Promise<RedactedReceipt[]>;
+  inspect(targets: URL[], maxSeconds: number): Promise<InspectResult>;
 }
 
 export class AgentCoreBrowserTransportError extends Error {
@@ -117,11 +131,11 @@ export function buildAgentCoreStartRequest(maxSeconds: number): { name: string; 
   };
 }
 
-async function invokeSigned(config: AgentCoreRuntimeConfig, method: string, path: string, payload: unknown): Promise<unknown> {
+async function invokeSigned(config: AgentCoreRuntimeConfig, method: string, path: string, payload: unknown, timeoutMs = 20_000): Promise<unknown> {
   const body = Buffer.from(JSON.stringify(payload));
   const signed = signedAgentCoreRequest(config, method, path, body);
   return new Promise((resolve, reject) => {
-    const req = httpsRequest({ hostname: signed.headers.host, method: signed.method, path: signed.path, headers: { ...signed.headers, 'content-length': String(signed.body.length) }, timeout: 20_000 }, (res) => {
+    const req = httpsRequest({ hostname: signed.headers.host, method: signed.method, path: signed.path, headers: { ...signed.headers, 'content-length': String(signed.body.length) }, timeout: Math.max(1, timeoutMs) }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
       res.on('end', () => {
@@ -162,13 +176,13 @@ class CdpSocket {
 
   private constructor(socket: TLSSocket) { this.socket = socket; }
 
-  static async connect(endpoint: string, signedHeaders: Record<string, string>): Promise<CdpSocket> {
+  static async connect(endpoint: string, signedHeaders: Record<string, string>, timeoutMs = 15_000): Promise<CdpSocket> {
     const url = new URL(endpoint);
     if (url.protocol !== 'wss:') throw new AgentCoreBrowserTransportError('provider_stream_invalid', 'AgentCore returned a non-secure automation stream.', 'No browser content was returned.');
     const socket = connectTls({ host: url.hostname, port: Number(url.port || '443'), servername: url.hostname });
     const client = new CdpSocket(socket);
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new AgentCoreBrowserTransportError('provider_stream_timeout', 'AgentCore automation stream did not connect in time.', 'No browser content was returned.')), 15_000);
+      const timer = setTimeout(() => reject(new AgentCoreBrowserTransportError('provider_stream_timeout', 'AgentCore automation stream did not connect in time.', 'No browser content was returned.')), Math.max(1, timeoutMs));
       socket.once('error', () => { clearTimeout(timer); reject(new AgentCoreBrowserTransportError('provider_stream_failed', 'AgentCore automation stream could not connect.', 'No browser content was returned.')); });
       socket.once('secureConnect', () => {
         const key = randomBytes(16).toString('base64');
@@ -322,38 +336,84 @@ export function evaluatedResult(value: Record<string, unknown>): CdpResult {
   };
 }
 
+/** Fixed, independent ceiling for the final session-stop cleanup call (FND-20260829-e454). Cleanup
+ *  runs in `finally`, generally AFTER the main deadline has already been spent navigating, so it
+ *  gets its OWN small bounded allowance rather than sharing (or being starved by) the caller's
+ *  `maxSeconds` -- a slow-but-successful inspection must not skip stopping the remote session, but
+ *  a hanging cleanup also must not be allowed to add an unbounded tail on top of it. */
+const CLEANUP_TIMEOUT_MS = 8_000;
+
+/**
+ * Pure, directly-testable core of the setup-call timeout policy (FND-20260829-e454): a SETUP step
+ * (session start, CDP connect, Target.getTargets, Target.attachToTarget) has no partial inspection
+ * data yet to salvage, so if the shared deadline has ALREADY passed it throws `provider_timeout`
+ * immediately rather than attempting a doomed call; otherwise it returns whatever time remains,
+ * capped at `ceilingMs` so one step can never consume the ENTIRE remaining budget on its own.
+ * Extracted out of `inspect()`'s closure (which the real class method still calls with its live
+ * `remainingMs()`) specifically so this policy is unit-testable without a real AgentCore session.
+ */
+export function setupCallTimeoutMs(remainingMs: number, ceilingMs: number): number {
+  if (remainingMs <= 0) {
+    throw new AgentCoreBrowserTransportError('provider_timeout', 'AgentCore browser inspection exceeded its bounded deadline before setup completed.', 'No browser content was returned.');
+  }
+  return Math.min(remainingMs, ceilingMs);
+}
+
 export class AwsAgentCorePublicReadOnlyTransport implements AgentCoreBrowserTransport {
   constructor(private readonly config: AgentCoreRuntimeConfig = agentCoreRuntimeConfig()) {}
 
-  async inspect(targets: URL[], maxSeconds: number): Promise<RedactedReceipt[]> {
+  /**
+   * FND-20260829-e454: `maxSeconds` bounds the WHOLE call now, not just the per-target loop.
+   * `deadline` is computed once, before the very first network call (session start), and every
+   * subsequent setup step (connect, getTargets, attachToTarget) is bounded to whatever time
+   * remains against it (capped at a sane per-call ceiling, via setupCallTimeoutMs above) instead
+   * of each carrying its own independent 15-20s allowance on top of the others -- previously the
+   * setup steps alone could sum to ~75s regardless of `maxSeconds`, before the per-target loop
+   * even started. A setup step that would start with zero time left throws `provider_timeout`
+   * immediately (there is no partial data to salvage before the page target attaches). Once
+   * inspection is underway, running out of budget BETWEEN targets is not an error: the loop stops
+   * and returns what it already has, `partial:true`, and the untouched targets named in
+   * `skipped_targets`.
+   */
+  async inspect(targets: URL[], maxSeconds: number): Promise<InspectResult> {
     assertAgentCoreConfigured(this.config);
     const started = Date.now();
-    const response = await invokeSigned(this.config, 'PUT', '/browsers/aws.browser.v1/sessions/start', buildAgentCoreStartRequest(maxSeconds));
+    const deadline = started + Math.max(1, maxSeconds) * 1000;
+    const remainingMs = (): number => deadline - Date.now();
+    const setupTimeout = (ceilingMs: number): number => setupCallTimeoutMs(remainingMs(), ceilingMs);
+
+    const response = await invokeSigned(this.config, 'PUT', '/browsers/aws.browser.v1/sessions/start', buildAgentCoreStartRequest(maxSeconds), setupTimeout(20_000));
     const session = sessionFrom(response);
     const receipts: RedactedReceipt[] = [];
+    const skippedTargets: string[] = [];
     let cleanupSuccess = false;
     let socket: CdpSocket | undefined;
     try {
-      socket = await CdpSocket.connect(session.automationEndpoint, streamHeaders(this.config, session.automationEndpoint));
+      socket = await CdpSocket.connect(session.automationEndpoint, streamHeaders(this.config, session.automationEndpoint), setupTimeout(15_000));
       // AgentCore exposes browser-level CDP first. Page-domain commands must be routed through
       // the attached page target's flattened CDP session, rather than the root connection.
-      const targetListing = await socket.request('Target.getTargets', {}, 20_000);
+      const targetListing = await socket.request('Target.getTargets', {}, setupTimeout(20_000));
       const targetInfos = targetListing.targetInfos as Array<{ targetId?: unknown; type?: unknown }> | undefined;
       const pageTargetId = targetInfos?.find((candidate) => candidate.type === 'page' && typeof candidate.targetId === 'string')?.targetId;
       if (typeof pageTargetId !== 'string') {
         throw new AgentCoreBrowserTransportError('provider_page_target_missing', 'AgentCore did not expose a page target for the bounded inspection.', 'No browser content was returned.');
       }
-      const attached = await socket.request('Target.attachToTarget', { targetId: pageTargetId, flatten: true }, 20_000);
+      const attached = await socket.request('Target.attachToTarget', { targetId: pageTargetId, flatten: true }, setupTimeout(20_000));
       const pageSessionId = attached.sessionId;
       if (typeof pageSessionId !== 'string' || !pageSessionId) {
         throw new AgentCoreBrowserTransportError('provider_page_session_missing', 'AgentCore did not return a page-scoped CDP session.', 'No browser content was returned.');
       }
-      for (const target of targets) {
-        const remaining = maxSeconds * 1000 - (Date.now() - started);
-        if (remaining <= 0) throw new AgentCoreBrowserTransportError('provider_timeout', 'AgentCore browser inspection exceeded its bounded deadline.', 'No additional page was inspected.');
+      for (let i = 0; i < targets.length; i++) {
+        const target = targets[i]!;
+        const remaining = remainingMs();
+        if (remaining <= 0) {
+          // Graceful stop, not a thrown error: whatever was already inspected is still returned.
+          skippedTargets.push(...targets.slice(i).map((t) => t.toString()));
+          break;
+        }
         await socket.request('Page.navigate', { url: target.toString() }, Math.min(remaining, 20_000), pageSessionId);
-        await sleep(Math.min(750, Math.max(1, remaining)));
-        const inspected = evaluatedResult(await socket.request('Runtime.evaluate', { expression: "JSON.stringify({title:document.title,url:location.href,status:performance.getEntriesByType('navigation')[0]?.responseStatus ?? null})", returnByValue: true }, Math.min(remaining, 20_000), pageSessionId));
+        await sleep(Math.min(750, Math.max(1, remainingMs())));
+        const inspected = evaluatedResult(await socket.request('Runtime.evaluate', { expression: "JSON.stringify({title:document.title,url:location.href,status:performance.getEntriesByType('navigation')[0]?.responseStatus ?? null})", returnByValue: true }, Math.min(Math.max(1, remainingMs()), 20_000), pageSessionId));
         if (!inspected.url || !validatePublicTargets([inspected.url]).ok) {
           throw new AgentCoreBrowserTransportError('redirect_outside_allowlist', 'A public target redirected outside the strict browser allowlist.', 'No page content or external destination was returned.');
         }
@@ -363,19 +423,23 @@ export class AwsAgentCorePublicReadOnlyTransport implements AgentCoreBrowserTran
       try { await socket?.close(); }
       catch { /* StopBrowserSession below remains authoritative cleanup. */ }
       try {
-        await invokeSigned(this.config, 'PUT', `/browsers/${encodeURIComponent(session.browserIdentifier)}/sessions/stop?sessionId=${encodeURIComponent(session.sessionId)}`, { clientToken: randomClientToken() });
+        await invokeSigned(this.config, 'PUT', `/browsers/${encodeURIComponent(session.browserIdentifier)}/sessions/stop?sessionId=${encodeURIComponent(session.sessionId)}`, { clientToken: randomClientToken() }, CLEANUP_TIMEOUT_MS);
         cleanupSuccess = true;
       } catch {
         throw new AgentCoreBrowserTransportError('session_cleanup_failed', 'The AgentCore browser session could not be confirmed stopped.', 'Treat the run as failed and inspect the AWS session record before another browser invocation.');
       }
     }
-    return receipts.map((receipt) => ({ ...receipt, cleanup_success: cleanupSuccess }));
+    return {
+      receipts: receipts.map((receipt) => ({ ...receipt, cleanup_success: cleanupSuccess })),
+      partial: skippedTargets.length > 0,
+      ...(skippedTargets.length > 0 ? { skipped_targets: skippedTargets } : {}),
+    };
   }
 }
 
 /** Retained for deterministic disabled-runtime tests only; production registration uses AwsAgentCorePublicReadOnlyTransport. */
 export class UnconfiguredAgentCoreBrowserTransport implements AgentCoreBrowserTransport {
-  async inspect(_targets: URL[], _maxSeconds: number): Promise<RedactedReceipt[]> {
+  async inspect(_targets: URL[], _maxSeconds: number): Promise<InspectResult> {
     throw new AgentCoreBrowserTransportError('runtime_adapter_unconfigured', 'AgentCore policy passed, but the session transport is intentionally not configured.', 'Complete the reviewed transport deployment before enabling public inspection; no browser session was created.');
   }
 }

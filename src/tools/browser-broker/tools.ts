@@ -9,6 +9,21 @@ const leases = new ProfileLeaseStore();
 const PROVIDER = 'aws-agentcore-browser';
 const defaultTransport = new AwsAgentCorePublicReadOnlyTransport();
 
+// FND-20260829-e454: ChatGPT's MCP client hard-times-out any single tool call at 45 seconds. This
+// tool's `max_seconds` USED to bound only the per-target navigation loop inside transport.ts's
+// inspect(), while several setup/teardown steps (session start, the CDP WebSocket connect,
+// Target.getTargets, Target.attachToTarget, and the final session-stop cleanup) each carried their
+// OWN independent 15-20s ceiling on top of it -- so the real worst case was ~95s regardless of what
+// max_seconds was set to, and the schema let a caller request up to 300s (the DEFAULT was also
+// 300s) on top of that. transport.ts's inspect() now treats `maxSeconds` as the deadline for the
+// ENTIRE call (every setup step is bounded against the SAME remaining time), so the only budget
+// left outside its control is the fixed, independent CLEANUP_TIMEOUT_MS (8s) added in its own
+// `finally` block. Capping the caller-visible bound here at 25s keeps the true worst case (25s +
+// 8s = 33s) comfortably under both the 40s target and ChatGPT's 45s hard cutoff, with margin for
+// MCP transport/JSON overhead on top.
+const MAX_INSPECT_SECONDS = 25;
+const DEFAULT_INSPECT_SECONDS = 20;
+
 function refusal(code: string, summary: string): ToolResultPayload {
   return { data: { mode: 'refused', error: code }, summary };
 }
@@ -46,9 +61,9 @@ export function registerAgentCoreBrowserBrokerTools(server: McpServer, callerHas
 
   registerTool(server, {
     name: 'browser_broker_inspect_public', category: 'read',
-    annotations: { title: 'AgentCore Browser broker public inspection', description: 'Runs an enrolled agent public-read browser session and returns redacted evidence receipts only.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    inputShape: { targets: z.array(z.string()).min(1).max(12), max_seconds: z.number().int().min(1).max(300).optional() },
-    outputShape: { mode: z.string(), receipts: z.array(z.unknown()).optional(), error: z.string().optional() },
+    annotations: { title: 'AgentCore Browser broker public inspection', description: `Runs an enrolled agent public-read browser session and returns redacted evidence receipts only. Bounded to at most ${MAX_INSPECT_SECONDS}s total (default ${DEFAULT_INSPECT_SECONDS}s) so a single call can never approach a 45-second-class MCP client timeout; if the budget is reached before every target is inspected, the response comes back with partial:true and the untouched targets listed in skipped_targets -- call again for just those targets.`, readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputShape: { targets: z.array(z.string()).min(1).max(12), max_seconds: z.number().int().min(1).max(MAX_INSPECT_SECONDS).optional() },
+    outputShape: { mode: z.string(), receipts: z.array(z.unknown()).optional(), partial: z.boolean().optional(), skipped_targets: z.array(z.string()).optional(), error: z.string().optional() },
     handler: async (input, ctx) => {
       const decision = enrollmentFor(ctx.callerAgent, 'public_read');
       if ('refusal' in decision) return decision.refusal;
@@ -64,8 +79,18 @@ export function registerAgentCoreBrowserBrokerTools(server: McpServer, callerHas
         return { data: { mode: 'busy', error: 'profile_in_use' }, summary: 'Refused: this enrolled browser identity already has an active lease.' };
       }
       try {
-        const receipts = await transport.inspect(targets.urls, input.max_seconds ?? 300);
-        return { data: { mode: 'public_read', receipts }, summary: `Completed ${receipts.length} redacted public receipt(s) for ${enrollment.callerAgent}.` };
+        const result = await transport.inspect(targets.urls, input.max_seconds ?? DEFAULT_INSPECT_SECONDS);
+        const data: Record<string, unknown> = { mode: 'public_read', receipts: result.receipts };
+        if (result.partial) {
+          data.partial = true;
+          data.skipped_targets = result.skipped_targets ?? [];
+        }
+        return {
+          data,
+          summary: result.partial
+            ? `Completed ${result.receipts.length} of ${targets.urls.length} redacted public receipt(s) for ${enrollment.callerAgent} before the bounded time budget was reached; ${result.skipped_targets?.length ?? 0} target(s) were not inspected -- see skipped_targets.`
+            : `Completed ${result.receipts.length} redacted public receipt(s) for ${enrollment.callerAgent}.`,
+        };
       } catch (error) {
         const e = error as AgentCoreBrowserTransportError;
         return { data: { mode: e.code || 'provider_error', error: e.code || 'provider_error' }, summary: `${e.message || 'Browser provider failed.'} ${e.nextStep || 'No browser state was retained.'}` };

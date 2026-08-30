@@ -1662,6 +1662,13 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         caveats: z.array(z.string()),
         methodology_note: z.string(),
         error: z.string().optional(),
+        // FND-20260829-e454: present only when the wall-clock budget was exhausted before every
+        // requested month could be assembled (a large range can take longer than a 45-second-class
+        // MCP client allows) -- `months` still holds everything that DID complete. `continuation`
+        // is the SAME {from,to} shape as this tool's own input: call again with it to assemble the
+        // remainder under a fresh budget.
+        partial: z.boolean().optional(),
+        continuation: z.object({ from: z.string(), to: z.string() }).optional(),
       },
       handler: async (input, ctx) => {
         if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_gl_assemble', ctx.callerAgent);
@@ -1669,12 +1676,15 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
         const result = await assembleGl(input.org as XeroOrg, input.from, input.to);
         const totalVariances = result.months.reduce((acc, m) => acc + m.nonzeroVarianceCount, 0);
         const caveatNote = result.caveats.length ? ` CAVEATS: ${result.caveats.join(' | ')}` : '';
+        const budgetNote = result.partial && result.continuation
+          ? ` BUDGET: call again with from="${result.continuation.from}", to="${result.continuation.to}" to assemble the remainder.`
+          : '';
         return {
           data: result,
           summary:
             `Xero GL assembled for ${input.org}, ${result.months.length} month(s) ${input.from}..${input.to}: ` +
             `${totalVariances} account-month(s) with nonzero manual-journal variance (see methodology_note — each month's ` +
-            `Invoices/CreditNotes/BankTransactions activity is in that month's own otherDocuments).${caveatNote}`,
+            `Invoices/CreditNotes/BankTransactions activity is in that month's own otherDocuments).${caveatNote}${budgetNote}`,
         };
       },
     },

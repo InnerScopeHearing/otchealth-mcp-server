@@ -259,10 +259,13 @@ test('direct Avatar Video schema accepts only the bounded deterministic surface'
   assert.throws(() => parse(HEYGEN_EXISTING_VIDEO_INGEST_QA_INPUT, {
     ingest_id: 'short', video_id: 'v_1', expected_title_sha256: 'A'.repeat(64),
   }));
+  // FND-20260829-e454: max_wait_seconds' bound was tightened 90 -> 15 so heygen_video_wait_ingest_qa
+  // can never itself approach a 45-second-class MCP client timeout (see production-tools.ts's
+  // comment on this input shape for the full worst-case-wall-time accounting).
   assert.deepEqual(parse(HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT, {
-    operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 90, max_asset_bytes: 52_428_800,
-  }), { operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 90, max_asset_bytes: 52_428_800 });
+    operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 15, max_asset_bytes: 52_428_800,
+  }), { operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 15, max_asset_bytes: 52_428_800 });
   assert.throws(() => parse(HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT, {
-    operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 91,
+    operation_id: 'video_op_01', video_id: 'v_1', max_wait_seconds: 16,
   }));
 });

@@ -18,6 +18,8 @@ process.env.BLOB_BACKEND ||= 'azure';
 import {
   ingestHeyGenVideoArtifacts,
   validateSrt,
+  fetchAttemptTimeoutMs,
+  ingestDeadlineMs,
 } from './artifact-qa.js';
 import {
   heyGenArtifactUri,
@@ -198,4 +200,114 @@ test('ingestion rejects non-HeyGen URLs, oversized assets, bad magic, and non-co
     chunkedOversize,
   ), /exceeds max_asset_bytes/);
   assert.equal(writes, 0);
+});
+
+// ============================================================================================
+// FND-20260829-e454: bounded ingest deadline. HEYGEN_INGEST_DEADLINE_MS/HEYGEN_FETCH_ATTEMPT_
+// TIMEOUT_MS are ONLY-DOWNWARD env overrides of the safe 16s/8s ceilings, added specifically so
+// this can be tested in milliseconds instead of real seconds/minutes.
+// ============================================================================================
+
+test('fetchAttemptTimeoutMs / ingestDeadlineMs: env overrides can only LOWER the bound, never raise it above the safe ceiling', () => {
+  const priorFetch = process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS;
+  const priorIngest = process.env.HEYGEN_INGEST_DEADLINE_MS;
+  try {
+    delete process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS;
+    delete process.env.HEYGEN_INGEST_DEADLINE_MS;
+    assert.equal(fetchAttemptTimeoutMs(), 8_000, 'default when unset');
+    assert.equal(ingestDeadlineMs(), 16_000, 'default when unset');
+
+    process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS = '999999';
+    process.env.HEYGEN_INGEST_DEADLINE_MS = '999999';
+    assert.equal(fetchAttemptTimeoutMs(), 8_000, 'a caller/env cannot RAISE the ceiling -- that would reintroduce the original bug');
+    assert.equal(ingestDeadlineMs(), 16_000, 'a caller/env cannot RAISE the ceiling -- that would reintroduce the original bug');
+
+    process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS = '10';
+    process.env.HEYGEN_INGEST_DEADLINE_MS = '20';
+    assert.equal(fetchAttemptTimeoutMs(), 10, 'lowering IS allowed (this is how tests get sub-40s determinism)');
+    assert.equal(ingestDeadlineMs(), 20, 'lowering IS allowed (this is how tests get sub-40s determinism)');
+
+    process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS = 'garbage';
+    process.env.HEYGEN_INGEST_DEADLINE_MS = '-5';
+    assert.equal(fetchAttemptTimeoutMs(), 8_000, 'garbage/non-positive falls back to the default, not 0');
+    assert.equal(ingestDeadlineMs(), 16_000, 'garbage/non-positive falls back to the default, not 0');
+  } finally {
+    if (priorFetch === undefined) delete process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS;
+    else process.env.HEYGEN_FETCH_ATTEMPT_TIMEOUT_MS = priorFetch;
+    if (priorIngest === undefined) delete process.env.HEYGEN_INGEST_DEADLINE_MS;
+    else process.env.HEYGEN_INGEST_DEADLINE_MS = priorIngest;
+  }
+});
+
+test('BUDGET: the mandatory video asset always completes; an optional asset (subtitle/thumbnail) that would exceed the now-tiny ingest deadline is SKIPPED gracefully, not thrown -- partial:true, skippedAssets, and the manifest records it too', async () => {
+  const priorIngest = process.env.HEYGEN_INGEST_DEADLINE_MS;
+  process.env.HEYGEN_INGEST_DEADLINE_MS = '10'; // 10ms -- the video fetch below deliberately outlives it
+  const writes: Array<{ path: string; body: Uint8Array }> = [];
+  const store: HeyGenArtifactStore = {
+    configured: () => true,
+    put: async (path, body) => {
+      writes.push({ path, body: new Uint8Array(body) });
+      return { artifactUri: `azure://test/${path}`, blobPath: path };
+    },
+  };
+  const fetchImpl = (async (url: string | URL) => {
+    const path = new URL(String(url)).pathname;
+    if (path.endsWith('.mp4')) {
+      // Real (small) delay so the shared 10ms deadline has genuinely elapsed by the time the loop
+      // checks again before the NEXT (optional) asset -- deterministic without waiting anywhere
+      // near the real 16s production default.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return response(MP4, 'video/mp4');
+    }
+    throw new Error(`must never be reached: the deadline should skip this asset entirely (${path})`);
+  }) as typeof fetch;
+
+  try {
+    const result = await ingestHeyGenVideoArtifacts(completed(), {
+      operationId: 'video_op_01',
+      includeCaptionedVideo: false,
+      includeSubtitle: true,
+      includeThumbnail: true,
+      includeGif: false,
+      maxAssetBytes: 1_048_576,
+    }, store, fetchImpl);
+
+    assert.equal(result.assets.length, 1, 'only the mandatory video asset was fetched');
+    assert.equal(result.assets[0].kind, 'video');
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.skippedAssets, ['subtitle', 'thumbnail']);
+    assert.ok(writes.at(-1)?.path.endsWith('/manifest.json'));
+    const manifest = JSON.parse(new TextDecoder().decode(writes.at(-1)!.body));
+    assert.deepEqual(manifest.skipped_assets, ['subtitle', 'thumbnail'], 'the durable manifest discloses the skip too, not just the tool response');
+  } finally {
+    if (priorIngest === undefined) delete process.env.HEYGEN_INGEST_DEADLINE_MS;
+    else process.env.HEYGEN_INGEST_DEADLINE_MS = priorIngest;
+  }
+});
+
+test('BUDGET: when every requested asset fits inside the deadline, partial/skippedAssets are ABSENT (lock: the fix is purely additive)', async () => {
+  const priorIngest = process.env.HEYGEN_INGEST_DEADLINE_MS;
+  process.env.HEYGEN_INGEST_DEADLINE_MS = '16000'; // the real production default, explicit for clarity
+  const store: HeyGenArtifactStore = {
+    configured: () => true,
+    put: async (path) => ({ artifactUri: `azure://test/${path}`, blobPath: path }),
+  };
+  const fetchImpl = (async (url: string | URL) => {
+    const path = new URL(String(url)).pathname;
+    if (path.endsWith('.mp4')) return response(MP4, 'video/mp4');
+    if (path.endsWith('.srt')) return response(SRT, 'text/plain');
+    if (path.endsWith('.jpg')) return response(JPEG, 'image/jpeg');
+    return new Response('missing', { status: 404 });
+  }) as typeof fetch;
+  try {
+    const result = await ingestHeyGenVideoArtifacts(completed(), {
+      operationId: 'video_op_01', includeCaptionedVideo: false, includeSubtitle: true, includeThumbnail: true, includeGif: false, maxAssetBytes: 1_048_576,
+    }, store, fetchImpl);
+    assert.equal(result.assets.length, 3);
+    assert.equal('partial' in result, false);
+    assert.equal('skippedAssets' in result, false);
+  } finally {
+    if (priorIngest === undefined) delete process.env.HEYGEN_INGEST_DEADLINE_MS;
+    else process.env.HEYGEN_INGEST_DEADLINE_MS = priorIngest;
+  }
 });

@@ -54,7 +54,12 @@ export function registerBrowserAgentcoreTools(server: McpServer, callerHash: Cal
         return { data: { mode: 'busy', error: 'profile_in_use' }, summary: 'Refused: the isolated Wefunder profile already has an active lease.' };
       }
       try {
-        const receipts = await transport.inspect(result.urls, input.max_seconds ?? MAX_SECONDS);
+        // Not a connector surface (see registry.connector-lanes.test.ts -- this tool family is
+        // deliberately absent from every curated connector toolset), so it keeps its pre-existing
+        // output shape unchanged; transport.inspect() now returns {receipts, partial,
+        // skipped_targets} (FND-20260829-e454), this just unwraps the receipts it always returned.
+        const inspected = await transport.inspect(result.urls, input.max_seconds ?? MAX_SECONDS);
+        const receipts = inspected.receipts;
         return { data: { mode: 'public_read_only', receipts }, summary: `Completed ${receipts.length} redacted public receipt(s).` };
       } catch (error) {
         const e = error as AgentCoreBrowserTransportError;

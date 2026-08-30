@@ -89,6 +89,66 @@ export const INJECTION_DETECTED_ANSWER =
   'Synthesis was withheld: one or more retrieved passages were flagged by the content-safety injection ' +
   'screen. See the retrieved passages below and review them directly.';
 
+// ---- wall-clock budget (FND-20260829-e454) ────────────────────────────────────────────────────
+//
+// ChatGPT's MCP client opens a FRESH session per tool call and hard-times-out any single call at
+// 45 seconds. Deep mode's worst case (LLM-planned plan + up to 2 rounds of up to ~24 parallel
+// hybridSearch pairs each + an optional refine call + an injection-shield call + a tier:'high'
+// synthesis call) can exceed that by a wide margin if any of those Foundry/Search calls sits near
+// its own fetchWithBudget ceiling (8s timeout + 1 retry ~= 21s worst case, PER SEQUENTIAL STEP,
+// and this pipeline has up to 4 sequential steps: plan, refine, shield, synth).
+//
+// FIX: an internal wall-clock deadline, computed once at the top of deepRetrieve() from `now()`
+// (the real clock by default, injectable for tests) + `budgetMs` (a safe default well under both
+// the 40s target and ChatGPT's 45s hard cutoff). runDeepFlow() checks it at TWO points:
+//   (1) before spending the optional refine round -- if the deadline has already passed, the
+//       refine round is skipped (never entered) and the skip is disclosed via `budget_skipped`,
+//       even though the OVERALL result is not `partial` (the pool from round 1 is still returned
+//       and still gets a real synthesized answer -- refine is a quality nice-to-have, not a
+//       correctness requirement).
+//   (2) before the injection-shield + tier:'high' synthesis calls (the single most expensive,
+//       least-bounded remaining stretch) -- if the deadline has passed, BOTH are skipped and the
+//       function returns immediately with the FULL retrieved+cited hits (nothing already computed
+//       is discarded), `partial:true`, an honest `answer` explaining why, and a `continuation` the
+//       caller can pass back on a NEW brain_search(mode:'deep') call to skip planning (already
+//       decided) and resume directly into one retrieval pass + shield + synth under a FRESH
+//       budget -- i.e. option (a) from the fix pattern ("enforce a budget with an honest partial
+//       result + continuation"), not option (b) (there is no separate durable operation to poll:
+//       the hits themselves ARE the useful partial output, and a resumed call is cheap).
+//
+// mode:'fast' (brain-search.ts's untouched code path) is COMPLETELY unaffected: this budget only
+// exists inside runDeepFlow/deepRetrieve, which fast mode never calls.
+export const DEFAULT_DEEP_BUDGET_MS = 32_000;
+/** Hard ceiling on any caller/env-supplied budget, so a misconfiguration can never defeat the
+ *  whole point of this bound. Still comfortably under ChatGPT's 45s hard cutoff even after
+ *  accounting for MCP transport/JSON overhead on top. */
+const MAX_DEEP_BUDGET_MS = 40_000;
+
+/** Parse DEEP_RETRIEVAL_BUDGET_MS, defaulting to DEFAULT_DEEP_BUDGET_MS on unset/garbage input, and
+ *  always clamped to MAX_DEEP_BUDGET_MS. Pure. Read fresh from process.env at the call site
+ *  (deepRetrieve), same convention as parseDeepRetrievalMode / the other kill-switches in this file. */
+export function resolveDeepBudgetMs(value: string | undefined): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_DEEP_BUDGET_MS;
+  return Math.min(n, MAX_DEEP_BUDGET_MS);
+}
+
+export const PARTIAL_BUDGET_ANSWER =
+  'Deep retrieval hit its internal wall-clock budget before the cited answer could be synthesized. ' +
+  'The retrieved passages below are complete and citable; only the narrated answer was skipped. Call ' +
+  'brain_search again with mode:"deep" and this continuation to resume straight into synthesis under ' +
+  'a fresh budget, or read the passages directly.';
+
+/** A resumable snapshot of what deep mode already decided, so a follow-up call can skip planning
+ *  (and, when present, the already-spent refine round) and go straight to one retrieval pass + the
+ *  shield/synth tail. Deliberately does NOT carry `query` -- brain_search's own `query` input is
+ *  passed fresh on every call, so a continuation only needs to restate rooms/sub_queries/rounds. */
+export interface DeepContinuation {
+  rooms: string[];
+  sub_queries: string[];
+  rounds_used: number;
+}
+
 // ---- public types ──────────────────────────────────────────────────────────────────────────────
 
 export interface DeepRetrieveOptions {
@@ -101,6 +161,16 @@ export interface DeepRetrieveOptions {
   /** Exclude operational exhaust (status/episode/heartbeat/digest chatter). Default false, mirroring
    *  brain_search's own include_ops default. */
   includeOps?: boolean;
+  /** Wall-clock budget in ms for the WHOLE deep flow (plan + search + refine + shield + synth).
+   *  Default resolveDeepBudgetMs(process.env.DEEP_RETRIEVAL_BUDGET_MS). See the budget block above. */
+  budgetMs?: number;
+  /** Injectable monotonic-ish clock. Defaults to Date.now. Test seam only -- production callers
+   *  never set this. */
+  now?: () => number;
+  /** Resume a prior budget-exceeded (`partial:true`) call. Sanitized defensively (see
+   *  sanitizeContinuation) exactly like the LLM planner's own JSON reply: rooms are clamped to the
+   *  caller's ACTUAL permitted `rooms` above, never trusted from the continuation itself. */
+  continuation?: DeepContinuation;
 }
 
 export interface Citation {
@@ -124,6 +194,53 @@ export interface DeepRetrieveResult {
    *  AND Content Safety is configured). Mirrors the "surface auto-guard outcomes when they ran"
    *  convention in tools/registry.ts. Absent when not run/inert. */
   injection_screen?: { attackDetected: boolean; mode: GuardMode };
+  /** True ONLY when the wall-clock budget was exhausted before the injection screen + synthesis
+   *  could run. `hits`/`citations` above are still the FULL retrieved set; only the narrated
+   *  `answer` was skipped (see PARTIAL_BUDGET_ANSWER). Absent (not merely false) in the normal
+   *  case, so an ordinary deep-agentic result's shape is completely unchanged by this fix. */
+  partial?: true;
+  /** Present only when partial is true. Pass this back as brain_search's `continuation` input on a
+   *  new mode:'deep' call to skip planning and resume straight into one retrieval pass + shield +
+   *  synth under a fresh budget. */
+  continuation?: DeepContinuation;
+  /** True only when this result was produced by CONSUMING a caller-supplied continuation (skipped
+   *  planning). Absent on a normal first-attempt call. */
+  resumed?: true;
+  /** Non-empty only when a stage that would otherwise have run was skipped purely because the
+   *  budget was already exhausted at the decision point -- e.g. `['refine']` when round 1 came
+   *  back thin enough to want a refine round, but there was no time left to spend on it. This is
+   *  the "say so" half of "never silently truncate quality without saying so": the OVERALL result
+   *  can still be non-partial (round 1's hits are real and still get a real synthesized answer),
+   *  but a quality-improving step was skipped, and this discloses which one and why. */
+  budget_skipped?: string[];
+}
+
+/** Defensive sanitizer for a caller-supplied continuation. Round-tripped through an external,
+ *  non-Claude MCP client (the whole point of this feature), so it is treated with the SAME
+ *  suspicion as the LLM planner's own JSON reply (see parseQueryPlan above): `rooms` is
+ *  INTERSECTED with `allowedRooms` -- the caller's ACTUAL, freshly-computed permitted set for
+ *  THIS call -- never trusted directly, so a continuation minted under one ring can never be
+ *  replayed to reach a room outside it. `sub_queries` is trimmed/capped/deduped identically to
+ *  parseQueryPlan. `rounds_used` is clamped into [0, MAX_ROUNDS]. Never throws; a garbage/empty
+ *  continuation degrades to an empty `subQueries` (the caller, runDeepFlow, treats that as "no
+ *  continuation" and re-plans from scratch -- a malformed resume payload can never silently
+ *  return nothing). */
+export function sanitizeContinuation(
+  continuation: DeepContinuation,
+  allowedRooms: string[],
+): { rooms: string[]; subQueries: string[]; roundsUsed: number } {
+  const allowedSet = new Set(allowedRooms);
+  const rawRooms = Array.isArray(continuation?.rooms) ? continuation.rooms : [];
+  const rooms = [...new Set(rawRooms.filter((r): r is string => typeof r === 'string' && allowedSet.has(r)))];
+  const rawSubQueries = Array.isArray(continuation?.sub_queries) ? continuation.sub_queries : [];
+  const subQueries = dedupeCaseInsensitive(
+    rawSubQueries
+      .filter((q): q is string => typeof q === 'string' && q.trim().length > 0)
+      .map((q) => q.trim().slice(0, 500)),
+  ).slice(0, 4);
+  const roundsRaw = Number(continuation?.rounds_used);
+  const roundsUsed = Number.isFinite(roundsRaw) ? Math.min(Math.max(0, Math.trunc(roundsRaw)), MAX_ROUNDS) : 0;
+  return { rooms: rooms.length ? rooms : [...allowedRooms], subQueries, roundsUsed };
 }
 
 export interface QueryPlan {
@@ -428,42 +545,111 @@ async function runRetrievalRound(
 }
 
 /**
- * The full agentic pipeline (plan -> round 1 -> optional bounded refine round -> synthesize). Each
- * LLM step is individually fail-open (see planQuery/refineSubQueries/synthesizeAnswer); this
- * function itself can still throw on a genuinely unexpected error (e.g. hybridSearch's own thrown
- * errors on a non-400 failure — see azure/search.ts), which is exactly why deepRetrieve() wraps the
- * call to this function in its own outer try/catch down to fallbackFastSearch().
+ * The full agentic pipeline (plan-or-resume -> round 1 -> optional bounded refine round ->
+ * synthesize), now wall-clock-budgeted (FND-20260829-e454 -- see the budget block near
+ * DeepRetrieveOptions above). Each LLM step is individually fail-open (see planQuery/
+ * refineSubQueries/synthesizeAnswer); this function itself can still throw on a genuinely
+ * unexpected error (e.g. hybridSearch's own thrown errors on a non-400 failure — see
+ * azure/search.ts), which is exactly why deepRetrieve() wraps the call to this function in its own
+ * outer try/catch down to fallbackFastSearch().
+ *
+ * `continuation`, when present and non-empty after sanitizeContinuation, SKIPS planning (and any
+ * refine round) entirely: it reuses the already-decided sub_queries/rooms and runs exactly ONE
+ * (bounded, parallel) retrieval pass before falling into the SAME shield+synth tail as a fresh
+ * call. This is deliberately lighter than a first attempt (no LLM plan/refine call), so a resumed
+ * call is structurally less likely to hit the budget a second time.
  */
-async function runDeepFlow(query: string, rooms: string[], top: number, includeOps: boolean): Promise<DeepRetrieveResult> {
-  const plan = await planQuery(query, rooms);
-  let subQueries = plan.subQueries;
-  const targetRooms = plan.rooms;
+async function runDeepFlow(
+  query: string,
+  rooms: string[],
+  top: number,
+  includeOps: boolean,
+  budget: { deadline: number; now: () => number },
+  continuation?: DeepContinuation,
+): Promise<DeepRetrieveResult> {
+  const { deadline, now } = budget;
+  const overBudget = (): boolean => now() >= deadline;
+  const budgetSkipped: string[] = [];
 
-  const round1 = await runRetrievalRound(subQueries, targetRooms, top, includeOps);
-  let rounds = 1;
-  let pool = [...round1.perRoom];
-  const searched = new Set(round1.searched);
-  const failed = new Set(round1.failed);
+  const resumeFrom = continuation ? sanitizeContinuation(continuation, rooms) : null;
+  const resumed = resumeFrom !== null && resumeFrom.subQueries.length > 0;
 
-  let fusedPreview = dedupeById(rrfFuse(pool, top * 3));
+  let subQueries: string[];
+  let targetRooms: string[];
+  let rounds: number;
+  let pool: RoomHitList[];
+  const searched = new Set<string>();
+  const failed = new Set<string>();
 
-  if (needsRefine(fusedPreview, rounds, MAX_ROUNDS)) {
-    const refined = await refineSubQueries(query, subQueries, fusedPreview.length);
-    if (refined.length) {
-      const round2 = await runRetrievalRound(refined, targetRooms, top, includeOps);
-      rounds = 2;
-      subQueries = [...subQueries, ...refined];
-      pool = [...pool, ...round2.perRoom];
-      for (const r of round2.searched) searched.add(r);
-      // failed entries are "room: reason" — compare on the room name, not the whole string.
-      for (const r of round2.failed) if (!searched.has(r.split(':')[0]!)) failed.add(r);
-      fusedPreview = dedupeById(rrfFuse(pool, top * 3));
+  if (resumed && resumeFrom) {
+    subQueries = resumeFrom.subQueries;
+    targetRooms = resumeFrom.rooms;
+    rounds = resumeFrom.roundsUsed;
+    const round = await runRetrievalRound(subQueries, targetRooms, top, includeOps);
+    pool = [...round.perRoom];
+    for (const s of round.searched) searched.add(s);
+    for (const f of round.failed) failed.add(f);
+  } else {
+    const plan = await planQuery(query, rooms);
+    subQueries = plan.subQueries;
+    targetRooms = plan.rooms;
+
+    const round1 = await runRetrievalRound(subQueries, targetRooms, top, includeOps);
+    rounds = 1;
+    pool = [...round1.perRoom];
+    for (const s of round1.searched) searched.add(s);
+    for (const f of round1.failed) failed.add(f);
+
+    const fusedPreview = dedupeById(rrfFuse(pool, top * 3));
+
+    if (needsRefine(fusedPreview, rounds, MAX_ROUNDS)) {
+      if (overBudget()) {
+        // A refine round WOULD have been attempted (round 1 came back thin), but there is no
+        // budget left to spend on it. Never silently drop this: disclose the skip explicitly
+        // rather than letting the result look identical to "round 1 was rich enough."
+        budgetSkipped.push('refine');
+      } else {
+        const refined = await refineSubQueries(query, subQueries, fusedPreview.length);
+        if (refined.length) {
+          const round2 = await runRetrievalRound(refined, targetRooms, top, includeOps);
+          rounds = 2;
+          subQueries = [...subQueries, ...refined];
+          pool = [...pool, ...round2.perRoom];
+          for (const r of round2.searched) searched.add(r);
+          // failed entries are "room: reason" — compare on the room name, not the whole string.
+          for (const r of round2.failed) if (!searched.has(r.split(':')[0]!)) failed.add(r);
+        }
+      }
     }
   }
 
+  const fusedFinal = dedupeById(rrfFuse(pool, top * 3));
   const retracted = await retractedIds();
-  const { kept, dropped } = filterRetracted(fusedPreview, retracted);
+  const { kept, dropped } = filterRetracted(fusedFinal, retracted);
   const hits = kept.slice(0, top);
+
+  // BUDGET GATE: the single most expensive, least-bounded remaining stretch (an injection-shield
+  // call plus a tier:'high' synthesis call) is skipped entirely once the deadline has passed.
+  // Nothing already computed is discarded -- hits/citations below are the FULL retrieved set, only
+  // the narrated answer is replaced with an honest explanation plus a continuation.
+  if (overBudget()) {
+    const result: DeepRetrieveResult = {
+      mode: 'deep-agentic',
+      answer: PARTIAL_BUDGET_ANSWER,
+      citations: buildCitations(hits),
+      sub_queries: subQueries,
+      rounds_used: rounds,
+      hits,
+      rooms_searched: [...searched],
+      partial: true,
+      continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds },
+    };
+    if (resumed) result.resumed = true;
+    if (failed.size) result.rooms_failed = [...failed];
+    if (dropped.length) result.retracted_dropped = dropped;
+    if (budgetSkipped.length) result.budget_skipped = budgetSkipped;
+    return result;
+  }
 
   // INJECTION SCREEN (Wave 3, security hardening): scan the EXACT passages synthesizeAnswer is about
   // to concatenate into the synthesis prompt (mirroring its own MAX_SYNTH_HITS bound), so what is
@@ -484,11 +670,13 @@ async function runDeepFlow(query: string, rooms: string[], top: number, includeO
     hits,
     rooms_searched: [...searched],
   };
+  if (resumed) result.resumed = true;
   if (failed.size) result.rooms_failed = [...failed];
   if (dropped.length) result.retracted_dropped = dropped;
   if (injectionScreen.ran) {
     result.injection_screen = { attackDetected: injectionScreen.attackDetected, mode: injectionScreen.mode };
   }
+  if (budgetSkipped.length) result.budget_skipped = budgetSkipped;
   return result;
 }
 
@@ -562,6 +750,8 @@ export async function deepRetrieve(query: string, opts: DeepRetrieveOptions): Pr
   const rooms = opts.rooms ?? [];
   const top = opts.top ?? DEFAULT_TOP;
   const includeOps = opts.includeOps ?? false;
+  const now = opts.now ?? Date.now;
+  const budgetMs = opts.budgetMs ?? resolveDeepBudgetMs(process.env.DEEP_RETRIEVAL_BUDGET_MS);
 
   if (rooms.length === 0) {
     return { mode: 'no-rooms', answer: '', citations: [], sub_queries: [], rounds_used: 0, hits: [], rooms_searched: [] };
@@ -571,7 +761,7 @@ export async function deepRetrieve(query: string, opts: DeepRetrieveOptions): Pr
   }
 
   try {
-    return await runDeepFlow(query, rooms, top, includeOps);
+    return await runDeepFlow(query, rooms, top, includeOps, { deadline: now() + budgetMs, now }, opts.continuation);
   } catch {
     // FAIL-OPEN: any unexpected error anywhere in the agentic flow degrades to a single plain
     // search pass across the same rooms — deep mode can never throw, and can never be WORSE than

@@ -134,7 +134,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
-          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes any explicit "memories" verbatim, server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the credit-funded Azure LLM is configured, always writes an episode marker, and always resets the capture-pressure counter for this caller. Fail-open: an LLM or index error still persists what it can. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
+          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes up to 20 explicit "memories" verbatim (sequentially, one write+index per entry -- this is for a handful of session takeaways, not a bulk import), server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the credit-funded Azure LLM is configured, always writes an episode marker, and always resets the capture-pressure counter for this caller. Fail-open: an LLM or index error still persists what it can. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -146,6 +146,13 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
           .string()
           .optional()
           .describe('Optional freeform summary of what happened / what to remember. Server-side distilled into 0-3 atomic memories when the Azure LLM is configured.'),
+        // Capped at 20 (FND-20260829-e454): each entry writes+indexes SEQUENTIALLY (one Cosmos
+        // write + one AI Search index call per item, never batched -- see the handler's `for`
+        // loop below), and this array had no bound at all before. A well-formed checkpoint call
+        // ("atomic, non-sensitive memory text" -- this is meant for a session's key takeaways, not
+        // a bulk import) never approaches 20; the cap exists so a caller cannot turn one checkpoint
+        // call into dozens of sequential network round trips well past a 45-second-class MCP client
+        // timeout.
         memories: z
           .array(
             z.object({
@@ -155,8 +162,9 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
               supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES.'),
             }),
           )
+          .max(20)
           .optional()
-          .describe('Optional explicit memories to write verbatim (no LLM involved).'),
+          .describe('Optional explicit memories to write verbatim (no LLM involved). Max 20 -- this is for a handful of atomic session takeaways, not a bulk import.'),
       },
       outputShape: {
         written: z.array(z.string()),
