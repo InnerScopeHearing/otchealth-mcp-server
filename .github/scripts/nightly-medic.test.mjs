@@ -10,7 +10,7 @@
 // the mocked fetch would then see a request to /search/issues that this test asserts never
 // happens, and the resolved issue would be #21 (from the search fixture) instead of #258.
 
-import { test, mock } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Set required/consumed env vars BEFORE importing the module under test: nightly-medic.mjs reads
