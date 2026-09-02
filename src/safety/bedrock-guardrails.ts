@@ -112,6 +112,25 @@
  * {configured:true, ran:false, error:<detail>} with the corresponding boolean
  * (attackDetected / ungroundedDetected) forced false -- NEVER rendered as a clean verdict. See
  * shield-check.ts's / groundedness-check.ts's summarize functions for how this renders.
+ *
+ * PII (added 2026-09-02, after live production verification showed sensitiveInformationPolicy
+ * coming back null for a prompt containing an SSN and a card number -- the live guardrail
+ * m7goqvo48q4m had ZERO PII entities configured; see scripts/create-guardrail.mjs for the
+ * idempotent update+version script that adds them). shield_check's source:'INPUT' call ALREADY
+ * scans for sensitiveInformationPolicy whenever the guardrail has piiEntitiesConfig entries --
+ * ApplyGuardrail evaluates every configured policy on a single call, there is no separate PII
+ * request. This just reads assessments[].sensitiveInformationPolicy.piiEntities[] out of the SAME
+ * response bedrockShieldPrompt already fetches for PROMPT_ATTACK, exactly like extractGroundingFilters
+ * reads a different policy out of a DIFFERENT call's response.
+ *
+ * DELIBERATELY NOT SURFACED IN THE STRUCTURED RESULT: GuardrailPiiEntityFilter's `match` field (the
+ * ACTUAL matched PII text -- e.g. the real SSN or card number). piiEntityTypes below carries only
+ * the entity TYPE (e.g. "US_SOCIAL_SECURITY_NUMBER"), never the value. The full `raw` response
+ * (which DOES include `match`) is attached exactly as it already was for PROMPT_ATTACK/GROUNDING --
+ * this is not a new exposure, `raw` was never redacted for those either -- but registry.ts's
+ * logToolEnd only logs payload.audit.before/after (see audit/logger.ts), and shield_check never sets
+ * `audit`, so the raw match value is returned to the calling agent but is not additionally written to
+ * the gateway's own structured logs by this path.
  */
 
 import { resolveAwsCredentials, signRequest } from '../search/sigv4.js';
@@ -187,6 +206,17 @@ interface RawGroundingFilter {
   detected?: boolean;
 }
 
+/** https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_GuardrailPiiEntityFilter.html
+ *  -- `match` (the actual matched PII text) is intentionally typed here so extractPiiEntities can
+ *  read it, but bedrockShieldPrompt below deliberately never copies it into piiEntityTypes; see this
+ *  module's PII doc-comment section for why. */
+interface RawPiiEntityFilter {
+  type?: string;
+  action?: string;
+  match?: string;
+  detected?: boolean;
+}
+
 /** Flatten `assessments[].contentPolicy.filters[]` across every assessment entry (there is
  *  typically exactly one, but nothing in the contract guarantees that). Exported for direct
  *  response-mapping unit tests without a network call. Defensive against any missing/malformed
@@ -210,6 +240,19 @@ export function extractGroundingFilters(raw: unknown): RawGroundingFilter[] {
   return assessments.flatMap((a) => {
     const filters = (a?.contextualGroundingPolicy as { filters?: unknown } | undefined)?.filters;
     return Array.isArray(filters) ? (filters as RawGroundingFilter[]) : [];
+  });
+}
+
+/** Flatten `assessments[].sensitiveInformationPolicy.piiEntities[]` across every assessment entry.
+ *  Exported for direct response-mapping unit tests without a network call. Only populated once the
+ *  guardrail has piiEntitiesConfig entries -- see this module's PII doc-comment section. */
+export function extractPiiEntities(raw: unknown): RawPiiEntityFilter[] {
+  const assessments = Array.isArray((raw as { assessments?: unknown })?.assessments)
+    ? ((raw as { assessments: unknown[] }).assessments as Array<Record<string, unknown>>)
+    : [];
+  return assessments.flatMap((a) => {
+    const entities = (a?.sensitiveInformationPolicy as { piiEntities?: unknown } | undefined)?.piiEntities;
+    return Array.isArray(entities) ? (entities as RawPiiEntityFilter[]) : [];
   });
 }
 
@@ -291,6 +334,15 @@ export interface BedrockShieldResult {
   attackDetected: boolean;
   userPromptAttack: boolean;
   documentsAttack: boolean;
+  /** True when the SAME source:'INPUT' call also found sensitive PII (independent of
+   *  attackDetected -- a prompt can contain PII without being a prompt-injection attack, and vice
+   *  versa). Always false while the guardrail has no piiEntitiesConfig entries -- see this module's
+   *  PII doc-comment section. */
+  piiDetected: boolean;
+  /** Deduplicated PII entity TYPES only (e.g. "EMAIL", "US_SOCIAL_SECURITY_NUMBER") for entities
+   *  with detected:true. NEVER the matched value itself -- see this module's PII doc-comment
+   *  section for why. Empty array when piiDetected is false. */
+  piiEntityTypes: string[];
   provider: string;
   error?: string;
   raw: unknown;
@@ -314,6 +366,8 @@ export async function bedrockShieldPrompt(
       attackDetected: false,
       userPromptAttack: false,
       documentsAttack: false,
+      piiDetected: false,
+      piiEntityTypes: [],
       provider: BEDROCK_GUARDRAILS_NOT_SELECTED,
       raw: { skipped: 'Bedrock Guardrails not selected (set GUARDRAIL_PROVIDER=bedrock and BEDROCK_GUARDRAIL_ID)' },
     };
@@ -328,12 +382,21 @@ export async function bedrockShieldPrompt(
     const attackDetected = extractContentFilters(raw).some(
       (f) => f.type === 'PROMPT_ATTACK' && f.detected === true,
     );
+    // PII: type-only, deduplicated, never the matched value -- see this module's PII doc-comment
+    // section (RawPiiEntityFilter's own doc comment repeats the "never copy `match`" rule at the
+    // point it would be easiest to accidentally do so).
+    const detectedPiiTypes = extractPiiEntities(raw)
+      .filter((p) => p.detected === true && typeof p.type === 'string')
+      .map((p) => p.type as string);
+    const piiEntityTypes = Array.from(new Set(detectedPiiTypes));
     return {
       configured: true,
       ran: true,
       attackDetected,
       userPromptAttack: attackDetected,
       documentsAttack: attackDetected && hasDocuments,
+      piiDetected: piiEntityTypes.length > 0,
+      piiEntityTypes,
       provider: BEDROCK_GUARDRAILS_PROVIDER,
       raw,
     };
@@ -344,6 +407,8 @@ export async function bedrockShieldPrompt(
       attackDetected: false,
       userPromptAttack: false,
       documentsAttack: false,
+      piiDetected: false,
+      piiEntityTypes: [],
       provider: BEDROCK_GUARDRAILS_PROVIDER,
       error: err instanceof Error ? err.message : String(err),
       raw: undefined,

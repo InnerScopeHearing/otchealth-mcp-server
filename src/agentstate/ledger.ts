@@ -76,14 +76,31 @@ export interface Task {
   attempt_count: number;
 }
 
-async function appendEvent(taskId: string, kind: string, actor: string, detail: string): Promise<void> {
+/**
+ * `claimedActor` (FND-20260829-878f): when the caller's tool input named a different identity than
+ * their authenticated token (see tools/agentstate/attribution.ts's resolveAttribution -- the actor
+ * param here is ALWAYS already the token-bound value, never the raw caller input), the mismatch is
+ * recorded on the event as its own field AND appended to `detail`, so both a structured query
+ * (`c.claimed_actor != null`) and a human skimming raw event text can see it. Never persisted onto
+ * the Task document itself -- the events container is this module's own documented "immutable audit
+ * trail" (see this file's header), which is exactly what "recorded for audit" calls for without
+ * widening the Task schema every caller of task_get/task_list already reads.
+ */
+async function appendEvent(
+  taskId: string,
+  kind: string,
+  actor: string,
+  detail: string,
+  claimedActor?: string,
+): Promise<void> {
   const ev = {
     id: newId('e'),
     type: 'event',
     task_id: taskId,
     kind,
     actor,
-    detail,
+    detail: claimedActor ? `${detail} (claimed actor: "${claimedActor}")` : detail,
+    ...(claimedActor ? { claimed_actor: claimedActor } : {}),
     ts: new Date().toISOString(),
   };
   try {
@@ -111,6 +128,10 @@ export async function createTask(input: {
   tags?: string[];
   board?: string;
   idempotency_key?: string;
+  /** FND-20260829-878f: set by the tool layer only when the caller's claimed created_by differed
+   *  from their authenticated token identity. `created_by` above is ALREADY the token-bound value
+   *  by the time it reaches here -- this is audit-only, threaded to the 'created' event. */
+  claimed_created_by?: string;
 }): Promise<{ task: Task; deduped: boolean }> {
   const owner = normalizeAgent(input.owner_agent);
   const board = (input.board || DEFAULT_BOARD).trim().toLowerCase();
@@ -157,7 +178,7 @@ export async function createTask(input: {
     }
     throw e;
   }
-  await appendEvent(task.id, 'created', input.created_by, `created for ${owner} (${task.priority})`);
+  await appendEvent(task.id, 'created', input.created_by, `created for ${owner} (${task.priority})`, input.claimed_created_by);
   return { task, deduped: false };
 }
 
@@ -184,6 +205,9 @@ export async function claimTask(
   id: string,
   agent: string,
   board = DEFAULT_BOARD,
+  /** FND-20260829-878f: audit-only, see createTask's claimed_created_by doc comment -- `agent`
+   *  above is already the token-bound value by the time it reaches here. */
+  claimedActor?: string,
 ): Promise<{ task?: Task; conflict?: boolean; reason?: string; dead_lettered?: boolean }> {
   const who = normalizeAgent(agent);
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -223,6 +247,7 @@ export async function claimTask(
         'dead_lettered',
         who,
         `attempt_count ${currentAttemptCount} >= MAX_CLAIM_ATTEMPTS ${MAX_CLAIM_ATTEMPTS}; claim by ${who} refused`,
+        claimedActor,
       );
       return { task, dead_lettered: true, reason: `task exceeded ${MAX_CLAIM_ATTEMPTS} claim attempts and has been dead-lettered` };
     }
@@ -250,6 +275,7 @@ export async function claimTask(
       'claimed',
       who,
       `lease until ${task.lease_until} (lease_version ${task.lease_version}, attempt_count ${task.attempt_count})`,
+      claimedActor,
     );
     return { task };
   }
@@ -264,6 +290,9 @@ export async function heartbeatTask(
   agent: string,
   board = DEFAULT_BOARD,
   expectedLeaseVersion?: number,
+  /** FND-20260829-878f: audit-only, see createTask's claimed_created_by doc comment -- `agent`
+   *  above is already the token-bound value by the time it reaches here. */
+  claimedActor?: string,
 ): Promise<{ task?: Task; reason?: string; fenced?: boolean }> {
   const who = normalizeAgent(agent);
   const hit = await readDoc(TASKS, board, id);
@@ -284,7 +313,7 @@ export async function heartbeatTask(
   const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
   if (res.status === 412) return { reason: 'conflict, re-read and retry' };
   if (!res.ok) return { reason: `heartbeat failed: ${res.status}` };
-  await appendEvent(id, 'heartbeat', who, `lease extended to ${task.lease_until}`);
+  await appendEvent(id, 'heartbeat', who, `lease extended to ${task.lease_until}`, claimedActor);
   return { task };
 }
 
@@ -294,6 +323,10 @@ export async function updateTask(
   actor: string,
   board = DEFAULT_BOARD,
   expectedLeaseVersion?: number,
+  /** FND-20260829-878f: audit-only, see createTask's claimed_created_by doc comment -- `actor`
+   *  above is already the token-bound value by the time it reaches here. Unrelated to
+   *  patch.owner_agent, a legitimate caller-controlled reassignment target, untouched by this fix. */
+  claimedActor?: string,
 ): Promise<{ task?: Task; reason?: string; fenced?: boolean }> {
   const hit = await readDoc(TASKS, board, id);
   if (!hit) return { reason: 'not found' };
@@ -310,7 +343,7 @@ export async function updateTask(
   const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
   if (res.status === 412) return { reason: 'conflict, re-read and retry' };
   if (!res.ok) return { reason: `update failed: ${res.status}` };
-  await appendEvent(id, 'updated', actor, JSON.stringify(patch).slice(0, 240));
+  await appendEvent(id, 'updated', actor, JSON.stringify(patch).slice(0, 240), claimedActor);
   return { task };
 }
 
@@ -322,11 +355,14 @@ export async function completeTask(
   note: string | undefined,
   board = DEFAULT_BOARD,
   expectedLeaseVersion?: number,
+  /** FND-20260829-878f: audit-only, see createTask's claimed_created_by doc comment -- `agent`
+   *  above is already the token-bound value by the time it reaches here. */
+  claimedActor?: string,
 ): Promise<{ task?: Task; rejected?: boolean; reason?: string; resolution?: unknown; fenced?: boolean }> {
   const who = normalizeAgent(agent);
   const resolution = await resolveArtifact(artifactUri);
   if (!resolution.resolved) {
-    await appendEvent(id, 'complete_rejected', who, `${artifactUri} :: ${resolution.detail}`);
+    await appendEvent(id, 'complete_rejected', who, `${artifactUri} :: ${resolution.detail}`, claimedActor);
     return {
       rejected: true,
       reason: `done = artifact landed. artifact_uri did not resolve (${resolution.scheme}: ${resolution.detail}). Land the work-product first (commons blob:, a resolvable URL, a cosmos: doc, or gh:).`,
@@ -348,7 +384,7 @@ export async function completeTask(
   const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
   if (res.status === 412) return { reason: 'conflict, re-read and retry' };
   if (!res.ok) return { reason: `complete failed: ${res.status}` };
-  await appendEvent(id, 'completed', who, `artifact ${artifactUri} (${resolution.detail})`);
+  await appendEvent(id, 'completed', who, `artifact ${artifactUri} (${resolution.detail})`, claimedActor);
   return { task, resolution };
 }
 

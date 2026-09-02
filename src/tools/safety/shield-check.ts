@@ -20,6 +20,11 @@
  *   BEDROCK_REGION (both optional, default 'DRAFT' / 'us-east-1').
  * Required env vars for the (permanently dead) legacy path, kept only for documentation:
  *   CONTENT_SAFETY_ENDPOINT, CONTENT_SAFETY_KEY
+ *
+ * PII (2026-09-02): the Bedrock path also surfaces `piiDetected`/`piiEntityTypes` -- see
+ * bedrock-guardrails.ts's PII doc-comment section. This is independent of `attackDetected` (a
+ * prompt can carry PII without being an injection attempt); see `scripts/create-guardrail.mjs` for
+ * how the live guardrail's PII entity list is configured and versioned.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -43,6 +48,12 @@ export interface ShieldCheckResult extends ShieldPromptResult {
   /** Present only when a configured provider was called and the call itself failed (network /
    *  non-2xx / malformed response). Never set alongside a real clean/attack verdict. */
   error?: string;
+  /** True when the Bedrock path's SAME call also found sensitive PII. Present (true or false) for
+   *  the Bedrock path; absent (undefined) for the legacy Azure-retired path, which never checked
+   *  PII at all. See bedrock-guardrails.ts's PII doc-comment section. */
+  piiDetected?: boolean;
+  /** PII entity TYPES only (never the matched value); see BedrockShieldResult's own doc comment. */
+  piiEntityTypes?: string[];
 }
 
 /**
@@ -61,7 +72,14 @@ export function summarizeShieldResult(result: ShieldCheckResult): string {
   if (result.error) {
     return `Prompt Shields: ERROR — the provider (${result.provider}) was called but failed: ${result.error}. This is not a scan verdict.`;
   }
-  return result.attackDetected ? 'Prompt Shields: attack DETECTED' : 'Prompt Shields: clean';
+  const attackPart = result.attackDetected ? 'Prompt Shields: attack DETECTED' : 'Prompt Shields: clean';
+  // PII is an independent signal from attackDetected (see BedrockShieldResult's doc comment) --
+  // appended rather than replacing the attack verdict, and only when the provider actually checked
+  // for it (piiDetected is undefined, not false, on the legacy Azure-retired path).
+  if (result.piiDetected === undefined) return attackPart;
+  if (!result.piiDetected) return `${attackPart}; no PII detected`;
+  const types = (result.piiEntityTypes ?? []).join(', ') || 'unspecified type';
+  return `${attackPart}; PII DETECTED (${types})`;
 }
 
 export function registerShieldCheck(server: McpServer, callerHash: CallerHashProvider): void {
@@ -73,7 +91,7 @@ export function registerShieldCheck(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Prompt Shields — injection & jailbreak detection',
         description:
-          'Detects prompt-injection and jailbreak attacks in a user prompt (and optional documents). Returns attackDetected=true when a threat is found. Provider is Amazon Bedrock Guardrails when GUARDRAIL_PROVIDER=bedrock is configured; otherwise the legacy Azure AI Content Safety path (permanently RETIRED — Azure subscription deleted) reports an honest NOT RUN. A configured provider that fails its call reports an explicit ERROR. Neither state is ever rendered as a fake clean/attack verdict; see `provider`/`ran`/`error`. Read-only; never mutates data.',
+          'Detects prompt-injection and jailbreak attacks in a user prompt (and optional documents). Returns attackDetected=true when a threat is found. On the Bedrock path also returns piiDetected/piiEntityTypes for sensitive PII found in the SAME scan (an independent signal from attackDetected). Provider is Amazon Bedrock Guardrails when GUARDRAIL_PROVIDER=bedrock is configured; otherwise the legacy Azure AI Content Safety path (permanently RETIRED, Azure subscription deleted) reports an honest NOT RUN. A configured provider that fails its call reports an explicit ERROR. Neither state is ever rendered as a fake clean/attack verdict; see `provider`/`ran`/`error`. Read-only; never mutates data.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -92,6 +110,8 @@ export function registerShieldCheck(server: McpServer, callerHash: CallerHashPro
         attackDetected: z.boolean(),
         userPromptAttack: z.boolean(),
         documentsAttack: z.boolean(),
+        piiDetected: z.boolean().optional(),
+        piiEntityTypes: z.array(z.string()).optional(),
         provider: z.string(),
         error: z.string().optional(),
         raw: z.unknown(),
