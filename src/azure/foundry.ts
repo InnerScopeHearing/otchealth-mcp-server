@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { recordOpenAIUsage } from '../telemetry/openai-cost.js';
 
 const API_VERSION = '2024-08-01-preview';
 
@@ -258,7 +259,19 @@ async function postEmbeddings<T>(target: EmbeddingsTarget, body: Record<string, 
 export async function embed(text: string): Promise<number[] | null> {
   const target = embeddingsTarget();
   if (!target) return null;
-  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }> }>(target, { input: text });
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: text });
+  // Cost visibility ONLY for the OpenAI-direct branch (target.model is set only there -- see
+  // ProviderTarget's own doc comment above). Azure/Foundry spend is a separate, already-credit-
+  // funded line this instrumentation is not trying to measure. Never throws (recordOpenAIUsage's
+  // own contract); a bug here must never break a real embedding call.
+  if (target.model) {
+    recordOpenAIUsage({
+      model: target.model,
+      kind: 'embedding',
+      promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0,
+      caller: 'gateway-embed',
+    });
+  }
   return j.data?.[0]?.embedding ?? null;
 }
 
@@ -277,9 +290,20 @@ export async function embedBatch(texts: string[]): Promise<number[][] | null> {
   const target = embeddingsTarget();
   if (!target) return null;
   if (texts.length === 0) return [];
-  const j = await postEmbeddings<{ data?: Array<{ embedding: number[]; index?: number }> }>(target, {
+  const j = await postEmbeddings<{
+    data?: Array<{ embedding: number[]; index?: number }>;
+    usage?: { prompt_tokens?: number; total_tokens?: number };
+  }>(target, {
     input: texts,
   });
+  if (target.model) {
+    recordOpenAIUsage({
+      model: target.model,
+      kind: 'embedding',
+      promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0,
+      caller: 'gateway-embed-batch',
+    });
+  }
   const data = j.data ?? [];
   return [...data]
     .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
@@ -351,8 +375,27 @@ export async function chat(
   // and safe: `user` is ignored where unsupported (incl. by OpenAI-direct) and never changes the
   // completion.
   body.user = opts?.cacheKey || promptCacheKey(target.resolvedLabel, messages);
-  const j = await postToTarget<{ choices?: Array<{ message?: { content?: string } }>; usage?: unknown; model?: string }>(target, body);
+  const j = await postToTarget<{
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+    model?: string;
+  }>(target, body);
+  const resolvedModel = j.model || target.resolvedLabel;
+  // Cost visibility ONLY for the OpenAI-direct branch (target.model is set only there -- see
+  // ProviderTarget's own doc comment above). Recorded here (inside the shared chat() function)
+  // rather than at its one current caller (tools/llm/azure.ts) so any FUTURE caller of chat() gets
+  // fleet cost visibility for free too, mirroring how embed()/embedBatch() above are instrumented.
+  if (target.model) {
+    recordOpenAIUsage({
+      model: resolvedModel,
+      kind: 'chat',
+      promptTokens: j.usage?.prompt_tokens ?? 0,
+      completionTokens: j.usage?.completion_tokens ?? 0,
+      cachedTokens: j.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      caller: 'gateway-chat',
+    });
+  }
   // The API echoes which underlying model actually answered (the Azure Model Router in particular
   // picks one per request); surface that, falling back to the resolved deployment/model label.
-  return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: j.model || target.resolvedLabel };
+  return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: resolvedModel };
 }
