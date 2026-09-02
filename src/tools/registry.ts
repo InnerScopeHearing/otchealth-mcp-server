@@ -119,6 +119,10 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // role gate (catalog/governance.ts), no secrets in its output; safe on every ship lane.
   'catalog_probe',
   'task_list', 'task_get', 'task_create', 'task_claim', 'task_update', 'task_complete', 'task_heartbeat', 'inbox_read', 'agent_dispatch',
+  // Owner setup-code minting for the URL-only connector elevation flow (2026-08-29). Advertised to
+  // ship lanes so the ChatGPT CTO seat can hand the owner the next agent's code conversationally;
+  // the handler + governance both hard-gate execution to cto/exec regardless of who can SEE it.
+  'connector_setup_code_create',
   'posthog_query_hogql', 'posthog_insight_list',
   'github_get_file_contents', 'github_list_pull_requests', 'github_issue_list', 'sentry_list_issues',
   // ITEM #2 Azure control-plane READ lane (Phase A). MUST be on the connector surface or the
@@ -263,6 +267,20 @@ export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
 ] as const;
 
 /**
+ * The seat-memory baseline every ROLE-elevated connector (occ_gpt_* / URL-only owner-code
+ * elevation, 2026-08-29) needs to honor its own instruction block: the shared team memory, the
+ * write-through verbs, checkpoint, incident lookup, and work-ledger reads. These are exactly the
+ * verbs the fleet's per-seat instructions reference ("wake, recall before asserting,
+ * memory_remember, checkpoint"); every one still carries its own in-handler ring/lane checks
+ * (memory-write.ts's ring gate among them), so advertising them here widens FINDABILITY for a lane
+ * the handler already accepts, never authority.
+ */
+const CONNECTOR_SEAT_MEMORY_BASELINE: readonly string[] = [
+  'memory_team', 'memory_remember', 'memory_pack', 'memory_reconcile', 'memory_inbound',
+  'checkpoint', 'incident_match', 'task_list', 'task_get', 'inbox_read',
+] as const;
+
+/**
  * Fixed owner-delegated CRO connector surface. The saved CRO Hyperagent skill still carries the
  * occ_cro connector credential, so this lane must be useful without widening it to the full ship
  * catalog. It exposes all bounded HeyGen reads and non-executing preflights plus only the guarded
@@ -272,11 +290,36 @@ export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
  */
 export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  ...CONNECTOR_SEAT_MEMORY_BASELINE,
   ...HEYGEN_DATA_TOOLS,
   ...HEYGEN_PREFLIGHT_TOOLS,
   'heygen_avatar_video_create',
   'heygen_existing_video_ingest_qa',
   'heygen_video_wait_ingest_qa',
+  // Commerce curation (2026-08-29, the ChatGPT fleet gap found by live tools/list probe): the CRO
+  // seat's own charter names Shopify/Customer.io/Intercom/RevenueCat/Stripe as its lane, and the
+  // M365 CRO declarative agent already curates the same families -- but this connector surface
+  // carried only HeyGen, so a role-elevated CRO connector could not even SEE its probe tool
+  // (shopify_list_products). Reads plus exactly the two bounded write families the seat's
+  // instruction block promises (draft orders, discount codes); every write still hits its own
+  // in-handler governance.
+  'shopify_list_products', 'shopify_get_product', 'shopify_collection_list',
+  'shopify_order_list', 'shopify_get_order', 'shopify_order_count',
+  'shopify_customer_search', 'shopify_customer_get', 'shopify_list_abandoned_checkouts',
+  'shopify_inventory_level_list', 'shopify_price_rule_list', 'shopify_discount_code_list',
+  'shopify_create_draft_order', 'shopify_draft_order_list', 'shopify_draft_order_get',
+  'shopify_draft_order_send_invoice', 'shopify_create_discount_code',
+  'cio_get_customer', 'cio_customer_search', 'cio_customer_get_attributes',
+  'cio_customer_get_activities', 'cio_customer_get_messages', 'cio_customer_get_segments',
+  'cio_segment_list', 'cio_campaign_list', 'cio_campaign_get', 'cio_campaign_get_metrics',
+  'cio_broadcast_list', 'cio_broadcast_get_metrics', 'cio_message_list', 'cio_transactional_list',
+  'cio_track_event',
+  'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get',
+  'intercom_contact_search', 'intercom_contact_get', 'intercom_list_articles',
+  'revenuecat_list_projects', 'revenuecat_customer_get', 'revenuecat_customer_get_subscriptions',
+  'revenuecat_customer_get_active_entitlements', 'revenuecat_offering_list', 'revenuecat_product_list',
+  'stripe_get_balance', 'stripe_list_charges', 'stripe_list_customers', 'stripe_invoice_list',
+  'stripe_subscription_list', 'stripe_list_payment_intents',
 ] as const;
 
 /**
@@ -290,6 +333,20 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
   'browser_broker_preflight',
   'browser_broker_inspect_public',
+] as const;
+
+/**
+ * Fixed COO connector surface (2026-08-29, same live-probe gap as the CRO commerce curation
+ * above): the COO seat's charter is coordination through the SHARED TEAM MEMORY and the work
+ * ledger, but this lane fell through to EXTERNAL_READONLY_TOOLSET, which advertises neither
+ * memory_team nor any write-through verb -- so a role-elevated COO connector could not perform the
+ * exact duties its instruction block names. External read baseline + the seat-memory baseline +
+ * the ledger coordination verbs. No commerce, no legal, no engineering, no privileged RAG.
+ */
+export const COO_CONNECTOR_TOOLSET: readonly string[] = [
+  ...EXTERNAL_READONLY_TOOLSET,
+  ...CONNECTOR_SEAT_MEMORY_BASELINE,
+  'task_create', 'task_update', 'agent_dispatch',
 ] as const;
 
 /**
@@ -316,9 +373,11 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
     ? env.CONNECTOR_TOOLSET || CTO_SHIP_LANE_TOOLSET.join(',')
     : lane === 'cro'
       ? CRO_CONNECTOR_TOOLSET.join(',')
-      : lane === 'wefunder-campaign-director'
-        ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
-        : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
+      : lane === 'coo'
+        ? COO_CONNECTOR_TOOLSET.join(',')
+        : lane === 'wefunder-campaign-director'
+          ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
+          : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   return new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
 }
 

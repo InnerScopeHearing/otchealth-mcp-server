@@ -147,10 +147,18 @@ export const HEYGEN_EXISTING_VIDEO_INGEST_QA_INPUT = {
   max_asset_bytes: z.number().int().min(1_048_576).max(52_428_800).optional(),
 } as const;
 
+// FND-20260829-e454: max_wait_seconds was capped at 90 -- combined with ingestHeyGenVideoArtifacts'
+// PRE-FIX 120s overall deadline (and its per-asset 2x45s download retries), a single call to this
+// tool could block for MINUTES, far past ChatGPT's 45-second-per-call hard timeout. The ingest side
+// is now bounded to ~16-18s worst case (see artifact-qa.ts's INGEST_DEADLINE_MS/
+// FETCH_ATTEMPT_TIMEOUT_MS); capping the poll side at 15s keeps the WHOLE call's worst case
+// comfortably under 40s. The tool's existing "video still processing, call again later" response
+// (unchanged below) already IS the poll-again pattern this shrink relies on -- a caller who needs
+// to wait longer than 15s simply calls again, each individual call still bounded.
 export const HEYGEN_VIDEO_WAIT_INGEST_QA_INPUT = {
   operation_id: z.string().regex(HEYGEN_OPERATION_ID_RE),
   video_id: SAFE_ID,
-  max_wait_seconds: z.number().int().min(0).max(90).optional(),
+  max_wait_seconds: z.number().int().min(0).max(15).optional(),
   poll_interval_seconds: z.number().int().min(2).max(15).optional(),
   include_captioned_video: z.boolean().optional(),
   include_subtitle: z.boolean().optional(),
@@ -797,6 +805,10 @@ export function registerHeyGenProductionTools(
         manual_visual_review_required: z.boolean(),
         checks: z.array(z.string()),
       }).strict().optional(),
+      // FND-20260829-e454: present only when the bounded ingest deadline skipped an optional
+      // asset (subtitle/thumbnail/gif/captioned_video); the mandatory video is never skipped.
+      partial: z.boolean().optional(),
+      skipped_assets: z.array(z.string()).optional(),
     },
     handler: async (input, ctx) => {
       if (!isHeyGenToolAllowed('heygen_existing_video_ingest_qa', ctx.callerAgent)) return laneRefusal('heygen_existing_video_ingest_qa', ctx.callerAgent);
@@ -847,6 +859,7 @@ export function registerHeyGenProductionTools(
             manual_visual_review_required: ingested.qa.manualVisualReviewRequired,
             checks: ingested.qa.checks,
           },
+          ...(ingested.partial ? { partial: true, skipped_assets: ingested.skippedAssets ?? [] } : {}),
         },
         audit: {
           after: {
@@ -856,7 +869,9 @@ export function registerHeyGenProductionTools(
             asset_count: ingested.assets.length,
           },
         },
-        summary: `Existing HeyGen video ${ingested.videoId} securely ingested with ${ingested.assets.length} artifact(s); visual/likeness approval remains manual.`,
+        summary:
+          `Existing HeyGen video ${ingested.videoId} securely ingested with ${ingested.assets.length} artifact(s); visual/likeness approval remains manual.` +
+          (ingested.partial ? ` BUDGET: skipped optional asset(s) [${(ingested.skippedAssets ?? []).join(', ')}] to stay within the bounded ingest deadline.` : ''),
       };
     },
   }, callerHash);
@@ -866,7 +881,7 @@ export function registerHeyGenProductionTools(
     category: 'write_orchestrated',
     annotations: {
       title: 'HeyGen: wait, ingest, and technically QA video (CTO/CRO)',
-      description: 'Polls a video tied to a durable operation for up to 90 seconds; on completion downloads only allowlisted HeyGen signed assets without logging their URLs, validates size/content magic/SRT cues, hashes them, writes private non-PHI artifacts plus a manifest to Azure Blob, and leaves visual/likeness approval explicitly manual.',
+      description: 'Polls a video tied to a durable operation for up to 15 seconds (call again if it is still processing -- each call is individually bounded well under a 45-second-class MCP client timeout); on completion downloads only allowlisted HeyGen signed assets without logging their URLs, validates size/content magic/SRT cues, hashes them, writes private non-PHI artifacts plus a manifest to Azure Blob, and leaves visual/likeness approval explicitly manual. Ingest itself is also bounded: if the deadline is reached after the mandatory video asset is already downloaded, an optional asset (subtitle/thumbnail/gif/captioned_video) is skipped rather than discarding a completed ingest, and the response says so via partial/skipped_assets.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
@@ -895,6 +910,10 @@ export function registerHeyGenProductionTools(
         manual_visual_review_required: z.boolean(),
         checks: z.array(z.string()),
       }).strict().optional(),
+      // FND-20260829-e454: present only when the bounded ingest deadline skipped an optional
+      // asset (subtitle/thumbnail/gif/captioned_video); the mandatory video is never skipped.
+      partial: z.boolean().optional(),
+      skipped_assets: z.array(z.string()).optional(),
     },
     handler: async (input, ctx) => {
       if (!isHeyGenToolAllowed('heygen_video_wait_ingest_qa', ctx.callerAgent)) return laneRefusal('heygen_video_wait_ingest_qa', ctx.callerAgent);
@@ -956,9 +975,12 @@ export function registerHeyGenProductionTools(
             manual_visual_review_required: ingested.qa.manualVisualReviewRequired,
             checks: ingested.qa.checks,
           },
+          ...(ingested.partial ? { partial: true, skipped_assets: ingested.skippedAssets ?? [] } : {}),
         },
         audit: { after: { operation_id: input.operation_id, video_id: ingested.videoId, manifest_uri: ingested.manifestUri } },
-        summary: `HeyGen video ${ingested.videoId} ingested and passed technical QA. Manual visual and likeness review remains required.`,
+        summary:
+          `HeyGen video ${ingested.videoId} ingested and passed technical QA. Manual visual and likeness review remains required.` +
+          (ingested.partial ? ` BUDGET: skipped optional asset(s) [${(ingested.skippedAssets ?? []).join(', ')}] to stay within the bounded ingest deadline.` : ''),
       };
     },
   }, callerHash);

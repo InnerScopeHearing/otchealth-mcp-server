@@ -14,6 +14,14 @@ jobs:
           GH_PAT: ${{ secrets.OTC_AUTOMATION_PAT }}
           REPO: ${{ github.repository }}
           AGENT_LOGIN: openai-code-agent
+          # 2026-08-30: issue #21 ("Nightly Medic Log") hit GitHub's 2500-comment cap ~2026-08-10.
+          # The gateway's own postAlert() was already repointed at successor issue #258
+          # ("fleet-medic alert log v2 (successor to #21)") via this exact same env var name on
+          # the live task definition on 2026-08-28 -- this line brings the nightly workflow onto
+          # the same, already-established successor instead of inventing a new one. When #258
+          # approaches the cap, its own body documents the runbook: create the next successor and
+          # bump FLEET_MEDIC_LOG_ISSUE here AND on the gateway task definition.
+          FLEET_MEDIC_LOG_ISSUE: '258'
         run: |
           curl -fsSL -o medic.mjs https://raw.githubusercontent.com/${{ github.repository }}/main/.github/scripts/nightly-medic.mjs
           node medic.mjs

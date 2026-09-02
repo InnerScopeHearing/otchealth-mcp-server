@@ -355,3 +355,23 @@ test('HeyGen tools register before M365 alias finalization', () => {
     source.indexOf('registerHeyGenTools(server, callerHash)') < source.indexOf('finalizeM365Aliases(server, callerHash)'),
   );
 });
+
+test('FND-20260829-e454: both ingest tool handlers actually surface ingestHeyGenVideoArtifacts\' partial/skippedAssets onto the tool response, not just onto the internal result object', () => {
+  // A cheap, source-level regression guard alongside artifact-qa.test.ts's own thorough
+  // behavioral tests: there is no existing handler-level test harness for production-tools.ts
+  // (its handlers are defined inline, with a large injected `deps` object covering billing/
+  // owner-approval/spend-controller machinery unrelated to this fix), so this locks the SHAPE of
+  // the one-line passthrough this fix adds to each handler, catching an accidental deletion of it.
+  const source = readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8');
+  const existingStart = source.indexOf("name: 'heygen_existing_video_ingest_qa'");
+  const waitStart = source.indexOf("name: 'heygen_video_wait_ingest_qa'");
+  const waitEnd = source.indexOf('}, callerHash);\n}', waitStart); // end of registerHeyGenProductionTools
+  assert.ok(existingStart >= 0 && waitStart > existingStart && waitEnd > waitStart);
+  const existingBlock = source.slice(existingStart, waitStart);
+  const waitBlock = source.slice(waitStart, waitEnd);
+  for (const block of [existingBlock, waitBlock]) {
+    assert.match(block, /partial: z\.boolean\(\)\.optional\(\)/, 'outputShape must declare partial');
+    assert.match(block, /skipped_assets: z\.array\(z\.string\(\)\)\.optional\(\)/, 'outputShape must declare skipped_assets');
+    assert.match(block, /ingested\.partial \? \{ partial: true, skipped_assets: ingested\.skippedAssets \?\? \[\] \} : \{\}/, 'the handler must actually spread ingested.partial/.skippedAssets onto the response data');
+  }
+});

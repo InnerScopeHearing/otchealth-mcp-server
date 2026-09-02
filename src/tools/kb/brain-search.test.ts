@@ -136,7 +136,9 @@ test('handleBrainSearch mode:"fast" is a regression: same output shape as brain_
     assert.equal(typeof data.count, 'number');
     assert.ok(Array.isArray(data.rooms_searched));
     assert.equal(data.include_ops, false);
-    for (const deepOnlyField of ['answer', 'citations', 'sub_queries', 'rounds_used']) {
+    // FND-20260829-e454: the wall-clock-budget fields are ALSO deep-only -- fast mode's code path
+    // (below the deep-mode `if`) is untouched by this fix and must never carry them.
+    for (const deepOnlyField of ['answer', 'citations', 'sub_queries', 'rounds_used', 'partial', 'continuation', 'resumed', 'budget_skipped']) {
       assert.ok(!(deepOnlyField in data), `fast mode must NOT carry the deep-only field "${deepOnlyField}"`);
     }
   });
@@ -153,7 +155,7 @@ test('DEEP_RETRIEVAL_MODE=off: mode:"deep" behaves EXACTLY like mode:"fast" (kil
       const result = await handleBrainSearch({ query: 'what is the ASC key id', mode: 'deep' }, fakeCtx('cto'));
       const data = result.data as Record<string, unknown>;
       assert.equal(data.mode, 'federated-rrf', 'kill-switched-off deep must produce the FAST mode marker, not deep-agentic');
-      for (const deepOnlyField of ['answer', 'citations', 'sub_queries', 'rounds_used']) {
+      for (const deepOnlyField of ['answer', 'citations', 'sub_queries', 'rounds_used', 'partial', 'continuation', 'resumed', 'budget_skipped']) {
         assert.ok(!(deepOnlyField in data), `kill-switched-off deep must NOT carry the deep-only field "${deepOnlyField}"`);
       }
     });
@@ -196,5 +198,72 @@ test('DEEP_RETRIEVAL_MODE unset (default "on"): mode:"deep" takes the deep path 
     assert.equal(typeof data.answer, 'string');
     assert.ok(Array.isArray(data.sub_queries));
     assert.equal(typeof data.rounds_used, 'number');
+  });
+});
+
+// --- FND-20260829-e454: handleBrainSearch wires input.continuation through to deepRetrieve, and
+// surfaces partial/continuation/resumed/budget_skipped on the tool's own `data` object exactly
+// like it already does for rooms_failed/retracted_dropped/injection_screen above. ---
+
+// NOTE: this file's preamble deliberately leaves Foundry unconfigured (see its header comment),
+// and loadEnv() caches per-process (the SAME constraint the pre-existing "DEEP_RETRIEVAL_MODE
+// unset" test above documents) -- so, unlike deep-retrieval.test.ts's own budget/continuation
+// tests, chat() can never actually be reached from THIS file, and planQuery/refineSubQueries/
+// synthesizeAnswer stay on their fail-open trivial paths for every test here. The two tests below
+// are scoped to what that constraint still lets them prove at the handler level: continuation
+// surfacing/wiring and a real time-budget trip, using search-only real search calls (not chat).
+// The full plan-skipping / re-synthesis behavior is already proven directly against deepRetrieve()
+// in deep-retrieval.test.ts, where Foundry IS configured.
+
+test('handleBrainSearch: input.continuation reaches deepRetrieve and its rooms/sub_queries are honored (not the trivial fail-open plan)', async () => {
+  await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+    // A hand-crafted continuation whose sub_queries value could never arise from the trivial
+    // fail-open plan (which always falls back to [originalQuery], i.e. ['q']) -- so seeing it
+    // echoed back in the response proves the continuation was actually consumed, not ignored.
+    const result = await handleBrainSearch(
+      { query: 'q', mode: 'deep', continuation: { rooms: ['memory-exec'], sub_queries: ['a hand-crafted resumed sub-query'], rounds_used: 1 } },
+      fakeCtx('cto'),
+    );
+    const data = result.data as Record<string, unknown>;
+    assert.equal(data.mode, 'deep-agentic');
+    assert.equal(data.resumed, true);
+    assert.deepEqual(data.sub_queries, ['a hand-crafted resumed sub-query']);
+    assert.deepEqual(data.rooms_searched, ['memory-exec']);
+    assert.equal(data.partial, undefined, 'a generously-budgeted resume must not also come back partial');
+  });
+});
+
+test('handleBrainSearch: exceeding the wall-clock budget surfaces partial:true + a continuation on the tool response (not just inside deepRetrieve)', async () => {
+  const stub = (async (url: string | URL) => {
+    const u = String(url);
+    if (isSearchUrl(u)) {
+      // A real (if tiny) sleep -- combined with DEEP_RETRIEVAL_BUDGET_MS=1 below, this
+      // deterministically guarantees the shared deadline has passed by the time deepRetrieve
+      // reaches its budget check, without depending on microsecond-scale scheduling luck.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return new Response(JSON.stringify({ value: [{ id: 'doc1', text: 'a hit', '@search.rerankerScore': 1 }] }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch to ${u} (Foundry is unconfigured in this file -- no chat/embeddings call should ever be attempted)`);
+  }) as typeof fetch;
+
+  await withStubbedFetch(stub, async () => {
+    // budgetMs is not a wire-level input field -- this proves the shape end to end using the
+    // DEEP_RETRIEVAL_BUDGET_MS env override, the same "read fresh from process.env" convention
+    // deepRetrieve itself documents. 1ms (not 0) deliberately -- resolveDeepBudgetMs treats
+    // 0/negative as "unset" and falls back to the real default.
+    const prior = process.env.DEEP_RETRIEVAL_BUDGET_MS;
+    process.env.DEEP_RETRIEVAL_BUDGET_MS = '1';
+    try {
+      const result = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'));
+      const data = result.data as Record<string, unknown>;
+      assert.equal(data.partial, true);
+      assert.ok(data.continuation, 'the tool response must surface deepRetrieve\'s continuation, not just deepRetrieve\'s own return value');
+      assert.equal(typeof data.answer, 'string');
+      assert.ok((data.answer as string).length > 0);
+      assert.ok(Array.isArray(data.matches) && (data.matches as unknown[]).length > 0, 'the already-retrieved hit is still returned in full');
+    } finally {
+      if (prior === undefined) delete process.env.DEEP_RETRIEVAL_BUDGET_MS;
+      else process.env.DEEP_RETRIEVAL_BUDGET_MS = prior;
+    }
   });
 });

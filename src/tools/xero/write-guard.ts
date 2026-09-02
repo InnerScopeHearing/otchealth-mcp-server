@@ -342,3 +342,58 @@ export function readExisting(
 export function blocksCreate(statuses: string[]): boolean {
   return statuses.length > 0;
 }
+
+/**
+ * True when `path` targets the Xero Attachments sub-resource of some record -- e.g.
+ * "/Invoices/{guid}/Attachments/{fileName}" or ".../Attachments" (a listing shape, GET-only in
+ * practice but matched here too for robustness). Detected by SEGMENT, not by a fixed position or a
+ * hardcoded endpoint allowlist (compare ATTACHMENT_ENDPOINT_ENUM in tools.ts, which enumerates the
+ * record types Xero currently lets carry attachments): the danger this guards against is the PATH
+ * SHAPE, not which specific endpoint it hangs off, so this keeps working even if Xero adds another
+ * attachment-capable endpoint or a caller mistypes one. Case-insensitive on purpose -- a caller's
+ * casing slip must never fall through to a live write instead of a loud refusal.
+ */
+export function isAttachmentPath(path: string): boolean {
+  return path
+    .replace(/^\/+/, '')
+    .split('/')
+    .some((segment) => segment.toLowerCase() === 'attachments');
+}
+
+/**
+ * Guard for `xero_request` closing the RESIDUAL half of FND-20260724-f6df (found 2026-08-28).
+ *
+ * The original finding fixed the dedicated `xero_attachment_upload` tool (xeroUploadAttachment in
+ * client.ts sends the correct raw-file-bytes-plus-real-Content-Type request Xero's Attachments API
+ * requires), but left the UNIVERSAL `xero_request` tool able to reach the exact same Attachments
+ * sub-resource unguarded. `xeroRequest()` (client.ts) always `JSON.stringify()`s its body and always
+ * sends `Content-Type: application/json` -- there was nothing stopping a caller from POSTing or
+ * PUTting straight to "/ManualJournals/{guid}/Attachments/{fileName}" through xero_request with a
+ * JSON body, silently reproducing the identical defect the dedicated tool was built to fix: Xero
+ * accepts the JSON text as though it were the file and returns a plausible 200 plus a real-shaped
+ * AttachmentID, while nothing usable is ever persisted (independently verified via xero_attachments
+ * returning `Attachments:[]` after every such attempt, at every payload size tried -- the original
+ * finding's evidence). The tool's own description already told callers not to do this; a prose
+ * warning is not an enforcement, and this is the enforcement.
+ *
+ * A DELETE is not gated: it carries no body, so it cannot trigger the JSON-body-instead-of-bytes
+ * mismatch this guard exists to prevent.
+ *
+ * Returns the exact `{error, summary}` pair the handler returns to the caller WITHOUT ever calling
+ * xeroRequest (and therefore without any network call), or null when the write may proceed. Pure
+ * function, extracted for the same reason as checkAttachmentPayloadIntegrity in tools.ts: directly
+ * unit-testable without Cosmos, ring gating, or a live Xero token.
+ */
+export function attachmentWriteRefusal(method: string, path: string): { error: string; summary: string } | null {
+  if (method.toUpperCase() === 'DELETE') return null;
+  if (!isAttachmentPath(path)) return null;
+  return {
+    error: 'use_xero_attachment_upload',
+    summary:
+      `REFUSED (nothing sent to Xero): "${path}" targets the Attachments sub-resource. xero_request always sends a ` +
+      `JSON body with Content-Type: application/json, but Xero's Attachments API requires the RAW FILE BYTES with ` +
+      `the file's own Content-Type -- this is the exact mismatch behind FND-20260724-f6df (a plausible 200 + ` +
+      `AttachmentID returned while nothing is actually persisted). Use xero_attachment_upload instead, then verify ` +
+      `with xero_attachments.`,
+  };
+}
