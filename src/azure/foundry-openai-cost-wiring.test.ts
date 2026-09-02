@@ -36,10 +36,14 @@ interface CapturedDdCall {
 function stubFetch(ddCalls: CapturedDdCall[], openaiResponse: unknown) {
   return (async (url: string, init?: RequestInit) => {
     const u = String(url);
-    if (u.includes('api.openai.com')) {
+    // Route on the PARSED hostname/path, not a substring of the raw string (CodeQL
+    // js/incomplete-url-substring-sanitization): a stub that matched 'api.openai.com' anywhere
+    // in the URL would also accept e.g. https://evil.example/?next=api.openai.com.
+    const parsed = new URL(u);
+    if (parsed.hostname === 'api.openai.com') {
       return new Response(JSON.stringify(openaiResponse), { status: 200 });
     }
-    if (u.includes('/api/v2/series')) {
+    if (parsed.pathname.endsWith('/api/v2/series')) {
       ddCalls.push({ url: u, body: JSON.parse(String(init?.body)) });
       return new Response('{}', { status: 202 });
     }
