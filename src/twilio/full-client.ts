@@ -22,10 +22,17 @@
 import { loadEnv } from '../config/env.js';
 import { TwilioApiError } from './api-client.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { incomingPhoneNumberParams, messagingServiceParams, type IncomingPhoneNumberUpdateArgs, type MessagingServiceUpdateArgs } from './params.js';
+export { incomingPhoneNumberParams, messagingServiceParams } from './params.js';
+export type { IncomingPhoneNumberUpdateArgs, MessagingServiceUpdateArgs } from './params.js';
 
 const env = loadEnv();
 
 const TWILIO_BASE = 'https://api.twilio.com/2010-04-01';
+// Messaging Services live on a DIFFERENT API host/version than the 2010-04-01 REST API. The old
+// getMessagingService path (/Accounts/{sid}/Services/{ServiceSid}.json on api.twilio.com) does not
+// exist and 404'd live on 2026-09-02; every Messaging Service call must use this base.
+const MESSAGING_BASE = 'https://messaging.twilio.com/v1';
 const ELEVENLABS_BASE = 'https://api.elevenlabs.io/v1';
 
 // ── Auth helpers ─────────────────────────────────────────────────────────────
@@ -126,9 +133,9 @@ function mapTwilioError(status: number, path: string, data: any): TwilioApiError
   });
 }
 
-async function twilioGet<T = unknown>(path: string): Promise<T> {
+async function twilioGet<T = unknown>(path: string, base: string = TWILIO_BASE): Promise<T> {
   const creds = requireTwilioCreds();
-  const url = `${TWILIO_BASE}${path}`;
+  const url = `${base}${path}`;
   let statusCode: number;
   let text: string;
   try {
@@ -154,9 +161,9 @@ async function twilioGet<T = unknown>(path: string): Promise<T> {
   throw mapTwilioError(statusCode, path, data);
 }
 
-async function twilioPost<T = unknown>(path: string, params: Record<string, string>): Promise<T> {
+async function twilioPost<T = unknown>(path: string, params: Record<string, string>, base: string = TWILIO_BASE): Promise<T> {
   const creds = requireTwilioCreds();
-  const url = `${TWILIO_BASE}${path}`;
+  const url = `${base}${path}`;
   const body = new URLSearchParams(params).toString();
   let statusCode: number;
   let text: string;
@@ -423,19 +430,9 @@ export async function getIncomingPhoneNumber(phoneSid: string): Promise<any> {
   return twilioGet(`/Accounts/${creds.sid}/IncomingPhoneNumbers/${phoneSid}.json`);
 }
 
-export async function updateIncomingPhoneNumber(phoneSid: string, args: {
-  friendly_name?: string;
-  sms_url?: string;
-  voice_url?: string;
-  status_callback?: string;
-}): Promise<any> {
+export async function updateIncomingPhoneNumber(phoneSid: string, args: IncomingPhoneNumberUpdateArgs): Promise<any> {
   const creds = requireTwilioCreds();
-  const params: Record<string, string> = {};
-  if (args.friendly_name) params.FriendlyName = args.friendly_name;
-  if (args.sms_url) params.SmsUrl = args.sms_url;
-  if (args.voice_url) params.VoiceUrl = args.voice_url;
-  if (args.status_callback) params.StatusCallback = args.status_callback;
-  return twilioPost(`/Accounts/${creds.sid}/IncomingPhoneNumbers/${phoneSid}.json`, params);
+  return twilioPost(`/Accounts/${creds.sid}/IncomingPhoneNumbers/${phoneSid}.json`, incomingPhoneNumberParams(args));
 }
 
 export async function releasePhoneNumber(phoneSid: string): Promise<void> {
@@ -493,8 +490,13 @@ export async function listMessagingServices(page_size = 20): Promise<any[]> {
 }
 
 export async function getMessagingService(serviceSid: string): Promise<any> {
-  const creds = requireTwilioCreds();
-  return twilioGet(`/Accounts/${creds.sid}/Services/${serviceSid}.json`);
+  requireTwilioCreds();
+  return twilioGet(`/Services/${serviceSid}`, MESSAGING_BASE);
+}
+
+export async function updateMessagingService(serviceSid: string, args: MessagingServiceUpdateArgs): Promise<any> {
+  requireTwilioCreds();
+  return twilioPost(`/Services/${serviceSid}`, messagingServiceParams(args), MESSAGING_BASE);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
