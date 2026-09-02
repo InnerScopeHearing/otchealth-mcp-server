@@ -827,6 +827,7 @@ import { registerTwilioMessageGet } from './twilio/message-get.js';
 import { registerTwilioMessageListMedia } from './twilio/message-list-media.js';
 import { registerTwilioMessageRedact } from './twilio/message-redact.js';
 import { registerTwilioMessagingServiceGet } from './twilio/messaging-service-get.js';
+import { registerTwilioMessagingServiceUpdate } from './twilio/messaging-service-update.js';
 import { registerTwilioMessagingServiceList } from './twilio/messaging-service-list.js';
 import { registerTwilioNumberBuy } from './twilio/number-buy.js';
 import { registerTwilioNumberGet } from './twilio/number-get.js';
@@ -1868,6 +1869,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerTwilioMessageListMedia(server, callerHash);
   registerTwilioMessageRedact(server, callerHash);
   registerTwilioMessagingServiceGet(server, callerHash);
+  registerTwilioMessagingServiceUpdate(server, callerHash);
   registerTwilioMessagingServiceList(server, callerHash);
   registerTwilioNumberBuy(server, callerHash);
   registerTwilioNumberGet(server, callerHash);

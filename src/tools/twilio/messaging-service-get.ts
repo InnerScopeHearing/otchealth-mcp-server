@@ -9,7 +9,7 @@ export function registerTwilioMessagingServiceGet(server: McpServer, callerHash:
     category: 'read',
     annotations: {
       title: 'Get Twilio Messaging Service',
-      description: 'Fetches full details of a Twilio Messaging Service by SID via GET /Accounts/{SID}/Services/{ServiceSid}.json. Read-only.',
+      description: 'Fetches a Twilio Messaging Service by SID via GET https://messaging.twilio.com/v1/Services/{ServiceSid}. Read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -23,6 +23,8 @@ export function registerTwilioMessagingServiceGet(server: McpServer, callerHash:
       friendly_name: z.string().nullable(),
       inbound_request_url: z.string().nullable(),
       fallback_url: z.string().nullable(),
+      status_callback: z.string().nullable(),
+      use_inbound_webhook_on_number: z.boolean().nullable(),
       date_created: z.string().nullable(),
     },
     handler: async (input) => {
@@ -33,6 +35,8 @@ export function registerTwilioMessagingServiceGet(server: McpServer, callerHash:
           friendly_name: svc.friendly_name ?? null,
           inbound_request_url: svc.inbound_request_url ?? null,
           fallback_url: svc.fallback_url ?? null,
+          status_callback: svc.status_callback ?? null,
+          use_inbound_webhook_on_number: typeof svc.use_inbound_webhook_on_number === 'boolean' ? svc.use_inbound_webhook_on_number : null,
           date_created: svc.date_created ?? null,
         },
         summary: `Messaging Service ${svc.sid}: ${svc.friendly_name ?? '(no name)'}`,
