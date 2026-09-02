@@ -57,29 +57,33 @@ export function llmMetricPoints(
   ];
 }
 
-/**
- * Fire-and-forget submission of the per-call LLM metrics. Never awaited, never throws, times out
- * fast (1.5s), and no-ops when DD_API_KEY is unset. Safe to call in the hot path.
- */
-export function emitLlmMetrics(
-  model: string,
-  task: string,
-  s: { prompt_tokens: number; cached_tokens: number; cached_pct: number },
-): void {
-  let key = '';
-  let site = 'datadoghq.com';
+/** Resolve the Datadog metrics credential once, shared by every emitter in this file. Prefers a
+ *  DEDICATED metrics key so custom-metric emission can be enabled WITHOUT turning on full APM
+ *  tracing (instrument.ts keys APM off DD_API_KEY); falls back to DD_API_KEY when a single key is
+ *  used for both. Never throws (an env-access failure resolves to an empty key, which every caller
+ *  below already treats as "inert"). */
+function resolveDdCreds(): { key: string; site: string } {
   try {
-    // Prefer a DEDICATED metrics key so custom-metric emission can be enabled WITHOUT turning on
-    // full APM tracing (instrument.ts keys APM off DD_API_KEY). Falls back to DD_API_KEY when a
-    // single key is used for both.
-    key = process.env.DD_METRICS_API_KEY || process.env.DD_API_KEY || '';
-    site = process.env.DD_SITE || site;
+    return {
+      key: process.env.DD_METRICS_API_KEY || process.env.DD_API_KEY || '',
+      site: process.env.DD_SITE || 'datadoghq.com',
+    };
   } catch {
-    return;
+    return { key: '', site: 'datadoghq.com' };
   }
-  if (!key) return;
-  const payload = buildSeriesPayload(llmMetricPoints(model, task, s));
+}
+
+/**
+ * Fire-and-forget POST of an already-built v2/series payload. Never awaited by the caller, never
+ * throws, times out fast (1.5s), and no-ops when no key resolves or the payload is empty. This is
+ * the ONE place that talks to the Datadog HTTP metrics API in this file -- emitLlmMetrics and
+ * emitOpenAIFleetMetrics below both route through it so the key/site resolution and the
+ * fetch/timeout/fire-and-forget shape are written once, not duplicated per metric family.
+ */
+function submitSeriesFireAndForget(payload: ReturnType<typeof buildSeriesPayload>): void {
   if (!payload) return;
+  const { key, site } = resolveDdCreds();
+  if (!key) return;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 1500);
   void fetch(`https://api.${site}/api/v2/series`, {
@@ -90,4 +94,64 @@ export function emitLlmMetrics(
   })
     .catch(() => {})
     .finally(() => clearTimeout(timer));
+}
+
+/**
+ * Fire-and-forget submission of the per-call LLM metrics. Never awaited, never throws, times out
+ * fast (1.5s), and no-ops when DD_API_KEY is unset. Safe to call in the hot path.
+ */
+export function emitLlmMetrics(
+  model: string,
+  task: string,
+  s: { prompt_tokens: number; cached_tokens: number; cached_pct: number },
+): void {
+  submitSeriesFireAndForget(buildSeriesPayload(llmMetricPoints(model, task, s)));
+}
+
+/**
+ * Pure: the fleet-wide OpenAI cost-visibility points for one usage event, under the SAME metric
+ * names and tag shape as otchealth-claude-tools' setup/openai-usage.mjs (`otc.fleet.openai.*`,
+ * tags model/kind/caller/repo/unknown, plus direction:input|output on the tokens metric) -- so a
+ * single Datadog query/monitor covers spend from BOTH repos without special-casing which one
+ * produced a given point (the `repo` tag distinguishes origin when that matters). See
+ * otchealth-claude-tools/docs/OPENAI-COST-VISIBILITY.md for the full cross-repo contract.
+ *
+ * Unlike the toolkit's CLI-oriented sibling, this gateway emits ONE point per real call (no
+ * buffering/aggregation) -- the gateway is a long-running server, and firing per-call mirrors this
+ * file's own pre-existing emitLlmMetrics() pattern rather than introducing a second, inconsistent
+ * emission model into the same process.
+ */
+export function openAIUsageMetricPoints(input: {
+  model: string;
+  kind: string;
+  caller: string;
+  repo?: string;
+  unknown: boolean;
+  promptTokens: number;
+  completionTokens: number;
+  costUsd: number;
+}): DdPoint[] {
+  const tags = [
+    `model:${input.model || 'unknown'}`,
+    `kind:${input.kind || 'other'}`,
+    `caller:${input.caller || 'unknown'}`,
+    `repo:${input.repo || 'otchealth-mcp-server'}`,
+    `unknown:${input.unknown ? 'true' : 'false'}`,
+  ];
+  const pts: DdPoint[] = [];
+  if (input.promptTokens > 0) {
+    pts.push({ metric: 'otc.fleet.openai.tokens', value: input.promptTokens, type: 1, tags: [...tags, 'direction:input'] });
+  }
+  if (input.completionTokens > 0) {
+    pts.push({ metric: 'otc.fleet.openai.tokens', value: input.completionTokens, type: 1, tags: [...tags, 'direction:output'] });
+  }
+  pts.push({ metric: 'otc.fleet.openai.requests', value: 1, type: 1, tags });
+  pts.push({ metric: 'otc.fleet.openai.cost_usd_est', value: input.costUsd, type: 1, tags });
+  return pts;
+}
+
+/** Fire-and-forget submission of the fleet-wide OpenAI cost/usage points for one call. Never
+ *  awaited, never throws, no-ops when no Datadog key resolves. See openAIUsageMetricPoints above. */
+export function emitOpenAIFleetMetrics(points: DdPoint[]): void {
+  submitSeriesFireAndForget(buildSeriesPayload(points));
 }
