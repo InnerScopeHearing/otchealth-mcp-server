@@ -123,6 +123,9 @@ import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js'
 import { registerKbSearch } from './kb/search.js';
 import { registerBrainSearch } from './kb/brain-search.js';
 import { registerWebSearch } from './web/web-search.js';
+// Task G-3 (2026-09-03): Tavily-only parity tools alongside web_search -- see each file's header.
+import { registerWebResearch } from './web/web-research.js';
+import { registerWebExtract } from './web/web-extract.js';
 import { registerKbSearchPrivileged } from './kb/search-privileged.js';
 import { registerKbGetDocument } from './kb/get-document.js';
 
@@ -1083,6 +1086,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerBrainSearch(server, callerHash);
   registerRetrievalFeedback(server, callerHash); // write_simple: opt-in feedback on a brain_search/kb_search hit (Wave 7 item 7.1)
   registerWebSearch(server, callerHash);
+  // Task G-3 (2026-09-03): web_search parity -- deeper multi-step research + fetch-a-known-URL,
+  // both Tavily-only regardless of WEB_SEARCH_PROVIDER (see each file's header).
+  registerWebResearch(server, callerHash);
+  registerWebExtract(server, callerHash);
   registerKbSearchPrivileged(server, callerHash);
   registerKbGetDocument(server, callerHash);
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. NON-PRIVILEGED rooms only —

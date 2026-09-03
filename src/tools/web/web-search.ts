@@ -23,6 +23,7 @@ import { loadEnv } from '../../config/env.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
 import { azureWebSearch } from './providers/azure-web-search.js';
 import { tavilyWebSearch } from './providers/tavily-web-search.js';
+import { loadDomainGovernance } from './domain-governance.js';
 import type { WebSearchResult } from './providers/types.js';
 
 export type WebSearchProvider = 'azure' | 'tavily';
@@ -41,7 +42,12 @@ export function resolveWebSearchProvider(): WebSearchProvider {
  *  WebSearchResult shape (providers/types.ts) with no reshaping needed here -- that shared contract
  *  is what makes this a genuine drop-in switch rather than a per-provider special case. */
 async function dispatchToProvider(provider: WebSearchProvider, query: string): Promise<WebSearchResult> {
-  return provider === 'tavily' ? tavilyWebSearch(query, loadEnv().TAVILY_API_KEY) : azureWebSearch(query);
+  // Domain governance (Task G-3, domain-governance.ts) is Tavily-only, like TAVILY_API_KEY itself
+  // just above -- azureWebSearch() predates this feature and stays byte-identical (see its own
+  // header for why that provider is deliberately untouched).
+  return provider === 'tavily'
+    ? tavilyWebSearch(query, loadEnv().TAVILY_API_KEY, loadDomainGovernance(loadEnv()))
+    : azureWebSearch(query);
 }
 
 /**
