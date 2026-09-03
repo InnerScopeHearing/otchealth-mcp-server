@@ -176,3 +176,32 @@ test('a model_not_found-style 404 fails LOUDLY (the safe failure mode for a wron
 // 'sk-test-key' -- the exact trap this file's own header warns about, one level removed (mutating
 // process.env.OPENAI_API_KEY mid-file has no effect on the cached parse). See
 // chat-provider-unconfigured.test.ts for that scenario in its own process.
+
+// ---- temperature gate for models that reject any non-default value (live-verified 2026-09-03) ----
+
+test('a caller temperature is OMITTED for the gpt-5.6 family (api.openai.com 400s "Unsupported value: temperature" on luna/terra), so the router-tier temperature:0 caller keeps working on the new default', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.6-luna' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { temperature: 0, maxTokens: 20, tier: 'router' }),
+  );
+  assert.equal(body.model, 'gpt-5.6-luna');
+  assert.equal('temperature' in body, false, 'temperature must not be sent to a gpt-5.6 model');
+  assert.equal(body.max_completion_tokens, 20, 'the rest of the body is untouched');
+});
+
+test('a caller temperature is still passed through verbatim for models that accept it (gpt-5.1 verified live: temperature 0 -> HTTP 200)', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { temperature: 0, maxTokens: 20, deployment: 'gpt-5.1' }),
+  );
+  assert.equal(body.model, 'gpt-5.1');
+  assert.equal(body.temperature, 0, 'non-gpt-5.6 models keep the caller temperature');
+});

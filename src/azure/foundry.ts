@@ -184,6 +184,23 @@ function openaiModelForTier(e: ReturnType<typeof loadEnv>, tier?: 'standard' | '
 }
 
 /**
+ * Models that reject ANY non-default `temperature` outright -- api.openai.com answers HTTP 400
+ * "Unsupported value: 'temperature' does not support 0.0 with this model. Only the default (1)
+ * value is supported." LIVE-VERIFIED 2026-09-03 from the CTO seat: gpt-5.6-luna and gpt-5.6-terra
+ * reject temperature 0; gpt-5.1 and gpt-5.4 ACCEPT it (HTTP 200). So the gate is exactly the
+ * gpt-5.6 family, NOT "every gpt-5 model": widening it would silently change the sampling of the
+ * gpt-5.1/5.4 callers that rely on temperature 0 today (src/memory/auto-supersede-runtime.ts passes
+ * temperature 0 on tier:'router'), and narrowing it would 400 every such call the moment the
+ * gpt-5.6 defaults above (or an OPENAI_*_MODEL env pointing at them) take effect. chat() below
+ * simply omits `temperature` for these models, the same way the toolkit's chatBody() drops it for
+ * reasoning-family deployments; callers keep their own temperature for every other model. Extend
+ * the pattern only after a live probe proves a new family rejects the parameter too.
+ */
+export function rejectsTemperature(model: string): boolean {
+  return /^gpt-5\.6-/i.test(String(model || ''));
+}
+
+/**
  * Resolve where a chat() call should go: URL, headers, and the model/deployment to use, for the
  * ACTIVE provider (LLM_PROVIDER) and the requested tier. `deploymentOverride` (chat()'s `deployment`
  * opt) forces an exact deployment name (Foundry) or model id (OpenAI) regardless of tier, mirroring
@@ -396,7 +413,10 @@ export async function chat(
     messages,
     max_completion_tokens: opts?.maxTokens ?? 1024,
   };
-  if (typeof opts?.temperature === 'number') body.temperature = opts.temperature;
+  // temperature: passed through verbatim when a caller sets it, EXCEPT for models that reject any
+  // non-default value (see rejectsTemperature() above -- the gpt-5.6 family, live-verified), where
+  // it is omitted so the call succeeds instead of 400ing.
+  if (typeof opts?.temperature === 'number' && !rejectsTemperature(target.resolvedLabel)) body.temperature = opts.temperature;
   if (opts?.jsonMode) body.response_format = { type: 'json_object' };
   // reasoning_effort: see the reasoningEffort opt's own doc comment above for the full contract
   // (emitted only when the caller sets it; unused by every call site today).
