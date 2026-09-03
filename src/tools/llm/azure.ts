@@ -24,7 +24,7 @@ import { checkFaqDeflect, seedFaqStore, faqDeflectOn } from './faq-deflect.js';
 
 const TASK_PROMPTS: Record<string, string> = {
   summarize: 'You are a precise summarizer. Produce a faithful, well-structured summary of the user content. Preserve key facts, numbers, names, and decisions. No preamble.',
-  classify: 'You are a classifier. Assign the single best label from the provided set. Reply with only the label.',
+  classify: 'You are a classifier. Assign the single best label from the provided set. Reply with only the label; when JSON output is requested, reply with exactly {"label": "<label>"}.',
   extract: 'You are a structured-data extractor. Extract the requested fields from the user content accurately. Reply with JSON only.',
   synthesize: 'You synthesize multiple sources into one coherent, accurate answer grounded strictly in the provided content. Preserve specifics; no outside facts; no preamble.',
   complete: 'You are a capable, concise assistant for routine text work.',
