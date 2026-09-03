@@ -83,6 +83,10 @@ import { EXEC_RING } from './kb/search-privileged.js';
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'web_search', 'kb_search', 'kb_search_privileged',
+  // web_research / web_extract (Task G-3, 2026-09-03): web_search's own deeper-research and
+  // fetch-a-known-URL siblings, added in the SAME change that registers them -- see web-search.ts's
+  // omission-class comments above for why a tool is not done until it is visible here too.
+  'web_research', 'web_extract',
   // kb_get_document: whole-document retrieval from the finance/legal doc rooms (paginated, ring-gated
   // in get-document.ts). MUST be on the connector surface or the Claude Chat CFO cannot SEE it -- and
   // kb_search returns only chunk SNIPPETS, so without this the CFO can never pull a full source doc
@@ -264,6 +268,11 @@ export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
   // brain-search.ts's roomsFor() and fetch independently re-derives + re-checks the ring per call
   // rather than trusting the id) — see kb/openai-search.ts + kb/openai-fetch.ts headers.
   'search', 'fetch',
+  // web_research / web_extract (Task G-3, 2026-09-03): the SAME read-only exposure web_search
+  // already has here, nothing wider -- both tools are non-privileged by construction (Tavily-only,
+  // MNPI-gated the same way, no write capability) so belong on every external/unrecognized lane
+  // exactly like web_search does. See web-research.ts / web-extract.ts headers.
+  'web_research', 'web_extract',
 ] as const;
 
 /**
