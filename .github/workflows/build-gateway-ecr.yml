@@ -27,6 +27,12 @@ on:
 
 permissions:
   contents: read
+  # Required to mint the OIDC token aws-actions/configure-aws-credentials exchanges for a
+  # short-lived AWS credential below. Granting this alone authorizes nothing by itself -- it only
+  # lets the workflow REQUEST a token; whether any AWS role trusts that token is decided entirely
+  # by that role's own trust policy (infra/oidc/policies/trust-gateway-ecr-push.json in
+  # otchealth-cto), not by anything in this file.
+  id-token: write
 
 jobs:
   build:
@@ -62,37 +68,55 @@ jobs:
       # definition's runtimePlatform, so this is safe to land and push before any task
       # definition is touched -- the currently-running amd64 service keeps pulling amd64 from
       # this exact tag until a task definition is deliberately switched to ARM64/Graviton.
-      - name: Set up QEMU (arm64 emulation on the amd64 runner)
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: arm64
+      # Depot's remote builders are native linux/amd64 AND linux/arm64 hardware, so this no longer
+      # needs docker/setup-qemu-action (arm64 emulation) or docker/setup-buildx-action at all --
+      # depot/build-push-action drives the build on Depot's own infrastructure and only pushes the
+      # resulting manifest through this runner's already-authenticated ECR docker credential.
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # OIDC role when the repo variable is configured; the pre-existing static ECR-push IAM
+      # user's key as a fallback otherwise. Exactly one of role-to-assume / access-key-id ever
+      # evaluates non-empty, never both -- see otchealth-cto/infra/oidc/README.md for why (in
+      # short: aws-actions/configure-aws-credentials treats a non-empty role-to-assume PLUS a
+      # non-empty static key as "use the static key to assume the role," which the new OIDC
+      # role's trust policy does not authorize and would fail). Until AWS_OIDC_ROLE_ARN is set as
+      # a repository variable (otchealth-cto/infra/oidc/apply-github-oidc-roles.sh prints the
+      # exact command once the role exists), this resolves to the second branch on every run,
+      # unchanged from today. This credential is verified DENIED ssm:GetParameter (see
+      # infra/oidc/permissions-gateway-ecr-push.json in otchealth-cto), matching the existing
+      # static IAM user's own least-privilege scope.
+      - name: Configure AWS credentials (OIDC role when configured, static key fallback otherwise)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
-          aws-access-key-id: ${{ secrets.ECR_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.ECR_AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          role-session-name: gateway-ecr-push-${{ github.run_id }}
+          aws-access-key-id: ${{ vars.AWS_OIDC_ROLE_ARN == '' && secrets.ECR_AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ vars.AWS_OIDC_ROLE_ARN == '' && secrets.ECR_AWS_SECRET_ACCESS_KEY || '' }}
           aws-region: us-east-1
 
       - name: Log in to Amazon ECR
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@aded0d722166a37980e030aa969dda0bfe6b6947 # v2.1.7
 
-      - name: Build and push (linux/amd64 + linux/arm64)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - name: Set up Depot CLI
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
+
+      - name: Build and push (linux/amd64 + linux/arm64) via Depot
+        uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1.18.0
         with:
+          # The account's one existing Depot project (confirmed live via the gateway's
+          # depot_list_projects on 2026-09-03: id p5k0c551zm, name "default" -- it is the ONLY
+          # project in the account, already shared across whatever else runs through Depot Build
+          # here). Overridable via a repo variable if the CTO later splits the gateway onto its
+          # own dedicated Depot project; falls back to the one confirmed-live project otherwise.
+          project: ${{ vars.DEPOT_PROJECT_ID || 'p5k0c551zm' }}
+          token: ${{ secrets.DEPOT_TOKEN }}
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.ecr.outputs.registry }}/otchealth-mcp-gateway:${{ steps.tag.outputs.tag }}
-          # GHA layer cache keeps the added arm64 leg from doubling wall-clock time on every run.
-          # There was no cache config before this (a plain `docker build`), so this is new, not
-          # a preserved setting.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache-from/cache-to: Depot's remote builders maintain their own persistent
+          # per-project build cache automatically; the GHA-cache inputs the buildx path needed are
+          # Depot-irrelevant and removed rather than carried over as dead configuration.
           # Keep the pushed artifact a plain two-platform manifest list, matching today's shape
           # (one manifest per tag) just widened to two platforms. Provenance/SBOM attestations
           # add extra referrer manifests to the index that nothing downstream has ever had to
