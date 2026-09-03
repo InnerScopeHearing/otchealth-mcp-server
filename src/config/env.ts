@@ -440,6 +440,29 @@ const EnvSchema = z.object({
     .default('')
     .refine((value) => value === '' || value.startsWith('tvly-'), 'TAVILY_API_KEY must be a Tavily tvly- key'),
 
+  // DOMAIN GOVERNANCE for every Tavily-backed open-web tool (web_search, web_research, web_extract
+  // -- Task G-3, 2026-09-03, src/tools/web/domain-governance.ts). CSV, case-insensitive, trimmed;
+  // both default to '' (no restriction). Matching is host-suffix (a listed domain also matches its
+  // subdomains), the SAME convention as safety/mnpi-gate.ts's INTERNAL_EMAIL_DOMAINS -- kept
+  // consistent rather than inventing a second domain-matching shape in this codebase.
+  //
+  //   WEB_SEARCH_DOMAIN_ALLOW   when non-empty, only these domains (Tavily's include_domains) are
+  //                             preferred/admitted; when empty (default), no allow restriction.
+  //   WEB_SEARCH_DOMAIN_DENY    these domains (Tavily's exclude_domains) are never returned. DENY
+  //                             ALWAYS WINS: a domain listed on both is still excluded -- see
+  //                             domain-governance.ts's domainAllowed() for the exact precedence.
+  //
+  // Applied TWO ways, per tool: (1) as Tavily's own include_domains/exclude_domains request
+  // parameters on web_search's /search and web_research's /research (Tavily's own enforcement,
+  // reducing what it even fetches) -- NOT available on /extract, which has no such parameter, so
+  // web_extract instead pre-filters its caller-supplied `urls` before ever calling Tavily; and (2)
+  // as a governance-side POST-FILTER on every tool's results regardless, a code-level backstop
+  // independent of how strictly Tavily's own parameter is honored (its own docs describe
+  // /research's include_domains as only a "soft preference", not a hard filter). See
+  // domain-governance.ts's header for the full contract.
+  WEB_SEARCH_DOMAIN_ALLOW: z.string().optional().default(''),
+  WEB_SEARCH_DOMAIN_DENY: z.string().optional().default(''),
+
   // Which store serves DOCUMENT reads (kb_get_document, legal_blob_get, _TEXT sidecars) AND, for
   // the containers listed in blob-store.ts's S3_WRITABLE_CONTAINERS, writes too.
   //   azure            Azure Blob, via src/legal/blob-store.ts. PERMANENTLY UNREACHABLE

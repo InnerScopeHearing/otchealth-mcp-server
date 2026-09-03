@@ -43,8 +43,16 @@
  *
  * POST https://api.tavily.com/search, bearer-token auth. Full pricing + the signup step live on
  * TAVILY_API_KEY's schema comment in config/env.ts (single source of truth so the two never drift).
+ *
+ * DOMAIN GOVERNANCE (Task G-3, 2026-09-03, domain-governance.ts): `governance` is an OPTIONAL third
+ * parameter, defaulted to the empty (no-op) value, for the SAME reason `apiKey` is a plain
+ * parameter rather than an internal loadEnv() read -- this module stays a pure function of its
+ * arguments, and every EXISTING call site/test that predates this feature (a bare two-argument
+ * `tavilyWebSearch(query, apiKey)` call) keeps compiling and behaving byte-for-byte as before,
+ * since an empty governance value adds no request-body keys and filters nothing.
  */
 import { fetchWithBudget } from '../../../util/fetch-budget.js';
+import { filterCitationsByDomain, tavilyDomainRequestParams, NO_DOMAIN_GOVERNANCE, type DomainGovernance } from '../domain-governance.js';
 import type { WebSearchResult } from './types.js';
 
 const TAVILY_SEARCH_URL = 'https://api.tavily.com/search';
@@ -82,7 +90,11 @@ export function tavilyWebSearchConfigured(apiKey: string): boolean {
  * and must stay byte-identical; a genuinely new provider has no such constraint, so it takes the key
  * as a parameter -- the more testable shape, and the one this file's own test suite relies on).
  */
-export async function tavilyWebSearch(query: string, apiKey: string): Promise<WebSearchResult> {
+export async function tavilyWebSearch(
+  query: string,
+  apiKey: string,
+  governance: DomainGovernance = NO_DOMAIN_GOVERNANCE,
+): Promise<WebSearchResult> {
   if (!tavilyWebSearchConfigured(apiKey)) {
     return { answer: '', citations: [], mode: 'unconfigured' };
   }
@@ -101,6 +113,9 @@ export async function tavilyWebSearch(query: string, apiKey: string): Promise<We
           include_answer: 'basic',
           search_depth: 'basic',
           max_results: MAX_RESULTS,
+          // Omits both keys entirely when governance is unconfigured -- see tavilyDomainRequestParams's
+          // own doc comment for why that keeps this body byte-for-byte unchanged in that case.
+          ...tavilyDomainRequestParams(governance),
         }),
       },
       // Tavily's own searches are typically fast, but this mirrors the Azure provider's generous 60s
@@ -126,9 +141,13 @@ export async function tavilyWebSearch(query: string, apiKey: string): Promise<We
     return { answer: '', citations: [], mode: 'error', error: `tavily ${r.status}: ${String(msg).slice(0, 200)}` };
   }
   const answer = typeof j.answer === 'string' ? j.answer : '';
-  const citations = (j.results ?? [])
+  const rawCitations = (j.results ?? [])
     .filter((res) => res && (res.url || res.title))
     .map((res) => ({ title: res.title, url: res.url }));
+  // Post-filter (defense in depth, domain-governance.ts's module header): re-applies the SAME
+  // allow/deny governance already sent as include_domains/exclude_domains above, independent of how
+  // strictly Tavily itself enforces that parameter. A no-op (identical array) when unconfigured.
+  const citations = filterCitationsByDomain(rawCitations, governance);
   // Same 4000-char cap as the Azure provider, so a caller reading `answer` sees a consistent bound
   // regardless of which provider actually served the request.
   return { answer: answer.slice(0, 4000), citations, mode: 'web' };

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tavilyWebSearch, tavilyWebSearchConfigured } from './tavily-web-search.js';
+import { NO_DOMAIN_GOVERNANCE } from '../domain-governance.js';
 
 // This module takes its API key as a plain function argument (not through loadEnv()) precisely so
 // it is testable like this, with no per-process env-parse cache to work around.
@@ -106,6 +107,67 @@ test('a network failure surfaces as a bounded timeout error, never a thrown exce
   );
   assert.equal(result.mode, 'error');
   assert.equal(result.error, 'web_search timeout');
+});
+
+// ── Task G-3 (2026-09-03): domain governance -- request shaping + result post-filter ──
+
+test('a bare 2-argument call (no governance) is unaffected: no include_domains/exclude_domains key at all', async () => {
+  let seenBody: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_url: string, init?: RequestInit) => {
+      seenBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ answer: '', results: [] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => tavilyWebSearch('anything', 'tvly-test-key'),
+  );
+  assert.equal('include_domains' in seenBody, false);
+  assert.equal('exclude_domains' in seenBody, false);
+});
+
+test('an explicit NO_DOMAIN_GOVERNANCE value behaves identically to omitting the parameter', async () => {
+  let seenBody: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_url: string, init?: RequestInit) => {
+      seenBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ answer: '', results: [] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => tavilyWebSearch('anything', 'tvly-test-key', NO_DOMAIN_GOVERNANCE),
+  );
+  assert.equal('include_domains' in seenBody, false);
+  assert.equal('exclude_domains' in seenBody, false);
+});
+
+test('a configured allow/deny governance is sent as include_domains/exclude_domains on the request', async () => {
+  let seenBody: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_url: string, init?: RequestInit) => {
+      seenBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ answer: '', results: [] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => tavilyWebSearch('anything', 'tvly-test-key', { allow: ['good.example'], deny: ['evil.example'] }),
+  );
+  assert.deepEqual(seenBody.include_domains, ['good.example']);
+  assert.deepEqual(seenBody.exclude_domains, ['evil.example']);
+});
+
+test('governance ALSO post-filters the response citations, independent of what Tavily itself returned', async () => {
+  const result = await withStubbedFetch(
+    (async () =>
+      new Response(
+        JSON.stringify({
+          answer: 'an answer citing both',
+          results: [
+            { title: 'a good source', url: 'https://good.example/a' },
+            { title: 'a source Tavily returned anyway despite exclude_domains', url: 'https://evil.example/b' },
+          ],
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch,
+    () => tavilyWebSearch('anything', 'tvly-test-key', { allow: [], deny: ['evil.example'] }),
+  );
+  assert.equal(result.mode, 'web');
+  assert.equal(result.citations.length, 1);
+  assert.deepEqual(result.citations[0], { title: 'a good source', url: 'https://good.example/a' });
 });
 
 test('the answer is capped at 4000 characters, same as the Azure provider', async () => {
