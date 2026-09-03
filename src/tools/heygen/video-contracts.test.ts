@@ -102,11 +102,18 @@ test('credit estimate is conservative, engine-aware, and custom Avatar IV motion
   assert.equal(ivMotion.credits, (iv.credits - 1) * 2 + 1);
 });
 
-test('Avatar IV six-second canary uses a three-credit conservative bound after the 591-to-588 incident', () => {
+test('Avatar IV six-second canary uses a five-credit conservative bound under the published 31-credits-per-minute video-look rate', () => {
+  // Corrected 2026-09-03 per HeyGen's published per-look credit rates
+  // (https://help.heygen.com/en/articles/14602974-avatar-v-is-now-available-on-heygen): Avatar IV
+  // with a video look (studio_avatar/digital_twin, or an unresolved look) costs 31 credits/minute.
+  // 6 s: ceil(6*31/60) = ceil(3.1) = 4, +1 safety credit = 5. This was 3 before the 2026-09-03 rate
+  // correction (when the estimator assumed a flat one-credit-per-three-seconds rate); the original
+  // 591-to-588 incident that motivated the safety credit is unchanged and documented on
+  // conservativeAvatarVideoCreditCap.
   const script = 'one two three four five six seven eight nine ten eleven twelve';
   const estimate = estimateAvatarVideoCredits(script, 'avatar_iv', 1, false);
   assert.equal(estimate.durationSeconds, 6);
-  assert.equal(estimate.credits, 3);
+  assert.equal(estimate.credits, 5);
   assert.throws(() => buildHeyGenAvatarVideoPlan(validInput({
     script,
     engine: 'avatar_iv',
@@ -117,15 +124,24 @@ test('Avatar IV six-second canary uses a three-credit conservative bound after t
 });
 
 test('Avatar V conservative cap rounds provider duration upward and includes the observed safety credit', () => {
-  assert.equal(conservativeAvatarVideoCreditCap(3, 'avatar_v'), 2);
-  assert.equal(conservativeAvatarVideoCreditCap(3.000001, 'avatar_v'), 3);
-  assert.equal(conservativeAvatarVideoCreditCap(4.62367, 'avatar_v'), 3);
-  assert.equal(conservativeAvatarVideoCreditCap(6, 'avatar_v'), 3);
-  assert.equal(conservativeAvatarVideoCreditCap(6.000001, 'avatar_v'), 4);
+  // Rates corrected 2026-09-03 to HeyGen's published 48 credits/minute for Avatar V
+  // (https://help.heygen.com/en/articles/14602974-avatar-v-is-now-available-on-heygen). At 48/60
+  // credits/sec, exact-duration boundaries fall at multiples of 1.25 s (5 s -> 4.0 exactly), not the
+  // old rate's multiples of 3 s.
+  assert.equal(conservativeAvatarVideoCreditCap(5, 'avatar_v'), 5);
+  assert.equal(conservativeAvatarVideoCreditCap(5.000001, 'avatar_v'), 6);
+  assert.equal(conservativeAvatarVideoCreditCap(4.62367, 'avatar_v'), 5);
+  assert.equal(conservativeAvatarVideoCreditCap(6, 'avatar_v'), 6);
+  assert.equal(conservativeAvatarVideoCreditCap(6.000001, 'avatar_v'), 6);
   assert.throws(() => conservativeAvatarVideoCreditCap(0, 'avatar_v'));
 });
 
 test('historical Moore-family Avatar V dry-run receipts map to corrected conservative maxima', () => {
+  // correctedCap re-corrected 2026-09-03 to HeyGen's published 48 credits/minute Avatar V rate
+  // (https://help.heygen.com/en/articles/14602974-avatar-v-is-now-available-on-heygen), replacing
+  // the interim one-credit-per-three-seconds-plus-safety-credit maxima below.
+  // 6 s: ceil(6*48/60) = ceil(4.8) = 5, +1 safety credit = 6 (was 3).
+  // 7 s: ceil(7*48/60) = ceil(5.6) = 6, +1 safety credit = 7 (was 4).
   const cases = [
     {
       founder: 'kimberly' as const,
@@ -135,7 +151,7 @@ test('historical Moore-family Avatar V dry-run receipts map to corrected conserv
       historicalRequestSha256: 'de5d7142aab962f341a58b5d2d57e5297da274f4d88e15ced60efacc848e20ce',
       durationSeconds: 6,
       historicalEstimate: 2,
-      correctedCap: 3,
+      correctedCap: 6,
     },
     {
       founder: 'mark' as const,
@@ -145,7 +161,7 @@ test('historical Moore-family Avatar V dry-run receipts map to corrected conserv
       historicalRequestSha256: 'fd24b6fbdcdc1e28f696117dcb6a68561da5f7b24ccbc1a8afb38efea813337a',
       durationSeconds: 7,
       historicalEstimate: 3,
-      correctedCap: 4,
+      correctedCap: 7,
     },
     {
       founder: 'matthew' as const,
@@ -155,7 +171,7 @@ test('historical Moore-family Avatar V dry-run receipts map to corrected conserv
       historicalRequestSha256: 'c31a0562dd8a0d041b28d3a154e6a97277cc793673e70a39515f40be9fa0fdab',
       durationSeconds: 6,
       historicalEstimate: 2,
-      correctedCap: 3,
+      correctedCap: 6,
     },
   ];
   for (const receipt of cases) {
@@ -175,7 +191,8 @@ test('historical Moore-family Avatar V dry-run receipts map to corrected conserv
 test('Avatar V six-second dry run rejects the old two-credit maximum', () => {
   const script = 'one two three four five six seven eight nine ten eleven twelve';
   const estimate = estimateAvatarVideoCredits(script, 'avatar_v', 1, false);
-  assert.deepEqual(estimate, { durationSeconds: 6, pauseSeconds: 0, credits: 3 });
+  // 2026-09-03: 48 credits/minute -> ceil(6*48/60)=5, +1 safety credit = 6 (was 3).
+  assert.deepEqual(estimate, { durationSeconds: 6, pauseSeconds: 0, credits: 6 });
   assert.throws(() => buildHeyGenAvatarVideoPlan(validInput({ script, maxApprovedCredits: 2 })), /exceeds max_approved_credits 2/);
 });
 
@@ -194,14 +211,15 @@ test('Matthew Family Story final contract locks Avatar V, exact casting, 1080p 1
     motionPrompt: undefined,
     expressiveness: undefined,
     voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
-    maxApprovedCredits: 3,
+    // 2026-09-03: Avatar V is 48 credits/minute; 6 s -> ceil(4.8)+1 = 6 (was 3).
+    maxApprovedCredits: 6,
   });
   const plan = buildHeyGenAvatarVideoPlan(base);
   assert.deepEqual(plan.body.engine, { type: 'avatar_v', reference_look_id: matt.personalizedMotionReferenceLookId });
   assert.equal(plan.productionProfile, 'family_story_final');
   assert.equal(plan.familyStoryFounder, 'matthew');
   assert.equal(plan.personalizedMotion, true);
-  assert.equal(plan.conservativeCreditCap, 3);
+  assert.equal(plan.conservativeCreditCap, 6);
   assert.equal(plan.providerCreditCapAvailable, false);
   assert.equal(Object.hasOwn(plan.body, 'expressiveness'), false);
   assert.equal(Object.hasOwn(plan.body, 'motion_prompt'), false);
@@ -209,11 +227,13 @@ test('Matthew Family Story final contract locks Avatar V, exact casting, 1080p 1
   const pausePlan = buildHeyGenAvatarVideoPlan({
     ...base,
     script: 'Hello <break time="60s"/> world.',
-    maxApprovedCredits: 22,
+    // 2026-09-03: 63 s at 48 credits/minute -> ceil(63*48/60)=ceil(50.4)=51, +1 safety credit = 52
+    // (was 22 under the old one-credit-per-three-seconds rate).
+    maxApprovedCredits: 52,
   });
   assert.equal(pausePlan.pauseSeconds, 60);
   assert.equal(pausePlan.estimatedDurationSeconds, 63);
-  assert.equal(pausePlan.conservativeCreditCap, 22);
+  assert.equal(pausePlan.conservativeCreditCap, 52);
   assert.throws(() => buildHeyGenAvatarVideoPlan({
     ...base,
     script: 'Hello <break time="60s"/> world.',
@@ -265,7 +285,8 @@ test('Kimberly and Mark final personalized motion remain blocked while a separat
       motionPrompt: undefined,
       expressiveness: undefined,
       voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
-      maxApprovedCredits: 3,
+      // 2026-09-03: Avatar V is 48 credits/minute; 6 s -> ceil(4.8)+1 = 6 (was 3).
+      maxApprovedCredits: 6,
     });
     assert.throws(
       () => buildHeyGenAvatarVideoPlan({ ...common, productionProfile: 'family_story_final' }),

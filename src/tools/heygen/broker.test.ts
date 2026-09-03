@@ -1104,8 +1104,11 @@ function avatarVideoInput(overrides: Record<string, unknown> = {}): Parameters<t
     confirmedBillingSnapshotSha256: billing.snapshot_sha256,
     confirmedBillingStateSha256: billing.state_sha256,
     confirmedBillingObservedAt: billing.observed_at,
-    maxApprovedCredits: 3,
-    reservePremiumCredits: 4,
+    // 2026-09-03: the default 3-word script's minimum avatar_v estimate is now 4 credits
+    // (duration floors at 3s; ceil(3*48/60)+1=4), so the reserve headroom against the mocked
+    // 7-credit balance shrinks from 4 to 3 (7-4=3).
+    maxApprovedCredits: 4,
+    reservePremiumCredits: 3,
     ...overrides,
   } as Parameters<typeof executeHeyGenAvatarVideoCreate>[0];
   const plan = buildHeyGenAvatarVideoPlan(base);
@@ -1249,8 +1252,11 @@ function matthewFamilyInput(overrides: Record<string, unknown> = {}) {
     motionPrompt: undefined,
     expressiveness: undefined,
     voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
-    maxApprovedCredits: 2,
-    reservePremiumCredits: 5,
+    // 2026-09-03: Family Story requires max_approved_credits to equal the conservative cap exactly;
+    // the default 3-word script's avatar_v cap is now 4 (was 2), so the reserve headroom against
+    // the mocked 7-credit balance shrinks from 5 to 3 (7-4=3).
+    maxApprovedCredits: 4,
+    reservePremiumCredits: 3,
     ...overrides,
   });
 }
@@ -1276,7 +1282,9 @@ test('Matthew Family Story Avatar V preflight verifies selected photo Look, exac
   assert.equal(prepared.group.consentStatus, 'accepted');
   assert.equal(prepared.voice.supportPause, true);
   assert.equal(prepared.plan.productionProfile, 'family_story_final');
-  assert.equal(prepared.plan.conservativeCreditCap, 2);
+  // 2026-09-03: avatar_v is now 48 credits/minute, so the default 3-word/3-second script's exact
+  // conservative cap is 4 (was 2).
+  assert.equal(prepared.plan.conservativeCreditCap, 4);
   assert.equal(harness.requests.some((entry) => entry.method === 'POST'), false);
 });
 
@@ -1331,20 +1339,21 @@ test('Family Story live metadata fails closed on group drift, missing source sta
 test('Family Story pause tags are duration-billed and require support_pause=true on the exact voice', async () => {
   const script = 'Hello <break time="1s"/> world.';
   const supported = avatarVideoHarness(matthewFamilyOptions(true));
+  // 2026-09-03: 4 s at 48 credits/minute -> ceil(4*48/60)=ceil(3.2)=4, +1 safety credit = 5 (was 3).
   const prepared = await prepareHeyGenAvatarVideoCreate(matthewFamilyInput({
     script,
-    maxApprovedCredits: 3,
-    reservePremiumCredits: 4,
+    maxApprovedCredits: 5,
+    reservePremiumCredits: 2,
   }), supported.deps);
   assert.equal(prepared.plan.pauseSeconds, 1);
   assert.equal(prepared.plan.estimatedDurationSeconds, 4);
-  assert.equal(prepared.plan.conservativeCreditCap, 3);
+  assert.equal(prepared.plan.conservativeCreditCap, 5);
 
   const unsupported = avatarVideoHarness(matthewFamilyOptions(false));
   await assert.rejects(() => prepareHeyGenAvatarVideoCreate(matthewFamilyInput({
     script,
-    maxApprovedCredits: 3,
-    reservePremiumCredits: 4,
+    maxApprovedCredits: 5,
+    reservePremiumCredits: 2,
   }), unsupported.deps), /does not explicitly advertise support_pause=true/);
   assert.equal(unsupported.postCalls(), 0);
 });
@@ -1398,8 +1407,9 @@ test('an explicitly approved future Kimberly photo fallback remains durably labe
     motionPrompt: undefined,
     expressiveness: undefined,
     voiceSettings: { speed: 1, pitch: 0, volume: 1, locale: 'en-US' },
-    maxApprovedCredits: 2,
-    reservePremiumCredits: 5,
+    // 2026-09-03: default 3-second script's exact avatar_v cap is now 4 (was 2).
+    maxApprovedCredits: 4,
+    reservePremiumCredits: 3,
   }), harness.deps);
   assert.equal(result.productionProfile, 'family_story_photo_fallback');
   assert.equal(result.familyStoryFounder, 'kimberly');
@@ -1420,8 +1430,9 @@ test('legacy version-1 Matthew terminal operation remains readable without reope
     script: 'Hello <break time="1s"/> world.',
   };
   const plan = buildHeyGenAvatarVideoPlan(legacyInput, { legacyTerminalReplay: true });
-  assert.equal(plan.conservativeCreditCap, 3, 'new estimator is stricter than the stored v1 approval');
-  assert.equal(legacyInput.maxApprovedCredits, 2);
+  // 2026-09-03: 4 s avatar_iv at the unresolved-look (video) rate is ceil(4*31/60)+1=4 (was 3).
+  assert.equal(plan.conservativeCreditCap, 4, 'new estimator is stricter than the stored v1 approval');
+  assert.equal(legacyInput.maxApprovedCredits, 4);
   const id = `heygen.video.${legacyInput.operationId}`;
   harness.store.set(id, { doc: {
     id,
@@ -1557,7 +1568,9 @@ test('accepted operation replays without network and changed payload is refused 
 test('credit snapshot and reserve violations block before POST', async () => {
   for (const input of [
     avatarVideoInput({ confirmedPremiumCreditsBefore: 6 }),
-    avatarVideoInput({ maxApprovedCredits: 3, reservePremiumCredits: 5 }),
+    // 2026-09-03: maxApprovedCredits must be at least 4 (the new minimum viable avatar_v estimate)
+    // to clear the plan-build ceiling check before the reserve-floor check below can fire.
+    avatarVideoInput({ maxApprovedCredits: 4, reservePremiumCredits: 5 }),
   ]) {
     const harness = avatarVideoHarness();
     await assert.rejects(() => executeHeyGenAvatarVideoCreate(input, harness.deps), /balance changed|reserve floor/);
@@ -1569,24 +1582,43 @@ test('credit snapshot and reserve violations block before POST', async () => {
 });
 
 test('post-call credit delta above the approved maximum locks account spending for reconciliation', async () => {
+  // 2026-09-03: the default script's minimum viable avatar_v estimate is now 4 credits (was 2), so
+  // the mocked 7-credit balance used elsewhere in this file no longer leaves enough headroom to
+  // both clear the reserve floor AND land a delta that exceeds max_approved_credits. This scenario
+  // uses its own larger before/after balances (20 -> 10, an "unexpectedly expensive render") so both
+  // the first call's reserve check and the second call's reserve check still pass, while the
+  // 10-credit delta still exceeds any plausible max_approved_credits.
+  const accountBefore = {
+    data: {
+      username: 'test-user',
+      billing_type: 'subscription',
+      subscription: { plan: 'team', credits: { premium_credits: { remaining: 20 } } },
+    },
+  };
   const accountAfter = {
     data: {
       username: 'test-user',
       billing_type: 'subscription',
-      subscription: { plan: 'team', credits: { premium_credits: { remaining: 3 } } },
+      subscription: { plan: 'team', credits: { premium_credits: { remaining: 10 } } },
     },
   };
-  const harness = avatarVideoHarness({ accountAfter });
-  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput(), harness.deps);
+  const beforeSnapshot = parseHeyGenBillingSnapshot(accountBefore, new Date(1_000_000).toISOString());
+  const harness = avatarVideoHarness({ account: accountBefore, accountAfter });
+  const result = await executeHeyGenAvatarVideoCreate(avatarVideoInput({
+    confirmedPremiumCreditsBefore: 20,
+    confirmedBillingSnapshotSha256: beforeSnapshot.snapshot_sha256,
+    confirmedBillingStateSha256: beforeSnapshot.state_sha256,
+    confirmedBillingObservedAt: beforeSnapshot.observed_at,
+  }), harness.deps);
   assert.equal(result.state, 'accepted');
-  assert.equal(result.actualCreditDelta, 4);
+  assert.equal(result.actualCreditDelta, 10);
   assert.equal(result.errorCode, 'unexpected_credit_delta');
   const afterSnapshot = parseHeyGenBillingSnapshot(accountAfter, new Date(1_000_000).toISOString());
   await assert.rejects(
     () => executeHeyGenAvatarVideoCreate(avatarVideoInput({
       operationId: 'video_op_02',
       idempotencyKey: 'video-op:02',
-      confirmedPremiumCreditsBefore: 3,
+      confirmedPremiumCreditsBefore: 10,
       confirmedBillingSnapshotSha256: afterSnapshot.snapshot_sha256,
       confirmedBillingStateSha256: afterSnapshot.state_sha256,
       confirmedBillingObservedAt: afterSnapshot.observed_at,

@@ -5,7 +5,7 @@
  * same X-Shopify-Access-Token header, same ShopifyApiError shape) but only
  * exposes mutating operations. Import from write-client.js in tool wrappers.
  *
- * API version: follows SHOPIFY_API_VERSION env var (default 2024-10).
+ * API version: follows SHOPIFY_API_VERSION env var (default 2026-04).
  * All endpoints are REST (not GraphQL) to match the existing read client.
  */
 

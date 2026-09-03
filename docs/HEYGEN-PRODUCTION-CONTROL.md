@@ -156,6 +156,22 @@ The extra one credit is a safety allowance derived from the live canary, not a c
 
 There is no honest way to make the provider itself enforce a subscription-credit cap through the current API. The working safety path is a conservative approved bound plus a default-off write switch, exact owner grant, account reservation, and post-call reconciliation lock.
 
+## 2026-09-03 published per-minute credit rates supersede the flat one-credit-per-three-seconds bound
+
+HeyGen's help center now publishes per-Look credit rates for Avatar IV and Avatar V (source: https://help.heygen.com/en/articles/14602974-avatar-v-is-now-available-on-heygen, read 2026-09-03): Avatar V costs 48 credits/minute and is video-look only (HeyGen: "Avatar V is not available for photo-based looks"); Avatar IV costs 31 credits/minute with a video Look (`studio_avatar`/`digital_twin`) and 16 credits/minute with a photo Look. The 2026-08-10 canary's apparent "about one credit per three seconds" rate reflected an under-informed assumption, not HeyGen's actual published rate; the real Avatar IV video-look rate (31 credits/minute, about 0.52 credits/second) is noticeably higher, and Avatar V (48 credits/minute) higher still.
+
+This supersedes the `Avatar III: ...` / `Avatar IV/V: ...` block above and the "Avatar V conservative caps" formula below. The bound is still a strict ceiling that must never under-estimate real provider billing: when the rendering Look's type has not yet been resolved (the pre-submission cap is computed before the gateway fetches the live Look via `GET /v3/avatars/looks/{id}`), Avatar IV falls back to the higher video-look rate rather than guessing photo.
+
+```text
+Avatar III (unchanged): ceil(estimated_seconds / 60 * 3) + 1
+Avatar IV, photo Look: ceil(estimated_seconds * 16 / 60) + 1
+Avatar IV, video Look or unresolved: ceil(estimated_seconds * 31 / 60) + 1
+Avatar IV with custom motion: 2 * ceil(estimated_seconds * <selected IV rate> / 60) + 1
+Avatar V (video-look only): ceil(estimated_seconds * 48 / 60) + 1
+```
+
+Worked examples: a 6-second Avatar V request was previously capped at 3 credits; it is now capped at `ceil(6*48/60)+1 = ceil(4.8)+1 = 6`. A 7-second Avatar V request moves from 4 to `ceil(7*48/60)+1 = ceil(5.6)+1 = 7`. A 6-second Avatar IV request (video Look or unresolved) moves from 3 to `ceil(6*31/60)+1 = ceil(3.1)+1 = 5`. The one-credit safety allowance from the 2026-08-10 incident is unchanged; only the per-minute base rate is corrected.
+
 ## Owner-approval re-enable architecture
 
 The direct Avatar Video lane is re-enabled only through a separate `otchealth-approval-broker` Container App. A dry run returns a 10-minute HMAC-bound context for one exact conservative packet. The owner opens its approval URL, Descope sends a six-digit email OTP to the configured verified owner, and the broker issues one five-minute ES256 JWS for that exact packet. The raw JWS never enters an MCP input or response: the broker encrypts it into an opaque handle and posts it to the authenticated gateway callback, which stores only the encrypted handle and bounded hashes in Cosmos. Live create loads and decrypts that handle internally, verifies every grant claim, consumes the JTI once, reserves the account cap, and performs one provider POST with zero automatic retries.
@@ -196,21 +212,21 @@ Live read-only verification showed all selected photo Looks advertise `avatar_v`
 
 ### Avatar V conservative caps
 
-The gateway rounds every positive duration up to a three-second billing bucket and adds the one-credit safety allowance proven by the 591-to-588 incident:
+The gateway rounds every positive duration to HeyGen's published 48-credits-per-minute Avatar V rate (corrected 2026-09-03, see the section above; supersedes the earlier flat one-credit-per-three-seconds bound) and adds the one-credit safety allowance proven by the 591-to-588 incident:
 
 ```text
-Avatar V cap = ceil(estimated_seconds / 3) + 1
+Avatar V cap = ceil(estimated_seconds * 48 / 60) + 1
 ```
 
-Examples: up to 3.000s -> 2; 3.001-6.000s -> 3; 6.001-9.000s -> 4. The observed 4.62367-second canary maps to 3. Family Story requests must set `max_approved_credits` equal to this cap; lower and higher values both fail locally. HeyGen still exposes no provider-enforced cap, so the owner grant, global/family switches, reservation, no-retry rule, and post-call reconciliation lock remain mandatory.
+Examples: up to 1.250s -> 2; 1.251-2.500s -> 3; 2.501-3.750s -> 4; 3.751-5.000s -> 5; 5.001-6.250s -> 6. The 2026-08-10 owner-approved Avatar V canary (3.99673s) maps to 5. Family Story requests must set `max_approved_credits` equal to this cap; lower and higher values both fail locally. HeyGen still exposes no provider-enforced cap, so the owner grant, global/family switches, reservation, no-retry rule, and post-call reconciliation lock remain mandatory.
 
-Historical zero-credit Avatar V receipts are permanent named regressions:
+Historical zero-credit Avatar V receipts are permanent named regressions. The "corrected cap" column below was itself corrected again 2026-09-03 (was 3/4/3 under the interim one-credit-per-three-seconds bound; see the section above):
 
 | Founder | Historical local result | Corrected cap | Interpretation |
 |---|---:|---:|---|
-| Kimberly | 6s / old estimate 2 | 3 | selected Look supports Avatar V, but live group remains pending consent and has zero same-group Digital Twins |
-| Mark | 7s / old estimate 3 | 4 | selected Look supports Avatar V, but live group remains pending consent and has zero same-group Digital Twins |
-| Matthew | 6s / old estimate 2 | 3 | selected Look + exact voice + completed same-group Digital Twin passed current live gateway dry-run |
+| Kimberly | 6s / old estimate 2 | 6 | selected Look supports Avatar V, but live group remains pending consent and has zero same-group Digital Twins |
+| Mark | 7s / old estimate 3 | 7 | selected Look supports Avatar V, but live group remains pending consent and has zero same-group Digital Twins |
+| Matthew | 6s / old estimate 2 | 6 | selected Look + exact voice + completed same-group Digital Twin passed current live gateway dry-run |
 
 These old requests proved only local request construction and zero mutation. Current live read-only provider evidence proves Kim/Mark's selected photo Looks advertise `avatar_v`, their groups remain `pending_consent/pending`, and group-scoped Digital Twin lists are empty. It does not prove provider render behavior or quality. Only a separately approved live canary after consent/reference readiness can provide that evidence. Matthew is the first allowed canary under the new owner-approval broker; Kimberly and Mark remain blocked until their own consent/reference gates pass and each receives a separate exact-packet grant.
 
@@ -221,6 +237,7 @@ Official sources:
 - https://developers.heygen.com/reference/create-video
 - https://developers.heygen.com/changelog
 - https://help.heygen.com/en/articles/15126059-how-to-use-credits-on-heygen
+- https://help.heygen.com/en/articles/14602974-avatar-v-is-now-available-on-heygen (2026-09-03 published per-minute rates)
 
 ## CRO direct bridge and rejected Matthew canary — 2026-08-10
 
