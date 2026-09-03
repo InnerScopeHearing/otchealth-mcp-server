@@ -20,13 +20,26 @@
  */
 import { emitOpenAIFleetMetrics, openAIUsageMetricPoints } from './datadog-metrics.js';
 
-export const PRICE_TABLE_VERSION = '2026-09-02';
+export const PRICE_TABLE_VERSION = '2026-09-03';
 
-interface ChatPriceRule {
-  re: RegExp;
+interface ChatPriceTier {
   input: number;
   output: number;
   cachedInput: number;
+}
+
+interface ChatPriceRule {
+  re: RegExp;
+  /** The default (short-context) price tier -- used whenever a rule has no `long` tier, or the
+   *  request's prompt-token count does not exceed `longContextThresholdTokens`. */
+  short: ChatPriceTier;
+  /** Optional long-context price tier. Only the GPT-5.6 family currently publishes a documented
+   *  long-context price break (confirmed live 2026-09-03: threshold is PROMPT tokens above
+   *  272,000). Every other family in this table has one flat rate regardless of context length, so
+   *  `long`/`longContextThresholdTokens` stay unset for them and matchChatPrice() always resolves
+   *  to `short`. */
+  long?: ChatPriceTier;
+  longContextThresholdTokens?: number;
 }
 
 interface EmbeddingPriceRule {
@@ -37,15 +50,43 @@ interface EmbeddingPriceRule {
 // USD per 1,000,000 tokens. Mirrors otchealth-claude-tools/setup/openai-usage.mjs's CHAT_PRICES
 // exactly (see that file for the full "why these numbers, why this shape" reasoning) -- ordered
 // rules, first match wins, anchored (not loose-prefix) so a genuinely different/newer model
-// (gpt-4.15, gpt-5.6-luna, ...) falls through to the unknown_model bucket instead of silently
-// absorbing a family's pricing it was never confirmed to share.
+// (gpt-4.15, gpt-5.7, ...) falls through to the unknown_model bucket instead of silently absorbing
+// a family's pricing it was never confirmed to share. (gpt-5.6 itself -- sol/terra/luna -- moved
+// from "genuinely unknown" to explicitly priced below on 2026-09-03; do not reuse those three names
+// as "still unknown" examples anywhere, including in tests.)
 const CHAT_PRICES: ChatPriceRule[] = [
-  { re: /^gpt-4o-mini(-\d{4}-\d{2}-\d{2})?$/i, input: 0.15, output: 0.6, cachedInput: 0.075 },
-  { re: /^gpt-4o(-\d{4}-\d{2}-\d{2})?$/i, input: 2.5, output: 10.0, cachedInput: 1.25 },
-  { re: /^gpt-4\.1-nano(-\d{4}-\d{2}-\d{2})?$/i, input: 0.1, output: 0.4, cachedInput: 0.025 },
-  { re: /^gpt-4\.1-mini(-\d{4}-\d{2}-\d{2})?$/i, input: 0.4, output: 1.6, cachedInput: 0.1 },
-  { re: /^gpt-4\.1(-\d{4}-\d{2}-\d{2})?$/i, input: 2.0, output: 8.0, cachedInput: 0.5 },
-  { re: /^gpt-3\.5-turbo(-\d{4})?$/i, input: 0.5, output: 1.5, cachedInput: 0.25 },
+  { re: /^gpt-4o-mini(-\d{4}-\d{2}-\d{2})?$/i, short: { input: 0.15, output: 0.6, cachedInput: 0.075 } },
+  { re: /^gpt-4o(-\d{4}-\d{2}-\d{2})?$/i, short: { input: 2.5, output: 10.0, cachedInput: 1.25 } },
+  { re: /^gpt-4\.1-nano(-\d{4}-\d{2}-\d{2})?$/i, short: { input: 0.1, output: 0.4, cachedInput: 0.025 } },
+  { re: /^gpt-4\.1-mini(-\d{4}-\d{2}-\d{2})?$/i, short: { input: 0.4, output: 1.6, cachedInput: 0.1 } },
+  { re: /^gpt-4\.1(-\d{4}-\d{2}-\d{2})?$/i, short: { input: 2.0, output: 8.0, cachedInput: 0.5 } },
+  { re: /^gpt-3\.5-turbo(-\d{4})?$/i, short: { input: 0.5, output: 1.5, cachedInput: 0.25 } },
+  // GPT-5.6 family (verified live 2026-09-03, OpenAI list prices per 1M tokens). Long-context
+  // pricing applies once the PROMPT (input) token count exceeds 272,000, matching the published
+  // short/long split for all three models.
+  //   luna  -- the CHEAP tier (src/azure/foundry.ts openaiModelForTier() tier:'router' default).
+  {
+    re: /^gpt-5\.6-luna(-\d{4}-\d{2}-\d{2})?$/i,
+    short: { input: 0.2, output: 1.2, cachedInput: 0.02 },
+    long: { input: 0.4, output: 1.8, cachedInput: 0.04 },
+    longContextThresholdTokens: 272_000,
+  },
+  //   terra -- the STANDARD tier default (tier:'standard').
+  {
+    re: /^gpt-5\.6-terra(-\d{4}-\d{2}-\d{2})?$/i,
+    short: { input: 2.0, output: 12.0, cachedInput: 0.2 },
+    long: { input: 4.0, output: 18.0, cachedInput: 0.4 },
+    longContextThresholdTokens: 272_000,
+  },
+  //   sol   -- the QUALITY tier default (tier:'high'). PROMO pricing through 2026-11-21 per
+  //   OpenAI's own list-price page as of 2026-09-03; this table has no auto-expiry for a promo, so
+  //   re-verify sol's rate after that date.
+  {
+    re: /^gpt-5\.6-sol(-\d{4}-\d{2}-\d{2})?$/i,
+    short: { input: 4.0, output: 20.0, cachedInput: 0.4 },
+    long: { input: 8.0, output: 30.0, cachedInput: 0.8 },
+    longContextThresholdTokens: 272_000,
+  },
 ];
 
 const EMBEDDING_PRICES: EmbeddingPriceRule[] = [
@@ -54,12 +95,21 @@ const EMBEDDING_PRICES: EmbeddingPriceRule[] = [
   { re: /^text-embedding-ada-002$/i, input: 0.1 },
 ];
 
-const MOST_EXPENSIVE_CHAT = CHAT_PRICES.reduce((a, b) => (b.output > a.output ? b : a));
+// The fallback for an UNKNOWN chat model must never under-price relative to any known price point
+// -- short OR long-context -- of any known family, so this maximizes over every tier this table
+// defines (today: gpt-5.6-sol's long-context tier, output $30/1M), not just each rule's own short
+// tier. Ranked by `.output` alone, matching this table's pre-existing (pre-2026-09-03) heuristic.
+const ALL_CHAT_TIERS: ChatPriceTier[] = CHAT_PRICES.flatMap((p) => (p.long ? [p.short, p.long] : [p.short]));
+const MOST_EXPENSIVE_CHAT = ALL_CHAT_TIERS.reduce((a, b) => (b.output > a.output ? b : a));
 const MOST_EXPENSIVE_EMBEDDING = EMBEDDING_PRICES.reduce((a, b) => (b.input > a.input ? b : a));
 
-function matchChatPrice(model: string): { input: number; output: number; cachedInput: number; unknown: boolean } {
+function matchChatPrice(model: string, promptTokens: number): { input: number; output: number; cachedInput: number; unknown: boolean } {
   for (const p of CHAT_PRICES) {
-    if (p.re.test(model)) return { input: p.input, output: p.output, cachedInput: p.cachedInput, unknown: false };
+    if (p.re.test(model)) {
+      const useLong = p.long !== undefined && p.longContextThresholdTokens !== undefined && promptTokens > p.longContextThresholdTokens;
+      const tier = useLong ? p.long! : p.short;
+      return { input: tier.input, output: tier.output, cachedInput: tier.cachedInput, unknown: false };
+    }
   }
   return { input: MOST_EXPENSIVE_CHAT.input, output: MOST_EXPENSIVE_CHAT.output, cachedInput: MOST_EXPENSIVE_CHAT.cachedInput, unknown: true };
 }
@@ -82,12 +132,14 @@ export function estimateOpenAICostUsd(input: {
   cachedTokens: number;
 }): { costUsd: number; unknown: boolean } {
   const model = input.model || 'unknown';
+  const pt = Math.max(0, input.promptTokens);
   if (input.kind === 'embedding') {
     const price = matchEmbeddingPrice(model);
-    return { costUsd: (Math.max(0, input.promptTokens) / 1e6) * price.input, unknown: price.unknown };
+    return { costUsd: (pt / 1e6) * price.input, unknown: price.unknown };
   }
-  const price = matchChatPrice(model);
-  const pt = Math.max(0, input.promptTokens);
+  // promptTokens decides short vs. long-context pricing for families that publish a break (see
+  // ChatPriceRule.longContextThresholdTokens) -- so it must be resolved BEFORE matching the price.
+  const price = matchChatPrice(model, pt);
   const cached = Math.max(0, Math.min(input.cachedTokens, pt));
   const fresh = Math.max(0, pt - cached);
   const inputCost = (fresh / 1e6) * price.input + (cached / 1e6) * price.cachedInput;

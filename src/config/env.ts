@@ -364,24 +364,23 @@ const EnvSchema = z.object({
   // CORRECTED 2026-08-28: default flipped 'foundry' -> 'openai', same reasoning and same live-value
   // verification as EMBEDDINGS_PROVIDER/SEARCH_BACKEND above.
   LLM_PROVIDER: z.enum(['foundry', 'openai']).default('openai'),
-  // Tier -> OpenAI-direct model id overrides for the LLM_PROVIDER=openai path (src/azure/foundry.ts
-  // openaiModelForTier()). FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT ('gpt-5.1'/'gpt-5.4') are
-  // AZURE DEPLOYMENT NAMES -- an operator-chosen alias, not necessarily a real, callable
-  // api.openai.com model id. Unlike EMBEDDINGS_PROVIDER's model (verified byte-identical across both
-  // providers 2026-08-15), there is no equivalent live verification for chat here. Defaulting these
-  // to the SAME strings as the Foundry deployment names is a bet that the operator named the Azure
-  // deployment after its real underlying model (a common, not universal, Azure OpenAI convention).
-  // If the bet is wrong, api.openai.com returns a fast, loud 404 model_not_found -- never a silent
-  // wrong-model answer -- so the failure mode is safe even when the default guess is wrong. Set
-  // these the moment the real ids are confirmed; do not treat the defaults as verified fact.
+  // Tier -> OpenAI-direct model id OVERRIDES for the LLM_PROVIDER=openai path (src/azure/foundry.ts
+  // openaiModelForTier() -- the literal defaults live there, not here, so there is exactly one place
+  // to keep in sync: CORRECTED 2026-09-03, defaults are the confirmed-live gpt-5.6 family --
+  // terra/standard, sol/high, luna/router -- superseding the prior 'gpt-5.1'/'gpt-5.4' guess (that
+  // guess is UNCHANGED and still accurate for FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT below,
+  // the Foundry-branch equivalent of these three; only the OpenAI-direct defaults moved). Leave these
+  // three env vars unset (empty string) to use those defaults; set any of them the moment a newer
+  // family should replace one. If an id is ever wrong, api.openai.com returns a fast, loud 404
+  // model_not_found -- never a silent wrong-model answer.
   OPENAI_CHAT_MODEL: z.string().optional().default(''),
   OPENAI_HIGH_MODEL: z.string().optional().default(''),
-  // tier:'router' (Azure Model Router, an auto-pick-the-cheapest-sufficient-model PRODUCT) has NO
-  // documented api.openai.com counterpart. Rather than invent one, an unset OPENAI_ROUTER_MODEL
-  // makes tier:'router' fall back to the SAME model as tier:'standard' on the OpenAI path -- the
-  // identical fallback chat() already performs today when FOUNDRY_ROUTER_ENDPOINT/KEY are unset, so
-  // LLM_PROVIDER=openai simply behaves as if the router were permanently unconfigured. Set this only
-  // if a real OpenAI routing model id is confirmed later.
+  // tier:'router' (Azure Model Router, an auto-pick-the-cheapest-sufficient-model PRODUCT) still has
+  // no literal api.openai.com PRODUCT equivalent, but as of the gpt-5.6 family the OpenAI-direct path
+  // has a real, confirmed answer to the question the router exists to answer, so an unset
+  // OPENAI_ROUTER_MODEL now defaults to gpt-5.6-luna directly (see openaiModelForTier()) rather than
+  // collapsing to tier:'standard's model the way it did before that model existed. Set this only if a
+  // dedicated OpenAI routing product id is confirmed later.
   OPENAI_ROUTER_MODEL: z.string().optional().default(''),
 
   // WEB SEARCH PROVIDER SWITCH (src/tools/web/web-search.ts dispatcher, Wave A item A5,

@@ -154,9 +154,12 @@ test('chat(): the cost estimate reflects the cheaper cached-token rate when prom
 });
 
 test('a model this table does not confidently know the price of is tagged unknown:true, never silently absorbed into a known family', async () => {
+  // gpt-5.6-luna is now a KNOWN, explicitly-priced model (added to openai-cost.ts 2026-09-03) -- do
+  // not reuse it (or -terra/-sol) as a "still unknown" example. gpt-9.9-unreleased stands in as a
+  // genuinely unmatched, hypothetical future model name.
   const ddCalls: CapturedDdCall[] = [];
   await withStubbedFetch(
-    stubFetch(ddCalls, { choices: [{ message: { content: 'x' } }], model: 'gpt-5.6-luna', usage: { prompt_tokens: 10, completion_tokens: 10 } }),
+    stubFetch(ddCalls, { choices: [{ message: { content: 'x' } }], model: 'gpt-9.9-unreleased', usage: { prompt_tokens: 10, completion_tokens: 10 } }),
     () => chat([{ role: 'user', content: 'x' }]),
   );
   const tokenPoint = pointsNamed(ddCalls, 'otc.fleet.openai.tokens')[0];

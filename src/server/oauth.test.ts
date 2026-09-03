@@ -107,6 +107,78 @@ test('Part 6: /register still validates redirect_uris (missing/empty -> 400, unc
   await app.close();
 });
 
+// ── application_type (MCP authorization spec, 2026-07-28 revision) ─────────────────────────────
+// A registering client declares application_type ('web' or 'native', RFC 7591 SS2 / RFC 8252).
+// This gateway does not yet branch behavior on it, but must still validate it per RFC 7591
+// SS3.2.1/3.2.2 (an unrecognized value is invalid_client_metadata, never silently accepted) and
+// echo back whatever value it accepted (RFC 7591 SS3.2.1: a registration response echoes the
+// client's registered metadata). Absent -> RFC 7591's own default, 'web'.
+test('application_type: absent in the request defaults to "web" and is echoed in the response', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+
+  const app = Fastify();
+  registerOAuthRoutes(app);
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/register',
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK] }),
+  });
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.json().application_type, 'web');
+
+  await app.close();
+});
+
+test('application_type: "web" and "native" are both accepted and echoed back verbatim', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+  const { parseStatelessClient } = await import('../auth/oauth-tokens.js');
+
+  const app = Fastify();
+  registerOAuthRoutes(app);
+
+  for (const application_type of ['web', 'native']) {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/register',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK], application_type }),
+    });
+    assert.equal(res.statusCode, 201, `application_type "${application_type}" must be accepted`);
+    assert.equal(res.json().application_type, application_type);
+    // P0 invariant, untouched by this metadata field: the bound lane stays external-read regardless
+    // of what the client declares here, exactly like the already-ignored client_name.
+    const decoded = parseStatelessClient(res.json().client_id as string, SIGNING_SECRET);
+    assert.equal(decoded!.agent, 'external-read', `application_type "${application_type}" must not affect the bound lane`);
+  }
+
+  await app.close();
+});
+
+test('application_type: any value other than "web"/"native" is rejected with invalid_client_metadata, never silently accepted or defaulted', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+
+  const app = Fastify();
+  registerOAuthRoutes(app);
+
+  for (const application_type of ['desktop', 'Web', 'NATIVE', '', 123, null, true, ['web']]) {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/register',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK], application_type }),
+    });
+    assert.equal(res.statusCode, 400, `application_type ${JSON.stringify(application_type)} must be rejected`);
+    assert.equal(res.json().error, 'invalid_client_metadata');
+  }
+
+  await app.close();
+});
+
 // ── The OAUTH_DEFAULT_AGENT startup guard (reviewer nit) ───────────────────────────────────────
 // isPrivilegedDefaultAgent() is the guard's condition, extracted + exported for a hermetic test
 // (capturing pino output in-process is fiddly and brittle). It gates a loud logger.warn at startup

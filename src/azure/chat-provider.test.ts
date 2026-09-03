@@ -62,17 +62,18 @@ test('LLM_PROVIDER and EMBEDDINGS_PROVIDER move independently: this file only se
   assert.equal(t?.headers.Authorization, undefined);
 });
 
-test('tier "standard" defaults the OpenAI model to the Foundry deployment-name string (the documented judgement call)', () => {
-  assert.equal(chatTarget('standard')?.model, 'gpt-5.1');
-  assert.equal(chatTarget()?.model, 'gpt-5.1', 'tier omitted behaves like "standard"');
+test('tier "standard" defaults the OpenAI model to the gpt-5.6 family (terra), verified live 2026-09-03', () => {
+  assert.equal(chatTarget('standard')?.model, 'gpt-5.6-terra');
+  assert.equal(chatTarget()?.model, 'gpt-5.6-terra', 'tier omitted behaves like "standard"');
 });
 
-test('tier "high" resolves to the high-tier default', () => {
-  assert.equal(chatTarget('high')?.model, 'gpt-5.4');
+test('tier "high" resolves to the high/quality-tier default (sol)', () => {
+  assert.equal(chatTarget('high')?.model, 'gpt-5.6-sol');
 });
 
-test('tier "router" has no OpenAI product equivalent, so it collapses to the standard model (matches the unconfigured-router Foundry fallback)', () => {
-  assert.equal(chatTarget('router')?.model, chatTarget('standard')?.model);
+test('tier "router" (the cheap tier) now has its OWN gpt-5.6 default (luna), distinct from standard', () => {
+  assert.equal(chatTarget('router')?.model, 'gpt-5.6-luna');
+  assert.notEqual(chatTarget('router')?.model, chatTarget('standard')?.model);
 });
 
 // OPENAI_CHAT_MODEL/OPENAI_HIGH_MODEL/OPENAI_ROUTER_MODEL override coverage lives in its own file
@@ -92,14 +93,36 @@ test('the model is sent in the BODY for OpenAI (Azure addresses it by URL deploy
     (async (_u: string, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
       return new Response(
-        JSON.stringify({ choices: [{ message: { content: 'hi' } }], model: 'gpt-5.1' }),
+        JSON.stringify({ choices: [{ message: { content: 'hi' } }], model: 'gpt-5.6-terra' }),
         { status: 200 },
       );
     }) as unknown as typeof fetch,
     () => chat([{ role: 'user', content: 'hello' }]),
   );
-  assert.equal(body.model, 'gpt-5.1');
+  assert.equal(body.model, 'gpt-5.6-terra');
   assert.equal(Array.isArray(body.messages), true);
+});
+
+test('reasoning_effort is sent in the BODY only when the caller explicitly sets it, never as a default', async () => {
+  let bodyWithout: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      bodyWithout = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'x' } }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }]),
+  );
+  assert.equal('reasoning_effort' in bodyWithout, false, 'omitted entirely when unset -- never sent as undefined/null');
+
+  let bodyWith: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      bodyWith = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'x' } }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { reasoningEffort: 'low' }),
+  );
+  assert.equal(bodyWith.reasoning_effort, 'low');
 });
 
 test('the Azure URL shape is NOT used on the OpenAI chat path', async () => {
@@ -119,12 +142,12 @@ test('the Azure URL shape is NOT used on the OpenAI chat path', async () => {
 test('chat() returns the model the API echoed back, falling back to the resolved label only when absent', async () => {
   const withEcho = await withStubbedFetch(
     (async () =>
-      new Response(JSON.stringify({ choices: [{ message: { content: 'a' } }], model: 'gpt-5.1-2026-01-01' }), {
+      new Response(JSON.stringify({ choices: [{ message: { content: 'a' } }], model: 'gpt-5.6-terra-2026-01-01' }), {
         status: 200,
       })) as unknown as typeof fetch,
     () => chat([{ role: 'user', content: 'x' }]),
   );
-  assert.equal(withEcho.model, 'gpt-5.1-2026-01-01');
+  assert.equal(withEcho.model, 'gpt-5.6-terra-2026-01-01');
 
   const withoutEcho = await withStubbedFetch(
     (async () => new Response(JSON.stringify({ choices: [{ message: { content: 'b' } }] }), { status: 200 })) as unknown as typeof fetch,
@@ -139,7 +162,7 @@ test('a model_not_found-style 404 fails LOUDLY (the safe failure mode for a wron
       withStubbedFetch(
         (async () =>
           new Response(
-            JSON.stringify({ error: { message: "The model `gpt-5.4` does not exist or you do not have access to it." } }),
+            JSON.stringify({ error: { message: "The model `gpt-5.6-sol` does not exist or you do not have access to it." } }),
             { status: 404 },
           )) as unknown as typeof fetch,
         () => chat([{ role: 'user', content: 'x' }], { tier: 'high' }),
@@ -153,3 +176,32 @@ test('a model_not_found-style 404 fails LOUDLY (the safe failure mode for a wron
 // 'sk-test-key' -- the exact trap this file's own header warns about, one level removed (mutating
 // process.env.OPENAI_API_KEY mid-file has no effect on the cached parse). See
 // chat-provider-unconfigured.test.ts for that scenario in its own process.
+
+// ---- temperature gate for models that reject any non-default value (live-verified 2026-09-03) ----
+
+test('a caller temperature is OMITTED for the gpt-5.6 family (api.openai.com 400s "Unsupported value: temperature" on luna/terra), so the router-tier temperature:0 caller keeps working on the new default', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.6-luna' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { temperature: 0, maxTokens: 20, tier: 'router' }),
+  );
+  assert.equal(body.model, 'gpt-5.6-luna');
+  assert.equal('temperature' in body, false, 'temperature must not be sent to a gpt-5.6 model');
+  assert.equal(body.max_completion_tokens, 20, 'the rest of the body is untouched');
+});
+
+test('a caller temperature is still passed through verbatim for models that accept it (gpt-5.1 verified live: temperature 0 -> HTTP 200)', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { temperature: 0, maxTokens: 20, deployment: 'gpt-5.1' }),
+  );
+  assert.equal(body.model, 'gpt-5.1');
+  assert.equal(body.temperature, 0, 'non-gpt-5.6 models keep the caller temperature');
+});
