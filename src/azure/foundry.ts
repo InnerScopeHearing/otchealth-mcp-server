@@ -201,6 +201,25 @@ export function rejectsTemperature(model: string): boolean {
 }
 
 /**
+ * OpenAI (and Azure OpenAI) REJECT `response_format: { type: 'json_object' }` unless at least one
+ * message contains the word "json": HTTP 400 "'messages' must contain the word 'json' in some form,
+ * to use 'response_format' of type 'json_object'". Live-verified 2026-09-03 on the rev-39 gateway:
+ * llm_azure task=classify with jsonMode=true failed on ALL three tiers (terra/sol/luna) because the
+ * classify system prompt only said "Reply with only the label." -- while extract ("Reply with JSON
+ * only.") and every other in-repo jsonMode caller (auto-supersede, checkpoint, deep-retrieval
+ * plan/refine, claims-check) already say JSON and were fine. Guarded HERE, at the single request
+ * builder, so no present or future caller can hit the rule again: when jsonMode is on and no message
+ * mentions json, ONE trailing system line is appended. Additive only -- prompts that already mention
+ * JSON come back untouched (same array identity), and jsonMode off is a no-op.
+ */
+export const JSON_MODE_NUDGE = 'Respond with a single valid JSON object and nothing else.';
+export function ensureJsonModeMessages(messages: ChatMessage[], jsonMode: boolean | undefined): ChatMessage[] {
+  if (!jsonMode) return messages;
+  const mentionsJson = messages.some((m) => /json/i.test(String(m?.content ?? '')));
+  return mentionsJson ? messages : [...messages, { role: 'system', content: JSON_MODE_NUDGE }];
+}
+
+/**
  * Resolve where a chat() call should go: URL, headers, and the model/deployment to use, for the
  * ACTIVE provider (LLM_PROVIDER) and the requested tier. `deploymentOverride` (chat()'s `deployment`
  * opt) forces an exact deployment name (Foundry) or model id (OpenAI) regardless of tier, mirroring
@@ -410,7 +429,8 @@ export async function chat(
   // OpenAI-direct speak the same Chat Completions body shape (Azure OpenAI mirrors OpenAI's own
   // REST API for whatever model family is deployed), so this body is NOT provider-branched.
   const body: Record<string, unknown> = {
-    messages,
+    // See ensureJsonModeMessages(): json_object mode needs the word "json" somewhere in the prompt.
+    messages: ensureJsonModeMessages(messages, opts?.jsonMode),
     max_completion_tokens: opts?.maxTokens ?? 1024,
   };
   // temperature: passed through verbatim when a caller sets it, EXCEPT for models that reject any
