@@ -383,6 +383,38 @@ const EnvSchema = z.object({
   // dedicated OpenAI routing product id is confirmed later.
   OPENAI_ROUTER_MODEL: z.string().optional().default(''),
 
+  // Default reasoning_effort applied to a tier:'router' src/azure/foundry.ts chat() call ONLY when
+  // BOTH the resolved model is in the gpt-5.6 family (isGpt56Family()) AND the caller did not
+  // explicitly pass its own opts.reasoningEffort -- see chat()'s own reasoning_effort resolution
+  // for the full contract. VALIDATED against the exact set OpenAI accepts (live-verified
+  // 2026-09-03: none/low/medium/high/xhigh/max, HTTP 200 on every one; a typo/garbage value fails
+  // loudly at startup via this enum, rather than being silently swallowed the way most of this
+  // file's OTHER mode/kill-switch flags are) PLUS the literal 'off', which disables the default
+  // outright -- chat() then omits reasoning_effort entirely for router calls that did not ask for
+  // one, i.e. the exact behavior before this default existed. Defaults to 'low': tier:'router'
+  // exists to be the CHEAPEST-sufficient path, and a small nonzero reasoning budget is the
+  // appropriate default for that job; 'none' remains available to any caller (or a future override
+  // of this var) that wants the absolute floor. standard/high tiers are NEVER defaulted this way,
+  // even though high (sol) is also a gpt-5.6-family model -- see chat()'s own comment for why only
+  // router gets an automatic default.
+  OPENAI_ROUTER_REASONING_EFFORT: z
+    .enum(['off', 'none', 'low', 'medium', 'high', 'xhigh', 'max'])
+    .optional()
+    .default('low'),
+
+  // Kill-switch for tools/llm/azure.ts (llm_azure)'s automatic selection of OpenAI's service_tier
+  // 'flex' (50% off the model's list price, live-verified 2026-09-03 on the gpt-5.6 family --
+  // see telemetry/openai-cost.ts's FLEX_SERVICE_TIER_DISCOUNT) on latencyClass:'background' calls
+  // only (hot/normal calls never request flex regardless of this var, since flex trades a
+  // best-effort queue with no completion-time SLA for the discount -- acceptable for a
+  // fire-and-forget background call, not for a user-blocking one). Defaults to flex APPLIED; set to
+  // the literal string '0' to opt a deployment back into the default (non-discounted) service tier
+  // for background calls. Deliberately read fresh from process.env at call time in
+  // tools/llm/azure.ts (like this file's other LLM_CACHE_MODE/FAQ_DEFLECT_MODE-style kill-switches
+  // in that same directory), not through loadEnv()'s per-process cache, so it stays flippable
+  // without a process restart; declared here mainly for documentation/shape.
+  OPENAI_FLEX_BACKGROUND: z.string().optional().default(''),
+
   // WEB SEARCH PROVIDER SWITCH (src/tools/web/web-search.ts dispatcher, Wave A item A5,
   // runbooks/azure-full-retirement.md). Mirrors SEARCH_BACKEND / BLOB_BACKEND / EMBEDDINGS_PROVIDER's
   // shape exactly, but closes a DIFFERENT class of gap than those three: web_search had NO dispatcher,

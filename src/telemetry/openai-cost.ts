@@ -123,6 +123,16 @@ function matchEmbeddingPrice(model: string): { input: number; unknown: boolean }
 
 export type OpenAIUsageKind = 'chat' | 'embedding' | 'other';
 
+/**
+ * OpenAI's 'flex' service tier bills at exactly 50% of the model's normal (short/long-context)
+ * list price, in exchange for a best-effort queue with no completion-time SLA (live-verified
+ * 2026-09-03 on the gpt-5.6 family). This is a POST-hoc discount on top of whatever
+ * matchChatPrice()/matchEmbeddingPrice() resolved -- not a separate price table -- because flex is
+ * a billing MODE, not a different model: the per-token rates it discounts are the same numbers
+ * CHAT_PRICES/EMBEDDING_PRICES already publish for that model at 'default'.
+ */
+const FLEX_SERVICE_TIER_DISCOUNT = 0.5;
+
 /** PURE. Estimate USD cost for one usage event. Exported for direct unit testing. */
 export function estimateOpenAICostUsd(input: {
   model: string;
@@ -130,12 +140,17 @@ export function estimateOpenAICostUsd(input: {
   promptTokens: number;
   completionTokens: number;
   cachedTokens: number;
+  /** 'flex' halves the estimate via FLEX_SERVICE_TIER_DISCOUNT above; any other value (or unset)
+   *  is full price. Pass the caller's OWN resolved value here (see src/azure/foundry.ts chat()'s
+   *  resolvedServiceTier -- prefers what the API echoed back, falls back to what was requested). */
+  serviceTier?: string;
 }): { costUsd: number; unknown: boolean } {
   const model = input.model || 'unknown';
   const pt = Math.max(0, input.promptTokens);
+  const discount = input.serviceTier === 'flex' ? FLEX_SERVICE_TIER_DISCOUNT : 1;
   if (input.kind === 'embedding') {
     const price = matchEmbeddingPrice(model);
-    return { costUsd: (pt / 1e6) * price.input, unknown: price.unknown };
+    return { costUsd: (pt / 1e6) * price.input * discount, unknown: price.unknown };
   }
   // promptTokens decides short vs. long-context pricing for families that publish a break (see
   // ChatPriceRule.longContextThresholdTokens) -- so it must be resolved BEFORE matching the price.
@@ -144,7 +159,7 @@ export function estimateOpenAICostUsd(input: {
   const fresh = Math.max(0, pt - cached);
   const inputCost = (fresh / 1e6) * price.input + (cached / 1e6) * price.cachedInput;
   const outputCost = (Math.max(0, input.completionTokens) / 1e6) * price.output;
-  return { costUsd: inputCost + outputCost, unknown: price.unknown };
+  return { costUsd: (inputCost + outputCost) * discount, unknown: price.unknown };
 }
 
 export interface RecordOpenAIUsageInput {
@@ -154,6 +169,11 @@ export interface RecordOpenAIUsageInput {
   completionTokens?: number;
   cachedTokens?: number;
   caller: string;
+  /** See estimateOpenAICostUsd's own doc comment -- 'flex' halves the recorded cost estimate and
+   *  is also passed through to the Datadog tag (openAIUsageMetricPoints), so cost dashboards can
+   *  break down spend by service tier. Optional; omitted/non-'flex' means full price, tagged
+   *  'default'. */
+  serviceTier?: string;
 }
 
 /**
@@ -170,7 +190,8 @@ export function recordOpenAIUsage(input: RecordOpenAIUsageInput): void {
     const promptTokens = Math.max(0, Number(input.promptTokens) || 0);
     const completionTokens = Math.max(0, Number(input.completionTokens) || 0);
     const cachedTokens = Math.max(0, Math.min(Number(input.cachedTokens) || 0, promptTokens));
-    const { costUsd, unknown } = estimateOpenAICostUsd({ model, kind, promptTokens, completionTokens, cachedTokens });
+    const serviceTier = input.serviceTier;
+    const { costUsd, unknown } = estimateOpenAICostUsd({ model, kind, promptTokens, completionTokens, cachedTokens, serviceTier });
     emitOpenAIFleetMetrics(
       openAIUsageMetricPoints({
         model,
@@ -181,6 +202,7 @@ export function recordOpenAIUsage(input: RecordOpenAIUsageInput): void {
         promptTokens,
         completionTokens,
         costUsd,
+        serviceTier,
       }),
     );
   } catch {

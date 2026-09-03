@@ -196,8 +196,17 @@ function openaiModelForTier(e: ReturnType<typeof loadEnv>, tier?: 'standard' | '
  * reasoning-family deployments; callers keep their own temperature for every other model. Extend
  * the pattern only after a live probe proves a new family rejects the parameter too.
  */
-export function rejectsTemperature(model: string): boolean {
+/** True for any model in the gpt-5.6 family (terra/sol/luna, or any dated variant of them) --
+ *  the single family-membership test shared by every gpt-5.6-specific behavior in this file:
+ *  rejectsTemperature() below, and chat()'s router-tier reasoning_effort default (see chat()'s own
+ *  opts.reasoningEffort doc comment). Kept as one regex so the family boundary is never updated in
+ *  two places. */
+function isGpt56Family(model: string): boolean {
   return /^gpt-5\.6-/i.test(String(model || ''));
+}
+
+export function rejectsTemperature(model: string): boolean {
+  return isGpt56Family(model);
 }
 
 /**
@@ -402,15 +411,39 @@ export async function chat(
     tier?: 'standard' | 'high' | 'router';
     cacheKey?: string;
     /**
-     * OPTIONAL passthrough for the gpt-5.6 family's reasoning_effort parameter (verified live
-     * 2026-09-03: none/low/medium/high/xhigh/max, HTTP 200 on every value). Emitted ONLY when a
-     * caller explicitly sets it -- no call site in this repo does yet, so adding this field is pure
-     * additive plumbing, not a behavior change for anything shipped today. Deliberately NOT wired
-     * into any privileged (kb_search_privileged / legal_blob_*) or quality (tier:'high') caller as
-     * part of adding it; whether and how to tune reasoning effort for those paths is a separate,
-     * deliberate adoption decision for later, not a side effect of this capability existing.
+     * PASSTHROUGH for the gpt-5.6 family's reasoning_effort parameter (verified live 2026-09-03:
+     * none/low/medium/high/xhigh/max, HTTP 200 on every value; 0 reasoning tokens observed on a
+     * simple classification at 'low' or the provider's own unset default). An EXPLICIT value here
+     * always wins and is emitted verbatim, on any tier. When UNSET, tier:'router' on a resolved
+     * gpt-5.6-family model additionally gets an environment-configured default -- see
+     * OPENAI_ROUTER_REASONING_EFFORT in config/env.ts, and this function's own reasoning_effort
+     * resolution below -- standard/high tiers are NEVER defaulted this way, even when they too
+     * resolve to a gpt-5.6-family model (sol, tier:'high', is one): whether and how to tune
+     * reasoning effort for those paths stays a separate, deliberate adoption decision, not a side
+     * effect of router's own default existing.
      */
     reasoningEffort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+    /**
+     * OpenAI-direct service_tier passthrough (live-verified 2026-09-03: 'flex' is accepted on the
+     * gpt-5.6 family and bills at 50% of the model's list price -- see telemetry/openai-cost.ts's
+     * estimateOpenAICostUsd -- in exchange for a best-effort, no-completion-time-SLA queue, which is
+     * why tools/llm/azure.ts only requests it for latencyClass:'background' calls). 'flex' is the
+     * only value that changes the request body; 'default' (or omitting this opt entirely) sends
+     * nothing, which is already the provider's own default behavior. NEVER sent to Azure OpenAI --
+     * see this opt's use below, gated on `target.model` (non-null only on the OpenAI-direct branch,
+     * per ProviderTarget's own doc comment above).
+     */
+    serviceTier?: 'flex' | 'default';
+    /**
+     * OPTIONAL routing-hint passthrough for OpenAI's own prompt-caching mechanism -- distinct from
+     * the Azure-side cache-affinity `promptCacheKey()`/`body.user` already below (same name,
+     * different destination and different provider's caching mechanism; see that function's own
+     * doc comment). A STABLE value shared by calls of the same shape increases the odds OpenAI
+     * routes them to the same warm cache node. Additive and safe across BOTH providers -- like
+     * `body.user` below, an unrecognised field is ignored rather than rejected, so this is never
+     * provider-gated the way serviceTier above is.
+     */
+    promptCacheKey?: string;
   },
 ): Promise<{ text: string; usage?: unknown; model: string }> {
   const target = chatTarget(opts?.tier, opts?.deployment);
@@ -438,9 +471,26 @@ export async function chat(
   // it is omitted so the call succeeds instead of 400ing.
   if (typeof opts?.temperature === 'number' && !rejectsTemperature(target.resolvedLabel)) body.temperature = opts.temperature;
   if (opts?.jsonMode) body.response_format = { type: 'json_object' };
-  // reasoning_effort: see the reasoningEffort opt's own doc comment above for the full contract
-  // (emitted only when the caller sets it; unused by every call site today).
-  if (opts?.reasoningEffort) body.reasoning_effort = opts.reasoningEffort;
+  // reasoning_effort: an EXPLICIT caller value always wins (see the reasoningEffort opt's own doc
+  // comment above). Failing that, tier:'router' on a resolved gpt-5.6-family model gets the
+  // environment-configured default -- OPENAI_ROUTER_REASONING_EFFORT (config/env.ts), a validated
+  // enum defaulting to 'low'; the literal value 'off' disables this default outright, leaving
+  // reasoning_effort unset exactly as it was before this default existed. standard/high tiers are
+  // NEVER defaulted this way, even though high (sol) also resolves to a gpt-5.6-family model.
+  let reasoningEffort = opts?.reasoningEffort;
+  if (!reasoningEffort && opts?.tier === 'router' && isGpt56Family(target.resolvedLabel)) {
+    const routerDefault = loadEnv().OPENAI_ROUTER_REASONING_EFFORT;
+    if (routerDefault !== 'off') reasoningEffort = routerDefault;
+  }
+  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+  // prompt_cache_key: see the promptCacheKey opt's own doc comment above. Unconditional across
+  // providers -- same "additive and safe, ignored where unsupported" treatment as `user` below.
+  if (opts?.promptCacheKey) body.prompt_cache_key = opts.promptCacheKey;
+  // service_tier: OpenAI-direct ONLY -- see the serviceTier opt's own doc comment above for why
+  // this one IS provider-gated (unlike prompt_cache_key/`user`). `target.model` is non-null only on
+  // the OpenAI-direct branch of chatTarget() (see ProviderTarget's own doc comment), the same
+  // discriminator this function already uses below to gate recordOpenAIUsage.
+  if (opts?.serviceTier === 'flex' && target.model) body.service_tier = 'flex';
   // Cache-affinity routing for Azure OpenAI automatic prompt caching (see promptCacheKey). Additive
   // and safe: `user` is ignored where unsupported (incl. by OpenAI-direct) and never changes the
   // completion.
@@ -449,8 +499,24 @@ export async function chat(
     choices?: Array<{ message?: { content?: string } }>;
     usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
     model?: string;
+    service_tier?: string;
   }>(target, body);
   const resolvedModel = j.model || target.resolvedLabel;
+  // service_tier for cost + telemetry: prefer what the API actually ECHOED BACK (the ground truth
+  // of which tier served the request), falling back to what was REQUESTED only when the response
+  // does not echo a service_tier at all (defensive -- every response observed during 2026-09-03
+  // verification did echo one, but a future response omitting the field must never silently
+  // under-report a flex-priced call at full price). Either signal being 'flex' prices/tags as flex.
+  const responseServiceTier = typeof j.service_tier === 'string' ? j.service_tier : undefined;
+  // The ECHO WINS OUTRIGHT whenever the response carries one; the requested value is used ONLY when
+  // the response omits the field entirely. An earlier form of this line OR-ed the two ("either
+  // signal being flex counts as flex"), which is wrong in the one direction that matters for money:
+  // if flex is REQUESTED but OpenAI serves the call at 'default' (flex is a best-effort queue, and
+  // the response is what states which tier actually billed), the OR would still apply the 50%
+  // FLEX_SERVICE_TIER_DISCOUNT and under-report real spend, with no signal that it had. Preferring
+  // the echo makes an under-report impossible; the requested-value fallback only ever fires when
+  // there is no echo to contradict it.
+  const resolvedServiceTier = responseServiceTier ?? opts?.serviceTier;
   // Cost visibility ONLY for the OpenAI-direct branch (target.model is set only there -- see
   // ProviderTarget's own doc comment above). Recorded here (inside the shared chat() function)
   // rather than at its one current caller (tools/llm/azure.ts) so any FUTURE caller of chat() gets
@@ -463,6 +529,7 @@ export async function chat(
       completionTokens: j.usage?.completion_tokens ?? 0,
       cachedTokens: j.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       caller: 'gateway-chat',
+      serviceTier: resolvedServiceTier,
     });
   }
   // The API echoes which underlying model actually answered (the Azure Model Router in particular
