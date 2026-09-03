@@ -67,7 +67,17 @@ export function backgroundChatOpts(
   const opts: { serviceTier?: 'flex'; promptCacheKey?: string } = {
     promptCacheKey: scopeFor(callerAgent, task, tier),
   };
-  if (flexBackgroundEnabled()) opts.serviceTier = 'flex';
+  // NEVER request flex on the ROUTER tier. Live-proven on gateway rev 41 (2026-09-03): with flex
+  // applied, tier:'router' + latencyClass:'background' timed out inside the gateway's own request
+  // budget on 2 of 2 probes, while tier:'standard' + background (flex applied, no reasoning_effort
+  // default) and tier:'router' + normal (reasoning_effort default, no flex) both returned in under
+  // a second. The router tier is the one tier that also carries an automatic reasoning_effort
+  // default (see azure/foundry.ts chat()), and reasoning work on a best-effort queue with no
+  // completion-time SLA is what pushes it past the budget. Excluding just this one tier keeps the
+  // 50% discount on every other background call, which a blanket OPENAI_FLEX_BACKGROUND=0 would
+  // throw away. Router is also the tier that least needs it: it exists to pick the
+  // cheapest-sufficient model, so its per-call cost is already the smallest of the three.
+  if (tier !== 'router' && flexBackgroundEnabled()) opts.serviceTier = 'flex';
   return opts;
 }
 
