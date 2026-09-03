@@ -77,6 +77,17 @@ export function backgroundChatOpts(
   // 50% discount on every other background call, which a blanket OPENAI_FLEX_BACKGROUND=0 would
   // throw away. Router is also the tier that least needs it: it exists to pick the
   // cheapest-sufficient model, so its per-call cost is already the smallest of the three.
+  //
+  // NOTE (2026-09-03): this exclusion is now a cheap OPTIMIZATION layered on top of a real runtime
+  // fallback, not the sole protection it was when first added. Router's hang was a REQUEST-BUDGET
+  // problem (a reasoning call on a best-effort queue outliving the gateway's own timeout), which
+  // skipping the tier avoids outright and for free (router needs no discount either, per the
+  // paragraph above). Flex CAPACITY EXHAUSTION is a separate, tier-independent failure mode -- the
+  // shared 'flex' pool can run dry for ANY model at any time, standard/high included -- and
+  // azure/foundry.ts chat() now detects that case directly (a 429 whose body says flex has no
+  // capacity, per isFlexCapacityError()) and retries once with service_tier stripped. Keep this
+  // exclusion anyway rather than deleting it in favor of the fallback: it is a zero-cost avoidance
+  // of a failure mode that is already fully understood, not a redundant safety net to prune.
   if (tier !== 'router' && flexBackgroundEnabled()) opts.serviceTier = 'flex';
   return opts;
 }
