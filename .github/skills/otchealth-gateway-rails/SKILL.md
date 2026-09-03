@@ -38,7 +38,10 @@ security-sensitive, never as routine.
   that mode, not a style issue (this exact bug has shipped and been fixed
   in this repo before). Flag a new or edited JSON-mode call whose prompt
   text does not contain "json".
-- Models in the gpt-5.6 family reject a `temperature` parameter. A call
-  that targets a gpt-5.6-family model must not set `temperature`; flag it
-  if it does, since the call will error rather than silently ignore the
-  parameter.
+- Models in the gpt-5.6 family reject any non-default `temperature` value
+  (HTTP 400 `unsupported_value`; live-verified 2026-09-03). A call that
+  targets a gpt-5.6-family model must not pass a custom `temperature`; the
+  gateway's `chat()` already drops it for that family via
+  `rejectsTemperature()`, so flag any new call site that bypasses `chat()`
+  or re-adds the parameter, since the call will error rather than silently
+  ignore it.
