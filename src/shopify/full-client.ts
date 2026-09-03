@@ -3,7 +3,7 @@
  *
  * Self-contained: copies auth + request pattern from client.ts / write-client.ts.
  * Same base URL, same X-Shopify-Access-Token header, same error shape.
- * API version: follows SHOPIFY_API_VERSION env var (default 2024-10).
+ * API version: follows SHOPIFY_API_VERSION env var (default 2026-04).
  *
  * Exports one async function per operation. Import from full-client.js in tool wrappers.
  */

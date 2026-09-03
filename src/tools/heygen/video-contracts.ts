@@ -288,22 +288,55 @@ function assertString(value: string, field: string, min: number, max: number, pr
   return preserve ? value : value.trim();
 }
 
+// Per-minute premium-credit rates HeyGen publishes for each engine/look combination. Source:
+// https://help.heygen.com/en/articles/14602974-avatar-v-is-now-available-on-heygen (read 2026-09-03).
+// Avatar V is video-look only (HeyGen: "Avatar V is not available for photo-based looks"), so it
+// has a single rate. Avatar IV differs by look: a video look (studio_avatar/digital_twin) costs
+// more than a photo look. Expressed as numerator-over-60 so integer-second math stays exact.
+const HEYGEN_AVATAR_V_CREDITS_PER_MINUTE = 48;
+const HEYGEN_AVATAR_IV_VIDEO_LOOK_CREDITS_PER_MINUTE = 31;
+const HEYGEN_AVATAR_IV_PHOTO_LOOK_CREDITS_PER_MINUTE = 16;
+
+/**
+ * Avatar IV's per-minute rate depends on whether the rendering Look is a photo Look or a video
+ * Look (studio_avatar/digital_twin). When the caller has not resolved the Look yet (the
+ * pre-submission conservative cap is computed before the gateway fetches the live Look via
+ * GET /v3/avatars/looks/{id}), the type is unknown -- fail toward the higher video-look rate so
+ * the cap never under-estimates real provider billing.
+ */
+function heygenAvatarIvCreditsPerMinute(lookAvatarType?: HeyGenAvatarType | null): number {
+  return lookAvatarType === 'photo_avatar'
+    ? HEYGEN_AVATAR_IV_PHOTO_LOOK_CREDITS_PER_MINUTE
+    : HEYGEN_AVATAR_IV_VIDEO_LOOK_CREDITS_PER_MINUTE;
+}
+
 export function conservativeAvatarVideoCreditCap(
   durationSeconds: number,
   engine: HeyGenAvatarEngine,
   hasCustomMotion = false,
+  lookAvatarType?: HeyGenAvatarType | null,
 ): number {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
     throw new Error('durationSeconds must be positive and finite.');
   }
-  const avatarCredits = engine === 'avatar_iii'
-    ? Math.max(1, Math.ceil((durationSeconds / 60) * 3))
-    : Math.max(1, Math.ceil(durationSeconds / 3));
+  let avatarCredits: number;
+  if (engine === 'avatar_iii') {
+    avatarCredits = Math.max(1, Math.ceil((durationSeconds / 60) * 3));
+  } else if (engine === 'avatar_v') {
+    avatarCredits = Math.max(1, Math.ceil((durationSeconds * HEYGEN_AVATAR_V_CREDITS_PER_MINUTE) / 60));
+  } else {
+    avatarCredits = Math.max(
+      1,
+      Math.ceil((durationSeconds * heygenAvatarIvCreditsPerMinute(lookAvatarType)) / 60),
+    );
+  }
   const motionAdjusted = engine === 'avatar_iv' && hasCustomMotion ? avatarCredits * 2 : avatarCredits;
   // Conservative subscription bound: the 2026-08-09 owner-approved direct Avatar IV canary had a
   // six-second local estimate but an actual 4.62367-second output and a three-credit debit despite
-  // the published one-credit-per-three-seconds rate. A fixed one-credit safety allowance captures
-  // the observed provider/TTS/rounding overhead. The API exposes no provider-enforced credit cap.
+  // the (then-assumed) published one-credit-per-three-seconds rate. A fixed one-credit safety
+  // allowance captures the observed provider/TTS/rounding overhead on top of HeyGen's real
+  // published per-minute rates (corrected 2026-09-03, see the rate constants above). The API
+  // exposes no provider-enforced credit cap.
   return motionAdjusted + 1;
 }
 
@@ -319,6 +352,7 @@ export function estimateAvatarVideoCredits(
   engine: HeyGenAvatarEngine,
   speed = 1,
   hasCustomMotion = false,
+  lookAvatarType?: HeyGenAvatarType | null,
 ): { durationSeconds: number; pauseSeconds: number; credits: number } {
   const pauseSeconds = parseHeyGenBreakSeconds(script);
   const spokenText = script.replace(/<break\s+time=["'][0-9]+(?:\.[0-9]+)?s["']\s*\/>/gi, ' ');
@@ -326,7 +360,7 @@ export function estimateAvatarVideoCredits(
   const normalizedSpeed = Number.isFinite(speed) && speed >= 0.5 && speed <= 1.5 ? speed : 1;
   const spokenSeconds = Math.max(3, Math.ceil((words / 2.5 / normalizedSpeed) * 1.15));
   const durationSeconds = Math.ceil(spokenSeconds + pauseSeconds);
-  const credits = conservativeAvatarVideoCreditCap(durationSeconds, engine, hasCustomMotion);
+  const credits = conservativeAvatarVideoCreditCap(durationSeconds, engine, hasCustomMotion, lookAvatarType);
   return { durationSeconds, pauseSeconds, credits };
 }
 

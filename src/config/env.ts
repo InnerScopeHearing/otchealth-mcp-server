@@ -594,7 +594,11 @@ const EnvSchema = z.object({
 
   // Phase 2: Shopify (hearingassist.myshopify.com / otchealthmart.com)
   SHOPIFY_SHOP: z.string().optional().default(''),
-  SHOPIFY_API_VERSION: z.string().optional().default('2024-10'),
+  // 2024-10 is no longer a supported Shopify API version (unsupported versions silently fall
+  // forward); 2026-04 is supported until 2027-04-16 per
+  // https://shopify.dev/docs/api/usage/versioning. The live gateway task definition already sets
+  // this explicitly; this default only matters when the env var is unset.
+  SHOPIFY_API_VERSION: z.string().optional().default('2026-04'),
   SHOPIFY_ACCESS_TOKEN: z.string().optional().default(''),
 
   // Phase 2: Intercom
