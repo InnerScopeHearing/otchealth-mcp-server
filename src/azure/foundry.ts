@@ -392,6 +392,44 @@ export function routerConfigured(): boolean {
 }
 
 /**
+ * True when a 429 indicates OpenAI's `service_tier: 'flex'` best-effort capacity pool has nothing
+ * free right now, as opposed to an ORDINARY rate limit (RPM/TPM caps, org quota, etc). Live-observed
+ * error text (api.openai.com, gpt-5.6-luna, 2026-09-03):
+ *
+ *   "Flex does not have sufficient resources available to fulfill your request. You can try again
+ *    later in case more resources are available, or change service_tier=default."
+ *
+ * Matched on a KEYWORD PAIR, not that one exact sentence, so a vendor reword ("insufficient
+ * capacity", "no resources currently available", ...) still matches: the message must mention
+ * "flex" (ties the match to the tier itself, so it is never tripped by an unrelated 429 that
+ * happens to share some other word) AND a resource/capacity word (sufficient / insufficient /
+ * capacity / "resources available"). A generic "Rate limit reached for requests" or "You exceeded
+ * your current quota" 429 contains neither half and can never trip this by accident. Used by chat()
+ * below, gated ADDITIONALLY on the failing request having actually carried service_tier:'flex' (see
+ * chat()'s own call site) -- this function alone only proves what the error TEXT says, not what was
+ * requested, so it must never be trusted standalone as "this request wanted flex." Exported for
+ * direct unit testing.
+ */
+const FLEX_KEYWORD_RE = /\bflex\b/i;
+const FLEX_CAPACITY_KEYWORD_RE = /(insufficient|sufficient|capacity|resources?\s+available)/i;
+export function isFlexCapacityError(status: number, message: string | undefined | null): boolean {
+  if (status !== 429) return false;
+  const text = String(message ?? '');
+  return FLEX_KEYWORD_RE.test(text) && FLEX_CAPACITY_KEYWORD_RE.test(text);
+}
+
+/** Shape of a Chat Completions response this file reads from. Named (rather than inlined at each
+ *  call site) because chat() below now calls postToTarget for this shape up to twice -- the
+ *  original request, and, on a matched flex-capacity 429, one fallback retry -- and both must
+ *  agree on exactly what they read back. */
+interface ChatCompletionResponse {
+  choices?: Array<{ message?: { content?: string } }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+  model?: string;
+  service_tier?: string;
+}
+
+/**
  * Chat completion on the ACTIVE provider (LLM_PROVIDER: a credit-funded Foundry deployment, default
  * gpt-5.1, the Model Router; or api.openai.com when LLM_PROVIDER=openai). URL/headers/model
  * resolution lives entirely in chatTarget() above -- this function no longer knows which provider
@@ -495,12 +533,51 @@ export async function chat(
   // and safe: `user` is ignored where unsupported (incl. by OpenAI-direct) and never changes the
   // completion.
   body.user = opts?.cacheKey || promptCacheKey(target.resolvedLabel, messages);
-  const j = await postToTarget<{
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
-    model?: string;
-    service_tier?: string;
-  }>(target, body);
+  // FLEX 429 -> DEFAULT-TIER FALLBACK (one bounded extra attempt). fetchWithBudget (inside
+  // postToTarget) already retries a 429 up to its own budget (see util/fetch-budget.ts), but it
+  // always re-sends the IDENTICAL body -- a reasonable safety net for an ordinary rate limit, but
+  // useless for a CAPACITY exhaustion, where re-asking for the same scarce resource can only fail
+  // again. Live-verified 2026-09-03: requesting service_tier:'flex' on gpt-5.6-luna returns HTTP 429
+  // "Flex does not have sufficient resources available..." while the SAME model with no
+  // service_tier (or 'default') returns HTTP 200 -- a shared best-effort pool being exhausted, not a
+  // per-model or per-caller rate limit, and OpenAI's own error text names the exact remedy ("...or
+  // change service_tier=default"). tools/llm/azure.ts's `tier !== 'router'` guard already avoids the
+  // one tier live-observed to overrun the gateway's own request budget even when flex succeeds; this
+  // is the general-case protection underneath it for every OTHER tier/model, whose flex pool can run
+  // dry on its own schedule, independent of anything router-specific.
+  let j: ChatCompletionResponse;
+  // What was ACTUALLY sent on the attempt that produced `j`. Starts as the caller's own request, but
+  // a successful fallback means the final, billed attempt did NOT request flex -- cost accounting
+  // below must not credit that call with the flex discount just because the ORIGINAL request asked
+  // for it (see resolvedServiceTier below; this is the identical under-report bug the echo-wins fix
+  // in this function's history already closed for a different cause, guarded again here for this
+  // new one).
+  let requestedServiceTier = opts?.serviceTier;
+  try {
+    j = await postToTarget<ChatCompletionResponse>(target, body);
+  } catch (err) {
+    // NARROW on purpose: only fall back when (a) THIS request actually carried
+    // service_tier:'flex' -- never touch a plain rate-limit 429 on a call that never requested flex
+    // -- AND (b) the failure text itself says flex has no capacity (isFlexCapacityError). Anything
+    // else (a different 429 reason on a flex request, a 4xx/5xx, a network error) rethrows unchanged
+    // so the real error/status is never swallowed or misreported as a fallback success.
+    if (body.service_tier === 'flex' && err instanceof FoundryError && isFlexCapacityError(err.status, err.message)) {
+      const fallbackBody: Record<string, unknown> = { ...body };
+      delete fallbackBody.service_tier;
+      // ONE extra attempt, not wrapped in another try/catch: if the fallback ALSO fails, that error
+      // propagates out of chat() as-is (its own real FoundryError/status), never silently retried
+      // again and never reported as this call's success. WORST-CASE ATTEMPT COUNT: fetchWithBudget's
+      // own internal retry (default retries:1, so up to 2 physical HTTP attempts) applies to EACH of
+      // the two logical requests independently -- the original flex request, then this fallback --
+      // for a worst case of 2 + 2 = 4 physical attempts total. That is one additional LOGICAL retry
+      // layered on top of the existing budget, not a multiplied ladder: a call that never requests
+      // flex, or a flex call that fails for any other reason, keeps today's worst case of 2.
+      j = await postToTarget<ChatCompletionResponse>(target, fallbackBody);
+      requestedServiceTier = undefined;
+    } else {
+      throw err;
+    }
+  }
   const resolvedModel = j.model || target.resolvedLabel;
   // service_tier for cost + telemetry: prefer what the API actually ECHOED BACK (the ground truth
   // of which tier served the request), falling back to what was REQUESTED only when the response
@@ -508,15 +585,16 @@ export async function chat(
   // verification did echo one, but a future response omitting the field must never silently
   // under-report a flex-priced call at full price). Either signal being 'flex' prices/tags as flex.
   const responseServiceTier = typeof j.service_tier === 'string' ? j.service_tier : undefined;
-  // The ECHO WINS OUTRIGHT whenever the response carries one; the requested value is used ONLY when
-  // the response omits the field entirely. An earlier form of this line OR-ed the two ("either
-  // signal being flex counts as flex"), which is wrong in the one direction that matters for money:
-  // if flex is REQUESTED but OpenAI serves the call at 'default' (flex is a best-effort queue, and
-  // the response is what states which tier actually billed), the OR would still apply the 50%
-  // FLEX_SERVICE_TIER_DISCOUNT and under-report real spend, with no signal that it had. Preferring
-  // the echo makes an under-report impossible; the requested-value fallback only ever fires when
-  // there is no echo to contradict it.
-  const resolvedServiceTier = responseServiceTier ?? opts?.serviceTier;
+  // The ECHO WINS OUTRIGHT whenever the response carries one; the requested value (requestedServiceTier,
+  // NOT the raw opts?.serviceTier -- see above, a successful flex->default fallback resets it) is
+  // used ONLY when the response omits the field entirely. An earlier form of this line OR-ed the two
+  // ("either signal being flex counts as flex"), which is wrong in the one direction that matters
+  // for money: if flex is REQUESTED but OpenAI serves the call at 'default' (flex is a best-effort
+  // queue, and the response is what states which tier actually billed), the OR would still apply the
+  // 50% FLEX_SERVICE_TIER_DISCOUNT and under-report real spend, with no signal that it had.
+  // Preferring the echo makes an under-report impossible; the requested-value fallback only ever
+  // fires when there is no echo to contradict it.
+  const resolvedServiceTier = responseServiceTier ?? requestedServiceTier;
   // Cost visibility ONLY for the OpenAI-direct branch (target.model is set only there -- see
   // ProviderTarget's own doc comment above). Recorded here (inside the shared chat() function)
   // rather than at its one current caller (tools/llm/azure.ts) so any FUTURE caller of chat() gets
