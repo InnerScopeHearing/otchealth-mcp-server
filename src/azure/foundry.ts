@@ -508,8 +508,15 @@ export async function chat(
   // verification did echo one, but a future response omitting the field must never silently
   // under-report a flex-priced call at full price). Either signal being 'flex' prices/tags as flex.
   const responseServiceTier = typeof j.service_tier === 'string' ? j.service_tier : undefined;
-  const resolvedServiceTier =
-    responseServiceTier === 'flex' || opts?.serviceTier === 'flex' ? 'flex' : responseServiceTier;
+  // The ECHO WINS OUTRIGHT whenever the response carries one; the requested value is used ONLY when
+  // the response omits the field entirely. An earlier form of this line OR-ed the two ("either
+  // signal being flex counts as flex"), which is wrong in the one direction that matters for money:
+  // if flex is REQUESTED but OpenAI serves the call at 'default' (flex is a best-effort queue, and
+  // the response is what states which tier actually billed), the OR would still apply the 50%
+  // FLEX_SERVICE_TIER_DISCOUNT and under-report real spend, with no signal that it had. Preferring
+  // the echo makes an under-report impossible; the requested-value fallback only ever fires when
+  // there is no echo to contradict it.
+  const resolvedServiceTier = responseServiceTier ?? opts?.serviceTier;
   // Cost visibility ONLY for the OpenAI-direct branch (target.model is set only there -- see
   // ProviderTarget's own doc comment above). Recorded here (inside the shared chat() function)
   // rather than at its one current caller (tools/llm/azure.ts) so any FUTURE caller of chat() gets
