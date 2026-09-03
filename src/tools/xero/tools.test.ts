@@ -622,9 +622,11 @@ test('handleXeroRequest: an ORDINARY (non-Attachments) write still enforces the 
       org: 'otchealth',
       method: 'POST',
       path: '/Invoices',
-      // LineItems (not ManualJournals' JournalLines) is the field findAccountCodeViolations checks --
-      // this must be refused BEFORE the duplicate-create probe even runs, so throwingFetchDeps (which
-      // throws on any network call) proves it never reached that far.
+      // An Invoice LineItems violation must be refused BEFORE the duplicate-create probe even runs,
+      // so throwingFetchDeps (which throws on any network call) proves it never reached that far.
+      // (FND-20260902-3ab8 extended this same guard to ManualJournals' JournalLines and to
+      // BankTransfers/Payments' bare Account-reference fields -- see write-guard.test.ts and the
+      // dedicated handleXeroRequest tests below for those.)
       body: { Invoices: [{ Reference: 'INV-1', LineItems: [{ LineAmount: 5, AccountCode: '1251' }] }] },
     },
     fakeCtx('cfo', false),
@@ -632,6 +634,125 @@ test('handleXeroRequest: an ORDINARY (non-Attachments) write still enforces the 
   );
   const data = result.data as { error?: string };
   assert.equal(data.error, 'account_code_not_permitted', 'the pre-existing cross-org account-code guard must survive the extraction unchanged');
+});
+
+// ── FND-20260902-3ab8: handler-level wiring proof that the guard's coverage extension actually
+// reaches handleXeroRequest, not just the pure write-guard.ts unit tests above. ───────────────────
+
+test('handleXeroRequest: a ManualJournal write coded by AccountCode on JournalLines is refused BEFORE any network call (closes FND-20260902-3ab8)', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    {
+      org: 'otchealth',
+      method: 'POST',
+      path: '/ManualJournals',
+      body: {
+        ManualJournals: [
+          {
+            Narration: 'Reclass derivative liability, note 4',
+            Date: '2022-01-31',
+            JournalLines: [
+              { LineAmount: 1500.5, AccountCode: '1251' },
+              { LineAmount: -1500.5, AccountCode: '2000' },
+            ],
+          },
+        ],
+      },
+    },
+    fakeCtx('cfo', false),
+    throwingFetchDeps(state), // proves the refusal fires before the duplicate-create probe's xeroGet call
+  );
+  const data = result.data as { error?: string };
+  assert.equal(
+    data.error,
+    'account_code_not_permitted',
+    'a ManualJournal coded by AccountCode on JournalLines must be refused, the same as an Invoice coded on LineItems',
+  );
+});
+
+test('handleXeroRequest: dry_run does NOT mask the ManualJournal JournalLines account-code refusal -- the guard runs before the dry-run return, same as every other write-guard check', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    {
+      org: 'otchealth',
+      method: 'POST',
+      path: '/ManualJournals',
+      body: {
+        ManualJournals: [
+          { Narration: 'n', Date: '2022-01-31', JournalLines: [{ LineAmount: 100, AccountCode: '1251' }] },
+        ],
+      },
+    },
+    fakeCtx('cfo', true), // dry_run: true
+    throwingFetchDeps(state),
+  );
+  const data = result.data as { error?: string };
+  assert.equal(
+    data.error,
+    'account_code_not_permitted',
+    'dry_run must report the REAL refusal, not a misleading "would write" or the generic dry_run marker',
+  );
+});
+
+test('handleXeroRequest: a BankTransfer whose legs are identified by Code (not AccountID) is refused BEFORE any network call', async () => {
+  const state = liveTokenState();
+  const result = await handleXeroRequest(
+    {
+      org: 'otchealth',
+      method: 'POST',
+      path: '/BankTransfers',
+      body: {
+        BankTransfers: [{ FromBankAccount: { Code: '090' }, ToBankAccount: { Code: '091' }, Amount: 500, Date: '2026-01-01' }],
+      },
+    },
+    fakeCtx('cfo', false),
+    throwingFetchDeps(state),
+  );
+  const data = result.data as { error?: string };
+  assert.equal(data.error, 'account_code_not_permitted', 'a BankTransfer has no LineItems at all -- FromBankAccount/ToBankAccount are its only account identity, and must be guarded');
+});
+
+test('handleXeroRequest: a ManualJournal write identified by AccountID (already mapped) reaches xeroRequest cleanly -- no false positive from the extended guard', async () => {
+  const state = liveTokenState();
+  let requestCalled = false;
+  const deps = {
+    fetchImpl: (async (url: unknown, init?: RequestInit) => {
+      const u = new URL(String(url));
+      if (u.pathname.endsWith('/ManualJournals') && init?.method === 'POST') {
+        requestCalled = true;
+        return new Response(JSON.stringify({ ManualJournals: [{ ManualJournalID: 'mj-2' }] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    read: (async () => ({ doc: state.doc, etag: state.etag })) as never,
+    replace: (async () => { throw new Error('replace should never be called'); }) as never,
+    create: (async () => { throw new Error('create should never be called'); }) as never,
+  };
+  const result = await handleXeroRequest(
+    {
+      org: 'otchealth',
+      method: 'POST',
+      path: '/ManualJournals',
+      allow_duplicate: true, // isolates the account-code guard from the duplicate-create probe, same pattern as the existing clean-write test above
+      body: {
+        ManualJournals: [
+          {
+            Narration: 'n',
+            Date: '2026-01-01',
+            JournalLines: [
+              { LineAmount: 5, AccountID: 'ha-acct-guid-1' },
+              { LineAmount: -5, AccountCode: '2000', AccountID: 'ha-acct-guid-2' },
+            ],
+          },
+        ],
+      },
+    },
+    fakeCtx('cfo', false),
+    deps,
+  );
+  assert.ok(requestCalled, 'an AccountID-mapped ManualJournal must still reach xeroRequest');
+  const data = result.data as { error?: string };
+  assert.equal(data.error, undefined);
 });
 
 test('handleXeroRequest: an ORDINARY (non-Attachments) write with no duplicate-detection blockers reaches xeroRequest and returns its response', async () => {

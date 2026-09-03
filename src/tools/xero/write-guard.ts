@@ -224,30 +224,99 @@ export function manualJournalKeyGaps(item: Record<string, unknown>): string[] {
 
 export interface MappingViolation {
   itemIndex: number;
-  lineIndex: number;
+  /** The field on the item carrying this reference: a line-array field (`LineItems` on
+   *  Invoices/CreditNotes/BankTransactions/PurchaseOrders/Quotes, `JournalLines` on ManualJournals
+   *  -- see LINE_ARRAY_FIELDS) or a bare single-object Account-reference field (`BankAccount`,
+   *  `Account`, `FromBankAccount`, `ToBankAccount` -- see ACCOUNT_REF_FIELDS). */
+  field: string;
+  /** Index within `field` for a line-array violation. Absent (undefined) for a bare single-object
+   *  reference field, which has no array to index. */
+  lineIndex?: number;
+  /** The literal Xero property that carried the code value -- `AccountCode` on a line, `Code` on
+   *  an embedded Account-shaped reference object -- so a refusal names the field the caller
+   *  actually sent rather than a generic placeholder. */
+  codeField: 'AccountCode' | 'Code';
   accountCode: string;
 }
 
 /**
- * Cross-org mapping defence: a write whose line items identify the account by CODE cannot be
- * verified as landing in the intended account, because codes are per-org and Xero re-resolves them
- * locally. Require `AccountID` (a GUID, globally unique) instead. Returns every violation rather
- * than the first, so one refusal shows the caller the whole set to fix.
+ * Line-array fields whose entries identify a GL account by AccountCode. Invoices, CreditNotes,
+ * BankTransactions, PurchaseOrders and Quotes all share `LineItems` -- checking it here is
+ * COLLECTION-AGNOSTIC by design (findAccountCodeViolations never looks at which top-level
+ * collection a body belongs to, only at field shape), which is exactly why those were all already
+ * covered without ever being named individually. ManualJournals alone uses `JournalLines` instead
+ * of `LineItems` for the identical purpose (see write-guard.test.ts's JOURNAL fixture, which has
+ * used JournalLines[].AccountID since before this fix), and until FND-20260902-3ab8 this scan
+ * never looked there: a ManualJournal coded entirely by AccountCode reached Xero with NO cross-org
+ * check at all -- the exact defect this guard exists to close, on the one collection it never
+ * actually inspected. A close posts corrections as manual journals constantly (see the
+ * naturalKeyOf/manualJournalKeyGaps history above), so this was not a narrow gap.
+ */
+const LINE_ARRAY_FIELDS = ['LineItems', 'JournalLines'] as const;
+
+/**
+ * Single embedded Account-reference fields a Xero write body carries OUTSIDE any line array, each
+ * shaped like the chart-of-accounts Account resource itself ({AccountID, Code, Name, ...} -- see
+ * Xero's published OpenAPI schema) and therefore exposed to the IDENTICAL per-org Code ambiguity a
+ * line item's AccountCode is: `BankAccount` is a BankTransaction's own bank leg (required on every
+ * BankTransaction write, independent of its LineItems); `Account` is a Payment's bank/clearing
+ * account; `FromBankAccount`/`ToBankAccount` are a BankTransfer's two legs (a BankTransfer has NO
+ * LineItems at all -- see gl-assemble.ts's header on that -- so without this it would have had ZERO
+ * account-identity coverage of any kind). Confirmed against Xero's documented BankTransfer and
+ * Payment schemas, not a guess. Added during the FND-20260902-3ab8 audit of "every write shape that
+ * carries account-coded lines", which named BankTransfers and Payments explicitly.
+ *
+ * NOT covered here, and deliberately: PurchaseOrders/Quotes need no entry -- they fall under
+ * LINE_ARRAY_FIELDS above (they carry LineItems exactly like Invoices, so the existing generic scan
+ * already reaches them). Overpayments and Prepayments have NO documented direct create endpoint in
+ * Xero's Accounting API -- they arise only as a side effect of a Payment or BankTransaction whose
+ * amount exceeds the target, both of which ARE covered above; their own write surface,
+ * `.../Allocations`, carries only an Invoice reference by InvoiceID, never an account code, so
+ * there is nothing for this guard to check there today. If Xero ever adds a direct create for
+ * either, audit it the same way before assuming this list still covers it.
+ */
+const ACCOUNT_REF_FIELDS = ['BankAccount', 'Account', 'FromBankAccount', 'ToBankAccount'] as const;
+
+/** True when `obj` carries a non-empty AccountID (or the lowercase-d `AccountId` some hand-built
+ *  payloads use), which makes its account reference unambiguous regardless of any Code also present. */
+function hasAccountId(obj: Record<string, unknown>): boolean {
+  const id = obj['AccountID'] ?? obj['AccountId'];
+  return id !== undefined && id !== null && String(id).trim() !== '';
+}
+
+/**
+ * Cross-org mapping defence: a write that identifies an account by CODE cannot be verified as
+ * landing in the intended account, because codes are per-org and Xero re-resolves them locally.
+ * Require `AccountID` (a GUID, globally unique) instead. Scans every line-array field
+ * (LINE_ARRAY_FIELDS) AND every bare Account-reference field (ACCOUNT_REF_FIELDS) on every
+ * unwrapped item, so this stays collection-agnostic the same way the original LineItems-only scan
+ * was -- a body is checked by field SHAPE, never by which endpoint it is headed to. Returns every
+ * violation rather than the first, so one refusal shows the caller the whole set to fix.
  */
 export function findAccountCodeViolations(body: unknown): MappingViolation[] {
   const out: MappingViolation[] = [];
   unwrapItems(body).forEach((item, itemIndex) => {
-    const lines = item['LineItems'];
-    if (!Array.isArray(lines)) return;
-    lines.forEach((line, lineIndex) => {
-      if (!line || typeof line !== 'object') return;
-      const l = line as Record<string, unknown>;
-      const code = l['AccountCode'];
-      const id = l['AccountID'] ?? l['AccountId'];
-      if (code !== undefined && code !== null && String(code).trim() !== '' && !id) {
-        out.push({ itemIndex, lineIndex, accountCode: String(code) });
+    for (const field of LINE_ARRAY_FIELDS) {
+      const lines = item[field];
+      if (!Array.isArray(lines)) continue;
+      lines.forEach((line, lineIndex) => {
+        if (!line || typeof line !== 'object') return;
+        const l = line as Record<string, unknown>;
+        const code = l['AccountCode'];
+        if (code !== undefined && code !== null && String(code).trim() !== '' && !hasAccountId(l)) {
+          out.push({ itemIndex, field, lineIndex, codeField: 'AccountCode', accountCode: String(code) });
+        }
+      });
+    }
+    for (const field of ACCOUNT_REF_FIELDS) {
+      const ref = item[field];
+      if (!ref || typeof ref !== 'object' || Array.isArray(ref)) continue;
+      const r = ref as Record<string, unknown>;
+      const code = r['Code'];
+      if (code !== undefined && code !== null && String(code).trim() !== '' && !hasAccountId(r)) {
+        out.push({ itemIndex, field, codeField: 'Code', accountCode: String(code) });
       }
-    });
+    }
   });
   return out;
 }

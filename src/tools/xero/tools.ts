@@ -532,17 +532,24 @@ export async function handleXeroRequest(
   if (api === 'accounting') {
     // 1. MAP BY IDENTITY, NOT BY CODE. Account codes are per-org and Xero silently
     //    re-resolves them in the destination org, which is how one document landed in both
-    //    the INND and HearingAssist ledgers.
+    //    the INND and HearingAssist ledgers. findAccountCodeViolations (write-guard.ts) covers
+    //    every line-array field it knows about (LineItems, JournalLines) AND every bare
+    //    Account-reference field it knows about (BankAccount, Account, FromBankAccount,
+    //    ToBankAccount) -- see its header for the FND-20260902-3ab8 audit that closed the
+    //    ManualJournals/JournalLines gap and extended coverage to BankTransfers and Payments.
     const violations = findAccountCodeViolations(input.body);
     if (violations.length) {
       const where = violations
         .slice(0, 5)
-        .map((v) => `item[${v.itemIndex}].LineItems[${v.lineIndex}] AccountCode=${v.accountCode}`)
+        .map(
+          (v) =>
+            `item[${v.itemIndex}].${v.field}${v.lineIndex !== undefined ? `[${v.lineIndex}]` : ''} ${v.codeField}=${v.accountCode}`,
+        )
         .join('; ');
       return {
         data: { org: input.org, method: input.method, api, path, body: null, error: 'account_code_not_permitted' },
         summary:
-          `REFUSED (${violations.length} line item(s) identify the account by CODE, not AccountID): ${where}. ` +
+          `REFUSED (${violations.length} account reference(s) identify the account by CODE, not AccountID): ${where}. ` +
           'Account codes are per-org and Xero re-resolves them locally, so the same code reaches an unrelated ' +
           'account in another org (1251 is "Due from HearingAssist Inc" in INND but "Star Funding - AR" in ' +
           'HearingAssist). Resolve each account to its AccountID in the DESTINATION org and resend.',
