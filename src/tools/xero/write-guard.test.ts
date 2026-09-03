@@ -83,6 +83,161 @@ test('every violation is reported, not just the first', () => {
   assert.equal(v.length, 3, 'caller sees the whole set to fix in one refusal');
 });
 
+// ── FND-20260902-3ab8: the guard only ever inspected LineItems, so ManualJournals (which use
+// JournalLines instead) and the bare Account-reference fields on BankTransfers/BankTransactions/
+// Payments (which have no LineItems array at all) passed unguarded. Extends the SAME function
+// rather than forking a second one, per the finding's own instruction. ──────────────────────────
+
+test('THE RESIDUAL BUG (FND-20260902-3ab8): a ManualJournal JournalLine coded by AccountCode (not AccountID) is a violation, same as an Invoice LineItem', () => {
+  // Same real code from the header incident: 1251 is "Due from HearingAssist Inc" in INND but
+  // "Star Funding - AR" in HearingAssist. A close posts corrections as manual journals constantly,
+  // and a ManualJournal has no Reference for the duplicate-create check to key on -- until this fix,
+  // NOTHING stood between an AccountCode-only journal and the wrong ledger.
+  const v = findAccountCodeViolations({
+    ManualJournals: [
+      {
+        Narration: 'Reclass to Due from HearingAssist Inc',
+        Date: '2022-01-31',
+        JournalLines: [
+          { LineAmount: 1500.5, AccountCode: '1251' },
+          { LineAmount: -1500.5, AccountCode: '2000' },
+        ],
+      },
+    ],
+  });
+  assert.equal(v.length, 2, 'both coded lines are reported');
+  assert.equal(v[0].itemIndex, 0);
+  assert.equal(v[0].field, 'JournalLines');
+  assert.equal(v[0].lineIndex, 0);
+  assert.equal(v[0].codeField, 'AccountCode');
+  assert.equal(v[0].accountCode, '1251');
+  assert.equal(v[1].lineIndex, 1);
+  assert.equal(v[1].accountCode, '2000');
+});
+
+test('a manual journal whose lines are identified by AccountID (already mapped to the destination org) passes cleanly -- a Code may also be present, AccountID wins', () => {
+  // The safe shape the refusal above tells the caller to send: 1251 already resolved to the
+  // CORRECT AccountID in the destination org before the journal was posted.
+  assert.equal(
+    findAccountCodeViolations({
+      ManualJournals: [
+        {
+          JournalLines: [
+            { LineAmount: 1500.5, AccountID: 'ha-acct-guid-1' },
+            { LineAmount: -1500.5, AccountCode: '2000', AccountID: 'ha-acct-guid-2' },
+          ],
+        },
+      ],
+    }).length,
+    0,
+  );
+});
+
+test('a write body mixing an Invoice LineItems violation and a ManualJournal JournalLines violation reports BOTH, in item order', () => {
+  // Proves LINE_ARRAY_FIELDS is scanned in full for every item, not "the first array field found" --
+  // the exact class of bug unwrapItems's own header (item 1 above) already warns about elsewhere.
+  const v = findAccountCodeViolations([
+    { LineItems: [{ AccountCode: '1159' }] },
+    { JournalLines: [{ AccountCode: '1251' }] },
+  ]);
+  assert.equal(v.length, 2);
+  assert.equal(v[0].itemIndex, 0);
+  assert.equal(v[0].field, 'LineItems');
+  assert.equal(v[1].itemIndex, 1);
+  assert.equal(v[1].field, 'JournalLines');
+});
+
+test('a BankTransaction whose own BankAccount leg is identified by Code (not AccountID) is a violation, independent of its LineItems', () => {
+  const v = findAccountCodeViolations({
+    BankTransactions: [{ Type: 'SPEND', BankAccount: { Code: '090' }, LineItems: [{ AccountID: 'exp-acct-1' }] }],
+  });
+  assert.equal(v.length, 1, 'the LineItems entry is clean (AccountID) -- only the BankAccount leg is flagged');
+  assert.equal(v[0].itemIndex, 0);
+  assert.equal(v[0].field, 'BankAccount');
+  assert.equal(v[0].lineIndex, undefined, 'a bare reference field has no array index');
+  assert.equal(v[0].codeField, 'Code');
+  assert.equal(v[0].accountCode, '090');
+});
+
+test('CONTROL: a BankAccount identified by AccountID is not a violation, even alongside a Code', () => {
+  assert.equal(
+    findAccountCodeViolations({ BankTransactions: [{ BankAccount: { AccountID: 'bank-1', Code: '090' } }] }).length,
+    0,
+  );
+});
+
+test('a Payment whose Account is identified by Code (not AccountID) is a violation', () => {
+  const v = findAccountCodeViolations({ Payments: [{ Account: { Code: '090' }, Amount: 500 }] });
+  assert.equal(v.length, 1);
+  assert.equal(v[0].field, 'Account');
+  assert.equal(v[0].codeField, 'Code');
+  assert.equal(v[0].accountCode, '090');
+});
+
+test('a BankTransfer with BOTH legs identified by Code (not AccountID) reports both violations -- a BankTransfer has no LineItems at all, so before this fix it had ZERO coverage', () => {
+  const v = findAccountCodeViolations({
+    BankTransfers: [{ FromBankAccount: { Code: '090' }, ToBankAccount: { Code: '091' }, Amount: 100 }],
+  });
+  assert.equal(v.length, 2);
+  assert.deepEqual(
+    v.map((x) => x.field).sort(),
+    ['FromBankAccount', 'ToBankAccount'],
+  );
+});
+
+test('CONTROL: a BankTransfer with both legs identified by AccountID is not a violation', () => {
+  assert.equal(
+    findAccountCodeViolations({
+      BankTransfers: [{ FromBankAccount: { AccountID: 'a-1' }, ToBankAccount: { AccountID: 'a-2' } }],
+    }).length,
+    0,
+  );
+});
+
+test('a non-object, array, or whitespace-only value in an Account-reference field is ignored, not a false positive', () => {
+  assert.equal(findAccountCodeViolations({ Payments: [{ Account: 'not-an-object' }] }).length, 0);
+  assert.equal(findAccountCodeViolations({ Payments: [{ Account: ['nope'] }] }).length, 0);
+  assert.equal(findAccountCodeViolations({ Payments: [{ Account: { Code: '   ' } }] }).length, 0, 'whitespace-only Code is not a violation');
+});
+
+test('COUNTERFACTUAL: the pre-fix (LineItems-only) scan would have missed this exact ManualJournal violation, so the write would have been attempted', () => {
+  // Reconstructed from write-guard.ts's original findAccountCodeViolations (pre FND-20260902-3ab8),
+  // which walked ONLY `LineItems`. A ManualJournal never carries that field -- it uses JournalLines
+  // -- so the pre-fix scan always scored zero violations against one, regardless of what its lines
+  // were actually coded by. With zero violations, handleXeroRequest's step 1 never refuses, so
+  // execution falls through to step 2 (the duplicate-create probe) and, once that passes, to the
+  // real xeroRequest call -- i.e. the write is attempted, which is the exact defect this guard
+  // exists to prevent.
+  function preFixScan(body: unknown): number {
+    let count = 0;
+    unwrapItems(body).forEach((item) => {
+      const lines = item['LineItems'];
+      if (!Array.isArray(lines)) return;
+      for (const line of lines) {
+        if (!line || typeof line !== 'object') continue;
+        const l = line as Record<string, unknown>;
+        const code = l['AccountCode'];
+        const id = l['AccountID'] ?? l['AccountId'];
+        if (code !== undefined && code !== null && String(code).trim() !== '' && !id) count++;
+      }
+    });
+    return count;
+  }
+  const body = {
+    ManualJournals: [
+      { Narration: 'n', Date: '2022-01-31', JournalLines: [{ LineAmount: 100, AccountCode: '1251' }] },
+    ],
+  };
+  assert.equal(preFixScan(body), 0, 'the pre-fix scan never looks at JournalLines at all, so it sees zero violations here');
+  assert.equal(findAccountCodeViolations(body).length, 1, 'the fixed scan catches it');
+
+  // Same counterfactual for the bare Account-reference fields: a BankTransfer has no LineItems at
+  // all, so the pre-fix scan saw zero violations on EVERY BankTransfer body, unconditionally.
+  const transfer = { BankTransfers: [{ FromBankAccount: { Code: '090' }, ToBankAccount: { Code: '091' } }] };
+  assert.equal(preFixScan(transfer), 0, 'a BankTransfer has no LineItems, so the pre-fix scan never had any coverage of it');
+  assert.equal(findAccountCodeViolations(transfer).length, 2, 'the fixed scan catches both legs');
+});
+
 test('existsFilterFor escapes quotes so a reference cannot break the predicate', () => {
   assert.equal(existsFilterFor({ kind: 'field' as const, field: 'Reference', value: 'QBO-Bill-22838' }), 'Reference=="QBO-Bill-22838"');
   assert.equal(existsFilterFor({ kind: 'field' as const, field: 'Reference', value: 'a"b' }), 'Reference=="a\\"b"');
