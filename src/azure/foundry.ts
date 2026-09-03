@@ -130,28 +130,34 @@ export function embeddingsTarget(): EmbeddingsTarget | null {
  *   LLM_PROVIDER=foundry  (default)  Azure Foundry. Byte-identical to every prior deploy.
  *   LLM_PROVIDER=openai              api.openai.com, using OPENAI_API_KEY.
  *
- * MODEL-EQUIVALENCE IS A REAL RISK HERE, UNLIKE THE EMBEDDINGS PATH ABOVE. Embeddings are safe to
- * default identically across providers because text-embedding-3-large is verifiably the SAME model
- * on both (confirmed live 2026-08-15, cosine similarity 0.99999791 between the two -- see
- * embeddings-provider.test.ts). Chat has no such proof: FOUNDRY_CHAT_DEPLOYMENT/
- * FOUNDRY_HIGH_DEPLOYMENT ('gpt-5.1'/'gpt-5.4') are AZURE DEPLOYMENT NAMES -- an operator-chosen
- * alias for whatever underlying model was deployed under it -- not necessarily a real, callable
- * api.openai.com model id. Defaulting OPENAI_CHAT_MODEL/OPENAI_HIGH_MODEL to those SAME strings
- * (see openaiModelForTier below) is a documented JUDGEMENT CALL: a bet that the operator named the
- * Azure deployment after its real underlying model, which is a common but not universal Azure
- * OpenAI convention. This code has no way to verify that bet from inside the gateway. If it is
- * wrong, api.openai.com returns a fast, loud 404 model_not_found -- never a silently-wrong answer
- * from the wrong model -- so an incorrect guess fails safely; it does not corrupt anything the way
- * a wrong embeddings model would. Override OPENAI_CHAT_MODEL/OPENAI_HIGH_MODEL the moment the real
- * ids are confirmed.
+ * MODEL DEFAULTS (CORRECTED 2026-09-03): OPENAI_CHAT_MODEL/OPENAI_HIGH_MODEL/OPENAI_ROUTER_MODEL
+ * now default to the confirmed-live gpt-5.6 family -- terra (standard), sol (high/quality), luna
+ * (router/cheap); see openaiModelForTier() below and src/telemetry/openai-cost.ts's price table
+ * (same three names, same date). This supersedes the PRIOR 'gpt-5.1'/'gpt-5.4' defaults, which were
+ * a documented judgement call rather than a verified fact: a bet that the operator had named the
+ * Azure Foundry deployment after its real underlying model, which is a common but not universal
+ * Azure OpenAI convention, with no way for this code to verify it. That bet is UNCHANGED and still
+ * exactly describes FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT on the Foundry branch above
+ * (cfg(), still 'gpt-5.1'/'gpt-5.4') -- only the OpenAI-direct branch's own defaults move here,
+ * because gpt-5.6-{terra,sol,luna} are real api.openai.com model ids, confirmed reachable directly,
+ * not an alias inherited from an unrelated Azure deployment name. OPENAI_CHAT_MODEL/
+ * OPENAI_HIGH_MODEL/OPENAI_ROUTER_MODEL still override these at any time (e.g. once a newer family
+ * ships), and a wrong id still fails fast and loud -- api.openai.com's 404 model_not_found, never a
+ * silently-wrong answer from the wrong model.
  *
  * tier:'router' (Azure Model Router, a PRODUCT that auto-picks the cheapest-sufficient underlying
- * model per request) has NO documented api.openai.com counterpart at all. Rather than invent one,
- * the OpenAI path makes tier:'router' fall back to the SAME model as tier:'standard' -- this is not
- * a guess dressed as a feature, it is the IDENTICAL fallback chat() already performs today when
- * FOUNDRY_ROUTER_ENDPOINT/KEY are unset (see the tier==='router' branch below). LLM_PROVIDER=openai
- * simply behaves as if the router were permanently unconfigured. OPENAI_ROUTER_MODEL overrides this
- * if a real OpenAI routing model id is confirmed later.
+ * model per request) still has no literal api.openai.com PRODUCT equivalent, but the gpt-5.6 family
+ * gives the OpenAI-direct path a real answer to the question the router exists to answer -- "the
+ * cheapest model still sufficient for this request" -- for the first time: gpt-5.6-luna. So
+ * tier:'router' now defaults to luna DIRECTLY, rather than collapsing to the standard-tier model the
+ * way it did back when no confirmed OpenAI-direct model was cheap enough to justify its own default
+ * (see openaiModelForTier() below; this is a genuine behavior change for the fully-unconfigured
+ * case, not just a literal-string swap). OPENAI_CHAT_MODEL still cascades into an unset
+ * OPENAI_ROUTER_MODEL before the luna default -- mirroring the identical OPENAI_HIGH_MODEL /
+ * OPENAI_CHAT_MODEL cascade tier:'high' already used -- so an operator who has set ONLY
+ * OPENAI_CHAT_MODEL still gets that one override applied uniformly across every tier, exactly as
+ * before this change. OPENAI_ROUTER_MODEL overrides the luna default outright once a dedicated
+ * OpenAI routing product id exists.
  */
 export interface ChatTarget extends ProviderTarget {
   /** The resolved deployment name (Foundry) or model id (OpenAI), for cache-key derivation and as
@@ -161,16 +167,20 @@ export interface ChatTarget extends ProviderTarget {
 
 const OPENAI_CHAT_API_URL = 'https://api.openai.com/v1/chat/completions';
 
-/** Tier -> OpenAI-direct model id. See this section's header for why these defaults are a
- *  judgement call, not a verified fact, and why 'router' collapses to 'standard'. Mirrors cfg()'s
- *  own chat/high fallback chain above exactly (high falls back to the STANDARD model before the
- *  hardcoded literal, same as FOUNDRY_HIGH_DEPLOYMENT falls back to FOUNDRY_CHAT_DEPLOYMENT) --
- *  the hardcoded high-tier literal is 'gpt-5.4', NOT 'gpt-5.1', or a caller asking for tier:'high'
- *  with neither override set would silently get the standard-tier model instead. */
+/** Tier -> OpenAI-direct model id, defaulting to the gpt-5.6 family (verified live 2026-09-03):
+ *  terra (standard), sol (high/quality), luna (router/cheap) -- see this section's header above for
+ *  the full reasoning, including why 'router' gets luna as its OWN default rather than collapsing
+ *  to 'standard' the way it used to. Mirrors cfg()'s own chat/high fallback shape: high AND router
+ *  both fall back through OPENAI_CHAT_MODEL before their own literal (the same cascade
+ *  FOUNDRY_HIGH_DEPLOYMENT uses for FOUNDRY_CHAT_DEPLOYMENT), so an operator who has set only
+ *  OPENAI_CHAT_MODEL still gets it applied to every tier. The hardcoded high-tier literal is
+ *  'gpt-5.6-sol' and router's is 'gpt-5.6-luna' -- NEITHER is 'gpt-5.6-terra' -- or a caller asking
+ *  for tier:'high'/'router' with nothing overridden would silently get the standard-tier model
+ *  instead. */
 function openaiModelForTier(e: ReturnType<typeof loadEnv>, tier?: 'standard' | 'high' | 'router'): string {
-  if (tier === 'high') return e.OPENAI_HIGH_MODEL || e.OPENAI_CHAT_MODEL || 'gpt-5.4';
-  if (tier === 'router') return e.OPENAI_ROUTER_MODEL || e.OPENAI_CHAT_MODEL || 'gpt-5.1';
-  return e.OPENAI_CHAT_MODEL || 'gpt-5.1';
+  if (tier === 'high') return e.OPENAI_HIGH_MODEL || e.OPENAI_CHAT_MODEL || 'gpt-5.6-sol';
+  if (tier === 'router') return e.OPENAI_ROUTER_MODEL || e.OPENAI_CHAT_MODEL || 'gpt-5.6-luna';
+  return e.OPENAI_CHAT_MODEL || 'gpt-5.6-terra';
 }
 
 /**
@@ -348,7 +358,24 @@ export function routerConfigured(): boolean {
  */
 export async function chat(
   messages: ChatMessage[],
-  opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean; deployment?: string; tier?: 'standard' | 'high' | 'router'; cacheKey?: string },
+  opts?: {
+    temperature?: number;
+    maxTokens?: number;
+    jsonMode?: boolean;
+    deployment?: string;
+    tier?: 'standard' | 'high' | 'router';
+    cacheKey?: string;
+    /**
+     * OPTIONAL passthrough for the gpt-5.6 family's reasoning_effort parameter (verified live
+     * 2026-09-03: none/low/medium/high/xhigh/max, HTTP 200 on every value). Emitted ONLY when a
+     * caller explicitly sets it -- no call site in this repo does yet, so adding this field is pure
+     * additive plumbing, not a behavior change for anything shipped today. Deliberately NOT wired
+     * into any privileged (kb_search_privileged / legal_blob_*) or quality (tier:'high') caller as
+     * part of adding it; whether and how to tune reasoning effort for those paths is a separate,
+     * deliberate adoption decision for later, not a side effect of this capability existing.
+     */
+    reasoningEffort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  },
 ): Promise<{ text: string; usage?: unknown; model: string }> {
   const target = chatTarget(opts?.tier, opts?.deployment);
   if (!target) {
@@ -371,6 +398,9 @@ export async function chat(
   };
   if (typeof opts?.temperature === 'number') body.temperature = opts.temperature;
   if (opts?.jsonMode) body.response_format = { type: 'json_object' };
+  // reasoning_effort: see the reasoningEffort opt's own doc comment above for the full contract
+  // (emitted only when the caller sets it; unused by every call site today).
+  if (opts?.reasoningEffort) body.reasoning_effort = opts.reasoningEffort;
   // Cache-affinity routing for Azure OpenAI automatic prompt caching (see promptCacheKey). Additive
   // and safe: `user` is ignored where unsupported (incl. by OpenAI-direct) and never changes the
   // completion.

@@ -198,6 +198,25 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     if (uris.length === 0 || !uris.every((u) => allowedRedirect(u))) {
       return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be the Claude connector callback' });
     }
+    // OAuth for MCP hygiene (2026-07-28 authorization-spec revision): a registering client declares
+    // application_type ('web' or 'native', RFC 7591 SS2 / RFC 8252) so the server knows which redirect
+    // and PKCE posture the client expects. This gateway does not yet BRANCH behavior on it -- every
+    // DCR client gets the identical PKCE-S256 requirement and the same fixed Claude-callback
+    // allow-list regardless of application_type -- but it MUST still validate and echo the value per
+    // RFC 7591 SS3.2.1/3.2.2: an unrecognized value is a registration-metadata error
+    // (invalid_client_metadata), never a silently-accepted or silently-ignored one. Absent ->
+    // RFC 7591's own documented default, 'web'. This check is purely metadata hygiene: it can never
+    // change which lane a client is bound to (see the SECURITY-CRITICAL comment just below --
+    // agent stays hardcoded to 'external-read' regardless of what a caller declares here, exactly
+    // like the already-ignored client_name).
+    const rawApplicationType = body.application_type;
+    const applicationType = rawApplicationType === undefined ? 'web' : rawApplicationType;
+    if (applicationType !== 'web' && applicationType !== 'native') {
+      return reply.status(400).send({
+        error: 'invalid_client_metadata',
+        error_description: 'application_type must be "web" or "native"',
+      });
+    }
     // SECURITY-CRITICAL (Phase 6): a self-registered PUBLIC client has NO identity proof (no pre-shared
     // secret; PKCE is self-supplied; the auth code is readable off the /authorize 302 redirect), so it
     // can ONLY ever bind the non-privileged 'external-read' lane -- REGARDLESS of what the caller names
@@ -208,7 +227,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     const agent = 'external-read';
     const clientId = registerStatelessClient({ agent, redirectUris: uris }, env.OAUTH_TOKEN_SIGNING_SECRET);
     reply.header('Cache-Control', 'no-store');
-    logger.info({ type: 'oauth_register', agent }, 'issued stateless DCR client (external-read lane)');
+    logger.info({ type: 'oauth_register', agent, application_type: applicationType }, 'issued stateless DCR client (external-read lane)');
     return reply.status(201).send({
       client_id: clientId,
       client_id_issued_at: Math.floor(Date.now() / 1000),
@@ -216,6 +235,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
+      application_type: applicationType,
       scope: 'mcp',
     });
   });
@@ -521,6 +541,39 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     });
   });
 }
+
+/**
+ * STATELESSNESS (MCP authorization spec, 2026-07-28 revision: "transport is stateless per
+ * request"), CONFIRMED for this gateway, not merely assumed: every POST /mcp request is authorized
+ * independently and from scratch by auth/bearer.ts's validateBearer(), which calls
+ * isValidIssuedAccessToken()/issuedAgent()/issuedClientId() below purely on the bearer token
+ * PRESENTED ON THAT REQUEST. There is no cache, no per-connection table, and no authorization
+ * decision carried forward keyed by anything transport-level -- each call to these three functions
+ * re-verifies the token's HMAC signature, expiry, and audience from nothing but the token string
+ * itself (see verifyToken() in auth/oauth-tokens.ts).
+ *
+ * This lines up with server/mcp.ts's own transport configuration: `sessionIdGenerator: undefined`
+ * on StreamableHTTPServerTransport, and a brand-new McpServer + Transport constructed and torn down
+ * on every single POST /mcp call. The MCP SDK never issues an Mcp-Session-Id here, so there is no
+ * session identifier an authorization decision could depend on even if one were tempting to add.
+ *
+ * The ONE piece of state that survives across requests ANYWHERE in this file is scoped to the
+ * browser-based /oauth/authorize -> consent -> /oauth/token dance, and it is a poor fit for the term
+ * "per-connection authorization state" -- describing it precisely, rather than folding it into (or
+ * changing it to match) the statelessness claim above:
+ *   - createAuthCode()/consumeAuthCode() (auth/oauth-tokens.ts): a single-use authorization code,
+ *     keyed by a random 32-byte value, expiring in 5 minutes.
+ *   - createPendingAuth()/resolveElevateChoice() (server/oauth-consent.ts): the owner-code consent
+ *     interstitial's pending-auth record, keyed by its own pending-auth id, with a 10-minute TTL and
+ *     a 5-guess budget.
+ * Neither is keyed by, or in any way derived from, an MCP transport/session id -- both live and die
+ * entirely within the OAuth dance itself, BEFORE any bearer token exists. By the time a bearer token
+ * reaches POST /mcp, this state has already been exchanged for that token (or expired) and is gone.
+ * So there is no per-connection authorization state at the MCP layer to reason about: each MCP
+ * request's authorization decision is a pure function of the bearer token it presents, exactly as
+ * the spec's statelessness requirement describes. Nothing below changes as a result of this note --
+ * it documents behavior this file and server/mcp.ts already have.
+ */
 
 /** Exposed for auth/bearer.ts: is a presented token a valid issued OAuth access token? */
 export function isValidIssuedAccessToken(token: string): boolean {
