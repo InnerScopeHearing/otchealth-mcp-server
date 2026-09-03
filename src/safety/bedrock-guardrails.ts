@@ -135,6 +135,7 @@
 
 import { resolveAwsCredentials, signRequest } from '../search/sigv4.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { emitLlmObsSpan, nowNs } from '../telemetry/llmobs.js';
 
 /** The honest provider label on a result that genuinely called Bedrock (success or failure). */
 export const BEDROCK_GUARDRAILS_PROVIDER = 'bedrock';
@@ -377,6 +378,11 @@ export async function bedrockShieldPrompt(
     { text: { text: userPrompt } },
     ...(documents || []).map((d) => ({ text: { text: d } }) as GuardrailContentBlock),
   ];
+  // DD_LLMOBS: timed from here (the first real Bedrock attempt), not from function entry -- the
+  // "not selected" early return above is not a call and is never instrumented. See
+  // ../telemetry/llmobs.js's SAFETY CONTRACT doc comment for why userPrompt/documents are
+  // deliberately never forwarded as inputText/outputText below (only categorical signals are).
+  const __obsStartNs = nowNs();
   try {
     const raw = await applyGuardrail('INPUT', content);
     const attackDetected = extractContentFilters(raw).some(
@@ -389,6 +395,20 @@ export async function bedrockShieldPrompt(
       .filter((p) => p.detected === true && typeof p.type === 'string')
       .map((p) => p.type as string);
     const piiEntityTypes = Array.from(new Set(detectedPiiTypes));
+    emitLlmObsSpan({
+      name: 'bedrock.apply_guardrail.shield',
+      kind: 'tool',
+      startNs: __obsStartNs,
+      durationNs: nowNs() - __obsStartNs,
+      ok: true,
+      provider: BEDROCK_GUARDRAILS_PROVIDER,
+      metadata: {
+        attack_detected: attackDetected,
+        pii_detected: piiEntityTypes.length > 0,
+        pii_entity_types: piiEntityTypes,
+        has_documents: hasDocuments,
+      },
+    });
     return {
       configured: true,
       ran: true,
@@ -401,6 +421,16 @@ export async function bedrockShieldPrompt(
       raw,
     };
   } catch (err) {
+    const __obsMessage = err instanceof Error ? err.message : String(err);
+    emitLlmObsSpan({
+      name: 'bedrock.apply_guardrail.shield',
+      kind: 'tool',
+      startNs: __obsStartNs,
+      durationNs: nowNs() - __obsStartNs,
+      ok: false,
+      provider: BEDROCK_GUARDRAILS_PROVIDER,
+      errorMessage: __obsMessage,
+    });
     return {
       configured: true,
       ran: false,
@@ -410,7 +440,7 @@ export async function bedrockShieldPrompt(
       piiDetected: false,
       piiEntityTypes: [],
       provider: BEDROCK_GUARDRAILS_PROVIDER,
-      error: err instanceof Error ? err.message : String(err),
+      error: __obsMessage,
       raw: undefined,
     };
   }
@@ -457,6 +487,9 @@ export async function bedrockDetectGroundedness(
     { text: { text: query, qualifiers: ['query'] } },
     { text: { text, qualifiers: ['guard_content'] } },
   ];
+  // DD_LLMOBS: see bedrockShieldPrompt's identical comment above -- timed from the first real
+  // Bedrock attempt; query/text/groundingSources are deliberately never forwarded as content.
+  const __obsStartNs = nowNs();
   try {
     const raw = await applyGuardrail('OUTPUT', content);
     const groundingFilter = extractGroundingFilters(raw).find((f) => f.type === 'GROUNDING');
@@ -465,6 +498,19 @@ export async function bedrockDetectGroundedness(
       groundingFilter && typeof groundingFilter.score === 'number'
         ? Math.max(0, Math.min(1, 1 - groundingFilter.score))
         : 0;
+    emitLlmObsSpan({
+      name: 'bedrock.apply_guardrail.groundedness',
+      kind: 'tool',
+      startNs: __obsStartNs,
+      durationNs: nowNs() - __obsStartNs,
+      ok: true,
+      provider: BEDROCK_GUARDRAILS_PROVIDER,
+      metadata: {
+        ungrounded_detected: ungroundedDetected,
+        ungrounded_percentage: ungroundedPercentage,
+        grounding_source_count: (groundingSources || []).length,
+      },
+    });
     return {
       configured: true,
       ran: true,
@@ -474,13 +520,23 @@ export async function bedrockDetectGroundedness(
       raw,
     };
   } catch (err) {
+    const __obsMessage = err instanceof Error ? err.message : String(err);
+    emitLlmObsSpan({
+      name: 'bedrock.apply_guardrail.groundedness',
+      kind: 'tool',
+      startNs: __obsStartNs,
+      durationNs: nowNs() - __obsStartNs,
+      ok: false,
+      provider: BEDROCK_GUARDRAILS_PROVIDER,
+      errorMessage: __obsMessage,
+    });
     return {
       configured: true,
       ran: false,
       ungroundedDetected: false,
       ungroundedPercentage: 0,
       provider: BEDROCK_GUARDRAILS_PROVIDER,
-      error: err instanceof Error ? err.message : String(err),
+      error: __obsMessage,
       raw: undefined,
     };
   }
