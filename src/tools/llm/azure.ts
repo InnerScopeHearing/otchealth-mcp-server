@@ -19,7 +19,7 @@ import { chat, chatConfigured, type ChatMessage } from '../../azure/foundry.js';
 import { loadEnv } from '../../config/env.js';
 import { captureGatewayEvent, summarizeUsage, overSoftBudget, buildLatencyFields, type LatencyClass } from '../../telemetry/gateway-ops.js';
 import { emitLlmMetrics } from '../../telemetry/datadog-metrics.js';
-import { checkLlmCache, writeLlmCache } from './semantic-cache.js';
+import { checkLlmCache, writeLlmCache, scopeFor } from './semantic-cache.js';
 import { checkFaqDeflect, seedFaqStore, faqDeflectOn } from './faq-deflect.js';
 
 const TASK_PROMPTS: Record<string, string> = {
@@ -29,6 +29,47 @@ const TASK_PROMPTS: Record<string, string> = {
   synthesize: 'You synthesize multiple sources into one coherent, accurate answer grounded strictly in the provided content. Preserve specifics; no outside facts; no preamble.',
   complete: 'You are a capable, concise assistant for routine text work.',
 };
+
+/**
+ * OPENAI_FLEX_BACKGROUND kill-switch (config/env.ts has the full contract) -- read FRESH from
+ * process.env on every check, the same convention this directory's other mode flags use
+ * (semantic-cache.ts cacheMode()/similarityThreshold(), faq-deflect.ts faqDeflectOn()), so it stays
+ * flippable per-call/per-test without needing loadEnv()'s per-process cache to be re-warmed.
+ * Defaults to flex APPLIED (true); the literal string '0' disables it. Exported for direct testing.
+ */
+export function flexBackgroundEnabled(): boolean {
+  return (process.env.OPENAI_FLEX_BACKGROUND || '').trim() !== '0';
+}
+
+/**
+ * PURE: the BACKGROUND-ONLY chat() opts additions for one llm_azure call. Exported so the wiring
+ * is directly unit-testable without standing up the full registered tool.
+ *
+ * A fire-and-forget/best-effort latencyClass:'background' call can trade OpenAI's completion-time
+ * SLA for a 50% service_tier:'flex' discount (config/env.ts's OPENAI_FLEX_BACKGROUND has the full
+ * contract), which hot/normal calls never should -- a user-blocking call needs the SLA, not the
+ * discount. promptCacheKey is derived from the SAME partition key the semantic cache uses
+ * (scopeFor: task+tier+caller lane) rather than the raw input content, so repeated calls of the
+ * same SHAPE (a recurring classify/summarize job with a stable system prompt, different payloads
+ * each run) share a cache-routing prefix. promptCacheKey is unconditional on latencyClass being
+ * 'background' (a pure routing hint, safe regardless of the flex kill-switch); serviceTier is
+ * additionally gated on flexBackgroundEnabled() so the switch can disable ONLY the discount+SLA
+ * trade-off without touching cache routing. Any non-'background' latencyClass returns {} (no
+ * change to today's request body).
+ */
+export function backgroundChatOpts(
+  latencyClass: LatencyClass,
+  callerAgent: string,
+  task: string,
+  tier: string,
+): { serviceTier?: 'flex'; promptCacheKey?: string } {
+  if (latencyClass !== 'background') return {};
+  const opts: { serviceTier?: 'flex'; promptCacheKey?: string } = {
+    promptCacheKey: scopeFor(callerAgent, task, tier),
+  };
+  if (flexBackgroundEnabled()) opts.serviceTier = 'flex';
+  return opts;
+}
 
 export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -193,6 +234,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             maxTokens: input.maxTokens ?? 1500,
             jsonMode: input.jsonMode ?? input.task === 'extract',
             tier,
+            ...backgroundChatOpts(latencyClass, ctx.callerAgent, input.task, tier),
           });
           const modelEnded = Date.now();
           // Observe-only per-call cost/usage event -> Gateway Ops project (fire-and-forget,

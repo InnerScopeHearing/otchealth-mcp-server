@@ -130,6 +130,11 @@ export function openAIUsageMetricPoints(input: {
   promptTokens: number;
   completionTokens: number;
   costUsd: number;
+  /** OpenAI service_tier actually billed ('flex', 'default', 'priority', ...). Tagged verbatim;
+   *  unset/empty is tagged 'default' so every point always carries this tag (a query/monitor can
+   *  filter on it without a separate "tag present" branch). See openai-cost.ts's
+   *  estimateOpenAICostUsd for the cost side of the same signal. */
+  serviceTier?: string;
 }): DdPoint[] {
   const tags = [
     `model:${input.model || 'unknown'}`,
@@ -137,6 +142,7 @@ export function openAIUsageMetricPoints(input: {
     `caller:${input.caller || 'unknown'}`,
     `repo:${input.repo || 'otchealth-mcp-server'}`,
     `unknown:${input.unknown ? 'true' : 'false'}`,
+    `service_tier:${input.serviceTier || 'default'}`,
   ];
   const pts: DdPoint[] = [];
   if (input.promptTokens > 0) {

@@ -21,7 +21,7 @@ process.env.WEB_SEARCH_PROVIDER ||= 'azure';
 process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
 process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 
-const { embedBatch, foundryConfigured, chatTarget, chatConfigured, promptCacheKey } = await import('./foundry.js');
+const { embedBatch, foundryConfigured, chatTarget, chatConfigured, promptCacheKey, chat } = await import('./foundry.js');
 
 test('promptCacheKey: stable across calls sharing a system prefix, and independent of user content', () => {
   const sys = { role: 'system' as const, content: 'You are a precise summarizer.' };
@@ -177,4 +177,45 @@ test('embedBatch: a response missing the `.index` field falls back to array posi
       assert.deepEqual(vectors, [[10], [20]]);
     },
   );
+});
+
+// ---- provider gating for the 2026-09-03 OpenAI cost levers (serviceTier is OpenAI-direct ONLY) ----
+
+test('chat(): serviceTier:"flex" is NEVER sent to Azure OpenAI, even when explicitly requested (this file is LLM_PROVIDER=foundry)', async () => {
+  let body: Record<string, unknown> = {};
+  let seenUrl = '';
+  await withStubbedFetch(
+    (async (u: string | URL, init?: RequestInit) => {
+      seenUrl = String(u);
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { serviceTier: 'flex' }),
+  );
+  assert.ok(seenUrl.includes('/openai/deployments/'), 'sanity: this really is the Azure URL shape');
+  assert.equal('service_tier' in body, false, 'service_tier must never reach Azure OpenAI');
+});
+
+test('chat(): promptCacheKey (OpenAI-style prompt_cache_key) is still additive on the Azure path -- unlike serviceTier, it is not provider-gated', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { promptCacheKey: 'llm:cto:summarize:standard' }),
+  );
+  assert.equal(body.prompt_cache_key, 'llm:cto:summarize:standard');
+});
+
+test('chat(): router-tier reasoning_effort default is ALSO provider-neutral in principle, but never fires on Azure because FOUNDRY_CHAT_DEPLOYMENT/_HIGH_DEPLOYMENT here are gpt-5.1/gpt-5.4, not the gpt-5.6 family', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { tier: 'router' }),
+  );
+  assert.equal('reasoning_effort' in body, false, 'the family gate correctly excludes this deploy\'s gpt-5.1 fallback');
 });

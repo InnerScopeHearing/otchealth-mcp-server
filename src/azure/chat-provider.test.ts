@@ -205,3 +205,140 @@ test('a caller temperature is still passed through verbatim for models that acce
   assert.equal(body.model, 'gpt-5.1');
   assert.equal(body.temperature, 0, 'non-gpt-5.6 models keep the caller temperature');
 });
+
+// ---- service_tier passthrough (2026-09-03 cost levers: 'flex' is 50% off, live-verified) ----
+
+test('serviceTier:"flex" is sent as body.service_tier on the OpenAI-direct path', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.6-terra', service_tier: 'flex' }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { serviceTier: 'flex' }),
+  );
+  assert.equal(body.service_tier, 'flex');
+});
+
+test('serviceTier:"default" sends NO service_tier field at all -- only the literal "flex" value changes the body', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { serviceTier: 'default' }),
+  );
+  assert.equal('service_tier' in body, false);
+});
+
+test('serviceTier omitted entirely also sends no service_tier field (matches pre-this-change behavior)', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }]),
+  );
+  assert.equal('service_tier' in body, false);
+});
+
+// ---- prompt_cache_key passthrough (OpenAI's own routing hint, distinct from body.user below) ----
+
+test('promptCacheKey is sent verbatim as body.prompt_cache_key when the caller sets it', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { promptCacheKey: 'llm:cto:summarize:standard' }),
+  );
+  assert.equal(body.prompt_cache_key, 'llm:cto:summarize:standard');
+  // body.user (the SEPARATE Azure-style cache-affinity field) is still populated independently --
+  // adding prompt_cache_key never suppresses the pre-existing `user` derivation.
+  assert.equal(typeof body.user, 'string');
+  assert.match(String(body.user), /^oc-[0-9a-f]{24}$/);
+});
+
+test('prompt_cache_key is omitted entirely when the caller does not set promptCacheKey', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }]),
+  );
+  assert.equal('prompt_cache_key' in body, false);
+});
+
+// ---- router-tier reasoning_effort default (OPENAI_ROUTER_REASONING_EFFORT unset here -> 'low') ----
+// A custom value / the 'off' kill-switch / an invalid-value validation failure need their OWN
+// process (loadEnv() caches per process on first call) -- see the dedicated
+// chat-provider-router-reasoning-*.test.ts files for those scenarios.
+
+test('router tier + a gpt-5.6-family model + no explicit reasoningEffort -> body.reasoning_effort defaults to "low" (OPENAI_ROUTER_REASONING_EFFORT unset in this file)', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.6-luna' }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { tier: 'router' }),
+  );
+  assert.equal(body.model, 'gpt-5.6-luna', 'router really did resolve to a gpt-5.6-family model');
+  assert.equal(body.reasoning_effort, 'low');
+});
+
+test('an EXPLICIT reasoningEffort always wins over the router default, even on tier:"router"', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.6-luna' }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { tier: 'router', reasoningEffort: 'xhigh' }),
+  );
+  assert.equal(body.reasoning_effort, 'xhigh', 'the caller-supplied value must win over the env default');
+});
+
+test('tier:"standard" is NEVER defaulted, even though standard can resolve to a gpt-5.6-family model', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.6-terra' }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { tier: 'standard' }),
+  );
+  assert.equal(body.model, 'gpt-5.6-terra', 'standard really did resolve to a gpt-5.6-family model');
+  assert.equal('reasoning_effort' in body, false, 'standard tier must never get the router-only default');
+});
+
+test('tier:"high" is NEVER defaulted, even though high (sol) is ALSO a gpt-5.6-family model -- only "router" gets the automatic default', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-5.6-sol' }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { tier: 'high' }),
+  );
+  assert.equal(body.model, 'gpt-5.6-sol', 'high really did resolve to a gpt-5.6-family model (sol)');
+  assert.equal('reasoning_effort' in body, false, 'high tier must never get the router-only default');
+});
+
+test('router tier on a NON-gpt-5.6-family model (a deploymentOverride) does not get the family-gated default either', async () => {
+  let body: Record<string, unknown> = {};
+  await withStubbedFetch(
+    (async (_u: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], model: 'gpt-4o-mini' }), { status: 200 });
+    }) as unknown as typeof fetch,
+    () => chat([{ role: 'user', content: 'x' }], { tier: 'router', deployment: 'gpt-4o-mini' }),
+  );
+  assert.equal(body.model, 'gpt-4o-mini');
+  assert.equal('reasoning_effort' in body, false, 'the family gate, not just the tier gate, must hold');
+});
