@@ -282,13 +282,17 @@ export function chatConfigured(): boolean {
 /** Shared POST helper for any resolved {url, headers, model} provider target (embeddings or chat).
  *  Sends `model` in the body only when the target declares one (OpenAI addresses the model in the
  *  body; Azure already baked its deployment into `target.url`, so `model` stays null there). */
-async function postToTarget<T>(target: ProviderTarget, body: Record<string, unknown>): Promise<T> {
+async function postToTarget<T>(
+  target: ProviderTarget,
+  body: Record<string, unknown>,
+  budget?: { timeoutMs?: number; retries?: number },
+): Promise<T> {
   const payload = target.model ? { ...body, model: target.model } : body;
   const res = await fetchWithBudget(target.url, {
     method: 'POST',
     headers: target.headers,
     body: JSON.stringify(payload),
-  });
+  }, budget ?? {});
   const text = await res.text();
   let data: unknown;
   try {
@@ -301,6 +305,20 @@ async function postToTarget<T>(target: ProviderTarget, body: Record<string, unkn
     throw new FoundryError(res.status, msg);
   }
   return data as T;
+}
+
+/** HTTP budget for a CHAT completion request. Embeddings keep fetchWithBudget's 8 s default
+ *  (they are fast and idempotent); a reasoning-tier chat completion is not. Live 2026-09-04:
+ *  gpt-5.6-sol on a 3.4 KB JSON-mode claims packet needs well over 8 s, so every such call was
+ *  aborting inside the default budget and claims_check could not screen its own release
+ *  packets. timeoutMs comes from FOUNDRY_CHAT_TIMEOUT_MS (bounded in config/env.ts). The retry
+ *  count is deliberately NOT set here: chat keeps fetchWithBudget's default (one identical
+ *  retry on a network error / 429 / 5xx), the behaviour flex-429-default-fallback.test.ts pins
+ *  as "2 physical attempts per logical leg". Exported for its unit test. */
+export function chatRequestBudget(env: { FOUNDRY_CHAT_TIMEOUT_MS?: number } = loadEnv()): { timeoutMs: number } {
+  const raw = Number(env.FOUNDRY_CHAT_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(raw) && raw >= 8_000 && raw <= 300_000 ? Math.floor(raw) : 90_000;
+  return { timeoutMs };
 }
 
 /** POST to a fully-formed embeddings target. Kept as a thin named wrapper (rather than calling
@@ -554,7 +572,7 @@ export async function chat(
   // new one).
   let requestedServiceTier = opts?.serviceTier;
   try {
-    j = await postToTarget<ChatCompletionResponse>(target, body);
+    j = await postToTarget<ChatCompletionResponse>(target, body, chatRequestBudget());
   } catch (err) {
     // NARROW on purpose: only fall back when (a) THIS request actually carried
     // service_tier:'flex' -- never touch a plain rate-limit 429 on a call that never requested flex
@@ -572,7 +590,7 @@ export async function chat(
       // for a worst case of 2 + 2 = 4 physical attempts total. That is one additional LOGICAL retry
       // layered on top of the existing budget, not a multiplied ladder: a call that never requests
       // flex, or a flex call that fails for any other reason, keeps today's worst case of 2.
-      j = await postToTarget<ChatCompletionResponse>(target, fallbackBody);
+      j = await postToTarget<ChatCompletionResponse>(target, fallbackBody, chatRequestBudget());
       requestedServiceTier = undefined;
     } else {
       throw err;

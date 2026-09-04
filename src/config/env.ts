@@ -382,6 +382,13 @@ const EnvSchema = z.object({
   // collapsing to tier:'standard's model the way it did before that model existed. Set this only if a
   // dedicated OpenAI routing product id is confirmed later.
   OPENAI_ROUTER_MODEL: z.string().optional().default(''),
+  // Per-request HTTP budget for Foundry/OpenAI CHAT completions (ms). util/fetch-budget.ts defaults
+  // every call to 8000 ms, which is right for embeddings and health probes but NOT for a
+  // reasoning-tier chat completion: live 2026-09-04, claims_check on a 3.4 KB JSON-mode packet
+  // against gpt-5.6-sol (tier:'high') aborted with "The operation was aborted due to timeout" on
+  // 4 of 5 packets while the 2 KB packet passed -- the gate could not screen its own release
+  // packets. Bounded so a typo can neither disable the budget nor hang a request for minutes.
+  FOUNDRY_CHAT_TIMEOUT_MS: z.coerce.number().int().min(8_000).max(300_000).default(90_000),
 
   // Default reasoning_effort applied to a tier:'router' src/azure/foundry.ts chat() call ONLY when
   // BOTH the resolved model is in the gpt-5.6 family (isGpt56Family()) AND the caller did not
