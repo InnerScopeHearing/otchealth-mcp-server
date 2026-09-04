@@ -390,6 +390,68 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   return new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
 }
 
+export type ConnectorAnnotationsMode = 'off' | 'on';
+
+/**
+ * Whether the connector-surface (dcr_/occ_ OAuth client) branch of registerTool()'s `toolConfig`
+ * includes the small `annotations` hints object (readOnlyHint/destructiveHint/idempotentHint/
+ * openWorldHint) on the wire. Defaults to 'on'.
+ *
+ * HISTORY (why this is a flag and not just a code change): commit 66cdde5 (2026-07-03, "spec-bare
+ * MCP surface for Claude Chat (DCR) connectors") dropped `title`, `outputSchema`, AND `annotations`
+ * from this branch all at once, citing a Claude web client bug (anthropics/claude-code#25081) where
+ * an unexpected `tools/list` shape caused the ENTIRE tool list to be dropped from the model (which
+ * had made brain_search unreachable). That commit bundled four fields -- two top-level MCP
+ * `capabilities` fields plus the three per-tool fields above -- under one theory, with no isolated
+ * per-field test recorded anywhere in this repo.
+ *
+ * The SAME evening a follow-on (#80, "response-level strip") went further, additionally stripping
+ * the MCP SDK's own auto-injected, protocol-legal `execution` field and normalizing
+ * `capabilities.tools.listChanged`, via a raw http.ServerResponse.write/end rewrite, on the theory
+ * that THOSE were the real drop-triggers. That rewrite hung connector /mcp responses and was
+ * reverted two hours later (#82); its message states the leftover SDK-injected `execution`/
+ * `listChanged` fields "remain (harmless; Sentry connector has same)" -- i.e. confirms, in
+ * production, that an unexpected/extra field is NOT uniformly fatal to Claude's client. That is real
+ * evidence against the broadest form of the original theory, but `annotations` was never re-tested
+ * in isolation from `outputSchema`/`title`, so which of those three specifically mattered (if any
+ * still would, an MCP SDK major version later) remains genuinely unproven either way -- there is no
+ * ablation test in this repo's history for the per-tool trio.
+ *
+ * Structurally, the `annotations` object re-added here is the SAME small object (four booleans)
+ * already sent, byte-for-byte, on every internal client_credentials lane (cto/cfo/clo/... via
+ * gateway-connect, i.e. every path where isConnectorSurface() is false) with no reported
+ * tool-list-drop symptom. NOTE the boundary precisely: isConnectorSurface() is true for EVERY
+ * dcr_/occ_ OAuth client (auth/bearer.ts), so the per-lane curated connector SEATS (the occ_gpt_* /
+ * elevated-DCR CTO ship surface, CRO, COO) go through THIS bare branch today and therefore currently
+ * send NO annotations at all -- which is exactly why Codex prompts on every call on the CTO seat.
+ * Those seats, plus every Claude.ai and Claude Code web connector, are the blast radius of flipping
+ * this on; verify one of each after the deploy. `outputSchema` is categorically different: a large,
+ * per-tool, deeply nested JSON Schema wrapper repeated across the whole catalog. So this flag re-adds
+ * ONLY `annotations`' four boolean hints (readOnlyHint/destructiveHint/idempotentHint/openWorldHint
+ * -- exactly what an MCP client's approval machinery reads); it deliberately does NOT re-add the
+ * optional `title` sub-field, the outer `title`, or `outputSchema` -- those three stay off the
+ * connector surface unconditionally, unrelated to this flag, since nothing requires them for
+ * approval-gating and the evidence on `title`/`outputSchema` is unchanged from 66cdde5.
+ *
+ * MOTIVATION (2026-09): OpenAI Codex's `writes`-mode approval policy treats a tool with NO
+ * `annotations` at all as write-capable and prompts on every call; `readOnlyHint:true` passes
+ * silently. Without this, every one of the ~1004 gateway tools -- including brain_search -- prompts
+ * on the connector surface. This stays a flippable mode rather than a plain code change precisely
+ * because the history above is not a proof: if a real client regresses in the wild, flip
+ * CONNECTOR_ANNOTATIONS_MODE=off (one env-var change on the ECS task definition plus a service
+ * rollout; no image rebuild, no code rollback) to return to the EXACT prior bare shape.
+ *
+ * Parse: garbage/unset -> 'on' (the new, Codex-safe default); only the literal string 'off' (any
+ * case, trimmed) reverts to the pre-existing bare shape. Mirrors AUTO_JOURNAL_MODE / JIT_DOCTRINE_MODE
+ * / SHIELD_MODE's convention: fail open toward the new default, never crash or no-op on garbage.
+ * Read fresh from process.env at each registerTool() call (never cached via loadEnv()'s memoized
+ * `env`), the same convention as those three.
+ */
+export function parseConnectorAnnotationsMode(value: string | undefined): ConnectorAnnotationsMode {
+  const v = (value || '').trim().toLowerCase();
+  return v === 'off' ? 'off' : 'on';
+}
+
 export type ToolCategory = 'read' | 'write_simple' | 'write_orchestrated';
 
 export interface ToolAnnotations {
@@ -743,8 +805,31 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     dry_run: z.boolean(),
   };
 
+  // See parseConnectorAnnotationsMode's doc comment (above, next to connectorToolset()) for the
+  // full history of why this is a flag: 66cdde5 dropped annotations/outputSchema/title together for
+  // a Claude web client bug, but the #80/#82 saga later showed unexpected extra fields are not
+  // uniformly fatal, and `annotations` was never independently re-tested against that bug. Default
+  // 'on' so OpenAI Codex's writes-mode approval gate (which treats a tool with NO annotations as
+  // write-capable) can pass safe reads like brain_search silently; CONNECTOR_ANNOTATIONS_MODE=off
+  // reverts to the exact prior bare shape (task-definition env change + rollout, no image rebuild)
+  // if a client regresses.
+  const includeConnectorAnnotations =
+    parseConnectorAnnotationsMode(process.env.CONNECTOR_ANNOTATIONS_MODE) === 'on';
   const toolConfig = connectorSurfaceForThisTool
-    ? { description: def.annotations.description, inputSchema: inputShape }
+    ? {
+        description: def.annotations.description,
+        inputSchema: inputShape,
+        ...(includeConnectorAnnotations
+          ? {
+              annotations: {
+                readOnlyHint: def.annotations.readOnlyHint,
+                destructiveHint: def.annotations.destructiveHint,
+                idempotentHint: def.annotations.idempotentHint,
+                openWorldHint: def.annotations.openWorldHint,
+              },
+            }
+          : {}),
+      }
     : {
         title: def.annotations.title,
         description: def.annotations.description,

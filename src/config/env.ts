@@ -972,6 +972,21 @@ const EnvSchema = z.object({
   // Search/Foundry outage, or the candidate re-run itself throwing all degrade to "no comparison
   // written" rather than ever affecting the live call's latency, result, or failure rate.
 
+  // CONNECTOR ANNOTATIONS (src/tools/registry.ts's registerTool()). Also NOT in this schema on
+  // purpose, same reasoning as COLD_START_MODE above -- read fresh from process.env per call, the
+  // same convention as that flag:
+  //   CONNECTOR_ANNOTATIONS_MODE  off | on (default)
+  // Whether the connector-surface (dcr_/occ_ OAuth client) branch of a registered tool's config
+  // includes the small `annotations` hints object (readOnlyHint/destructiveHint/idempotentHint/
+  // openWorldHint). 'on' (the default) lets an MCP client's approval machinery -- OpenAI Codex's
+  // `writes`-mode policy is the concrete motivator -- pass a safe read like brain_search silently
+  // instead of prompting on every call, since a tool with NO annotations reads as write-capable.
+  // `outputSchema` and `title` stay off the connector surface unconditionally either way (see
+  // parseConnectorAnnotationsMode's doc comment in registry.ts for the full history of why those
+  // two are not part of this flag). 'off' reverts to the exact pre-2026-09 bare shape with one
+  // env-var change on the ECS task definition plus a rollout (no image rebuild), if a real client
+  // regresses.
+
   // Wave A: Azure Document Intelligence (CFO invoices + CLO contracts; read/analyze only, non-BAA).
   // NEVER send PHI/MedReview documents through this gateway.
   DOCINTEL_ENDPOINT: z.string().optional().default(''),
