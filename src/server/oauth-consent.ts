@@ -373,6 +373,24 @@ export function formatValidUntilUtc(expiresAt: string): string {
   return `${hh}:${mm} UTC`;
 }
 
+/** The whole validity sentence shown on the consent page. It LEADS with the relative time left
+ *  ("about 27 more minutes") because the person reading it is a human in their own local timezone,
+ *  and a bare UTC clock time makes them do timezone arithmetic at exactly the moment they are already
+ *  confused about why a code "did not work"; the absolute UTC time follows as the unambiguous anchor.
+ *  `now` is a parameter rather than Date.now() read inside so (a) the wrong-code re-render reports
+ *  the minutes actually left AT THAT SUBMISSION, not at the original page load, and (b) tests can pin
+ *  exact strings. Whole minutes are FLOORED, never rounded up: the sentence must never promise a
+ *  minute the record does not have. Under one minute it says so instead of printing "0 minutes". */
+export function formatValidityLine(expiresAt: string, now: number): string {
+  const ms = Date.parse(expiresAt);
+  if (!Number.isFinite(ms)) return 'This page expires shortly.';
+  const until = formatValidUntilUtc(expiresAt);
+  const remainingMin = Math.floor((ms - now) / 60_000);
+  if (remainingMin < 1) return `This page is valid for less than one more minute, until ${until}.`;
+  if (remainingMin === 1) return `This page is valid for about 1 more minute, until ${until}.`;
+  return `This page is valid for about ${remainingMin} more minutes, until ${until}.`;
+}
+
 /** The consent form. No dynamic content is ever interpolated except the pending_id (server-
  *  generated hex, never attacker-influenced), the optional retry error (a fixed, non-secret literal
  *  this file itself chooses -- see resolveElevateChoice's 'retry' message), and the pending record's
@@ -381,14 +399,21 @@ export function formatValidUntilUtc(expiresAt: string): string {
  *  optional: both call sites in oauth.ts already have it on hand (createPendingAuth's own return, or
  *  the stored record's own expiresAt threaded through the 'retry' outcome) without a second storage
  *  read, and making it required means a future call site that forgets to thread it through fails to
- *  compile rather than silently rendering a page with no "valid until" line. Deliberately NEVER
+ *  compile rather than silently rendering a page with no "valid until" line. `now` defaults to the
+ *  server clock; it is a parameter so the wrong-code re-render reports the minutes actually left at
+ *  THAT submission (see formatValidityLine) and so tests can pin exact strings. Deliberately NEVER
  *  renders client_id/redirect_uri: those come from the DCR client's own self-registration and, absent
  *  an OAUTH_REDIRECT_URIS allow-list, can be an attacker-chosen https URL -- rendering it here would
  *  need the SAME escaping discipline for no user benefit, so the simplest defense is to never
  *  interpolate it into the page at all. */
-export function renderConsentPage(pendingId: string, errorMessage: string | undefined, expiresAt: string): string {
+export function renderConsentPage(
+  pendingId: string,
+  errorMessage: string | undefined,
+  expiresAt: string,
+  now: number = Date.now(),
+): string {
   const errorBlock = errorMessage ? `<p class="err">${escapeHtml(errorMessage)}</p>` : '';
-  const validUntilBlock = `<p class="hint">This page is valid until ${escapeHtml(formatValidUntilUtc(expiresAt))}.</p>`;
+  const validUntilBlock = `<p class="hint">${escapeHtml(formatValidityLine(expiresAt, now))}</p>`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTCHealth Gateway Connection</title><style>${PAGE_STYLE}</style></head><body><main><h1>Connect to the OTCHealth gateway</h1><p>A connector is requesting access to the OTCHealth gateway.</p>${errorBlock}<form method="post" action="/oauth/authorize/consent"><input type="hidden" name="pending_id" value="${escapeHtml(pendingId)}"><label for="code">Owner setup code (optional)</label><input id="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="64"><p class="hint">Have a setup code from the OTCHealth CTO? Enter it to connect with an elevated role. Otherwise, connect read-only.</p>${validUntilBlock}<div class="row"><button type="submit" name="action" value="readonly" class="secondary">Connect read-only instead</button><button type="submit" name="action" value="elevate" class="primary">Elevate with owner code</button></div></form></main></body></html>`;
 }
 

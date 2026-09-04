@@ -6,6 +6,7 @@ import {
   buildAuthorizeRedirectUrl,
   createPendingAuth,
   formatValidUntilUtc,
+  formatValidityLine,
   isValidPendingAuthId,
   newPendingAuthId,
   renderConsentPage,
@@ -407,16 +408,50 @@ test('formatValidUntilUtc renders a 24-hour, zero-padded, UTC time, and never th
   assert.equal(formatValidUntilUtc('not-a-date'), 'shortly');
 });
 
-test('renderConsentPage shows "This page is valid until HH:MM UTC." derived from expiresAt, on both the fresh page and a retry re-render', () => {
-  const fresh = renderConsentPage('deadbeefdeadbeefdeadbeefdeadbeef', undefined, '2026-09-04T14:32:00.000Z');
-  assert.match(fresh, /This page is valid until 14:32 UTC\./);
+test('formatValidityLine leads with the FLOORED minutes left at `now`, then the absolute UTC time, and never says "0 minutes"', () => {
+  const expiresAt = '2026-09-04T14:32:00.000Z';
+  // 27 min 30 s left -> floored to 27, never rounded up to a minute the record does not have.
+  assert.equal(
+    formatValidityLine(expiresAt, Date.parse('2026-09-04T14:04:30.000Z')),
+    'This page is valid for about 27 more minutes, until 14:32 UTC.',
+  );
+  // Exactly 60 s left -> singular.
+  assert.equal(
+    formatValidityLine(expiresAt, Date.parse('2026-09-04T14:31:00.000Z')),
+    'This page is valid for about 1 more minute, until 14:32 UTC.',
+  );
+  // 59 s left -> under a minute, said in words.
+  assert.equal(
+    formatValidityLine(expiresAt, Date.parse('2026-09-04T14:31:01.000Z')),
+    'This page is valid for less than one more minute, until 14:32 UTC.',
+  );
+  // Defensive fallback only (both real call sites pass a value this file itself generated).
+  assert.equal(formatValidityLine('not-a-date', 0), 'This page expires shortly.');
+  // No U+2013 / U+2014 in any variant of the published sentence (\u escapes, not literal glyphs).
+  for (const now of ['2026-09-04T14:04:30.000Z', '2026-09-04T14:31:00.000Z', '2026-09-04T14:31:01.000Z']) {
+    assert.doesNotMatch(formatValidityLine(expiresAt, Date.parse(now)), /[\u2013\u2014]/);
+  }
+});
 
+test('renderConsentPage shows the validity sentence computed from expiresAt and `now`, on both the fresh page and a retry re-render', () => {
+  const fresh = renderConsentPage(
+    'deadbeefdeadbeefdeadbeefdeadbeef',
+    undefined,
+    '2026-09-04T14:32:00.000Z',
+    Date.parse('2026-09-04T14:04:30.000Z'),
+  );
+  assert.match(fresh, /This page is valid for about 27 more minutes, until 14:32 UTC\./);
+
+  // A wrong-code re-render reports the time left AT THAT SUBMISSION (here 50 s before expiry), not
+  // the original page load, and the expiry itself is unchanged by the wrong guess.
   const retry = renderConsentPage(
     'deadbeefdeadbeefdeadbeefdeadbeef',
     'That code is invalid or has expired.',
     '2026-09-04T09:05:00.000Z',
+    Date.parse('2026-09-04T09:04:10.000Z'),
   );
-  assert.match(retry, /This page is valid until 09:05 UTC\./);
+  assert.match(retry, /That code is invalid or has expired\./);
+  assert.match(retry, /This page is valid for less than one more minute, until 09:05 UTC\./);
 });
 
 test('renderDeadEndPage renders distinct wording for expired vs server_error, with no form', () => {
