@@ -26,8 +26,12 @@
  * so a tampered hidden field cannot redirect the flow anywhere the original GET request did not
  * already validate.
  *
- * Two independent budgets bound the record: a 10-minute TTL, and MAX_SETUP_CODE_ATTEMPTS (5) wrong
- * codes before the record is permanently burned (resolveElevateChoice below) -- checked and
+ * Two independent budgets bound the record: a TTL kept in lockstep with auth/setup-codes.ts's own
+ * DEFAULT_TTL_MINUTES (see PENDING_TTL_MS below -- this used to be a separately hardcoded 10 minutes,
+ * SHORTER than the setup-code's own default 30-minute TTL, which was a real, user-visible dead-end
+ * bug: a code fetched just after the pending page loaded could still be perfectly valid while the
+ * page itself had already died), and MAX_SETUP_CODE_ATTEMPTS (5) wrong codes before the record is
+ * permanently burned (resolveElevateChoice below) -- checked and
  * persisted with the SAME read -> mutate -> replace(ifMatch) -> retry-on-412 shape auth/setup-codes.ts uses,
  * so two concurrent wrong-guess submissions against the SAME pending id cannot each be counted as
  * "attempt 1 of 5" and together exceed the cap unnoticed.
@@ -54,6 +58,7 @@ import {
   replaceDoc,
 } from '../agentstate/store.js';
 import {
+  DEFAULT_TTL_MINUTES,
   consumeSetupCode,
   defaultSetupCodeDeps,
   type SetupCodeDeps,
@@ -62,7 +67,14 @@ import {
 const CACHE_CONTAINER = 'cache';
 const PENDING_KIND = 'connector-pending-auth';
 const DOC_ID_PREFIX = 'connector-pending-auth_';
-const PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
+// Derived from auth/setup-codes.ts's own DEFAULT_TTL_MINUTES (the setup-code TTL a mint gets when it
+// does not pass ttl_minutes) rather than a second hardcoded number, so the two clocks can never again
+// drift out of lockstep. A shorter pending-auth window than the code's own default TTL is invisible
+// until it actually bites: the owner fetches a still-valid code, comes back, submits it, and lands on
+// a dead page anyway even though the code itself was never expired. A unit test in
+// oauth-consent.test.ts pins this equality directly so a future edit to either constant cannot
+// silently reopen the gap.
+const PENDING_TTL_MS = DEFAULT_TTL_MINUTES * 60 * 1000;
 export const MAX_SETUP_CODE_ATTEMPTS = 5;
 /** External-facing pending_id charset: 16 random bytes, hex-encoded (see newPendingAuthId). */
 const PENDING_ID_RE = /^[a-f0-9]{32}$/;
@@ -230,7 +242,10 @@ export type ResolveOutcome =
       /** The elevated role, or null for the plain read-only completion. */
       agentOverride: string | null;
     }
-  | { outcome: 'retry'; message: string }
+  /** `expiresAt` is the SAME pending record's own expiry (never re-read from storage, never
+   *  extended by a wrong guess) -- carried here purely so the caller can re-render renderConsentPage's
+   *  "valid until" line without a second storage read. It is NOT a new expiry for this retry. */
+  | { outcome: 'retry'; message: string; expiresAt: string }
   | { outcome: 'burned' }
   | { outcome: 'store_error' };
 
@@ -317,7 +332,7 @@ export async function resolveElevateChoice(
     if (result.status === 404) return { outcome: 'burned' };
     if (!result.ok) return { outcome: 'store_error' };
     if (burned) return { outcome: 'burned' };
-    return { outcome: 'retry', message: 'That code is invalid or has expired.' };
+    return { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt: found.doc.expiresAt };
   }
   return { outcome: 'store_error' };
 }
@@ -342,26 +357,78 @@ function escapeHtml(value: string): string {
 
 const PAGE_STYLE = `body{font-family:system-ui,-apple-system,sans-serif;background:#f5f7fb;color:#102035;margin:0;padding:7vw}main{max-width:480px;margin:auto;background:#fff;border:1px solid #d9e0ea;border-radius:16px;padding:32px;box-shadow:0 12px 36px rgba(16,32,53,0.09)}h1{font-size:1.35rem;margin:0 0 8px}p{color:#4a5a70;line-height:1.5}label{display:block;font-weight:600;margin:20px 0 6px;font-size:.9rem}input{width:100%;box-sizing:border-box;font:inherit;padding:12px;border-radius:9px;border:1px solid #9caabd;letter-spacing:.05em;text-transform:uppercase}.row{display:flex;gap:10px;margin-top:20px}button{flex:1;font:inherit;padding:12px;border-radius:9px;border:0;cursor:pointer;font-weight:650}.primary{background:#0b5fff;color:#fff}.secondary{background:#eef1f6;color:#102035}.err{color:#b42318;background:#fdecea;border:1px solid #f7c8c2;border-radius:9px;padding:10px 12px;margin:16px 0 0;font-size:.9rem}.hint{color:#7c8aa0;font-size:.8rem;margin-top:10px}`;
 
+/** Pure formatting helper: turn a pending record's `expiresAt` (an ISO string this file itself
+ *  produced, either freshly in createPendingAuth or read back unmodified in resolveElevateChoice's
+ *  'retry' outcome) into the exact "HH:MM UTC" text shown on the consent page -- 24-hour, zero-padded,
+ *  always UTC so the printed time never depends on the reader's or the server's local timezone. Falls
+ *  back to a neutral, non-alarming phrase rather than ever rendering "NaN:NaN UTC" if a future caller
+ *  somehow passes something unparsable; this should never happen in practice since both call sites
+ *  pass a value this file generated, not anything client-supplied. */
+export function formatValidUntilUtc(expiresAt: string): string {
+  const ms = Date.parse(expiresAt);
+  if (!Number.isFinite(ms)) return 'shortly';
+  const d = new Date(ms);
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${hh}:${mm} UTC`;
+}
+
+/** The whole validity sentence shown on the consent page. It LEADS with the relative time left
+ *  ("about 27 more minutes") because the person reading it is a human in their own local timezone,
+ *  and a bare UTC clock time makes them do timezone arithmetic at exactly the moment they are already
+ *  confused about why a code "did not work"; the absolute UTC time follows as the unambiguous anchor.
+ *  `now` is a parameter rather than Date.now() read inside so (a) the wrong-code re-render reports
+ *  the minutes actually left AT THAT SUBMISSION, not at the original page load, and (b) tests can pin
+ *  exact strings. Whole minutes are FLOORED, never rounded up: the sentence must never promise a
+ *  minute the record does not have. Under one minute it says so instead of printing "0 minutes". */
+export function formatValidityLine(expiresAt: string, now: number): string {
+  const ms = Date.parse(expiresAt);
+  if (!Number.isFinite(ms)) return 'This page expires shortly.';
+  const until = formatValidUntilUtc(expiresAt);
+  const remainingMin = Math.floor((ms - now) / 60_000);
+  if (remainingMin < 1) return `This page is valid for less than one more minute, until ${until}.`;
+  if (remainingMin === 1) return `This page is valid for about 1 more minute, until ${until}.`;
+  return `This page is valid for about ${remainingMin} more minutes, until ${until}.`;
+}
+
 /** The consent form. No dynamic content is ever interpolated except the pending_id (server-
- *  generated hex, never attacker-influenced) and the optional retry error (a fixed, non-secret
- *  literal this file itself chooses -- see resolveElevateChoice's 'retry' message) -- both are still
- *  run through escapeHtml as a blanket, no-exceptions practice. Deliberately NEVER renders
- *  client_id/redirect_uri: those come from the DCR client's own self-registration and, absent an
- *  OAUTH_REDIRECT_URIS allow-list, can be an attacker-chosen https URL -- rendering it here would
+ *  generated hex, never attacker-influenced), the optional retry error (a fixed, non-secret literal
+ *  this file itself chooses -- see resolveElevateChoice's 'retry' message), and the pending record's
+ *  own `expiresAt` (also server-computed, also never attacker-influenced) -- all three are still run
+ *  through escapeHtml as a blanket, no-exceptions practice. `expiresAt` is a REQUIRED parameter, not
+ *  optional: both call sites in oauth.ts already have it on hand (createPendingAuth's own return, or
+ *  the stored record's own expiresAt threaded through the 'retry' outcome) without a second storage
+ *  read, and making it required means a future call site that forgets to thread it through fails to
+ *  compile rather than silently rendering a page with no "valid until" line. `now` defaults to the
+ *  server clock; it is a parameter so the wrong-code re-render reports the minutes actually left at
+ *  THAT submission (see formatValidityLine) and so tests can pin exact strings. Deliberately NEVER
+ *  renders client_id/redirect_uri: those come from the DCR client's own self-registration and, absent
+ *  an OAUTH_REDIRECT_URIS allow-list, can be an attacker-chosen https URL -- rendering it here would
  *  need the SAME escaping discipline for no user benefit, so the simplest defense is to never
  *  interpolate it into the page at all. */
-export function renderConsentPage(pendingId: string, errorMessage?: string): string {
+export function renderConsentPage(
+  pendingId: string,
+  errorMessage: string | undefined,
+  expiresAt: string,
+  now: number = Date.now(),
+): string {
   const errorBlock = errorMessage ? `<p class="err">${escapeHtml(errorMessage)}</p>` : '';
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTCHealth Gateway Connection</title><style>${PAGE_STYLE}</style></head><body><main><h1>Connect to the OTCHealth gateway</h1><p>A connector is requesting access to the OTCHealth gateway.</p>${errorBlock}<form method="post" action="/oauth/authorize/consent"><input type="hidden" name="pending_id" value="${escapeHtml(pendingId)}"><label for="code">Owner setup code (optional)</label><input id="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="64"><p class="hint">Have a setup code from the OTCHealth CTO? Enter it to connect with an elevated role. Otherwise, connect read-only.</p><div class="row"><button type="submit" name="action" value="readonly" class="secondary">Connect read-only instead</button><button type="submit" name="action" value="elevate" class="primary">Elevate with owner code</button></div></form></main></body></html>`;
+  const validUntilBlock = `<p class="hint">${escapeHtml(formatValidityLine(expiresAt, now))}</p>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTCHealth Gateway Connection</title><style>${PAGE_STYLE}</style></head><body><main><h1>Connect to the OTCHealth gateway</h1><p>A connector is requesting access to the OTCHealth gateway.</p>${errorBlock}<form method="post" action="/oauth/authorize/consent"><input type="hidden" name="pending_id" value="${escapeHtml(pendingId)}"><label for="code">Owner setup code (optional)</label><input id="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="64"><p class="hint">Have a setup code from the OTCHealth CTO? Enter it to connect with an elevated role. Otherwise, connect read-only.</p>${validUntilBlock}<div class="row"><button type="submit" name="action" value="readonly" class="secondary">Connect read-only instead</button><button type="submit" name="action" value="elevate" class="primary">Elevate with owner code</button></div></form></main></body></html>`;
 }
 
 /** A dead-end page: no form, nothing left to submit. `kind` distinguishes a clean expiry/tamper
- *  (400) from a genuine server error (500) purely in wording -- oauth.ts picks the status code. */
+ *  (400) from a genuine server error (500) purely in wording -- oauth.ts picks the status code.
+ *  The 'expired' copy is deliberately explicit that THIS PAGE itself is spent and a fresh code cannot
+ *  revive it -- the prior wording ("Return to the app... and try again") read as generic enough that
+ *  users repeatedly fetched a brand-new setup code and pasted it into this same dead page, which can
+ *  never work: a NEW /oauth/authorize GET (clicking Authenticate again in the app) is required to get
+ *  a live pending record. */
 export function renderDeadEndPage(kind: 'expired' | 'server_error'): string {
   const title = kind === 'expired' ? 'This connection request has expired' : 'Something went wrong';
   const message =
     kind === 'expired'
-      ? 'Return to the app you were connecting and try again.'
+      ? 'This connection request has expired or was already used. Go back to the app you were connecting, click Authenticate again, and enter your setup code on the new page that opens. A code will not work on this page.'
       : 'Please try again in a moment. If this keeps happening, contact the OTCHealth team.';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTCHealth Gateway Connection</title><style>${PAGE_STYLE}</style></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main></body></html>`;
 }

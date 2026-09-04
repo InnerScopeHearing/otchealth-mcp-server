@@ -340,7 +340,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     // owner-minted setup code (connector_setup_code_create, cto/exec-gated) typed into THIS page by
     // a human in their own browser -- the connecting client itself never sees it.
     if (oauthConfigured() && ac && ac.isPublic) {
-      let pending: { id: string };
+      let pending: Awaited<ReturnType<typeof createPendingAuth>>;
       try {
         pending = await createPendingAuth(
           {
@@ -364,7 +364,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
       applyConsentPageHeaders(reply);
-      return reply.status(200).send(renderConsentPage(pending.id));
+      return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt));
     }
 
     const code = await createAuthCode({
@@ -417,7 +417,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       }
       if (resolved.outcome === 'retry') {
         applyConsentPageHeaders(reply);
-        return reply.status(200).send(renderConsentPage(pendingId, resolved.message));
+        return reply.status(200).send(renderConsentPage(pendingId, resolved.message, resolved.expiresAt));
       }
 
       // resolved.outcome === 'issue'. SECURITY (hostile-reviewer check): agentOverride here is
@@ -613,8 +613,9 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
  *   - createAuthCode()/consumeAuthCode() (auth/oauth-tokens.ts): a single-use authorization code,
  *     keyed by a random 32-byte value, expiring in 5 minutes.
  *   - createPendingAuth()/resolveElevateChoice() (server/oauth-consent.ts): the owner-code consent
- *     interstitial's pending-auth record, keyed by its own pending-auth id, with a 10-minute TTL and
- *     a 5-guess budget.
+ *     interstitial's pending-auth record, keyed by its own pending-auth id, with a TTL kept in
+ *     lockstep with the setup-code's own default TTL (30 minutes as of this writing -- see
+ *     oauth-consent.ts's PENDING_TTL_MS) and a 5-guess budget.
  * Neither is keyed by, or in any way derived from, an MCP transport/session id -- both live and die
  * entirely within the OAuth dance itself, BEFORE any bearer token exists. By the time a bearer token
  * reaches POST /mcp, this state has already been exchanged for that token (or expired) and is gone.
