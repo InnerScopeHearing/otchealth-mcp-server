@@ -5,6 +5,7 @@ import {
   applyConsentPageHeaders,
   buildAuthorizeRedirectUrl,
   createPendingAuth,
+  formatValidUntilUtc,
   isValidPendingAuthId,
   newPendingAuthId,
   renderConsentPage,
@@ -14,7 +15,7 @@ import {
   type OAuthConsentDeps,
   type PendingAuthDoc,
 } from './oauth-consent.js';
-import { mintSetupCode, type SetupCodeDeps } from '../auth/setup-codes.js';
+import { DEFAULT_TTL_MINUTES, mintSetupCode, type SetupCodeDeps } from '../auth/setup-codes.js';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // A SHARED fake `cache` store (real ETag CAS semantics) that BOTH the pending-auth deps and the
@@ -130,6 +131,27 @@ test('createPendingAuth stores a record and returns a valid external id', async 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// REGRESSION (the live 2026-09-04 dead-end bug): the pending-auth page's own TTL must equal the
+// setup-code's default TTL exactly, computed independently here from the SAME exported constant
+// oauth-consent.ts derives PENDING_TTL_MS from. Before this fix PENDING_TTL_MS was a separately
+// hardcoded 10 minutes, SHORTER than the setup-code's own 30-minute default -- a user who fetched a
+// still-valid code and came back could land on an already-dead page. If a future edit reverts
+// oauth-consent.ts to hardcode its own number again, this test fails the moment the two values
+// diverge, without needing to export the internal PENDING_TTL_MS constant itself.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('the pending-auth TTL equals the setup-code default TTL, so a page cannot die before a code fetched at the same moment does', async () => {
+  const cache = makeFakeCacheStore();
+  const clockRef = { now: 1_000_000 };
+  const { consentDeps } = makeDeps(cache, clockRef);
+  const { expiresAt } = await createPendingAuth(
+    { clientId: 'dcr_ttl', redirectUri: 'https://claude.ai/api/mcp/auth_callback', codeChallenge: 'chal_ttl', codeChallengeMethod: 'S256' },
+    consentDeps,
+  );
+  assert.equal(Date.parse(expiresAt) - clockRef.now, DEFAULT_TTL_MINUTES * 60 * 1000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // TAMPERED / UNKNOWN / EXPIRED pending id -> a clean, non-redirecting 'burned' outcome for BOTH
 // choices. Never a store_error, never an 'issue'.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -229,12 +251,12 @@ test('a wrong code returns "retry" and increments the pending record\'s attempt 
   const cache = makeFakeCacheStore();
   const clockRef = { now: 1_000_000 };
   const { consentDeps, setupDeps } = makeDeps(cache, clockRef);
-  const { id } = await createPendingAuth(
+  const { id, expiresAt } = await createPendingAuth(
     { clientId: 'dcr_z', redirectUri: 'https://claude.ai/api/mcp/auth_callback', codeChallenge: 'c3', codeChallengeMethod: 'S256' },
     consentDeps,
   );
   const outcome = await resolveElevateChoice(id, 'WRONG-CODE-AAAA-BBBB', consentDeps, setupDeps);
-  assert.deepEqual(outcome, { outcome: 'retry', message: 'That code is invalid or has expired.' });
+  assert.deepEqual(outcome, { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt });
   const doc = [...cache.store.values()].find((r) => (r.doc as PendingAuthDoc).kind === 'connector-pending-auth')!.doc as PendingAuthDoc;
   assert.equal(doc.attempts, 1);
   assert.equal(doc.burned, false);
@@ -245,14 +267,18 @@ test('BURN: after MAX_SETUP_CODE_ATTEMPTS wrong guesses the record is burned, an
   const clockRef = { now: 1_000_000 };
   const { consentDeps, setupDeps } = makeDeps(cache, clockRef);
   const minted = await mintSetupCode({ role: 'clo', createdBy: 'exec' }, setupDeps);
-  const { id } = await createPendingAuth(
+  const { id, expiresAt } = await createPendingAuth(
     { clientId: 'dcr_burn', redirectUri: 'https://claude.ai/api/mcp/auth_callback', codeChallenge: 'c4', codeChallengeMethod: 'S256' },
     consentDeps,
   );
 
   for (let i = 1; i < MAX_SETUP_CODE_ATTEMPTS; i += 1) {
     const outcome = await resolveElevateChoice(id, `WRONG-${i}-AAAA-BBBB`, consentDeps, setupDeps);
-    assert.deepEqual(outcome, { outcome: 'retry', message: 'That code is invalid or has expired.' }, `attempt ${i} should still be a retry`);
+    assert.deepEqual(
+      outcome,
+      { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt },
+      `attempt ${i} should still be a retry`,
+    );
   }
   // The MAX_SETUP_CODE_ATTEMPTS-th wrong guess burns the record.
   const burning = await resolveElevateChoice(id, 'WRONG-FINAL-AAAA-BBBB', consentDeps, setupDeps);
@@ -323,7 +349,7 @@ test('two concurrent wrong-code submissions against the SAME pending id both cou
   const cache = makeFakeCacheStore();
   const clockRef = { now: 1_000_000 };
   const { consentDeps, setupDeps } = makeDeps(cache, clockRef);
-  const { id } = await createPendingAuth(
+  const { id, expiresAt } = await createPendingAuth(
     { clientId: 'dcr_race', redirectUri: 'https://claude.ai/api/mcp/auth_callback', codeChallenge: 'c8', codeChallengeMethod: 'S256' },
     consentDeps,
   );
@@ -333,7 +359,7 @@ test('two concurrent wrong-code submissions against the SAME pending id both cou
     resolveElevateChoice(id, 'WRONG-B-BBBB-BBBB', consentDeps, setupDeps),
   ]);
   for (const r of [r1, r2]) {
-    assert.deepEqual(r, { outcome: 'retry', message: 'That code is invalid or has expired.' });
+    assert.deepEqual(r, { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt });
   }
   const doc = [...cache.store.values()].find((r) => (r.doc as PendingAuthDoc).kind === 'connector-pending-auth')!.doc as PendingAuthDoc;
   assert.equal(doc.attempts, 2, 'both concurrent wrong guesses must be counted, not collapsed into one');
@@ -344,22 +370,53 @@ test('two concurrent wrong-code submissions against the SAME pending id both cou
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 test('renderConsentPage embeds the pending_id, both action buttons, and (when given) an escaped error', () => {
-  const page = renderConsentPage('deadbeefdeadbeefdeadbeefdeadbeef');
+  const page = renderConsentPage('deadbeefdeadbeefdeadbeefdeadbeef', undefined, '2026-09-04T14:32:00.000Z');
   assert.match(page, /name="pending_id" value="deadbeefdeadbeefdeadbeefdeadbeef"/);
   assert.match(page, /name="action" value="readonly"/);
   assert.match(page, /name="action" value="elevate"/);
   assert.match(page, /A connector is requesting access to the OTCHealth gateway/);
 
-  const withError = renderConsentPage('deadbeefdeadbeefdeadbeefdeadbeef', 'That code is invalid or has expired.');
+  const withError = renderConsentPage(
+    'deadbeefdeadbeefdeadbeefdeadbeef',
+    'That code is invalid or has expired.',
+    '2026-09-04T14:32:00.000Z',
+  );
   assert.match(withError, /That code is invalid or has expired\./);
 });
 
 test('renderConsentPage HTML-escapes whatever it is given, even though pending_id is never attacker-controlled in production', () => {
-  const page = renderConsentPage('"><script>alert(1)</script>', '<img onerror=alert(1) src=x>');
+  const page = renderConsentPage('"><script>alert(1)</script>', '<img onerror=alert(1) src=x>', '2026-09-04T14:32:00.000Z');
   assert.equal(page.includes('<script>alert(1)</script>'), false);
   assert.equal(page.includes('<img onerror=alert(1) src=x>'), false);
   assert.match(page, /&lt;script&gt;/);
   assert.match(page, /&lt;img onerror=alert\(1\) src=x&gt;/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The "valid until HH:MM UTC" line (the second half of the 2026-09-04 fix): renderConsentPage must
+// show the owner exactly when THIS page itself dies, computed from the pending record's own
+// expiresAt, so a code fetched after the fact but before that time is guaranteed to still work here.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('formatValidUntilUtc renders a 24-hour, zero-padded, UTC time, and never throws on a bad value', () => {
+  assert.equal(formatValidUntilUtc('2026-09-04T14:32:00.000Z'), '14:32 UTC');
+  assert.equal(formatValidUntilUtc('2026-09-04T09:05:00.000Z'), '09:05 UTC');
+  assert.equal(formatValidUntilUtc('2026-09-04T00:00:00.000Z'), '00:00 UTC');
+  // Defensive fallback only: neither real call site can ever pass something unparsable, since both
+  // values originate in this file's own createPendingAuth/resolveElevateChoice, never from the client.
+  assert.equal(formatValidUntilUtc('not-a-date'), 'shortly');
+});
+
+test('renderConsentPage shows "This page is valid until HH:MM UTC." derived from expiresAt, on both the fresh page and a retry re-render', () => {
+  const fresh = renderConsentPage('deadbeefdeadbeefdeadbeefdeadbeef', undefined, '2026-09-04T14:32:00.000Z');
+  assert.match(fresh, /This page is valid until 14:32 UTC\./);
+
+  const retry = renderConsentPage(
+    'deadbeefdeadbeefdeadbeefdeadbeef',
+    'That code is invalid or has expired.',
+    '2026-09-04T09:05:00.000Z',
+  );
+  assert.match(retry, /This page is valid until 09:05 UTC\./);
 });
 
 test('renderDeadEndPage renders distinct wording for expired vs server_error, with no form', () => {
@@ -369,6 +426,28 @@ test('renderDeadEndPage renders distinct wording for expired vs server_error, wi
   assert.match(serverError, /wrong/i);
   assert.equal(expired.includes('<form'), false);
   assert.equal(serverError.includes('<form'), false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The rewritten 'expired' dead-end copy (the first half of the 2026-09-04 fix): it must say the PAGE
+// itself is spent, that a NEW /oauth/authorize page is required (clicking Authenticate again in the
+// connecting app), and that a code can never work here -- the exact gap that let users repeatedly
+// paste a freshly fetched, still-valid code into an already-dead page. No em dash or en dash.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('renderDeadEndPage("expired") tells the user the PAGE is dead, not just to "try again", and never to paste a code here', () => {
+  const expired = renderDeadEndPage('expired');
+  assert.match(
+    expired,
+    /This connection request has expired or was already used\. Go back to the app you were connecting, click Authenticate again, and enter your setup code on the new page that opens\. A code will not work on this page\./,
+  );
+  assert.match(expired, /new page/i);
+  assert.match(expired, /will not work on this page/i);
+  // No U+2013 (en dash) or U+2014 (em dash) anywhere in either dead-end variant's copy. Written as
+  // \u escapes, not the literal glyphs, so this guard itself never trips the repo's own no-dash grep.
+  const serverError = renderDeadEndPage('server_error');
+  assert.doesNotMatch(expired, /[\u2013\u2014]/);
+  assert.doesNotMatch(serverError, /[\u2013\u2014]/);
 });
 
 test('applyConsentPageHeaders sets the expected no-store / CSP / frame headers', () => {
