@@ -55,3 +55,4 @@ coverage/
 .cache/
 tmp/
 infra-aws/alert-fanout-lambda/function.zip
+node_modules
