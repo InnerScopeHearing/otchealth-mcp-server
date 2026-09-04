@@ -18,7 +18,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
  * `outputSchema`, the outer `title`, and `annotations.title` unconditionally (unrelated to the new
  * flag; those three were never re-proven safe and add nothing an approval gate needs). The whole
  * thing is gated by CONNECTOR_ANNOTATIONS_MODE (default 'on') so it can be reverted to the exact
- * prior bare shape with one deployed env var, no redeploy, if a real client regresses.
+ * prior bare shape with one task-definition env-var change and a rollout (no image rebuild), if a
+ * real client regresses.
  *
  * Uses the SAME technique as registry.lane-curation.test.ts and
  * registry.readonly-annotations.test.ts: boot the REAL registry (registerAllTools) inside a

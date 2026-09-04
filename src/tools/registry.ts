@@ -418,9 +418,14 @@ export type ConnectorAnnotationsMode = 'off' | 'on';
  * ablation test in this repo's history for the per-tool trio.
  *
  * Structurally, the `annotations` object re-added here is the SAME small object (four booleans)
- * already sent, byte-for-byte, on every OTHER live registration path in this codebase today (every
- * internal client_credentials lane, every per-lane curated connector seat: the CTO ship lane, CRO,
- * COO) with no reported tool-list-drop symptom. `outputSchema` is categorically different: a large,
+ * already sent, byte-for-byte, on every internal client_credentials lane (cto/cfo/clo/... via
+ * gateway-connect, i.e. every path where isConnectorSurface() is false) with no reported
+ * tool-list-drop symptom. NOTE the boundary precisely: isConnectorSurface() is true for EVERY
+ * dcr_/occ_ OAuth client (auth/bearer.ts), so the per-lane curated connector SEATS (the occ_gpt_* /
+ * elevated-DCR CTO ship surface, CRO, COO) go through THIS bare branch today and therefore currently
+ * send NO annotations at all -- which is exactly why Codex prompts on every call on the CTO seat.
+ * Those seats, plus every Claude.ai and Claude Code web connector, are the blast radius of flipping
+ * this on; verify one of each after the deploy. `outputSchema` is categorically different: a large,
  * per-tool, deeply nested JSON Schema wrapper repeated across the whole catalog. So this flag re-adds
  * ONLY `annotations`' four boolean hints (readOnlyHint/destructiveHint/idempotentHint/openWorldHint
  * -- exactly what an MCP client's approval machinery reads); it deliberately does NOT re-add the
@@ -433,14 +438,14 @@ export type ConnectorAnnotationsMode = 'off' | 'on';
  * silently. Without this, every one of the ~1004 gateway tools -- including brain_search -- prompts
  * on the connector surface. This stays a flippable mode rather than a plain code change precisely
  * because the history above is not a proof: if a real client regresses in the wild, flip
- * CONNECTOR_ANNOTATIONS_MODE=off (one deployed env var, no redeploy) to return to the EXACT prior
- * bare shape, rather than shipping a code rollback.
+ * CONNECTOR_ANNOTATIONS_MODE=off (one env-var change on the ECS task definition plus a service
+ * rollout; no image rebuild, no code rollback) to return to the EXACT prior bare shape.
  *
  * Parse: garbage/unset -> 'on' (the new, Codex-safe default); only the literal string 'off' (any
  * case, trimmed) reverts to the pre-existing bare shape. Mirrors AUTO_JOURNAL_MODE / JIT_DOCTRINE_MODE
  * / SHIELD_MODE's convention: fail open toward the new default, never crash or no-op on garbage.
  * Read fresh from process.env at each registerTool() call (never cached via loadEnv()'s memoized
- * `env`), so it stays flippable without a redeploy -- same reasoning as those three.
+ * `env`), the same convention as those three.
  */
 export function parseConnectorAnnotationsMode(value: string | undefined): ConnectorAnnotationsMode {
   const v = (value || '').trim().toLowerCase();
@@ -806,7 +811,8 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // uniformly fatal, and `annotations` was never independently re-tested against that bug. Default
   // 'on' so OpenAI Codex's writes-mode approval gate (which treats a tool with NO annotations as
   // write-capable) can pass safe reads like brain_search silently; CONNECTOR_ANNOTATIONS_MODE=off
-  // reverts to the exact prior bare shape with no redeploy if a client regresses.
+  // reverts to the exact prior bare shape (task-definition env change + rollout, no image rebuild)
+  // if a client regresses.
   const includeConnectorAnnotations =
     parseConnectorAnnotationsMode(process.env.CONNECTOR_ANNOTATIONS_MODE) === 'on';
   const toolConfig = connectorSurfaceForThisTool
