@@ -307,18 +307,18 @@ async function postToTarget<T>(
   return data as T;
 }
 
-/** HTTP budget for a CHAT completion request. Embeddings keep fetchWithBudget's 8 s / 1-retry
- *  default (they are fast and idempotent); a reasoning-tier chat completion is neither. Live
- *  2026-09-04: gpt-5.6-sol on a 3.4 KB JSON-mode claims packet needs well over 8 s, so every
- *  such call was aborting inside the default budget and claims_check could not screen its own
- *  release packets. timeoutMs comes from FOUNDRY_CHAT_TIMEOUT_MS (bounded in config/env.ts);
- *  retries is 0 because a second identical attempt after a long timeout only doubles the wait
- *  (the flex-capacity 429 fallback in chat() is the one deliberate extra attempt and lives
- *  above this layer). Exported for its unit test. */
-export function chatRequestBudget(env: { FOUNDRY_CHAT_TIMEOUT_MS?: number } = loadEnv()): { timeoutMs: number; retries: number } {
+/** HTTP budget for a CHAT completion request. Embeddings keep fetchWithBudget's 8 s default
+ *  (they are fast and idempotent); a reasoning-tier chat completion is not. Live 2026-09-04:
+ *  gpt-5.6-sol on a 3.4 KB JSON-mode claims packet needs well over 8 s, so every such call was
+ *  aborting inside the default budget and claims_check could not screen its own release
+ *  packets. timeoutMs comes from FOUNDRY_CHAT_TIMEOUT_MS (bounded in config/env.ts). The retry
+ *  count is deliberately NOT set here: chat keeps fetchWithBudget's default (one identical
+ *  retry on a network error / 429 / 5xx), the behaviour flex-429-default-fallback.test.ts pins
+ *  as "2 physical attempts per logical leg". Exported for its unit test. */
+export function chatRequestBudget(env: { FOUNDRY_CHAT_TIMEOUT_MS?: number } = loadEnv()): { timeoutMs: number } {
   const raw = Number(env.FOUNDRY_CHAT_TIMEOUT_MS);
   const timeoutMs = Number.isFinite(raw) && raw >= 8_000 && raw <= 300_000 ? Math.floor(raw) : 90_000;
-  return { timeoutMs, retries: 0 };
+  return { timeoutMs };
 }
 
 /** POST to a fully-formed embeddings target. Kept as a thin named wrapper (rather than calling
