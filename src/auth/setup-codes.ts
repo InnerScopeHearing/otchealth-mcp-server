@@ -181,7 +181,11 @@ function isSetupCodeDoc(value: unknown): value is SetupCodeDoc {
   );
 }
 
-const DEFAULT_TTL_MINUTES = 30;
+// Exported so server/oauth-consent.ts can derive the consent interstitial's own pending-auth TTL
+// from this single number instead of hardcoding a second one that can silently drift out of
+// lockstep with it (see that file's PENDING_TTL_MS comment for why a shorter pending-auth clock
+// than the code's own default TTL is a real, user-visible dead-end bug, not a theoretical one).
+export const DEFAULT_TTL_MINUTES = 30;
 const MIN_TTL_MINUTES = 1;
 const MAX_TTL_MINUTES = 24 * 60; // 24h, per the brief's stated bound
 

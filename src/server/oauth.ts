@@ -98,8 +98,57 @@ export function baseUrlOf(req: { protocol: string; hostname: string }): string {
   return `${req.protocol}://${req.hostname}`;
 }
 
+/** True for an RFC 8252 loopback redirect: http://127.0.0.1:PORT/... or http://[::1]:PORT/...
+ *
+ *  WHY THIS EXISTS (2026-09-04): a NATIVE app cannot use a fixed redirect URI. It opens an
+ *  ephemeral listener on a random high port, so its redirect_uri is http://localhost:54321/callback
+ *  with a DIFFERENT port every attempt. Our allow-list is exact-string, so such a client could never
+ *  match and /register answered 400 invalid_redirect_uri -- silently, since the reject path predates
+ *  the success logger. That is exactly what blocked the ChatGPT desktop app's Codex MCP client from
+ *  connecting: "Couldn't connect to otchealth."
+ *
+ *  RFC 8252 section 7.3 is explicit that this is the server's job, not the client's:
+ *  "the authorization server MUST allow any port to be specified at the time of the request for
+ *  loopback IP redirect URIs, to accommodate clients that obtain an available ephemeral port".
+ *
+ *  SECURITY. This deliberately does NOT widen who can reach a privileged lane:
+ *   - Loopback only. The host must be the literal IP 127.0.0.1 or [::1] -- NEVER the name
+ *     "localhost", which can be repointed by DNS or a hosts file, and never any other host. RFC 8252
+ *     section 8.3 makes the same recommendation for the same reason.
+ *   - http is accepted ONLY for these loopback literals (the OS guarantees the listener is local);
+ *     every non-loopback redirect still has to be https and on the explicit allow-list.
+ *   - No query string is permitted, so a matched URI cannot smuggle parameters.
+ *   - A public DCR client is hard-bound to the non-privileged 'external-read' lane at /register
+ *     regardless of redirect (see the Part 6 note below), and PKCE S256 is mandatory. Reaching a
+ *     privileged lane still requires either a confidential client with a provisioned secret, or the
+ *     owner typing a single-use setup code at the consent screen. */
+function isLoopbackRedirect(uri: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(uri);
+  } catch {
+    return false; // unparseable is never allowed
+  }
+  if (u.protocol !== 'http:') return false; // https loopback is fine too, but it goes through the normal allow-list
+  // 'localhost' is accepted alongside the IP literals, and that is a deliberate, documented
+  // trade-off rather than an oversight. RFC 8252 section 8.3 PREFERS the literals because the NAME
+  // can be repointed by DNS or a hosts-file entry. But real native clients send the name: Codex's
+  // MCP OAuth callback is http://localhost:<ephemeral>/callback, so literal-only would reject the
+  // very client this function exists to admit. The residual risk is bounded and small: redirecting
+  // the name requires already controlling the victim's own name resolution, the intercepted artifact
+  // is an authorization CODE that is useless without the PKCE verifier (S256 is mandatory here), and
+  // a public DCR client is hard-bound to the non-privileged 'external-read' lane regardless.
+  const host = u.hostname;
+  if (host !== '127.0.0.1' && host !== '[::1]' && host !== '::1' && host !== 'localhost') return false;
+  if (u.search || u.hash) return false; // no smuggled parameters
+  return true;
+}
+
 function allowedRedirect(uri: string): boolean {
   if (CLAUDE_CALLBACKS.has(uri)) return true;
+  // RFC 8252 loopback: any ephemeral port, checked before the exact-match list because the port
+  // cannot be known in advance and so can never be enumerated in configuration.
+  if (isLoopbackRedirect(uri)) return true;
   const list = (env.OAUTH_REDIRECT_URIS || '')
     .split(',')
     .map((s) => s.trim())
@@ -291,7 +340,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     // owner-minted setup code (connector_setup_code_create, cto/exec-gated) typed into THIS page by
     // a human in their own browser -- the connecting client itself never sees it.
     if (oauthConfigured() && ac && ac.isPublic) {
-      let pending: { id: string };
+      let pending: Awaited<ReturnType<typeof createPendingAuth>>;
       try {
         pending = await createPendingAuth(
           {
@@ -315,7 +364,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
       applyConsentPageHeaders(reply);
-      return reply.status(200).send(renderConsentPage(pending.id));
+      return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt));
     }
 
     const code = await createAuthCode({
@@ -368,7 +417,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       }
       if (resolved.outcome === 'retry') {
         applyConsentPageHeaders(reply);
-        return reply.status(200).send(renderConsentPage(pendingId, resolved.message));
+        return reply.status(200).send(renderConsentPage(pendingId, resolved.message, resolved.expiresAt));
       }
 
       // resolved.outcome === 'issue'. SECURITY (hostile-reviewer check): agentOverride here is
@@ -564,8 +613,9 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
  *   - createAuthCode()/consumeAuthCode() (auth/oauth-tokens.ts): a single-use authorization code,
  *     keyed by a random 32-byte value, expiring in 5 minutes.
  *   - createPendingAuth()/resolveElevateChoice() (server/oauth-consent.ts): the owner-code consent
- *     interstitial's pending-auth record, keyed by its own pending-auth id, with a 10-minute TTL and
- *     a 5-guess budget.
+ *     interstitial's pending-auth record, keyed by its own pending-auth id, with a TTL kept in
+ *     lockstep with the setup-code's own default TTL (30 minutes as of this writing -- see
+ *     oauth-consent.ts's PENDING_TTL_MS) and a 5-guess budget.
  * Neither is keyed by, or in any way derived from, an MCP transport/session id -- both live and die
  * entirely within the OAuth dance itself, BEFORE any bearer token exists. By the time a bearer token
  * reaches POST /mcp, this state has already been exchanged for that token (or expired) and is gone.
