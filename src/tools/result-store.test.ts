@@ -9,7 +9,42 @@ process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 
-const { buildPreview, pageCount, pageSlice, shouldOffload, PAGE_CHARS } = await import('./result-store.js');
+const { buildPreview, pageCount, pageSlice, shouldOffload, extractResultSummary, PAGE_CHARS } = await import(
+  './result-store.js'
+);
+
+test('extractResultSummary: Xero list envelope -> pagination + array lengths, nothing else copied', () => {
+  const data = {
+    body: {
+      Id: 'x',
+      Status: 'OK',
+      pagination: { page: 1, pageSize: 100, pageCount: 18, itemCount: 1753, extra: 'ignored' },
+      Invoices: new Array(100).fill({ Total: 1 }),
+    },
+  };
+  assert.deepEqual(extractResultSummary(data), {
+    pagination: { page: 1, pageSize: 100, pageCount: 18, itemCount: 1753 },
+    array_lengths: { Invoices: 100 },
+  });
+});
+
+test('extractResultSummary: xero_bank_transfers shim counts are carried', () => {
+  const s = extractResultSummary({ total_matching: 256, page: 1, pages: 3, body: { BankTransfers: [1, 2, 3] } });
+  assert.deepEqual(s, { total_matching: 256, page: 1, pages: 3, array_lengths: { BankTransfers: 3 } });
+});
+
+test('extractResultSummary: returns undefined for scalars, null and shapes with nothing recognisable', () => {
+  assert.equal(extractResultSummary(null), undefined);
+  assert.equal(extractResultSummary('text'), undefined);
+  assert.equal(extractResultSummary({ a: 1, b: { c: 2 } }), undefined);
+});
+
+test('extractResultSummary: caps array_lengths at 8 keys', () => {
+  const body: Record<string, unknown[]> = {};
+  for (let i = 0; i < 12; i++) body['k' + i] = [i];
+  const s = extractResultSummary({ body }) as { array_lengths: Record<string, number> };
+  assert.equal(Object.keys(s.array_lengths).length, 8);
+});
 
 test('shouldOffload is false for a short result (backward-compatible: small results untouched)', () => {
   assert.equal(shouldOffload('small result'), false);
