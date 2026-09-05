@@ -99,6 +99,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // it repeats the exact kb_get_document omission this file's own comment above documents. VISIBILITY
   // only; the ring gate (isLaneAllowed, imported unmodified from search-privileged.ts) stays in-handler.
   'kb_list_documents',
+  // kb_ingest_drive_file (2026-09-05): self-service OneDrive -> finance-dataroom copy for the CFO
+  // lane. MUST be visible on the same ship lane or it repeats the exact kb_get_document/
+  // kb_list_documents omission this file's own comments document. VISIBILITY only; both gates
+  // (isExecRingLane + isDriveFolderAllowed, imported unmodified) stay in-handler.
+  'kb_ingest_drive_file',
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract (search/fetch — see
   // kb/openai-search.ts). Non-privileged by construction even on this lane: the tools re-derive
   // and re-check the ring per call, they are not widened just because cto/exec can see them here.
