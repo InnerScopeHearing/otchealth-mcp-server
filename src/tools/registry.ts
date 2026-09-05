@@ -21,7 +21,7 @@ import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
-import { shouldOffload, offloadResult } from './result-store.js';
+import { shouldOffload, offloadResult, extractResultSummary } from './result-store.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
 import {
   inboundShield,
