@@ -1,6 +1,6 @@
 /**
  * xero_* tools — full READ + WRITE for the executive ring (see client.ts header for the ring +
- * token-rotation design). 23 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
+ * token-rotation design). 24 tools, all EXEC_RING-gated in-handler. They cover the FULL consented
  * OAuth scope surface (accounting + all reports + payroll + files + assets + projects), across all
  * four orgs, rate-governed. The CFO seat is authorized for full read+write on the books (Matt
  * directive 2026-07-16); Xero writes are bookkeeping (they post to the ledger, they do NOT move real
