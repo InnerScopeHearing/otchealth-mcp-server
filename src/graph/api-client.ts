@@ -195,7 +195,7 @@ async function getExecReadAccessToken(): Promise<string> {
 async function graphRequest<T = unknown>(
   method: string,
   path: string,
-  opts?: { body?: unknown; tokenOverride?: string },
+  opts?: { body?: unknown; tokenOverride?: string; headers?: Record<string, string> },
 ): Promise<T> {
   const token = opts?.tokenOverride ?? (await getAccessToken());
   const url = `https://graph.microsoft.com/v1.0${path}`;
@@ -208,6 +208,7 @@ async function graphRequest<T = unknown>(
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      ...opts?.headers,
     },
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
   }, { retries });
@@ -290,13 +291,41 @@ export async function sendEmail(opts: SendEmailOpts): Promise<void> {
 
 // ----- List mailbox messages -----
 
+/** Escape a single-quoted OData string literal by doubling any embedded single quotes. */
+function escapeODataLiteral(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+/** True when a raw $filter expression uses contains()/startswith() -- Graph rejects those
+ * combined with $orderby with InefficientFilter ("restriction too complex"), so callers of this
+ * must drop $orderby and sort client-side instead. */
+function filterNeedsClientSort(filter: string): boolean {
+  return /\b(contains|startswith)\s*\(/i.test(filter);
+}
+
+/** Sort a page of messages by receivedDateTime desc, client-side -- used whenever $orderby was
+ * dropped (either because $search is in play, or because the $filter uses contains()/
+ * startswith()) so callers still get their usual newest-first ordering. */
+function sortByReceivedDesc(messages: any[]): any[] {
+  return [...messages].sort((a, b) => {
+    const ta = Date.parse(a?.receivedDateTime ?? '') || 0;
+    const tb = Date.parse(b?.receivedDateTime ?? '') || 0;
+    return tb - ta;
+  });
+}
+
 export async function listMessages(opts?: {
   mailbox?: string;
   folder?: string;
   top?: number;
   filter?: string;
   since?: string;
+  until?: string;
   unreadOnly?: boolean;
+  search?: string;
+  subjectContains?: string;
+  fromContains?: string;
+  hasAttachments?: boolean;
 }): Promise<any[]> {
   const config = requireGraphConfig();
   const mailbox = opts?.mailbox ?? config.senderEmail;
@@ -306,19 +335,48 @@ export async function listMessages(opts?: {
   let path = `/users/${mailbox}/mailFolders/${folder}/messages`;
   const params = new URLSearchParams();
   if (opts?.top) params.set('$top', String(opts.top));
-  // Compose $filter from the explicit filter param plus since/unreadOnly convenience params,
-  // joined with 'and' -- OData requires a single $filter expression, not multiple.
-  const filterParts: string[] = [];
-  if (opts?.filter) filterParts.push(opts.filter);
-  if (opts?.since) filterParts.push(`receivedDateTime ge ${opts.since}`);
-  if (opts?.unreadOnly) filterParts.push('isRead eq false');
-  if (filterParts.length) params.set('$filter', filterParts.join(' and '));
-  params.set('$orderby', 'receivedDateTime desc');
+
+  const headers: Record<string, string> = {};
+  let clientSort = false;
+
+  if (opts?.search) {
+    // Graph rejects $search combined with EITHER $filter or $orderby -- so when search is set,
+    // it is the only query option besides $top, and ConsistencyLevel: eventual is required for
+    // $search against mail. Sort client-side to preserve the usual newest-first ordering.
+    params.set('$search', `"${opts.search.replace(/"/g, '\\"')}"`);
+    headers.ConsistencyLevel = 'eventual';
+    clientSort = true;
+  } else {
+    // Compose $filter from the explicit filter param plus the convenience params, joined with
+    // 'and' -- OData requires a single $filter expression, not multiple.
+    const filterParts: string[] = [];
+    if (opts?.filter) filterParts.push(opts.filter);
+    if (opts?.since) filterParts.push(`receivedDateTime ge ${opts.since}`);
+    if (opts?.until) filterParts.push(`receivedDateTime le ${opts.until}`);
+    if (opts?.unreadOnly) filterParts.push('isRead eq false');
+    if (opts?.subjectContains) filterParts.push(`contains(subject,'${escapeODataLiteral(opts.subjectContains)}')`);
+    if (opts?.fromContains) filterParts.push(`contains(from/emailAddress/address,'${escapeODataLiteral(opts.fromContains)}')`);
+    if (opts?.hasAttachments !== undefined) filterParts.push(`hasAttachments eq ${opts.hasAttachments}`);
+    if (filterParts.length) params.set('$filter', filterParts.join(' and '));
+
+    // contains()/startswith() anywhere in the composed filter (whether from subject_contains/
+    // from_contains above, or baked into the caller's own raw `filter`) trips Graph's
+    // InefficientFilter ("restriction too complex") when paired with $orderby. hasAttachments/
+    // since/until/isRead are all indexed properties and orderby is safe to keep alongside them.
+    const needsClientSort = Boolean(opts?.subjectContains) || Boolean(opts?.fromContains) || (opts?.filter ? filterNeedsClientSort(opts.filter) : false);
+    if (needsClientSort) {
+      clientSort = true;
+    } else {
+      params.set('$orderby', 'receivedDateTime desc');
+    }
+  }
+
   const qs = params.toString();
   if (qs) path += `?${qs}`;
   const tokenOverride = execPath ? await getExecReadAccessToken() : undefined;
-  const resp = await graphRequest<{ value: any[] }>('GET', path, { tokenOverride });
-  return resp.value ?? [];
+  const resp = await graphRequest<{ value: any[] }>('GET', path, { tokenOverride, headers });
+  const messages = resp.value ?? [];
+  return clientSort ? sortByReceivedDesc(messages) : messages;
 }
 
 // ----- Get a single message (full body + attachment metadata) -----
