@@ -9,16 +9,21 @@ export function registerGraphListMessages(server: McpServer, callerHash: CallerH
     category: 'read',
     annotations: {
       title: 'List messages in an allowlisted mailbox',
-      description: 'List recent messages in one of the allowlisted customer-service / COO mailboxes (see the `mailbox` param, GRAPH_CS_MAILBOXES), OR, for EXEC_RING callers only, one of the executive mailboxes on GRAPH_EXEC_MAILBOXES (e.g. matthew@innd.com, ap@innd.com, accounting@hearingassist.com, cfo@innd.com). Read-only. Defaults to coo@otchealthmart.com for back-compat.',
+      description: 'List recent messages in one of the allowlisted customer-service / COO mailboxes (see the `mailbox` param, GRAPH_CS_MAILBOXES), OR, for EXEC_RING callers only, one of the executive mailboxes on GRAPH_EXEC_MAILBOXES (e.g. matthew@innd.com, ap@innd.com, accounting@hearingassist.com, cfo@innd.com). Supports a Graph $search KQL query (`search`), substring filters on subject/sender (`subject_contains`/`from_contains`), an attachment filter (`has_attachments`), and an upper time bound (`until`) alongside the existing `since`. Read-only. Defaults to coo@otchealthmart.com for back-compat.',
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true,
     },
     inputShape: {
       mailbox: z.string().optional().describe('Mailbox UPN to list (e.g. care@otchealthmart.com). Must be on the GRAPH_CS_MAILBOXES allowlist. Defaults to coo@otchealthmart.com.'),
       folder: z.string().optional().describe('Mail folder (default "inbox"). Options: inbox, sentitems, drafts, deleteditems.'),
       top: z.number().int().min(1).max(50).optional().describe('Number of messages to return (max 50).'),
-      filter: z.string().optional().describe('OData filter expression (e.g. "isRead eq false"). Combined with since/unread_only via AND if both given.'),
+      filter: z.string().optional().describe('OData filter expression (e.g. "isRead eq false"). Combined with since/until/unread_only/has_attachments via AND if given. If this uses contains(/startswith(, results are sorted client-side (Graph rejects those combined with $orderby). Mutually exclusive with `search` in practice -- prefer `search` for full-text/attachment KQL queries.'),
       since: z.string().optional().describe('ISO 8601 datetime. Only messages received on/after this time.'),
+      until: z.string().optional().describe('ISO 8601 datetime. Only messages received on/before this time (pairs with `since`).'),
       unread_only: z.boolean().optional().describe('Only return unread messages.'),
+      search: z.string().optional().describe('Graph $search KQL query, e.g. \'subject:statement hasAttachments:true received>=2024-01-01\'. When set, this is the ONLY query option applied besides `top` -- Graph rejects $search combined with $filter or $orderby -- and results are sorted client-side by receivedDateTime desc.'),
+      subject_contains: z.string().optional().describe('Case-sensitive substring match on subject (OData contains()). Forces client-side sort (see `filter`).'),
+      from_contains: z.string().optional().describe('Case-sensitive substring match on the sender address (OData contains()). Forces client-side sort (see `filter`).'),
+      has_attachments: z.boolean().optional().describe('Only return messages with (true) or without (false) attachments.'),
     },
     outputShape: {
       messages: z.array(z.object({
