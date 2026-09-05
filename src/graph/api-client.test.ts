@@ -106,7 +106,7 @@ test('listMessages: from_contains behaves the same as subject_contains (drops $o
     () => listMessages({ mailbox: 'coo@otchealthmart.com', fromContains: 'billing@vendor.com' }),
   );
   const graphCall = calls.find((c) => c.url.includes('graph.microsoft.com'));
-  const decodedFilter = decodeURIComponent(graphCall!.url.split('%24filter=')[1]?.split('&')[0] ?? '');
+  const decodedFilter = decodeFormValue(graphCall!.url.split('%24filter=')[1]?.split('&')[0] ?? '');
   assert.equal(decodedFilter, "contains(from/emailAddress/address,'billing@vendor.com')");
   assert.equal(graphCall!.url.includes('%24orderby'), false);
 });
