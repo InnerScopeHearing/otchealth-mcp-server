@@ -787,3 +787,61 @@ test('handleXeroRequest: an ORDINARY (non-Attachments) write with no duplicate-d
   assert.equal(data.error, undefined);
   assert.deepEqual(data.body, { ManualJournals: [{ ManualJournalID: 'mj-1' }] });
 });
+
+// -------------------------------------------------------------------------------------------
+// STRUCTURAL INVENTORY (#291b). tools.ts's module header states a tool COUNT ("24 tools, all
+// EXEC_RING-gated in-handler") and then lists them by name -- a header that is load-bearing
+// documentation for anyone reasoning about the Xero surface, and that silently rots the moment a
+// tool is added or removed without touching it. This pins the inventory against what
+// registerXeroTools ACTUALLY registers (a stub server that records names), NOT against a
+// source-text regex: counting `registerTool(` occurrences in the file would be wrong by
+// construction anyway, since three of these tools share ONE call site inside
+// registerPagedAccountingRead. Adding a tool must therefore also update this list and the header.
+// -------------------------------------------------------------------------------------------
+
+const EXPECTED_XERO_TOOLS = [
+  'xero_accounts',
+  'xero_aggregate',
+  'xero_assets',
+  'xero_attachment_content',
+  'xero_attachment_upload',
+  'xero_attachments',
+  'xero_bank_transactions',
+  'xero_bank_transfers',
+  'xero_budgets',
+  'xero_connections',
+  'xero_contacts',
+  'xero_credit_notes',
+  'xero_files',
+  'xero_get',
+  'xero_gl_assemble',
+  'xero_invoices',
+  'xero_manual_journals',
+  'xero_orgs',
+  'xero_payments',
+  'xero_payroll',
+  'xero_projects',
+  'xero_report',
+  'xero_request',
+  'xero_settings',
+] as const;
+
+test('registerXeroTools: registers EXACTLY the 24 xero_* tools the module header claims, including xero_aggregate', () => {
+  const registered: string[] = [];
+  const stubServer = {
+    registerTool(name: string) {
+      registered.push(name);
+      return { remove() {} };
+    },
+  };
+  registerXeroTools(stubServer as unknown as Parameters<typeof registerXeroTools>[0], () => 'test-hash');
+
+  assert.equal(new Set(registered).size, registered.length, 'no tool name may be registered twice');
+  assert.deepEqual(
+    [...registered].sort(),
+    [...EXPECTED_XERO_TOOLS],
+    'the registered xero_* set drifted from this pinned inventory — update BOTH this list and tools.ts\'s header count',
+  );
+  assert.equal(registered.length, 24, "tools.ts's module header says \"24 tools\"; keep the two in step");
+  assert.ok(registered.includes('xero_aggregate'), 'xero_aggregate (#291b) must actually be registered, not merely written');
+});
