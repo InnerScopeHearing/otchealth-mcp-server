@@ -202,6 +202,14 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // EXEC_RING-gated -- exposing it is a deliberate, not incidental, mutating capability.
   'mail_archive_list_folders', 'mail_archive_search', 'mail_archive_get_message',
   'mail_archive_download_attachment', 'mail_archive_save_attachment_to_dataroom',
+  // kb_ingest_drive_file (2026-09-05): the OTHER way a source document reaches the finance dataroom
+  // -- from a OneDrive source drop rather than an archived email attachment. Same container, same
+  // putBlobRaw helper, same EXEC_RING gate, plus graph_drive_download's own-role folder gate on the
+  // source. Listed HERE, in the same change that registers it, precisely because this list's own
+  // history (catalog_probe / xero_attachment_upload / kb_get_document / mail_archive_*) is a run of
+  // tools that were built, registered, ring-gated, and then invisible on every connector for weeks.
+  // VISIBILITY only; both gates stay in-handler.
+  'kb_ingest_drive_file',
   // Xero (accounting of record). MUST be on the connector surface or the Claude Chat CFO (the whole
   // reason this service exists — no filesystem/CLI to reach the old skills/xero path) cannot SEE
   // them. Execution stays EXEC_RING-gated in each handler, so a non-exec ship lane that sees them is
