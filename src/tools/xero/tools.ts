@@ -1708,6 +1708,142 @@ export function registerXeroTools(server: McpServer, callerHash: CallerHashProvi
     callerHash,
   );
 
+  // --- xero_aggregate: server-side count/sum, grouped (issue #291b) — see aggregate.ts's module
+  // doc comment for the reducer's exact semantics (count is a LINE count in exploded mode; a
+  // record-level metric is added once per (group, record), never once per line) and for why the
+  // date filter is client-side. ---
+  registerTool(
+    server,
+    {
+      name: 'xero_aggregate',
+      category: 'read',
+      annotations: {
+        title: 'Xero: server-side count/sum grouped by Status/Type/Contact/Year/AccountCode (executive ring only)',
+        description:
+          'COUNT and SUM a whole Xero population server-side, grouped — the aggregation the Xero accounting API itself does not have. ' +
+          'Pages the resource once inside the gateway and returns ONLY the reduced figures (itemCount, pageCount, groups[{key,count,sums}]), ' +
+          'so a census question that previously required pulling the raw population through 5-10 JIT-offloaded chunks and adding it up ' +
+          'client-side is now one small call. resource = Invoices | CreditNotes | Payments | BankTransactions | ManualJournals | BankTransfers. ' +
+          'DELETED/VOIDED ARE EXCLUDED BY DEFAULT: include_deleted defaults false, which prepends Status=="AUTHORISED" to your `where` (joined ' +
+          'with AND) — the filter every other xero_* tool only WARNS you to add, because Xero returns deleted/voided records in the default ' +
+          'population and counting them fabricates exceptions that do not exist. If your own `where` already mentions Status it is sent ' +
+          'verbatim and never second-guessed; pass include_deleted:true to count the full population. ' +
+          'fromDate/toDate (YYYY-MM-DD) are applied CLIENT-SIDE to each record\'s parsed Date (Xero\'s where-date syntax silently no-ops on ' +
+          'some endpoints, and a filter that silently does nothing is worse than no filter); a record whose Date cannot be parsed is KEPT and ' +
+          'reported in caveats rather than silently dropped from your count. ' +
+          'group_by = any combination of Status, Type, ContactID, ContactName, Year, Month, AccountCode, BankAccountID (default [] = one ' +
+          'whole-population group). metrics = Total, SubTotal, TotalTax, AmountDue, AmountPaid, AmountCredited, RemainingCredit, Amount, ' +
+          'LineAmount (default [Total]); sums are rounded to 2dp. ' +
+          'GROUPING BY AccountCode (or summing LineAmount) EXPLODES THE LINES — LineItems for Invoices/CreditNotes/BankTransactions, ' +
+          'JournalLines for ManualJournals — so each line lands in its own account bucket. In that mode `count` is a LINE count, and a ' +
+          'record-level metric is added ONCE per (group, record), never once per line, so a 3-line invoice does not contribute 3x its Total. ' +
+          'AmountDue/AmountPaid/AmountCredited/RemainingCredit are CURRENT-STATE, not as-at: with a date filter they answer "outstanding TODAY ' +
+          'on records dated in that window", NOT "outstanding at the end of that window". ' +
+          'BankTransfers is a single unpaged fetch (that endpoint ignores both page and where server-side, confirmed live), so `where`/' +
+          'include_deleted are not applied by Xero for it — fromDate/toDate still are, client-side. ' +
+          'ALWAYS READ `caveats` AND `truncated` BEFORE QUOTING A FIGURE: truncated:true means paging stopped early (max_pages cap, the ' +
+          'wall-clock budget, or a malformed response shape) and the population is INCOMPLETE. MNPI: executive-ring lanes only. Read-only.',
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: {
+        org: ORG_ENUM,
+        resource: z.enum(AGGREGATE_RESOURCES).describe('Which population to aggregate.'),
+        where: z
+          .string()
+          .optional()
+          .describe('Optional Xero where filter, e.g. RemainingCredit>0 or Type=="ACCPAY". Ignored by Xero for BankTransfers.'),
+        include_deleted: z
+          .boolean()
+          .optional()
+          .describe(
+            'Default false: prepends Status=="AUTHORISED" to `where` so DELETED/VOIDED records never inflate a count. ' +
+              'A `where` that already mentions Status is left exactly as written. Pass true to count the full population.',
+          ),
+        fromDate: z.string().optional().describe('YYYY-MM-DD — keep only records dated on/after this, applied CLIENT-SIDE.'),
+        toDate: z.string().optional().describe('YYYY-MM-DD — keep only records dated on/before this, applied CLIENT-SIDE.'),
+        group_by: z
+          .array(z.enum(AGGREGATE_GROUP_BYS))
+          .optional()
+          .describe('Grouping dimensions. Default [] = a single whole-population group. AccountCode explodes the line items.'),
+        metrics: z
+          .array(z.enum(AGGREGATE_METRICS))
+          .optional()
+          .describe('Which numeric fields to sum. Default [Total]. LineAmount explodes the line items.'),
+        max_pages: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('Page cap (100 records/page). Default 200. Hitting it sets truncated:true plus a caveat — never a silently short count.'),
+      },
+      outputShape: {
+        org: z.string(),
+        resource: z.string(),
+        where_sent: z.string().nullable(),
+        group_by: z.array(z.string()),
+        metrics: z.array(z.string()),
+        itemCount: z.number(),
+        pageCount: z.number(),
+        groups: z.array(z.unknown()),
+        caveats: z.array(z.string()),
+        truncated: z.literal(true).optional(),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!isXeroAllowed(ctx.callerAgent)) return ringRefusal('xero_aggregate', ctx.callerAgent);
+        if (!xeroConfigured()) return unconfigured('xero_aggregate');
+        // Validate dates BEFORE fetching, for the same reason xero_bank_transfers does: Date.parse
+        // of a malformed/impossible date yields NaN, every NaN comparison is false, and an
+        // unvalidated bound would silently match everything while the summary still claimed the
+        // result was date-filtered — the exact opposite of what the caller asked for.
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+        for (const [label, value] of [['fromDate', input.fromDate], ['toDate', input.toDate]] as const) {
+          if (value === undefined) continue;
+          if (!dateRe.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
+            return {
+              data: {
+                org: input.org,
+                resource: input.resource,
+                where_sent: null,
+                group_by: input.group_by ?? [],
+                metrics: input.metrics ?? ['Total'],
+                itemCount: 0,
+                pageCount: 0,
+                groups: [],
+                caveats: [],
+                error: 'invalid_date',
+              },
+              summary: `xero_aggregate: ${label}="${value}" is not a valid YYYY-MM-DD date. Refused before fetching, rather than returning an unfiltered count that claims to be filtered.`,
+            };
+          }
+        }
+        const result = await aggregateXero(input.org as XeroOrg, {
+          resource: input.resource as AggregateResource,
+          where: input.where,
+          include_deleted: input.include_deleted,
+          fromDate: input.fromDate,
+          toDate: input.toDate,
+          group_by: input.group_by as AggregateGroupBy[] | undefined,
+          metrics: input.metrics as AggregateMetric[] | undefined,
+          max_pages: input.max_pages,
+        });
+        const caveatNote = result.caveats.length ? ` CAVEATS: ${result.caveats.join(' | ')}` : '';
+        const truncNote = result.truncated ? ' TRUNCATED: this population is INCOMPLETE — do not quote these figures as totals.' : '';
+        return {
+          data: result,
+          summary:
+            `Xero ${result.resource} aggregated for ${input.org}: ${result.itemCount} record(s) over ${result.pageCount} page(s), ` +
+            `${result.groups.length} group(s) by [${result.group_by.join(', ') || 'whole population'}] summing [${result.metrics.join(', ')}]` +
+            `${result.where_sent ? ` (where: ${result.where_sent})` : ''}.${truncNote}${caveatNote}`,
+        };
+      },
+    },
+    callerHash,
+  );
+
   // --- Universal WRITE: POST/PUT/DELETE any scoped endpoint (the CFO write lane; Matt-authorized) ---
   registerTool(
     server,
