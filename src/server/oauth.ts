@@ -103,8 +103,9 @@ export function baseUrlOf(req: { protocol: string; hostname: string }): string {
  *  WHY THIS EXISTS (2026-09-04): a NATIVE app cannot use a fixed redirect URI. It opens an
  *  ephemeral listener on a random high port, so its redirect_uri is http://localhost:54321/callback
  *  with a DIFFERENT port every attempt. Our allow-list is exact-string, so such a client could never
- *  match and /register answered 400 invalid_redirect_uri -- silently, since the reject path predates
- *  the success logger. That is exactly what blocked the ChatGPT desktop app's Codex MCP client from
+ *  match and /register answered 400 invalid_redirect_uri -- silently at the time, since the reject
+ *  path predated the success logger (every /register rejection is logged at warn since 2026-09-05,
+ *  FND-20260904-4b1e). That is exactly what blocked the ChatGPT desktop app's Codex MCP client from
  *  connecting: "Couldn't connect to otchealth."
  *
  *  RFC 8252 section 7.3 is explicit that this is the server's job, not the client's:
@@ -144,11 +145,47 @@ function isLoopbackRedirect(uri: string): boolean {
   return true;
 }
 
+/** True for ChatGPT's per-connection dynamic OAuth callback:
+ *    https://chatgpt.com/connector/oauth/<callback_id>
+ *
+ *  WHY THIS EXISTS (2026-09-05): OpenAI's Apps SDK authorization guide documents TWO callbacks for a
+ *  custom MCP app. With issuer identification ChatGPT redirects to the fixed
+ *  https://chatgpt.com/connector_platform_oauth_redirect (which OAUTH_REDIRECT_URIS already lists);
+ *  without it, ChatGPT uses a per-connection https://chatgpt.com/connector/oauth/{callback_id}, which
+ *  can never be enumerated in configuration -- the same shape as the RFC 8252 ephemeral port above.
+ *  Against an exact-match list that client is refused at /register with 400 invalid_redirect_uri,
+ *  and until this same change that refusal was not even logged.
+ *
+ *  SECURITY. Narrow by construction and it widens no lane:
+ *   - https only, and the host must be EXACTLY chatgpt.com (never a subdomain, a look-alike, or a
+ *     userinfo-prefixed host), so the authorization code can only ever be delivered to OpenAI.
+ *   - the fixed path prefix /connector/oauth/ followed by ONE opaque segment; no query or fragment,
+ *     so a matched URI cannot smuggle parameters.
+ *   - a public DCR client stays hard-bound to the non-privileged 'external-read' lane at /register
+ *     regardless of redirect, PKCE S256 stays mandatory, and a privileged seat still needs a
+ *     confidential client or the owner's single-use setup code at the consent screen. */
+const CHATGPT_DYNAMIC_CALLBACK_PATH = /^\/connector\/oauth\/[A-Za-z0-9_.~-]{1,128}$/;
+export function isChatgptDynamicCallback(uri: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(uri);
+  } catch {
+    return false; // unparseable is never allowed
+  }
+  if (u.protocol !== 'https:') return false;
+  if (u.hostname !== 'chatgpt.com') return false;
+  if (u.username || u.password || u.port) return false;
+  if (u.search || u.hash) return false;
+  return CHATGPT_DYNAMIC_CALLBACK_PATH.test(u.pathname);
+}
+
 function allowedRedirect(uri: string): boolean {
   if (CLAUDE_CALLBACKS.has(uri)) return true;
   // RFC 8252 loopback: any ephemeral port, checked before the exact-match list because the port
   // cannot be known in advance and so can never be enumerated in configuration.
   if (isLoopbackRedirect(uri)) return true;
+  // ChatGPT's per-connection callback: same reasoning, see isChatgptDynamicCallback.
+  if (isChatgptDynamicCallback(uri)) return true;
   const list = (env.OAUTH_REDIRECT_URIS || '')
     .split(',')
     .map((s) => s.trim())
@@ -245,7 +282,14 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     const body = (typeof req.body === 'string' ? {} : (req.body ?? {})) as Record<string, unknown>;
     const uris = Array.isArray(body.redirect_uris) ? (body.redirect_uris as unknown[]).filter((u): u is string => typeof u === 'string') : [];
     if (uris.length === 0 || !uris.every((u) => allowedRedirect(u))) {
-      return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be the Claude connector callback' });
+      // FND-20260904-4b1e: a rejection is exactly the event an operator needs to see, and this path
+      // used to return silently (only the success path logged). redirect_uris are caller-supplied
+      // and not secrets; they are the diagnostic. Bounded to the first five.
+      logger.warn(
+        { type: 'oauth_register_rejected', reason: 'invalid_redirect_uri', redirect_uris: uris.slice(0, 5), application_type: body.application_type ?? null, client_name: typeof body.client_name === 'string' ? body.client_name.slice(0, 80) : null },
+        'rejected DCR registration: redirect_uri not allowed',
+      );
+      return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be an allow-listed callback (Claude, ChatGPT, or an RFC 8252 loopback)' });
     }
     // OAuth for MCP hygiene (2026-07-28 authorization-spec revision): a registering client declares
     // application_type ('web' or 'native', RFC 7591 SS2 / RFC 8252) so the server knows which redirect
@@ -261,6 +305,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     const rawApplicationType = body.application_type;
     const applicationType = rawApplicationType === undefined ? 'web' : rawApplicationType;
     if (applicationType !== 'web' && applicationType !== 'native') {
+      logger.warn({ type: 'oauth_register_rejected', reason: 'invalid_client_metadata', application_type: rawApplicationType ?? null }, 'rejected DCR registration: bad application_type');
       return reply.status(400).send({
         error: 'invalid_client_metadata',
         error_description: 'application_type must be "web" or "native"',
