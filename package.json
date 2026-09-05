@@ -23,7 +23,7 @@
     "@fastify/rate-limit": "10.3.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "dd-trace": "^5.109.0",
-    "fastify": "^5.1.0",
+    "fastify": "^5.12.1",
     "pg": "8.22.0",
     "pino": "^9.5.0",
     "pino-pretty": "^11.3.0",
@@ -33,7 +33,10 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/pg": "8.15.6",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "fast-uri": "3.1.6"
   }
 }
