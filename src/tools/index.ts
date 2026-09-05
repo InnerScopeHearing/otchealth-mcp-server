@@ -1094,6 +1094,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerWebExtract(server, callerHash);
   registerKbSearchPrivileged(server, callerHash);
   registerKbGetDocument(server, callerHash);
+  // write_simple: copies ONE OneDrive source drop into the same finance dataroom kb_get_document
+  // reads, so the CFO lane can ingest a bank statement itself. Ring-gated + own-role-folder gated
+  // in-handler; dry_run defaults true like every write tool here.
+  registerKbIngestDriveFile(server, callerHash);
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. NON-PRIVILEGED rooms only —
   // see kb/openai-search.ts + kb/openai-fetch.ts headers for the ring-safety argument.
   registerOpenAiSearch(server, callerHash);
