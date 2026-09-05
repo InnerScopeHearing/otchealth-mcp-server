@@ -128,7 +128,7 @@ test('listMessages: has_attachments and until stay indexed $filter clauses, and 
     () => listMessages({ mailbox: 'coo@otchealthmart.com', hasAttachments: true, until: '2026-06-01T00:00:00Z', since: '2026-01-01T00:00:00Z' }),
   );
   const graphCall = calls.find((c) => c.url.includes('graph.microsoft.com'));
-  const decodedFilter = decodeURIComponent(graphCall!.url.split('%24filter=')[1]?.split('&')[0] ?? '');
+  const decodedFilter = decodeFormValue(graphCall!.url.split('%24filter=')[1]?.split('&')[0] ?? '');
   assert.equal(decodedFilter, 'receivedDateTime ge 2026-01-01T00:00:00Z and receivedDateTime le 2026-06-01T00:00:00Z and hasAttachments eq true');
   assert.ok(graphCall!.url.includes('%24orderby=receivedDateTime+desc'), 'indexed-only filter should keep $orderby');
 });
