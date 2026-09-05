@@ -57,6 +57,12 @@ function messagesResponse(messages: Array<{ id: string; receivedDateTime: string
   return new Response(JSON.stringify({ value: messages }), { status: 200 });
 }
 
+// URLSearchParams#toString() form-encodes spaces as '+', which plain decodeURIComponent does NOT
+// turn back into ' ' -- replace '+' first, same as any application/x-www-form-urlencoded decode.
+function decodeFormValue(raw: string): string {
+  return decodeURIComponent(raw.replace(/\+/g, ' '));
+}
+
 test('listMessages: search sets $search (quoted) with no $filter/$orderby, ConsistencyLevel header, and sorts client-side', async () => {
   const { listMessages } = await import('./api-client.js');
   const { calls, result } = await withStubbedGraphFetch(
