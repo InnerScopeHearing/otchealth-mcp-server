@@ -26,7 +26,7 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
-const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload, handleXeroAttachmentContent, handleXeroRequest } = await import('./tools.js');
+const { checkAttachmentPayloadIntegrity, filterReportRows, handleXeroAttachmentUpload, handleXeroAttachmentContent, handleXeroRequest, registerXeroTools } = await import('./tools.js');
 const { buildTokenDoc, bootstrapHash } = await import('./client.js');
 
 /**
