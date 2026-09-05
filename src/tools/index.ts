@@ -1093,6 +1093,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerWebExtract(server, callerHash);
   registerKbSearchPrivileged(server, callerHash);
   registerKbGetDocument(server, callerHash);
+  registerKbListDocuments(server, callerHash); // #292: ring-gated prefix listing, same rooms as above
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. NON-PRIVILEGED rooms only —
   // see kb/openai-search.ts + kb/openai-fetch.ts headers for the ring-safety argument.
   registerOpenAiSearch(server, callerHash);
