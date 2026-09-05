@@ -93,7 +93,7 @@ test('listMessages: subject_contains appends contains() to $filter and drops $or
     () => listMessages({ mailbox: 'coo@otchealthmart.com', subjectContains: "O'Brien invoice" }),
   );
   const graphCall = calls.find((c) => c.url.includes('graph.microsoft.com'));
-  const decodedFilter = decodeURIComponent(graphCall!.url.split('%24filter=')[1]?.split('&')[0] ?? '');
+  const decodedFilter = decodeFormValue(graphCall!.url.split('%24filter=')[1]?.split('&')[0] ?? '');
   assert.equal(decodedFilter, "contains(subject,'O''Brien invoice')", 'single quotes must be doubled');
   assert.equal(graphCall!.url.includes('%24orderby'), false, 'contains() + $orderby is InefficientFilter -- orderby must be dropped');
   assert.deepEqual(result.map((m: any) => m.id), ['newer', 'older']);
