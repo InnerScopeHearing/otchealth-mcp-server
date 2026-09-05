@@ -195,7 +195,7 @@ async function getExecReadAccessToken(): Promise<string> {
 async function graphRequest<T = unknown>(
   method: string,
   path: string,
-  opts?: { body?: unknown; tokenOverride?: string },
+  opts?: { body?: unknown; tokenOverride?: string; headers?: Record<string, string> },
 ): Promise<T> {
   const token = opts?.tokenOverride ?? (await getAccessToken());
   const url = `https://graph.microsoft.com/v1.0${path}`;
@@ -208,6 +208,7 @@ async function graphRequest<T = unknown>(
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      ...opts?.headers,
     },
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
   }, { retries });
