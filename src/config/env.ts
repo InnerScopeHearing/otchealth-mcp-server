@@ -82,6 +82,27 @@ const EnvSchema = z.object({
   M365_COO_MCP_TOKEN: z.string().optional().default(''),
   M365_CRO_MCP_TOKEN: z.string().optional().default(''),
 
+  // Static per-seat tokens for OpenAI Codex (the ChatGPT desktop app / Codex CLI MCP client), one
+  // per fleet lane, mirroring the M365_<ROLE>_MCP_TOKEN family above. WHY (2026-09-05): the OAuth
+  // path works end to end (DCR register -> consent -> elevated auth code all succeed) but
+  // codex-mcp-client 0.153.3 does NOT persist/attach the resulting token across a restart -- every
+  // restart produced exactly one /mcp call with reason=no_credential (03:05, 05:42 UTC) and Codex
+  // then marked the server unavailable and hid every gateway tool. Codex natively supports a static
+  // bearer via `bearer_token_env_var` on a streamable-HTTP server, so a per-seat static token is the
+  // same fix the fleet already applied to Microsoft Copilot when ITS OAuth proved unreliable.
+  // Delivered as a REAL Authorization header (never the M365 query-string carrier). Each maps to the
+  // SAME lane identity the OAuth seat would get -- a second front door, not a wider grant -- and,
+  // unlike the M365 tokens, sets connector_surface=true so the seat receives the curated per-lane
+  // connector toolset (cto = the 202-tool ship surface), not the raw internal catalog (Codex chokes
+  // on ~1000 tools). Individually named so each seat rotates independently. Inert when unset.
+  // Rotate-before-launch.
+  CODEX_CTO_MCP_TOKEN: z.string().optional().default(''),
+  CODEX_CFO_MCP_TOKEN: z.string().optional().default(''),
+  CODEX_CLO_MCP_TOKEN: z.string().optional().default(''),
+  CODEX_COO_MCP_TOKEN: z.string().optional().default(''),
+  CODEX_CRO_MCP_TOKEN: z.string().optional().default(''),
+  CODEX_DEVELOPER_MCP_TOKEN: z.string().optional().default(''),
+
   // n8n
   //
   // CORRECTED 2026-08-28: automation.otchealth.app was the Azure self-host; it died with the

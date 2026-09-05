@@ -14,6 +14,9 @@ import assert from 'node:assert/strict';
 
 const CONNECTOR_TOKEN = 'a'.repeat(32);
 const M365_CTO_TOKEN = 'm'.repeat(40);
+// Deliberately a DIFFERENT string from M365_CTO_TOKEN: the Codex tests prove the two families are
+// independent (neither accepts the other's value) and that CODEX_* is its own variable.
+const CODEX_CTO_TOKEN = 'codex-cto-static-' + 'k'.repeat(40);
 const EVAL_TOKEN = 'e'.repeat(40);
 
 before(() => {
@@ -32,6 +35,7 @@ before(() => {
     // difference to prove EVAL_AGENT_TOKEN is checked as its own variable, not aliased to
     // PERPLEXITY_CONNECTOR_TOKEN (the exact bug this token was added to stop recurring).
     EVAL_AGENT_TOKEN: EVAL_TOKEN,
+    CODEX_CTO_MCP_TOKEN: CODEX_CTO_TOKEN,
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
@@ -340,5 +344,63 @@ test('M365: a forged token is rejected on both the header path and the query-par
   const viaQuery = await app.inject({ method: 'POST', url: `/mcp?m365_dev_token=${forged}` });
   assert.equal(viaQuery.statusCode, 401);
 
+  await app.close();
+});
+
+// ── CODEX_<ROLE>_MCP_TOKEN (2026-09-05) ─────────────────────────────────────────────────────────
+// Static per-seat bearer for OpenAI Codex, added because codex-mcp-client 0.153.3 does not persist
+// its OAuth token across a restart (every restart -> one /mcp call with no credential -> 401 -> Codex
+// hides every gateway tool). Mirrors the M365 family but is presented as a real Authorization header
+// and, unlike M365, is flagged connector_surface=true so the seat gets the curated per-lane toolset.
+
+test('CODEX: the static cto token authenticates as caller_agent cto with connector_surface TRUE and m365_static_auth false', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply);
+    if (!ctx) return;
+    return reply.send({ caller_agent: ctx.caller_agent, connector_surface: ctx.connector_surface, m365_static_auth: ctx.m365_static_auth });
+  });
+  const res = await app.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${CODEX_CTO_TOKEN}` } });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.caller_agent, 'cto');
+  assert.equal(body.connector_surface, true, 'a Codex static seat must be connector surface (curated per-lane toolset)');
+  assert.equal(body.m365_static_auth, false, 'a Codex token is not the M365 carrier');
+  await app.close();
+});
+
+test('CODEX: a forged token and a too-short token are both rejected', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply);
+    if (!ctx) return;
+    return reply.send({ ok: true });
+  });
+  for (const bad of ['codex-cto-static-' + 'x'.repeat(40), 'short']) {
+    const res = await app.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${bad}` } });
+    assert.equal(res.statusCode, 401, `must reject ${bad.length}-char forged/short token`);
+  }
+  await app.close();
+});
+
+test('CODEX and M365 cto tokens are independent: each authenticates as cto, neither accepts the other, and only Codex is connector surface', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply);
+    if (!ctx) return;
+    return reply.send({ caller_agent: ctx.caller_agent, connector_surface: ctx.connector_surface, m365_static_auth: ctx.m365_static_auth });
+  });
+  assert.notEqual(CODEX_CTO_TOKEN, M365_CTO_TOKEN);
+  const codex = await app.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${CODEX_CTO_TOKEN}` } });
+  const m365 = await app.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${M365_CTO_TOKEN}` } });
+  assert.equal(codex.statusCode, 200); assert.equal(m365.statusCode, 200);
+  assert.deepEqual(codex.json(), { caller_agent: 'cto', connector_surface: true, m365_static_auth: false });
+  assert.deepEqual(m365.json(), { caller_agent: 'cto', connector_surface: false, m365_static_auth: true });
   await app.close();
 });

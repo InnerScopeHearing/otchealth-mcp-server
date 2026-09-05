@@ -140,6 +140,25 @@ function m365StaticAgentTokens(): Record<string, string> {
 }
 
 /**
+ * Static per-seat tokens for OpenAI Codex, mirroring m365StaticAgentTokens() above. Codex presents
+ * these as a REAL Authorization: Bearer header (its `bearer_token_env_var` config), never the M365
+ * query-string carrier. See CODEX_CTO_MCP_TOKEN's comment in config/env.ts for why they exist (this
+ * Codex build does not persist its OAuth token across a restart). A match resolves to the SAME lane
+ * identity the OAuth seat would get, and is flagged connector_surface=true (see validateBearer) so
+ * the seat receives the curated per-lane connector toolset rather than the raw internal catalog.
+ */
+function codexStaticAgentTokens(): Record<string, string> {
+  return {
+    cto: env.CODEX_CTO_MCP_TOKEN,
+    cfo: env.CODEX_CFO_MCP_TOKEN,
+    clo: env.CODEX_CLO_MCP_TOKEN,
+    coo: env.CODEX_COO_MCP_TOKEN,
+    cro: env.CODEX_CRO_MCP_TOKEN,
+    developer: env.CODEX_DEVELOPER_MCP_TOKEN,
+  };
+}
+
+/**
  * Validates a bearer against PERPLEXITY_CONNECTOR_TOKEN. On success returns
  * the AuthContext (with SHA256 caller hash). On failure returns null and the
  * caller is responsible for sending 401. Never logs the raw token.
@@ -166,12 +185,14 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
   // rotation); (5) one of the M365 declarative-agent per-lane static tokens (see
   // m365StaticAgentTokens above) for each fleet agent's own MCP runtime (see extractQueryToken's
   // header for why these travel as a query-string value wrapped into a synthetic "Bearer <token>"
-  // string by requireConnectorAuth below, rather than a real Authorization header). All
-  // rotate-before-launch.
+  // string by requireConnectorAuth below, rather than a real Authorization header); (6) one of
+  // the Codex per-seat static tokens (see codexStaticAgentTokens above), presented as a REAL
+  // Authorization header and flagged connector_surface. All rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
   let isM365Static = false;
+  let isCodexStatic = false;
   if (!issued) {
     // Only worth attempting Descope verification if the token even looks like a JWT (3 dot-
     // separated segments) -- cheap guard that avoids a pointless JWKS-cache lookup for the
@@ -207,7 +228,15 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
           staticAgent = m365Hit[0];
           isM365Static = true;
         } else {
-          return null;
+          const codexHit = Object.entries(codexStaticAgentTokens()).find(
+            ([, v]) => v && v.length >= 32 && safeEqual(token, v),
+          );
+          if (codexHit) {
+            staticAgent = codexHit[0];
+            isCodexStatic = true;
+          } else {
+            return null;
+          }
         }
       }
     }
@@ -217,7 +246,10 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
   // Connector clients: DCR public clients (dcr_) OR manually-registered confidential connector clients
   // (occ_ = OTCHealth Connector Client) entered in Claude's Advanced settings to bypass the DCR tool-delivery
   // bug (modelcontextprotocol#1675). Both get the curated, spec-bare connector surface.
-  const connector_surface = Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_')));
+  // A Codex static per-seat token (codexStaticAgentTokens) is ALSO connector surface: the seat gets the
+  // curated per-lane connector toolset, exactly as if it had elevated to that lane via OAuth.
+  const connector_surface =
+    Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_'))) || isCodexStatic;
   return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static };
 }
 
