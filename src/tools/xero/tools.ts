@@ -15,6 +15,7 @@
  *   xero_report             TrialBalance | BalanceSheet | ProfitAndLoss | Aged{Payables,Receivables}ByContact |
  *                           BankSummary | BudgetSummary | ExecutiveSummary | TenNinetyNine (1099); nonZeroOnly/match filter client-side
  *   xero_gl_assemble        server-side GL reconstruction: reads each month's own TrialBalance period movement directly (never diffed against another month), netted against ManualJournals — see gl-assemble.ts
+ *   xero_aggregate          server-side COUNT/SUM over a whole population, grouped by Status/Type/Contact/Year/Month/AccountCode/BankAccountID — pages once server-side and returns only the reduced figures — see aggregate.ts
  *   xero_accounts           full chart of accounts
  *   xero_contacts           contacts (customers + suppliers), paged/filterable
  *   xero_invoices           invoices (AR + AP), paged/filterable
