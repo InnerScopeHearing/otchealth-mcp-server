@@ -44,7 +44,12 @@ export function registerGraphListMessages(server: McpServer, callerHash: CallerH
         top: input.top,
         filter: input.filter,
         since: input.since,
+        until: input.until,
         unreadOnly: input.unread_only,
+        search: input.search,
+        subjectContains: input.subject_contains,
+        fromContains: input.from_contains,
+        hasAttachments: input.has_attachments,
       });
       const mapped = msgs.map((m: any) => ({
         id: m.id ?? '',
