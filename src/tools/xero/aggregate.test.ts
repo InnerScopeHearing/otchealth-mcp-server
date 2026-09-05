@@ -8,6 +8,33 @@ import assert from 'node:assert/strict';
  * server-side, instead of by a model paging JIT chunks — so the arithmetic has to be pinned here,
  * not merely observed working against live data one afternoon.
  */
+// Same preamble as client.test.ts / tools.test.ts / gl-assemble.test.ts -- satisfies loadEnv()'s
+// required vars for the import chain below. Every assertion in this file is against PURE functions
+// that never touch Xero, Cosmos or the network, but aggregate.ts imports ./client.js (for xeroGet /
+// XeroOrg / TokenDeps), so loading it pulls in config/env.js and agentstate/store.js exactly as its
+// three sibling test files do. Set at MODULE TOP LEVEL, not inside before(): the `await import()`
+// below runs during module evaluation, which is BEFORE node:test executes any before() hook, so a
+// hook cannot protect the import itself.
+const requiredEnv: Record<string, string> = {
+  CIO_SITE_ID: 'test',
+  CIO_TRACK_KEY: 'test',
+  CIO_APP_API_BEARER: 'test',
+  PERPLEXITY_CONNECTOR_TOKEN: 'x'.repeat(32),
+  ADMIN_REVOKE_TOKEN: 'x'.repeat(32),
+  N8N_WEBHOOK_SECRET: 'x'.repeat(32),
+  XERO_CLIENT_ID: 'test-client-id',
+  XERO_CLIENT_SECRET: 'test-client-secret',
+  XERO_RT_OTCHEALTH: 'bootstrap-rt-otchealth',
+  // Pinned for the same reason tools.test.ts pins it: STATE_BACKEND's schema default flipped to
+  // 'postgres' (2026-08-28), and nothing in this file should depend on which backend the
+  // agent-state dispatcher resolves to.
+  STATE_BACKEND: 'cosmos',
+  COSMOS_ENDPOINT: 'https://test.documents.azure.com',
+  COSMOS_DB: 'test',
+  COSMOS_KEY: Buffer.from('test-key').toString('base64'),
+};
+for (const [k, v] of Object.entries(requiredEnv)) process.env[k] ??= v;
+
 const {
   reduceAggregate,
   parseXeroDate,
