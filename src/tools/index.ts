@@ -128,6 +128,8 @@ import { registerWebResearch } from './web/web-research.js';
 import { registerWebExtract } from './web/web-extract.js';
 import { registerKbSearchPrivileged } from './kb/search-privileged.js';
 import { registerKbGetDocument } from './kb/get-document.js';
+// Self-service ingest: copy a OneDrive source drop into the finance dataroom kb_get_document reads.
+import { registerKbIngestDriveFile } from './kb/ingest-drive-file.js';
 
 // Phase 6 — OpenAI ChatGPT / Deep Research connector contract (search + fetch, non-privileged only)
 import { registerOpenAiSearch } from './kb/openai-search.js';
