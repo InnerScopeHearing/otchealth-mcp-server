@@ -65,6 +65,54 @@ export interface OffloadOutcome {
   totalBytes: number;
 }
 
+/**
+ * Small, bounded summary of an offloaded payload so a caller can learn population size WITHOUT
+ * paging gateway_fetch_result to the tail (CFO close request 2026-09-05, issue #291 part a).
+ *
+ * Recognised shapes (all optional, all copied by value, nothing else is inspected):
+ *  - `data.body.pagination` or `data.pagination` -> {page,pageSize,pageCount,itemCount} (Xero list envelope)
+ *  - `data.total_matching` / `data.page` / `data.pages`            (xero_bank_transfers client-side shim)
+ *  - for `data.body` (or `data`) each top-level key whose value is an array -> its length, capped at
+ *    8 keys, under `array_lengths` (e.g. {Invoices: 100})
+ * Returns undefined when nothing recognisable is present. Pure; never throws.
+ */
+export function extractResultSummary(data: unknown): Record<string, unknown> | undefined {
+  try {
+    if (!data || typeof data !== 'object') return undefined;
+    const d = data as Record<string, unknown>;
+    const body = d.body && typeof d.body === 'object' ? (d.body as Record<string, unknown>) : undefined;
+    const out: Record<string, unknown> = {};
+
+    const pag = (body?.pagination ?? d.pagination) as Record<string, unknown> | undefined;
+    if (pag && typeof pag === 'object') {
+      const p: Record<string, unknown> = {};
+      for (const k of ['page', 'pageSize', 'pageCount', 'itemCount']) {
+        if (typeof pag[k] === 'number') p[k] = pag[k];
+      }
+      if (Object.keys(p).length) out.pagination = p;
+    }
+
+    for (const k of ['total_matching', 'page', 'pages']) {
+      if (typeof d[k] === 'number') out[k] = d[k];
+    }
+
+    const container = body ?? d;
+    const lengths: Record<string, number> = {};
+    let n = 0;
+    for (const [k, v] of Object.entries(container)) {
+      if (Array.isArray(v)) {
+        lengths[k] = v.length;
+        if (++n >= 8) break;
+      }
+    }
+    if (n) out.array_lengths = lengths;
+
+    return Object.keys(out).length ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Store the full result in Cosmos (cache) with TTL; return the preview + id, or null (fail-open). */
 export async function offloadResult(
   fullText: string,
