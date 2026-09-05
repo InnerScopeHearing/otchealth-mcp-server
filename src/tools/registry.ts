@@ -94,6 +94,11 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // into the catalog but never added it here, so it stayed invisible on every exec DCR connector (the
   // CFO reported "102 tools, kb_get_document absent"). VISIBILITY only; the ring gate stays in-handler.
   'kb_get_document',
+  // kb_list_documents (#292): prefix-listing sibling of kb_get_document/kb_search_privileged over
+  // the SAME ring-gated finance/legal dataroom keys, so it MUST be visible on the same ship lane or
+  // it repeats the exact kb_get_document omission this file's own comment above documents. VISIBILITY
+  // only; the ring gate (isLaneAllowed, imported unmodified from search-privileged.ts) stays in-handler.
+  'kb_list_documents',
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract (search/fetch — see
   // kb/openai-search.ts). Non-privileged by construction even on this lane: the tools re-derive
   // and re-check the ring per call, they are not widened just because cto/exec can see them here.
