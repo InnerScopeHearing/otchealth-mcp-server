@@ -72,6 +72,15 @@ import {
 import { looksBinary } from '../kb/get-document.js';
 import { assembleGl } from './gl-assemble.js';
 import {
+  AGGREGATE_RESOURCES,
+  AGGREGATE_GROUP_BYS,
+  AGGREGATE_METRICS,
+  aggregateXero,
+  type AggregateGroupBy,
+  type AggregateMetric,
+  type AggregateResource,
+} from './aggregate.js';
+import {
   collectionOf,
   isCreate,
   unwrapItems,
