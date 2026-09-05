@@ -129,6 +129,7 @@ import { registerWebExtract } from './web/web-extract.js';
 import { registerKbSearchPrivileged } from './kb/search-privileged.js';
 import { registerKbGetDocument } from './kb/get-document.js';
 import { registerKbListDocuments } from './kb/list-documents.js';
+import { registerKbIngestDriveFile } from './kb/ingest-drive-file.js';
 
 // Phase 6 — OpenAI ChatGPT / Deep Research connector contract (search + fetch, non-privileged only)
 import { registerOpenAiSearch } from './kb/openai-search.js';
@@ -1094,6 +1095,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerKbSearchPrivileged(server, callerHash);
   registerKbGetDocument(server, callerHash);
   registerKbListDocuments(server, callerHash); // #292: ring-gated prefix listing, same rooms as above
+  registerKbIngestDriveFile(server, callerHash); // self-service OneDrive -> finance dataroom ingest for the CFO lane
   // Phase 6: the OpenAI ChatGPT / Deep Research connector contract. NON-PRIVILEGED rooms only —
   // see kb/openai-search.ts + kb/openai-fetch.ts headers for the ring-safety argument.
   registerOpenAiSearch(server, callerHash);
