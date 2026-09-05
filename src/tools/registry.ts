@@ -232,6 +232,12 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // feature at all. Adding them here is VISIBILITY only (the security boundary is the in-handler
   // isXeroAllowed(ctx.callerAgent) gate, unchanged); see registry.connector-lanes.test.ts.
   'xero_gl_assemble', 'xero_connections',
+  // xero_aggregate (issue #291b): server-side count/sum grouped by Status/Type/Contact/Year/
+  // AccountCode. Added HERE in the same change that registers it, deliberately -- the omission
+  // class documented immediately above (built + registered + EXEC_RING-gated, but invisible on
+  // every connector) has now bitten this list six times, and this tool exists specifically for the
+  // Claude Chat CFO seat, i.e. the one caller that can ONLY reach tools listed here.
+  'xero_aggregate',
   // HeyGen durable subscription-OAuth broker: Phase 0 discovery/reconciliation plus bounded CTO-only
   // prompt-avatar, idempotent direct-video, and private artifact-ingestion writes. Visibility here is not
   // authorization: every handler re-checks the exact lane and every write has an exact governance rule.
