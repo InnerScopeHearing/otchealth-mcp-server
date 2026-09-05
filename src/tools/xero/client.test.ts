@@ -437,7 +437,8 @@ test('SAFETY-CRITICAL (S2): every registered xero tool has its OWN in-handler ri
   const tools = (src.match(/registerTool\(/g) || []).length;
   const gates = (src.match(/isXeroAllowed\(ctx\.callerAgent\)/g) || []).length;
   const refusals = (src.match(/return ringRefusal\(/g) || []).length;
-  assert.equal(tools, 21, 'expected exactly 21 registerTool call-sites (20 explicit + 1 shared helper)');
+  // Bumped 21->22: +1 xero_aggregate (server-side count/sum aggregation, aggregate.ts); its registerTool call-site gates with isXeroAllowed(ctx.callerAgent) and return ringRefusal( like every other tool here.
+  assert.equal(tools, 22, 'expected exactly 22 registerTool call-sites (21 explicit + 1 shared helper)');
   assert.equal(gates, tools, 'every registerTool call-site MUST call isXeroAllowed(ctx.callerAgent)');
   assert.equal(refusals, tools, 'every gate MUST return ringRefusal on a non-exec caller');
 });
