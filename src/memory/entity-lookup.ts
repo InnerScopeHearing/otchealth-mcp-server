@@ -23,6 +23,7 @@
  * TTL-cached, FAIL-OPEN read over the commons feed (an outage returns "no entity", never an error).
  */
 import { readSharedAll } from './store.js';
+import { collectRetractedByAgent } from './retractions.js';
 
 /** A ledger row carrying the typed-entity fields. MemoryEntry's `type` union predates entity/alias,
  *  so those rows arrive as plain objects with a widened `type`; model that explicitly here. */
@@ -34,6 +35,9 @@ export interface EntityRow {
   evalue?: string;
   source?: string;
   tags?: string[] | string;
+  agent?: string;
+  by?: string;
+  supersedes?: string;
 }
 
 export interface EntityHit {
@@ -42,6 +46,8 @@ export interface EntityHit {
   ts: string;
   id: string;
   source?: string;
+  owner?: string;
+  matchedBy?: 'exact' | 'containment' | 'current-question';
 }
 
 /**
@@ -95,6 +101,135 @@ function hasTag(row: EntityRow, tag: string): boolean {
   return tags.some((value) => value.trim().toLowerCase() === tag);
 }
 
+/** Rows that make up the bounded, typed current-state schema are explicitly tagged at write time. */
+export const CURRENT_VALUE_TAG = 'current-value';
+
+const CURRENT_INTENT = new Set(['current', 'currently', 'now', 'today', 'active', 'live', 'present', 'presently', 'still']);
+const HISTORICAL_INTENT = new Set([
+  'historical', 'historically', 'former', 'formerly', 'previous', 'previously', 'prior', 'past',
+  'legacy', 'old', 'before', 'replaced', 'replace', 'migration', 'migrated', 'was', 'were', 'did',
+  'ago',
+]);
+const SELF_SCOPE = new Set(['otchealth', 'innerscope', 'innd', 'our']);
+const FOREIGN_SCOPE = new Set([
+  'another', 'other', 'their', 'competitor', 'competition', 'foreign', 'unrelated',
+  'versus', 'vs', 'compare', 'compared', 'comparison',
+]);
+
+/**
+ * Small vocabulary clusters, not query aliases. Canonical entity keys select clusters by their own
+ * tokens, then an unseen query must independently match the key's distinctive domain cluster and
+ * enough of its remaining concepts. This lets new phrasings compose without storing every sentence.
+ */
+const CONCEPTS: ReadonlyArray<{ anchor: string; words: ReadonlySet<string>; domain?: boolean }> = [
+  { anchor: 'cloud', domain: true, words: new Set(['cloud', 'estate', 'hosting', 'host', 'hosts', 'hosted', 'provider', 'platform', 'infrastructure']) },
+  { anchor: 'gateway', domain: true, words: new Set(['gateway', 'mcp', 'api']) },
+  { anchor: 'brain', domain: true, words: new Set(['brain', 'memory', 'memories', 'knowledge', 'search', 'index', 'indexes', 'indexing']) },
+  { anchor: 'agent', domain: true, words: new Set(['agent', 'agents', 'checkpoint', 'checkpoints', 'handoff', 'handoffs', 'session', 'sessions']) },
+  { anchor: 'state', words: new Set(['state', 'states', 'checkpoint', 'checkpoints', 'handoff', 'handoffs', 'session', 'sessions', 'coordination']) },
+  { anchor: 'backend', words: new Set(['backend', 'store', 'stores', 'storage', 'database', 'engine', 'service', 'system', 'keep', 'keeps', 'kept', 'persist', 'persists', 'power', 'powers', 'powered']) },
+  { anchor: 'runtime', words: new Set(['runtime', 'run', 'runs', 'running', 'host', 'hosts', 'hosted', 'container', 'deployment', 'deployed']) },
+];
+
+function tokenSet(value: string): Set<string> {
+  return new Set(normKey(value).split('_').filter(Boolean));
+}
+
+function intersects(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  for (const value of a) if (b.has(value)) return true;
+  return false;
+}
+
+function hasHistoricalIntent(tokens: ReadonlySet<string>): boolean {
+  return intersects(tokens, HISTORICAL_INTENT) || (tokens.has('used') && tokens.has('to'));
+}
+
+/**
+ * Infer one CTO-owned infrastructure entity from a present-tense current-state question. Pure.
+ * Precision gates are deliberate: explicit current intent, no historical intent, explicit OTCHealth
+ * self scope, no foreign or comparison target, current-value tag, owner=cto, provenance, a distinctive
+ * domain match, and one
+ * unambiguous best candidate. Exact keys/aliases continue to use the compatibility path above.
+ */
+export function matchCurrentQuestion(query: string, rows: readonly EntityRow[]): EntityHit | null {
+  const queryTokens = tokenSet(query);
+  if (!intersects(queryTokens, CURRENT_INTENT) || hasHistoricalIntent(queryTokens)) return null;
+
+  if (!intersects(queryTokens, SELF_SCOPE) || intersects(queryTokens, FOREIGN_SCOPE)) return null;
+  const scored: Array<{ row: EntityRow; matched: number; total: number }> = [];
+  const keys = new Set(rows.filter((row) => row.type === 'entity' && row.ekey).map((row) => row.ekey as string));
+
+  for (const key of keys) {
+    const row = currentEntity(rows, key);
+    if (
+      !row ||
+      typeof row.evalue !== 'string' ||
+      row.agent !== 'cto' ||
+      !row.source ||
+      !hasTag(row, CURRENT_VALUE_TAG)
+    ) continue;
+
+    const keyTokens = tokenSet(key);
+    if (!keyTokens.has('otchealth')) continue;
+    const concepts = CONCEPTS.filter((concept) => keyTokens.has(concept.anchor));
+    const domainConcepts = concepts.filter((concept) => concept.domain);
+    if (domainConcepts.length === 0) continue;
+
+    const matchedConcepts = concepts.filter((concept) => intersects(queryTokens, concept.words));
+    const matchedDomains = domainConcepts.filter((concept) => intersects(queryTokens, concept.words));
+    if (matchedDomains.length === 0) continue;
+
+    // A one-concept key such as primary_cloud is specific once company/current gates pass.
+    // Multi-concept keys must match at least two clusters, preventing "current backend" guessing.
+    const required = Math.min(2, concepts.length);
+    if (matchedConcepts.length < required) continue;
+    scored.push({ row, matched: matchedConcepts.length, total: concepts.length });
+  }
+
+  scored.sort((a, b) =>
+    (b.matched / b.total) - (a.matched / a.total) ||
+    b.matched - a.matched ||
+    String(b.row.ekey).length - String(a.row.ekey).length,
+  );
+  if (scored.length === 0) return null;
+  if (scored.length > 1) {
+    const first = scored[0];
+    const second = scored[1];
+    if (first.matched * second.total === second.matched * first.total && first.matched === second.matched) return null;
+  }
+
+  const row = scored[0].row;
+  return {
+    ekey: row.ekey as string,
+    evalue: row.evalue as string,
+    ts: row.ts || '',
+    id: row.id || '',
+    source: row.source,
+    owner: row.agent,
+    matchedBy: 'current-question',
+  };
+}
+
+/** Drop typed rows retracted by a later entry in the same agent lane. Pure and collision-safe. */
+export type RetractionsByAgent = ReadonlyMap<string, ReadonlySet<string>>;
+
+export function activeEntityRows(
+  rows: readonly EntityRow[],
+  externalRetractions?: RetractionsByAgent,
+): EntityRow[] {
+  const sharedRetractions = collectRetractedByAgent([...rows]);
+  return rows.filter((row) => {
+    if (row.type !== 'entity' && row.type !== 'alias') return false;
+    const owner = typeof row.agent === 'string' ? row.agent : '';
+    const id = typeof row.id === 'string' ? row.id : '';
+    return !(
+      owner &&
+      id &&
+      (sharedRetractions.get(owner)?.has(id) || externalRetractions?.get(owner)?.has(id))
+    );
+  });
+}
+
 /**
  * Resolve a natural-language query to the single best current-value entity, or null. PURE.
  *
@@ -110,15 +245,23 @@ export function matchEntity(query: string, rows: readonly EntityRow[]): EntityHi
   const nq = normKey(query);
   if (!nq) return null;
 
-  const toHit = (row: EntityRow | null): EntityHit | null =>
+  const toHit = (row: EntityRow | null, matchedBy: EntityHit['matchedBy']): EntityHit | null =>
     row && row.ekey && typeof row.evalue === 'string'
-      ? { ekey: row.ekey, evalue: row.evalue, ts: row.ts || '', id: row.id || '', source: row.source }
+      ? {
+          ekey: row.ekey, evalue: row.evalue, ts: row.ts || '', id: row.id || '',
+          source: row.source, owner: row.agent, matchedBy,
+        }
       : null;
 
   // 1) EXACT: the whole query normalizes to a key (or an alias to one).
   const exactKey = resolveAlias(rows, nq);
-  const exact = toHit(currentEntity(rows, exactKey));
+  const exact = toHit(currentEntity(rows, exactKey), 'exact');
   if (exact) return exact;
+
+  // Historical questions must stay semantic. Do not promote a current row merely because the
+  // sentence embeds its canonical key (exact whole-key requests above remain supported).
+  const queryTokens = tokenSet(query);
+  if (hasHistoricalIntent(queryTokens) || intersects(queryTokens, FOREIGN_SCOPE)) return null;
 
   // 2) CONTAINMENT: the longest known key that appears token-bounded inside the query.
   const padded = `_${nq}_`;
@@ -156,11 +299,11 @@ export function matchEntity(query: string, rows: readonly EntityRow[]): EntityHi
   for (const k of entityKeys) consider(k, true);
   for (const k of aliasKeys) consider(k, false);
 
-  if (!best) return null;
+  if (!best) return matchCurrentQuestion(query, rows);
   const resolved = (best as { key: string; isEntity: boolean }).isEntity
     ? (best as { key: string }).key
     : resolveAlias(rows, (best as { key: string }).key);
-  return toHit(currentEntity(rows, resolved));
+  return toHit(currentEntity(rows, resolved), 'containment');
 }
 
 // ── cached, fail-open loader ──────────────────────────────────────────────────────────────────────
@@ -169,19 +312,26 @@ let cache: { at: number; rows: EntityRow[] } | null = null;
 
 /** The entity + alias rows from the commons feed, briefly cached. FAIL-OPEN: any error -> [] (so the
  *  caller degrades to pure semantic recall, never an outage). Exported for the test seam reset. */
-export async function entityRows(nowMs: number = Date.now()): Promise<EntityRow[]> {
-  if (cache && nowMs - cache.at < TTL_MS) return cache.rows;
+export async function entityRows(
+  nowMs: number = Date.now(),
+  externalRetractions?: RetractionsByAgent,
+): Promise<EntityRow[]> {
+  if (cache && nowMs - cache.at < TTL_MS) {
+    return activeEntityRows(cache.rows, externalRetractions);
+  }
   let rows: EntityRow[] = [];
   try {
     // readSharedAll() types rows as MemoryEntry (whose `type` union predates entity/alias); the raw
     // JSONL really carries entity/alias rows, so re-view as EntityRow to read ekey/evalue/wider type.
     const all = (await readSharedAll()) as unknown as EntityRow[];
-    rows = all.filter((r) => r.type === 'entity' || r.type === 'alias');
+    rows = activeEntityRows(all);
   } catch {
     rows = []; // fail-open
   }
+  // Cache only the shared-feed view. Apply the caller's current full retraction map on every
+  // lookup so a memory-of-record retraction cannot be hidden by this loader's longer-lived cache.
   cache = { at: nowMs, rows };
-  return rows;
+  return activeEntityRows(rows, externalRetractions);
 }
 
 /** Test seam: drop the cache so one test never sees another's rows. */
@@ -193,10 +343,14 @@ export function __resetEntityCache(): void {
  * The recall-path entry point: resolve a query to its current-value entity, or null. FAIL-OPEN and
  * kill-switchable — pass mode 'off' (from ENTITY_LOOKUP_MODE) to disable entirely. Never throws.
  */
-export async function lookupEntity(query: string, mode?: string): Promise<EntityHit | null> {
+export async function lookupEntity(
+  query: string,
+  mode?: string,
+  externalRetractions?: RetractionsByAgent,
+): Promise<EntityHit | null> {
   if ((mode || '').trim().toLowerCase() === 'off') return null;
   try {
-    const rows = await entityRows();
+    const rows = await entityRows(Date.now(), externalRetractions);
     return matchEntity(query, rows);
   } catch {
     return null;

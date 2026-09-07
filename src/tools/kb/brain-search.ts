@@ -66,7 +66,7 @@ import { isLaneAllowed } from './search-privileged.js';
 import { retractedIdsByAgent, filterRetractedByAgent } from '../../memory/retractions.js';
 import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
 import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
-import { lookupEntity } from '../../memory/entity-lookup.js';
+import { lookupEntity, type EntityHit } from '../../memory/entity-lookup.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 
 // Re-exported so the pre-existing `import { rrfFuse, ... } from './brain-search.js'` in
@@ -86,6 +86,40 @@ export function fuseWithDirectCandidate(
   const pool = rrfFuse(perRoom, top * 3);
   if (!directCandidate) return pool;
   return [directCandidate, ...pool.filter((hit) => String(hit.id ?? '') !== String(directCandidate.id ?? ''))];
+}
+
+
+/** Typed entities live in memory-exec. Domain narrowing must remain authoritative. */
+export function canUseEntityLookup(rooms: readonly string[]): boolean {
+  return rooms.includes('memory-exec');
+}
+
+/** Build the public promotion and metadata from one already-authorized entity hit. Pure. */
+export function buildEntityPromotion(entity: EntityHit): {
+  match: Record<string, unknown>;
+  answer: Record<string, unknown>;
+} {
+  const recorded = (entity.ts || '').slice(0, 10);
+  return {
+    match: {
+      id: entity.id,
+      text: `${entity.ekey} = ${entity.evalue}${entity.source ? ` (source: ${entity.source})` : ''}${recorded ? ` [current value, recorded ${recorded}]` : ' [current value]'}`,
+      score: 1,
+      type: 'entity',
+      authoritative: true,
+      ...(entity.owner ? { agent: entity.owner } : {}),
+      ...(entity.matchedBy ? { matched_by: entity.matchedBy } : {}),
+    },
+    answer: {
+      key: entity.ekey,
+      value: entity.evalue,
+      recorded: entity.ts,
+      id: entity.id,
+      ...(entity.source ? { source: entity.source } : {}),
+      ...(entity.owner ? { owner: entity.owner } : {}),
+      ...(entity.matchedBy ? { matched_by: entity.matchedBy } : {}),
+    },
+  };
 }
 
 /** Rooms every agent may read (non-PHI / non-MNPI / non-privileged). */
@@ -288,17 +322,13 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   // that key's CURRENT value AHEAD of the semantic top-k -- structurally unable to return a superseded
   // value, instead of whatever the reranker floated up. Ring-safe: the source is the commons feed and
   // entity rows are already in memory-exec (an OPEN_ROOM), so this changes RANKING, not exposure.
-  const entity = await lookupEntity(input.query, process.env.ENTITY_LOOKUP_MODE);
+  const entity = canUseEntityLookup(rooms)
+    ? await lookupEntity(input.query, process.env.ENTITY_LOOKUP_MODE, retracted)
+    : null;
+  const promotion = entity ? buildEntityPromotion(entity) : null;
   let matches: unknown[] = kept.slice(0, top);
-  if (entity) {
-    const recorded = (entity.ts || '').slice(0, 10);
-    const authoritative: Record<string, unknown> = {
-      id: entity.id,
-      text: `${entity.ekey} = ${entity.evalue}${entity.source ? ` (source: ${entity.source})` : ''}${recorded ? ` [current value, recorded ${recorded}]` : ' [current value]'}`,
-      score: Number.POSITIVE_INFINITY,
-      type: 'entity',
-      authoritative: true,
-    };
+  if (entity && promotion) {
+    const authoritative = promotion.match;
     // Prepend the deterministic answer; drop any semantic duplicate of the same row so it is not
     // listed twice. Keep at least the authoritative hit even if top somehow rounds it out.
     matches = [
@@ -319,15 +349,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     rooms_searched: searched,
     include_ops: includeOps,
   };
-  if (entity) {
-    data.entity_answer = {
-      key: entity.ekey,
-      value: entity.evalue,
-      recorded: entity.ts,
-      id: entity.id,
-      ...(entity.source ? { source: entity.source } : {}),
-    };
-  }
+  if (promotion) data.entity_answer = promotion.answer;
   if (failed.length) data.rooms_failed = failed;
   // Disclose retractions rather than silently vanishing them -- an agent should be able to SEE
   // that the brain deliberately withheld a belief the fleet has retracted.
