@@ -434,7 +434,7 @@ test('hybridSearch: an embed() failure degrades to keyword-only (mode "keyword",
 // ================================================================================================
 
 test('result shape parity: OpenSearch and Azure return the SAME KbHit key set for an equivalent flat-room hit', async () => {
-  const DOC_FIELDS = { type: 'fact', text: 'the ASC key id is 9MR7PJHRYH', ts: '2026-06-17T00:00:00Z', source: 'Matt 2026-06-17', by: 'cto' };
+  const DOC_FIELDS = { agent: 'cto', type: 'fact', text: 'the ASC key id is 9MR7PJHRYH', ts: '2026-06-17T00:00:00Z', source: 'Matt 2026-06-17', by: 'cto' };
 
   const azureRes = await withStubbedFetch(
     (async (url: string | URL) => {
@@ -472,7 +472,7 @@ test('result shape parity: OpenSearch and Azure return the SAME KbHit key set fo
   const azureKeys = Object.keys(azureRes!.matches[0]).sort();
   const osKeys = Object.keys(openSearchRes!.matches[0]).sort();
   assert.deepEqual(osKeys, azureKeys, 'OpenSearch must expose exactly the same KbHit keys Azure does for this hit');
-  assert.deepEqual(azureKeys, ['id', 'path', 'score', 'text', 'type'].filter((k) => azureKeys.includes(k)).sort(), 'sanity: no unexpected key leaked through on the Azure side either');
+  assert.deepEqual(azureKeys, ['agent', 'id', 'path', 'score', 'text', 'type'].filter((k) => azureKeys.includes(k)).sort(), 'sanity: no unexpected key leaked through on the Azure side either');
 
   // Internal ranking-signal fields (ts/source/by/_parent) must never leak into either engine's
   // public output -- they exist only to feed the authority re-rank + room-hygiene demotion.
@@ -486,6 +486,8 @@ test('result shape parity: OpenSearch and Azure return the SAME KbHit key set fo
   assert.equal(openSearchRes!.matches[0].id, azureRes!.matches[0].id);
   assert.equal(openSearchRes!.matches[0].text, azureRes!.matches[0].text);
   assert.equal(openSearchRes!.matches[0].type, azureRes!.matches[0].type);
+  assert.equal(openSearchRes!.matches[0].agent, 'cto');
+  assert.equal(azureRes!.matches[0].agent, 'cto');
 });
 
 // ================================================================================================
