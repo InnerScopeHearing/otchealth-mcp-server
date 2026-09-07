@@ -149,7 +149,7 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
   },
   memory: {
     description: 'Cross-agent shared brain (kb-memory commons): recall, team view, pack, remember.',
-    ring: 'non-phi', auth: 'AZURE_COMMONS_STORAGE_* / AZURE_SEARCH_*', status: 'wired',
+    ring: 'non-phi', auth: 'BLOB_BACKEND / SEARCH_BACKEND; AWS IAM for S3 and OpenSearch', status: 'wired',
     available: [],
   },
   agent: {
@@ -163,13 +163,13 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     available: [], rule: 'Never send PHI/MedReview documents through this gateway.',
   },
   kb: {
-    description: 'Fleet knowledge RAG over Azure AI Search (commons open; finance/legal ring-gated).',
-    ring: 'non-phi', auth: 'AZURE_SEARCH_*', status: 'wired',
+    description: 'Fleet knowledge retrieval through SEARCH_BACKEND (OpenSearch in the AWS estate; commons open; finance/legal ring-gated).',
+    ring: 'non-phi', auth: 'SEARCH_BACKEND; AWS IAM for OpenSearch', status: 'wired',
     available: [], rule: 'Privileged (finance/legal) index access is ring-gated.',
   },
   llm: {
-    description: 'Credit-funded Azure OpenAI commodity path (gpt-4.1/5.x) — the cost-protocol escape hatch.',
-    ring: 'non-phi', auth: 'FOUNDRY_OPENAI_ENDPOINT / FOUNDRY_KEY', status: 'wired',
+    description: 'Shared LLM inference through LLM_PROVIDER (OpenAI-direct in the AWS estate); usage follows the selected provider and model.',
+    ring: 'non-phi', auth: 'LLM_PROVIDER; OPENAI_API_KEY for OpenAI-direct', status: 'wired',
     available: [],
   },
   shield: {
@@ -218,13 +218,13 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
   // its own singleton service rather than a shared "openai" prefix group.
   search: {
     description: 'OpenAI ChatGPT / Deep Research connector: hybrid search over the non-privileged company brain (memory-exec, commons-company-journal only). See kb/openai-search.ts.',
-    ring: 'non-phi', auth: 'AZURE_SEARCH_ENDPOINT / AZURE_SEARCH_QUERY_KEY', status: 'wired',
+    ring: 'non-phi', auth: 'SEARCH_BACKEND; AWS IAM for OpenSearch', status: 'wired',
     available: [],
     rule: 'Room selection is hard-capped to the non-privileged allow-set for every caller, including cto/exec — stricter than brain_search on purpose. OPENAI_SEARCH_MODE=off disables it.',
   },
   fetch: {
     description: 'OpenAI ChatGPT / Deep Research connector: resolve a search() citation id to full text. See kb/openai-fetch.ts.',
-    ring: 'non-phi', auth: 'AZURE_SEARCH_ENDPOINT / AZURE_SEARCH_QUERY_KEY', status: 'wired',
+    ring: 'non-phi', auth: 'SEARCH_BACKEND; AWS IAM for OpenSearch', status: 'wired',
     available: [],
     rule: 'Re-derives the room from the id and re-checks it against the non-privileged allow-set on every call; never trusts the id. OPENAI_SEARCH_MODE=off disables it.',
   },
