@@ -321,6 +321,20 @@ test('putBlobRaw routes the migrated CFO source container through S3 without an 
   assert.equal(seenHeaders['if-none-match'], '*');
 });
 
+test('non-CFO raw containers keep the existing Azure path under S3 mode', async () => {
+  const { putBlobRaw } = await import('./blob-store.js');
+  let seenUrl = '';
+  const result = await withStubbedFetch(
+    (async (url: string | URL) => {
+      seenUrl = String(url);
+      return new Response(null, { status: 201 });
+    }) as unknown as typeof fetch,
+    () => putBlobRaw('otchealthlegalstore', 'unit-test-key', 'company', 'unit-test.txt', { text: 'synthetic fixture' }),
+  );
+  assert.equal(result.bytes, Buffer.byteLength('synthetic fixture'));
+  assert.ok(seenUrl.startsWith('https://otchealthlegalstore.blob.core.windows.net/company/'));
+});
+
 test('a key needing no encoding is unchanged (the case that always worked, kept working)', async () => {
   const url = await urlFor('INND/_KNOWLEDGE-BASE/CFO_PROJECT_MEMORY.md');
   assert.ok(url.endsWith('/otchealthcfodata/cfo-source-docs/INND/_KNOWLEDGE-BASE/CFO_PROJECT_MEMORY.md'));
