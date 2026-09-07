@@ -64,6 +64,21 @@ export function vectorFieldFor(index: string): string {
   return isChunkedRoom(index) ? 'text_vector' : 'contentVector';
 }
 
+/** True only for indexes whose rows use memoryDocId(agent, id). Flat document indexes such as
+ * cs-knowledge and finance-otchealth-cfo-source-docs deliberately stay on hybrid retrieval. */
+export function isFlatMemoryRoom(index: string): boolean {
+  return index === 'memory-exec' || index.endsWith('-memory');
+}
+
+/** Canonical composite memory key. The agent half matches normalizeAgent's accepted shape and the
+ * entry half is limited to characters memoryDocId preserves unchanged. Bare IDs are ambiguous
+ * across agents and full SHAs are content identifiers, so neither enters this path. */
+export function exactFlatMemoryId(index: string, query: string): string | null {
+  if (!isFlatMemoryRoom(index)) return null;
+  const q = query.trim();
+  return /^[a-z0-9][a-z0-9_-]{0,40}__[A-Za-z0-9][A-Za-z0-9_=-]{2,127}$/.test(q) ? q : null;
+}
+
 async function signedSearchFetch(index: string, body: Record<string, unknown>): Promise<Response> {
   const e = loadEnv();
   const host = (e.OPENSEARCH_ENDPOINT || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
@@ -163,6 +178,41 @@ export async function hybridSearch(
   const chunked = isChunkedRoom(index);
   const vecField = vectorFieldFor(index);
 
+  // An exact identifier is a fetch request. Keep this before embed(query). A miss, malformed
+  // response, non-2xx response, or thrown error falls through to the existing hybrid path.
+  // A caller-supplied filter is part of the authorization/selection contract. A direct GET cannot
+  // enforce an OData filter, so filtered searches always stay on the existing search path.
+  const exactId = opts?.filter ? null : exactFlatMemoryId(index, query);
+  if (exactId) {
+    try {
+      const direct = await signedGetFetch(index, exactId);
+      if (direct.ok) {
+        const payload = (await direct.json()) as { found?: boolean; _source?: Record<string, unknown> };
+        const doc = payload._source;
+        if (payload.found !== false && doc) {
+          const sep = exactId.indexOf('__');
+          const hit: KbHit = {
+            score: 1,
+            text: pickText(doc).slice(0, 1200),
+            // The requested _id is canonical. Do not let a legacy or corrupt _source.id turn a
+            // scoped key back into a bare ID before retraction filtering.
+            id: exactId,
+            agent: exactId.slice(0, sep),
+            type: typeof doc['type'] === 'string' ? (doc['type'] as string) : undefined,
+          };
+          return {
+            // includeOps=false deprioritizes operational rows but does not remove them. Passing the
+            // exact hit through the shared helper preserves that contract for explicit ID fetches.
+            matches: demoteExhaustHits([hit], includeOps, top),
+            mode: 'direct-id',
+          };
+        }
+      }
+    } catch {
+      // Fail open to the existing hybrid path.
+    }
+  }
+
   let vector: number[] | null = null;
   try {
     vector = await embed(query);
@@ -246,6 +296,7 @@ export async function hybridSearch(
         score: rrfScore,
         text: pickText(doc).slice(0, 1200),
         id: (doc['id'] as string | undefined) ?? (doc['chunk_id'] as string | undefined) ?? id,
+        agent: typeof doc['agent'] === 'string' ? (doc['agent'] as string) : undefined,
         type: typeof doc['type'] === 'string' ? (doc['type'] as string) : undefined,
         path: typeof doc['path'] === 'string' ? (doc['path'] as string) : undefined,
         ts: typeof doc['ts'] === 'string' ? (doc['ts'] as string) : undefined,

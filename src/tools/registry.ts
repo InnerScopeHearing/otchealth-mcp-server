@@ -125,6 +125,12 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // the enrolled caller/profile and permits only public_read; visibility here does not grant
   // authentication, persistence, draft, committed-write, or any campaign capability.
   'browser_broker_preflight', 'browser_broker_inspect_public',
+  // Hyperagent broker: expose the existing ring-gated orchestration surface to ship-lane
+  // connector clients. Visibility does not widen authority: every handler still checks the
+  // caller lane against HYPERAGENT_LANE_AGENTS and HYPERAGENT_AGENT_CLASSES, and the two actions
+  // that trigger an agent run remain write_orchestrated and invocation-budgeted.
+  'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
+  'hyperagent_create_thread', 'hyperagent_send_message',
   // catalog_probe (2026-08-03): a diagnostic tool built specifically to answer "what caller_agent/
   // connector_surface/m365_static_auth did THIS request actually resolve to" -- exactly the question
   // needed to root-cause a connector showing an unexpectedly narrow toolset -- was itself never added

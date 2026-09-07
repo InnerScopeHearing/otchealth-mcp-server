@@ -41,7 +41,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { hybridSearch, searchConfigured } from '../../search/index.js';
 import { roomsFor, OPEN_ROOMS } from './brain-search.js';
 import { rrfFuse } from '../../memory/rrf.js';
-import { retractedIds, filterRetracted } from '../../memory/retractions.js';
+import { retractedIdsByAgent, filterRetractedByAgent } from '../../memory/retractions.js';
 import { buildCompositeId } from './openai-ids.js';
 
 export type OpenAiSearchMode = 'off' | 'on';
@@ -118,7 +118,7 @@ export async function handleOpenAiSearch(input: OpenAiSearchInput, ctx: ToolCont
   const settled = await Promise.allSettled(
     rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps: false }) })),
   );
-  const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string }> }> = [];
+  const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }> = [];
   for (const s of settled) {
     if (s.status === 'fulfilled' && s.value.res) perRoom.push({ room: s.value.room, hits: s.value.res.matches });
   }
@@ -126,8 +126,8 @@ export async function handleOpenAiSearch(input: OpenAiSearchInput, ctx: ToolCont
   // Fuse a wider pool first, drop retracted beliefs, THEN trim — mirrors brain_search's own order
   // so a retracted hit never leaves a hole instead of promoting a real result into its place.
   const pool = rrfFuse(perRoom, RESULT_TOP * 3);
-  const retracted = await retractedIds();
-  const { kept } = filterRetracted(pool, retracted);
+  const retracted = await retractedIdsByAgent();
+  const { kept } = filterRetractedByAgent(pool, retracted);
   const trimmed = kept.slice(0, RESULT_TOP);
 
   const results: OpenAiSearchResult[] = trimmed

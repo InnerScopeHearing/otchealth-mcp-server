@@ -20,6 +20,8 @@ export interface FusedHit {
   text: string;
   /** The index doc id (`{agent}__{entryId}`). Carried through so retracted beliefs can be identified. */
   id?: unknown;
+  /** Owning lane for collision-safe handling of legacy bare IDs. */
+  agent?: string;
   /** Source path of the parent doc (chunked doc rooms), threaded through for citation. */
   path?: string;
 }
@@ -34,14 +36,14 @@ export interface FusedHit {
  * itself (see memory/deep-retrieval.ts's dedupeById for that case). Pure + unit-tested.
  */
 export function rrfFuse(
-  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string }> }>,
+  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }>,
   top: number,
   k = 60,
 ): FusedHit[] {
   const fused: FusedHit[] = [];
   for (const { room, hits } of perRoom) {
     hits.forEach((h, i) => {
-      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id, path: h.path });
+      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id, path: h.path, agent: h.agent });
     });
   }
   return fused.sort((a, b) => b.score - a.score).slice(0, top);

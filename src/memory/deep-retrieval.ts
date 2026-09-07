@@ -61,7 +61,7 @@
 import { chat, chatConfigured, type ChatMessage } from '../azure/foundry.js';
 import { hybridSearch, searchConfigured, type KbHit } from '../search/index.js';
 import { rrfFuse, type FusedHit } from './rrf.js';
-import { retractedIds, filterRetracted } from './retractions.js';
+import { retractedIdsByAgent, filterRetractedByAgent } from './retractions.js';
 import { retrievalShield, type GuardMode } from '../safety/auto-guard.js';
 
 // ---- constants ────────────────────────────────────────────────────────────────────────────────
@@ -355,10 +355,9 @@ export function dedupeById(hits: FusedHit[]): FusedHit[] {
   const seen = new Set<string>();
   const out: FusedHit[] = [];
   for (const h of hits) {
-    const key =
-      (typeof h.id === 'string' && h.id) ||
-      (typeof h.id === 'number' && String(h.id)) ||
-      `text:${h.text.slice(0, 200)}`;
+    const key = typeof h.id === 'string' && h.id
+      ? h.id.includes('__') || !h.agent ? h.id : `${h.agent}__${h.id}`
+      : typeof h.id === 'number' ? String(h.id) : `text:${h.text.slice(0, 200)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(h);
@@ -496,7 +495,7 @@ async function synthesizeAnswer(query: string, hits: FusedHit[]): Promise<string
 
 // ---- IO: retrieval ─────────────────────────────────────────────────────────────────────────────
 
-type RoomHitList = { room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string }> };
+type RoomHitList = { room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> };
 
 /**
  * One retrieval round: every (bounded) sub-query runs against every target room in parallel. A
@@ -525,7 +524,7 @@ async function runRetrievalRound(
       if (lists.length === 0) throw new Error(`room ${room}: every sub-query failed`);
       // Intra-room fusion across this room's sub-query result lists — reuses the SAME rrfFuse.
       const fused = rrfFuse(lists, perRoomTop);
-      return { room, hits: fused.map((f) => ({ score: f.score, text: f.text, id: f.id, path: f.path })) };
+      return { room, hits: fused.map((f) => ({ score: f.score, text: f.text, id: f.id, path: f.path, agent: f.agent })) };
     }),
   );
 
@@ -624,8 +623,8 @@ async function runDeepFlow(
   }
 
   const fusedFinal = dedupeById(rrfFuse(pool, top * 3));
-  const retracted = await retractedIds();
-  const { kept, dropped } = filterRetracted(fusedFinal, retracted);
+  const retracted = await retractedIdsByAgent();
+  const { kept, dropped } = filterRetractedByAgent(fusedFinal, retracted);
   const hits = kept.slice(0, top);
 
   // BUDGET GATE: the single most expensive, least-bounded remaining stretch (an injection-shield
@@ -711,8 +710,8 @@ export async function fallbackFastSearch(query: string, rooms: string[], top: nu
       }
     });
     const pool = rrfFuse(perRoom, top * 3);
-    const retracted = await retractedIds();
-    const { kept, dropped } = filterRetracted(pool, retracted);
+    const retracted = await retractedIdsByAgent();
+    const { kept, dropped } = filterRetractedByAgent(pool, retracted);
     const hits = kept.slice(0, top);
     const result: DeepRetrieveResult = {
       mode: 'deep-fallback-fast',

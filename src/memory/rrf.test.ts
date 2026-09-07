@@ -59,3 +59,10 @@ test('rrfFuse does not dedupe by id — a caller that needs one row per document
   );
   assert.equal(fused.length, 2, 'rrfFuse itself is a flatten+rank operation, not an id-aware merge');
 });
+
+test('rrfFuse preserves the owning agent for collision-safe retraction filtering', () => {
+  const fused = rrfFuse([{ room: 'memory-exec', hits: [{
+    text: 'legacy row', id: '20260730-001', agent: 'cto',
+  }] }], 5);
+  assert.equal(fused[0]?.agent, 'cto');
+});
