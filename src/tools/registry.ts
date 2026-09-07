@@ -1211,7 +1211,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // per process so the same pitfall does not nag on every subsequent call.
         // canonicalName, not def.name -- a pitfall bound to e.g. "posthog_" or "azure_containerapp_set_env"
         // should still fire when reached via an M365 alias, not silently go dark under the stripped name.
-        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName);
+        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName, handlerInput);
         if (jitDoctrine.pitfalls.length) {
           structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
           // PHASE 2 SLO TELEMETRY (observe-only): feeds the doctrine-coverage SLO -- how often a

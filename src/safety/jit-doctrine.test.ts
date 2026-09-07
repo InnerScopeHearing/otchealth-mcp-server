@@ -224,6 +224,37 @@ test('FAIL-OPEN: evaluateJitDoctrine on an empty toolName returns empty pitfalls
 
 // ---- table integrity -------------------------------------------------------------------------------
 
+test('memory supersession reminder is omitted when the caller already supplied an id', () => {
+  for (const tool of ['memory_write', 'memory_remember']) {
+    assert.deepEqual(jitDoctrineFor(tool, { supersedes: '20260907-001' }), []);
+    assert.deepEqual(jitDoctrineFor(tool, { supersedes: ' 20260907-001 ' }), []);
+    for (const supersedes of [undefined, null, '', '   ', 123, false]) {
+      assert.equal(jitDoctrineFor(tool, { supersedes }).length, 1);
+    }
+  }
+});
+
+test('supersedes never suppresses unrelated safety doctrine', () => {
+  assert.deepEqual(
+    jitDoctrineFor('legal_blob_get', { supersedes: '20260907-001' }),
+    jitDoctrineFor('legal_blob_get'),
+  );
+});
+
+test('a satisfied supersession reminder does not consume the next actionable warning', () => {
+  __resetJitDoctrineState();
+  const previous = process.env.JIT_DOCTRINE_MODE;
+  process.env.JIT_DOCTRINE_MODE = 'warn';
+  try {
+    assert.deepEqual(evaluateJitDoctrine('cfo-supersedes', 'memory_remember', { supersedes: '20260907-001' }).pitfalls, []);
+    assert.equal(evaluateJitDoctrine('cfo-supersedes', 'memory_remember', {}).pitfalls.length, 1);
+    assert.deepEqual(evaluateJitDoctrine('cfo-supersedes', 'memory_remember', {}).pitfalls, []);
+  } finally {
+    if (previous === undefined) delete process.env.JIT_DOCTRINE_MODE;
+    else process.env.JIT_DOCTRINE_MODE = previous;
+  }
+});
+
 test('JIT_DOCTRINE_BINDINGS: every binding has at least one non-empty pitfall string', () => {
   for (const binding of JIT_DOCTRINE_BINDINGS) {
     assert.ok(binding.pitfalls.length > 0, `binding for "${binding.match}" has no pitfalls`);
