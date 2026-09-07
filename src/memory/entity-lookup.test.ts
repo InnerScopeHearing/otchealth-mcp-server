@@ -233,4 +233,3 @@ test('lookupEntity kill-switch: mode "off" short-circuits to null (no read)', as
   assert.equal(await lookupEntity('n8n base url', 'off'), null);
   assert.equal(await lookupEntity('n8n base url', 'OFF'), null);
 });
-
