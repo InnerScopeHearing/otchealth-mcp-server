@@ -323,7 +323,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   // value, instead of whatever the reranker floated up. Ring-safe: the source is the commons feed and
   // entity rows are already in memory-exec (an OPEN_ROOM), so this changes RANKING, not exposure.
   const entity = canUseEntityLookup(rooms)
-    ? await lookupEntity(input.query, process.env.ENTITY_LOOKUP_MODE)
+    ? await lookupEntity(input.query, process.env.ENTITY_LOOKUP_MODE, retracted)
     : null;
   const promotion = entity ? buildEntityPromotion(entity) : null;
   let matches: unknown[] = kept.slice(0, top);
