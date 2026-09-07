@@ -4,6 +4,7 @@ import { z } from 'zod';
 export const RELATIONSHIP_SCHEMA = 'otc.relationship.pilot.v1' as const;
 export const RELATIONSHIP_PREFIX = '_MEMORY/_relationships/pilot-v1/' as const;
 export const RELATIONSHIP_EVENT_LIMIT = 100;
+export const RELATIONSHIP_EVENT_SCAN_LIMIT = 200;
 export const RELATIONSHIP_ENTITY_LIMIT = 50;
 export const RELATIONSHIP_EDGE_LIMIT = 100;
 export const RELATIONSHIP_EVIDENCE_LIMIT = 3;

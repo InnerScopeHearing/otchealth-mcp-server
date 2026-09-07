@@ -1,6 +1,6 @@
-import { getTextFromS3, listBlobsFromS3, putObjectToS3, S3ObjectAlreadyExistsError } from '../legal/s3-blob-store.js';
+import { getTextFromS3, listBlobsFromS3, putObjectToS3, S3ObjectAlreadyExistsError, S3WriteHttpError, S3WriteTransportError } from '../legal/s3-blob-store.js';
 import { assertRelationshipAuthority, canReadRelationshipEvent, canWriteRelationshipEvent, type RelationshipAuthority } from './authority.js';
-import { RELATIONSHIP_EVENT_LIMIT, RELATIONSHIP_PREFIX, canonicalJson, parseRelationshipEvent, sha256, type RelationshipEvent } from './schema.js';
+import { RELATIONSHIP_EVENT_LIMIT, RELATIONSHIP_EVENT_SCAN_LIMIT, RELATIONSHIP_PREFIX, canonicalJson, parseRelationshipEvent, sha256, type RelationshipEvent } from './schema.js';
 
 const ACCOUNT = 'otchealthcommons';
 const CONTAINER = 'company-journal';
@@ -52,7 +52,7 @@ export async function putCanonicalIfAbsent(store: RelationshipObjectStore, path:
 export async function readRelationshipEvents(store: RelationshipObjectStore, authority: RelationshipAuthority): Promise<RelationshipEvent[]> {
   assertRelationshipAuthority(authority);
   const listed = await store.list(EVENT_PREFIX);
-  if (listed.length > RELATIONSHIP_EVENT_LIMIT) throw new Error(`relationship pilot event cap exceeded: ${listed.length}`);
+  if (listed.length > RELATIONSHIP_EVENT_SCAN_LIMIT) throw new Error('relationship pilot scan budget exceeded');
   const names = listed.map((item) => relationshipPath(item.name)).sort();
   for (const name of names) {
     if (!/^_MEMORY\/_relationships\/pilot-v1\/events\/rel_evt_[a-f0-9]{64}\.json$/.test(name)) {
@@ -67,7 +67,10 @@ export async function readRelationshipEvents(store: RelationshipObjectStore, aut
     try { parsed = JSON.parse(text); } catch { throw new Error(`relationship event is not valid JSON: ${name}`); }
     const event = parseRelationshipEvent(parsed);
     if (name !== `${EVENT_PREFIX}${event.event_id}.json`) throw new Error(`relationship event path and event_id disagree: ${name}`);
-    if (canReadRelationshipEvent(authority, event)) events.push(event);
+    if (canReadRelationshipEvent(authority, event)) {
+      events.push(event);
+      if (events.length > RELATIONSHIP_EVENT_LIMIT) throw new Error('relationship pilot authorized event cap exceeded');
+    }
   }
   return events.sort((a, b) => a.event_id.localeCompare(b.event_id));
 }
@@ -87,18 +90,24 @@ export async function writeRelationshipEvent(
     await store.putIfAbsent(path, body);
     return { event: proposed, created: true, replayed: false, sha256: sha256(body) };
   } catch (error) {
-    if (!(error instanceof S3ObjectAlreadyExistsError)) throw new RelationshipWriteOutcomeUnknownError();
+    if (!(error instanceof S3ObjectAlreadyExistsError)) {
+      if (error instanceof S3WriteTransportError ||
+          (error instanceof S3WriteHttpError && (error.status === 408 || error.status === 429 || error.status >= 500))) {
+        throw new RelationshipWriteOutcomeUnknownError();
+      }
+      throw error;
+    }
     const existingText = await store.get(path);
     if (existingText === null) throw new Error(`conditional create conflict but strict read found no object at ${path}`);
     let existingValue: unknown;
     try { existingValue = JSON.parse(existingText); } catch { throw new Error(`existing relationship event is invalid JSON at ${path}`); }
     const existing = parseRelationshipEvent(existingValue);
-    if (existing.event_id !== proposed.event_id || existing.intent_sha256 !== proposed.intent_sha256) {
-      throw new Error(`idempotency key collision at ${path}`);
-    }
     if (!canReadRelationshipEvent(authority, existing) || !canWriteRelationshipEvent(authority, existing) ||
         existing.auth.owner_agent !== authority.lane) {
       throw new Error('existing relationship event is outside server-selected authority');
+    }
+    if (existing.event_id !== proposed.event_id || existing.intent_sha256 !== proposed.intent_sha256) {
+      throw new Error(`idempotency key collision at ${path}`);
     }
     const expected = { ...proposed, transaction_time: existing.transaction_time };
     if (canonicalJson(existing) !== canonicalJson(expected)) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { S3ObjectAlreadyExistsError } from '../legal/s3-blob-store.js';
+import { S3ObjectAlreadyExistsError, S3WriteHttpError, S3WriteTransportError } from '../legal/s3-blob-store.js';
 import { requireRelationshipPilotAuthority } from './authority.js';
 import { materializeRelationships } from './materialize.js';
 import { buildFixtureEvent } from './operations.js';
@@ -164,7 +164,7 @@ test('accepted write with lost response reports UNKNOWN and same-key replay pres
     await originalPut(path, body);
     if (path.includes('/events/') && loseOnce) {
       loseOnce = false;
-      throw new Error('synthetic transport response lost');
+      throw new S3WriteTransportError('company-journal', path, new Error('synthetic transport response lost'));
     }
   };
   const uncertain = await ingest(store, 'alpha_depends_beta', 'lost-response-001', '2026-01-02T00:00:00Z');
@@ -185,12 +185,52 @@ test('replay refuses stored permission or semantic tampering even with copied in
   const path = `_MEMORY/_relationships/pilot-v1/events/${original.event_id}.json`;
   const restricted = structuredClone(original);
   restricted.auth.ring = 'restricted-synthetic';
+  restricted.intent_sha256 = 'd'.repeat(64);
   const store = new MemoryObjectStore(new Map([[path, canonicalJson(restricted)]]));
   await assert.rejects(() => writeRelationshipEvent(store, authority, later), /outside server-selected authority/);
   const changed = structuredClone(original);
   if (changed.operation === 'assert') changed.object.entity_id = 'synthetic_other_entity';
   store.objects.set(path, canonicalJson(changed));
   await assert.rejects(() => writeRelationshipEvent(store, authority, later), /immutable operation intent/);
+});
+
+test('an explicit denied PUT is a hard failure, not UNKNOWN durability', async () => {
+  process.env.RELATIONSHIP_PILOT_MODE = 'synthetic';
+  for (const status of [403, 404] as const) {
+    const store = new MemoryObjectStore();
+    store.putIfAbsent = async () => { throw new S3WriteHttpError(status, 'company-journal', 'synthetic', 'Denied'); };
+    await assert.rejects(
+      () => ingest(store, 'alpha_depends_beta', `denied-write-${status}`, '2026-01-02T00:00:00Z'),
+      new RegExp(`s3 blob put ${status}`),
+    );
+  }
+});
+
+test('query returns the immutable snapshot opened before a concurrent append', async () => {
+  process.env.RELATIONSHIP_PILOT_MODE = 'synthetic';
+  const store = new MemoryObjectStore();
+  const authority = requireRelationshipPilotAuthority(ctx(), 'synthetic');
+  const base = buildFixtureEvent('alpha_depends_beta', 'snapshot-base-001', '2026-01-02T00:00:00Z', authority, []);
+  store.objects.set(`_MEMORY/_relationships/pilot-v1/events/${base.event_id}.json`, canonicalJson(base));
+  const initial = await rebuildRelationshipProjection(store, authority);
+  const appended = buildFixtureEvent('alpha_candidate_delta', 'snapshot-later-001', '2026-01-03T00:00:00Z', authority, [base]);
+  const originalGet = store.get.bind(store);
+  let injected = false;
+  store.get = async (path) => {
+    const value = await originalGet(path);
+    if (!injected && path.includes('/manifests/')) {
+      injected = true;
+      store.objects.set(`_MEMORY/_relationships/pilot-v1/events/${appended.event_id}.json`, canonicalJson(appended));
+    }
+    return value;
+  };
+  const result = await querySyntheticRelationships({
+    entityId: 'synthetic_service_alpha', hops: 1, includeCandidates: true,
+    asOfValid: '2026-01-10T00:00:00Z', asOfTransaction: '2026-01-10T00:00:00Z',
+  }, ctx(), deps(store, ['2026-01-10T00:00:00Z']));
+  assert.equal(result.generation_id, initial.generation_id);
+  assert.deepEqual(result.edges.map((edge) => edge.object), ['synthetic_service_beta']);
+  assert.equal([...store.objects.keys()].filter((key) => key.includes('/events/')).length, 2);
 });
 
 test('a full pilot refuses a new key before writing but permits an existing key replay', async () => {

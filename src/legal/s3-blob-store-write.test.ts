@@ -35,6 +35,7 @@ const {
   s3LocationFor,
   PERSONAL_LEGAL_BUCKET,
   S3ObjectAlreadyExistsError,
+  S3WriteHttpError,
 } = await import('./s3-blob-store.js');
 
 interface Seen {
@@ -262,6 +263,18 @@ test('a 403 on a WRITE throws -- it is never folded into a plausible success', a
     putObjectToS3('otchealthcommons', 'company-journal', '_MEMORY/_exec/cto.jsonl', Buffer.from('x'), 'application/x-ndjson'),
   );
   assert.match(String(error), /s3 blob put 403/);
+  assert.ok(error instanceof S3WriteHttpError);
+  assert.equal(error.status, 403);
+});
+
+test('nonambiguous write HTTP failures preserve their status', async () => {
+  for (const status of [403, 404] as const) {
+    const { error } = await capture([() => new Response('Denied', { status })], () =>
+      putObjectToS3('otchealthcommons', 'company-journal', '_MEMORY/_exec/cto.jsonl', Buffer.from('x'), 'application/x-ndjson'),
+    );
+    assert.ok(error instanceof S3WriteHttpError);
+    assert.equal(error.status, status);
+  }
 });
 
 test('an existing object with overwrite=false throws a message naming the fix', async () => {
