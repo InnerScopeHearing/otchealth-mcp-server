@@ -16,6 +16,7 @@ test('off ECS: every container field is null and the reason is stated, not fabri
     assert.equal(r.image, null);
     assert.equal(r.image_tag, null);
     assert.equal(r.task_definition, null);
+    assert.equal(r.task_arn, null);
     assert.match(String(r.source_error), /not running on ECS/);
     // The process-derived half is always real, and is what distinguishes two tasks on one image.
     assert.match(r.started_at, /^\d{4}-\d{2}-\d{2}T/);
@@ -45,6 +46,7 @@ test('a metadata endpoint that FAILS degrades to null with the error, and is not
           Image: '900915535335.dkr.ecr.us-east-1.amazonaws.com/otchealth-mcp-gateway:2d2fe9a',
           ImageID: 'sha256:abc123',
           Labels: {
+            'com.amazonaws.ecs.task-arn': 'arn:aws:ecs:us-east-1:123456789012:task/synthetic/0123456789abcdef0123456789abcdef',
             'com.amazonaws.ecs.task-definition-family': 'otchealth-gateway',
             'com.amazonaws.ecs.task-definition-version': '13',
           },
@@ -54,6 +56,7 @@ test('a metadata endpoint that FAILS degrades to null with the error, and is not
     const ok = await revisionInfo();
     assert.equal(ok.image_tag, '2d2fe9a', 'the tag is the git sha the image was built from');
     assert.equal(ok.task_definition, 'otchealth-gateway:13');
+    assert.equal(ok.task_arn, 'arn:aws:ecs:us-east-1:123456789012:task/synthetic/0123456789abcdef0123456789abcdef');
     assert.equal(ok.image_digest, 'sha256:abc123');
     assert.equal(ok.source_error, null);
   } finally {
@@ -82,4 +85,16 @@ test('tagOf: a registry host carrying a PORT is not mistaken for an image tag', 
   );
   // Digest-only, no tag: honestly null rather than the hex masquerading as a tag.
   assert.equal(tagOf('repo/gateway@sha256:4c818a121aa273f5'), null);
+});
+
+
+test('task identity comes only from a valid AWS task ARN label', async () => {
+  const { taskArnOf } = await import('./revision.js');
+  const valid = 'arn:aws:ecs:us-east-1:123456789012:task/synthetic/0123456789abcdef0123456789abcdef';
+  assert.equal(taskArnOf({ 'com.amazonaws.ecs.task-arn': valid }), valid);
+  for (const labels of [undefined, null, [], {}, { 'com.amazonaws.ecs.task-arn': 123 },
+    { 'com.amazonaws.ecs.task-arn': 'synthetic' }, { 'com.amazonaws.ecs.task-arn': valid + '/extra' },
+    { 'com.amazonaws.ecs.task-arn': valid + '\n' }, { TaskARN: valid }]) {
+    assert.equal(taskArnOf(labels), null);
+  }
 });

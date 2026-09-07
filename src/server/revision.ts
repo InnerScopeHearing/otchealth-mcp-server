@@ -38,6 +38,8 @@ export interface RevisionInfo {
   image_digest: string | null;
   /** ECS task definition family and revision, e.g. "otchealth-gateway:13". */
   task_definition: string | null;
+  /** Exact ECS task identity, required to prove every live replica was observed. */
+  task_arn: string | null;
   /** When THIS process started (ISO). Distinguishes tasks running the same image. */
   started_at: string;
   /** Seconds this process has been up. A tiny value means a rollout just happened. */
@@ -49,7 +51,7 @@ export interface RevisionInfo {
 const STARTED_AT = new Date().toISOString();
 
 /** Cached container-derived half. The process-derived half is recomputed per call (uptime moves). */
-let cached: Pick<RevisionInfo, 'image' | 'image_tag' | 'image_digest' | 'task_definition' | 'source_error'> | null =
+let cached: Pick<RevisionInfo, 'image' | 'image_tag' | 'image_digest' | 'task_definition' | 'task_arn' | 'source_error'> | null =
   null;
 
 /** Exported for direct unit test: the cached-after-success path makes this unreachable from
@@ -72,6 +74,19 @@ export function tagOf(image: string | null): string | null {
   return tag.includes('/') || !tag ? null : tag;
 }
 
+/** AWS-owned container metadata identifies the task without guessing from process start time.
+ * Source: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-metadata-endpoint-v4-fargate-examples.html
+ * Missing or malformed identity stays null so release verification cannot count a fabricated task.
+ */
+export function taskArnOf(labels: unknown): string | null {
+  if (!labels || typeof labels !== 'object' || Array.isArray(labels)) return null;
+  const value = (labels as Record<string, unknown>)['com.amazonaws.ecs.task-arn'];
+  if (typeof value !== 'string') return null;
+  return /^arn:aws(?:-cn|-us-gov)?:ecs:[a-z0-9-]+:\d{12}:task\/(?:[A-Za-z0-9_-]+\/)?(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(value)
+    ? value
+    : null;
+}
+
 async function loadContainerMetadata(): Promise<NonNullable<typeof cached>> {
   const uri = process.env.ECS_CONTAINER_METADATA_URI_V4 || process.env.ECS_CONTAINER_METADATA_URI;
   if (!uri) {
@@ -80,6 +95,7 @@ async function loadContainerMetadata(): Promise<NonNullable<typeof cached>> {
       image_tag: null,
       image_digest: null,
       task_definition: null,
+      task_arn: null,
       source_error: 'not running on ECS (no container metadata endpoint)',
     };
   }
@@ -98,6 +114,7 @@ async function loadContainerMetadata(): Promise<NonNullable<typeof cached>> {
       image_tag: tagOf(image),
       image_digest: typeof body['ImageID'] === 'string' ? body['ImageID'] : null,
       task_definition: family && version ? `${family}:${version}` : null,
+      task_arn: taskArnOf(labels),
       source_error: null,
     };
   } catch (e) {
@@ -106,6 +123,7 @@ async function loadContainerMetadata(): Promise<NonNullable<typeof cached>> {
       image_tag: null,
       image_digest: null,
       task_definition: null,
+      task_arn: null,
       source_error: e instanceof Error ? e.message : String(e),
     };
   }
