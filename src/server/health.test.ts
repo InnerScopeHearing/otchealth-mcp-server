@@ -10,6 +10,8 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    NODE_ENV: 'test',
+    REVOCATION_MEMORY_ONLY_MODE: 'development',
   };
   for (const [k, v] of Object.entries(required)) {
     process.env[k] ??= v;
@@ -21,6 +23,8 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
   const payload = buildHealthPayload();
 
   assert.equal(payload.status, 'ok');
+  assert.equal(payload.liveness, 'ok');
+  assert.equal(payload.readiness, 'ready');
   assert.equal(payload.service, 'otchealth-mcp-server');
   assert.equal(typeof payload.time, 'string');
   assert.ok('env' in payload);
@@ -58,4 +62,46 @@ test('buildHealthPayload returns expected shape with status ok', async () => {
       callback_secret_sha256: undefined,
     },
   });
+});
+
+test('buildHealthPayload reports degraded readiness while preserving liveness', async () => {
+  const { buildHealthPayload } = await import('./health.js');
+  const payload = buildHealthPayload({
+    persistence_configured: false,
+    persistence_required: true,
+    static_token_auth_ready: false,
+    state: 'unavailable',
+    last_successful_load_at: null,
+    last_failed_load_at: '2026-09-07T00:00:00.000Z',
+    last_failed_persist_at: null,
+    stale_for_ms: null,
+    max_stale_ms: 300_000,
+  });
+  assert.equal(payload.status, 'degraded');
+  assert.equal(payload.liveness, 'ok');
+  assert.equal(payload.readiness, 'not_ready');
+});
+
+test('/health stays live while /health/ready returns 503 for unavailable static auth', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerHealth } = await import('./health.js');
+  const app = Fastify();
+  registerHealth(app, () => ({
+    persistence_configured: false,
+    persistence_required: true,
+    static_token_auth_ready: false,
+    state: 'unavailable',
+    last_successful_load_at: null,
+    last_failed_load_at: '2026-09-07T00:00:00.000Z',
+    last_failed_persist_at: null,
+    stale_for_ms: null,
+    max_stale_ms: 300_000,
+  }));
+  const live = await app.inject({ method: 'GET', url: '/health' });
+  const ready = await app.inject({ method: 'GET', url: '/health/ready' });
+  assert.equal(live.statusCode, 200);
+  assert.equal(live.json().status, 'degraded');
+  assert.equal(ready.statusCode, 503);
+  assert.equal(ready.json().status, 'not_ready');
+  await app.close();
 });

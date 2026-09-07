@@ -22,6 +22,8 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    NODE_ENV: 'test',
+    REVOCATION_MEMORY_ONLY_MODE: 'development',
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
@@ -62,7 +64,7 @@ test('clearRevocation removes every revocation', async () => {
   assert.equal(getRevocationState().revoked_token_hash, null);
 });
 
-test('loadRevocations is safe (fail-open) with no Cosmos configured', async () => {
+test('loadRevocations uses the explicit development memory-only mode', async () => {
   const n = await loadRevocations();
   assert.equal(typeof n, 'number', 'returns a count, never throws');
 });

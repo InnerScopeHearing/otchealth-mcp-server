@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
-import { isRevoked } from './revocation-store.js';
+import { isRevoked, isStaticTokenAuthReady } from './revocation-store.js';
 import { isValidIssuedAccessToken, issuedAgent, issuedClientId, baseUrlOf } from '../server/oauth.js';
 import { agentFromDescopeToken } from './descope.js';
 
@@ -163,7 +163,10 @@ function codexStaticAgentTokens(): Record<string, string> {
  * the AuthContext (with SHA256 caller hash). On failure returns null and the
  * caller is responsible for sending 401. Never logs the raw token.
  */
-export async function validateBearer(authHeader: string | undefined): Promise<AuthContext | null> {
+export async function validateBearer(
+  authHeader: string | undefined,
+  staticTokenReady: () => boolean = isStaticTokenAuthReady,
+): Promise<AuthContext | null> {
   const token = extractBearer(authHeader);
   if (!token) return null;
   if (isRevoked(token)) {
@@ -241,6 +244,13 @@ export async function validateBearer(authHeader: string | undefined): Promise<Au
       }
     }
   }
+  if (staticAgent !== null && !staticTokenReady()) {
+    logger.error(
+      { type: 'auth_revocation_store_unavailable', caller_hash: hashToken(token), caller_agent: staticAgent },
+      'rejected static connector token until the durable revocation state is loaded',
+    );
+    return null;
+  }
   const caller_agent = issued ? (issuedAgent(token) || '') : (descopeAgent || staticAgent || '');
   const clientId = issued ? issuedClientId(token) : null;
   // Connector clients: DCR public clients (dcr_) OR manually-registered confidential connector clients
@@ -306,15 +316,16 @@ export function authRejectionLogFields(request: FastifyRequest): Record<string, 
 export async function requireConnectorAuth(
   request: FastifyRequest,
   reply: FastifyReply,
+  staticTokenReady: () => boolean = isStaticTokenAuthReady,
 ): Promise<AuthContext | undefined> {
-  let ctx = await validateBearer(request.headers['authorization']);
+  let ctx = await validateBearer(request.headers['authorization'], staticTokenReady);
   if (!ctx) {
     // No Authorization header matched -- try the M365 declarative-agent query-string token (see
     // extractQueryToken's doc comment). Wrapping it as a synthetic "Bearer <token>" string reuses
     // validateBearer's existing safeEqual/timing-safe comparison and revocation check verbatim,
     // rather than duplicating that logic for a second token source.
     const queryToken = extractQueryToken(request);
-    if (queryToken) ctx = await validateBearer(`Bearer ${queryToken}`);
+    if (queryToken) ctx = await validateBearer(`Bearer ${queryToken}`, staticTokenReady);
   }
   if (!ctx) {
     // WHY THESE THREE EXTRA FIELDS (2026-08-17): for months this log carried only route + ip, which

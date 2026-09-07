@@ -27,6 +27,9 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: CONNECTOR_TOKEN,
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    NODE_ENV: 'test',
+    REVOCATION_MEMORY_ONLY_MODE: 'development',
+    OAUTH_TOKEN_SIGNING_SECRET: 'o'.repeat(48),
     // Set before the FIRST dynamic import of bearer.js in this file, since bearer.ts's
     // `m365StaticAgentTokens()` reads `env.M365_CTO_MCP_TOKEN` via the module-level `loadEnv()`
     // call, which only ever runs once per process.
@@ -104,6 +107,48 @@ test('a VALID bearer token succeeds and carries no WWW-Authenticate header (head
   assert.equal(res.statusCode, 200);
   assert.equal(res.headers['www-authenticate'], undefined);
 
+  await app.close();
+});
+
+test('recognized static token fails closed while durable revocations are not ready', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  const ctx = await validateBearer(`Bearer ${CONNECTOR_TOKEN}`, () => false);
+  assert.equal(ctx, null);
+});
+
+test('M365 query token fails closed at the route while revocation state is not ready', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply, () => false);
+    if (!ctx) return;
+    return reply.send({ ok: true });
+  });
+  const res = await app.inject({ method: 'POST', url: `/mcp?m365_dev_token=${M365_CTO_TOKEN}` });
+  assert.equal(res.statusCode, 401);
+  await app.close();
+});
+
+test('issued OAuth token remains available while static revocation state is not ready', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth } = await import('./bearer.js');
+  const { issueAccessToken } = await import('./oauth-tokens.js');
+  const secret = process.env.OAUTH_TOKEN_SIGNING_SECRET as string;
+  const token = issueAccessToken('dcr_fixture', 'mcp', secret, 'https://fixture.invalid', 'cto');
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const ctx = await requireConnectorAuth(request, reply, () => false);
+    if (!ctx) return;
+    return reply.send({ caller_agent: ctx.caller_agent });
+  });
+  const res = await app.inject({
+    method: 'POST',
+    url: '/mcp',
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().caller_agent, 'cto');
   await app.close();
 });
 

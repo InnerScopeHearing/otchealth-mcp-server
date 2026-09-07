@@ -59,6 +59,30 @@ export function registerAdmin(app: FastifyInstance): void {
     }
     const targetToken = parsed.data.token ?? env.PERPLEXITY_CONNECTOR_TOKEN;
     const state = await revokeToken(targetToken, parsed.data.reason);
+    if (state.durability === 'failed') {
+      logger.error(
+        {
+          type: 'admin_revoke_persist_failed',
+          revoked_token_hash: state.revoked_token_hash,
+          revoked_at: state.revoked_at,
+          explicit_token: Boolean(parsed.data.token),
+          ip: request.ip,
+        },
+        'token blocked on this replica but durable revocation failed',
+      );
+      return reply.code(503).send({
+        status: 'revocation_not_persisted',
+        locally_blocked: true,
+        persisted: false,
+        revoked_at: state.revoked_at,
+        revoked_token_hash: state.revoked_token_hash,
+        reason: state.revoked_reason,
+        retry_required: true,
+        note:
+          'This replica rejects the token, but the durable write failed. Retry until persisted=true; ' +
+          'other replicas and future restarts are not confirmed protected.',
+      });
+    }
     logger.warn(
       {
         type: 'admin_revoke_applied',
@@ -71,15 +95,16 @@ export function registerAdmin(app: FastifyInstance): void {
       'token revoked via /admin/revoke',
     );
     return reply.code(200).send({
-      status: 'revoked',
+      status: state.durability === 'durable' ? 'revoked' : 'revoked_memory_only',
+      persisted: state.persisted,
       revoked_at: state.revoked_at,
       revoked_token_hash: state.revoked_token_hash,
       reason: state.revoked_reason,
-      note:
-        'Requests using this exact token now return 401. The revocation is DURABLE (persisted to ' +
-        'Cosmos and reloaded into memory on restart/redeploy), so it survives deploys until the token ' +
-        'expires. To invalidate EVERY issued JWT at once (not just this one), rotate ' +
-        'OAUTH_TOKEN_SIGNING_SECRET instead.',
+      note: state.durability === 'durable'
+        ? 'Requests using this exact token now return 401. persisted=true confirms the revocation ' +
+          'will be reloaded after restart and reconciled to other replicas.'
+        : 'Requests using this exact token now return 401 in this memory-only runtime. No durable ' +
+          'revocation backend is configured.',
     });
   });
 
@@ -94,11 +119,21 @@ export function registerAdmin(app: FastifyInstance): void {
     if (!validateAdminToken(request.headers['authorization'])) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    await clearRevocation();
+    const result = await clearRevocation();
+    if (!result.cleared) {
+      logger.warn(
+        { type: 'admin_revoke_clear_refused', ip: request.ip, ...result },
+        'durable revocation clear refused',
+      );
+      return reply.code(409).send({
+        ...result,
+        note: 'Durable clear is disabled until a versioned tombstone protocol can converge every replica.',
+      });
+    }
     logger.warn(
       { type: 'admin_revoke_cleared', ip: request.ip },
-      'revocation cleared via /admin/clear-revoke',
+      'memory-only revocation cleared via /admin/clear-revoke',
     );
-    return reply.code(200).send({ status: 'cleared' });
+    return reply.code(200).send(result);
   });
 }
