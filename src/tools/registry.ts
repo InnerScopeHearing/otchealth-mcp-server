@@ -116,6 +116,7 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'legal_blob_move', 'legal_blob_copy', 'legal_blob_delete',
   'graph_drive_list', 'graph_drive_download', 'graph_drive_upload',
   'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
+  'relationship_pilot_ingest_fixture', 'relationship_pilot_query', 'relationship_pilot_rebuild',
   // Wave 7 item 7.1: opt-in feedback reporting on a brain_search/kb_search hit (see kb/search.ts,
   // kb/brain-search.ts, memory/retrieval-feedback.ts). Not added to EXTERNAL_READONLY_TOOLSET below,
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
