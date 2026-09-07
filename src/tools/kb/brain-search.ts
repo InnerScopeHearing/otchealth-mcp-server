@@ -416,4 +416,3 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
     callerHash,
   );
 }
-
