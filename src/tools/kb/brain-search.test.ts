@@ -27,7 +27,7 @@ process.env.WEB_SEARCH_PROVIDER ||= 'azure';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
-const { roomsFor, rrfFuse, fuseWithDirectCandidate, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
+const { roomsFor, rrfFuse, fuseWithDirectCandidate, canUseEntityLookup, buildEntityPromotion, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
 const { filterRetractedByAgent } = await import('../../memory/retractions.js');
 const { z } = await import('zod');
 
@@ -117,6 +117,30 @@ test('domain filter narrows correctly for a permitted caller', () => {
 
 test('an unknown domain returns all permitted rooms rather than silently nothing', () => {
   assert.deepEqual(roomsFor('cto', 'not-a-domain'), [...OPEN_ROOMS]);
+});
+
+
+test('entity lookup obeys room narrowing and only runs when memory-exec is authorized', () => {
+  assert.equal(canUseEntityLookup(['memory-exec', 'commons-company-journal']), true);
+  assert.equal(canUseEntityLookup(['commons-company-journal']), false);
+  assert.equal(canUseEntityLookup(['finance-cfo-source-docs']), false);
+});
+
+test('entity promotion exposes provenance metadata and a finite JSON-safe score', () => {
+  const promotion = buildEntityPromotion({
+    ekey: 'otchealth_brain_backend',
+    evalue: 'current-value',
+    ts: '2026-09-07T12:00:00.000Z',
+    id: '20260907-001',
+    source: 'verified witness',
+    owner: 'cto',
+    matchedBy: 'current-question',
+  });
+  assert.equal(Number.isFinite(promotion.match.score as number), true);
+  assert.equal(promotion.match.agent, 'cto');
+  assert.equal(promotion.match.matched_by, 'current-question');
+  assert.equal(promotion.answer.source, 'verified witness');
+  assert.equal(promotion.answer.owner, 'cto');
 });
 
 // --- RRF: rrfFuse's own behavior is now tested at its source, src/memory/rrf.test.ts. This just
@@ -290,3 +314,4 @@ test('handleBrainSearch: exceeding the wall-clock budget surfaces partial:true +
     }
   });
 });
+
