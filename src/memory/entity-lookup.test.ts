@@ -7,6 +7,7 @@ import {
   matchEntity,
   lookupEntity,
   MIN_KEY_LEN,
+  EXACT_MATCH_ONLY_TAG,
   type EntityRow,
 } from './entity-lookup.js';
 
@@ -18,7 +19,7 @@ const E = (ekey: string, evalue: string, ts: string, extra: Partial<EntityRow> =
   id: `${ekey}-${ts}`,
   ...extra,
 });
-const AL = (from: string, to: string, ts: string): EntityRow => ({ type: 'alias', ekey: from, evalue: to, ts, id: `a-${from}` });
+const AL = (from: string, to: string, ts: string, extra: Partial<EntityRow> = {}): EntityRow => ({ type: 'alias', ekey: from, evalue: to, ts, id: `a-${from}`, ...extra });
 
 // ── pure key helpers (must match mem.mjs exactly) ────────────────────────────────────────────────
 test('normKey collapses casing + punctuation to a token key', () => {
@@ -54,6 +55,41 @@ test('matchEntity ALIAS: a phrasing resolves to the canonical key', () => {
     AL('asc_signing_key', 'asc_consumer_signing_key_id', '2026-07-01'),
   ];
   assert.equal(matchEntity('asc signing key', rows)?.evalue, '9MR7PJHRYH');
+});
+
+test('matchEntity EXACT honors an exact-match-only alias', () => {
+  const phrase = 'what_is_the_current_search_backend_for_brain_search';
+  const rows = [
+    E('otchealth_brain_backend', 'Amazon OpenSearch Service', '2026-09-07'),
+    AL(phrase, 'otchealth_brain_backend', '2026-09-07', { tags: [EXACT_MATCH_ONLY_TAG] }),
+  ];
+  assert.equal(
+    matchEntity('what is the current search backend for brain_search', rows)?.ekey,
+    'otchealth_brain_backend',
+  );
+});
+
+test('matchEntity CONTAINMENT skips an exact-match-only alias inside a historical query', () => {
+  const phrase = 'what_is_the_current_search_backend_for_brain_search';
+  const rows = [
+    E('otchealth_brain_backend', 'Amazon OpenSearch Service', '2026-09-07'),
+    AL(phrase, 'otchealth_brain_backend', '2026-09-07', { tags: 'current-value,exact-match-only' }),
+  ];
+  assert.equal(
+    matchEntity(`historically, ${phrase}, and what did it replace?`, rows),
+    null,
+  );
+});
+
+test('latest exact-match-only correction disables containment from an older untagged alias row', () => {
+  const phrase = 'where_is_the_otchealth_gateway_running_now';
+  const rows = [
+    E('otchealth_gateway_runtime', 'AWS ECS', '2026-09-07'),
+    AL(phrase, 'otchealth_gateway_runtime', '2026-09-06'),
+    AL(phrase, 'otchealth_gateway_runtime', '2026-09-07', { tags: [EXACT_MATCH_ONLY_TAG] }),
+  ];
+  assert.equal(matchEntity(`historically ${phrase} before AWS`, rows), null);
+  assert.equal(matchEntity(phrase, rows)?.evalue, 'AWS ECS');
 });
 
 test('matchEntity CONTAINMENT: the LONGEST key inside a sentence wins', () => {

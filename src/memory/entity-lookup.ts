@@ -33,6 +33,7 @@ export interface EntityRow {
   ekey?: string;
   evalue?: string;
   source?: string;
+  tags?: string[] | string;
 }
 
 export interface EntityHit {
@@ -85,6 +86,15 @@ export function currentEntity(rows: readonly EntityRow[], k: string): EntityRow 
  *  generic to trust as a whole-query substring (avoids "id"/"key" firing on any sentence). */
 export const MIN_KEY_LEN = 4;
 
+/** Alias contract for current-only natural-language phrases. These aliases resolve when the whole
+ * query matches, but never become containment candidates inside a longer historical question. */
+export const EXACT_MATCH_ONLY_TAG = 'exact-match-only';
+
+function hasTag(row: EntityRow, tag: string): boolean {
+  const tags = Array.isArray(row.tags) ? row.tags : String(row.tags || '').split(',');
+  return tags.some((value) => value.trim().toLowerCase() === tag);
+}
+
 /**
  * Resolve a natural-language query to the single best current-value entity, or null. PURE.
  *
@@ -113,11 +123,22 @@ export function matchEntity(query: string, rows: readonly EntityRow[]): EntityHi
   // 2) CONTAINMENT: the longest known key that appears token-bounded inside the query.
   const padded = `_${nq}_`;
   const entityKeys = new Set<string>();
-  const aliasKeys = new Set<string>();
+  const latestAliases = new Map<string, EntityRow>();
   for (const r of rows) {
-    if (r.type === 'entity' && r.ekey) entityKeys.add(r.ekey);
-    else if (r.type === 'alias' && r.ekey) aliasKeys.add(r.ekey);
+    if (r.type === 'entity' && r.ekey) {
+      entityKeys.add(r.ekey);
+    } else if (r.type === 'alias' && r.ekey) {
+      const previous = latestAliases.get(r.ekey);
+      if (!previous || (r.ts || '').localeCompare(previous.ts || '') > 0) latestAliases.set(r.ekey, r);
+    }
   }
+  // Exact-only is evaluated on the latest row for each alias. An older untagged row cannot keep
+  // containment enabled after the owner corrects that alias to the safer tagged contract.
+  const aliasKeys = new Set(
+    [...latestAliases.entries()]
+      .filter(([, row]) => !hasTag(row, EXACT_MATCH_ONLY_TAG))
+      .map(([key]) => key),
+  );
 
   let best: { key: string; isEntity: boolean } | null = null;
   const consider = (key: string, isEntity: boolean) => {
