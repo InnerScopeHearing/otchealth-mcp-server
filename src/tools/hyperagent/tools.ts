@@ -17,6 +17,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { loadEnv } from '../../config/env.js';
 import { callHyperagentTool, hyperagentConfigured } from './client.js';
 import { checkInvocationBudget } from './rate-limit.js';
+import { ownerAgentIdOf } from './thread-owner.js';
 import {
   isHyperagentAgentAllowed,
   parseAgentClassMap,
@@ -49,23 +50,6 @@ function extractAgents(data: unknown): Array<{ id?: string; name?: string; descr
   const o = data as { agents?: unknown } | null;
   if (o && Array.isArray(o.agents)) return o.agents as Array<{ id?: string; name?: string }>;
   return [];
-}
-
-/**
- * Resolve the agent that owns a thread. Tries the field names a thread payload plausibly uses, and
- * returns null when none is present rather than defaulting to anything.
- */
-function ownerAgentIdOf(data: unknown): string | null {
-  const t = data as Record<string, unknown> | null;
-  if (!t) return null;
-  const thread = (t.thread as Record<string, unknown> | undefined) ?? t;
-  for (const key of ['agentId', 'agent_id', 'agentID']) {
-    const v = thread[key];
-    if (typeof v === 'string' && v.trim()) return v.trim();
-  }
-  const nested = thread.agent as Record<string, unknown> | undefined;
-  if (nested && typeof nested.id === 'string' && nested.id.trim()) return nested.id.trim();
-  return null;
 }
 
 export function registerHyperagentTools(server: McpServer, callerHash: CallerHashProvider): void {
@@ -208,7 +192,7 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
 
         // The payload is in this process now, but it has NOT been returned to the caller. The ring
         // check happens here, before any of it crosses back out.
-        const ownerId = ownerAgentIdOf(res.data);
+        const ownerId = ownerAgentIdOf(res.data, input.threadId);
         if (!ownerId) {
           return {
             data: { ok: false, error: 'owner_agent_undeterminable' },
@@ -258,7 +242,7 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
         // one — it puts this lane's content into a thread whose readers it does not control.
         const probe = await callHyperagentTool('get_thread', { threadId: input.threadId });
         if (!probe.ok) return { data: { ok: false, error: probe.error ?? 'provider_error' }, summary: `Could not verify thread ownership: ${probe.error}.` };
-        const ownerId = ownerAgentIdOf(probe.data);
+        const ownerId = ownerAgentIdOf(probe.data, input.threadId);
         if (!ownerId) {
           return {
             data: { ok: false, error: 'owner_agent_undeterminable' },
