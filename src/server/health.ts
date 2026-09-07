@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { revisionInfo } from './revision.js';
-import { getRevocationState } from '../auth/revocation-store.js';
+import { getRevocationState, getRevocationStoreStatus } from '../auth/revocation-store.js';
 import { toolCount } from '../catalog/catalog.js';
 import { validateAdminToken } from '../auth/bearer.js';
 import { probeDependencies } from './deep-health.js';
@@ -12,10 +12,12 @@ import { HEYGEN_CRO_DIRECT_TOOLS } from '../tools/heygen/access.js';
 const env = loadEnv();
 
 /** The /health response body. Exported so it is unit-testable without standing up Fastify. */
-export function buildHealthPayload() {
+export function buildHealthPayload(revocationStore = getRevocationStoreStatus()) {
   const rev = getRevocationState();
   return {
-    status: 'ok',
+    status: revocationStore.static_token_auth_ready ? 'ok' : 'degraded',
+    liveness: 'ok',
+    readiness: revocationStore.static_token_auth_ready ? 'ready' : 'not_ready',
     service: 'otchealth-mcp-server',
     time: new Date().toISOString(),
     env: env.NODE_ENV,
@@ -57,17 +59,37 @@ export function buildHealthPayload() {
     },
     cio_workspace_id: env.CIO_WORKSPACE_ID,
     connector_token_revoked: rev.revoked_token_hash !== null,
+    revocation_store: revocationStore,
     // Regression guard: the deploy pipeline asserts this stays >= the expected catalog size,
     // so a build that drops the tool surface (as happened 2026-07-01) fails the health gate.
     tool_count: toolCount(),
   };
 }
 
-export function registerHealth(app: FastifyInstance): void {
+export function registerHealth(
+  app: FastifyInstance,
+  revocationStatus: () => ReturnType<typeof getRevocationStoreStatus> = getRevocationStoreStatus,
+): void {
   // The revision block answers "which image is serving this call?" -- see revision.ts. It is
   // awaited here rather than in buildHealthPayload() so every existing synchronous caller of that
   // function (tests, the deep-health route) keeps its current signature.
-  app.get('/health', async () => ({ ...buildHealthPayload(), revision: await revisionInfo() }));
+  app.get('/health', async () => ({
+    ...buildHealthPayload(revocationStatus()),
+    revision: await revisionInfo(),
+  }));
+
+  // Readiness is separate from liveness so an auth-state outage is visible without asking the
+  // orchestrator to restart a healthy process repeatedly.
+  app.get('/health/ready', async (_request, reply) => {
+    const payload = buildHealthPayload(revocationStatus());
+    return reply.code(payload.readiness === 'ready' ? 200 : 503).send({
+      status: payload.readiness,
+      service: payload.service,
+      time: payload.time,
+      revocation_store: payload.revocation_store,
+      revision: await revisionInfo(),
+    });
+  });
 
   // GET /health/deep: bounded reachability probe of every CONFIGURED downstream dependency
   // (Cosmos, Azure AI Search, Foundry -- permanently unreachable but still probed, see

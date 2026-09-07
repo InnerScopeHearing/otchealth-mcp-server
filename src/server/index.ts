@@ -10,7 +10,11 @@ import { registerOAuthRoutes } from './oauth.js';
 import { registerHeyGenPairingRoute } from './heygen-pairing.js';
 import { registerHeyGenApprovalCallback } from './heygen-approval-callback.js';
 import { registerWebhookRoutes } from './webhooks.js';
-import { loadRevocations, startRevocationReloader } from '../auth/revocation-store.js';
+import {
+  getRevocationStoreStatus,
+  loadRevocations,
+  startRevocationReloader,
+} from '../auth/revocation-store.js';
 import { startDeindexResweepReloader } from '../agentstate/deindex-resweep.js';
 import { responseLogFields } from './response-log.js';
 
@@ -119,8 +123,16 @@ async function main(): Promise<void> {
 
   // Load the durable token-revocation blocklist into memory BEFORE accepting requests, so a leaked
   // token that was revoked stays rejected across restarts / blue-green redeploys (the blocklist is
-  // persisted in Cosmos). Fail-open by construction (loadRevocations never throws).
+  // persisted in the configured state backend). A failed initial read keeps only static-token auth
+  // closed; short-lived OAuth remains available so the process can start and expose diagnostics.
   const revokedCount = await loadRevocations();
+  const revocationStatus = getRevocationStoreStatus();
+  if (!revocationStatus.static_token_auth_ready) {
+    logger.error(
+      { type: 'revocation_store_unavailable', state: revocationStatus.state },
+      'static-token authentication is closed until the durable revocation state loads',
+    );
+  }
   if (revokedCount > 0) {
     logger.warn({ type: 'revocations_loaded', count: revokedCount }, 'loaded durable token revocations at boot');
   }

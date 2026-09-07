@@ -8,15 +8,20 @@
  * "succeeded" against a live revision, and evaporated on the next deploy. This closes that gap.
  *
  * DESIGN: an in-memory Set<hash> is the hot-path check (isRevoked stays sync + allocation-light; it runs
- * on EVERY request in auth/bearer.ts, so it must not do IO). Each revoke is WRITE-THROUGH to Cosmos (the
- * already-provisioned shared `cache` container, one doc per revoked hash) so it survives restarts, and
- * the set is LOADED back from Cosmos at boot via loadRevocations() (called from server startup). No Cosmos
- * read is ever on the request path. With no Cosmos configured (tests / local dev) it degrades to
- * in-memory-only, exactly as the original did. Only token HASHES are ever stored, never a raw token.
+ * on EVERY request in auth/bearer.ts, so it must not do IO). Each revoke is WRITE-THROUGH to the selected
+ * agent-state backend (one doc per revoked hash) so it survives restarts. The set is loaded at boot via
+ * loadRevocations(). No state-store read is on the request path. Static authentication stays closed until
+ * the first complete durable read succeeds. Memory-only operation requires an explicit non-production
+ * selector. Only token HASHES are stored, never a raw token.
  */
 
-import { hashToken } from '../audit/logger.js';
-import { isConfigured as cosmosConfigured, upsertDoc, deleteDoc, queryDocs } from '../agentstate/store.js';
+import { isConfigured as stateConfigured, upsertDoc, queryDocs } from '../agentstate/store.js';
+import {
+  TokenRevocationStore,
+  type RevocationResult,
+  type RevocationState,
+  type RevocationStoreStatus,
+} from './revocation-store-core.js';
 
 // The `cache` container's partition key path is /cacheScope (see tools/result-store.ts, which sets
 // cacheScope = id so each doc is its own partition -> a point read/write). We mirror that: one doc per
@@ -24,126 +29,100 @@ import { isConfigured as cosmosConfigured, upsertDoc, deleteDoc, queryDocs } fro
 const CACHE_COLL = 'cache';
 const REVOKED_KIND = 'revoked-token';
 const idFor = (hash: string): string => `revoked_${hash}`;
+const MAX_ROWS = 1000;
+const parsedMaxStaleMs = Number(process.env.REVOCATION_MAX_STALE_MS);
+const MAX_STALE_MS = Number.isFinite(parsedMaxStaleMs) && parsedMaxStaleMs >= 0
+  ? parsedMaxStaleMs
+  : 300_000;
 
-interface RevocationState {
-  revoked_token_hash: string | null;
-  revoked_at: string | null;
-  revoked_reason: string | null;
+function allowMemoryOnly(): boolean {
+  return (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test')
+    && process.env.REVOCATION_MEMORY_ONLY_MODE === 'development';
 }
 
-// Hot-path source of truth: the set of revoked token HASHES. isRevoked() reads only this.
-const revokedHashes = new Set<string>();
-// Back-compat single "most recent revocation" view for /health + the /admin GET/response shape.
-let latest: RevocationState = { revoked_token_hash: null, revoked_at: null, revoked_reason: null };
+const store = new TokenRevocationStore({
+  isConfigured: stateConfigured,
+  query: () => queryDocs(
+    CACHE_COLL,
+    'SELECT c.hash, c.revoked_at, c.revoked_reason FROM c WHERE c.kind = @k',
+    [{ name: '@k', value: REVOKED_KIND }],
+    // Request one extra row so a capped response is detected and rejected as incomplete.
+    { max: MAX_ROWS + 1 },
+  ),
+  upsert: async (hash, at, reason) => {
+    await upsertDoc(CACHE_COLL, idFor(hash), {
+      id: idFor(hash),
+      cacheScope: idFor(hash),
+      kind: REVOKED_KIND,
+      hash,
+      revoked_at: at,
+      revoked_reason: reason,
+    });
+  },
+}, {
+  allowMemoryOnly,
+  maxRows: MAX_ROWS,
+  maxStaleMs: MAX_STALE_MS,
+});
 
 /**
- * Load the durable blocklist into memory at process start. Idempotent and FAIL-OPEN: a Cosmos hiccup
- * must never brick boot -- the set simply starts from whatever loads, and any /admin/revoke re-adds
- * durably. Returns the number of hashes now in the set. Call once from server startup.
+ * Load the durable blocklist into memory at process start. A failed initial read leaves static-token
+ * authentication unavailable; a successful empty result makes it ready. Returns the in-memory count.
  */
 export async function loadRevocations(): Promise<number> {
-  if (!cosmosConfigured()) return revokedHashes.size;
-  try {
-    const rows = await queryDocs(
-      CACHE_COLL,
-      'SELECT c.hash, c.revoked_at, c.revoked_reason FROM c WHERE c.kind = @k',
-      [{ name: '@k', value: REVOKED_KIND }],
-      { max: 1000 },
-    );
-    let newestAt = '';
-    for (const r of rows) {
-      const rec = r as { hash?: unknown; revoked_at?: unknown; revoked_reason?: unknown };
-      if (typeof rec.hash === 'string' && rec.hash) {
-        revokedHashes.add(rec.hash);
-        const at = typeof rec.revoked_at === 'string' ? rec.revoked_at : '';
-        // ISO-8601 strings sort lexicographically by time, so ">" picks the newest revocation.
-        if (at > newestAt) {
-          newestAt = at;
-          latest = {
-            revoked_token_hash: rec.hash,
-            revoked_at: at || null,
-            revoked_reason: typeof rec.revoked_reason === 'string' ? rec.revoked_reason : null,
-          };
-        }
-      }
-    }
-    return revokedHashes.size;
-  } catch {
-    return revokedHashes.size; // fail-open: never throw on boot
-  }
+  return store.load();
 }
 
 /**
- * Revoke a token by hash, permanently. Adds to the hot-path set AND write-throughs to Cosmos so the
- * revocation survives restarts/redeploys. FAIL-OPEN on the durable write: a Cosmos blip must not turn a
- * security revoke into a hard error (the token is already rejected on the live revision the moment the
- * set is updated); re-issuing /admin/revoke re-attempts the durable write. Returns the latest state.
+ * Revoke a token by hash. It is rejected on this replica immediately, then written through to the
+ * durable backend. The result distinguishes confirmed persistence from a failed write so the admin
+ * route cannot claim fleet-wide or restart-safe revocation until persistence succeeds. Reissuing the
+ * same revoke retries its per-hash upsert without replacing any other revoked hash.
  */
-export async function revokeToken(rawToken: string, reason: string): Promise<RevocationState> {
-  const h = hashToken(rawToken);
-  const at = new Date().toISOString();
-  revokedHashes.add(h);
-  latest = { revoked_token_hash: h, revoked_at: at, revoked_reason: reason };
-  if (cosmosConfigured()) {
-    try {
-      await upsertDoc(CACHE_COLL, idFor(h), {
-        id: idFor(h),
-        cacheScope: idFor(h),
-        kind: REVOKED_KIND,
-        hash: h,
-        revoked_at: at,
-        revoked_reason: reason,
-      });
-    } catch {
-      /* fail-open: in-memory set holds it for this revision; re-run /admin/revoke to persist durably */
-    }
-  }
-  return { ...latest };
+export async function revokeToken(rawToken: string, reason: string): Promise<RevocationResult> {
+  return store.revoke(rawToken, reason);
 }
 
 /** Hot-path revocation check. Sync + IO-free (in-memory Set), safe to run on every request. */
 export function isRevoked(rawToken: string): boolean {
-  if (revokedHashes.size === 0) return false;
-  return revokedHashes.has(hashToken(rawToken));
+  return store.isRevoked(rawToken);
 }
 
 export function getRevocationState(): RevocationState {
-  return { ...latest };
+  return store.state();
 }
 
-/** Clear ALL revocations (ops reset via /admin/clear-revoke, and test teardown). Best-effort deletes the
- *  durable Cosmos docs too so a cleared token stays cleared across a redeploy. */
-export async function clearRevocation(): Promise<void> {
-  const hashes = [...revokedHashes];
-  revokedHashes.clear();
-  latest = { revoked_token_hash: null, revoked_at: null, revoked_reason: null };
-  if (cosmosConfigured()) {
-    for (const h of hashes) {
-      try {
-        await deleteDoc(CACHE_COLL, idFor(h), idFor(h));
-      } catch {
-        /* best-effort */
-      }
-    }
-  }
+export function getRevocationStoreStatus(): RevocationStoreStatus {
+  return store.status();
+}
+
+export function isStaticTokenAuthReady(): boolean {
+  return store.status().static_token_auth_ready;
+}
+
+/**
+ * Clear revocations only in an explicitly selected local development memory mode.
+ * Durable clear is disabled until a versioned tombstone protocol can converge every replica.
+ */
+export async function clearRevocation() {
+  return store.clear();
 }
 
 // ── Multi-replica propagation ──────────────────────────────────────────────────────────────────────
 // The gateway runs behind Front Door / APIM and can serve from MORE THAN ONE replica. A /admin/revoke
-// lands on exactly ONE replica: it updates that replica's in-memory set + Cosmos, but the OTHER replicas
+// lands on exactly ONE replica: it updates that replica's in-memory set + persistence, but other replicas
 // keep their stale set until they reboot. Verified live 2026-07-16: right after a single revoke, the
 // leaked token was still HTTP 200 on ~half of requests. So each replica periodically re-pulls the durable
-// blocklist from Cosmos, making any revoke fleet-wide within one interval with NO restart and no manual
+// blocklist from persistence, making any revoke fleet-wide within one interval with NO restart and no manual
 // fan-out. loadRevocations() is add-only (never un-revokes on a transient empty read -> fail-SAFE for a
-// kill-switch); a genuine clear is handled per-replica + the Cosmos delete, and a lagging replica that
-// keeps a cleared token rejected for one extra interval is the safe direction to err. Cheap: one tiny
-// kind-filtered query on a handful of docs.
+// kill-switch). Durable clear is disabled because additive reload cannot safely propagate an un-revoke;
+// that needs a separately reviewed versioned tombstone protocol. Cheap: one tiny kind-filtered query.
 const RELOAD_MS = Number(process.env.REVOCATION_RELOAD_MS) || 30_000;
 let _reloadTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Start the periodic Cosmos reconciler (idempotent; no-op without Cosmos). Called once from server boot. */
+/** Start the periodic state-store reconciler (idempotent; only with configured persistence). */
 export function startRevocationReloader(): void {
-  if (_reloadTimer || !cosmosConfigured()) return;
+  if (_reloadTimer || !getRevocationStoreStatus().persistence_configured) return;
   _reloadTimer = setInterval(() => {
     void loadRevocations();
   }, RELOAD_MS);

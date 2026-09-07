@@ -668,6 +668,12 @@ const EnvSchema = z.object({
     .transform((v) => Number.parseInt(v, 10))
     .refine((n) => Number.isFinite(n) && n > 0 && n < 65536, 'PORT must be a valid port number'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production'),
+  REVOCATION_MEMORY_ONLY_MODE: z.enum(['disabled', 'development']).default('disabled'),
+  REVOCATION_MAX_STALE_MS: z
+    .string()
+    .default('300000')
+    .transform((v) => Number.parseInt(v, 10))
+    .refine((n) => Number.isFinite(n) && n >= 0, 'REVOCATION_MAX_STALE_MS must be a non-negative integer'),
   LOG_LEVEL: z
     .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal'])
     .default('info'),
