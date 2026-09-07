@@ -153,7 +153,7 @@ test('held-out current paraphrases compose from entity key concepts instead of s
     ['Where is OTCHealth hosted now?', 'otchealth_primary_cloud'],
     ['What cloud provider is currently used by OTCHealth?', 'otchealth_primary_cloud'],
     ['Where do our agent checkpoints persist currently?', 'otchealth_agent_state_backend'],
-    ['What engine powers the Brain search today?', 'otchealth_brain_backend'],
+    ['What engine powers our Brain search today?', 'otchealth_brain_backend'],
   ] as const;
   for (const [query, expected] of cases) {
     const hit = matchCurrentQuestion(query, CURRENT_INFRA);
@@ -191,6 +191,18 @@ test('general current inference requires the typed tag, CTO ownership, and prove
 
 test('general current inference fails closed on broad scope and ambiguous typed entities', () => {
   assert.equal(matchCurrentQuestion('Which cloud is active now?', CURRENT_INFRA), null, 'generic cloud question');
+  assert.equal(matchCurrentQuestion('What engine powers the Brain search today?', CURRENT_INFRA), null,
+    'a subsystem word alone is not company authorization');
+  assert.equal(matchCurrentQuestion("What currently powers Acme's AI brain?", CURRENT_INFRA), null,
+    'a foreign company target cannot promote an OTCHealth entity');
+  assert.equal(matchCurrentQuestion(
+    'What is the current agent state backend for another company?',
+    CURRENT_INFRA,
+  ), null, 'bare company plus strong subsystem cannot authorize promotion');
+  assert.equal(matchCurrentQuestion(
+    'Compare our current Brain backend with their system',
+    CURRENT_INFRA,
+  ), null, 'comparison and foreign target cues fail closed even with self scope');
   assert.equal(matchCurrentQuestion('What is the current customer support backend?', CURRENT_INFRA), null);
   const ambiguous = [
     ...CURRENT_INFRA,
@@ -226,6 +238,25 @@ test('activeEntityRows retains the replacement and removes the row it supersedes
   const active = activeEntityRows(rows);
   assert.deepEqual(active.map((row) => row.id), ['new-id']);
   assert.equal(matchEntity('otchealth_brain_backend', active)?.evalue, 'new');
+});
+
+
+test('memory-of-record retractions filter entity and alias rows without cross-lane ID collisions', () => {
+  const rows: EntityRow[] = [
+    E('otchealth_brain_backend', 'cto-row', '1', {
+      id: 'same-id', agent: 'cto', source: 'witness', tags: [CURRENT_VALUE_TAG],
+    }),
+    E('coo_process_backend', 'coo-row', '1', { id: 'same-id', agent: 'coo' }),
+    AL('brain_alias', 'otchealth_brain_backend', '1', { id: 'alias-id', agent: 'cto' }),
+  ];
+  const memoryOfRecord = new Map([
+    ['cto', new Set(['same-id', 'alias-id'])],
+  ]);
+  const active = activeEntityRows(rows, memoryOfRecord);
+  assert.equal(active.some((row) => row.agent === 'cto'), false);
+  assert.equal(active.some((row) => row.agent === 'coo' && row.id === 'same-id'), true,
+    'the same bare ID owned by another lane remains live');
+  assert.equal(matchEntity('brain_alias', active), null, 'the retracted alias is removed before resolution');
 });
 
 // ── kill-switch ──────────────────────────────────────────────────────────────────────────────────
