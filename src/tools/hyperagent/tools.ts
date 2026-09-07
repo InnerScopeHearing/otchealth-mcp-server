@@ -15,8 +15,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { loadEnv } from '../../config/env.js';
-import { callHyperagentTool, hyperagentConfigured } from './client.js';
+import { callHyperagentTool, hyperagentConfigured, type McpCallResult } from './client.js';
 import { checkInvocationBudget } from './rate-limit.js';
+import { ownerAgentIdOf } from './thread-owner.js';
 import {
   isHyperagentAgentAllowed,
   parseAgentClassMap,
@@ -51,24 +52,21 @@ function extractAgents(data: unknown): Array<{ id?: string; name?: string; descr
   return [];
 }
 
-/**
- * Resolve the agent that owns a thread. Tries the field names a thread payload plausibly uses, and
- * returns null when none is present rather than defaulting to anything.
- */
-function ownerAgentIdOf(data: unknown): string | null {
-  const t = data as Record<string, unknown> | null;
-  if (!t) return null;
-  const thread = (t.thread as Record<string, unknown> | undefined) ?? t;
-  for (const key of ['agentId', 'agent_id', 'agentID']) {
-    const v = thread[key];
-    if (typeof v === 'string' && v.trim()) return v.trim();
-  }
-  const nested = thread.agent as Record<string, unknown> | undefined;
-  if (nested && typeof nested.id === 'string' && nested.id.trim()) return nested.id.trim();
-  return null;
+export interface HyperagentToolTransport {
+  configured(): boolean;
+  call(name: string, args: Record<string, unknown>): Promise<McpCallResult>;
 }
 
-export function registerHyperagentTools(server: McpServer, callerHash: CallerHashProvider): void {
+const DEFAULT_TRANSPORT: HyperagentToolTransport = {
+  configured: hyperagentConfigured,
+  call: callHyperagentTool,
+};
+
+export function registerHyperagentTools(
+  server: McpServer,
+  callerHash: CallerHashProvider,
+  transport: HyperagentToolTransport = DEFAULT_TRANSPORT,
+): void {
   // ---------------------------------------------------------------- list_agents (read, filtered)
   registerTool(
     server,
@@ -92,9 +90,9 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
         error: z.string().optional(),
       },
       handler: async (_input, ctx) => {
-        if (!hyperagentConfigured()) return unconfigured('listing agents');
+        if (!transport.configured()) return unconfigured('listing agents');
         const caller = ctx.callerAgent || '';
-        const res = await callHyperagentTool('list_agents', {});
+        const res = await transport.call('list_agents', {});
         if (!res.ok) {
           return {
             data: { agents: [], count: 0, error: res.error ?? 'provider_error' },
@@ -144,7 +142,7 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
         error: z.string().optional(),
       },
       handler: async (input, ctx) => {
-        if (!hyperagentConfigured()) return unconfigured('starting a thread');
+        if (!transport.configured()) return unconfigured('starting a thread');
         const caller = ctx.callerAgent || '';
         const { laneMap, classMap } = maps();
         const verdict = isHyperagentAgentAllowed(caller, { id: input.agentId }, laneMap, classMap);
@@ -167,7 +165,7 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
               `or raise HYPERAGENT_MAX_INVOCATIONS_PER_HOUR.`,
           };
         }
-        const res = await callHyperagentTool('create_thread', { agentId: input.agentId, message: input.message });
+        const res = await transport.call('create_thread', { agentId: input.agentId, message: input.message });
         if (!res.ok) return { data: { ok: false, error: res.error ?? 'provider_error' }, summary: `create_thread failed: ${res.error}.` };
         const tid = (res.data as { threadId?: string } | null)?.threadId;
         return {
@@ -201,14 +199,14 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
         error: z.string().optional(),
       },
       handler: async (input, ctx) => {
-        if (!hyperagentConfigured()) return unconfigured('reading a thread');
+        if (!transport.configured()) return unconfigured('reading a thread');
         const caller = ctx.callerAgent || '';
-        const res = await callHyperagentTool('get_thread', { threadId: input.threadId });
+        const res = await transport.call('get_thread', { threadId: input.threadId });
         if (!res.ok) return { data: { ok: false, error: res.error ?? 'provider_error' }, summary: `get_thread failed: ${res.error}.` };
 
         // The payload is in this process now, but it has NOT been returned to the caller. The ring
         // check happens here, before any of it crosses back out.
-        const ownerId = ownerAgentIdOf(res.data);
+        const ownerId = ownerAgentIdOf(res.data, input.threadId);
         if (!ownerId) {
           return {
             data: { ok: false, error: 'owner_agent_undeterminable' },
@@ -252,13 +250,13 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
       },
       outputShape: { ok: z.boolean(), error: z.string().optional() },
       handler: async (input, ctx) => {
-        if (!hyperagentConfigured()) return unconfigured('sending a message');
+        if (!transport.configured()) return unconfigured('sending a message');
         const caller = ctx.callerAgent || '';
         // Resolve ownership FIRST. Writing into a privileged thread is at least as bad as reading
         // one — it puts this lane's content into a thread whose readers it does not control.
-        const probe = await callHyperagentTool('get_thread', { threadId: input.threadId });
+        const probe = await transport.call('get_thread', { threadId: input.threadId });
         if (!probe.ok) return { data: { ok: false, error: probe.error ?? 'provider_error' }, summary: `Could not verify thread ownership: ${probe.error}.` };
-        const ownerId = ownerAgentIdOf(probe.data);
+        const ownerId = ownerAgentIdOf(probe.data, input.threadId);
         if (!ownerId) {
           return {
             data: { ok: false, error: 'owner_agent_undeterminable' },
@@ -285,7 +283,7 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
               `or raise HYPERAGENT_MAX_INVOCATIONS_PER_HOUR.`,
           };
         }
-        const res = await callHyperagentTool('send_message', { threadId: input.threadId, message: input.message });
+        const res = await transport.call('send_message', { threadId: input.threadId, message: input.message });
         if (!res.ok) return { data: { ok: false, error: res.error ?? 'provider_error' }, summary: `send_message failed: ${res.error}.` };
         return { data: { ok: true }, summary: `Message added to thread ${input.threadId} (agent ${ownerId}).` };
       },
@@ -317,9 +315,9 @@ export function registerHyperagentTools(server: McpServer, callerHash: CallerHas
         error: z.string().optional(),
       },
       handler: async (_input, ctx) => {
-        if (!hyperagentConfigured()) return unconfigured('listing threads');
+        if (!transport.configured()) return unconfigured('listing threads');
         const caller = ctx.callerAgent || '';
-        const res = await callHyperagentTool('list_threads', {});
+        const res = await transport.call('list_threads', {});
         if (!res.ok) return { data: { threads: [], count: 0, error: res.error ?? 'provider_error' }, summary: `list_threads failed: ${res.error}.` };
 
         const raw = Array.isArray(res.data) ? res.data : ((res.data as { threads?: unknown[] } | null)?.threads ?? []);
