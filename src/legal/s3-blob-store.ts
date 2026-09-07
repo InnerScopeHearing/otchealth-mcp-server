@@ -63,6 +63,19 @@ import { fetchWithBudget } from '../util/fetch-budget.js';
 /** SHA-256 of the empty string: the required `x-amz-content-sha256` for any bodyless S3 request. */
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
+export class S3ObjectAlreadyExistsError extends Error {
+  readonly status: 409 | 412;
+  readonly container: string;
+  readonly path: string;
+
+  constructor(status: 409 | 412, container: string, path: string) {
+    super(`s3 blob put refused: an object already exists at ${container}/${path} (HTTP ${status}). Pass overwrite=true to intentionally replace it.`);
+    this.name = 'S3ObjectAlreadyExistsError';
+    this.status = status;
+    this.container = container;
+    this.path = path;
+  }
+}
 export interface S3Location {
   bucket: string;
   /** Key prefix inside the bucket. Mirror keys are `<azureAccount>/<container>/<blobPath>`. */
@@ -504,10 +517,7 @@ export async function putObjectToS3(
     ...(overwrite ? {} : { extraHeaders: { 'if-none-match': '*' } }),
   });
   if (r.status === 409 || r.status === 412) {
-    throw new Error(
-      `s3 blob put refused: an object already exists at ${container}/${path} (HTTP ${r.status}). ` +
-        `Pass overwrite=true to intentionally replace it.`,
-    );
+    throw new S3ObjectAlreadyExistsError(r.status, container, path);
   }
   if (!r.ok) throw new Error(`s3 blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
   return { bytes: body.length, etag: r.headers.get('etag') };

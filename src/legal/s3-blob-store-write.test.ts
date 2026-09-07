@@ -34,6 +34,7 @@ const {
   getTextFromS3,
   s3LocationFor,
   PERSONAL_LEGAL_BUCKET,
+  S3ObjectAlreadyExistsError,
 } = await import('./s3-blob-store.js');
 
 interface Seen {
@@ -270,6 +271,16 @@ test('an existing object with overwrite=false throws a message naming the fix', 
   assert.match(String(error), /already exists.*overwrite=true/s);
 });
 
+test('conditional create reports typed 409 and 412 collisions without folding other failures', async () => {
+  for (const status of [409, 412] as const) {
+    const { error } = await capture([() => new Response('ConditionalFailure', { status })], () =>
+      putObjectToS3('otchealthlegalstore', 'company', 'typed-conflict.json', Buffer.from('x'), 'application/json', false),
+    );
+    assert.ok(error instanceof S3ObjectAlreadyExistsError);
+    assert.equal(error.status, status);
+    assert.equal(error.path, 'typed-conflict.json');
+  }
+});
 test('CopyObject returning HTTP 200 with an <Error> body is treated as a FAILURE', async () => {
   // S3's documented trap: a copy that fails midway answers 200 and reports it in the payload.
   // Trusting the status code would tell a copy-then-delete caller to delete the original.

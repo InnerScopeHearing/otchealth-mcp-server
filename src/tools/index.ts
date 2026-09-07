@@ -77,6 +77,9 @@ import { registerMemoryReconcile } from './memory/reconcile.js';
 import { registerCheckpoint } from './memory/checkpoint.js';
 // Wave 7 item 7.1 (production feedback loop): opt-in reporting on brain_search/kb_search hits.
 import { registerRetrievalFeedback } from './memory/retrieval-feedback.js';
+import { registerRelationshipPilotIngest } from './relationships/ingest-fixture.js';
+import { registerRelationshipPilotQuery } from './relationships/query.js';
+import { registerRelationshipPilotRebuild } from './relationships/rebuild.js';
 
 // Agent persona (cross-platform identity bootstrap)
 import { registerAgentPersona } from './agent/persona.js';
@@ -1045,6 +1048,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerCatalogProbe(server, callerHash); // read: diagnostic -- build/registry/caller-auth probe (2026-07-26, M365 tool-rendering isolation)
   registerMemoryReconcile(server, callerHash); // write_simple: ack inbound (advances marker; deletes nothing)
   registerCheckpoint(server, callerHash); // write_simple: platform-agnostic session-end capture; resets capture-pressure
+  registerRelationshipPilotIngest(server, callerHash);
+  registerRelationshipPilotQuery(server, callerHash);
+  registerRelationshipPilotRebuild(server, callerHash);
 
   // ===== P2: Agent persona (cross-platform identity bootstrap) =====
   registerAgentPersona(server, callerHash);

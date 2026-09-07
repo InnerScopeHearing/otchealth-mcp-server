@@ -15,6 +15,7 @@ export interface GovRule {
 }
 
 export const GOVERNANCE: GovRule[] = [
+  { pattern: 'relationship_pilot_*', requiredRole: 'cto', reason: 'The disabled-by-default synthetic relationship lifecycle pilot is restricted to the authenticated CTO lane.' },
   // Customer.io administrative control plane. CRO can read and dry-run every bounded wrapper; live
   // configuration writes are additionally restricted in-handler to cto/exec and require an owner
   // approval reference. This central rule duplicates the fixed in-handler lane model for visibility.
