@@ -101,7 +101,7 @@ function readCreds(): LegalCreds | null {
  * reach it through this file today; listing it means a future widening of that union inherits the
  * correct routing instead of silently defaulting to the wrong side of the fence.
  */
-const S3_WRITABLE_CONTAINERS: ReadonlySet<string> = new Set(['company', 'exec', 'personal', 'cfo-source-docs']);
+const S3_WRITABLE_CONTAINERS: ReadonlySet<string> = new Set(['company', 'exec', 'personal']);
 
 /** True when THIS container's writes should go to S3. Container-scoped, never global. */
 function s3WriteActive(container: string): boolean {
@@ -658,7 +658,10 @@ export async function putBlobRaw(
   const ct = body.contentType || (body.base64 != null ? 'application/octet-stream' : 'application/json');
   // Route only explicitly allow-listed migrated containers to S3. The generic helper receives the
   // account directly, so it must not use the legal-store account lookup here.
-  if (s3WriteActive(container)) {
+  // This raw helper has callers outside the legal-container union. Keep the new S3 route
+  // scoped to the one migrated CFO container; existing company/exec/personal raw callers retain
+  // their Azure SharedKey behavior until they receive their own explicit migration.
+  if (s3BlobBackendActive() && container === 'cfo-source-docs') {
     if (!account) throw new Error('blob store not configured (storage account unset)');
     const res = await putObjectToS3(account, container, path, buf, ct, overwrite);
     return { path, container, bytes: res.bytes, contentType: ct };
