@@ -639,13 +639,12 @@ export interface BlobPutRawResult {
 }
 
 /**
- * Generic SharedKey blob PUT against ANY account/container (2026-07-25, added for
- * mail_archive_save_attachment_to_dataroom) — the write-side counterpart to fetchBlobRaw above.
- * Same reasoning: reuse the proven azSig construction rather than re-deriving Azure SharedKey
- * signing for a second store. Binary-safe (pass base64 or text). Same fail-closed
- * no-silent-clobber default as putBlob, and the same BUGFIX documented above putBlob (If-None-Match
- * must be threaded into azSig, not just sent on the wire, or the signature won't match what Azure
- * actually received and every non-overwrite PUT 403s).
+ * Generic blob PUT against ANY account/container (2026-07-25, added for
+ * mail_archive_save_attachment_to_dataroom), with backend-aware routing.
+ *
+ * Under BLOB_BACKEND=s3, only containers in S3_WRITABLE_CONTAINERS use the existing signed S3
+ * writer. All other containers retain the Azure SharedKey path below. Binary-safe (pass base64 or
+ * text), with the same fail-closed no-silent-clobber default as putBlob.
  */
 export async function putBlobRaw(
   account: string,
@@ -657,6 +656,16 @@ export async function putBlobRaw(
 ): Promise<BlobPutRawResult> {
   const buf = body.base64 != null ? Buffer.from(body.base64, 'base64') : Buffer.from(body.text ?? '', 'utf8');
   const ct = body.contentType || (body.base64 != null ? 'application/octet-stream' : 'application/json');
+  // Route only explicitly allow-listed migrated containers to S3. The generic helper receives the
+  // account directly, so it must not use the legal-store account lookup here.
+  // This raw helper has callers outside the legal-container union. Keep the new S3 route
+  // scoped to the one migrated CFO container; existing company/exec/personal raw callers retain
+  // their Azure SharedKey behavior until they receive their own explicit migration.
+  if (s3BlobBackendActive() && container === 'cfo-source-docs') {
+    if (!account) throw new Error('blob store not configured (storage account unset)');
+    const res = await putObjectToS3(account, container, path, buf, ct, overwrite);
+    return { path, container, bytes: res.bytes, contentType: ct };
+  }
   const xms: Record<string, string> = {
     'x-ms-blob-type': 'BlockBlob',
     'x-ms-date': new Date().toUTCString(),
