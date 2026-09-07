@@ -45,6 +45,8 @@ export interface KbHit {
   score: number | undefined;
   text: string;
   id: unknown;
+  /** Owning memory lane. Present on flat memory rows; absent on document rooms. */
+  agent?: string;
   /** The record's discriminator (fact/decision/.../status/...), when the index carries one. */
   type?: string;
   /** Source path of the parent document (chunked doc rooms only), for citation. Flat rooms omit it. */
@@ -258,6 +260,7 @@ async function runHybridSearch(
     score: (typeof d['@search.rerankerScore'] === 'number' ? d['@search.rerankerScore'] : d['@search.score']) as number | undefined,
     text: pickText(d).slice(0, 1200),
     id: d['id'] ?? d['chunk_id'] ?? d['key'] ?? '',
+    agent: typeof d['agent'] === 'string' ? (d['agent'] as string) : undefined,
     type: typeof d['type'] === 'string' ? (d['type'] as string) : undefined,
     path: typeof d['path'] === 'string' ? (d['path'] as string) : undefined,
     // Authority/freshness signals for the memory-room re-rank (stripped before returning KbHit, so the

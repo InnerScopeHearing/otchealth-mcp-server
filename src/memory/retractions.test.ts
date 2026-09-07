@@ -1,6 +1,38 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entryIdFromDocId, collectRetracted, collectRetractedByAgent, filterRetracted } from './retractions.js';
+import { entryIdFromDocId, collectRetracted, collectRetractedByAgent, filterRetracted,
+  filterRetractedByAgent } from './retractions.js';
+
+test('search retractions do not cross agent lanes when bare entry IDs collide', () => {
+  const retractions = new Map([['cto', new Set(['20260730-001'])]]);
+  const hits = [
+    { id: 'cto__20260730-001', agent: 'cto', text: 'retracted CTO row' },
+    { id: 'cfo__20260730-001', agent: 'cfo', text: 'unrelated live CFO row' },
+  ];
+  const { kept, dropped } = filterRetractedByAgent(hits, retractions);
+  assert.deepEqual(kept.map((h) => h.id), ['cfo__20260730-001']);
+  assert.deepEqual(dropped, ['cto__20260730-001']);
+});
+
+test('canonical ID prefix wins over conflicting source agent metadata', () => {
+  const retractions = new Map([['cto', new Set(['20260730-001'])]]);
+  const { kept, dropped } = filterRetractedByAgent([
+    { id: 'cto__20260730-001', agent: 'cfo' },
+  ], retractions);
+  assert.equal(kept.length, 0);
+  assert.deepEqual(dropped, ['cto__20260730-001']);
+});
+
+test('legacy bare IDs use explicit agent and fail open when owner is absent', () => {
+  const retractions = new Map([['cto', new Set(['20260730-001'])]]);
+  const { kept, dropped } = filterRetractedByAgent([
+    { id: '20260730-001', agent: 'cto' },
+    { id: '20260730-001', agent: 'cfo' },
+    { id: '20260730-001' },
+  ], retractions);
+  assert.deepEqual(kept.map((h) => h.agent), ['cfo', undefined]);
+  assert.deepEqual(dropped, ['cto__20260730-001']);
+});
 
 test('entryIdFromDocId recovers the entry id from the agent-prefixed doc id', () => {
   assert.equal(entryIdFromDocId('cto__20260713-015'), '20260713-015');

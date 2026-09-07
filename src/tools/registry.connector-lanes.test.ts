@@ -86,6 +86,13 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   for (const browserTool of ['browser_broker_preflight', 'browser_broker_inspect_public']) {
     assert.ok(set.has(browserTool), `ship lane must expose ${browserTool} for its independently enforced public-read broker contract`);
   }
+  // Hyperagent broker: all five wrappers already enforce the caller lane and agent class in
+  // hyperagent/ring.ts. This guard prevents them from being globally registered but invisible to
+  // the connector-surface CTO seat again.
+  for (const hyperagentTool of [
+    'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
+    'hyperagent_create_thread', 'hyperagent_send_message',
+  ]) assert.ok(set.has(hyperagentTool), `ship lane must expose ${hyperagentTool}`);
   // Regression guard (2026-08-04): mail_archive_* -- built for the CFO's Exchange Online Archive
   // problem, EXEC_RING-gated in-handler, but never added to this ship set, so it was invisible on
   // every connector even though it already solves a problem the CFO reported as unsolvable by any
@@ -247,7 +254,10 @@ test('cro lane: commerce curation present, engineering/legal/finance/privileged 
 test('the seat additions never leak into the plain external/unknown lane', () => {
   const set = connectorToolset(testEnv(), 'totally-unknown-lane');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
-  for (const seatOnly of ['memory_team', 'memory_remember', 'checkpoint', 'task_create', 'shopify_list_products', 'cio_track_event']) {
+  for (const seatOnly of [
+    'memory_team', 'memory_remember', 'checkpoint', 'task_create', 'shopify_list_products',
+    'cio_track_event', 'hyperagent_list_agents', 'hyperagent_create_thread',
+  ]) {
     assert.equal(set.has(seatOnly), false, `external lane must NOT gain ${seatOnly}`);
   }
 });

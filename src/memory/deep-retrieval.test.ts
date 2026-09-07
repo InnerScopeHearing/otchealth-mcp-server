@@ -104,6 +104,14 @@ test('parseDeepRetrievalMode: "off" (any case/whitespace) -> off; everything els
   assert.equal(parseDeepRetrievalMode('garbage'), 'on');
 });
 
+test('dedupeById keeps colliding legacy bare IDs from distinct agents', () => {
+  const deduped = dedupeById([
+    { score: 0.5, source: 'memory-exec', id: '20260730-001', agent: 'cto', text: 'CTO row' },
+    { score: 0.4, source: 'memory-exec', id: '20260730-001', agent: 'cfo', text: 'CFO row' },
+  ]);
+  assert.equal(deduped.length, 2);
+});
+
 // --- parseQueryPlan: the planner model's JSON reply, defensively parsed ---
 
 test('parseQueryPlan: a clean plan is parsed, sub-queries capped at 4, rooms clamped to allowed', () => {

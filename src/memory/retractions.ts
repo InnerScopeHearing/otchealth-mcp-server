@@ -65,17 +65,14 @@ export function collectRetracted(entries: Array<{ supersedes?: unknown }>): Set<
  * WHY AGENT-SCOPED (review finding, 2026-07-30, from wake.ts/pack.ts's brief-mode PR): shared-feed
  * entry ids are per-agent day+counter values (memory/store.ts's nextId: `${day}-${N}` where N counts
  * only within THAT SAME agent's own rows), so two DIFFERENT agents' first entries on the same day
- * are both literally e.g. "20260730-001" -- a real collision, not a theoretical one. `retractedIds`
- * below returns a single FLEET-WIDE bare-id Set with no agent information, which is safe for its 3
- * existing callers (kb/openai-search.ts, kb/brain-search.ts, memory/deep-retrieval.ts x2): each
- * recovers a bare entry id from a `{agent}__{entryId}` SEARCH-INDEX doc id via entryIdFromDocId,
- * where the agent half is already known/checked separately by the caller's own room/lane scoping
- * before filterRetracted ever runs. wake.ts/pack.ts's brief mode is different: it applies retraction
+ * are both literally e.g. "20260730-001" -- a real collision, not a theoretical one. Federated
+ * search therefore must use this grouping too; room authorization does not identify which agent
+ * owns a row in the open cross-agent memory-exec room. wake.ts/pack.ts's brief mode applies retraction
  * directly against ONE agent's own in-memory entries by bare id, with no separate agent check, so a
  * bare fleet-wide Set is unsafe there -- an unrelated agent's retraction of "20260730-001" would
  * silently hide THIS agent's own unrelated live "20260730-001" entry. This function (and
  * retractedIdsForAgent below) exist to give wake.ts/pack.ts a properly agent-scoped lookup, without
- * changing retractedIds()'s existing bare-id contract or touching any of its 3 existing callers.
+ * changing retractedIds()'s existing bare-id contract for compatibility-only single-lane callers.
  */
 export function collectRetractedByAgent(entries: Array<{ agent?: unknown; supersedes?: unknown }>): Map<string, Set<string>> {
   const byAgent = new Map<string, Set<string>>();
@@ -106,14 +103,34 @@ export function filterRetracted<T extends { id?: unknown }>(
   return { kept, dropped };
 }
 
+/** Collision-safe filtering for federated search. Composite document IDs are canonical and their
+ * prefix wins if source metadata disagrees. A legacy bare ID uses hit.agent. Unknown owners stay. */
+export function filterRetractedByAgent<T extends { id?: unknown; agent?: unknown }>(
+  hits: T[],
+  byAgent: Map<string, Set<string>>,
+): { kept: T[]; dropped: string[] } {
+  if (byAgent.size === 0) return { kept: hits, dropped: [] };
+  const kept: T[] = [];
+  const dropped: string[] = [];
+  for (const hit of hits) {
+    const rawId = typeof hit.id === 'string' ? hit.id : '';
+    const sep = rawId.indexOf('__');
+    const owner = sep > 0
+      ? rawId.slice(0, sep)
+      : typeof hit.agent === 'string' ? hit.agent.trim().toLowerCase() : '';
+    const entryId = entryIdFromDocId(rawId);
+    if (owner && entryId && byAgent.get(owner)?.has(entryId)) dropped.push(`${owner}__${entryId}`);
+    else kept.push(hit);
+  }
+  return { kept, dropped };
+}
+
 /**
  * The set of entry-ids that have been superseded, from BOTH memory stores.
  * FAIL-OPEN: on any error, returns an empty set (filter nothing) rather than breaking search.
  *
- * BARE, FLEET-WIDE ids -- see collectRetractedByAgent's header for why this is unsafe to apply
- * directly against a single agent's own payload (a cross-agent id collision), and use
- * retractedIdsForAgent instead for that use case. This function's existing bare-id contract and its
- * 3 existing callers are unchanged.
+ * BARE, FLEET-WIDE ids. Retained for compatibility with single-lane callers only. Federated search
+ * must use retractedIdsByAgent(), because shared-feed bare ids collide across agents.
  */
 export async function retractedIds(): Promise<Set<string>> {
   await refreshCache();
@@ -130,6 +147,12 @@ export async function retractedIds(): Promise<Set<string>> {
 export async function retractedIdsForAgent(agent: string): Promise<Set<string>> {
   await refreshCache();
   return cache?.byAgent.get(agent) ?? new Set();
+}
+
+/** Full lane-scoped lookup for federated search. Callers treat the cached map as read-only. */
+export async function retractedIdsByAgent(): Promise<Map<string, Set<string>>> {
+  await refreshCache();
+  return cache?.byAgent ?? new Map();
 }
 
 /** Shared cache-fill for retractedIds/retractedIdsForAgent -- one fetch of both stores serves both

@@ -63,7 +63,7 @@ import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../search/index.js';
 import { isLaneAllowed } from './search-privileged.js';
-import { retractedIds, filterRetracted } from '../../memory/retractions.js';
+import { retractedIdsByAgent, filterRetractedByAgent } from '../../memory/retractions.js';
 import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
 import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
 import { lookupEntity } from '../../memory/entity-lookup.js';
@@ -75,6 +75,18 @@ import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 // import cycle, but this remains the SAME function, not a reimplementation.
 export { rrfFuse };
 export type { FusedHit };
+
+/** Fuse the normal bounded pool while retaining a direct exact-ID candidate ahead of truncation.
+ * Retraction filtering still runs after this helper, so retention cannot revive a withdrawn row. */
+export function fuseWithDirectCandidate(
+  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }>,
+  top: number,
+  directCandidate?: FusedHit,
+): FusedHit[] {
+  const pool = rrfFuse(perRoom, top * 3);
+  if (!directCandidate) return pool;
+  return [directCandidate, ...pool.filter((hit) => String(hit.id ?? '') !== String(directCandidate.id ?? ''))];
+}
 
 /** Rooms every agent may read (non-PHI / non-MNPI / non-privileged). */
 export const OPEN_ROOMS = ['memory-exec', 'commons-company-journal'] as const;
@@ -232,14 +244,28 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps }) })),
   );
 
-  const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown }> }> = [];
+  const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }> = [];
   const searched: string[] = [];
   const failed: string[] = [];
+  let directCandidate: FusedHit | undefined;
   for (let i = 0; i < settled.length; i++) {
     const s = settled[i];
     if (s.status === 'fulfilled' && s.value.res) {
       perRoom.push({ room: s.value.room, hits: s.value.res.matches });
       searched.push(s.value.room);
+      if (!directCandidate && s.value.res.mode === 'direct-id') {
+        const exact = s.value.res.matches.find((hit) => String(hit.id ?? '') === input.query.trim());
+        if (exact) {
+          directCandidate = {
+            score: 1,
+            source: s.value.room,
+            text: exact.text,
+            id: exact.id,
+            path: exact.path,
+            agent: exact.agent,
+          };
+        }
+      }
     } else {
       // One dead room must never blank the brain. Degrade, disclose, continue — WITH the reason,
       // so an agent (or the canary) can tell quota/semantic from auth from index-missing without
@@ -251,9 +277,11 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
 
   // Fuse a WIDER pool first, drop retracted beliefs, and only THEN trim to `top` -- otherwise
   // removing a retracted hit would leave a hole instead of promoting a real result into its place.
-  const pool = rrfFuse(perRoom, top * 3);
-  const retracted = await retractedIds();
-  const { kept, dropped } = filterRetracted(pool, retracted);
+  const pool = fuseWithDirectCandidate(perRoom, top, directCandidate);
+  const retracted = await retractedIdsByAgent();
+  const { kept, dropped } = filterRetractedByAgent(pool, retracted);
+  const directSurvived = Boolean(directCandidate && kept.some((hit) =>
+    hit.source === directCandidate?.source && String(hit.id ?? '') === String(directCandidate?.id ?? '')));
 
   // W1-3 DETERMINISTIC CURRENT-VALUE PROMOTION (fail-open, kill-switch ENTITY_LOOKUP_MODE). If the
   // query resolves to a known typed-entity key ("what is the ASC key id", "n8n base url"), surface
@@ -287,7 +315,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   const data: Record<string, unknown> = {
     matches: taggedMatches,
     count: taggedMatches.length,
-    mode: 'federated-rrf',
+    mode: directSurvived ? 'direct-id' : 'federated-rrf',
     rooms_searched: searched,
     include_ops: includeOps,
   };

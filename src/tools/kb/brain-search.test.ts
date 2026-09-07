@@ -27,7 +27,8 @@ process.env.WEB_SEARCH_PROVIDER ||= 'azure';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
-const { roomsFor, rrfFuse, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
+const { roomsFor, rrfFuse, fuseWithDirectCandidate, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
+const { filterRetractedByAgent } = await import('../../memory/retractions.js');
 const { z } = await import('zod');
 
 // Pure network mocking via globalThis.fetch — the same seam src/memory/agentic.test.ts and
@@ -58,6 +59,28 @@ test('a non-ring caller (cto) gets ONLY the open rooms — no finance, no legal'
   const rooms = roomsFor('cto');
   assert.deepEqual(rooms, [...OPEN_ROOMS]);
   for (const r of RING_ROOMS) assert.ok(!rooms.includes(r), `cto must not reach ${r}`);
+});
+
+test('direct exact hit survives top=1 fusion across many rooms, then remains retractable', () => {
+  const perRoom = Array.from({ length: 8 }, (_, i) => ({
+    room: `room-${i}`,
+    hits: [{ score: 1, text: `rank-one-${i}`, id: `other__${i}` }],
+  }));
+  const direct = {
+    score: 1,
+    source: 'room-7',
+    text: 'exact',
+    id: 'cto__20260907-007',
+    agent: 'cto',
+  };
+  const pool = fuseWithDirectCandidate(perRoom, 1, direct);
+  assert.equal(pool[0]?.id, direct.id, 'candidate is retained before the normal top*3 trim');
+  assert.equal(Number.isFinite(pool[0]?.score ?? Number.NaN), true,
+    'public result scores must remain JSON-serializable numbers');
+
+  const filtered = filterRetractedByAgent(pool, new Map([['cto', new Set(['20260907-007'])]]));
+  assert.equal(filtered.kept.some((hit) => hit.id === direct.id), false,
+    'retention runs before retraction filtering and cannot revive the exact row');
 });
 
 test('an unauthenticated caller still gets the open rooms, never the ring', () => {

@@ -35,7 +35,8 @@ process.env.AWS_SECRET_ACCESS_KEY ||= 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY'
 
 const openSearchClient = await import('./opensearch.js');
 const azureClient = await import('../azure/search.js');
-const { hybridSearch, getDocumentByKey, searchConfigured, vectorFieldFor, reciprocalRankFusion, translateODataFilter } =
+const { hybridSearch, getDocumentByKey, searchConfigured, vectorFieldFor, reciprocalRankFusion, translateODataFilter,
+  exactFlatMemoryId } =
   openSearchClient;
 
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
@@ -57,6 +58,92 @@ function embeddingsOk(): Response {
 }
 
 const OS_HOST = 'search-otchealth-brain-uqmq2jw23cv4yjnnxblxzb7nny.us-east-1.es.amazonaws.com';
+
+test('exactFlatMemoryId accepts canonical IDs only in flat memory rooms', () => {
+  assert.equal(exactFlatMemoryId('memory-exec', 'cto__20260907-007'), 'cto__20260907-007');
+  assert.equal(exactFlatMemoryId('memory-exec', 'cto__m_mtqtdgxm_cac8442d'), 'cto__m_mtqtdgxm_cac8442d');
+  assert.equal(exactFlatMemoryId('memory-exec', '20260907-007'), null);
+  assert.equal(exactFlatMemoryId('memory-exec', '80a4f5c1c43f5f506df1885644d27cff1bf969c1'), null);
+  assert.equal(exactFlatMemoryId('commons-company-journal', 'cto__20260907-007'), null);
+  assert.equal(exactFlatMemoryId('cs-knowledge', 'cto__20260907-007'), null);
+  assert.equal(exactFlatMemoryId('finance-otchealth-cfo-source-docs', 'cfo__20260907-007'), null);
+});
+
+test('hybridSearch direct lookup returns the canonical key and owning prefix without embedding', async () => {
+  const calls: string[] = [];
+  const res = await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      calls.push(u);
+      assert.match(u, /\/memory-exec\/_doc\/cto__20260907-007$/);
+      return new Response(JSON.stringify({
+        found: true,
+        _source: { id: '20260907-007', agent: 'cfo', type: 'fact', text: 'known safe CTO fact' },
+      }), { status: 200 });
+    }) as typeof fetch,
+    () => hybridSearch('memory-exec', 'cto__20260907-007', 5, { includeOps: false }),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(res?.mode, 'direct-id');
+  assert.equal(res?.matches[0]?.id, 'cto__20260907-007');
+  assert.equal(res?.matches[0]?.agent, 'cto');
+});
+
+test('hybridSearch does not bypass a caller filter for an exact-looking query', async () => {
+  const calls: string[] = [];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      calls.push(u);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (u.startsWith(`https://${OS_HOST}/memory-exec/_search`)) {
+        return new Response(JSON.stringify({ hits: { hits: [] } }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as typeof fetch,
+    () => hybridSearch('memory-exec', 'cto__20260907-007', 5, { filter: "type eq 'fact'", includeOps: false }),
+  );
+  assert.equal(calls.some((u) => u.includes('/_doc/')), false);
+  assert.ok(calls.some((u) => isEmbeddingsUrl(u)));
+});
+
+test('direct operational ID preserves includeOps=false demotion semantics', async () => {
+  const res = await withStubbedFetch(
+    (async () => new Response(JSON.stringify({
+      found: true,
+      _source: { id: 'cto__20260907-007', agent: 'cto', type: 'status', text: 'requested status' },
+    }), { status: 200 })) as typeof fetch,
+    () => hybridSearch('memory-exec', 'cto__20260907-007', 5, { includeOps: false }),
+  );
+  assert.equal(res?.mode, 'direct-id');
+  assert.equal(res?.matches.length, 1, 'operational rows are deprioritized, not excluded');
+});
+
+test('hybridSearch falls through to hybrid after an exact GET miss', async () => {
+  const calls: string[] = [];
+  const res = await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.endsWith('/memory-exec/_doc/cto__20260907-999')) {
+        return new Response(JSON.stringify({ found: false }), { status: 404 });
+      }
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (u.startsWith(`https://${OS_HOST}/memory-exec/_search`)) {
+        return new Response(JSON.stringify({ hits: { hits: [{
+          _id: 'related', _score: 1, _source: { id: 'cto__related', agent: 'cto', text: 'fallback result' },
+        }] } }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as typeof fetch,
+    () => hybridSearch('memory-exec', 'cto__20260907-999', 5, { includeOps: false }),
+  );
+  assert.equal(res?.mode, 'hybrid');
+  assert.equal(res?.matches[0]?.id, 'cto__related');
+  assert.ok(calls.some((u) => isEmbeddingsUrl(u)), 'miss must reach the embedding path');
+  assert.ok(calls.filter((u) => u.includes('/memory-exec/_search')).length >= 2,
+    'miss must run BM25 and vector search');
+});
 
 // ================================================================================================
 // vectorFieldFor -- the task's fixed 15-index room registry, asserted verbatim per index. This
