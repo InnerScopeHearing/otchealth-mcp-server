@@ -130,7 +130,11 @@ export interface IngestDeps {
   downloadFile: typeof downloadFile;
   fetchBlobRaw: typeof fetchBlobRaw;
   putBlobRaw: typeof putBlobRaw;
-  env: () => { AZURE_CFO_STORAGE_ACCOUNT: string; AZURE_CFO_STORAGE_KEY: string };
+  env: () => {
+    AZURE_CFO_STORAGE_ACCOUNT: string;
+    AZURE_CFO_STORAGE_KEY: string;
+    BLOB_BACKEND: 'azure' | 's3';
+  };
 }
 
 const REAL_DEPS: IngestDeps = { driveConfigured, downloadFile, fetchBlobRaw, putBlobRaw, env: loadEnv };
@@ -181,14 +185,16 @@ export async function handleKbIngestDriveFile(
     return { data: { ...empty, error: 'unconfigured' }, summary: 'Graph Drive not configured (GRAPH_* / GRAPH_DRIVE_USER unset) — cannot read the source drop.' };
   }
   const env = deps.env();
-  if (!env.AZURE_CFO_STORAGE_ACCOUNT || !env.AZURE_CFO_STORAGE_KEY) {
-    // Deliberately requires the KEY, unlike kb_get_document's financeStoreConfigError: this is a
-    // WRITE, and putBlobRaw is Azure-SharedKey-only (the S3 mirror is read-only by design — see
-    // s3-blob-store.ts's header). Same requirement, for the same reason, as
-    // mail_archive_save_attachment_to_dataroom.
+  // The migrated finance dataroom is writable through the existing S3 backend. An Azure SharedKey
+  // is required only when the selected backend is still Azure.
+  const needsAzureKey = env.BLOB_BACKEND !== 's3';
+  if (!env.AZURE_CFO_STORAGE_ACCOUNT || (needsAzureKey && !env.AZURE_CFO_STORAGE_KEY)) {
     return {
       data: { ...empty, error: 'unconfigured' },
-      summary: 'The finance dataroom is not configured for writes (AZURE_CFO_STORAGE_ACCOUNT / AZURE_CFO_STORAGE_KEY unset).',
+      summary:
+        needsAzureKey
+          ? 'The finance dataroom is not configured for Azure writes (AZURE_CFO_STORAGE_ACCOUNT / AZURE_CFO_STORAGE_KEY unset).'
+          : 'The finance dataroom is not configured for S3 writes (AZURE_CFO_STORAGE_ACCOUNT unset).',
     };
   }
 

@@ -28,7 +28,7 @@ interface Calls {
   heads: number;
 }
 
-function deps(opts: { fileBytes?: Buffer; exists?: boolean; found?: boolean } = {}) {
+function deps(opts: { fileBytes?: Buffer; exists?: boolean; found?: boolean; backend?: 'azure' | 's3' } = {}) {
   const calls: Calls = { puts: [], downloads: 0, heads: 0 };
   const buf = opts.fileBytes ?? Buffer.from('%PDF-1.7 fake statement bytes');
   const d = {
@@ -48,7 +48,7 @@ function deps(opts: { fileBytes?: Buffer; exists?: boolean; found?: boolean } = 
       calls.puts.push({ path, bytes, overwrite });
       return { path, container, bytes, contentType: body.contentType ?? 'application/octet-stream' };
     },
-    env: () => ({ AZURE_CFO_STORAGE_ACCOUNT: 'otchealthcfodata', AZURE_CFO_STORAGE_KEY: 'k' }),
+    env: () => ({ AZURE_CFO_STORAGE_ACCOUNT: 'otchealthcfodata', AZURE_CFO_STORAGE_KEY: 'k', BLOB_BACKEND: opts.backend ?? 'azure' }),
   };
   return { d: d as unknown as IngestDeps, calls };
 }
@@ -117,6 +117,13 @@ test('a bad dest_path refuses BEFORE touching either store', async () => {
 });
 
 // ── dry_run ──────────────────────────────────────────────────────────────────────────────────────
+
+test('S3 backend: a missing Azure SharedKey does not block a CFO dataroom copy', async () => {
+  const { d, calls } = deps({ backend: 's3' });
+  const res = await handleKbIngestDriveFile(GOOD, { callerAgent: 'cfo', dryRun: false }, d);
+  assert.equal((res.data as { written: boolean }).written, true);
+  assert.equal(calls.puts.length, 1);
+});
 
 test('dry_run: previews the planned copy and writes NOTHING', async () => {
   const { d, calls } = deps();

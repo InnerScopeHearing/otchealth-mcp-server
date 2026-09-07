@@ -304,6 +304,23 @@ test('AWS-reserved characters encodeURIComponent leaves raw are encoded too', as
   assert.equal(url.includes('%2523'), false, 'still exactly once');
 });
 
+test('putBlobRaw routes the migrated CFO source container through S3 without an Azure key', async () => {
+  const { putBlobRaw } = await import('./blob-store.js');
+  let seenUrl = '';
+  let seenHeaders: Record<string, string> = {};
+  const result = await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      seenUrl = String(url);
+      seenHeaders = (init?.headers ?? {}) as Record<string, string>;
+      return new Response(null, { status: 200, headers: { etag: '"s3-etag"' } });
+    }) as unknown as typeof fetch,
+    () => putBlobRaw('otchealthcfodata', '', 'cfo-source-docs', 'INND/test-fixture.pdf', { base64: Buffer.from('synthetic fixture').toString('base64'), contentType: 'application/pdf' }),
+  );
+  assert.equal(result.bytes, Buffer.byteLength('synthetic fixture'));
+  assert.ok(seenUrl.includes('/otchealthcfodata/cfo-source-docs/INND/test-fixture.pdf'));
+  assert.equal(seenHeaders['if-none-match'], '*');
+});
+
 test('a key needing no encoding is unchanged (the case that always worked, kept working)', async () => {
   const url = await urlFor('INND/_KNOWLEDGE-BASE/CFO_PROJECT_MEMORY.md');
   assert.ok(url.endsWith('/otchealthcfodata/cfo-source-docs/INND/_KNOWLEDGE-BASE/CFO_PROJECT_MEMORY.md'));
