@@ -9,7 +9,7 @@ export function registerCatalogServiceCapabilities(server: McpServer, callerHash
     category: 'read',
     annotations: {
       title: 'Service capabilities',
-      description: 'For one service (e.g. "stripe", "depot", "posthog"): its description, ring, auth, status (wired|planned), the tools currently wired, and the known API surface that is available but NOT yet wired. Use to decide whether a capability exists or needs building.',
+      description: 'For one service (e.g. "stripe", "depot", "posthog"): its description, ring, auth, status (wired|planned), the tools currently wired, and the known API surface that is available but NOT yet wired. Use to decide whether a capability exists or needs building. Wired means registered in the gateway, not that credentials, connectivity, or downstream service health have been verified.',
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
     },
     inputShape: {

@@ -558,7 +558,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       annotations: {
         title: 'Federated agent wake (one-call boot)',
         description:
-          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your Cosmos memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Pass brief:true on a long-lived session (large ledger) to get only current-truth entries (retracted/superseded entries filtered out across ALL sections, not just within one), hard-capped for size, so the response stays inline instead of JIT-offloading. DRILL-DOWN CAVEAT: task_get resolves a truncated task by id; memory_search resolves a truncated Cosmos memory_record by id. Neither resolves a truncated shared-feed correction/decision/pack.recent entry, or a truncated inbox/inbound entry -- for those, re-call wake(brief:false) or memory_pack(brief:false) to see the untruncated version. Ring-safe: shared feed + your own lane only.',
+          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your agent-state memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Pass brief:true on a long-lived session (large ledger) to get only current-truth entries (retracted/superseded entries filtered out across ALL sections, not just within one), hard-capped for size, so the response stays inline instead of JIT-offloading. DRILL-DOWN CAVEAT: task_get resolves a truncated task by id; memory_search resolves a truncated agent-state memory_record by id. Neither resolves a truncated shared-feed correction/decision/pack.recent entry, or a truncated inbox/inbound entry -- for those, re-call wake(brief:false) or memory_pack(brief:false) to see the untruncated version. Ring-safe: shared feed + your own lane only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -567,7 +567,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       inputShape: {
         agent: z.string().optional().describe('Agent lane to wake; defaults to your token identity (lowercase id, e.g. "cto").'),
         recent_limit: z.number().int().min(1).max(40).optional().describe('Max recent shared-feed entries (default 10).'),
-        memory_limit: z.number().int().min(1).max(40).optional().describe('Max Cosmos memory-of-record entries (default 12).'),
+        memory_limit: z.number().int().min(1).max(40).optional().describe('Max agent-state memory-of-record entries (default 12).'),
         task_limit: z.number().int().min(1).max(50).optional().describe('Max active tasks (default 15).'),
         brief: z
           .boolean()

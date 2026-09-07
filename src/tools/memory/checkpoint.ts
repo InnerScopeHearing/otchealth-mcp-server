@@ -8,7 +8,7 @@
  * Three things happen, in order, each independently fail-open:
  *  (a) any EXPLICIT `memories` the caller supplies are written VERBATIM (no LLM in the loop) via
  *      the same writeMemory + indexMemoryNow path every other durable memory uses.
- *  (b) if a `summary` is given and the shared Azure LLM (azure/foundry.ts chat()) is configured,
+ *  (b) if a `summary` is given and the configured shared LLM provider (azure/foundry.ts chat()) is configured,
  *      it is distilled server-side into 0-3 atomic durable memories (fact/decision/correction/
  *      pitfall) and those are written too.
  *  (c) an "episode" marker tagged "checkpoint" is ALWAYS written, and the caller's capture-pressure
@@ -81,7 +81,7 @@ export function parseDistillResponse(raw: string): DistilledMemory[] {
 }
 
 /**
- * Call the shared Azure LLM client (azure/foundry.ts) to distill a summary. Throws on transport/
+ * Call the shared LLM provider dispatcher (azure/foundry.ts) to distill a summary. Throws on transport/
  * API failure -- the caller wraps this in its own try/catch (fail-open at the call site).
  *
  * Tier: 'router' -- this is a bounded extraction task (a strict-JSON list of 0-3 short atomic
@@ -134,7 +134,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
-          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes up to 20 explicit "memories" verbatim (sequentially, one write+index per entry -- this is for a handful of session takeaways, not a bulk import), server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the credit-funded Azure LLM is configured, always writes an episode marker, and always resets the capture-pressure counter for this caller. Fail-open: an LLM or index error still persists what it can. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
+          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes up to 20 explicit "memories" verbatim (sequentially, one write+index per entry -- this is for a handful of session takeaways, not a bulk import), server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the selected LLM provider is configured, always writes an episode marker, and always resets the capture-pressure counter for this caller. Fail-open: an LLM or index error still persists what it can. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -145,7 +145,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         summary: z
           .string()
           .optional()
-          .describe('Optional freeform summary of what happened / what to remember. Server-side distilled into 0-3 atomic memories when the Azure LLM is configured.'),
+          .describe('Optional freeform summary of what happened / what to remember. Server-side distilled into 0-3 atomic memories when the selected LLM provider is configured.'),
         // Capped at 20 (FND-20260829-e454): each entry writes+indexes SEQUENTIALLY (one Cosmos
         // write + one AI Search index call per item, never batched -- see the handler's `for`
         // loop below), and this array had no bound at all before. A well-formed checkpoint call
@@ -187,8 +187,8 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         }
         if (!isConfigured()) {
           return {
-            data: { written: [], distilled: 0, checkpoint: false, note: 'agent-state Cosmos not configured.' },
-            summary: 'checkpoint unavailable: agent-state Cosmos not configured on the gateway.',
+            data: { written: [], distilled: 0, checkpoint: false, note: 'selected agent-state backend not configured.' },
+            summary: 'checkpoint unavailable: selected agent-state backend not configured on the gateway.',
           };
         }
         const memoriesIn = input.memories ?? [];
