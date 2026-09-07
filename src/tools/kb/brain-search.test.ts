@@ -314,4 +314,3 @@ test('handleBrainSearch: exceeding the wall-clock budget surfaces partial:true +
     }
   });
 });
-
