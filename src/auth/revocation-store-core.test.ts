@@ -232,4 +232,3 @@ test('durable clear is refused without removing local denies', async () => {
   assert.equal(result.local_revocations_preserved, true);
   assert.equal(f.store.isRevoked('fixture-token'), true);
 });
-
