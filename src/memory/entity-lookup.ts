@@ -110,9 +110,10 @@ const HISTORICAL_INTENT = new Set([
   'legacy', 'old', 'before', 'replaced', 'replace', 'migration', 'migrated', 'was', 'were', 'did',
   'ago',
 ]);
-const COMPANY_SCOPE = new Set(['otchealth', 'innerscope', 'innd', 'our', 'company']);
-const STRONG_SUBSYSTEM_SCOPE = new Set([
-  'brain', 'gateway', 'mcp', 'agent', 'agents', 'checkpoint', 'checkpoints', 'handoff', 'handoffs',
+const SELF_SCOPE = new Set(['otchealth', 'innerscope', 'innd', 'our']);
+const FOREIGN_SCOPE = new Set([
+  'another', 'other', 'their', 'competitor', 'competition', 'foreign', 'unrelated',
+  'versus', 'vs', 'compare', 'compared', 'comparison',
 ]);
 
 /**
@@ -145,16 +146,16 @@ function hasHistoricalIntent(tokens: ReadonlySet<string>): boolean {
 
 /**
  * Infer one CTO-owned infrastructure entity from a present-tense current-state question. Pure.
- * Precision gates are deliberate: explicit current intent, no historical intent, company or strong
- * subsystem scope, current-value tag, owner=cto, provenance, a distinctive domain match, and one
+ * Precision gates are deliberate: explicit current intent, no historical intent, explicit OTCHealth
+ * self scope, no foreign or comparison target, current-value tag, owner=cto, provenance, a distinctive
+ * domain match, and one
  * unambiguous best candidate. Exact keys/aliases continue to use the compatibility path above.
  */
 export function matchCurrentQuestion(query: string, rows: readonly EntityRow[]): EntityHit | null {
   const queryTokens = tokenSet(query);
   if (!intersects(queryTokens, CURRENT_INTENT) || hasHistoricalIntent(queryTokens)) return null;
 
-  const queryHasCompanyScope = intersects(queryTokens, COMPANY_SCOPE);
-  if (!queryHasCompanyScope && !intersects(queryTokens, STRONG_SUBSYSTEM_SCOPE)) return null;
+  if (!intersects(queryTokens, SELF_SCOPE) || intersects(queryTokens, FOREIGN_SCOPE)) return null;
   const scored: Array<{ row: EntityRow; matched: number; total: number }> = [];
   const keys = new Set(rows.filter((row) => row.type === 'entity' && row.ekey).map((row) => row.ekey as string));
 
@@ -210,13 +211,22 @@ export function matchCurrentQuestion(query: string, rows: readonly EntityRow[]):
 }
 
 /** Drop typed rows retracted by a later entry in the same agent lane. Pure and collision-safe. */
-export function activeEntityRows(rows: readonly EntityRow[]): EntityRow[] {
-  const retracted = collectRetractedByAgent([...rows]);
+export type RetractionsByAgent = ReadonlyMap<string, ReadonlySet<string>>;
+
+export function activeEntityRows(
+  rows: readonly EntityRow[],
+  externalRetractions?: RetractionsByAgent,
+): EntityRow[] {
+  const sharedRetractions = collectRetractedByAgent([...rows]);
   return rows.filter((row) => {
     if (row.type !== 'entity' && row.type !== 'alias') return false;
     const owner = typeof row.agent === 'string' ? row.agent : '';
     const id = typeof row.id === 'string' ? row.id : '';
-    return !(owner && id && retracted.get(owner)?.has(id));
+    return !(
+      owner &&
+      id &&
+      (sharedRetractions.get(owner)?.has(id) || externalRetractions?.get(owner)?.has(id))
+    );
   });
 }
 
@@ -250,7 +260,8 @@ export function matchEntity(query: string, rows: readonly EntityRow[]): EntityHi
 
   // Historical questions must stay semantic. Do not promote a current row merely because the
   // sentence embeds its canonical key (exact whole-key requests above remain supported).
-  if (hasHistoricalIntent(tokenSet(query))) return null;
+  const queryTokens = tokenSet(query);
+  if (hasHistoricalIntent(queryTokens) || intersects(queryTokens, FOREIGN_SCOPE)) return null;
 
   // 2) CONTAINMENT: the longest known key that appears token-bounded inside the query.
   const padded = `_${nq}_`;
@@ -301,8 +312,13 @@ let cache: { at: number; rows: EntityRow[] } | null = null;
 
 /** The entity + alias rows from the commons feed, briefly cached. FAIL-OPEN: any error -> [] (so the
  *  caller degrades to pure semantic recall, never an outage). Exported for the test seam reset. */
-export async function entityRows(nowMs: number = Date.now()): Promise<EntityRow[]> {
-  if (cache && nowMs - cache.at < TTL_MS) return cache.rows;
+export async function entityRows(
+  nowMs: number = Date.now(),
+  externalRetractions?: RetractionsByAgent,
+): Promise<EntityRow[]> {
+  if (cache && nowMs - cache.at < TTL_MS) {
+    return activeEntityRows(cache.rows, externalRetractions);
+  }
   let rows: EntityRow[] = [];
   try {
     // readSharedAll() types rows as MemoryEntry (whose `type` union predates entity/alias); the raw
@@ -312,8 +328,10 @@ export async function entityRows(nowMs: number = Date.now()): Promise<EntityRow[
   } catch {
     rows = []; // fail-open
   }
+  // Cache only the shared-feed view. Apply the caller's current full retraction map on every
+  // lookup so a memory-of-record retraction cannot be hidden by this loader's longer-lived cache.
   cache = { at: nowMs, rows };
-  return rows;
+  return activeEntityRows(rows, externalRetractions);
 }
 
 /** Test seam: drop the cache so one test never sees another's rows. */
@@ -325,10 +343,14 @@ export function __resetEntityCache(): void {
  * The recall-path entry point: resolve a query to its current-value entity, or null. FAIL-OPEN and
  * kill-switchable — pass mode 'off' (from ENTITY_LOOKUP_MODE) to disable entirely. Never throws.
  */
-export async function lookupEntity(query: string, mode?: string): Promise<EntityHit | null> {
+export async function lookupEntity(
+  query: string,
+  mode?: string,
+  externalRetractions?: RetractionsByAgent,
+): Promise<EntityHit | null> {
   if ((mode || '').trim().toLowerCase() === 'off') return null;
   try {
-    const rows = await entityRows();
+    const rows = await entityRows(Date.now(), externalRetractions);
     return matchEntity(query, rows);
   } catch {
     return null;
