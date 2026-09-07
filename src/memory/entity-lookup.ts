@@ -334,4 +334,3 @@ export async function lookupEntity(query: string, mode?: string): Promise<Entity
     return null;
   }
 }
-
