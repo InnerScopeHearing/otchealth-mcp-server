@@ -118,6 +118,73 @@ test('reload failure after readiness uses an explicit stale deny-set', async () 
   assert.equal(f.store.isRevoked(token), true, 'known revocations remain locally denied after expiry');
 });
 
+test('snapshot freshness expires at MAX_STALE even when the reload timer never runs', async () => {
+  const started = Date.parse('2026-09-07T00:00:00.000Z');
+  let now = started;
+  const f = fixture({ now: () => now, maxStaleMs: 300_000 });
+  await f.store.load();
+
+  now = started + 30_000;
+  assert.equal(f.store.status().state, 'ready', 'the normal 30s reload cadence is inside the window');
+  assert.equal(f.store.status().stale_for_ms, null);
+
+  now = started + 299_999;
+  assert.equal(f.store.status().state, 'ready');
+  assert.equal(f.store.status().static_token_auth_ready, true);
+
+  now = started + 300_000;
+  assert.equal(f.store.status().state, 'stale_expired');
+  assert.equal(f.store.status().static_token_auth_ready, false);
+  assert.equal(f.store.status().stale_for_ms, 300_000);
+  assert.equal(f.store.status().last_failed_load_at, null, 'timer absence is not fabricated as a failed query');
+});
+
+test('a pending reload cannot keep an old successful snapshot ready forever', async () => {
+  const started = Date.parse('2026-09-07T00:00:00.000Z');
+  let now = started;
+  let calls = 0;
+  let finishPending: (() => void) | undefined;
+  const persistence: RevocationPersistence = {
+    isConfigured: () => true,
+    query: async () => {
+      calls += 1;
+      if (calls === 1) return [];
+      await new Promise<void>((resolve) => {
+        finishPending = resolve;
+      });
+      return [];
+    },
+    upsert: async () => undefined,
+  };
+  const store = new TokenRevocationStore(persistence, { now: () => now, maxStaleMs: 300_000 });
+  await store.load();
+
+  now = started + 30_000;
+  const pending = store.load();
+  await Promise.resolve();
+  assert.equal(store.status().state, 'ready');
+  assert.equal(store.status().last_failed_load_at, null);
+
+  now = started + 300_000;
+  assert.equal(store.status().state, 'stale_expired');
+  assert.equal(store.status().static_token_auth_ready, false);
+  assert.equal(store.status().stale_for_ms, 300_000);
+
+  finishPending?.();
+  await pending;
+  assert.equal(store.status().state, 'ready', 'a later complete refresh starts a new freshness window');
+  assert.equal(store.status().static_token_auth_ready, true);
+});
+
+test('MAX_STALE zero expires a completed durable snapshot at the exact boundary', async () => {
+  let now = Date.parse('2026-09-07T00:00:00.000Z');
+  const f = fixture({ now: () => now, maxStaleMs: 0 });
+  await f.store.load();
+  assert.equal(f.store.status().state, 'stale_expired');
+  assert.equal(f.store.status().static_token_auth_ready, false);
+  assert.equal(f.store.status().stale_for_ms, 0);
+});
+
 test('missing persistence fails closed unless memory mode is explicitly enabled', async () => {
   const persistence: RevocationPersistence = {
     isConfigured: () => false,
@@ -165,3 +232,4 @@ test('durable clear is refused without removing local denies', async () => {
   assert.equal(result.local_revocations_preserved, true);
   assert.equal(f.store.isRevoked('fixture-token'), true);
 });
+

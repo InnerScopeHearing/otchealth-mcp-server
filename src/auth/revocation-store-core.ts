@@ -47,7 +47,7 @@ export interface RevocationPersistence {
 export interface RevocationStoreOptions {
   /** Explicit local-development escape hatch. Production callers must leave this false. */
   allowMemoryOnly?: boolean | (() => boolean);
-  /** Maximum time an already-loaded deny-set may be trusted after reload failures. */
+  /** Maximum age of the last complete durable snapshot, whether reload fails, hangs, or stops. */
   maxStaleMs?: number;
   /** Maximum complete row set accepted from persistence. The adapter must request one extra row. */
   maxRows?: number;
@@ -113,10 +113,13 @@ export class TokenRevocationStore {
       };
     }
 
-    const staleFor = this.successfulLoad && this.lastFailedLoadAt && this.lastSuccessfulLoadAt
+    const successfulLoadAge = this.successfulLoad && this.lastSuccessfulLoadAt
       ? Math.max(0, this.now() - Date.parse(this.lastSuccessfulLoadAt))
       : null;
-    const staleExpired = staleFor !== null && staleFor >= this.maxStaleMs;
+    // Freshness is anchored to the last completed durable read. A pending query never reaches
+    // catch, and a stopped timer never calls load(), so failure timestamps alone cannot bound trust.
+    const staleExpired = successfulLoadAge !== null && successfulLoadAge >= this.maxStaleMs;
+    const staleFor = this.lastFailedLoadAt || staleExpired ? successfulLoadAge : null;
     return {
       persistence_configured: backend.configured,
       persistence_required: true,
@@ -125,9 +128,11 @@ export class TokenRevocationStore {
         ? 'unavailable'
         : !this.successfulLoad
           ? (this.lastFailedLoadAt ? 'unavailable' : 'initializing')
-          : this.lastFailedLoadAt
-            ? (staleExpired ? 'stale_expired' : 'stale')
-            : 'ready',
+          : staleExpired
+            ? 'stale_expired'
+            : this.lastFailedLoadAt
+              ? 'stale'
+              : 'ready',
       last_successful_load_at: this.lastSuccessfulLoadAt,
       last_failed_load_at: this.lastFailedLoadAt,
       last_failed_persist_at: this.lastFailedPersistAt,
@@ -251,3 +256,4 @@ export class TokenRevocationStore {
     };
   }
 }
+
