@@ -10,6 +10,7 @@ import {
 } from '../../memory/store.js';
 import { searchMemory } from '../../agentstate/memory.js';
 import { listTasks } from '../../agentstate/ledger.js';
+import { canReadPersonalTasks, taskVisibleToCaller } from '../agentstate/task-read-access.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
 type TaskStatus = (typeof TASK_STATUSES)[number];
 import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
@@ -549,6 +550,29 @@ export function buildBriefWake(
   };
 }
 
+/** Apply the task access policy before the storage cap and every derived wake field. */
+export async function readWakeTasks(
+  agent: string,
+  callerAgent: string,
+  taskLimit: number,
+  readTasks: typeof listTasks = listTasks,
+): Promise<WakeTasks> {
+  const rows = await readTasks({
+    owner_agent: agent,
+    limit: 50,
+    exclude_personal_legal: !canReadPersonalTasks(callerAgent),
+  });
+  // Defense against legacy/malformed adapters. Hidden rows cannot affect counts or previews.
+  const visible = rows.filter((task) => taskVisibleToCaller(task, callerAgent));
+  const counts: Record<string, number> = {};
+  for (const task of visible) counts[task.status] = (counts[task.status] ?? 0) + 1;
+  const active = visible
+    .filter((task) => (ACTIVE_STATUSES as string[]).includes(String(task.status)))
+    .slice(0, taskLimit)
+    .map((task) => capText(task as unknown as Record<string, unknown>, 600));
+  return { configured: true, active, counts };
+}
+
 export function registerWake(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -661,14 +685,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
 
         const tasksP = (async () => {
           if (!cosmosConfigured()) return { configured: false, active: [] as Record<string, unknown>[], counts: {} as Record<string, number> };
-          const all = await listTasks({ owner_agent: agent, limit: 50 });
-          const counts: Record<string, number> = {};
-          for (const t of all) counts[t.status] = (counts[t.status] ?? 0) + 1;
-          const active = all
-            .filter((t) => (ACTIVE_STATUSES as string[]).includes(String(t.status)))
-            .slice(0, taskLimit)
-            .map((t) => capText(t as unknown as Record<string, unknown>, 600));
-          return { configured: true, active, counts };
+          return readWakeTasks(agent, ctx.callerAgent, taskLimit);
         })();
 
         const inboxP = (async () => {
