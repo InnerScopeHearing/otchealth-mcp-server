@@ -155,6 +155,7 @@ function codexStaticAgentTokens(): Record<string, string> {
     coo: env.CODEX_COO_MCP_TOKEN,
     cro: env.CODEX_CRO_MCP_TOKEN,
     developer: env.CODEX_DEVELOPER_MCP_TOKEN,
+    'wefunder-campaign-director': env.CODEX_WEFUNDER_MCP_TOKEN,
   };
 }
 

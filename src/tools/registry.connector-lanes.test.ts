@@ -149,14 +149,20 @@ test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus extern
   ]) assert.equal(set.has(forbidden), false, `cro connector must not expose ${forbidden}`);
 });
 
-test('(e) Wefunder Campaign Director gets only the external baseline plus bounded browser broker reads', () => {
+test('(e) Wefunder Campaign Director gets exact-source migration tools without private-data or browser-write grants', () => {
   const set = connectorToolset(testEnv(), 'wefunder-campaign-director');
   assert.deepEqual([...set].sort(), [...WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET].sort());
   assert.ok(set.has('browser_broker_preflight'));
   assert.ok(set.has('browser_broker_inspect_public'));
+  for (const required of ['catalog_probe', 'hyperagent_list_agents', 'hyperagent_list_threads',
+    'hyperagent_get_thread', 'hyperagent_create_thread', 'hyperagent_send_message']) {
+    assert.ok(set.has(required), required);
+  }
+  assert.equal(isShipLane('wefunder-campaign-director'), false);
   for (const forbidden of [
     'browser_agentcore_wefunder_preflight', 'github_push_files', 'kb_search_privileged',
-    'memory_write', 'legal_blob_put', 'heygen_pairing_start',
+    'memory_write', 'memory_remember', 'checkpoint', 'legal_blob_put', 'legal_blob_get',
+    'kb_get_document', 'kb_list_documents', 'xero_manual_journals', 'heygen_pairing_start', 'gateway_fetch_result',
   ]) assert.equal(set.has(forbidden), false, `Wefunder connector must not expose ${forbidden}`);
 });
 

@@ -62,6 +62,15 @@ const DEFAULT_TRANSPORT: HyperagentToolTransport = {
   call: callHyperagentTool,
 };
 
+/** Log/journal only routing metadata, never the investor-sensitive prompt sent to the source. */
+export function hyperagentInvocationMetadata(input: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(typeof input.agentId === 'string' ? { agentId: input.agentId } : {}),
+    ...(typeof input.threadId === 'string' ? { threadId: input.threadId } : {}),
+    message_chars: typeof input.message === 'string' ? input.message.length : 0,
+  };
+}
+
 export function registerHyperagentTools(
   server: McpServer,
   callerHash: CallerHashProvider,
@@ -123,6 +132,7 @@ export function registerHyperagentTools(
     {
       name: 'hyperagent_create_thread',
       category: 'write_orchestrated',
+      redactInputForLog: hyperagentInvocationMetadata,
       annotations: {
         title: 'Start a Hyperagent agent working (ring-gated)',
         description:
@@ -235,6 +245,7 @@ export function registerHyperagentTools(
     {
       name: 'hyperagent_send_message',
       category: 'write_orchestrated',
+      redactInputForLog: hyperagentInvocationMetadata,
       annotations: {
         title: 'Add a turn to a Hyperagent thread (ring-gated)',
         description:
