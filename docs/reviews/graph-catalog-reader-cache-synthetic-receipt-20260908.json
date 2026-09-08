@@ -1,0 +1,76 @@
+{
+  "schema": "graph-catalog-reader-cache-synthetic-receipt-v1",
+  "observed_at": "2026-09-08",
+  "source": {
+    "pr319_base_commit": "e4ba13ee62155a56a8556bfcb211579a79081105",
+    "implementation_commit": "42a6c8f42f0f68300f1f1843501c887a97c339c5",
+    "branch": "claude/catalog-reader-cache-20260908"
+  },
+  "fixture": {
+    "synthetic_only": true,
+    "catalog_rows": 200,
+    "catalog_bytes": 10980,
+    "sequential_reader_calls": 5,
+    "row_shape": {
+      "fields": [
+        "path",
+        "document_version_id"
+      ],
+      "values": "generated synthetic strings only"
+    }
+  },
+  "baseline": {
+    "fresh_head_requests": 5,
+    "get_requests": 5,
+    "downloaded_bytes": 54900,
+    "parse_passes": 5
+  },
+  "candidate": {
+    "fresh_head_requests": 5,
+    "get_requests": 1,
+    "downloaded_bytes": 10980,
+    "parse_passes": 1
+  },
+  "observed_delta": {
+    "fresh_head_requests": 0,
+    "get_requests": -4,
+    "downloaded_bytes": -43920,
+    "parse_passes": -4
+  },
+  "cache_bounds": {
+    "ready_entries": 2,
+    "combined_source_bytes": 8388608,
+    "combined_rows": 20000,
+    "active_downloads_per_raw_s3_adapter": 2,
+    "queued_identity_loads_per_raw_s3_adapter": 32
+  },
+  "identity": [
+    "object_key",
+    "configured_catalog_source_sha256",
+    "etag",
+    "s3_version_id_or_absence",
+    "content_length",
+    "raw_last_modified"
+  ],
+  "validation": {
+    "command": "& 'C:\\Users\\matth\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\bin\\node.exe' --test --import tsx src/server/graph-catalog-reader.test.ts src/server/graph-catalog-controller.test.ts src/server/graph-catalog-planner.test.ts; & '.\\node_modules\\.bin\\tsc.cmd' -p tsconfig.json --noEmit; git diff --check",
+    "tests_passed": 19,
+    "tests_failed": 0,
+    "typecheck_passed": true,
+    "diff_check_passed": true
+  },
+  "claims_not_made": [
+    "production latency improvement",
+    "production CPU or memory improvement",
+    "AWS transfer reduction",
+    "cost savings"
+  ],
+  "live_activity": {
+    "company_catalog_read": false,
+    "source_body_read": false,
+    "aws_call": false,
+    "model_call": false,
+    "deployment": false,
+    "publication": false
+  }
+}
