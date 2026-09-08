@@ -152,6 +152,8 @@ const EnvSchema = z.object({
   GRAPH_TENANT_ID: z.string().optional().default(''),
   GRAPH_CLIENT_ID: z.string().optional().default(''),
   GRAPH_CLIENT_SECRET: z.string().optional().default(''),
+  // Non-secret immutable activation bindings for the seat-scoped graph worker broker.
+  GRAPH_WORKER_BINDINGS_JSON: z.string().optional().default(''),
   GRAPH_SENDER_EMAIL: z.string().optional().default('coo@otchealthmart.com'),
   // Allowlist of mailboxes the graph_* mail tools (send/list/get/mark-read) are permitted to touch
   // (see graph/api-client.ts's allowedMailboxes() header for why this exists: the app's application
