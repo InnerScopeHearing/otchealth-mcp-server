@@ -450,3 +450,37 @@ test('same-identity followers have an explicit bounded waiter cap', async () => 
   assert.equal(rejected.length, 1);
   assert.match(String(rejected[0].reason), /catalog_reader_busy/);
 });
+
+test('early GET identity rejection bounded-cancels an unread response body', async () => {
+  const text = '{}\n';
+  let cancelCalls = 0;
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"body-mismatch"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': request.method === 'HEAD'
+        ? createdAt
+        : '2026-09-08T00:00:01.000Z',
+    });
+    return {
+      status: 200,
+      headers,
+      body: request.method === 'HEAD'
+        ? null
+        : new ReadableStream({
+            cancel() {
+              cancelCalls++;
+              return new Promise(() => undefined);
+            },
+          }),
+    };
+  };
+  const started = Date.now();
+  await assert.rejects(readPinnedGraphCatalog({
+    key: 'graph-trial/synthetic/unread-mismatch.jsonl',
+    sourceSha256: source,
+    s3,
+  }), /catalog_changed/);
+  assert.equal(cancelCalls, 1);
+  assert.ok(Date.now() - started < 1000, 'hung stream cancellation must remain bounded');
+});

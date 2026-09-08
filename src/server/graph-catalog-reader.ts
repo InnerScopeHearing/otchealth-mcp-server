@@ -322,8 +322,9 @@ async function downloadCatalog(input: Readonly<{
       input.signal,
     );
     active(input.signal);
+    reader = response.body?.getReader();
     if (response.status === 412) throw new Error('catalog_changed');
-    if (response.status !== 200 || response.headers.get('etag') !== input.head.etag || !response.body) {
+    if (response.status !== 200 || response.headers.get('etag') !== input.head.etag || !reader) {
       throw new Error('catalog_get_failed');
     }
     if (
@@ -339,7 +340,6 @@ async function downloadCatalog(input: Readonly<{
       throw new Error('catalog_length_changed');
     }
 
-    reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8', { fatal: true });
     const rows: Readonly<Record<string, unknown>>[] = [];
     let count = 0;
