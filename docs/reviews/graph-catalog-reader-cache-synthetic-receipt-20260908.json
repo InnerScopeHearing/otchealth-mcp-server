@@ -42,7 +42,8 @@
     "combined_source_bytes": 8388608,
     "combined_rows": 20000,
     "active_downloads_per_raw_s3_adapter": 2,
-    "queued_identity_loads_per_raw_s3_adapter": 32
+    "queued_identity_loads_per_raw_s3_adapter": 32,
+    "shared_consumers_per_identity": 32
   },
   "identity": [
     "object_key",
@@ -54,10 +55,15 @@
   ],
   "validation": {
     "command": "& 'C:\\Users\\matth\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\bin\\node.exe' --test --import tsx src/server/graph-catalog-reader.test.ts src/server/graph-catalog-controller.test.ts src/server/graph-catalog-planner.test.ts; & '.\\node_modules\\.bin\\tsc.cmd' -p tsconfig.json --noEmit; git diff --check",
-    "tests_passed": 19,
+    "tests_passed": 22,
     "tests_failed": 0,
     "typecheck_passed": true,
-    "diff_check_passed": true
+    "diff_check_passed": true,
+    "reviewer_regressions": [
+      "leader cancellation leaves live follower successful",
+      "follower cancellation leaves live leader successful",
+      "same-identity shared consumer cap rejects excess work"
+    ]
   },
   "claims_not_made": [
     "production latency improvement",

@@ -4,6 +4,7 @@ import {
   GRAPH_CATALOG_CACHE_MAX_ENTRIES,
   GRAPH_CATALOG_CACHE_MAX_IN_FLIGHT,
   GRAPH_CATALOG_CACHE_MAX_ROWS,
+  GRAPH_CATALOG_CACHE_MAX_SHARED_WAITERS,
   readPinnedGraphCatalog,
   type GraphCatalogRawS3,
 } from './graph-catalog-reader.js';
@@ -351,4 +352,101 @@ test('GET must still match the exact version and Last-Modified observed by HEAD'
       s3,
     }), /catalog_changed/);
   }
+});
+
+async function cancellationRace(cancelLeader: boolean): Promise<{
+  gets: number;
+  leader: PromiseSettledResult<unknown>;
+  follower: PromiseSettledResult<unknown>;
+}> {
+  const text = '{"path":"shared-cancellation"}\n';
+  let heads = 0;
+  let gets = 0;
+  let started!: () => void;
+  const getStarted = new Promise<void>(resolve => { started = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"shared-cancellation"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+    });
+    if (request.method === 'HEAD') {
+      heads++;
+      return { status: 200, headers, body: null };
+    }
+    gets++;
+    started();
+    await gate;
+    return { status: 200, headers, body: new Response(text).body };
+  };
+  const leaderController = new AbortController();
+  const followerController = new AbortController();
+  const input = {
+    key: `graph-trial/synthetic/cancel-${cancelLeader ? 'leader' : 'follower'}.jsonl`,
+    sourceSha256: source,
+    s3,
+  };
+  const leader = readPinnedGraphCatalog({ ...input, signal: leaderController.signal });
+  await getStarted;
+  const follower = readPinnedGraphCatalog({ ...input, signal: followerController.signal });
+  while (heads < 2) await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  if (cancelLeader) leaderController.abort();
+  else followerController.abort();
+  release();
+  const [leaderResult, followerResult] = await Promise.allSettled([leader, follower]);
+  return { gets, leader: leaderResult, follower: followerResult };
+}
+
+test('leader cancellation does not cancel a live follower sharing the GET', async () => {
+  const result = await cancellationRace(true);
+  assert.equal(result.gets, 1);
+  assert.equal(result.leader.status, 'rejected');
+  assert.match(String((result.leader as PromiseRejectedResult).reason), /catalog_cancelled/);
+  assert.equal(result.follower.status, 'fulfilled');
+});
+
+test('follower cancellation does not cancel the leader sharing the GET', async () => {
+  const result = await cancellationRace(false);
+  assert.equal(result.gets, 1);
+  assert.equal(result.leader.status, 'fulfilled');
+  assert.equal(result.follower.status, 'rejected');
+  assert.match(String((result.follower as PromiseRejectedResult).reason), /catalog_cancelled/);
+});
+
+test('same-identity followers have an explicit bounded waiter cap', async () => {
+  const text = '{"path":"waiter-cap"}\n';
+  let gets = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"waiter-cap"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+    });
+    if (request.method === 'HEAD') return { status: 200, headers, body: null };
+    gets++;
+    await gate;
+    return { status: 200, headers, body: new Response(text).body };
+  };
+  const reads = Array.from(
+    { length: GRAPH_CATALOG_CACHE_MAX_SHARED_WAITERS + 1 },
+    () => readPinnedGraphCatalog({
+      key: 'graph-trial/synthetic/waiter-cap.jsonl',
+      sourceSha256: source,
+      s3,
+    }),
+  );
+  const settled = Promise.allSettled(reads);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  release();
+  const outcomes = await settled;
+  assert.equal(gets, 1);
+  assert.equal(outcomes.filter(value => value.status === 'fulfilled').length, GRAPH_CATALOG_CACHE_MAX_SHARED_WAITERS);
+  const rejected = outcomes.filter(value => value.status === 'rejected') as PromiseRejectedResult[];
+  assert.equal(rejected.length, 1);
+  assert.match(String(rejected[0].reason), /catalog_reader_busy/);
 });
