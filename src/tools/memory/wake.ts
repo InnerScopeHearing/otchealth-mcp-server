@@ -17,6 +17,7 @@ import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
 import { isConfigured as inboxConfigured, readMessages } from '../../agentstate/queue.js';
 import { isM365StaticAuth } from '../../server/request-context.js';
 import { retractedIdsForAgent } from '../../memory/retractions.js';
+import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from '../hyperagent/ring.js';
 
 /**
  * wake — ONE federated boot call for any agent on any platform. Composes, server-side, everything
@@ -604,6 +605,13 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           };
         }
         const agent = normalizeAgent(agentRaw);
+        if (ctx.callerAgent === WEFUNDER_CAMPAIGN_DIRECTOR_LANE && agent !== ctx.callerAgent) {
+          return {
+            data: { agent: ctx.callerAgent, pack: null, memory_records: [], tasks: null, inbox: null,
+              inbound: null, errors: ['forbidden_agent'], doctrine: buildDoctrine() },
+            summary: 'wake: this dedicated seat can load only its own agent context.',
+          };
+        }
         const recentLimit = input.recent_limit ?? 10;
         const memoryLimit = input.memory_limit ?? 12;
         const taskLimit = input.task_limit ?? 15;

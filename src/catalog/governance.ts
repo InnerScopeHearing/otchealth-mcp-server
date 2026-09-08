@@ -63,12 +63,12 @@ export const GOVERNANCE: GovRule[] = [
   // "let a lane talk to its counterpart" and is not covered by this approval.
   {
     pattern: 'hyperagent_create_thread',
-    requiredRole: ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'developer'],
+    requiredRole: ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'developer', 'wefunder-campaign-director'],
     reason: 'Approved internal lanes may start a thread on a Hyperagent agent; ring.ts independently enforces which agents each lane may address, and a per-lane rate cap bounds spend.',
   },
   {
     pattern: 'hyperagent_send_message',
-    requiredRole: ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'developer'],
+    requiredRole: ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'developer', 'wefunder-campaign-director'],
     reason: 'Approved internal lanes may message a Hyperagent thread they are permitted to address; the owning agent is resolved and ring-checked before the write.',
   },
   { pattern: 'heygen_video_wait_ingest_qa', requiredRole: ['cto', 'cro'], reason: 'Operation-bound HeyGen polling/private artifact ingestion is available to CTO/CRO and leaves visual approval manual.' },

@@ -22,6 +22,7 @@ import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult, extractResultSummary } from './result-store.js';
+import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from './hyperagent/ring.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
 import {
   inboundShield,
@@ -355,13 +356,19 @@ export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
 
 /**
  * Fixed Wefunder Campaign Director connector surface. This is deliberately not a ship lane:
- * it receives the external read baseline plus only the bounded AgentCore Browser broker tools.
+ * it receives the external read baseline, diagnostics, its exact-source Hyperagent migration
+ * tools and the existing bounded AgentCore Browser broker tools. Hyperagent ring.ts independently
+ * restricts this lane to one reviewed source ID with explicit runtime class and assignment.
  * The broker independently enforces the Wefunder enrollment, public-read capability, public-host
  * allowlist, isolated lease, and redacted receipt contract. No login, persistence, draft/write,
  * financial, investor, KYC, tax, signature, or campaign-publish capability is exposed here.
  */
 export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
-  ...EXTERNAL_READONLY_TOOLSET,
+  // Result-store retrieval has no caller binding; never expose it to this scoped principal.
+  ...EXTERNAL_READONLY_TOOLSET.filter(name => name !== 'gateway_fetch_result'),
+  'catalog_probe',
+  'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
+  'hyperagent_create_thread', 'hyperagent_send_message',
   'browser_broker_preflight',
   'browser_broker_inspect_public',
 ] as const;
@@ -764,7 +771,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // CANONICAL name (see ToolDefinition.canonicalName's doc comment) -- for a primary registration
   // this is just def.name; for a generated alias it's the real tool the alias stands in for.
   const canonicalName = def.canonicalName ?? def.name;
-  const connectorSurfaceForThisTool = isConnectorSurface();
+  // Apply this specialist's fixed allowlist to every authentication path, including a legacy
+  // confidential OAuth client whose ID does not use the connector prefix.
+  const connectorSurfaceForThisTool = isConnectorSurface() || currentCallerAgent() === WEFUNDER_CAMPAIGN_DIRECTOR_LANE;
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
   // client_credentials lanes (cto/cfo/clo/clo-personal/coo/cro/cpo/cco/developer/exec), which today
@@ -1267,7 +1276,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // wake(), whose payload is routinely >40KB). Other engines (Claude Code, Hyperagent) are
         // UNCHANGED -- they reliably use the two-hop pattern today, so this is scoped narrowly to the
         // one consumer confirmed not to support it, not a global behavior change.
-        if (shouldOffload(text) && !isM365StaticAuth()) {
+        // The dedicated source may contain investor material. The shared result cache has no
+        // caller binding, so this principal must keep its payload inline, never in that cache.
+        if (callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE && shouldOffload(text) && !isM365StaticAuth()) {
           const off = await offloadResult(text, result, correlationId);
           if (off) {
             text = off.preview;
