@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readPinnedGraphCatalog, type GraphCatalogRawS3 } from './graph-catalog-reader.js';
-import { createHash } from 'node:crypto';
+import {
+  GRAPH_CATALOG_CACHE_MAX_ENTRIES,
+  GRAPH_CATALOG_CACHE_MAX_IN_FLIGHT,
+  GRAPH_CATALOG_CACHE_MAX_ROWS,
+  readPinnedGraphCatalog,
+  type GraphCatalogRawS3,
+} from './graph-catalog-reader.js';
 const source='a'.repeat(64), createdAt='2026-09-08T00:00:00.000Z';
 function harness(text:string, getStatus=200):GraphCatalogRawS3{return async r=>({status:r.method==='HEAD'?200:getStatus,headers:new Headers({etag:'"v1"','content-length':String(Buffer.byteLength(text)),'last-modified':createdAt}),body:r.method==='HEAD'?null:new ReadableStream({start(c){c.enqueue(Buffer.from(text));c.close();}})});}
 test('reads bounded JSONL only after a matching pinned HEAD and GET',async()=>{const result=await readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,createdAt,s3:harness('{"path":"a"}\n')});assert.equal(result.catalogEtag,'"v1"');assert.deepEqual(result.rows,[{path:'a'}]);});
@@ -16,20 +21,334 @@ test('rejects impossible HEAD size before GET and rejects truncated or invalid U
 test('caller cancellation bounds an unresolved transport without a later GET',async()=>{
  let requests=0;const controller=new AbortController();const pending=readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,signal:controller.signal,s3:async()=>{requests++;return new Promise(()=>{});}});setTimeout(()=>controller.abort(),5);await assert.rejects(pending,/catalog_cancelled/);assert.equal(requests,1);
 });
-test('pins raw bytes and an S3 version before and after the catalog read',async()=>{
- const body='{"path":"a"}\n',digest=createHash('sha256').update(body).digest('hex');let heads=0;
-  const s3:GraphCatalogRawS3=async r=>{if(r.method==='HEAD')heads++;return{status:200,headers:new Headers({etag:'"v1"','last-modified':createdAt,'content-length':String(Buffer.byteLength(body)),'x-amz-version-id':'version-1'}),body:r.method==='HEAD'?null:new Response(body).body};};
- const result=await readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,expectedContentSha256:digest,expectedVersionId:'version-1',s3});
- assert.equal(result.catalogContentSha256,digest);assert.equal(result.catalogVersionId,'version-1');assert.equal(heads,2);
- await assert.rejects(readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,expectedContentSha256:'b'.repeat(64),expectedVersionId:'version-1',s3}),/catalog_content_changed/);
- await assert.rejects(readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,expectedContentSha256:digest,expectedVersionId:'version-2',s3}),/catalog_version_changed/);
+
+test('fresh HEAD coalesces immutable GET and parse work for an unchanged identity', async () => {
+  const text = Array.from({ length: 200 }, (_, i) => JSON.stringify({
+    path: `finance/row-${i}`,
+    nested: { ordinal: i },
+  })).join('\n') + '\n';
+  let heads = 0;
+  let gets = 0;
+  let downloaded = 0;
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"same"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+      'x-amz-version-id': 'version-1',
+    });
+    if (request.method === 'HEAD') {
+      heads++;
+      return { status: 200, headers, body: null };
+    }
+    gets++;
+    downloaded += Buffer.byteLength(text);
+    return { status: 200, headers, body: new Response(text).body };
+  };
+
+  const results = [];
+  for (let i = 0; i < 5; i++) {
+    results.push(await readPinnedGraphCatalog({
+      key: 'graph-trial/synthetic/catalog.jsonl',
+      sourceSha256: source,
+      s3,
+    }));
+  }
+
+  assert.deepEqual({ heads, gets, downloaded }, {
+    heads: 5,
+    gets: 1,
+    downloaded: Buffer.byteLength(text),
+  });
+  assert.equal(results.every(result => result === results[0]), true);
+  assert.equal(Object.isFrozen(results[0]), true);
+  assert.equal(Object.isFrozen(results[0].rows), true);
+  assert.equal(Object.isFrozen(results[0].rows[0]), true);
+  assert.equal(Object.isFrozen(results[0].rows[0].nested), true);
+  assert.throws(() => {
+    (results[0].rows[0] as Record<string, unknown>).path = 'mutated';
+  }, TypeError);
 });
-test('rejects a same-ETag catalog whose version changes after GET',async()=>{
- const body='{"path":"a"}\n';let heads=0;
-  const s3:GraphCatalogRawS3=async r=>{const version=r.method==='HEAD'&&++heads===2?'version-2':'version-1';return{status:200,headers:new Headers({etag:'"stable"','last-modified':createdAt,'content-length':String(Buffer.byteLength(body)),'x-amz-version-id':version}),body:r.method==='HEAD'?null:new Response(body).body};};
- await assert.rejects(readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,expectedVersionId:'version-1',s3}),/catalog_changed/);
+
+test('every exact HEAD identity component invalidates the cached catalog immediately', async () => {
+  let text = '{"path":"v1"}\n';
+  let etag = '"etag-1"';
+  let modified = createdAt;
+  let versionId = 'version-1';
+  let heads = 0;
+  let gets = 0;
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag,
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': modified,
+      'x-amz-version-id': versionId,
+    });
+    if (request.method === 'HEAD') {
+      heads++;
+      return { status: 200, headers, body: null };
+    }
+    gets++;
+    return { status: 200, headers, body: new Response(text).body };
+  };
+  const read = () => readPinnedGraphCatalog({
+    key: 'graph-trial/synthetic/identity.jsonl',
+    sourceSha256: source,
+    s3,
+  });
+
+  await read();
+  versionId = 'version-2';
+  await read();
+  modified = '2026-09-08T00:00:01.000Z';
+  await read();
+  etag = '"etag-2"';
+  await read();
+  text = '{"path":"version-with-new-size"}\n';
+  const changed = await read();
+
+  assert.deepEqual({ heads, gets }, { heads: 5, gets: 5 });
+  assert.equal(changed.rows[0].path, 'version-with-new-size');
 });
-test('rejects a GET version change even when both HEADs would agree',async()=>{
- const body='{"path":"a"}\n';let calls=0;const s3:GraphCatalogRawS3=async r=>{calls++;const version=r.method==='GET'?'version-2':'version-1';return{status:200,headers:new Headers({etag:'"stable"','last-modified':createdAt,'content-length':String(Buffer.byteLength(body)),'x-amz-version-id':version}),body:r.method==='HEAD'?null:new Response(body).body};};
- await assert.rejects(readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,expectedVersionId:'version-1',s3}),/catalog_get_failed|catalog_version_changed/);assert.equal(calls,2);
+
+test('a partial stream failure and caller cancellation never publish a cache entry', async () => {
+  const text = '{"path":"complete"}\n';
+  let gets = 0;
+  let failPartial = true;
+  let hang = false;
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"retryable"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+    });
+    if (request.method === 'HEAD') return { status: 200, headers, body: null };
+    gets++;
+    if (failPartial) {
+      failPartial = false;
+      return {
+        status: 200,
+        headers,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(Buffer.from('{"path":'));
+            controller.error(new Error('synthetic stream failure'));
+          },
+        }),
+      };
+    }
+    if (hang) {
+      hang = false;
+      return {
+        status: 200,
+        headers,
+        body: new ReadableStream({ pull: () => new Promise(() => undefined) }),
+      };
+    }
+    return { status: 200, headers, body: new Response(text).body };
+  };
+  const input = {
+    key: 'graph-trial/synthetic/retry.jsonl',
+    sourceSha256: source,
+    s3,
+  };
+
+  await assert.rejects(readPinnedGraphCatalog(input), /synthetic stream failure/);
+  assert.equal((await readPinnedGraphCatalog(input)).rows[0].path, 'complete');
+  assert.equal(gets, 2);
+
+  let changedText = '{"path":"after-cancel"}\n';
+  const cancellable: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"cancel"',
+      'content-length': String(Buffer.byteLength(changedText)),
+      'last-modified': createdAt,
+    });
+    if (request.method === 'HEAD') return { status: 200, headers, body: null };
+    gets++;
+    if (changedText.includes('after-cancel')) {
+      changedText = '{"path":"recovered"}\n';
+      return {
+        status: 200,
+        headers,
+        body: new ReadableStream({ pull: () => new Promise(() => undefined) }),
+      };
+    }
+    headers.set('content-length', String(Buffer.byteLength(changedText)));
+    return { status: 200, headers, body: new Response(changedText).body };
+  };
+  const controller = new AbortController();
+  const cancelled = readPinnedGraphCatalog({
+    key: 'graph-trial/synthetic/cancel.jsonl',
+    sourceSha256: source,
+    s3: cancellable,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 5);
+  await assert.rejects(cancelled, /catalog_cancelled/);
+  const recovered = await readPinnedGraphCatalog({
+    key: 'graph-trial/synthetic/cancel.jsonl',
+    sourceSha256: source,
+    s3: cancellable,
+  });
+  assert.equal(recovered.rows[0].path, 'recovered');
+});
+
+test('concurrent readers perform fresh HEAD checks but coalesce to one bounded GET', async () => {
+  const text = '{"path":"coalesced"}\n';
+  let heads = 0;
+  let gets = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"coalesced"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+    });
+    if (request.method === 'HEAD') {
+      heads++;
+      return { status: 200, headers, body: null };
+    }
+    gets++;
+    await gate;
+    return { status: 200, headers, body: new Response(text).body };
+  };
+
+  const reads = Array.from({ length: 12 }, () => readPinnedGraphCatalog({
+    key: 'graph-trial/synthetic/concurrent.jsonl',
+    sourceSha256: source,
+    s3,
+  }));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(gets, 1);
+  release();
+  await Promise.all(reads);
+  assert.deepEqual({ heads, gets }, { heads: 12, gets: 1 });
+});
+
+test('cache entry and row caps retain bounded state and bypass oversized catalogs', async () => {
+  let gets = 0;
+  const s3: GraphCatalogRawS3 = async request => {
+    const many = request.key.endsWith('many.jsonl');
+    const text = many
+      ? Array.from({ length: GRAPH_CATALOG_CACHE_MAX_ROWS + 1 }, () => '{}').join('\n') + '\n'
+      : JSON.stringify({ path: request.key }) + '\n';
+    const headers = new Headers({
+      etag: '"bounded"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+    });
+    if (request.method === 'HEAD') return { status: 200, headers, body: null };
+    gets++;
+    return { status: 200, headers, body: new Response(text).body };
+  };
+
+  const readKey = (key: string) => readPinnedGraphCatalog({ key, sourceSha256: source, s3 });
+  for (let i = 0; i <= GRAPH_CATALOG_CACHE_MAX_ENTRIES; i++) {
+    await readKey(`graph-trial/synthetic/cache-${i}.jsonl`);
+  }
+  await readKey('graph-trial/synthetic/cache-0.jsonl');
+  assert.equal(gets, GRAPH_CATALOG_CACHE_MAX_ENTRIES + 2);
+
+  const beforeMany = gets;
+  await readKey('graph-trial/synthetic/many.jsonl');
+  await readKey('graph-trial/synthetic/many.jsonl');
+  assert.equal(gets, beforeMany + 2);
+});
+
+test('cache entries never cross distinct raw S3 authority adapters', async () => {
+  const make = (path: string) => {
+    let gets = 0;
+    const text = JSON.stringify({ path }) + '\n';
+    const s3: GraphCatalogRawS3 = async request => {
+      const headers = new Headers({
+        etag: '"same-authority-independent-identity"',
+        'content-length': String(Buffer.byteLength(text)),
+        'last-modified': createdAt,
+      });
+      if (request.method === 'HEAD') return { status: 200, headers, body: null };
+      gets++;
+      return { status: 200, headers, body: new Response(text).body };
+    };
+    return { s3, get gets() { return gets; } };
+  };
+  const first = make('first');
+  const second = make('second');
+  const input = { key: 'graph-trial/synthetic/scoped.jsonl', sourceSha256: source };
+  assert.equal((await readPinnedGraphCatalog({ ...input, s3: first.s3 })).rows[0].path, 'first');
+  assert.equal((await readPinnedGraphCatalog({ ...input, s3: second.s3 })).rows[0].path, 'second');
+  assert.deepEqual({ first: first.gets, second: second.gets }, { first: 1, second: 1 });
+});
+
+test('distinct cache misses cannot exceed the bounded download concurrency', async () => {
+  const maximum = GRAPH_CATALOG_CACHE_MAX_IN_FLIGHT;
+  let activeGets = 0;
+  let maximumActiveGets = 0;
+  let gets = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  const s3: GraphCatalogRawS3 = async request => {
+    const text = JSON.stringify({ path: request.key }) + '\n';
+    const headers = new Headers({
+      etag: `"${request.key}"`,
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+    });
+    if (request.method === 'HEAD') return { status: 200, headers, body: null };
+    gets++;
+    activeGets++;
+    maximumActiveGets = Math.max(maximumActiveGets, activeGets);
+    try {
+      await gate;
+      return { status: 200, headers, body: new Response(text).body };
+    } finally {
+      activeGets--;
+    }
+  };
+
+  const reads = Array.from({ length: maximum + 4 }, (_, ordinal) => readPinnedGraphCatalog({
+    key: `graph-trial/synthetic/distinct-${ordinal}.jsonl`,
+    sourceSha256: source,
+    s3,
+  }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(gets, maximum);
+  assert.equal(maximumActiveGets, maximum);
+  release();
+  await Promise.all(reads);
+  assert.equal(gets, maximum + 4);
+  assert.equal(maximumActiveGets, maximum);
+});
+
+test('GET must still match the exact version and Last-Modified observed by HEAD', async () => {
+  const text = '{}\n';
+  for (const changed of ['version', 'modified']) {
+    const s3: GraphCatalogRawS3 = async request => {
+      const headers = new Headers({
+        etag: '"same-etag"',
+        'content-length': String(Buffer.byteLength(text)),
+        'last-modified': request.method === 'GET' && changed === 'modified'
+          ? '2026-09-08T00:00:01.000Z'
+          : createdAt,
+        'x-amz-version-id': request.method === 'GET' && changed === 'version'
+          ? 'version-2'
+          : 'version-1',
+      });
+      return {
+        status: 200,
+        headers,
+        body: request.method === 'HEAD' ? null : new Response(text).body,
+      };
+    };
+    await assert.rejects(readPinnedGraphCatalog({
+      key: `graph-trial/synthetic/get-changed-${changed}.jsonl`,
+      sourceSha256: source,
+      s3,
+    }), /catalog_changed/);
+  }
 });
