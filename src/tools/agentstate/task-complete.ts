@@ -4,6 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured } from '../../agentstate/store.js';
 import { completeTask } from '../../agentstate/ledger.js';
 import { resolveAttribution } from './attribution.js';
+import { taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -22,8 +23,18 @@ export interface TaskCompleteInput {
 
 /** Exported standalone (mirroring memory-write.ts's handleMemoryWrite) so the attribution binding
  *  is directly testable through the actual registered entry point. */
-export async function handleTaskComplete(input: TaskCompleteInput, ctx: ToolContext): Promise<ToolResultPayload> {
-  if (!isConfigured()) return { data: { completed: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
+export interface TaskCompleteDependencies {
+  isConfigured: typeof isConfigured;
+  completeTask: typeof completeTask;
+  taskVisibleToCaller: typeof taskVisibleToCaller;
+}
+const DEFAULT_TASK_COMPLETE_DEPENDENCIES: TaskCompleteDependencies = { isConfigured, completeTask, taskVisibleToCaller };
+export async function handleTaskComplete(
+  input: TaskCompleteInput,
+  ctx: ToolContext,
+  deps: TaskCompleteDependencies = DEFAULT_TASK_COMPLETE_DEPENDENCIES,
+): Promise<ToolResultPayload> {
+  if (!deps.isConfigured()) return { data: { completed: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
   const { actor, claimed_actor } = resolveAttribution(ctx.callerAgent, input.agent);
   if (ctx.dryRun) {
     return {
@@ -31,7 +42,16 @@ export async function handleTaskComplete(input: TaskCompleteInput, ctx: ToolCont
       summary: `DRY RUN: would complete ${input.task_id} with ${input.artifact_uri}.`,
     };
   }
-  const res = await completeTask(input.task_id, input.artifact_uri, actor, input.note, input.board, input.expected_lease_version, claimed_actor);
+  const res = await deps.completeTask(
+    input.task_id,
+    input.artifact_uri,
+    actor,
+    input.note,
+    input.board,
+    input.expected_lease_version,
+    claimed_actor,
+    (task) => deps.taskVisibleToCaller(task, actor),
+  );
   if (res.task) {
     return {
       data: { completed: true, task: res.task, resolution: res.resolution, claimed_actor },

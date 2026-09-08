@@ -4,6 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured } from '../../agentstate/store.js';
 import { heartbeatTask } from '../../agentstate/ledger.js';
 import { resolveAttribution } from './attribution.js';
+import { taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -22,8 +23,18 @@ export interface TaskHeartbeatInput {
 
 /** Exported standalone (mirroring memory-write.ts's handleMemoryWrite) so the attribution binding
  *  is directly testable through the actual registered entry point. */
-export async function handleTaskHeartbeat(input: TaskHeartbeatInput, ctx: ToolContext): Promise<ToolResultPayload> {
-  if (!isConfigured()) return { data: { extended: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
+export interface TaskHeartbeatDependencies {
+  isConfigured: typeof isConfigured;
+  heartbeatTask: typeof heartbeatTask;
+  taskVisibleToCaller: typeof taskVisibleToCaller;
+}
+const DEFAULT_TASK_HEARTBEAT_DEPENDENCIES: TaskHeartbeatDependencies = { isConfigured, heartbeatTask, taskVisibleToCaller };
+export async function handleTaskHeartbeat(
+  input: TaskHeartbeatInput,
+  ctx: ToolContext,
+  deps: TaskHeartbeatDependencies = DEFAULT_TASK_HEARTBEAT_DEPENDENCIES,
+): Promise<ToolResultPayload> {
+  if (!deps.isConfigured()) return { data: { extended: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
   const { actor, claimed_actor } = resolveAttribution(ctx.callerAgent, input.agent);
   if (ctx.dryRun) {
     return {
@@ -31,7 +42,14 @@ export async function handleTaskHeartbeat(input: TaskHeartbeatInput, ctx: ToolCo
       summary: `DRY RUN: would extend the lease on ${input.task_id}.`,
     };
   }
-  const res = await heartbeatTask(input.task_id, actor, input.board, input.expected_lease_version, claimed_actor);
+  const res = await deps.heartbeatTask(
+    input.task_id,
+    actor,
+    input.board,
+    input.expected_lease_version,
+    claimed_actor,
+    (task) => deps.taskVisibleToCaller(task, actor),
+  );
   if (res.task) {
     return {
       data: { extended: true, task: res.task, claimed_actor },
