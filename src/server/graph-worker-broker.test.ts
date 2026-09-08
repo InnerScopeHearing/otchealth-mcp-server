@@ -89,6 +89,7 @@ function headers(etag = '"e1"') {
 async function harness(options: {
   caller?: string; policy?: unknown; active?: unknown; row?: unknown; transportError?: boolean;
   readCfoText?: GraphWorkerBrokerDeps['readCfoText'];
+  now?: () => number;
 } = {}) {
   const f = fixture();
   let revision = 1;
@@ -133,7 +134,7 @@ async function harness(options: {
       connector_surface: true, m365_static_auth: false,
     }),
     bindingsJson: () => JSON.stringify(options.policy ?? f.policy),
-    now: () => NOW,
+    now: options.now ?? (() => NOW),
     s3,
     readCfoText: options.readCfoText ?? (async (source) => Object.freeze({
       outcome: 'missing_text' as const,
@@ -324,6 +325,243 @@ test('CFO text preparation persists bound refs and serves only an exact prepared
   });
   assert.equal(cto.statusCode, 403);
   assert.equal(calls.length, 1);
+  await h.app.close();
+});
+
+test('prepared operations bind actual snapshot chunks, isolate snapshots, and fail closed when stale', async () => {
+  let sourceRead = 0;
+  let now = NOW;
+  const text = 'Synthetic prepared CFO chunk.';
+  const h = await harness({
+    now: () => now,
+    readCfoText: async (source) => {
+      const version = ++sourceRead;
+      return Object.freeze({
+        outcome: 'ready' as const,
+        descriptor: Object.freeze({
+          schema: 'cfo-version-pinned-text-snapshot-v1' as const,
+          room: 'finance' as const,
+          source_index: 'finance-cfo-source-docs' as const,
+          source_document_version: source.document_version_id,
+          catalog_source_sha256: source.source_version,
+          source_lineage_status: 'catalog_association_only' as const,
+          source_path_hash: source.source_path_hash,
+          sidecar_path_hash: H('_TEXT/' + source.path + '.txt'),
+          sidecar_etag: '"synthetic-etag-' + version + '"',
+          sidecar_version_id: 'synthetic-version-' + version,
+          sidecar_content_sha256: H(text),
+          total_bytes: Buffer.byteLength(text),
+          total_chars_utf16: text.length,
+          chunk_count: 1,
+          chunk_overlap_chars: 200,
+        }),
+        chunks: Object.freeze([Object.freeze({
+          ordinal: 0, start_utf16: 0, end_utf16: text.length,
+          start_byte: 0, end_byte: Buffer.byteLength(text),
+          text_sha256: H(text), text,
+        })]),
+      });
+    },
+  });
+  const prepareUrl = '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-snapshots';
+  const prepare = async () => {
+    const response = await h.app.inject({
+      method: 'POST', url: prepareUrl, headers: authHeaders,
+      payload: { run: h.f.run, document_ordinal: 0 },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().outcome, 'ready');
+    return response.json();
+  };
+  const firstReceipt = await prepare();
+  const secondReceipt = await prepare();
+  assert.notEqual(firstReceipt.snapshot_id, secondReceipt.snapshot_id);
+  assert.equal(firstReceipt.sidecar_content_sha256, secondReceipt.sidecar_content_sha256);
+
+  const prepared = (receipt: Record<string, unknown>) => {
+    const sourceBinding = {
+      schema: 'cfo-prepared-chunk-binding-v1',
+      run_id: h.f.run.run_id,
+      room: 'finance',
+      source_index: 'finance-cfo-source-docs',
+      catalog_manifest_sha256: h.f.run.manifest_sha256,
+      document_ordinal: 0,
+      source_document_version: h.f.item.document_version_id,
+      catalog_source_sha256: h.f.item.source_version,
+      snapshot_id: receipt.snapshot_id,
+      prepared_manifest_sha256: receipt.manifest_sha256,
+      sidecar_content_sha256: receipt.sidecar_content_sha256,
+      chunk_ordinal: 0,
+      chunk_sha256: H(text),
+    };
+    const sourceVersion = 'txtchunk_' + H(helper.canonical(sourceBinding));
+    const sourceId = 'cfotext_' + H(helper.canonical({
+      schema: 'cfo-prepared-chunk-source-v1',
+      purpose: h.f.run.purpose,
+      source_binding: sourceBinding,
+    }));
+    const document = { text, document_version_id: sourceVersion, room: 'finance' };
+    const request = {
+      schema: 'company-prepared-text-gateway-authorization-v1',
+      phase: 'model_source_access',
+      authenticated_caller: 'cfo',
+      run: h.f.run,
+      source: {
+        source_id: sourceId,
+        subscription_source_version: sourceVersion,
+        purpose: h.f.run.purpose,
+        canonical_input_sha256: H(helper.canonical(document)),
+        source_binding: sourceBinding,
+      },
+    };
+    return { sourceBinding, sourceVersion, sourceId, document, request };
+  };
+  const first = prepared(firstReceipt);
+  const second = prepared(secondReceipt);
+  assert.notEqual(first.sourceId, second.sourceId);
+  assert.notEqual(first.sourceVersion, second.sourceVersion);
+
+  const authorize = await h.app.inject({
+    method: 'POST', url: '/graph-worker/v1/authorize',
+    headers: authHeaders, payload: first.request,
+  });
+  assert.equal(authorize.statusCode, 200);
+  const decision = authorize.json();
+
+  const tamperedBinding = {
+    ...first.sourceBinding, chunk_sha256: H('tampered chunk'),
+  };
+  const tamperedVersion = 'txtchunk_' + H(helper.canonical(tamperedBinding));
+  const tamperedId = 'cfotext_' + H(helper.canonical({
+    schema: 'cfo-prepared-chunk-source-v1',
+    purpose: h.f.run.purpose,
+    source_binding: tamperedBinding,
+  }));
+  const tamperedDocument = {
+    text, document_version_id: tamperedVersion, room: 'finance',
+  };
+  const tamperedRequest = {
+    ...first.request,
+    source: {
+      ...first.request.source,
+      source_id: tamperedId,
+      subscription_source_version: tamperedVersion,
+      canonical_input_sha256: H(helper.canonical(tamperedDocument)),
+      source_binding: tamperedBinding,
+    },
+  };
+  const tamperedAuthorization = await h.app.inject({
+    method: 'POST', url: '/graph-worker/v1/authorize',
+    headers: authHeaders, payload: tamperedRequest,
+  });
+  assert.equal(tamperedAuthorization.statusCode, 403);
+
+  const spec = {
+    authorization_ref: decision.decision_ref,
+    authorization_sha256: H(helper.canonical({
+      authorized: true,
+      decision_ref: decision.decision_ref,
+      source_binding: first.sourceBinding,
+    })),
+    extractor_bundle_sha256: H('reviewed prepared extractor bundle'),
+    extractor_version: 'codex-subscription-extractor-v1',
+    input_sha256: first.request.source.canonical_input_sha256,
+    login_before_model_contract: 'codex-login-status-before-model-exec-v1',
+    model: 'gpt-5.6-luna',
+    provider: 'codex-chatgpt-subscription',
+    purpose: h.f.run.purpose,
+    source_id: first.sourceId,
+    source_version: first.sourceVersion,
+    source_binding: first.sourceBinding,
+  };
+  const operationId = 'subop_' + H(helper.canonical(spec));
+  const operation = {
+    operation_id: operationId, spec, state: 'claimed',
+    claim_token: 'prepared-claim-token-1234', revision: 0,
+  };
+  const operationEnvelope = {
+    schema: 'subscription-model-operation-v1',
+    operation_id: operationId,
+    operation_sha256: H(helper.canonical(operation)),
+    operation,
+  };
+  const operationUrl = '/graph-worker/v1/state/' + h.f.run.run_id +
+    '/operations/' + operationId + '.json';
+  const created = await h.app.inject({
+    method: 'PUT', url: operationUrl,
+    headers: { ...authHeaders, 'if-none-match': '*' },
+    payload: helper.canonical(operationEnvelope),
+  });
+  assert.equal(created.statusCode, 201);
+
+  const secondSpec = {
+    ...spec,
+    source_id: second.sourceId,
+    source_version: second.sourceVersion,
+    source_binding: second.sourceBinding,
+    input_sha256: second.request.source.canonical_input_sha256,
+  };
+  assert.notEqual(
+    'subop_' + H(helper.canonical(secondSpec)),
+    operationId,
+  );
+
+  const dispatched = {
+    ...operation, state: 'dispatched', revision: 1,
+    dispatched_at: '2026-09-08T04:00:01.000Z',
+  };
+  const dispatchedEnvelope = {
+    ...operationEnvelope,
+    operation_sha256: H(helper.canonical(dispatched)),
+    operation: dispatched,
+  };
+  const updated = await h.app.inject({
+    method: 'PUT', url: operationUrl,
+    headers: { ...authHeaders, 'if-match': created.headers.etag as string },
+    payload: helper.canonical(dispatchedEnvelope),
+  });
+  assert.equal(updated.statusCode, 201);
+
+  const wrongResult = {
+    operation_id: operationId,
+    spec_sha256: H(helper.canonical(spec)),
+    output: { source_sha256: H('wrong text') },
+  };
+  const wrongResultEnvelope = {
+    schema: 'subscription-model-result-v1',
+    operation_id: operationId,
+    result_sha256: H(helper.canonical(wrongResult)),
+    result: wrongResult,
+  };
+  const resultUrl = '/graph-worker/v1/state/' + h.f.run.run_id +
+    '/results/' + operationId + '.json';
+  const rejectedResult = await h.app.inject({
+    method: 'PUT', url: resultUrl,
+    headers: { ...authHeaders, 'if-none-match': '*' },
+    payload: helper.canonical(wrongResultEnvelope),
+  });
+  assert.equal(rejectedResult.statusCode, 403);
+
+  const bundleEntry = [...h.objects.entries()].find(([key]) =>
+    key.includes('/text-snapshots/' + firstReceipt.snapshot_id + '/bundles/'));
+  assert.ok(bundleEntry);
+  const [bundleKey, savedBundle] = bundleEntry!;
+  h.objects.set(bundleKey, {
+    ...savedBundle, body: Buffer.from('{"tampered":true}'),
+  });
+  const corruptRead = await h.app.inject({
+    method: 'GET', url: operationUrl,
+    headers: { authorization: 'Bearer cfo' },
+  });
+  assert.equal(corruptRead.statusCode, 503);
+  h.objects.set(bundleKey, savedBundle);
+
+  now = Date.parse(h.f.policy.expires_at);
+  const expiredRead = await h.app.inject({
+    method: 'GET', url: operationUrl,
+    headers: { authorization: 'Bearer cfo' },
+  });
+  assert.equal(expiredRead.statusCode, 503);
   await h.app.close();
 });
 

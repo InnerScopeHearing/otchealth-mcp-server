@@ -29,6 +29,12 @@ const SOURCE_SCHEMA = 'catalog-mention-snapshot-v1';
 const MANIFEST_SCHEMA = 'graph-backfill-runner-v1';
 const COMPANY_SCHEMA = 'company-metadata-subscription-source-v1';
 const AUTH_SCHEMA = 'company-metadata-gateway-authorization-v1';
+const PREPARED_AUTH_SCHEMA = 'company-prepared-text-gateway-authorization-v1';
+const PREPARED_BINDING_SCHEMA = 'cfo-prepared-chunk-binding-v1';
+const PREPARED_SOURCE_SCHEMA = 'cfo-prepared-chunk-source-v1';
+const PREPARED_SOURCE_ID = /^cfotext_[a-f0-9]{64}$/;
+const PREPARED_SOURCE_VERSION = /^txtchunk_[a-f0-9]{64}$/;
+const PREPARED_SNAPSHOT_ID = /^txtsnap_[a-f0-9]{64}$/;
 const ROW_FIELDS = new Set(['path','sha256','sidecar','enriched','enriched_sha256','err',
   'doc_date','entity','entities','named_entities_orgs','named_entities_people',
   'signatories','counterparty']);
@@ -45,6 +51,24 @@ type Policy = {
   schema: 'graph-worker-bindings-v1'; policy_version: string;
   expires_at: string; bindings: Binding[];
 };
+type PreparedBinding = {
+  schema: 'cfo-prepared-chunk-binding-v1';
+  run_id: string;
+  room: 'finance';
+  source_index: 'finance-cfo-source-docs';
+  catalog_manifest_sha256: string;
+  document_ordinal: number;
+  source_document_version: string;
+  catalog_source_sha256: string;
+  snapshot_id: string;
+  prepared_manifest_sha256: string;
+  sidecar_content_sha256: string;
+  chunk_ordinal: number;
+  chunk_sha256: string;
+};
+type OperationSource =
+  | { kind: 'metadata'; item: ManifestItem }
+  | { kind: 'prepared'; item: ManifestItem; sourceBinding: PreparedBinding };
 type RawResponse = { status: number; headers: Headers; body: Buffer };
 type RawRequest = {
   method: 'GET' | 'PUT'; key: string; headers?: Record<string, string>;
@@ -388,6 +412,65 @@ function sourceId(binding: Binding, item: ManifestItem): string {
     room: binding.room, purpose: binding.run.purpose,
   }));
 }
+const PREPARED_BINDING_KEYS = [
+  'schema','run_id','room','source_index','catalog_manifest_sha256',
+  'document_ordinal','source_document_version','catalog_source_sha256',
+  'snapshot_id','prepared_manifest_sha256','sidecar_content_sha256',
+  'chunk_ordinal','chunk_sha256',
+];
+function preparedBinding(
+  value: unknown, binding: Binding, manifest: Manifest,
+): { binding: PreparedBinding; item: ManifestItem } | null {
+  if (!exact(value, PREPARED_BINDING_KEYS)) return null;
+  const prepared = value as unknown as PreparedBinding;
+  if (prepared.schema !== PREPARED_BINDING_SCHEMA ||
+      prepared.run_id !== binding.run.run_id ||
+      prepared.room !== 'finance' || binding.room !== 'finance' ||
+      prepared.source_index !== 'finance-cfo-source-docs' ||
+      binding.source_index !== prepared.source_index ||
+      prepared.catalog_manifest_sha256 !== binding.run.manifest_sha256 ||
+      prepared.document_ordinal !== 0 ||
+      !/^docv_[a-f0-9]{64}$/.test(prepared.source_document_version) ||
+      !SHA.test(prepared.catalog_source_sha256) ||
+      !PREPARED_SNAPSHOT_ID.test(prepared.snapshot_id) ||
+      !SHA.test(prepared.prepared_manifest_sha256) ||
+      !SHA.test(prepared.sidecar_content_sha256) ||
+      !Number.isSafeInteger(prepared.chunk_ordinal) ||
+      prepared.chunk_ordinal < 0 || prepared.chunk_ordinal >= 100 ||
+      !SHA.test(prepared.chunk_sha256)) return null;
+  const item = manifest.documents[prepared.document_ordinal];
+  if (!item || item.ordinal !== prepared.document_ordinal ||
+      item.document_version_id !== prepared.source_document_version ||
+      item.source_version !== prepared.catalog_source_sha256) return null;
+  return { binding: Object.freeze({ ...prepared }), item };
+}
+function preparedSourceVersion(sourceBinding: PreparedBinding): string {
+  return 'txtchunk_' + digest(canonical(sourceBinding));
+}
+function preparedSourceId(purpose: string, sourceBinding: PreparedBinding): string {
+  return 'cfotext_' + digest(canonical({
+    schema: PREPARED_SOURCE_SCHEMA, purpose, source_binding: sourceBinding,
+  }));
+}
+function preparedAuthorizationRequest(
+  binding: Binding, sourceBinding: PreparedBinding,
+  sourceIdValue: string, sourceVersion: string, inputSha256: string,
+) {
+  return {
+    schema: PREPARED_AUTH_SCHEMA,
+    phase: 'model_source_access',
+    authenticated_caller: binding.authenticated_caller,
+    run: binding.run,
+    source: {
+      source_id: sourceIdValue,
+      subscription_source_version: sourceVersion,
+      purpose: binding.run.purpose,
+      canonical_input_sha256: inputSha256,
+      source_binding: sourceBinding,
+    },
+  };
+}
+
 function findItem(manifest: Manifest, source: Record<string, unknown>): ManifestItem | null {
   if (!Number.isSafeInteger(source.document_ordinal) ||
       (source.document_ordinal as number) < 0) return null;
@@ -395,30 +478,51 @@ function findItem(manifest: Manifest, source: Record<string, unknown>): Manifest
   return item && item.document_version_id === source.document_version_id &&
     item.source_version === source.source_version ? item : null;
 }
+type ParsedAuthorization =
+  | { kind: 'metadata'; request: Record<string, unknown>; source: Record<string, unknown> }
+  | {
+      kind: 'prepared'; request: Record<string, unknown>;
+      source: Record<string, unknown>; sourceBinding: unknown;
+    };
 function parseAuthorization(
   value: unknown, ctx: AuthContext, binding: Binding,
-): { request: Record<string, unknown>; source: Record<string, unknown> } | null {
+): ParsedAuthorization | null {
   if (!exact(value, ['schema','phase','authenticated_caller','run','source'])) return null;
   const request = value as Record<string, unknown>;
-  if (request.schema !== AUTH_SCHEMA ||
-      !['before_metadata_read','model_source_access'].includes(String(request.phase)) ||
-      request.authenticated_caller !== ctx.caller_agent ||
-      !sameRun(request.run, binding.run) ||
-      !exact(request.source, ['source_id','subscription_source_version','room','source_index',
-        'manifest_sha256','document_ordinal','document_version_id','source_version','purpose',
-        'canonical_input_sha256'])) return null;
+  if (request.authenticated_caller !== ctx.caller_agent ||
+      !sameRun(request.run, binding.run)) return null;
+  if (request.schema === AUTH_SCHEMA) {
+    if (!['before_metadata_read','model_source_access'].includes(String(request.phase)) ||
+        !exact(request.source, ['source_id','subscription_source_version','room','source_index',
+          'manifest_sha256','document_ordinal','document_version_id','source_version','purpose',
+          'canonical_input_sha256'])) return null;
+    const source = request.source as Record<string, unknown>;
+    if (source.room !== binding.room || source.source_index !== binding.source_index ||
+        source.manifest_sha256 !== binding.run.manifest_sha256 ||
+        source.purpose !== binding.run.purpose ||
+        !/^companymeta_[a-f0-9]{64}$/.test(String(source.source_id)) ||
+        !/^docv_[a-f0-9]{64}$/.test(String(source.subscription_source_version)) ||
+        !/^docv_[a-f0-9]{64}$/.test(String(source.document_version_id)) ||
+        !SHA.test(String(source.source_version))) return null;
+    if (request.phase === 'before_metadata_read'
+      ? source.canonical_input_sha256 !== null
+      : !SHA.test(String(source.canonical_input_sha256))) return null;
+    return { kind: 'metadata', request, source };
+  }
+  if (request.schema !== PREPARED_AUTH_SCHEMA ||
+      request.phase !== 'model_source_access' ||
+      ctx.caller_agent !== 'cfo' || binding.authenticated_caller !== 'cfo' ||
+      binding.room !== 'finance' ||
+      !exact(request.source, ['source_id','subscription_source_version','purpose',
+        'canonical_input_sha256','source_binding'])) return null;
   const source = request.source as Record<string, unknown>;
-  if (source.room !== binding.room || source.source_index !== binding.source_index ||
-      source.manifest_sha256 !== binding.run.manifest_sha256 ||
+  if (!PREPARED_SOURCE_ID.test(String(source.source_id)) ||
+      !PREPARED_SOURCE_VERSION.test(String(source.subscription_source_version)) ||
       source.purpose !== binding.run.purpose ||
-      !/^companymeta_[a-f0-9]{64}$/.test(String(source.source_id)) ||
-      !/^docv_[a-f0-9]{64}$/.test(String(source.subscription_source_version)) ||
-      !/^docv_[a-f0-9]{64}$/.test(String(source.document_version_id)) ||
-      !SHA.test(String(source.source_version))) return null;
-  if (request.phase === 'before_metadata_read'
-    ? source.canonical_input_sha256 !== null
-    : !SHA.test(String(source.canonical_input_sha256))) return null;
-  return { request, source };
+      !SHA.test(String(source.canonical_input_sha256))) return null;
+  return {
+    kind: 'prepared', request, source, sourceBinding: source.source_binding,
+  };
 }
 function decisionRef(policyVersion: string, request: unknown): string {
   return 'gateway_' + digest(canonical({
@@ -428,6 +532,7 @@ function decisionRef(policyVersion: string, request: unknown): string {
 const SPEC_KEYS = ['authorization_ref','authorization_sha256','extractor_bundle_sha256',
   'extractor_version','input_sha256','login_before_model_contract','model','provider',
   'purpose','source_id','source_version'];
+const PREPARED_SPEC_KEYS = [...SPEC_KEYS, 'source_binding'];
 const OP_KEYS = ['operation_id','spec','state','claim_token','revision'];
 const OP_STATE_KEYS: Record<string, readonly string[]> = {
   claimed: OP_KEYS,
@@ -445,19 +550,23 @@ const TRANSITIONS: Record<string, ReadonlySet<string>> = {
   unknown: new Set(), paused: new Set(), denied: new Set(),
   cancelled: new Set(), complete: new Set(),
 };
-function operationItem(
+function operationSource(
   operation: unknown, manifest: Manifest, binding: Binding, policyVersion: string,
-): ManifestItem | null {
+): OperationSource | null {
   if (!operation || typeof operation !== 'object') return null;
   const value = operation as Record<string, unknown>;
   const state = String(value.state);
   if (!Object.hasOwn(OP_STATE_KEYS, state) || !exact(value, OP_STATE_KEYS[state]) ||
-      !SUBOP.test(String(value.operation_id)) ||
-      !exact(value.spec, SPEC_KEYS) || !STATES.has(state) ||
+      !SUBOP.test(String(value.operation_id)) || !STATES.has(state) ||
       !bounded(value.claim_token, 128) || (value.claim_token as string).length < 16 ||
       !Number.isSafeInteger(value.revision) || (value.revision as number) < 0) return null;
   const spec = value.spec as Record<string, unknown>;
-  if (value.operation_id !== 'subop_' + digest(canonical(spec)) ||
+  if (!spec || Object.getPrototypeOf(spec) !== Object.prototype) return null;
+  const specKeySet = Object.keys(spec).sort().join('\0');
+  const isMetadata = specKeySet === [...SPEC_KEYS].sort().join('\0');
+  const isPrepared = specKeySet === [...PREPARED_SPEC_KEYS].sort().join('\0');
+  if ((!isMetadata && !isPrepared) ||
+      value.operation_id !== 'subop_' + digest(canonical(spec)) ||
       ![spec.authorization_sha256,spec.extractor_bundle_sha256,spec.input_sha256]
         .every((entry) => SHA.test(String(entry))) ||
       spec.login_before_model_contract !== 'codex-login-status-before-model-exec-v1' ||
@@ -468,36 +577,56 @@ function operationItem(
   if (Object.hasOwn(value, 'dispatched_at') && !utc(value.dispatched_at)) return null;
   if (Object.hasOwn(value, 'outcome_code') && !bounded(value.outcome_code)) return null;
   if (Object.hasOwn(value, 'result_sha256') && !SHA.test(String(value.result_sha256))) return null;
-  const item = manifest.documents.find((candidate) =>
-    sourceId(binding, candidate) === spec.source_id &&
-    candidate.document_version_id === spec.source_version);
-  if (!item) return null;
-  const request = {
-    schema: AUTH_SCHEMA, phase: 'model_source_access',
-    authenticated_caller: binding.authenticated_caller, run: binding.run,
-    source: {
-      source_id: spec.source_id, subscription_source_version: spec.source_version,
-      room: binding.room, source_index: binding.source_index,
-      manifest_sha256: binding.run.manifest_sha256, document_ordinal: item.ordinal,
-      document_version_id: item.document_version_id, source_version: item.source_version,
-      purpose: binding.run.purpose, canonical_input_sha256: spec.input_sha256,
-    },
-  };
+  if (isMetadata) {
+    const item = manifest.documents.find((candidate) =>
+      sourceId(binding, candidate) === spec.source_id &&
+      candidate.document_version_id === spec.source_version);
+    if (!item) return null;
+    const request = {
+      schema: AUTH_SCHEMA, phase: 'model_source_access',
+      authenticated_caller: binding.authenticated_caller, run: binding.run,
+      source: {
+        source_id: spec.source_id, subscription_source_version: spec.source_version,
+        room: binding.room, source_index: binding.source_index,
+        manifest_sha256: binding.run.manifest_sha256, document_ordinal: item.ordinal,
+        document_version_id: item.document_version_id, source_version: item.source_version,
+        purpose: binding.run.purpose, canonical_input_sha256: spec.input_sha256,
+      },
+    };
+    const ref = decisionRef(policyVersion, request);
+    return spec.authorization_ref === ref &&
+      spec.authorization_sha256 === digest(canonical({ authorized: true, decision_ref: ref }))
+      ? { kind: 'metadata', item } : null;
+  }
+  const prepared = preparedBinding(spec.source_binding, binding, manifest);
+  if (!prepared) return null;
+  const sourceVersion = preparedSourceVersion(prepared.binding);
+  const sourceIdValue = preparedSourceId(binding.run.purpose, prepared.binding);
+  if (spec.source_id !== sourceIdValue || spec.source_version !== sourceVersion) return null;
+  const request = preparedAuthorizationRequest(
+    binding, prepared.binding, sourceIdValue, sourceVersion, String(spec.input_sha256),
+  );
   const ref = decisionRef(policyVersion, request);
+  const authorization = {
+    authorized: true, decision_ref: ref, source_binding: prepared.binding,
+  };
   return spec.authorization_ref === ref &&
-    spec.authorization_sha256 === digest(canonical({ authorized: true, decision_ref: ref }))
-    ? item : null;
+    spec.authorization_sha256 === digest(canonical(authorization))
+    ? { kind: 'prepared', item: prepared.item, sourceBinding: prepared.binding } : null;
 }
 function parseOperationEnvelope(
   value: unknown, id: string, manifest: Manifest, binding: Binding, policyVersion: string,
-): { envelope: Record<string, unknown>; operation: Record<string, unknown>; item: ManifestItem } | null {
+): {
+  envelope: Record<string, unknown>; operation: Record<string, unknown>;
+  source: OperationSource;
+} | null {
   if (!exact(value, ['schema','operation_id','operation_sha256','operation']) ||
       value.schema !== 'subscription-model-operation-v1' || value.operation_id !== id ||
       value.operation_sha256 !== digest(canonical(value.operation))) return null;
   const operation = value.operation as Record<string, unknown>;
   if (operation.operation_id !== id) return null;
-  const item = operationItem(operation, manifest, binding, policyVersion);
-  return item ? { envelope: value, operation, item } : null;
+  const source = operationSource(operation, manifest, binding, policyVersion);
+  return source ? { envelope: value, operation, source } : null;
 }
 function parseResultEnvelope(value: unknown, id: string) {
   if (!exact(value, ['schema','operation_id','result_sha256','result']) ||
@@ -507,14 +636,6 @@ function parseResultEnvelope(value: unknown, id: string) {
       value.result.operation_id !== id || !SHA.test(String(value.result.spec_sha256)) ||
       !value.result.output || typeof value.result.output !== 'object') return null;
   return value as Record<string, unknown>;
-}
-async function currentOperationSource(
-  deps: GraphWorkerBrokerDeps, binding: Binding, operation: Record<string, unknown>,
-  item: ManifestItem, signal: AbortSignal,
-): Promise<boolean> {
-  const loaded = await loadRow(deps, binding, item, signal);
-  const actual = metadataInputSha(loaded.value.row, item, binding.room);
-  return actual !== null && actual === (operation.spec as Record<string, unknown>).input_sha256;
 }
 function legalTransition(
   prior: Record<string, unknown>, next: Record<string, unknown>, ifMatch: string, priorEtag: string,
@@ -529,25 +650,13 @@ function legalTransition(
     (!Object.hasOwn(prior, 'outcome_code') || prior.outcome_code === next.outcome_code) &&
     (!Object.hasOwn(prior, 'result_sha256') || prior.result_sha256 === next.result_sha256);
 }
-async function readStoredOperation(
-  deps: GraphWorkerBrokerDeps, binding: Binding, id: string, manifest: Manifest,
-  policyVersion: string, signal: AbortSignal,
-) {
-  const key = statePrefix(binding) + '/subscription-jobs/operations/' + id + '.json';
-  const response = await deps.s3({ method: 'GET', key, signal });
-  if (response.status !== 200 || response.body.length > MAX_RESPONSE_BYTES) return null;
-  let value: unknown;
-  try { value = JSON.parse(response.body.toString('utf8')); } catch { return null; }
-  const parsed = parseOperationEnvelope(value, id, manifest, binding, policyVersion);
-  const etag = response.headers.get('etag');
-  if (!parsed || !bounded(etag, 160) ||
-      !(await currentOperationSource(deps, binding, parsed.operation, parsed.item, signal))) return null;
-  return { ...parsed, etag, response };
-}
 export function registerGraphWorkerBrokerRoutes(
   app: FastifyInstance, injected?: Partial<GraphWorkerBrokerDeps>,
 ): void {
   const deps = depsOf(injected);
+  type BrokerControl = {
+    ctx: AuthContext; policy: Policy; binding: Binding; signal: AbortSignal;
+  };
   async function context(request: FastifyRequest, reply: FastifyReply, runId: string) {
     const ctx = await authenticate(request, reply, deps);
     if (!ctx) return null;
@@ -602,15 +711,38 @@ export function registerGraphWorkerBrokerRoutes(
     try {
       await assertActive(deps, c.binding, c.signal);
       const { manifest } = await loadManifest(deps, c.binding, c.signal);
-      const item = findItem(manifest, parsed.source);
-      if (!item || sourceId(c.binding, item) !== parsed.source.source_id ||
-          item.document_version_id !== parsed.source.subscription_source_version) {
-        return fail(reply, 403, 'graph_worker_forbidden');
-      }
-      if (parsed.request.phase === 'model_source_access') {
-        const loaded = await loadRow(deps, c.binding, item, c.signal);
-        const inputSha = metadataInputSha(loaded.value.row, item, c.binding.room);
-        if (!inputSha || inputSha !== parsed.source.canonical_input_sha256) {
+      if (parsed.kind === 'metadata') {
+        const item = findItem(manifest, parsed.source);
+        if (!item || sourceId(c.binding, item) !== parsed.source.source_id ||
+            item.document_version_id !== parsed.source.subscription_source_version) {
+          return fail(reply, 403, 'graph_worker_forbidden');
+        }
+        if (parsed.request.phase === 'model_source_access') {
+          const loaded = await loadRow(deps, c.binding, item, c.signal);
+          const inputSha = metadataInputSha(loaded.value.row, item, c.binding.room);
+          if (!inputSha || inputSha !== parsed.source.canonical_input_sha256) {
+            return fail(reply, 403, 'graph_worker_forbidden');
+          }
+        }
+      } else {
+        const prepared = preparedBinding(
+          parsed.sourceBinding, c.binding, manifest,
+        );
+        if (!prepared) return fail(reply, 403, 'graph_worker_forbidden');
+        const sourceVersion = preparedSourceVersion(prepared.binding);
+        const sourceIdValue = preparedSourceId(
+          c.binding.run.purpose, prepared.binding,
+        );
+        const expected = preparedAuthorizationRequest(
+          c.binding, prepared.binding, sourceIdValue, sourceVersion,
+          String(parsed.source.canonical_input_sha256),
+        );
+        const proof = await resolvePreparedChunk(c, prepared.binding);
+        if (!proof ||
+            proof.inputSha256 !== parsed.source.canonical_input_sha256 ||
+            parsed.source.source_id !== sourceIdValue ||
+            parsed.source.subscription_source_version !== sourceVersion ||
+            canonical(expected) !== canonical(parsed.request)) {
           return fail(reply, 403, 'graph_worker_forbidden');
         }
       }
@@ -635,9 +767,6 @@ export function registerGraphWorkerBrokerRoutes(
     }
   });
 
-  type BrokerControl = {
-    ctx: AuthContext; policy: Policy; binding: Binding; signal: AbortSignal;
-  };
   async function resolveBoundCfoTextSource(
     control: BrokerControl, ordinal: number, signal: AbortSignal,
   ): Promise<CfoTextSource> {
@@ -703,6 +832,92 @@ export function registerGraphWorkerBrokerRoutes(
       store: cfoTextStore(control),
       maxPreparedBytes: CFO_TEXT_CANARY_MAX_BYTES,
     });
+  }
+
+  async function resolvePreparedChunk(
+    control: BrokerControl, sourceBinding: PreparedBinding,
+  ): Promise<{ inputSha256: string; textSha256: string } | null> {
+    const result = await cfoTextController(control).readChunk({
+      snapshot_id: sourceBinding.snapshot_id,
+      ordinal: sourceBinding.chunk_ordinal,
+    }, { signal: control.signal });
+    if (!exact(result, ['schema','snapshot_id','source_document_version',
+      'manifest_sha256','sidecar_content_sha256','ordinal','start_utf16',
+      'end_utf16','start_byte','end_byte','text_sha256','text']) ||
+      result.schema !== 'cfo-text-prepared-chunk-v1' ||
+      result.snapshot_id !== sourceBinding.snapshot_id ||
+      result.source_document_version !== sourceBinding.source_document_version ||
+      result.manifest_sha256 !== sourceBinding.prepared_manifest_sha256 ||
+      result.sidecar_content_sha256 !== sourceBinding.sidecar_content_sha256 ||
+      result.ordinal !== sourceBinding.chunk_ordinal ||
+      result.text_sha256 !== sourceBinding.chunk_sha256 ||
+      typeof result.text !== 'string' || result.text.length < 1 ||
+      result.text.length > 16_000 || Buffer.byteLength(result.text, 'utf8') > 16 * 1024 ||
+      digest(result.text) !== sourceBinding.chunk_sha256) return null;
+    const sourceVersion = preparedSourceVersion(sourceBinding);
+    const document = {
+      text: result.text, document_version_id: sourceVersion, room: 'finance',
+    };
+    return {
+      inputSha256: digest(canonical(document)),
+      textSha256: digest(result.text),
+    };
+  }
+  async function resolveOperationSourceProof(
+    control: BrokerControl, manifest: Manifest,
+    operation: Record<string, unknown>, source: OperationSource,
+  ): Promise<{ inputSha256: string; textSha256: string | null } | null> {
+    const spec = operation.spec as Record<string, unknown>;
+    if (source.kind === 'metadata') {
+      const loaded = await loadRow(
+        deps, control.binding, source.item, control.signal,
+      );
+      const actual = metadataInputSha(
+        loaded.value.row, source.item, control.binding.room,
+      );
+      return actual !== null && actual === spec.input_sha256
+        ? { inputSha256: actual, textSha256: null } : null;
+    }
+    const current = preparedBinding(source.sourceBinding, control.binding, manifest);
+    if (!current ||
+        canonical(current.binding) !== canonical(source.sourceBinding)) return null;
+    const actual = await resolvePreparedChunk(control, current.binding);
+    return actual && actual.inputSha256 === spec.input_sha256 ? actual : null;
+  }
+  async function readStoredOperation(
+    control: BrokerControl, id: string, manifest: Manifest,
+  ) {
+    const key = statePrefix(control.binding) +
+      '/subscription-jobs/operations/' + id + '.json';
+    const response = await deps.s3({
+      method: 'GET', key, signal: control.signal,
+    });
+    if (response.status !== 200 ||
+        response.body.length > MAX_RESPONSE_BYTES) return null;
+    let value: unknown;
+    try { value = JSON.parse(response.body.toString('utf8')); }
+    catch { return null; }
+    const parsed = parseOperationEnvelope(
+      value, id, manifest, control.binding, control.policy.policy_version,
+    );
+    const etag = response.headers.get('etag');
+    if (!parsed || !bounded(etag, 160)) return null;
+    const sourceProof = await resolveOperationSourceProof(
+      control, manifest, parsed.operation, parsed.source,
+    );
+    return sourceProof ? { ...parsed, sourceProof, etag, response } : null;
+  }
+
+  function resultMatchesOperationSource(
+    result: Record<string, unknown>,
+    operation: Awaited<ReturnType<typeof readStoredOperation>>,
+  ): boolean {
+    if (!operation) return false;
+    if (operation.source.kind === 'metadata') return true;
+    const inner = result.result as Record<string, unknown>;
+    const output = inner.output as Record<string, unknown>;
+    return output.source_sha256 === operation.sourceProof.textSha256 &&
+      output.source_sha256 === operation.source.sourceBinding.chunk_sha256;
   }
 
   app.post('/graph-worker/v1/source/:runId/cfo-text-snapshots', {
@@ -818,9 +1033,7 @@ export function registerGraphWorkerBrokerRoutes(
       const { manifest } = await loadManifest(deps, c.binding, c.signal);
       if (request.method === 'GET') {
         if (params.artifact === 'operations') {
-          const stored = await readStoredOperation(
-            deps, c.binding, params.id, manifest, c.policy.policy_version, c.signal,
-          );
+          const stored = await readStoredOperation(c, params.id, manifest);
           if (!stored) {
             const absent = await deps.s3({ method: 'GET', key, signal: c.signal });
             return absent.status === 404 ? reply.code(404).send()
@@ -839,12 +1052,11 @@ export function registerGraphWorkerBrokerRoutes(
         try { resultValue = JSON.parse(resultResponse.body.toString('utf8')); }
         catch { return fail(reply, 503, 'graph_worker_state_unavailable'); }
         const result = parseResultEnvelope(resultValue, params.id);
-        const operation = await readStoredOperation(
-          deps, c.binding, params.id, manifest, c.policy.policy_version, c.signal,
-        );
+        const operation = await readStoredOperation(c, params.id, manifest);
         if (!result || !operation ||
             (result.result as Record<string, unknown>).spec_sha256 !==
               digest(canonical(operation.operation.spec)) ||
+            !resultMatchesOperationSource(result, operation) ||
             (operation.operation.state === 'complete' &&
               operation.operation.result_sha256 !== result.result_sha256)) {
           return fail(reply, 503, 'graph_worker_state_unavailable');
@@ -877,18 +1089,19 @@ export function registerGraphWorkerBrokerRoutes(
         const incoming = parseOperationEnvelope(
           value, params.id, manifest, c.binding, c.policy.policy_version,
         );
-        if (!incoming || !(await currentOperationSource(
-          deps, c.binding, incoming.operation, incoming.item, c.signal,
-        ))) return fail(reply, 403, 'graph_worker_state_invalid');
+        const incomingProof = incoming && await resolveOperationSourceProof(
+          c, manifest, incoming.operation, incoming.source,
+        );
+        if (!incoming || !incomingProof) {
+          return fail(reply, 403, 'graph_worker_state_invalid');
+        }
         if (create) {
           if (incoming.operation.state !== 'claimed' || incoming.operation.revision !== 0 ||
               Object.keys(incoming.operation).some((entry) => !OP_KEYS.includes(entry))) {
             return fail(reply, 403, 'graph_worker_state_invalid');
           }
         } else {
-          const prior = await readStoredOperation(
-            deps, c.binding, params.id, manifest, c.policy.policy_version, c.signal,
-          );
+          const prior = await readStoredOperation(c, params.id, manifest);
           if (!prior || !legalTransition(
             prior.operation, incoming.operation, ifMatch as string, prior.etag,
           )) return fail(reply, 412, 'graph_worker_state_conflict');
@@ -912,7 +1125,8 @@ export function registerGraphWorkerBrokerRoutes(
             if (!result ||
                 result.result_sha256 !== incoming.operation.result_sha256 ||
                 (result.result as Record<string, unknown>).spec_sha256 !==
-                  digest(canonical(incoming.operation.spec))) {
+                  digest(canonical(incoming.operation.spec)) ||
+                !resultMatchesOperationSource(result, prior)) {
               return fail(reply, 412, 'graph_worker_state_conflict');
             }
           }
@@ -920,13 +1134,12 @@ export function registerGraphWorkerBrokerRoutes(
       } else {
         if (!create) return fail(reply, 400, 'graph_worker_precondition_required');
         const result = parseResultEnvelope(value, params.id);
-        const operation = await readStoredOperation(
-          deps, c.binding, params.id, manifest, c.policy.policy_version, c.signal,
-        );
+        const operation = await readStoredOperation(c, params.id, manifest);
         if (!result || !operation ||
             !['dispatched','complete'].includes(String(operation.operation.state)) ||
             (result.result as Record<string, unknown>).spec_sha256 !==
-              digest(canonical(operation.operation.spec))) {
+              digest(canonical(operation.operation.spec)) ||
+            !resultMatchesOperationSource(result, operation)) {
           return fail(reply, 403, 'graph_worker_state_invalid');
         }
       }
