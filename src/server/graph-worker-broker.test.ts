@@ -88,6 +88,7 @@ function headers(etag = '"e1"') {
 }
 async function harness(options: {
   caller?: string; policy?: unknown; active?: unknown; row?: unknown; transportError?: boolean;
+  readCfoText?: GraphWorkerBrokerDeps['readCfoText'];
 } = {}) {
   const f = fixture();
   let revision = 1;
@@ -134,6 +135,14 @@ async function harness(options: {
     bindingsJson: () => JSON.stringify(options.policy ?? f.policy),
     now: () => NOW,
     s3,
+    readCfoText: options.readCfoText ?? (async (source) => Object.freeze({
+      outcome: 'missing_text' as const,
+      source_document_version: source.document_version_id,
+      catalog_source_sha256: source.source_version,
+      source_path_hash: source.source_path_hash,
+      observed_bytes: null,
+      chunks: Object.freeze([]),
+    })),
   });
   await app.ready();
   return { app, f, objects };
@@ -155,6 +164,21 @@ function authorizeRequest(f: ReturnType<typeof fixture>) {
     },
   };
 }
+
+test('broker dependency aborts and stream cancellation stay bounded', async () => {
+  const controller = new AbortController();
+  const pending = helper.abortable(new Promise<never>(() => {}), controller.signal);
+  controller.abort();
+  await assert.rejects(pending, /deadline/);
+
+  const started = Date.now();
+  let cancels = 0;
+  await helper.boundedCancel({
+    cancel: () => { cancels++; return new Promise<void>(() => {}); },
+  } as unknown as ReadableStreamDefaultReader<Uint8Array>);
+  assert.equal(cancels, 1);
+  assert.ok(Date.now() - started < 500);
+});
 
 test('control and authorization bind exact authenticated CFO run and reject CTO/query auth', async () => {
   const h = await harness();
@@ -217,6 +241,90 @@ test('expired policy, retired active pointer, and transport errors fail closed w
   assert.equal(cResult.statusCode, 503);
   assert.equal(cResult.body.includes('sensitive upstream text'), false);
   await c.app.close();
+});
+
+test('CFO text preparation persists bound refs and serves only an exact prepared chunk', async () => {
+  const calls: unknown[] = [];
+  const expected = fixture();
+  const text = 'Synthetic CFO source excerpt.';
+  const h = await harness({
+    readCfoText: async (source, callerContext, signal) => {
+      assert.equal(signal.aborted, false);
+      assert.equal(callerContext.caller_agent, 'cfo');
+      assert.ok(Object.isFrozen(source));
+      assert.deepEqual(source, {
+        room: 'finance', source_index: 'finance-cfo-source-docs',
+        path: 'finance/report.txt',
+        source_path_hash: expected.item.source_path_hash,
+        document_version_id: expected.item.document_version_id,
+        source_version: expected.item.source_version,
+      });
+      calls.push(source);
+      return Object.freeze({
+        outcome: 'ready' as const,
+        descriptor: Object.freeze({
+          schema: 'cfo-version-pinned-text-snapshot-v1' as const,
+          room: 'finance' as const,
+          source_index: 'finance-cfo-source-docs' as const,
+          source_document_version: source.document_version_id,
+          catalog_source_sha256: source.source_version,
+          source_lineage_status: 'catalog_association_only' as const,
+          source_path_hash: source.source_path_hash,
+          sidecar_path_hash: H('_TEXT/' + source.path + '.txt'),
+          sidecar_etag: '"synthetic-etag"',
+          sidecar_version_id: 'synthetic-version',
+          sidecar_content_sha256: H(text),
+          total_bytes: Buffer.byteLength(text),
+          total_chars_utf16: text.length,
+          chunk_count: 1,
+          chunk_overlap_chars: 200,
+        }),
+        chunks: Object.freeze([Object.freeze({
+          ordinal: 0, start_utf16: 0, end_utf16: text.length,
+          start_byte: 0, end_byte: Buffer.byteLength(text),
+          text_sha256: H(text), text,
+        })]),
+      });
+    },
+  });
+  const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-snapshots';
+  const response = await h.app.inject({
+    method: 'POST', url, headers: authHeaders,
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  const receipt = response.json();
+  assert.equal(receipt.outcome, 'ready');
+  assert.match(receipt.snapshot_id, /^txtsnap_[a-f0-9]{64}$/);
+  assert.match(receipt.manifest_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(receipt.sidecar_content_sha256, H(text));
+  assert.equal(calls.length, 1);
+
+  const chunk = await h.app.inject({
+    method: 'GET',
+    url: url + '/' + receipt.snapshot_id + '/chunks/0',
+    headers: { authorization: 'Bearer cfo' },
+  });
+  assert.equal(chunk.statusCode, 200);
+  assert.equal(chunk.headers['cache-control'], 'no-store');
+  assert.equal(chunk.json().text, text);
+  assert.equal(chunk.json().manifest_sha256, receipt.manifest_sha256);
+  assert.equal(chunk.json().sidecar_content_sha256, receipt.sidecar_content_sha256);
+  assert.equal(chunk.json().source_document_version, receipt.source_document_version);
+
+  const later = await h.app.inject({
+    method: 'POST', url, headers: authHeaders,
+    payload: { run: h.f.run, document_ordinal: 1 },
+  });
+  assert.equal(later.statusCode, 400);
+  const cto = await h.app.inject({
+    method: 'POST', url, headers: { ...authHeaders, authorization: 'Bearer cto' },
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(cto.statusCode, 403);
+  assert.equal(calls.length, 1);
+  await h.app.close();
 });
 
 test('metadata source GET refuses an unknown raw-body field outside the pinned projection', async () => {
@@ -322,5 +430,35 @@ test('operations use legal CAS transitions and results remain create-only', asyn
     payload: helper.canonical(resultEnvelope),
   });
   assert.equal(mutableResult.statusCode, 400);
+
+  const incorrectComplete = {
+    ...dispatched, state: 'complete', revision: 2,
+    result_sha256: H('wrong stored result'),
+  };
+  const incorrectEnvelope = {
+    ...envelope, operation_sha256: H(helper.canonical(incorrectComplete)),
+    operation: incorrectComplete,
+  };
+  const mismatched = await h.app.inject({
+    method: 'PUT', url,
+    headers: { ...authHeaders, 'if-match': updated.headers.etag as string },
+    payload: helper.canonical(incorrectEnvelope),
+  });
+  assert.equal(mismatched.statusCode, 412);
+
+  const complete = {
+    ...dispatched, state: 'complete', revision: 2,
+    result_sha256: resultEnvelope.result_sha256,
+  };
+  const completeEnvelope = {
+    ...envelope, operation_sha256: H(helper.canonical(complete)),
+    operation: complete,
+  };
+  const completed = await h.app.inject({
+    method: 'PUT', url,
+    headers: { ...authHeaders, 'if-match': updated.headers.etag as string },
+    payload: helper.canonical(completeEnvelope),
+  });
+  assert.equal(completed.statusCode, 201);
   await h.app.close();
 });

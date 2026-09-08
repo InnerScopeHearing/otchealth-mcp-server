@@ -4,6 +4,12 @@ import { requireConnectorAuth, type AuthContext } from '../auth/bearer.js';
 import { loadEnv } from '../config/env.js';
 import { isLaneAllowed } from '../tools/kb/search-privileged.js';
 import { canonicalUri, resolveAwsCredentials, signRequest } from '../search/sigv4.js';
+import {
+  createCfoTextSnapshotReader,
+  type CfoTextSnapshotResult,
+  type CfoTextSource,
+} from '../graph/cfo-text-snapshot.js';
+import { createCfoTextPreparationController } from '../graph/cfo-text-preparation.js';
 
 const BUCKET = 'otchealth-finance-legal-dr-55c84f6b';
 const REGION = 'us-east-1';
@@ -11,6 +17,7 @@ const SOURCE_PREFIX = 'graph-trial/20260908/source-pilot/snapshots';
 const STATE_BASE = 'graph-trial/20260908/workers';
 const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 512 * 1024;
+const CFO_TEXT_CANARY_MAX_BYTES = 256 * 1024;
 const SHA = /^[a-f0-9]{64}$/;
 const SUBOP = /^subop_[a-f0-9]{64}$/;
 const LABEL = /^[a-z0-9][a-z0-9_.:-]{0,95}$/;
@@ -48,6 +55,9 @@ export interface GraphWorkerBrokerDeps {
   bindingsJson: () => string;
   now: () => number;
   s3: (request: RawRequest) => Promise<RawResponse>;
+  readCfoText: (
+    source: CfoTextSource, callerContext: AuthContext, signal: AbortSignal,
+  ) => Promise<CfoTextSnapshotResult>;
 }
 function digest(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
@@ -129,9 +139,28 @@ function parsePolicy(text: string, now: number): Policy | null {
     bindings,
   };
 }
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new Error('deadline'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error('deadline'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+async function boundedCancel(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => reader.cancel()).catch(() => undefined),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, 100); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 async function defaultS3(input: RawRequest): Promise<RawResponse> {
   if (input.signal.aborted) throw new Error('deadline');
-  const credentials = await resolveAwsCredentials();
+  const credentials = await abortable(resolveAwsCredentials(), input.signal);
   if (!credentials || input.signal.aborted) throw new Error('credentials');
   const host = BUCKET + '.s3.' + REGION + '.amazonaws.com';
   const rawPath = '/' + input.key;
@@ -144,29 +173,32 @@ async function defaultS3(input: RawRequest): Promise<RawResponse> {
     method: input.method, host, path: rawPath, region: REGION, service: 's3',
     credentials, ...(body ? { body } : {}), extraHeaders,
   });
-  const response = await fetch('https://' + host + canonicalUri(rawPath), {
+  const response = await abortable(fetch('https://' + host + canonicalUri(rawPath), {
     method: input.method, headers: signed.headers, ...(body ? { body } : {}),
     signal: input.signal, redirect: 'error',
-  });
+  }), input.signal);
   const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Error('response_size');
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    if (response.body) await boundedCancel(response.body.getReader());
+    throw new Error('response_size');
+  }
   if (!response.body) return { status: response.status, headers: response.headers, body: Buffer.alloc(0) };
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let size = 0;
   try {
     for (;;) {
-      if (input.signal.aborted) throw new Error('deadline');
-      const next = await reader.read();
+      const next = await abortable(reader.read(), input.signal);
       if (next.done) break;
       size += next.value.byteLength;
       if (size > MAX_RESPONSE_BYTES) throw new Error('response_size');
       chunks.push(Buffer.from(next.value));
     }
   } catch (error) {
-    try { await reader.cancel(); } catch { /* bounded request signal owns cancellation */ }
+    await boundedCancel(reader);
     throw error;
   }
+  if (input.signal.aborted) throw new Error('deadline');
   return { status: response.status, headers: response.headers, body: Buffer.concat(chunks, size) };
 }
 function depsOf(injected?: Partial<GraphWorkerBrokerDeps>): GraphWorkerBrokerDeps {
@@ -175,6 +207,11 @@ function depsOf(injected?: Partial<GraphWorkerBrokerDeps>): GraphWorkerBrokerDep
     bindingsJson: injected?.bindingsJson ?? (() => loadEnv().GRAPH_WORKER_BINDINGS_JSON),
     now: injected?.now ?? Date.now,
     s3: injected?.s3 ?? defaultS3,
+    readCfoText: injected?.readCfoText ?? ((source, callerContext, signal) =>
+      createCfoTextSnapshotReader({
+        callerContext,
+        maxSourceBytes: CFO_TEXT_CANARY_MAX_BYTES,
+      }).readVersionPinnedPage(source, { signal })),
   };
 }
 function fail(reply: FastifyReply, status: number, code: string) {
@@ -598,6 +635,133 @@ export function registerGraphWorkerBrokerRoutes(
     }
   });
 
+  type BrokerControl = {
+    ctx: AuthContext; policy: Policy; binding: Binding; signal: AbortSignal;
+  };
+  async function resolveBoundCfoTextSource(
+    control: BrokerControl, ordinal: number, signal: AbortSignal,
+  ): Promise<CfoTextSource> {
+    if (signal !== control.signal || control.ctx.caller_agent !== 'cfo' ||
+        control.binding.authenticated_caller !== 'cfo' ||
+        control.binding.room !== 'finance' ||
+        control.binding.source_index !== 'finance-cfo-source-docs' ||
+        ordinal !== 0) throw new Error('cfo_text_forbidden');
+    await assertActive(deps, control.binding, signal);
+    const { manifest } = await loadManifest(deps, control.binding, signal);
+    const item = manifest.documents[ordinal];
+    if (!item || item.ordinal !== ordinal) throw new Error('cfo_text_source_missing');
+    const loaded = await loadRow(deps, control.binding, item, signal);
+    const source = Object.freeze({
+      room: 'finance' as const,
+      source_index: 'finance-cfo-source-docs' as const,
+      path: loaded.value.row.path as string,
+      source_path_hash: item.source_path_hash,
+      document_version_id: item.document_version_id,
+      source_version: item.source_version,
+    });
+    await recheck({ ...control, signal });
+    return source;
+  }
+  function cfoTextStore(control: BrokerControl) {
+    const prefix = statePrefix(control.binding) + '/text-snapshots/';
+    return async (input: RawRequest): Promise<RawResponse> => {
+      if (input.signal !== control.signal || !input.key.startsWith(prefix)) {
+        throw new Error('cfo_text_store_scope');
+      }
+      const suffix = input.key.slice(prefix.length);
+      const allowed = /^txtsnap_[a-f0-9]{64}\/(?:manifest\.json|bundles\/(?:0|[1-9]\d?)-[a-f0-9]{64}\.json)$/.test(suffix);
+      if (!allowed) throw new Error('cfo_text_store_scope');
+      if (input.method === 'GET') {
+        if (input.headers !== undefined || input.body !== undefined) {
+          throw new Error('cfo_text_store_scope');
+        }
+      } else if (input.method === 'PUT') {
+        if (!input.body || input.body.length > MAX_REQUEST_BYTES ||
+            !exact(input.headers, ['content-type','if-none-match']) ||
+            input.headers['content-type'] !== 'application/json' ||
+            input.headers['if-none-match'] !== '*') {
+          throw new Error('cfo_text_store_scope');
+        }
+        await recheck(control);
+      } else {
+        throw new Error('cfo_text_store_scope');
+      }
+      return deps.s3(input);
+    };
+  }
+  function cfoTextController(control: BrokerControl) {
+    return createCfoTextPreparationController({
+      runId: control.binding.run.run_id,
+      sourceReader: Object.freeze({
+        readVersionPinnedPage: (
+          source: CfoTextSource, options: { signal: AbortSignal },
+        ) => deps.readCfoText(source, control.ctx, options.signal),
+      }),
+      resolveSource: (ordinal, options) =>
+        resolveBoundCfoTextSource(control, ordinal, options.signal),
+      recheck: (options) => recheck({ ...control, signal: options.signal }),
+      store: cfoTextStore(control),
+      maxPreparedBytes: CFO_TEXT_CANARY_MAX_BYTES,
+    });
+  }
+
+  app.post('/graph-worker/v1/source/:runId/cfo-text-snapshots', {
+    config: { rateLimit: { max: 4, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    if (!exact(request.body, ['run','document_ordinal']) ||
+        !validRun(request.body.run) ||
+        request.body.document_ordinal !== 0) {
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    }
+    const params = request.params as { runId: string };
+    const c = await context(request, reply, params.runId);
+    if (!c) return;
+    if (!sameRun(request.body.run, c.binding.run) ||
+        c.binding.authenticated_caller !== 'cfo' ||
+        c.binding.room !== 'finance') {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    try {
+      const result = await cfoTextController(c).prepare(
+        { document_ordinal: request.body.document_ordinal },
+        { signal: c.signal },
+      );
+      reply.header('cache-control', 'no-store');
+      return reply.send(result);
+    } catch {
+      return fail(reply, 503, 'graph_worker_text_unavailable');
+    }
+  });
+
+  app.get(
+    '/graph-worker/v1/source/:runId/cfo-text-snapshots/:snapshotId/chunks/:ordinal',
+    { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      const params = request.params as {
+        runId: string; snapshotId: string; ordinal: string;
+      };
+      if (!/^(?:0|[1-9]\d?)$/.test(params.ordinal)) {
+        return fail(reply, 400, 'graph_worker_request_invalid');
+      }
+      const c = await context(request, reply, params.runId);
+      if (!c) return;
+      if (c.binding.authenticated_caller !== 'cfo' ||
+          c.binding.room !== 'finance') {
+        return fail(reply, 403, 'graph_worker_forbidden');
+      }
+      try {
+        const result = await cfoTextController(c).readChunk({
+          snapshot_id: params.snapshotId,
+          ordinal: Number(params.ordinal),
+        }, { signal: c.signal });
+        reply.header('cache-control', 'no-store');
+        return reply.send(result);
+      } catch {
+        return fail(reply, 503, 'graph_worker_text_unavailable');
+      }
+    },
+  );
+
   app.get('/graph-worker/v1/source/:runId/manifests/:sha.json', async (request, reply) => {
     const params = request.params as { runId: string; sha: string };
     const c = await context(request, reply, params.runId);
@@ -680,7 +844,9 @@ export function registerGraphWorkerBrokerRoutes(
         );
         if (!result || !operation ||
             (result.result as Record<string, unknown>).spec_sha256 !==
-              digest(canonical(operation.operation.spec))) {
+              digest(canonical(operation.operation.spec)) ||
+            (operation.operation.state === 'complete' &&
+              operation.operation.result_sha256 !== result.result_sha256)) {
           return fail(reply, 503, 'graph_worker_state_unavailable');
         }
         await recheck(c);
@@ -726,6 +892,30 @@ export function registerGraphWorkerBrokerRoutes(
           if (!prior || !legalTransition(
             prior.operation, incoming.operation, ifMatch as string, prior.etag,
           )) return fail(reply, 412, 'graph_worker_state_conflict');
+          if (incoming.operation.state === 'complete') {
+            const resultKey = statePrefix(c.binding) +
+              '/subscription-jobs/results/' + params.id + '.json';
+            const storedResult = await deps.s3({
+              method: 'GET', key: resultKey, signal: c.signal,
+            });
+            if (storedResult.status === 404) {
+              return fail(reply, 412, 'graph_worker_state_conflict');
+            }
+            if (storedResult.status !== 200 ||
+                storedResult.body.length > MAX_RESPONSE_BYTES) {
+              return fail(reply, 503, 'graph_worker_state_unavailable');
+            }
+            let storedValue: unknown;
+            try { storedValue = JSON.parse(storedResult.body.toString('utf8')); }
+            catch { return fail(reply, 503, 'graph_worker_state_unavailable'); }
+            const result = parseResultEnvelope(storedValue, params.id);
+            if (!result ||
+                result.result_sha256 !== incoming.operation.result_sha256 ||
+                (result.result as Record<string, unknown>).spec_sha256 !==
+                  digest(canonical(incoming.operation.spec))) {
+              return fail(reply, 412, 'graph_worker_state_conflict');
+            }
+          }
         }
       } else {
         if (!create) return fail(reply, 400, 'graph_worker_precondition_required');
@@ -770,4 +960,5 @@ export function registerGraphWorkerBrokerRoutes(
 export const graphWorkerBrokerTest = {
   BUCKET, SOURCE_PREFIX, STATE_BASE, canonical, digest, parsePolicy,
   bindingHash, statePrefix, validManifest, validRow, sourceId, metadataInputSha,
+  abortable, boundedCancel,
 };
