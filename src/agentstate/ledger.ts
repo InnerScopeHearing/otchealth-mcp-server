@@ -388,25 +388,56 @@ export async function completeTask(
   return { task, resolution };
 }
 
-export async function listTasks(filter: {
+export interface TaskListFilter {
   owner_agent?: string;
   status?: TaskStatus;
   board?: string;
   limit?: number;
-}): Promise<Task[]> {
+  /** Internal read policy. Never exposed in the MCP input schema. */
+  exclude_personal_legal?: boolean;
+}
+
+export interface TaskListQuery {
+  board: string;
+  query: string;
+  parameters: { name: string; value: unknown }[];
+  max: number;
+}
+
+/** Build the complete storage query so personal exclusions run before the database result limit. */
+export function buildTaskListQuery(filter: TaskListFilter): TaskListQuery {
   const board = (filter.board || DEFAULT_BOARD).trim().toLowerCase();
   const conds: string[] = ['c.board = @board', "c.type = 'task'"];
-  const params: { name: string; value: unknown }[] = [{ name: '@board', value: board }];
+  const parameters: { name: string; value: unknown }[] = [{ name: '@board', value: board }];
   if (filter.owner_agent) {
     conds.push('c.owner_agent = @owner');
-    params.push({ name: '@owner', value: normalizeAgent(filter.owner_agent) });
+    parameters.push({ name: '@owner', value: normalizeAgent(filter.owner_agent) });
   }
   if (filter.status) {
     conds.push('c.status = @status');
-    params.push({ name: '@status', value: filter.status });
+    parameters.push({ name: '@status', value: filter.status });
   }
-  const query = `SELECT * FROM c WHERE ${conds.join(' AND ')} ORDER BY c.created_at DESC`;
-  const rows = await queryDocs(TASKS, query, params, { pk: board, max: filter.limit ?? 50 });
+  if (filter.exclude_personal_legal) {
+    conds.push('c.owner_agent != @personal_agent');
+    conds.push('c.created_by != @personal_agent');
+    parameters.push({ name: '@personal_agent', value: 'clo-personal' });
+  }
+  return {
+    board,
+    query: 'SELECT * FROM c WHERE ' + conds.join(' AND ') + ' ORDER BY c.created_at DESC',
+    parameters,
+    max: filter.limit ?? 50,
+  };
+}
+
+export async function listTasks(filter: TaskListFilter): Promise<Task[]> {
+  const built = buildTaskListQuery(filter);
+  const rows = await queryDocs(
+    TASKS,
+    built.query,
+    built.parameters,
+    { pk: built.board, max: built.max },
+  );
   return rows as unknown as Task[];
 }
 

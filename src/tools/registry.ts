@@ -1279,7 +1279,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // The dedicated source may contain investor material. The shared result cache has no
         // caller binding, so this principal must keep its payload inline, never in that cache.
         if (callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE && shouldOffload(text) && !isM365StaticAuth()) {
-          const off = await offloadResult(text, result, correlationId);
+          const off = await offloadResult(text, result, correlationId, callerHash);
           if (off) {
             text = off.preview;
             // Bounded inline summary (pagination.itemCount/pageCount, shim page counts, array

@@ -9,9 +9,17 @@ process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 
-const { buildPreview, pageCount, pageSlice, shouldOffload, extractResultSummary, PAGE_CHARS } = await import(
-  './result-store.js'
-);
+const {
+  buildPreview,
+  pageCount,
+  pageSlice,
+  shouldOffload,
+  extractResultSummary,
+  offloadResult,
+  fetchStoredResult,
+  PAGE_CHARS,
+} = await import('./result-store.js');
+const { handleGatewayFetchResult } = await import('./gateway-fetch-result.js');
 
 test('extractResultSummary: Xero list envelope -> pagination + array lengths, nothing else copied', () => {
   const data = {
@@ -89,4 +97,135 @@ test('pageSlice: clamps out-of-range pages and returns the right chunk', () => {
 
 test('PAGE_CHARS stays below the offload threshold so a fetched page never re-offloads', () => {
   assert.ok(PAGE_CHARS < 40000);
+});
+
+function fakeResultStore(nowValue = Date.parse('2026-09-08T00:00:00.000Z')) {
+  const docs = new Map<string, Record<string, unknown>>();
+  let now = nowValue;
+  let sequence = 0;
+  return {
+    docs,
+    setNow(value: number) { now = value; },
+    deps: {
+      newId: () => 'jitres_fixture_' + String(++sequence),
+      upsertDoc: async (_collection: string, partitionKey: string, doc: Record<string, unknown>) => {
+        docs.set(partitionKey, structuredClone(doc));
+      },
+      readDoc: async (_collection: string, partitionKey: string, _id: string) => {
+        const doc = docs.get(partitionKey);
+        return doc ? { doc: structuredClone(doc) } : null;
+      },
+      now: () => now,
+    },
+  };
+}
+
+test('offloaded result persists the exact authenticated caller hash and same caller pages it', async () => {
+  const store = fakeResultStore();
+  const callerHash = 'a'.repeat(64);
+  const data = { payload: 'x'.repeat(PAGE_CHARS * 2 + 10) };
+  const outcome = await offloadResult(
+    JSON.stringify(data),
+    data,
+    'corr_synthetic',
+    callerHash,
+    store.deps,
+  );
+  assert.ok(outcome);
+  const stored = store.docs.get(outcome.resultId);
+  assert.equal(stored?.caller_hash, callerHash);
+  assert.equal(stored?.type, 'jit_result');
+
+  const first = await fetchStoredResult(outcome.resultId, 0, callerHash, store.deps);
+  const second = await fetchStoredResult(outcome.resultId, 1, callerHash, store.deps);
+  assert.equal(first.found, true);
+  assert.equal(first.page, 0);
+  assert.equal(second.found, true);
+  assert.equal(second.page, 1);
+  assert.ok(first.chunk);
+  assert.ok(second.chunk);
+});
+
+test('every page rejects a different caller without payload or existence metadata', async () => {
+  const store = fakeResultStore();
+  const ownerHash = 'b'.repeat(64);
+  const otherHash = 'c'.repeat(64);
+  const outcome = await offloadResult(
+    'synthetic',
+    { payload: 'private synthetic result' },
+    'corr_synthetic',
+    ownerHash,
+    store.deps,
+  );
+  assert.ok(outcome);
+  for (const page of [0, 1, 999]) {
+    const denied = await fetchStoredResult(outcome.resultId, page, otherHash, store.deps);
+    assert.deepEqual(denied, { found: false });
+    assert.equal('chunk' in denied, false);
+    assert.equal('expired' in denied, false);
+  }
+});
+
+test('legacy unbound and malformed-caller result access fails closed', async () => {
+  const store = fakeResultStore();
+  store.docs.set('jitres_legacy', {
+    id: 'jitres_legacy',
+    cacheScope: 'jitres_legacy',
+    type: 'jit_result',
+    data: { payload: 'legacy synthetic payload' },
+    expiresAt: store.deps.now() + 60_000,
+  });
+  assert.deepEqual(
+    await fetchStoredResult('jitres_legacy', 0, 'd'.repeat(64), store.deps),
+    { found: false },
+  );
+  assert.deepEqual(
+    await fetchStoredResult('jitres_legacy', 0, 'unknown', store.deps),
+    { found: false },
+  );
+  assert.equal(
+    await offloadResult('synthetic', { payload: 'x' }, 'corr', 'unknown', store.deps),
+    null,
+  );
+  assert.equal(store.docs.size, 1);
+});
+
+test('expiry is visible only to the exact caller bound to the result', async () => {
+  const store = fakeResultStore();
+  const ownerHash = 'e'.repeat(64);
+  const outcome = await offloadResult(
+    'synthetic',
+    { payload: 'expired synthetic payload' },
+    'corr_synthetic',
+    ownerHash,
+    store.deps,
+  );
+  assert.ok(outcome);
+  store.setNow(store.deps.now() + 3_700_000);
+  assert.deepEqual(
+    await fetchStoredResult(outcome.resultId, 0, ownerHash, store.deps),
+    { found: false, expired: true },
+  );
+  assert.deepEqual(
+    await fetchStoredResult(outcome.resultId, 0, 'f'.repeat(64), store.deps),
+    { found: false },
+  );
+});
+
+test('gateway fetch handler forwards the exact request caller hash on every page', async () => {
+  const callerHash = '1'.repeat(64);
+  const calls: unknown[] = [];
+  const response = await handleGatewayFetchResult(
+    { result_id: 'jitres_synthetic', page: 7 },
+    { callerHash },
+    {
+      fetchStoredResult: async (...args) => {
+        calls.push(args);
+        return { found: false };
+      },
+    },
+  );
+  assert.deepEqual(calls, [['jitres_synthetic', 7, callerHash]]);
+  assert.deepEqual(response.data, { found: false });
+  assert.match(response.summary, /unauthorized/);
 });

@@ -25,6 +25,32 @@ const MAX_OFFLOAD_CHARS = Number(process.env.JIT_RESULT_MAX_CHARS) || 1_600_000;
 // Page size for gateway_fetch_result. MUST stay below THRESHOLD_CHARS so a fetched page never
 // itself re-triggers offload (no recursion).
 export const PAGE_CHARS = 30000;
+export interface ResultStoreDeps {
+  newId: (prefix: string) => string;
+  upsertDoc: (
+    collection: string,
+    partitionKey: string,
+    doc: Record<string, unknown>,
+  ) => Promise<unknown>;
+  readDoc: (
+    collection: string,
+    partitionKey: string,
+    id: string,
+  ) => Promise<{ doc: Record<string, unknown> } | null>;
+  now: () => number;
+}
+
+const DEFAULT_RESULT_STORE_DEPS: ResultStoreDeps = {
+  newId: cosmos.newId,
+  upsertDoc: cosmos.upsertDoc,
+  readDoc: cosmos.readDoc,
+  now: Date.now,
+};
+
+function validCallerHash(callerHash: string): boolean {
+  return /^[a-f0-9]{64}$/.test(callerHash);
+}
+
 
 /** True when a result is large enough to offload, within the Cosmos doc cap, AND Cosmos is available. */
 export function shouldOffload(text: string): boolean {
@@ -118,18 +144,22 @@ export async function offloadResult(
   fullText: string,
   data: unknown,
   correlationId: string,
+  callerHash: string,
+  deps: ResultStoreDeps = DEFAULT_RESULT_STORE_DEPS,
 ): Promise<OffloadOutcome | null> {
   try {
-    const resultId = cosmos.newId('jitres');
-    const now = Date.now();
-    // The `cache` container partitions on /cacheScope (NOT /id), so the doc MUST carry a cacheScope
-    // field equal to the partition-key value we pass. We use resultId for both (cacheScope=id) so a
-    // point read is readDoc('cache', resultId, resultId). Cosmos native `ttl` is the best-effort
-    // backstop; explicit expiresAt is the authoritative expiry check on read.
-    await cosmos.upsertDoc('cache', resultId, {
+    // Never create a bearer-style result object without a verified authenticated caller binding.
+    // The registry keeps the full inline response when this returns null.
+    if (!validCallerHash(callerHash)) return null;
+    const resultId = deps.newId('jitres');
+    const now = deps.now();
+    // The cache container partitions on /cacheScope. resultId remains the point-read key while
+    // caller_hash is the mandatory authorization binding checked before expiry or payload parsing.
+    await deps.upsertDoc('cache', resultId, {
       id: resultId,
       cacheScope: resultId,
       type: 'jit_result',
+      caller_hash: callerHash,
       correlation_id: correlationId,
       data,
       total_bytes: fullText.length,
@@ -154,11 +184,22 @@ export interface FetchOutcome {
 }
 
 /** Retrieve a stored result by id, paged. Returns {found:false} on miss/expiry. */
-export async function fetchStoredResult(resultId: string, page = 0): Promise<FetchOutcome> {
-  const hit = await cosmos.readDoc('cache', resultId, resultId);
+export async function fetchStoredResult(
+  resultId: string,
+  page: number,
+  callerHash: string,
+  deps: ResultStoreDeps = DEFAULT_RESULT_STORE_DEPS,
+): Promise<FetchOutcome> {
+  if (!validCallerHash(callerHash)) return { found: false };
+  const hit = await deps.readDoc('cache', resultId, resultId);
   if (!hit || !hit.doc) return { found: false };
   const doc = hit.doc as Record<string, unknown>;
-  if (typeof doc.expiresAt === 'number' && Date.now() > doc.expiresAt) return { found: false, expired: true };
+  // Mismatch and legacy unbound records are indistinguishable from a miss. Check the binding before
+  // expiry or serialization so no metadata or payload leaks to another authenticated principal.
+  if (doc.type !== 'jit_result' || doc.caller_hash !== callerHash) return { found: false };
+  if (typeof doc.expiresAt === 'number' && deps.now() > doc.expiresAt) {
+    return { found: false, expired: true };
+  }
   const serialized = JSON.stringify(doc.data ?? null, null, 2);
   const sliced = pageSlice(serialized, page);
   return {
