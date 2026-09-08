@@ -20,6 +20,8 @@ import {
 } from './token-store.js';
 
 const MCP_ENDPOINT = 'https://hyperagent.com/api/mcp';
+// Retry eligibility is deliberately explicit. New tools, including writes, default to no replay.
+const AUTH_RETRY_READS = new Set(['list_agents', 'list_threads', 'get_thread']);
 
 export function hyperagentConfigured(): boolean {
   return tokenStoreConfigured();
@@ -38,12 +40,22 @@ export function __resetHyperagentClientForTests(): void {
  * replica count each replica refreshes several times an hour. An in-memory rotation meant one
  * replica silently invalidated the other's token, and any redeploy dropped both back to a spent
  * value. Under reuse detection that can revoke the whole family and cost a fresh human consent.
- * Token lifecycle now lives in token-store.ts, which persists every rotation under an ETag'd
- * compare-and-swap before the token is used. See that file for the full reasoning.
+ * Token lifecycle now lives in token-store.ts, which claims the chain under an ETag'd
+ * compare-and-swap before submitting it, then persists the rotation before returning a token.
  */
-export async function getAccessToken(): Promise<string | null> {
-  return getStoredAccessToken();
+export async function getAccessToken(opts: { rejectedAccessToken?: string } = {}): Promise<string | null> {
+  return getStoredAccessToken(opts);
 }
+
+export interface HyperagentClientDeps {
+  getAccessToken: (opts?: { rejectedAccessToken?: string }) => Promise<string | null>;
+  fetchImpl: typeof fetch;
+}
+
+const DEFAULT_DEPS: HyperagentClientDeps = {
+  getAccessToken,
+  fetchImpl: (input, init) => fetch(input, init),
+};
 
 export interface McpCallResult {
   ok: boolean;
@@ -58,21 +70,37 @@ export interface McpCallResult {
  * ring.ts and the tool wrappers, so this function stays a transport and cannot become a second,
  * divergent place where access is decided.
  */
-export async function callHyperagentTool(name: string, args: Record<string, unknown>): Promise<McpCallResult> {
-  const token = await getAccessToken();
+export async function callHyperagentTool(
+  name: string,
+  args: Record<string, unknown>,
+  deps: HyperagentClientDeps = DEFAULT_DEPS,
+): Promise<McpCallResult> {
+  const token = await deps.getAccessToken();
   if (!token) return { ok: false, status: 0, data: null, error: 'unconfigured' };
 
-  const res = await fetch(MCP_ENDPOINT, {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } });
+  const send = (accessToken: string) => deps.fetchImpl(MCP_ENDPOINT, {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${token}`,
+      authorization: `Bearer ${accessToken}`,
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
     },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+    body,
   });
 
-  const text = await res.text();
+  let res = await send(token);
+  let text = await res.text();
+  if (res.status === 401 && AUTH_RETRY_READS.has(name)) {
+    // A revoked access token may still be inside its stored expiry window. Pass the exact rejected
+    // token to the shared store so it adopts a newer token or claims one refresh under its lock.
+    // Never loop or replay writes: a provider response cannot prove a mutation did not happen.
+    const replacement = await deps.getAccessToken({ rejectedAccessToken: token });
+    if (replacement && replacement !== token) {
+      res = await send(replacement);
+      text = await res.text();
+    }
+  }
   if (!res.ok) {
     return { ok: false, status: res.status, data: null, error: `HTTP ${res.status}` };
   }
