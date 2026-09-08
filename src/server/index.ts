@@ -12,6 +12,7 @@ import { registerHeyGenApprovalCallback } from './heygen-approval-callback.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerGraphWorkerBrokerRoutes } from './graph-worker-broker.js';
 import { registerGraphCatalogControllerRoutes } from './graph-catalog-controller.js';
+import { registerRelationshipArtifactGatewayRoutes } from './relationship-artifact-gateway.js';
 import {
   getRevocationStoreStatus,
   loadRevocations,
@@ -97,6 +98,7 @@ async function main(): Promise<void> {
   registerMcpRoutes(app);
   registerGraphWorkerBrokerRoutes(app);
   registerGraphCatalogControllerRoutes(app);
+  registerRelationshipArtifactGatewayRoutes(app);
   registerWebhookRoutes(app);
 
   app.setNotFoundHandler(async (_req, reply) => {
