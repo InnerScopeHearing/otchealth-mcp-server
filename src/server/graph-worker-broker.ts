@@ -82,6 +82,8 @@ export interface GraphWorkerBrokerDeps {
   readCfoText: (
     source: CfoTextSource, callerContext: AuthContext, signal: AbortSignal,
   ) => Promise<CfoTextSnapshotResult>;
+  /** A dark cohort can supply a binding only from its durable server-issued receipt. */
+  resolveCohortBinding: (ctx: AuthContext, runId: string, signal: AbortSignal) => Promise<{ policy: Policy; binding: Binding } | null>;
 }
 function digest(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
@@ -226,16 +228,27 @@ async function defaultS3(input: RawRequest): Promise<RawResponse> {
   return { status: response.status, headers: response.headers, body: Buffer.concat(chunks, size) };
 }
 function depsOf(injected?: Partial<GraphWorkerBrokerDeps>): GraphWorkerBrokerDeps {
+  const s3 = injected?.s3 ?? defaultS3;
+  const resolveCohortBinding = injected?.resolveCohortBinding ?? (async (ctx, runId, signal) => {
+    // The controller owns the durable control-pointer schema. Keep this bridge a
+    // delegation so a broker deployment cannot accidentally accept a stale or
+    // weaker receipt format.
+    const controller = await import('./graph-catalog-controller.js');
+    return controller.resolveCatalogCohortBinding(ctx, runId, signal, {
+      s3, configs: () => loadEnv().GRAPH_CATALOG_COHORTS_JSON, now: injected?.now ?? Date.now,
+    });
+  });
   return {
     authenticate: injected?.authenticate ?? requireConnectorAuth,
     bindingsJson: injected?.bindingsJson ?? (() => loadEnv().GRAPH_WORKER_BINDINGS_JSON),
     now: injected?.now ?? Date.now,
-    s3: injected?.s3 ?? defaultS3,
+    s3,
     readCfoText: injected?.readCfoText ?? ((source, callerContext, signal) =>
       createCfoTextSnapshotReader({
         callerContext,
         maxSourceBytes: CFO_TEXT_CANARY_MAX_BYTES,
       }).readVersionPinnedPage(source, { signal })),
+    resolveCohortBinding,
   };
 }
 function fail(reply: FastifyReply, status: number, code: string) {
@@ -655,27 +668,37 @@ export function registerGraphWorkerBrokerRoutes(
 ): void {
   const deps = depsOf(injected);
   type BrokerControl = {
-    ctx: AuthContext; policy: Policy; binding: Binding; signal: AbortSignal;
+    ctx: AuthContext; policy: Policy; binding: Binding; signal: AbortSignal; cohort: boolean;
   };
   async function context(request: FastifyRequest, reply: FastifyReply, runId: string) {
     const ctx = await authenticate(request, reply, deps);
     if (!ctx) return null;
-    const policy = parsePolicy(deps.bindingsJson(), deps.now());
-    if (!policy) { await fail(reply, 503, 'graph_worker_unconfigured'); return null; }
-    const binding = policy.bindings.find((item) =>
+    let policy = parsePolicy(deps.bindingsJson(), deps.now());
+    let binding = policy?.bindings.find((item) =>
       item.authenticated_caller === ctx.caller_agent && item.run.run_id === runId);
+    let cohort = false;
+    if (!binding) {
+      const dynamic = await deps.resolveCohortBinding(ctx, runId, AbortSignal.timeout(15_000));
+      if (dynamic) { policy = dynamic.policy; binding = dynamic.binding; cohort = true; }
+    }
+    if (!policy) { await fail(reply, 503, 'graph_worker_unconfigured'); return null; }
     if (!binding || ROOM[binding.room].seat !== ctx.caller_agent ||
         !isLaneAllowed(binding.source_index, ctx.caller_agent)) {
       await fail(reply, 403, 'graph_worker_forbidden');
       return null;
     }
-    return { ctx, policy, binding, signal: AbortSignal.timeout(15_000) };
+    return { ctx, policy, binding, signal: AbortSignal.timeout(15_000), cohort };
   }
   async function recheck(control: {
-    policy: Policy; binding: Binding; signal: AbortSignal;
+    policy: Policy; binding: Binding; signal: AbortSignal; cohort?: boolean; ctx?: AuthContext;
   }): Promise<void> {
-    const current = parsePolicy(deps.bindingsJson(), deps.now());
-    if (!current || canonical(current) !== canonical(control.policy)) throw new Error('policy_changed');
+    if (control.cohort && control.ctx) {
+      const latest = await deps.resolveCohortBinding(control.ctx, control.binding.run.run_id, control.signal);
+      if (!latest || canonical(latest.binding) !== canonical(control.binding)) throw new Error('policy_changed');
+    } else {
+      const current = parsePolicy(deps.bindingsJson(), deps.now());
+      if (!current || canonical(current) !== canonical(control.policy)) throw new Error('policy_changed');
+    }
     await assertActive(deps, control.binding, control.signal);
   }
 

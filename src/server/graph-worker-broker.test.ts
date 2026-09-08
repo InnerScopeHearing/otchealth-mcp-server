@@ -101,6 +101,7 @@ function headers(etag = '"e1"') {
 async function harness(options: {
   caller?: string; policy?: unknown; active?: unknown; row?: unknown; transportError?: boolean;
   readCfoText?: GraphWorkerBrokerDeps['readCfoText'];
+  resolveCohortBinding?: GraphWorkerBrokerDeps['resolveCohortBinding'];
   now?: () => number;
 } = {}) {
   const f = fixture();
@@ -148,6 +149,7 @@ async function harness(options: {
     bindingsJson: () => JSON.stringify(options.policy ?? f.policy),
     now: options.now ?? (() => NOW),
     s3,
+    resolveCohortBinding: options.resolveCohortBinding,
     readCfoText: options.readCfoText ?? (async (source) => Object.freeze({
       outcome: 'missing_text' as const,
       source_document_version: source.document_version_id,
@@ -220,6 +222,20 @@ test('control and authorization bind exact authenticated CFO run and reject CTO/
     headers: authHeaders, payload: { run: h.f.run, action: 'subscription_worker' },
   });
   assert.equal(query.statusCode, 401);
+  await h.app.close();
+});
+
+test('dynamic cohort recheck uses the fresh cohort resolver without a static policy match', async () => {
+  const expected = fixture();
+  const h = await harness({
+    policy: 'not-json',
+    resolveCohortBinding: async () => ({ policy: expected.policy, binding: expected.binding }),
+  });
+  const response = await h.app.inject({
+    method: 'POST', url: '/graph-worker/v1/authorize', headers: authHeaders,
+    payload: authorizeRequest(h.f),
+  });
+  assert.equal(response.statusCode, 200);
   await h.app.close();
 });
 
