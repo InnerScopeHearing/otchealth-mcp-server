@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import {
   isConfigured as sharedConfigured,
-  normalizeAgent,
   readSharedAll,
   readInbound,
   readReconcileMarker,
@@ -17,7 +16,7 @@ import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
 import { isConfigured as inboxConfigured, readMessages } from '../../agentstate/queue.js';
 import { isM365StaticAuth } from '../../server/request-context.js';
 import { retractedIdsForAgent } from '../../memory/retractions.js';
-import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from '../hyperagent/ring.js';
+import { resolveAgentReadScope } from './agent-scope.js';
 
 /**
  * wake — ONE federated boot call for any agent on any platform. Composes, server-side, everything
@@ -566,7 +565,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         openWorldHint: false,
       },
       inputShape: {
-        agent: z.string().optional().describe('Agent lane to wake; defaults to your token identity (lowercase id, e.g. "cto").'),
+        agent: z.string().optional().describe('Agent lane to wake. Authenticated calls default to and may select only their token identity (lowercase id, e.g. "cto").'),
         recent_limit: z.number().int().min(1).max(40).optional().describe('Max recent shared-feed entries (default 10).'),
         memory_limit: z.number().int().min(1).max(40).optional().describe('Max agent-state memory-of-record entries (default 12).'),
         task_limit: z.number().int().min(1).max(50).optional().describe('Max active tasks (default 15).'),
@@ -588,8 +587,8 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         doctrine: z.unknown(),
       },
       handler: async (input, ctx) => {
-        const agentRaw = input.agent || ctx.callerAgent;
-        if (!agentRaw) {
+        const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
+        if (!scope) {
           return {
             data: {
               agent: '',
@@ -604,14 +603,14 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
             summary: 'wake: no agent identity.',
           };
         }
-        const agent = normalizeAgent(agentRaw);
-        if (ctx.callerAgent === WEFUNDER_CAMPAIGN_DIRECTOR_LANE && agent !== ctx.callerAgent) {
+        if (!scope.allowed) {
           return {
-            data: { agent: ctx.callerAgent, pack: null, memory_records: [], tasks: null, inbox: null,
+            data: { agent: scope.agent, pack: null, memory_records: [], tasks: null, inbox: null,
               inbound: null, errors: ['forbidden_agent'], doctrine: buildDoctrine() },
-            summary: 'wake: this dedicated seat can load only its own agent context.',
+            summary: 'wake: authenticated callers can load only their own agent context.',
           };
         }
+        const agent = scope.agent;
         const recentLimit = input.recent_limit ?? 10;
         const memoryLimit = input.memory_limit ?? 12;
         const taskLimit = input.task_limit ?? 15;
