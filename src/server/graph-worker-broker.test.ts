@@ -1,11 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Fastify from 'fastify';
-import {
-  graphWorkerBrokerTest as helper,
+import type { GraphWorkerBrokerDeps } from './graph-worker-broker.js';
+
+const SYNTHETIC_REQUIRED_ENV = Object.freeze({
+  CIO_SITE_ID: 'synthetic',
+  CIO_TRACK_KEY: 'synthetic',
+  CIO_APP_API_BEARER: 'synthetic',
+  PERPLEXITY_CONNECTOR_TOKEN: 'synthetic-placeholder-value-000000000',
+  ADMIN_REVOKE_TOKEN: 'synthetic-placeholder-value-000000000',
+  N8N_WEBHOOK_SECRET: 'synthetic-placeholder-value-000000000',
+});
+for (const [name, value] of Object.entries(SYNTHETIC_REQUIRED_ENV)) {
+  process.env[name] ??= value;
+}
+const {
+  graphWorkerBrokerTest: helper,
   registerGraphWorkerBrokerRoutes,
-  type GraphWorkerBrokerDeps,
-} from './graph-worker-broker.js';
+} = await import('./graph-worker-broker.js');
 
 const NOW = Date.parse('2026-09-08T04:00:00.000Z');
 const H = (value: string) => helper.digest(value);
