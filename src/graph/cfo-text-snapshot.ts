@@ -38,6 +38,8 @@ export type CfoTextChunk = Readonly<{
   ordinal: number;
   start_utf16: number;
   end_utf16: number;
+  start_byte: number;
+  end_byte: number;
   text_sha256: string;
   text: string;
 }>;
@@ -51,6 +53,7 @@ export type CfoTextSnapshotResult =
         source_index: typeof CFO_INDEX;
         source_document_version: string;
         catalog_source_sha256: string;
+        source_lineage_status: 'catalog_association_only';
         source_path_hash: string;
         sidecar_path_hash: string;
         sidecar_etag: string;
@@ -160,8 +163,23 @@ function adjustSurrogateBoundary(text: string, start: number, end: number): numb
   const next = text.charCodeAt(end);
   return previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff ? end - 1 : end;
 }
+function utf8Offsets(text: string): Uint32Array {
+  const offsets = new Uint32Array(text.length + 1);
+  let byteOffset = 0;
+  for (let index = 0; index < text.length;) {
+    offsets[index] = byteOffset;
+    const codePoint = text.codePointAt(index) as number;
+    const units = codePoint > 0xffff ? 2 : 1;
+    if (units === 2) offsets[index + 1] = byteOffset;
+    byteOffset += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+    index += units;
+    offsets[index] = byteOffset;
+  }
+  return offsets;
+}
 function chunkText(text: string): readonly CfoTextChunk[] {
   const chunks: CfoTextChunk[] = [];
+  const byteOffsets = utf8Offsets(text);
   let start = 0;
   while (start < text.length) {
     let low = start + 1;
@@ -169,7 +187,7 @@ function chunkText(text: string): readonly CfoTextChunk[] {
     let end = start;
     while (low <= high) {
       const candidate = Math.floor((low + high) / 2);
-      if (Buffer.byteLength(text.slice(start, candidate), 'utf8') <= CFO_TEXT_MAX_CHUNK_BYTES) {
+      if (byteOffsets[candidate] - byteOffsets[start] <= CFO_TEXT_MAX_CHUNK_BYTES) {
         end = candidate;
         low = candidate + 1;
       } else {
@@ -183,6 +201,8 @@ function chunkText(text: string): readonly CfoTextChunk[] {
       ordinal: chunks.length,
       start_utf16: start,
       end_utf16: end,
+      start_byte: byteOffsets[start],
+      end_byte: byteOffsets[end],
       text_sha256: digest(chunk),
       text: chunk,
     }));
@@ -197,6 +217,16 @@ function chunkText(text: string): readonly CfoTextChunk[] {
   }
   return Object.freeze(chunks);
 }
+async function boundedCancel(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    reader.cancel().catch(() => undefined),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, 100); }),
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+}
+async function discardResponse(response: Response): Promise<void> {
+  if (response.body) await boundedCancel(response.body.getReader());
+}
 async function readBounded(response: Response, limit: number, signal: AbortSignal): Promise<Buffer | null> {
   if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
@@ -209,13 +239,13 @@ async function readBounded(response: Response, limit: number, signal: AbortSigna
       if (next.done) break;
       size += next.value.byteLength;
       if (size > limit) {
-        await reader.cancel();
+        await boundedCancel(reader);
         return null;
       }
       chunks.push(Buffer.from(next.value));
     }
   } catch (error) {
-    try { await reader.cancel(); } catch { /* signal owns cancellation */ }
+    await boundedCancel(reader);
     throw error;
   }
   return Buffer.concat(chunks, size);
@@ -293,9 +323,16 @@ export function createCfoTextSnapshotReader(options: CfoTextSnapshotReaderOption
       if (length === 0) return emptyResult('missing_text', source, 0);
 
       const get = await request('GET', sidecarPath, credentials, boundedSignal, versionId, etag);
-      if (get.status === 404 || get.status === 412) return emptyResult('source_changed', source, length);
-      if (get.status !== 200) fail('cfo_text_source_unavailable');
+      if (get.status === 404 || get.status === 412) {
+        await discardResponse(get);
+        return emptyResult('source_changed', source, length);
+      }
+      if (get.status !== 200) {
+        await discardResponse(get);
+        fail('cfo_text_source_unavailable');
+      }
       if (get.headers.get('etag') !== etag || get.headers.get('x-amz-version-id') !== versionId) {
+        await discardResponse(get);
         return emptyResult('source_changed', source, length);
       }
       const body = await readBounded(get, maxSourceBytes, boundedSignal);
@@ -312,6 +349,7 @@ export function createCfoTextSnapshotReader(options: CfoTextSnapshotReaderOption
         source_index: CFO_INDEX,
         source_document_version: source.document_version_id,
         catalog_source_sha256: source.source_version,
+        source_lineage_status: 'catalog_association_only' as const,
         source_path_hash: source.source_path_hash,
         sidecar_path_hash: digest(sidecarPath),
         sidecar_etag: etag,

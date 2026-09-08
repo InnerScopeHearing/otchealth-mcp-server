@@ -81,6 +81,7 @@ test('CFO reader pins HEAD identity into exact VersionId and If-Match GET and re
   assert.equal(h.records[1].extraHeaders?.['if-match'], ETAG);
   assert.equal(result.descriptor.source_document_version, SOURCE.document_version_id);
   assert.equal(result.descriptor.catalog_source_sha256, SOURCE.source_version);
+  assert.equal(result.descriptor.source_lineage_status, 'catalog_association_only');
   assert.equal(result.descriptor.sidecar_content_sha256, digest(body));
   assert.equal(result.descriptor.sidecar_version_id, VERSION);
   assert.equal(result.descriptor.total_chars_utf16, text.length);
@@ -101,6 +102,8 @@ test('stable UTF-16 offsets cover every character with bounded overlapping UTF-8
     assert.equal(chunk.ordinal, index);
     assert.equal(chunk.text, text.slice(chunk.start_utf16, chunk.end_utf16));
     assert.equal(chunk.text_sha256, digest(chunk.text));
+    assert.equal(chunk.start_byte, Buffer.byteLength(text.slice(0, chunk.start_utf16)));
+    assert.equal(chunk.end_byte, Buffer.byteLength(text.slice(0, chunk.end_utf16)));
     assert.ok(chunk.text.length <= CFO_TEXT_MAX_CHUNK_CHARS);
     assert.ok(Buffer.byteLength(chunk.text) <= CFO_TEXT_MAX_CHUNK_BYTES);
     assert.ok(chunk.start_utf16 <= coveredUntil);
@@ -132,6 +135,22 @@ test('a lying GET length cannot bypass the bounded stream cap', async () => {
     : new Response(body, { status: 200, headers: { etag: ETAG, 'x-amz-version-id': VERSION, 'content-length': '5' } }),
   [], { maxSourceBytes: 4 });
   assert.equal((await h.reader.readVersionPinnedPage(SOURCE)).outcome, 'oversize');
+});
+test('oversize stream settles when response cancellation never resolves', async () => {
+  const hangingResponse = {
+    status: 200,
+    headers: new Headers({ etag: ETAG, 'x-amz-version-id': VERSION, 'content-length': '4' }),
+    body: { getReader: () => ({
+      read: async () => ({ done: false, value: new Uint8Array([1, 2, 3, 4, 5]) }),
+      cancel: () => new Promise<void>(() => {}),
+    }) },
+  } as unknown as Response;
+  const h = readerFor(async (_url, _init, call) => call === 1
+    ? new Response(null, { status: 200, headers: { etag: ETAG, 'x-amz-version-id': VERSION, 'content-length': '4' } })
+    : hangingResponse, [], { maxSourceBytes: 4 });
+  const started = Date.now();
+  assert.equal((await h.reader.readVersionPinnedPage(SOURCE)).outcome, 'oversize');
+  assert.ok(Date.now() - started < 300);
 });
 test('GET precondition failure or changed response identity cannot return text', async () => {
   const precondition = readerFor(async (_url, _init, call) => call === 1
