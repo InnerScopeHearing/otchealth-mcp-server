@@ -11,6 +11,7 @@ export const GRAPH_CATALOG_CACHE_MAX_ROWS = 20_000;
 export const GRAPH_CATALOG_CACHE_MAX_ENTRIES = 2;
 export const GRAPH_CATALOG_CACHE_MAX_IN_FLIGHT = 2;
 export const GRAPH_CATALOG_CACHE_MAX_WAITERS = 32;
+export const GRAPH_CATALOG_CACHE_MAX_SHARED_WAITERS = 32;
 
 const BUCKET = 'otchealth-finance-legal-dr-55c84f6b';
 const REGION = 'us-east-1';
@@ -49,9 +50,16 @@ type LoadWaiter = {
   reject: (error: Error) => void;
   abort: () => void;
 };
+type SharedLoad = {
+  promise: Promise<PinnedCatalog>;
+  controller: AbortController;
+  waiters: number;
+  settled: boolean;
+  timer: ReturnType<typeof setTimeout>;
+};
 type CacheScope = {
   entries: Map<string, CacheEntry>;
-  inFlight: Map<string, Promise<PinnedCatalog>>;
+  inFlight: Map<string, SharedLoad>;
   sourceBytes: number;
   rowCount: number;
   activeLoads: number;
@@ -182,6 +190,22 @@ async function withLoadSlot<T>(
     return await load();
   } finally {
     release();
+  }
+}
+
+async function waitForSharedLoad(load: SharedLoad, signal: AbortSignal): Promise<PinnedCatalog> {
+  active(signal);
+  if (load.waiters >= GRAPH_CATALOG_CACHE_MAX_SHARED_WAITERS) {
+    throw new Error('catalog_reader_busy');
+  }
+  load.waiters++;
+  try {
+    const catalog = await bounded(() => load.promise, signal);
+    active(signal);
+    return catalog;
+  } finally {
+    load.waiters--;
+    if (load.waiters === 0 && !load.settled) load.controller.abort();
   }
 }
 
@@ -433,31 +457,35 @@ export async function readPinnedGraphCatalog(input: Readonly<{
     }
 
     const existing = scope.inFlight.get(identity);
-    if (existing) {
-      const shared = await bounded(() => existing, signal);
-      active(signal);
-      return shared;
-    }
+    if (existing) return await waitForSharedLoad(existing, signal);
 
-    const loading = withLoadSlot(scope, signal, () => downloadCatalog({
+    const sharedController = new AbortController();
+    const sharedTimer = setTimeout(() => sharedController.abort(), 45_000);
+    let shared!: SharedLoad;
+    const promise = withLoadSlot(scope, sharedController.signal, () => downloadCatalog({
       key: input.key,
       sourceSha256: input.sourceSha256,
       head,
       s3,
-      signal,
+      signal: sharedController.signal,
     })).then(catalog => {
-      active(signal);
+      active(sharedController.signal);
       publish(scope, identity, catalog, head.size);
       return catalog;
+    }).finally(() => {
+      shared.settled = true;
+      clearTimeout(shared.timer);
+      if (scope.inFlight.get(identity) === shared) scope.inFlight.delete(identity);
     });
-    scope.inFlight.set(identity, loading);
-    try {
-      const loaded = await bounded(() => loading, signal);
-      active(signal);
-      return loaded;
-    } finally {
-      if (scope.inFlight.get(identity) === loading) scope.inFlight.delete(identity);
-    }
+    shared = {
+      promise,
+      controller: sharedController,
+      waiters: 0,
+      settled: false,
+      timer: sharedTimer,
+    };
+    scope.inFlight.set(identity, shared);
+    return await waitForSharedLoad(shared, signal);
   } finally {
     clearTimeout(timer);
     internal.abort();
