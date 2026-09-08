@@ -19,8 +19,8 @@ Object.assign(process.env, {
   SHIELD_MODE: 'off',
   GROUNDEDNESS_MODE: 'off',
   AUTO_JOURNAL_MODE: 'off',
-  HYPERAGENT_LANE_AGENTS: `cto=agent-general,agent-exec,${WEFUNDER_ID};${WEFUNDER_LANE}=${WEFUNDER_ID},agent-exec,other-wefunder,agent-general`,
-  HYPERAGENT_AGENT_CLASSES: `agent-general=general;agent-exec=exec;${WEFUNDER_ID}=exec;other-wefunder=exec`,
+  HYPERAGENT_LANE_AGENTS: `cto=agent-general,agent-exec,${WEFUNDER_ID};coo=agent-general,agent-exec;cro=agent-general,agent-exec;${WEFUNDER_LANE}=${WEFUNDER_ID},agent-exec,other-wefunder,agent-general`,
+  HYPERAGENT_AGENT_CLASSES: `agent-general=general;agent-unassigned=general;agent-exec=exec;${WEFUNDER_ID}=exec;other-wefunder=exec`,
 });
 
 const { requestContext } = await import('../../server/request-context.js');
@@ -77,6 +77,75 @@ function resultOf(response: Response): Record<string, unknown> {
   assert.ok(result && typeof result === 'object');
   return result as Record<string, unknown>;
 }
+
+// Exercise the real registry connector filter and the resulting guarded handlers. Transport is
+// synthetic throughout; adding catalog visibility must not grant a new source or executive ring.
+function registerConnectorBroker(lane: string, transport: HyperagentToolTransport) {
+  const fixture = fakeServer();
+  requestContext.run(
+    { callerHash: 'synthetic-hash', correlationId: 'synthetic-correlation', callerAgent: lane, connectorSurface: true },
+    () => registerHyperagentTools(fixture.server, () => 'synthetic-hash', transport),
+  );
+  return fixture.tools;
+}
+
+for (const lane of ['coo', 'cro']) {
+  test(`${lane} connector registers five broker tools and reads its assigned general source`, async () => {
+    const payload = { thread: { id: 'owned-thread', namedAgentId: 'agent-general' }, messages: [] };
+    const { transport, calls } = fakeTransport(async () => ({ ok: true, status: 200, data: payload }));
+    const tools = registerConnectorBroker(lane, transport);
+    assert.deepEqual([...tools.keys()].sort(), [
+      'hyperagent_create_thread', 'hyperagent_get_thread', 'hyperagent_list_agents',
+      'hyperagent_list_threads', 'hyperagent_send_message',
+    ]);
+    const response = await invoke(tools.get('hyperagent_get_thread')!, { threadId: 'owned-thread' }, lane);
+    assert.deepEqual(resultOf(response), { ok: true, thread: payload });
+    assert.deepEqual(calls, [{ name: 'get_thread', args: { threadId: 'owned-thread' } }]);
+  });
+
+  test(`${lane} connector still refuses executive, unassigned, conflicting and ownerless get/send`, async () => {
+    for (const owner of [
+      { id: 'blocked-thread', namedAgentId: 'agent-exec' },
+      { id: 'blocked-thread', namedAgentId: 'agent-unassigned' },
+      { id: 'blocked-thread', namedAgentId: 'agent-general', agentId: 'agent-exec' },
+      { id: 'blocked-thread' },
+    ]) {
+      const { transport, calls } = fakeTransport(async name => {
+        assert.equal(name, 'get_thread', 'denied writes must never reach the provider');
+        return { ok: true, status: 200, data: { thread: owner, messages: [{ content: 'blocked-fleet-marker' }] } };
+      });
+      const tools = registerConnectorBroker(lane, transport);
+      for (const toolName of ['hyperagent_get_thread', 'hyperagent_send_message']) {
+        assert.ok(tools.has(toolName), 'test the registered connector handler');
+        const args = toolName === 'hyperagent_get_thread' ? { threadId: 'blocked-thread' }
+          : { threadId: 'blocked-thread', message: 'synthetic follow up' };
+        const response = await invoke(tools.get(toolName)!, args, lane);
+        assert.equal(resultOf(response).ok, false);
+        assert.equal(JSON.stringify(response).includes('blocked-fleet-marker'), false);
+      }
+      assert.deepEqual(calls.map(call => call.name), ['get_thread', 'get_thread']);
+    }
+  });
+
+  test(`${lane} connector create refuses executive and unassigned sources without provider calls`, async () => {
+    const { transport, calls } = fakeTransport(async () => { throw new Error('provider must not be called'); });
+    const tools = registerConnectorBroker(lane, transport);
+    assert.ok(tools.has('hyperagent_create_thread'));
+    for (const agentId of ['agent-exec', 'agent-unassigned']) {
+      const response = await invoke(tools.get('hyperagent_create_thread')!, { agentId, message: 'synthetic task' }, lane);
+      assert.equal(resultOf(response).ok, false);
+    }
+    assert.deepEqual(calls, []);
+  });
+}
+
+test('external and unknown connectors receive no Hyperagent broker tools', () => {
+  const { transport, calls } = fakeTransport(async () => { throw new Error('provider must not be called'); });
+  for (const lane of ['external-read', '', 'unknown-fleet-seat']) {
+    assert.equal(registerConnectorBroker(lane, transport).size, 0, lane);
+  }
+  assert.deepEqual(calls, []);
+});
 
 test('get_thread permits current namedAgentId shape with exact thread id and ring match', async () => {
   const provider = {

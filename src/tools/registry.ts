@@ -323,6 +323,9 @@ const CONNECTOR_SEAT_MEMORY_BASELINE: readonly string[] = [
 export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
+  // Existing broker handlers enforce source assignment, owner identity, ring, and write budget.
+  'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
+  'hyperagent_create_thread', 'hyperagent_send_message',
   ...HEYGEN_DATA_TOOLS,
   ...HEYGEN_PREFLIGHT_TOOLS,
   'heygen_avatar_video_create',
@@ -384,6 +387,9 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
+  // Match the existing broker surface without widening any source assignment or ring grant.
+  'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
+  'hyperagent_create_thread', 'hyperagent_send_message',
   'task_create', 'task_update', 'agent_dispatch',
 ] as const;
 
