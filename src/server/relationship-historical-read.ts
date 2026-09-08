@@ -88,3 +88,6 @@ export function registerRelationshipHistoricalReadRoutes(app:FastifyInstance,inj
  });
 }
 export const relationshipHistoricalReadTest={canonical,hash,parse,validRun,artifactKey,admissionChain,sourceBound};
+
+// Shared validation is used by both explicit grants and automatic server publication.
+export const relationshipHistoricalAuthority={canonical,hash,parse,validRun,artifactKey,admissionChain,sourceBound,artifactRef,pinned,parseArtifact,current,deps,exact,path,version,utc};

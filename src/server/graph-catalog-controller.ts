@@ -134,3 +134,14 @@ export const graphCatalogControllerTest={canonical,hash,configFor,validManifest,
 
 
 
+
+/** Resolve only already-issued server records. This never admits or reopens a run. */
+export async function resolveRelationshipPublicationAdmission(input:{cohortId:string;run:{run_id:string};ctx:AuthContext;signal:AbortSignal},injected?:Partial<GraphCatalogDeps>){
+ const {cohortId,run,ctx,signal}=input;
+ if(ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash)||!ID.test(cohortId)||!validPath(cohortId)||!/^run_[a-f0-9]{64}$/.test(run.run_id))fail(403);
+ const d=depsOf(injected),admissionKey=`${BASE}/${cohortId}/server/admissions/${run.run_id}.json`;
+ const admission=await get(d,admissionKey,signal);if(!admission||!SHA.test(admission.value.key))fail(403);
+ const proposalKey=`${BASE}/${cohortId}/server/proposals/${admission.value.key}.json`,proposal=await get(d,proposalKey,signal);if(!proposal)fail(403);
+ const pin=(key:string,r:NonNullable<typeof admission>)=>{const version_id=r.raw.headers.get('x-amz-version-id');if(!version_id||version_id==='null'||version_id.length>1024||/[\s\p{C}]/u.test(version_id))fail();return{key,version_id,sha256:hash(r.raw.body)};};
+ return{admission:pin(admissionKey,admission),proposal:pin(proposalKey,proposal)};
+}
