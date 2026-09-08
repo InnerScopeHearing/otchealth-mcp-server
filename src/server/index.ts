@@ -14,6 +14,7 @@ import { registerGraphWorkerBrokerRoutes } from './graph-worker-broker.js';
 import { registerGraphCatalogControllerRoutes } from './graph-catalog-controller.js';
 import { registerRelationshipArtifactGatewayRoutes } from './relationship-artifact-gateway.js';
 import { registerRelationshipHistoricalReadRoutes } from './relationship-historical-read.js';
+import { registerRelationshipPublicationRoutes } from './relationship-publication.js';
 import {
   getRevocationStoreStatus,
   loadRevocations,
@@ -101,6 +102,7 @@ async function main(): Promise<void> {
   registerGraphCatalogControllerRoutes(app);
   registerRelationshipArtifactGatewayRoutes(app);
   registerRelationshipHistoricalReadRoutes(app);
+  registerRelationshipPublicationRoutes(app);
   registerWebhookRoutes(app);
 
   app.setNotFoundHandler(async (_req, reply) => {
