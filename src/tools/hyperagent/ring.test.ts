@@ -12,6 +12,8 @@ import assert from 'node:assert/strict';
 import {
   HYPERAGENT_EXEC_RING,
   HYPERAGENT_PERSONAL_LEGAL_RING,
+  WEFUNDER_CAMPAIGN_DIRECTOR_LANE,
+  WEFUNDER_SOURCE_AGENT_ID,
   classifyAgent,
   isHyperagentAgentAllowed,
   parseAgentClassMap,
@@ -21,6 +23,36 @@ import {
 } from './ring.js';
 
 const NO_CLASSES = {};
+
+test('dedicated WeFunder grant requires exact source, explicit exec classification and lane assignment', () => {
+  const lane = WEFUNDER_CAMPAIGN_DIRECTOR_LANE;
+  const id = WEFUNDER_SOURCE_AGENT_ID;
+  const classes = parseAgentClassMap(`${id}=exec`);
+  const assignment = { [lane]: [id] };
+  assert.equal(isHyperagentAgentAllowed(lane, { id }, assignment, classes).allowed, true);
+  assert.equal(isHyperagentAgentAllowed(lane, { id }, {}, classes).reason, 'agent_not_assigned_to_lane');
+  for (const invalid of ['', `${id}=general`, `${id}=personal-legal`]) {
+    assert.equal(isHyperagentAgentAllowed(lane, { id }, assignment, parseAgentClassMap(invalid)).allowed, false);
+  }
+  assert.equal(isHyperagentAgentAllowed(lane, { id, name: 'clo-personal' }, assignment, classes).allowed, false);
+});
+
+test('WeFunder grant cannot expand to other assigned sources, and CTO stays denied even under misclassification', () => {
+  const lane = WEFUNDER_CAMPAIGN_DIRECTOR_LANE;
+  const id = WEFUNDER_SOURCE_AGENT_ID;
+  const sources = [id, 'other-wefunder', 'investor-agent', 'finance-agent', 'legal-agent', 'general-agent', 'unknown-agent'];
+  const assignment = { [lane]: sources, cto: [id] };
+  const classes = parseAgentClassMap(`${id}=exec;other-wefunder=exec;investor-agent=exec;finance-agent=exec;legal-agent=personal-legal;general-agent=general`);
+  for (const other of sources.slice(1)) {
+    assert.equal(isHyperagentAgentAllowed(lane, { id: other }, assignment, classes).allowed, false, other);
+  }
+  for (const sourceClass of ['exec', 'general'] as const) {
+    assert.equal(isHyperagentAgentAllowed('cto', { id }, assignment, { [id]: sourceClass }).reason, 'forbidden_ring');
+  }
+  assert.equal(HYPERAGENT_EXEC_RING.includes(lane), false);
+  assert.equal(HYPERAGENT_PERSONAL_LEGAL_RING.includes(lane), false);
+  assert.deepEqual(visibleAgentsFor(lane, sources.map(id => ({ id })), assignment, classes), [{ id }]);
+});
 
 // ---------------------------------------------------------------- config parsing fails CLOSED
 

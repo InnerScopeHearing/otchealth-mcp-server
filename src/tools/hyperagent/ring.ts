@@ -28,6 +28,11 @@ export const HYPERAGENT_PERSONAL_LEGAL_RING: readonly string[] = ['clo-personal'
 /** Lanes permitted to reach an agent classified as executive/privileged (finance, company legal). */
 export const HYPERAGENT_EXEC_RING: readonly string[] = ['cfo', 'clo', 'clo-personal', 'cpo', 'cco', 'exec'];
 
+// Owner-requested dedicated migration seat. These identifiers are a reviewed resource grant,
+// not exec-ring membership. Runtime classification AND assignment must still be explicit.
+export const WEFUNDER_CAMPAIGN_DIRECTOR_LANE = 'wefunder-campaign-director';
+export const WEFUNDER_SOURCE_AGENT_ID = 'cmsozxle705pz07adrh3k9l2v';
+
 /**
  * Classification of a Hyperagent agent, from most to least restricted. `unknown` is not a gap in the
  * taxonomy — it is the safe landing spot for anything the operator has not explicitly classified,
@@ -118,6 +123,11 @@ export function classifyAgent(
   const hay = `${agent.id ?? ''} ${agent.name ?? ''}`.toLowerCase();
 
   if (FORCED_PERSONAL_LEGAL.some((p) => hay.includes(p))) return 'personal-legal';
+  // Thread reads resolve only an owner ID. Preserve the known source's exec classification even
+  // if its configured class is accidentally downgraded or its display name is absent/changed.
+  if (id === WEFUNDER_SOURCE_AGENT_ID) {
+    return classMap[id] === 'personal-legal' ? 'personal-legal' : 'exec';
+  }
   // NOTE ordering: personal-legal is checked FIRST because "clo-personal" also contains "clo",
   // which is in FORCED_EXEC. Reversing these two blocks would silently downgrade the most
   // sensitive surface in the fleet to the merely-executive ring.
@@ -162,7 +172,18 @@ export function isHyperagentAgentAllowed(
 
   const ring = ringForClass(cls);
   if (ring === 'none') return { allowed: false, reason: 'agent_unclassified', cls };
-  if (ring !== 'all' && !ring.includes(lane)) return { allowed: false, reason: 'forbidden_ring', cls };
+  const dedicatedSourceGrant = lane === WEFUNDER_CAMPAIGN_DIRECTOR_LANE
+    && id === WEFUNDER_SOURCE_AGENT_ID
+    && cls === 'exec'
+    && classMap[id] === 'exec';
+  // Even a later lane-map edit cannot hand this specialist another general or privileged agent.
+  // Personal-legal classification always overrides this exact-source grant.
+  if (lane === WEFUNDER_CAMPAIGN_DIRECTOR_LANE && !dedicatedSourceGrant) {
+    return { allowed: false, reason: 'forbidden_ring', cls };
+  }
+  if (ring !== 'all' && !ring.includes(lane) && !dedicatedSourceGrant) {
+    return { allowed: false, reason: 'forbidden_ring', cls };
+  }
 
   const assigned = laneMap[lane] ?? [];
   if (!assigned.includes(id)) return { allowed: false, reason: 'agent_not_assigned_to_lane', cls };

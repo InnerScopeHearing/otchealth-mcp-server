@@ -1,6 +1,7 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE as WEFUNDER_LANE, WEFUNDER_SOURCE_AGENT_ID as WEFUNDER_ID } from './ring.js';
 
 Object.assign(process.env, {
   CIO_SITE_ID: 'synthetic-site',
@@ -18,12 +19,13 @@ Object.assign(process.env, {
   SHIELD_MODE: 'off',
   GROUNDEDNESS_MODE: 'off',
   AUTO_JOURNAL_MODE: 'off',
-  HYPERAGENT_LANE_AGENTS: 'cto=agent-general,agent-exec',
-  HYPERAGENT_AGENT_CLASSES: 'agent-general=general;agent-exec=exec',
+  HYPERAGENT_LANE_AGENTS: `cto=agent-general,agent-exec,${WEFUNDER_ID};${WEFUNDER_LANE}=${WEFUNDER_ID},agent-exec,other-wefunder,agent-general`,
+  HYPERAGENT_AGENT_CLASSES: `agent-general=general;agent-exec=exec;${WEFUNDER_ID}=exec;other-wefunder=exec`,
 });
 
 const { requestContext } = await import('../../server/request-context.js');
 const { registerHyperagentTools } = await import('./tools.js');
+const { __resetInvocationBudgetForTests } = await import('./rate-limit.js');
 type HyperagentToolTransport = import('./tools.js').HyperagentToolTransport;
 
 interface Response {
@@ -63,9 +65,9 @@ function fakeTransport(
   };
 }
 
-async function invoke(tool: CapturedTool, args: Record<string, unknown>): Promise<Response> {
+async function invoke(tool: CapturedTool, args: Record<string, unknown>, callerAgent = 'cto'): Promise<Response> {
   return requestContext.run(
-    { callerHash: 'synthetic-hash', correlationId: 'synthetic-correlation', callerAgent: 'cto' },
+    { callerHash: 'synthetic-hash', correlationId: 'synthetic-correlation', callerAgent },
     () => tool.handler(args),
   );
 }
@@ -178,4 +180,177 @@ test('list_threads omits denied, conflicting, and ownerless title and content', 
     'ownerless-title-9d2',
     'ownerless-content-9d2',
   ]) assert.equal(visible.includes(marker), false, marker);
+});
+
+test('dedicated source read is allowed while CTO read of identical payload stays denied', async () => {
+  const payload = { thread: { id: 'source-thread', namedAgentId: WEFUNDER_ID }, messages: [{ content: 'synthetic-source-content' }] };
+  const { transport } = fakeTransport(async () => ({ ok: true, status: 200, data: payload }));
+  const { server, tools } = fakeServer();
+  registerHyperagentTools(server, () => 'synthetic-hash', transport);
+  const own = await invoke(tools.get('hyperagent_get_thread')!, { threadId: 'source-thread' }, WEFUNDER_LANE);
+  assert.deepEqual(resultOf(own), { ok: true, thread: payload });
+  const cto = await invoke(tools.get('hyperagent_get_thread')!, { threadId: 'source-thread' });
+  assert.deepEqual(resultOf(cto), { ok: false, error: 'forbidden_ring' });
+  assert.equal(JSON.stringify(cto).includes('synthetic-source-content'), false);
+});
+
+test('dedicated get/send refuse other owners, unresolved owners, conflicts and wrong thread identity without content or writes', async () => {
+  for (const owner of [
+    { id: 'blocked-thread', namedAgentId: 'other-wefunder' },
+    { id: 'blocked-thread', namedAgentId: 'agent-exec' },
+    { id: 'blocked-thread', namedAgentId: 'agent-general' },
+    { id: 'blocked-thread' },
+    { id: 'blocked-thread', namedAgentId: WEFUNDER_ID, agentId: 'agent-exec' },
+    { id: 'wrong-thread', namedAgentId: WEFUNDER_ID },
+  ]) {
+    const { transport, calls } = fakeTransport(async name => {
+      assert.equal(name, 'get_thread');
+      return { ok: true, status: 200, data: { thread: owner, messages: [{ content: 'blocked-synthetic-marker' }] } };
+    });
+    const { server, tools } = fakeServer();
+    registerHyperagentTools(server, () => 'synthetic-hash', transport);
+    for (const toolName of ['hyperagent_get_thread', 'hyperagent_send_message']) {
+      const args = toolName === 'hyperagent_get_thread' ? { threadId: 'blocked-thread' }
+        : { threadId: 'blocked-thread', message: 'prepare export' };
+      const response = await invoke(tools.get(toolName)!, args, WEFUNDER_LANE);
+      assert.equal(resultOf(response).ok, false, JSON.stringify(owner));
+      assert.equal(JSON.stringify(response).includes('blocked-synthetic-marker'), false);
+    }
+    assert.deepEqual(calls.map(call => call.name), ['get_thread', 'get_thread']);
+  }
+});
+
+test('dedicated listings contain only the exact source and its verified threads', async () => {
+  const ownAgent = { id: WEFUNDER_ID, name: 'Wefunder Campaign Director' };
+  const ownThread = { id: 'own-thread', namedAgentId: WEFUNDER_ID };
+  const { transport } = fakeTransport(async name => ({ ok: true, status: 200, data: name === 'list_agents'
+    ? { agents: [ownAgent, { id: 'other-wefunder', name: 'hidden-other-marker' }, { id: 'agent-exec', name: 'hidden-other-marker' }] }
+    : { threads: [ownThread, { id: 'hidden-other-marker', namedAgentId: 'agent-exec' }, { id: 'hidden-other-marker' }] } }));
+  const { server, tools } = fakeServer();
+  registerHyperagentTools(server, () => 'synthetic-hash', transport);
+  const agents = await invoke(tools.get('hyperagent_list_agents')!, {}, WEFUNDER_LANE);
+  const threads = await invoke(tools.get('hyperagent_list_threads')!, {}, WEFUNDER_LANE);
+  assert.deepEqual(resultOf(agents).agents, [ownAgent]);
+  assert.deepEqual(resultOf(threads).threads, [ownThread]);
+  assert.equal(JSON.stringify([agents, threads]).includes('hidden-other-marker'), false);
+});
+
+test('dedicated create/send share invocation budget and never write to any other assigned source', async () => {
+  __resetInvocationBudgetForTests();
+  const previousLimit = process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR;
+  process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR = '2';
+  try {
+    const { transport, calls } = fakeTransport(async (name, args) => ({ ok: true, status: 200, data: name === 'get_thread'
+      ? { thread: { id: args.threadId, namedAgentId: WEFUNDER_ID } }
+      : name === 'create_thread' ? { threadId: 'export-thread' } : {} }));
+    const { server, tools } = fakeServer();
+    registerHyperagentTools(server, () => 'synthetic-hash', transport);
+    const denied = await invoke(tools.get('hyperagent_create_thread')!, { agentId: 'other-wefunder', message: 'prepare export' }, WEFUNDER_LANE);
+    assert.equal(resultOf(denied).error, 'forbidden_ring');
+    assert.equal(calls.length, 0);
+    const created = await invoke(tools.get('hyperagent_create_thread')!, { agentId: WEFUNDER_ID, message: 'prepare export' }, WEFUNDER_LANE);
+    assert.equal(resultOf(created).ok, true);
+    const sent = await invoke(tools.get('hyperagent_send_message')!, { threadId: 'export-thread', message: 'report export manifest' }, WEFUNDER_LANE);
+    assert.equal(resultOf(sent).ok, true);
+    const limited = await invoke(tools.get('hyperagent_send_message')!, { threadId: 'export-thread', message: 'another run' }, WEFUNDER_LANE);
+    assert.equal(resultOf(limited).error, 'rate_limited');
+    assert.deepEqual(calls.map(call => call.name), ['create_thread', 'get_thread', 'send_message', 'get_thread']);
+    const preview = await invoke(tools.get('hyperagent_create_thread')!, { agentId: WEFUNDER_ID, message: 'preview only', dry_run: true }, WEFUNDER_LANE);
+    assert.equal((preview.structuredContent as { dry_run?: boolean }).dry_run, true);
+    assert.equal(calls.length, 4, 'dry-run must not spend or call the provider');
+  } finally {
+    if (previousLimit === undefined) delete process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR;
+    else process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR = previousLimit;
+    __resetInvocationBudgetForTests();
+  }
+});
+
+test('dedicated source grant gives no private finance/legal Brain rooms', async () => {
+  const { roomsFor, OPEN_ROOMS } = await import('../kb/brain-search.js');
+  assert.deepEqual(roomsFor(WEFUNDER_LANE).sort(), [...OPEN_ROOMS].sort());
+  assert.deepEqual(roomsFor(WEFUNDER_LANE, 'finance'), []);
+  assert.deepEqual(roomsFor(WEFUNDER_LANE, 'legal'), []);
+});
+
+test('dedicated wake refuses other agents and large source replies never touch the unscoped result store', async () => {
+  const { registerWake } = await import('../memory/wake.js');
+  const { loadEnv } = await import('../../config/env.js');
+  const { shouldOffload } = await import('../result-store.js');
+  const fixtureEnv = loadEnv();
+  const previousConfig = { STATE_BACKEND: fixtureEnv.STATE_BACKEND,
+    COSMOS_ENDPOINT: fixtureEnv.COSMOS_ENDPOINT, COSMOS_KEY: fixtureEnv.COSMOS_KEY };
+  Object.assign(fixtureEnv, { STATE_BACKEND: 'cosmos', COSMOS_ENDPOINT: 'https://synthetic-storage.invalid',
+    COSMOS_KEY: Buffer.from('synthetic-storage-key').toString('base64') });
+  let ioCount = 0;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    ioCount += 1;
+    throw new Error('Synthetic test forbids all network IO');
+  });
+  try {
+    const { server, tools } = fakeServer();
+    registerWake(server, () => 'synthetic-hash');
+    for (const agent of ['cfo', 'clo', 'clo-personal', 'cto']) {
+      const denied = await invoke(tools.get('wake')!, { agent }, WEFUNDER_LANE);
+      assert.deepEqual(resultOf(denied).errors, ['forbidden_agent']);
+      assert.deepEqual(resultOf(denied).memory_records, []);
+    }
+    assert.equal(ioCount, 0, 'foreign wake must stop before any storage lookup');
+    const payload = { thread: { id: 'large-source', namedAgentId: WEFUNDER_ID }, messages: [{ content: 'synthetic-large-body'.repeat(4000) }] };
+    assert.equal(shouldOffload(JSON.stringify(payload)), true, 'positive control: configured synthetic storage would offload this payload');
+    const { transport } = fakeTransport(async () => ({ ok: true, status: 200, data: payload }));
+    registerHyperagentTools(server, () => 'synthetic-hash', transport);
+    const result = await invoke(tools.get('hyperagent_get_thread')!, { threadId: 'large-source' }, WEFUNDER_LANE);
+    assert.deepEqual(resultOf(result), { ok: true, thread: payload });
+    assert.equal(ioCount, 0, 'large result must remain inline and must not enter shared cache');
+  } finally {
+    fetchMock.mock.restore();
+    Object.assign(fixtureEnv, previousConfig);
+  }
+});
+
+test('dedicated principal is curated even for a legacy non-connector auth path', async () => {
+  const { registerTool } = await import('../registry.js');
+  const { z } = await import('zod');
+  for (const connectorSurface of [false, true]) {
+    const { server, tools } = fakeServer();
+    requestContext.run({ callerAgent: WEFUNDER_LANE, callerHash: 'synthetic', correlationId: 'synthetic', connectorSurface }, () => {
+      for (const name of ['gateway_fetch_result', 'kb_get_document', 'memory_write', 'legal_blob_get', 'wake']) {
+        registerTool(server, { name, category: 'read', annotations: { title: name, description: name,
+          readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+          inputShape: {}, outputShape: { ok: z.boolean() }, handler: async () => ({ data: { ok: true }, summary: 'synthetic' }) }, () => 'synthetic');
+      }
+    });
+    assert.deepEqual([...tools.keys()], ['wake']);
+  }
+});
+
+test('source write log and episode projections contain only identifiers and message length', async () => {
+  const { logger } = await import('../../audit/logger.js');
+  const { buildEpisodeText, redactArgs } = await import('../../safety/journal.js');
+  const { hyperagentInvocationMetadata } = await import('./tools.js');
+  const captured: unknown[] = [];
+  const logMock = mock.method(logger, 'info', (...args: unknown[]) => { captured.push(args); });
+  const marker = 'PRIVATE_SYNTHETIC_EXPORT_PROMPT_MARKER';
+  __resetInvocationBudgetForTests();
+  try {
+    const { transport } = fakeTransport(async (name, args) => ({ ok: true, status: 200, data: name === 'get_thread'
+      ? { thread: { id: args.threadId, namedAgentId: WEFUNDER_ID } } : { threadId: 'synthetic-export' } }));
+    const { server, tools } = fakeServer();
+    registerHyperagentTools(server, () => 'synthetic-hash', transport);
+    for (const [name, args] of [
+      ['hyperagent_create_thread', { agentId: WEFUNDER_ID, message: marker }],
+      ['hyperagent_send_message', { threadId: 'synthetic-export', message: marker }],
+    ] as const) {
+      assert.equal(resultOf(await invoke(tools.get(name)!, args, WEFUNDER_LANE)).ok, true);
+      const episode = buildEpisodeText({ tool: name, actor: WEFUNDER_LANE, outcome: 'success',
+        redactedArgs: redactArgs(name, hyperagentInvocationMetadata(args)) });
+      assert.equal(episode.includes(marker), false);
+      assert.equal(episode.includes('message_chars'), true);
+    }
+    assert.ok(captured.length > 0);
+    assert.equal(JSON.stringify(captured).includes(marker), false, 'actual tool start/end logs must omit the prompt');
+  } finally {
+    logMock.mock.restore();
+    __resetInvocationBudgetForTests();
+  }
 });

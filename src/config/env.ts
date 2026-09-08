@@ -102,6 +102,8 @@ const EnvSchema = z.object({
   CODEX_COO_MCP_TOKEN: z.string().optional().default(''),
   CODEX_CRO_MCP_TOKEN: z.string().optional().default(''),
   CODEX_DEVELOPER_MCP_TOKEN: z.string().optional().default(''),
+  // Dedicated source-scoped seat. Parameter name only; remains inert until independently provisioned.
+  CODEX_WEFUNDER_MCP_TOKEN: z.string().optional().default(''),
 
   // n8n
   //
