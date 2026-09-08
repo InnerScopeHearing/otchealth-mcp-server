@@ -160,6 +160,8 @@ const EnvSchema = z.object({
   GRAPH_CATALOG_COHORTS_JSON: z.string().optional().default(''),
   // Trusted CFO producer bindings. Empty keeps immutable relationship transport disabled.
   GRAPH_RELATIONSHIP_ARTIFACT_POLICY_JSON: z.string().optional().default(''),
+  // Separately reviewed immutable historical READ authority. Never enables execution.
+  GRAPH_RELATIONSHIP_HISTORY_POLICY_JSON: z.string().optional().default(''),
   GRAPH_SENDER_EMAIL: z.string().optional().default('coo@otchealthmart.com'),
   // Allowlist of mailboxes the graph_* mail tools (send/list/get/mark-read) are permitted to touch
   // (see graph/api-client.ts's allowedMailboxes() header for why this exists: the app's application
