@@ -16,5 +16,6 @@ test('published relationship query replays qualified X-to-Y-to-Z evidence and de
   flags.deniedProducer=true;assert.equal((await post(body)).statusCode,403);flags.deniedProducer=false;
   flags.deniedSource=true;assert.equal((await post(body)).statusCode,403);flags.deniedSource=false;
   flags.changed=true;const stale=await post(body);assert.equal(stale.statusCode,200);assert.notEqual(stale.json().answer.status,'qualified');
+  flags.changed=false;flags.sourceChecks=0;flags.revokeAfterChecks=3;assert.equal((await post(body)).statusCode,403);
  }finally{await f.routes.close();}
 });
