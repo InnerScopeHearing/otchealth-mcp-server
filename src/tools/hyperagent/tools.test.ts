@@ -445,8 +445,12 @@ test('dedicated wake refuses other agents and large source replies never touch t
   const fixtureEnv = loadEnv();
   const previousConfig = { STATE_BACKEND: fixtureEnv.STATE_BACKEND,
     COSMOS_ENDPOINT: fixtureEnv.COSMOS_ENDPOINT, COSMOS_KEY: fixtureEnv.COSMOS_KEY };
+  const previousStateBackend = process.env.STATE_BACKEND;
   Object.assign(fixtureEnv, { STATE_BACKEND: 'cosmos', COSMOS_ENDPOINT: 'https://synthetic-storage.invalid',
     COSMOS_KEY: Buffer.from('synthetic-storage-key').toString('base64') });
+  // The repair worker reads STATE_BACKEND from the process environment so it can start with only
+  // state-plane credentials. Keep this legacy cached-config fixture aligned with that real input.
+  process.env.STATE_BACKEND = 'cosmos';
   let ioCount = 0;
   const fetchMock = mock.method(globalThis, 'fetch', async () => {
     ioCount += 1;
@@ -471,6 +475,8 @@ test('dedicated wake refuses other agents and large source replies never touch t
   } finally {
     fetchMock.mock.restore();
     Object.assign(fixtureEnv, previousConfig);
+    if (previousStateBackend === undefined) delete process.env.STATE_BACKEND;
+    else process.env.STATE_BACKEND = previousStateBackend;
   }
 });
 
