@@ -388,7 +388,9 @@ function writeIntentFingerprint(authenticatedLane: string, targetLane: string, k
  * with skills/kb-memory/shared-feed-append.mjs.
  */
 function sharedLogicalIntent(type: MemoryEntry['type'], text: string, tags: string[], source?: string, supersedes?: string): string {
-  return JSON.stringify({ type, text, tags, source: source ?? null, supersedes: supersedes ?? null });
+  // appendShared omits empty optional fields from the durable row, so make an explicit empty value
+  // retry-compatible with that row rather than assigning it a distinct logical intent.
+  return JSON.stringify({ type, text, tags, source: source || null, supersedes: supersedes || null });
 }
 
 /** Append an entry to an agent's shared feed (the cross-agent brain). Returns the stored entry.

@@ -1018,7 +1018,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // outright (mode=enforce). Reads are NEVER gated -- evaluateColdStart isn't even called for
       // them. Fail-open by construction (evaluateColdStart never throws; see safety/cold-start.ts).
       const coldStart = def.category === 'read'
-        ? { cold: false, block: false, mode: 'off' as const }
+        ? { cold: false, block: false, mode: 'off' as const, scope: 'process' as const }
         : evaluateColdStart(callerHash);
       if (coldStart.block) {
         const cmsg = `${COLD_START_MESSAGE} (COLD_START_MODE=enforce; tool "${def.name}" was refused.)`;
