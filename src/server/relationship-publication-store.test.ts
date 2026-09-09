@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRelationshipPublicationStore } from './relationship-publication-store.js';
+import { createRelationshipPublicationStore, relationshipPublicationStoreTest } from './relationship-publication-store.js';
+
+test('publication XML decodes each original entity once and rejects unknown entities',()=>{
+ const {xmlDecode}=relationshipPublicationStoreTest;
+ assert.equal(xmlDecode('&amp;lt; &amp;amp; &amp;quot;'),'&lt; &amp; &quot;');
+ assert.equal(xmlDecode('&lt;&gt;&quot;&apos;&amp;'),'< > " \' &'.replaceAll(' ',''));
+ assert.throws(()=>xmlDecode('&unknown;'),/xml/);
+ assert.throws(()=>xmlDecode('bare & text'),/xml/);
+});
 
 const run='run_'+'a'.repeat(64), body=Buffer.from('{"schema":"synthetic"}');
 const key=`graph-trial/20260908/relationship-publications/cfo/synthetic/synthetic-producer/runs/${run}.json`;
