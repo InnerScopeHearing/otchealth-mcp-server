@@ -1,0 +1,55 @@
+{
+  "schema": "identity-registry-production-verification-v1",
+  "date_utc": "2026-09-09",
+  "base_commit": "90c90f71fb3b406e564ff22e515c034dc3365522",
+  "synthetic_only": true,
+  "real_aws_calls": 0,
+  "deployed": false,
+  "real_source_export_verified": false,
+  "checks": [
+    {
+      "command": "node node_modules/typescript/bin/tsc -p tsconfig.json",
+      "exit_code": 0
+    },
+    {
+      "command": "node --import ./tools/relationship-artifacts/typescript-test-loader.mjs --test src/server/identity-registry-source-authority.test.ts src/server/identity-registry-source-reader.test.ts src/server/identity-registry-production-config.test.ts src/server/identity-registry-s3-runtime.test.ts",
+      "exit_code": 0,
+      "passed": 23,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "command": "node tools/relationship-artifacts/production-registry-wire.mjs",
+      "exit_code": 0,
+      "normal_configured_factory": true,
+      "production_sigv4": true,
+      "source_page_route": true,
+      "malformed_source_records_denied": true,
+      "revoked_source_denied": true,
+      "recreated_replica_pinned_read": true,
+      "changed_policy_denied": true
+    },
+    {
+      "command": "node --test tools/identity-registry-s3-store.test.mjs tools/identity-registry-store.test.mjs",
+      "exit_code": 0,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "node tools/partition-registry-wire.mjs ../.tmp-identity-revalidation-20260909",
+      "exit_code": 0,
+      "actual_partition_gateway": true,
+      "qualified_path": true,
+      "revoked_shard_invalidates": true
+    }
+  ],
+  "remaining_production_inputs": [
+    "source-owner explicit-ID export and signing authority",
+    "public key and exact source, catalog, run, partition and object version pins",
+    "reviewed bucket policy and storage scope hashes",
+    "effective IAM, retention/lifecycle and recovery verification",
+    "release-owner ECS configuration, deployed revision verification and independent live acceptance"
+  ]
+}
