@@ -7,7 +7,7 @@ param(
  [Parameter(Mandatory)][string]$CodexPath,
  [Parameter(Mandatory)][string]$CohortId,
  [Parameter(Mandatory)][string]$Producer,
- [ValidateSet('signed-review','candidate-only')][string]$ReviewMode='candidate-only',
+ [ValidateSet('signed-review','partitioned-signed-review','candidate-only')][string]$ReviewMode='candidate-only',
  [string]$RegistryId,
  [string]$RegistryVersion,
  [string]$RegistryPublicKeyFile,
@@ -22,7 +22,7 @@ $ctoDirectory=(Resolve-Path -LiteralPath $CtoRoot).Path
 $cfoConfig=(Resolve-Path -LiteralPath $CfoProjectConfig).Path
 if(([IO.Path]::GetFileName($cfoConfig) -ine 'config.toml') -or ([IO.Path]::GetFileName((Split-Path -Parent $cfoConfig)) -ine '.codex') -or ([IO.Path]::GetFileName((Split-Path -Parent (Split-Path -Parent $cfoConfig))) -ine 'CFO')){throw 'CFO project config required'}
 $registryConfig=$null
-if($ReviewMode -eq 'signed-review'){
+if($ReviewMode -in @('signed-review','partitioned-signed-review')){
 $registryKey=(Resolve-Path -LiteralPath $RegistryPublicKeyFile).Path
 $authority=Get-Content -LiteralPath (Resolve-Path -LiteralPath $RegistryAuthorityFile).Path -Raw | ConvertFrom-Json
 $registryConfig=@{id=$RegistryId;version=$RegistryVersion;public_key_file=$registryKey;authority=$authority}

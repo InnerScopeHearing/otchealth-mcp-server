@@ -28,12 +28,12 @@ function quotedBearer(value) {
  */
 export function createCfoProjectBearerTokenProvider({ configPath, readFileImpl = readFile, statImpl = stat } = {}) {
   const path = knownCfoConfig(configPath);
-  let token = null;
-  let loading = null;
-  async function load() {
+  async function load(signal) {
+    signal?.throwIfAborted();
     const info = await statImpl(path);
     if (!info.isFile() || info.size < 1 || info.size > MAX_CONFIG_BYTES) fail('cfo_project_credential_configuration');
-    const source = await readFileImpl(path, 'utf8');
+    const source = await readFileImpl(path, { encoding: 'utf8', signal });
+    signal?.throwIfAborted();
     if (Buffer.byteLength(source, 'utf8') !== info.size) fail('cfo_project_credential_configuration');
     let sectionName = '';
     const found = [];
@@ -50,9 +50,7 @@ export function createCfoProjectBearerTokenProvider({ configPath, readFileImpl =
     if (found.length !== 1) fail('cfo_project_credential_missing');
     return found[0];
   }
-  return Object.freeze(async () => {
-    if (token) return token;
-    if (!loading) loading = load().then(value => { token = value; return value; });
-    return loading;
-  });
+  // Re-read for each request so a long-running worker observes rotation or removal.
+  // Never retain a previously accepted credential after a failed refresh.
+  return Object.freeze(async (_request, { signal } = {}) => load(signal));
 }

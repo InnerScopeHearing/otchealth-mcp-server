@@ -9,6 +9,31 @@ const reader = value => ({
   readFileImpl: async () => value,
 });
 
+test('refresh observes rotation and never falls back after removal or read failure', async () => {
+  let value = `[mcp_servers.otchealth.http_headers]\nAuthorization = "Bearer ${token}"\n`;
+  let unavailable = false;
+  const provider = createCfoProjectBearerTokenProvider({configPath:path,
+    statImpl:async()=>({isFile:()=>true,size:Buffer.byteLength(value)}),
+    readFileImpl:async()=>{if(unavailable)throw Error('unavailable');return value;}});
+  assert.equal(await provider(), token);
+  const rotated = 'synthetic-rotated-token-value-56789';
+  value = value.replace(token, rotated);
+  assert.equal(await provider(), rotated);
+  unavailable = true;
+  await assert.rejects(provider(), /unavailable/);
+  unavailable = false;
+  value = '[mcp_servers.otchealth]\n';
+  await assert.rejects(provider(), /missing/);
+});
+
+test('cancelled credential lookup does not read the configuration', async () => {
+  const controller = new AbortController();controller.abort();let reads = 0;
+  const provider = createCfoProjectBearerTokenProvider({configPath:path,
+    statImpl:async()=>{reads++;return {};},readFileImpl:async()=>{reads++;return '';}});
+  await assert.rejects(provider({}, {signal:controller.signal}), {name:'AbortError'});
+  assert.equal(reads, 0);
+});
+
 test('reads one designated CFO bearer only into the returned closure', async () => {
   const config = `[mcp_servers.otchealth.http_headers]\nAuthorization = "Bearer ${token}"\n`;
   const provider = createCfoProjectBearerTokenProvider({ configPath: path, ...reader(config) });
