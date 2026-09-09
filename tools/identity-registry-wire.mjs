@@ -8,7 +8,9 @@
  */
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import Fastify from 'fastify';
 
@@ -47,6 +49,14 @@ assert.ok(helper.parsePolicy(JSON.stringify(policy), Date.parse('2026-09-08T04:0
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const envelopes = new Map();
 const revoked = new Set();
+const filesystemMode = process.argv[3] === '--filesystem-store';
+let storeDirectory, fileStore, createFileStore;
+if (filesystemMode) {
+  const { createIdentityRegistrySnapshotStore } = await import('./identity-registry-store.mjs');
+  storeDirectory = await mkdtemp(join(tmpdir(), 'synthetic-identity-wire-'));
+  createFileStore = () => createIdentityRegistrySnapshotStore({ rootDirectory: storeDirectory, allowNonDurableWindows: true });
+  fileStore = await createFileStore();
+}
 const app = Fastify({ logger: false });
 registerGraphWorkerBrokerRoutes(app, {
   authenticate: async () => ({ caller_hash: H('wire-caller'), raw_token: 'test-only', caller_agent: 'cfo',
@@ -76,11 +86,12 @@ registerGraphWorkerBrokerRoutes(app, {
         current: async ({ source_version }) => source_version === 'source-version-1',
       },
       snapshots: {
-        publish: async ({ version, envelope }) => {
+        publish: async ({ registry_id, version, envelope }, options) => {
+          if (filesystemMode) return fileStore.publish({ registry_id, version, envelope }, options);
           if (envelopes.has(version)) return false;
           envelopes.set(version, envelope); return true;
         },
-        read: async ({ version }) => revoked.has(version) ? { status: 'revoked' } :
+        read: async ({ registry_id, version }, options) => filesystemMode ? fileStore.read({ registry_id, version }, options) : revoked.has(version) ? { status: 'revoked' } :
           envelopes.has(version) ? { status: 'active', envelope: envelopes.get(version) } : { status: 'missing' },
       },
     } : null,
@@ -105,9 +116,20 @@ try {
   assert.equal(envelope.snapshot.entries.length, 1, 'ambiguous source record was not exported');
   const receipt = await gateway.publish(envelope);
   assert.equal(receipt.version, envelope.snapshot.version);
+  if (filesystemMode) fileStore = await createFileStore();
   assert.deepEqual(await gateway.readSnapshot({ registry_id: 'cfo-registry', version: envelope.snapshot.version }), envelope);
-  revoked.add(envelope.snapshot.version);
+  if (filesystemMode) {
+    await fileStore.revoke({ registry_id: 'cfo-registry', version: envelope.snapshot.version });
+    fileStore = await createFileStore();
+  } else revoked.add(envelope.snapshot.version);
   await assert.rejects(() => gateway.readSnapshot({ registry_id: 'cfo-registry', version: envelope.snapshot.version }),
     error => error.code === 'identity_registry_version_revoked');
-  process.stdout.write(JSON.stringify({ wire: 'identity-registry', published: true, revoked_read_denied: true }) + '\n');
-} finally { await app.close(); }
+  process.stdout.write(JSON.stringify({ wire: 'identity-registry', published: true, revoked_read_denied: true,
+    filesystem_restart: filesystemMode, power_loss_durability_verified: false }) + '\n');
+} finally {
+  await app.close();
+  if (storeDirectory) {
+    if (dirname(resolve(storeDirectory)) !== resolve(tmpdir())) throw Error('synthetic_cleanup_path_invalid');
+    await rm(storeDirectory, { recursive: true, force: true });
+  }
+}
