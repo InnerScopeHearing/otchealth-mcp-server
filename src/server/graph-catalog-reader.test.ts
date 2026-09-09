@@ -57,7 +57,7 @@ test('fresh HEAD coalesces immutable GET and parse work for an unchanged identit
   }
 
   assert.deepEqual({ heads, gets, downloaded }, {
-    heads: 5,
+    heads: 6,
     gets: 1,
     downloaded: Buffer.byteLength(text),
   });
@@ -108,7 +108,7 @@ test('every exact HEAD identity component invalidates the cached catalog immedia
   text = '{"path":"version-with-new-size"}\n';
   const changed = await read();
 
-  assert.deepEqual({ heads, gets }, { heads: 5, gets: 5 });
+  assert.deepEqual({ heads, gets }, { heads: 10, gets: 5 });
   assert.equal(changed.rows[0].path, 'version-with-new-size');
 });
 
@@ -227,7 +227,7 @@ test('concurrent readers perform fresh HEAD checks but coalesce to one bounded G
   assert.equal(gets, 1);
   release();
   await Promise.all(reads);
-  assert.deepEqual({ heads, gets }, { heads: 12, gets: 1 });
+  assert.deepEqual({ heads, gets }, { heads: 13, gets: 1 });
 });
 
 test('cache entry and row caps retain bounded state and bypass oversized catalogs', async () => {

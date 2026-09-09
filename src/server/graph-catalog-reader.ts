@@ -32,6 +32,8 @@ export type PinnedCatalog = Readonly<{
   rows: readonly Readonly<Record<string, unknown>>[];
   catalogEtag: string;
   catalogSourceSha256: string;
+  catalogContentSha256: string;
+  catalogVersionId: string | null;
   createdAt: string;
 }>;
 
@@ -309,6 +311,8 @@ async function downloadCatalog(input: Readonly<{
   head: CatalogHead;
   s3: GraphCatalogRawS3;
   signal: AbortSignal;
+  expectedContentSha256?: string;
+  expectedVersionId?: string;
 }>): Promise<PinnedCatalog> {
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
@@ -341,6 +345,7 @@ async function downloadCatalog(input: Readonly<{
     }
 
     const decoder = new TextDecoder('utf-8', { fatal: true });
+    const contentHash = createHash('sha256');
     const rows: Readonly<Record<string, unknown>>[] = [];
     let count = 0;
     let unparsed = '';
@@ -368,6 +373,7 @@ async function downloadCatalog(input: Readonly<{
       active(input.signal);
       if (part.done) break;
       count += part.value.byteLength;
+      contentHash.update(part.value);
       if (count > input.head.size) throw new Error('catalog_length_changed');
       unparsed += decoder.decode(part.value, { stream: true });
       let end: number;
@@ -382,11 +388,18 @@ async function downloadCatalog(input: Readonly<{
     unparsed += decoder.decode();
     parse(unparsed);
     if (count !== input.head.size) throw new Error('catalog_length_changed');
+    const catalogContentSha256 = contentHash.digest('hex');
+    if (input.expectedContentSha256 !== undefined && input.expectedContentSha256 !== catalogContentSha256) throw new Error('catalog_content_changed');
+    const after = await bounded(() => input.s3({ method: 'HEAD', key: input.key, signal: input.signal }), input.signal);
+    const afterHead = parseHead(after);
+    if (afterHead.etag !== input.head.etag || afterHead.size !== input.head.size || afterHead.modified !== input.head.modified || afterHead.versionId !== input.head.versionId) throw new Error('catalog_changed');
     active(input.signal);
     return Object.freeze({
       rows: Object.freeze(rows),
       catalogEtag: input.head.etag,
       catalogSourceSha256: input.sourceSha256,
+      catalogContentSha256,
+      catalogVersionId: input.head.versionId,
       createdAt: input.head.createdAt,
     });
   } finally {
@@ -428,11 +441,15 @@ export const defaultGraphCatalogS3: GraphCatalogRawS3 = async request => {
 export async function readPinnedGraphCatalog(input: Readonly<{
   key: string;
   sourceSha256: string;
+  expectedContentSha256?: string;
+  expectedVersionId?: string;
   createdAt?: string;
   s3?: GraphCatalogRawS3;
   signal?: AbortSignal;
 }>): Promise<PinnedCatalog> {
-  if (!safeKey(input.key) || !/^[a-f0-9]{64}$/.test(input.sourceSha256)) {
+  if (!safeKey(input.key) || !/^[a-f0-9]{64}$/.test(input.sourceSha256) ||
+    (input.expectedContentSha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.expectedContentSha256)) ||
+    (input.expectedVersionId !== undefined && (!/^[A-Za-z0-9._-]{1,1024}$/.test(input.expectedVersionId) || input.expectedVersionId === 'null'))) {
     throw new Error('catalog_reader_request_invalid');
   }
   const internal = new AbortController();
@@ -447,11 +464,13 @@ export async function readPinnedGraphCatalog(input: Readonly<{
     if (input.createdAt !== undefined && input.createdAt !== head.createdAt) {
       throw new Error('catalog_timestamp_changed');
     }
+    if (input.expectedVersionId !== undefined && input.expectedVersionId !== head.versionId) throw new Error('catalog_version_changed');
 
     const scope = cacheScope(s3);
     const identity = identityKey(input.key, input.sourceSha256, head);
     const ready = cached(scope, identity);
     if (ready) {
+      if (input.expectedContentSha256 !== undefined && ready.catalogContentSha256 !== input.expectedContentSha256) throw new Error('catalog_content_changed');
       active(signal);
       return ready;
     }
@@ -468,6 +487,8 @@ export async function readPinnedGraphCatalog(input: Readonly<{
       head,
       s3,
       signal: sharedController.signal,
+      expectedContentSha256: input.expectedContentSha256,
+      expectedVersionId: input.expectedVersionId,
     })).then(catalog => {
       active(sharedController.signal);
       publish(scope, identity, catalog, head.size);
