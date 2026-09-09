@@ -74,6 +74,8 @@ const MAX_CAPABILITY_TOOLS = 64;
 const MAX_SCHEMA_DEPTH = 8;
 const MAX_SCHEMA_NODES = 512;
 const DECLARED_PAGING_FIELD_NAMES = new Set(['cursor', 'after', 'before', 'page', 'offset', 'limit', 'pageSize', 'page_size']);
+const FIXED_METADATA_TOOL_NAMES = new Set(['get_thread', 'list_threads']);
+const PRIMITIVE_SCHEMA_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'null']);
 
 type SafeSchema = Record<string, unknown>;
 
@@ -147,13 +149,34 @@ function declaredPagingMetadata(schema: SafeSchema): Array<{ name: string; type:
     .map(([name, child]) => ({ name, type: String(plainRecord(child)?.type ?? 'unknown'), required: required.has(name) }));
 }
 
+/**
+ * If a provider adds descriptive or compositional schema facets, retain no part of that schema.
+ * The sole exception is this fixed migration probe: two named read tools may expose their direct
+ * primitive argument names and types. No descriptions, defaults, constraints, nesting, or values
+ * cross the boundary.
+ */
+function fixedNamedInputMetadata(name: string, value: unknown): Array<{ name: string; type: string; required: boolean }> | null {
+  if (!FIXED_METADATA_TOOL_NAMES.has(name)) return null;
+  const schema = plainRecord(value), properties = plainRecord(schema?.properties);
+  if (!schema || schema.type !== 'object' || !properties || Object.keys(properties).length > 16) return null;
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === 'string') : []);
+  const projected: Array<{ name: string; type: string; required: boolean }> = [];
+  for (const [propertyName, raw] of Object.entries(properties)) {
+    const property = plainRecord(raw), type = property?.type;
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(propertyName) || typeof type !== 'string' || !PRIMITIVE_SCHEMA_TYPES.has(type)) continue;
+    projected.push({ name: propertyName, type, required: required.has(propertyName) });
+  }
+  return projected.length ? projected.sort((left, right) => left.name.localeCompare(right.name)) : null;
+}
+
 export function sanitizeHyperagentCapabilities(data: unknown):
-  | { ok: true; tools: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }>; omittedUnsupportedSchemas: number }
+  | { ok: true; tools: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }>; omittedUnsupportedSchemas: number; fixedNamedInputs?: Array<{ name: string; inputs: Array<{ name: string; type: string; required: boolean }> }> }
   | { ok: false; error: 'unsafe_capabilities_metadata' } {
   const root = plainRecord(data);
   const tools = root?.tools;
   if (!Array.isArray(tools) || tools.length > MAX_CAPABILITY_TOOLS) return { ok: false, error: 'unsafe_capabilities_metadata' };
   const clean: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }> = [];
+  const fixedNamedInputs: Array<{ name: string; inputs: Array<{ name: string; type: string; required: boolean }> }> = [];
   let omittedUnsupportedSchemas = 0;
   for (const candidate of tools) {
     const tool = plainRecord(candidate);
@@ -168,11 +191,13 @@ export function sanitizeHyperagentCapabilities(data: unknown):
     // Omit the complete schema and expose only an aggregate count, never its name or contents.
     if (!inputSchema) {
       omittedUnsupportedSchemas += 1;
+      const fixed = fixedNamedInputMetadata(name, tool.inputSchema);
+      if (fixed) fixedNamedInputs.push({ name, inputs: fixed });
       continue;
     }
     clean.push({ name, inputSchema, declaredPaging: declaredPagingMetadata(inputSchema) });
   }
-  return { ok: true, tools: clean, omittedUnsupportedSchemas };
+  return { ok: true, tools: clean, omittedUnsupportedSchemas, ...(fixedNamedInputs.length ? { fixedNamedInputs } : {}) };
 }
 
 /** Log/journal only routing metadata, never the investor-sensitive prompt sent to the source. */
@@ -208,6 +233,7 @@ export function registerHyperagentTools(
       outputShape: {
         ok: z.boolean(),
         tools: z.array(z.unknown()).optional(),
+        fixedNamedInputs: z.array(z.unknown()).optional(),
         omittedUnsupportedSchemas: z.number().int().nonnegative().optional(),
         error: z.string().optional(),
       },
@@ -228,7 +254,7 @@ export function registerHyperagentTools(
           return { data: { ok: false, error: safe.error }, summary: 'Refused unsafe Hyperagent capability metadata.' };
         }
         return {
-          data: { ok: true, tools: safe.tools, omittedUnsupportedSchemas: safe.omittedUnsupportedSchemas },
+          data: { ok: true, tools: safe.tools, omittedUnsupportedSchemas: safe.omittedUnsupportedSchemas, ...(safe.fixedNamedInputs ? { fixedNamedInputs: safe.fixedNamedInputs } : {}) },
           summary: `Read ${safe.tools.length} validated Hyperagent tool schema(s) for migration planning.`,
         };
       },
