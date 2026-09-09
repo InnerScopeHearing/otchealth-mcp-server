@@ -2,7 +2,7 @@ import {createPublicationOutbox} from './publication-outbox.mjs';
 import {createPagedRecallHost} from './paged-recall-host.mjs';
 import {createCatalogExtractionLoader,createRelationshipPublicationPipeline} from './publication-pipeline.mjs';
 /** Production entry point: invokes the actual catalog CLI/host with a required review/publication pipeline. */
-export async function runRelationshipCatalogScheduler({runCatalogControllerCli,createSubscriptionCandidateReview,factories,reviewOptionsForRun,outboxDirectory,publisherOptions,argv,env,stdout,load,signal,onMonitor,brokerFactory}={}){
+export async function runRelationshipCatalogScheduler({runCatalogControllerCli,createSubscriptionCandidateReview,factories,reviewOptionsForRun,outboxDirectory,publisherOptions,argv,env,stdout,load,signal,onMonitor,brokerFactory,bearerTokenProvider}={}){
  if(typeof runCatalogControllerCli!=='function'||typeof createSubscriptionCandidateReview!=='function'||typeof reviewOptionsForRun!=='function'||!factories||typeof onMonitor!=='function')throw Error('relationship_scheduler_configuration');
  const outbox=createPublicationOutbox(outboxDirectory),publisher=createPagedRecallHost({...publisherOptions,...factories});let pipeline;
  const relationshipPipelineFactory=context=>{
@@ -14,5 +14,5 @@ export async function runRelationshipCatalogScheduler({runCatalogControllerCli,c
  };
  // Injection is also passed to an explicit broker constructor for faithful integration tests.
  const broker=brokerFactory?((local,options)=>brokerFactory(local,{...options,relationshipPipelineFactory})):undefined;
- return runCatalogControllerCli({argv,env,stdout,load,signal,relationshipPipelineFactory,...(broker?{brokerFactory:broker}:{})});
+ return runCatalogControllerCli({argv,env,stdout,load,signal,relationshipPipelineFactory,bearerTokenProvider,...(broker?{brokerFactory:broker}:{})});
 }
