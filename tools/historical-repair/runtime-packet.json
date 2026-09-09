@@ -1,0 +1,96 @@
+{
+  "version": "memory-index-repair-runtime-v1",
+  "minimum_source_commit": "369f36b7daac2f4737ec00c91befd082af855852",
+  "compiled_entrypoint": "/app/dist/search/historical-repair-cli.js",
+  "existing_job": {
+    "task_definition_family": "otchealth-job-brain-reindex",
+    "schedule_name": "otchealth-brain-reindex",
+    "required_schedule_state": "DISABLED",
+    "container_source": "copy image, roles, environment, secrets, network and logging from the deployed gateway task definition",
+    "retired_task_definition_is_not_a_source": true
+  },
+  "partition": {
+    "agent": "cfo",
+    "index": "memory-exec",
+    "max": 25
+  },
+  "checkpoint": {
+    "store": "agentstate-cache-cas",
+    "scope": "memory-index-repair-v1",
+    "record_id": "checkpoint.cfo.memory-exec",
+    "contains_source_text": false,
+    "dry_run_writes": false,
+    "ttl": -1,
+    "execute_lease_seconds": 7200,
+    "overlap_policy": "one active lease per agent and index, acquired by etag CAS before the repair engine"
+  },
+  "execute_budget": {
+    "maximum_source_rows": 25,
+    "maximum_new_embedding_texts": 25,
+    "actual_new_embedding_texts": "dry-run fetched count after exact OpenSearch existence checks",
+    "approval_gate": "review one durable dry run before the first manual execute"
+  },
+  "commands": {
+    "preflight": [
+      "node",
+      "/app/dist/search/historical-repair-cli.js",
+      "--agent",
+      "cfo",
+      "--index",
+      "memory-exec",
+      "--max",
+      "25",
+      "--durable",
+      "--preflight"
+    ],
+    "dry_run": [
+      "node",
+      "/app/dist/search/historical-repair-cli.js",
+      "--agent",
+      "cfo",
+      "--index",
+      "memory-exec",
+      "--max",
+      "25",
+      "--durable"
+    ],
+    "execute": [
+      "node",
+      "/app/dist/search/historical-repair-cli.js",
+      "--agent",
+      "cfo",
+      "--index",
+      "memory-exec",
+      "--max",
+      "25",
+      "--durable",
+      "--execute"
+    ]
+  },
+  "required_environment_names": [
+    "STATE_BACKEND",
+    "PG_HOST",
+    "PG_PORT",
+    "PG_DATABASE",
+    "PG_USER",
+    "PG_SSL_VERIFY",
+    "SEARCH_BACKEND",
+    "OPENSEARCH_ENDPOINT",
+    "OPENSEARCH_REGION",
+    "EMBEDDINGS_PROVIDER"
+  ],
+  "required_secret_names": [
+    "PG_PASSWORD",
+    "OPENAI_API_KEY"
+  ],
+  "activation_order": [
+    "register an image-pinned task definition revision with the preflight command",
+    "run preflight and require ready true with exit code zero",
+    "run the durable dry run, verify fetched is at most 25, and retain the prior durable checkpoint",
+    "register the execute command only after reviewing dry-run counts and the maximum 25 new embedding texts",
+    "keep the schedule disabled until one bounded execute pass and its persisted checkpoint are verified"
+  ],
+  "excluded_agents": [
+    "clo-personal"
+  ]
+}

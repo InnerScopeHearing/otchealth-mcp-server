@@ -2,11 +2,16 @@
  * deliberately defaults to preview mode.  Output contains operational counts and source IDs for
  * checkpoint resumption, never memory text, vectors, credentials, or backend error bodies. */
 import { runHistoricalRepair, type HistoricalRepairCheckpoint, type HistoricalRepairResult } from './opensearch-backfill.js';
+import {
+  historicalRepairCheckpointStore,
+  normalizeHistoricalRepairCheckpoint,
+  type HistoricalRepairCheckpointStore,
+} from './historical-repair-checkpoint.js';
+import crypto from 'node:crypto';
 import path from 'node:path';
 
-export type RepairCliOptions = Readonly<{ agent: string; index?: string; max?: number; embedBatchSize?: number; bulkBatchSize?: number; checkpoint?: HistoricalRepairCheckpoint; dryRun: boolean }>;
+export type RepairCliOptions = Readonly<{ agent: string; index?: string; max?: number; embedBatchSize?: number; bulkBatchSize?: number; checkpoint?: HistoricalRepairCheckpoint; dryRun: boolean; durable: boolean; preflight: boolean }>;
 const ID = /^[a-z0-9][a-z0-9_-]{0,40}$/;
-const SOURCE_ID = /^[A-Za-z0-9_.-]{1,255}$/;
 
 function integer(value: string | undefined, name: string, maximum: number): number | undefined {
   if (value === undefined) return undefined;
@@ -22,18 +27,19 @@ function checkpoint(raw: string | undefined, agent: string): HistoricalRepairChe
   if (Buffer.byteLength(raw, 'utf8') > 1024 * 1024) throw new Error('checkpoint_invalid');
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new Error('checkpoint_invalid'); }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('checkpoint_invalid');
-  const c = value as Record<string, unknown>;
-  if (Object.keys(c).sort().join(',') !== 'after_id,agent,pending_ids,version' || c.version !== 'memory-index-repair-v1' || c.agent !== agent || typeof c.after_id !== 'string' || !SOURCE_ID.test(c.after_id || 'x') || !Array.isArray(c.pending_ids) || c.pending_ids.some(id => typeof id !== 'string' || !SOURCE_ID.test(id))) throw new Error('checkpoint_invalid');
-  return { version: 'memory-index-repair-v1', agent, after_id: c.after_id, pending_ids: [...new Set(c.pending_ids as string[])].sort() };
+  return normalizeHistoricalRepairCheckpoint(value, agent);
 }
 
 export function parseHistoricalRepairArgs(argv: string[]): RepairCliOptions {
   const values = new Map<string, string>();
   let execute = false;
+  let durable = false;
+  let preflight = false;
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--execute') { if (execute) throw new Error('args_invalid'); execute = true; continue; }
+    if (flag === '--durable') { if (durable) throw new Error('args_invalid'); durable = true; continue; }
+    if (flag === '--preflight') { if (preflight) throw new Error('args_invalid'); preflight = true; continue; }
     if (!['--agent', '--index', '--max', '--embed-batch-size', '--bulk-batch-size', '--checkpoint'].includes(flag) || values.has(flag) || !argv[i + 1]) throw new Error('args_invalid');
     values.set(flag, argv[++i]);
   }
@@ -41,17 +47,78 @@ export function parseHistoricalRepairArgs(argv: string[]): RepairCliOptions {
   if (!agent || !ID.test(agent)) throw new Error('agent_invalid');
   const index = values.get('--index');
   if (index !== undefined && !/^[a-z0-9][a-z0-9_-]{0,127}$/.test(index)) throw new Error('index_invalid');
-  return { agent, index, max: integer(values.get('--max'), 'max', 200), embedBatchSize: integer(values.get('--embed-batch-size'), 'embed_batch', 16), bulkBatchSize: integer(values.get('--bulk-batch-size'), 'bulk_batch', 48), checkpoint: checkpoint(values.get('--checkpoint'), agent), dryRun: !execute };
+  if (durable && values.has('--checkpoint')) throw new Error('args_invalid');
+  if (preflight && (!durable || execute)) throw new Error('args_invalid');
+  return { agent, index, max: integer(values.get('--max'), 'max', 200), embedBatchSize: integer(values.get('--embed-batch-size'), 'embed_batch', 16), bulkBatchSize: integer(values.get('--bulk-batch-size'), 'bulk_batch', 48), checkpoint: checkpoint(values.get('--checkpoint'), agent), dryRun: !execute, durable, preflight };
 }
 
 export function repairOutput(result: HistoricalRepairResult): Record<string, unknown> {
   return { mode: result.mode, agent: result.checkpoint.agent, index: result.index, dry_run: result.dryRun, checked: result.checked, already_indexed: result.already_indexed, fetched: result.fetched, indexed: result.indexed, failed: result.failed, truncated: result.truncated, errors_count: result.errors.length, pending_count: result.checkpoint.pending_ids.length, complete: !result.dryRun && result.failed === 0 && !result.truncated && result.errors.length === 0 && result.checkpoint.pending_ids.length === 0, checkpoint: result.checkpoint };
 }
 
-export async function runHistoricalRepairCli(argv: string[], run = runHistoricalRepair): Promise<{ output: Record<string, unknown>; exitCode: number }> {
+export async function runHistoricalRepairCli(
+  argv: string[],
+  run = runHistoricalRepair,
+  store: HistoricalRepairCheckpointStore = historicalRepairCheckpointStore,
+): Promise<{ output: Record<string, unknown>; exitCode: number }> {
   const options = parseHistoricalRepairArgs(argv);
-  const result = await run(options);
+  const index = options.index || 'memory-exec';
+  const loaded = options.durable ? await store.load(options.agent, index) : { exists: false };
+  if (options.preflight) {
+    return {
+      output: {
+        mode: 'historical-reconciliation',
+        agent: options.agent,
+        index,
+        dry_run: true,
+        preflight: true,
+        checkpoint_store: 'agentstate-cache-cas',
+        checkpoint_present: loaded.exists,
+        lease_active: loaded.lease_active ?? false,
+        pending_count: loaded.checkpoint?.pending_ids.length ?? 0,
+        ready: loaded.lease_active !== true,
+      },
+      exitCode: loaded.lease_active === true ? 1 : 0,
+    };
+  }
+  const lease = options.durable && !options.dryRun
+    ? await store.acquire(options.agent, index, crypto.randomUUID())
+    : undefined;
+  if (lease && !lease.acquired) {
+    return {
+      output: {
+        mode: 'historical-reconciliation', agent: options.agent, index, dry_run: false,
+        checkpoint_store: 'agentstate-cache-cas', checkpoint_persisted: false,
+        complete: false, errors_count: 1, error: 'repair_already_running',
+      },
+      exitCode: 1,
+    };
+  }
+  let result: HistoricalRepairResult;
+  try {
+    result = await run({ ...options, checkpoint: lease?.checkpoint ?? loaded.checkpoint ?? options.checkpoint });
+  } catch (error) {
+    if (lease?.acquired) await store.release(lease).catch(() => false);
+    throw error;
+  }
   const output = repairOutput(result);
+  if (options.durable) {
+    delete output.checkpoint;
+    output.checkpoint_store = 'agentstate-cache-cas';
+    output.checkpoint_loaded = loaded.exists;
+    output.checkpoint_persisted = false;
+    if (!options.dryRun) {
+      try {
+        output.checkpoint_persisted = lease?.acquired === true && await store.commit(lease, result.checkpoint);
+      } catch {
+        output.checkpoint_persisted = false;
+      }
+      if (output.checkpoint_persisted !== true) {
+        output.complete = false;
+        output.errors_count = Number(output.errors_count) + 1;
+      }
+    }
+  }
   return { output, exitCode: output.complete === true ? 0 : 1 };
 }
 
