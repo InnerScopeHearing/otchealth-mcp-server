@@ -69,83 +69,19 @@ malformed responses, generic JSON-RPC errors, and operational tool errors fail t
 
 ---
 
-## Output
+## Output and acceptance
 
-- Prints a summary table to stdout (id, kind, PASS/FAIL).
-- Writes a timestamped JSON baseline to `src/eval/baselines/{YYYY-MM-DD}.json`.
+The runner emits one `EVAL_BASELINE_V1` JSON line to stdout and writes the same sanitized object to its local baseline file. The record includes schema version, timestamp, totals, threshold, `belowThreshold`, `allPassed`, and per-case ordinal, kind, pass and a fixed diagnostic reason. It excludes prompts, response bodies, notes, arbitrary case IDs and gateway URLs. Map ordinals to the exact source cases file from the task image receipt.
 
-```json
-{
-  "timestamp": "2026-06-25T07:01:23.456Z",
-  "gateway": "https://mcp.otchealth.app",
-  "totalCases": 10,
-  "passed": 9,
-  "failed": 1,
-  "passRate": 0.9,
-  "threshold": 0.7,
-  "belowThreshold": false,
-  "results": [ ... ]
-}
-```
+Exit 0 means the configured threshold was met. A score of 7/10 at threshold 0.7 still has `allPassed: false`. Failed guardrail evidence is not proof that protected data leaked. Transport failure, tool failure and missing structured policy evidence remain failures.
 
----
+## AWS scheduled runtime
 
-## Azure Container Apps Job (nightly)
+The ECS job runs `node eval/eval-runner.mjs` from a digest-pinned gateway image. Its existing awslogs stream is the durable destination for the sanitized baseline; the local file is ephemeral. No new storage, permission, schedule or model invocation is required by this source change.
 
-The runner is already the entrypoint — just wrap the existing gateway image and override
-the command, or build a minimal eval image from `node:24-alpine`.
+The writer waits for the stdout callback before exiting. That confirms the local write completed, not CloudWatch delivery. Deployment acceptance must locate the exact natural task ARN, verify revision and image digest, read back and parse its `EVAL_BASELINE_V1` event in CloudWatch, check all case outcomes, and verify guard claim release and absence of duplicates. Do not mark durable retention accepted from an exit code or a local file log alone.
 
-### az CLI command
-
-```bash
-az containerapp job create \
-  --name "otchealth-mcp-eval" \
-  --resource-group "<RESOURCE_GROUP>" \                # TODO: CTO to fill in
-  --environment "<CONTAINER_APPS_ENVIRONMENT>" \       # TODO: CTO to fill in
-  --trigger-type Schedule \
-  --cron-expression "0 7 * * *" \                      # 07:00 UTC daily
-  --replica-timeout 300 \
-  --replica-retry-limit 1 \
-  --replica-completion-count 1 \
-  --parallelism 1 \
-  --image "<TODO: eval image name — e.g. ghcr.io/gbgolfmatt/otchealth-mcp-eval:latest>" \
-  --cpu 0.25 \
-  --memory 0.5Gi \
-  --command "node" \
-  --args "src/eval/eval-runner.mjs" \
-  --env-vars \
-    "GATEWAY_BASE_URL=https://mcp.otchealth.app" \
-    "GATEWAY_BEARER=secretref:gateway-bearer" \
-    "BASELINE_THRESHOLD=0.7"
-```
-
-### Secrets
-
-Add `GATEWAY_BEARER` as a Container Apps secret (not a plain env var):
-
-```bash
-az containerapp job secret set \
-  --name "otchealth-mcp-eval" \
-  --resource-group "<RESOURCE_GROUP>" \
-  --secrets "gateway-bearer=<CONNECTOR_TOKEN>"
-```
-
-### What the CTO needs to supply
-
-1. `--resource-group` and `--environment` from the existing Azure Container Apps setup.
-2. The eval image name (`--image`). Two options:
-   - **Reuse the gateway image** (already has Node 24): override entrypoint to
-     `node src/eval/eval-runner.mjs`. No new image needed if the gateway repo is
-     checked out in the image.
-   - **Dedicated eval image**: `FROM node:24-alpine COPY src/eval/ ./src/eval/ CMD ["node","src/eval/eval-runner.mjs"]`
-3. Confirm the MCP endpoint path is `/mcp` (the runner currently calls `{GATEWAY_BASE_URL}/mcp`).
-   If the production gateway is behind a path prefix, set `GATEWAY_BASE_URL` accordingly.
-
-### Monitoring
-
-- Job execution history: `az containerapp job execution list --name otchealth-mcp-eval --resource-group <RG>`
-- Baseline JSON files accumulate in `src/eval/baselines/` — commit them to the repo or
-  mount a persistent volume so history survives container restarts.
+The image verifier covers all six evaluator runtime files. This source change does not build an image or deploy a task. Only the approved release owner can perform those later steps.
 
 ---
 
