@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import {
   GRAPH_CATALOG_CACHE_MAX_ENTRIES,
   GRAPH_CATALOG_CACHE_MAX_IN_FLIGHT,
@@ -21,6 +22,25 @@ test('rejects impossible HEAD size before GET and rejects truncated or invalid U
 });
 test('caller cancellation bounds an unresolved transport without a later GET',async()=>{
  let requests=0;const controller=new AbortController();const pending=readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,signal:controller.signal,s3:async()=>{requests++;return new Promise(()=>{});}});setTimeout(()=>controller.abort(),5);await assert.rejects(pending,/catalog_cancelled/);assert.equal(requests,1);
+});
+
+test('shared catalog download validates content pins independently for each concurrent caller', async () => {
+  const text = '{"path":"shared"}\n';
+  const actual = createHash('sha256').update(text).digest('hex');
+  let releaseGet: (() => void) | undefined;
+  const gate = new Promise<void>(resolve => { releaseGet = resolve; });
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({ etag: '"shared"', 'content-length': String(Buffer.byteLength(text)), 'last-modified': createdAt, 'x-amz-version-id': 'version-1' });
+    if (request.method === 'HEAD') return { status: 200, headers, body: null };
+    await gate;
+    return { status: 200, headers, body: new Response(text).body };
+  };
+  const leader = readPinnedGraphCatalog({ key: 'graph-trial/shared/catalog.jsonl', sourceSha256: source, s3 });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const mismatch = readPinnedGraphCatalog({ key: 'graph-trial/shared/catalog.jsonl', sourceSha256: source, expectedContentSha256: 'b'.repeat(64), s3 });
+  releaseGet!();
+  const [catalog] = await Promise.all([leader, assert.rejects(mismatch, /catalog_content_changed/)]);
+  assert.equal(catalog.catalogContentSha256, actual);
 });
 
 test('fresh HEAD coalesces immutable GET and parse work for an unchanged identity', async () => {

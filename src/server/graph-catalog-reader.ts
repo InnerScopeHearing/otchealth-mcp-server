@@ -311,8 +311,6 @@ async function downloadCatalog(input: Readonly<{
   head: CatalogHead;
   s3: GraphCatalogRawS3;
   signal: AbortSignal;
-  expectedContentSha256?: string;
-  expectedVersionId?: string;
 }>): Promise<PinnedCatalog> {
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
@@ -389,7 +387,6 @@ async function downloadCatalog(input: Readonly<{
     parse(unparsed);
     if (count !== input.head.size) throw new Error('catalog_length_changed');
     const catalogContentSha256 = contentHash.digest('hex');
-    if (input.expectedContentSha256 !== undefined && input.expectedContentSha256 !== catalogContentSha256) throw new Error('catalog_content_changed');
     const after = await bounded(() => input.s3({ method: 'HEAD', key: input.key, signal: input.signal }), input.signal);
     const afterHead = parseHead(after);
     if (afterHead.etag !== input.head.etag || afterHead.size !== input.head.size || afterHead.modified !== input.head.modified || afterHead.versionId !== input.head.versionId) throw new Error('catalog_changed');
@@ -405,6 +402,11 @@ async function downloadCatalog(input: Readonly<{
   } finally {
     if (reader) await cancel(reader);
   }
+}
+
+function validateCallerContentPin(catalog: PinnedCatalog, expectedContentSha256: string | undefined): PinnedCatalog {
+  if (expectedContentSha256 !== undefined && catalog.catalogContentSha256 !== expectedContentSha256) throw new Error('catalog_content_changed');
+  return catalog;
 }
 
 export const defaultGraphCatalogS3: GraphCatalogRawS3 = async request => {
@@ -470,13 +472,12 @@ export async function readPinnedGraphCatalog(input: Readonly<{
     const identity = identityKey(input.key, input.sourceSha256, head);
     const ready = cached(scope, identity);
     if (ready) {
-      if (input.expectedContentSha256 !== undefined && ready.catalogContentSha256 !== input.expectedContentSha256) throw new Error('catalog_content_changed');
       active(signal);
-      return ready;
+      return validateCallerContentPin(ready, input.expectedContentSha256);
     }
 
     const existing = scope.inFlight.get(identity);
-    if (existing) return await waitForSharedLoad(existing, signal);
+    if (existing) return validateCallerContentPin(await waitForSharedLoad(existing, signal), input.expectedContentSha256);
 
     const sharedController = new AbortController();
     const sharedTimer = setTimeout(() => sharedController.abort(), 45_000);
@@ -487,8 +488,6 @@ export async function readPinnedGraphCatalog(input: Readonly<{
       head,
       s3,
       signal: sharedController.signal,
-      expectedContentSha256: input.expectedContentSha256,
-      expectedVersionId: input.expectedVersionId,
     })).then(catalog => {
       active(sharedController.signal);
       publish(scope, identity, catalog, head.size);
@@ -506,7 +505,7 @@ export async function readPinnedGraphCatalog(input: Readonly<{
       timer: sharedTimer,
     };
     scope.inFlight.set(identity, shared);
-    return await waitForSharedLoad(shared, signal);
+    return validateCallerContentPin(await waitForSharedLoad(shared, signal), input.expectedContentSha256);
   } finally {
     clearTimeout(timer);
     internal.abort();
