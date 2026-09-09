@@ -4,6 +4,7 @@ import {loadEnv} from '../config/env.js';
 import {relationshipHistoricalAuthority as h,type RelationshipHistoricalReadDeps} from './relationship-historical-read.js';
 import {resolveRelationshipPublicationAdmission} from './graph-catalog-controller.js';
 import {createRelationshipPublicationStore} from './relationship-publication-store.js';
+import {queryDurableHistory} from './relationship-query/durable-query.mjs';
 
 type Json=Record<string,any>;
 type Stored={found:boolean;body?:Buffer;versionId?:string};
@@ -49,6 +50,20 @@ async function inspect(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,c
  for(const x of history.payload.sources){const response=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,x.payload_sha256),versionId:x.version_id,signal,maxBytes:16*1024*1024+1024}),s=h.parseArtifact(response,b,x.payload_sha256,x.version_id);if(s.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(s.payload))!==x.size_bytes||!h.sourceBound(s,b,p))fail();sources.push(s);if(wanted===x.payload_sha256+'/'+x.version_id)responses.set(x.payload_sha256+'/'+x.version_id,response);}
  await h.current(d,b,sources,ctx,signal);const current=await h.current(d,b,sources,ctx,signal);return{current,responses,refresh:()=>h.current(d,b,sources,ctx,signal)};
 }
+async function queryPublishedHistory(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal,query:Json){
+ const b=binding(policy,c,g,d.now()),[admission,proposal]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(admission,proposal,b))fail();
+ const ref=g.artifact_ref,historyArtifact=h.parseArtifact(await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),b,ref.payload_sha256,ref.version_id);
+ if(historyArtifact.payload.schema!=='resolution-history-v1'||Buffer.byteLength(h.canonical(historyArtifact.payload))!==ref.size_bytes)fail();
+ const sources:Json[]=[];for(const sourceRef of historyArtifact.payload.sources){
+  if(!g.approved_artifacts.some((x:Json)=>x.digest===sourceRef.payload_sha256&&x.version_id===sourceRef.version_id))fail();
+  const source=h.parseArtifact(await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,sourceRef.payload_sha256),versionId:sourceRef.version_id,signal,maxBytes:16*1024*1024+1024}),b,sourceRef.payload_sha256,sourceRef.version_id);
+  if(source.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(source.payload))!==sourceRef.size_bytes||!h.sourceBound(source,b,proposal))fail();sources.push(source);
+ }
+ const current=await h.current(d,b,sources,ctx,signal);
+ const authorization={allowed:true,provenance:{decision_source:'authenticated_gateway',policy_version:policy.policy_version,allowed_roles:['cfo']},decision_ref:`relationship-publication:${c.producer_id}:${policy.policy_version}`,expires_at:new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()};
+ const answer=queryDurableHistory({history:historyArtifact.payload,inputs:sources.map(source=>source.payload.input),query,authorization,sourceCurrent:current,now:d.now});
+ return {answer,refresh:()=>h.current(d,b,sources,ctx,signal)};
+}
 export function registerRelationshipPublicationRoutes(app:FastifyInstance,injected?:Partial<RelationshipPublicationDeps>){
  const base=h.deps(injected),d:RelationshipPublicationDeps={...base,policyJson:injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON),storeFor:injected?.storeFor??((cohort,producer)=>createRelationshipPublicationStore({cohort,producer})),resolveAdmission:injected?.resolveAdmission??(r=>resolveRelationshipPublicationAdmission({...r,run:{run_id:r.run.run_id}}))};
  const budgets=new WeakMap<AbortSignal,{bytes:number;reads:number}>(),rawRead=d.readVersion;d.readVersion=async r=>{const budget=budgets.get(r.signal)??{bytes:0,reads:0};budgets.set(r.signal,budget);if(r.signal.aborted||++budget.reads>256||budget.bytes>=64*1024*1024)fail(503);const result=await rawRead({...r,maxBytes:Math.min(r.maxBytes,64*1024*1024-budget.bytes)});budget.bytes+=result.body.length;if(budget.bytes>64*1024*1024||r.signal.aborted)fail(503);return result;};
@@ -80,6 +95,13 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   const q=new URL(req.url,'http://local').searchParams,after=q.get('after')??undefined,limit=q.has('limit')?Number(q.get('limit')):64;if([...q.keys()].some(k=>!['after','limit'].includes(k))||new Set(q.keys()).size!==q.size||after!==undefined&&!RUN.test(after)||!Number.isInteger(limit)||limit<1||limit>64)fail(400);
   const page=await d.storeFor(c.cohort_id,c.producer_id).list({after,limit,signal});if(page.records.length>limit)fail(503);let last=after??'';
   const items=[],refreshes:Array<()=>Promise<boolean>>=[];for(const r of page.records){const g=stored({found:true,...r});binding(policy,c,g,d.now());if(g.run.run_id!==r.runId||r.runId<=last)fail(503);last=r.runId;refreshes.push((await inspect(d,policy,c,g,ctx,signal)).refresh);items.push({run:g.run,producer_id:c.producer_id,artifact_ref:g.artifact_ref});}if(page.next!==undefined&&(page.next!==last||!items.length))fail(503);await recheck();for(const refresh of refreshes)await refresh();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();return reply.send({schema:'relationship-publication-page-v1',items,next_after:page.next??null});
+ });
+ route('POST',prefix+'/query',async(req,reply,c,policy,ctx,signal,recheck)=>{
+  if(new URL(req.url,'http://local').search)fail(400);const input=req.body as Json;
+  if(!h.exact(input,['run_id','artifact_ref','query'])||!RUN.test(input.run_id)||!h.artifactRef(input.artifact_ref)||!input.query||Object.getPrototypeOf(input.query)!==Object.prototype||Buffer.byteLength(h.canonical(input))>16384)fail(400);
+  const g=stored(await d.storeFor(c.cohort_id,c.producer_id).get(input.run_id,signal));binding(policy,c,g,d.now());if(g.run.run_id!==input.run_id||!equal(g.artifact_ref,input.artifact_ref))fail();
+  const result=await queryPublishedHistory(d,policy,c,g,ctx,signal,input.query);await recheck();await result.refresh();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
+  return reply.send({schema:'relationship-publication-query-v1',artifact_ref:g.artifact_ref,answer:result.answer});
  });
  route('GET',prefix+'/artifacts/:runId/sha256/:shard/:digest.json',async(req,reply,c,policy,ctx,signal,recheck)=>{
   const p=req.params as Json,q=new URL(req.url,'http://local').searchParams,v=q.get('versionId');if(!RUN.test(p.runId)||!SHA.test(p.digest)||p.shard!==p.digest.slice(0,2)||q.size!==1||!h.version(v))fail(400);
