@@ -10,7 +10,7 @@ test('published relationship query replays qualified X-to-Y-to-Z evidence and de
  const post=(body:any)=>f.routes.app.inject({method:'POST',url:'/relationship-publications/v1/synthetic-history/synthetic-reviewer-1/query',headers:{authorization:'Bearer synthetic-history-token-value-1234','content-type':'application/json'},payload:JSON.stringify(body)});
  try{
   const histories=[];for(let index=0;index<3;index++){f.admit(index);const receipt=await f.reviewAndPublish(index);histories.push({run_id:f.fixtures[index].state.run.run_id,artifact_ref:receipt.artifact_ref});}const body={histories,query:f.query};
-  const qualified=await post(body);assert.equal(qualified.statusCode,200,qualified.body);assert.equal(qualified.json().answer.status,'qualified');assert.equal(qualified.json().answer.premise_ids.length,3);assert.ok(qualified.json().answer.evidence.every((row:any)=>row.candidate.predicate==='depends_on'));
+  const qualified=await post(body);assert.equal(qualified.statusCode,200,JSON.stringify({body:qualified.body,flags}));assert.equal(qualified.json().answer.status,'qualified');assert.equal(qualified.json().answer.premise_ids.length,3);assert.ok(qualified.json().answer.evidence.every((row:any)=>row.candidate.predicate==='depends_on'));
   const malformed=await post({...body,query:{cypher:'MATCH (n) RETURN n'}});assert.equal(malformed.statusCode,400);
   const foreign=await post({...body,histories:[{...histories[0],run_id:histories[1]!.run_id}]});assert.equal(foreign.statusCode,403);
   flags.deniedProducer=true;assert.equal((await post(body)).statusCode,403);flags.deniedProducer=false;

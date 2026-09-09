@@ -18,6 +18,14 @@ export interface RelationshipPublicationDeps extends Omit<RelationshipHistorical
 }
 const SHA=/^[a-f0-9]{64}$/,RUN=/^run_[a-f0-9]{64}$/,LABEL=/^[a-z0-9][a-z0-9_.:-]{0,95}$/,PRODUCER=/^[a-z][a-z0-9-]{0,63}$/;
 const equal=(a:any,b:any)=>h.canonical(a)===h.canonical(b);
+function identityCurrentnessMap(proofs:Array<{proof?:Json}>,decisions:Array<unknown>){
+ const current=new Map<string,boolean>();
+ for(let index=0;index<proofs.length;index++){
+  const key=proofs[index]?.proof?.request_sha256;if(!SHA.test(key??''))continue;
+  current.set(key,(current.get(key)??true)&&decisions[index]!==null);
+ }
+ return current;
+}
 function fail(status=403):never{throw Object.assign(Error('relationship_publication_denied'),{status});}
 function parse(text:string,now:number):Json|null{
  try{
@@ -102,7 +110,7 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   if(!h.exact(input,['histories','query'])||!Array.isArray(input.histories)||!input.histories.length||input.histories.length>64||!input.query||Object.getPrototypeOf(input.query)!==Object.prototype||Buffer.byteLength(h.canonical(input))>16384)fail(400);const queryKeys=Object.keys(input.query);if(input.query.kind==='candidate_links'?queryKeys.some(k=>!['kind','subject_name','object_name','predicate','offset','limit','include_stale'].includes(k)):queryKeys.some(k=>!['subject_id','object_id','premise_ids','as_of_recorded','valid_at'].includes(k))||!Object.hasOwn(input.query,'subject_id')||!Object.hasOwn(input.query,'object_id'))fail(400);
   const seen=new Set<string>(),items:Json[]=[];for(const item of input.histories){if(!h.exact(item,['run_id','artifact_ref'])||!RUN.test(item.run_id)||!h.artifactRef(item.artifact_ref)||seen.has(item.run_id+'\0'+h.canonical(item.artifact_ref)))fail(400);seen.add(item.run_id+'\0'+h.canonical(item.artifact_ref));items.push(item);}
   const loaded=[];for(const item of items){const g=stored(await d.storeFor(c.cohort_id,c.producer_id).get(item.run_id,signal));binding(policy,c,g,d.now());if(g.run.run_id!==item.run_id||!equal(g.artifact_ref,item.artifact_ref))fail();loaded.push(await queryPublishedHistory(d,policy,c,g,ctx,signal));}
-  const answer=queryDurableHistories({entries:loaded.map(result=>result.entry),query:input.query,now:d.now});const proofs=(answer as any).identityProofs as Array<{request:unknown;proof:unknown}>;if(answer.status==='qualified'&&(!d.identityCurrentness||!proofs.length||!(await Promise.all(proofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal})))).every(Boolean)))fail();await recheck();for(const result of loaded)if(!(await result.refresh()))fail();if(answer.status==='qualified'&&!(await Promise.all(proofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal})))).every(Boolean))fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
+  const entries=loaded.map(result=>result.entry),preliminary=queryDurableHistories({entries,query:input.query,now:d.now}),proofs=(preliminary as any).identityProofs as Array<{request:unknown;proof:Json}>,uniqueProofs=[...new Map(proofs.map(item=>[h.canonical(item),item])).values()];const revalidate=async()=>d.identityCurrentness?await Promise.all(uniqueProofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal}))):uniqueProofs.map(()=>null),before=identityCurrentnessMap(uniqueProofs,await revalidate()),answer=queryDurableHistories({entries,query:input.query,now:d.now,identityCurrentness:before});await recheck();for(const result of loaded)if((await result.refresh())!==result.entry.sourceCurrent)fail();const after=identityCurrentnessMap(uniqueProofs,await revalidate());for(const [key,wasCurrent] of before)if(wasCurrent&&after.get(key)!==true)fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
   return reply.send({schema:'relationship-publication-query-v1',history_refs:items.map(item=>item.artifact_ref),answer});
  });
  route('GET',prefix+'/artifacts/:runId/sha256/:shard/:digest.json',async(req,reply,c,policy,ctx,signal,recheck)=>{
@@ -111,4 +119,4 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   reply.header('x-relationship-source-current',String(sourceCurrent)).header('x-relationship-policy-version',policy.policy_version).header('x-relationship-policy-expires-at',new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()).header('x-relationship-producer',c.producer_id).header('x-amz-version-id',v).header('x-amz-server-side-encryption',c.encryption.algorithm);if(c.encryption.algorithm==='aws:kms')reply.header('x-amz-server-side-encryption-aws-kms-key-id',c.encryption.kms_key_id);return reply.type('application/json').send(response!.body);
  });
 }
-export const relationshipPublicationTest={parse,binding};
+export const relationshipPublicationTest={parse,binding,identityCurrentnessMap};

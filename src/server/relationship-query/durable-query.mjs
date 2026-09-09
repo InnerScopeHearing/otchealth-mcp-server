@@ -13,7 +13,7 @@ const utc = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2
  * deliberately retrieval-only: verifier results are replayed receipts, while source currentness
  * and the policy authorization are supplied fresh by the gateway on every call.
  */
-export function queryDurableHistories({ entries, query, now = Date.now }) {
+export function queryDurableHistories({ entries, query, now = Date.now, identityCurrentness = null }) {
   if (!Array.isArray(entries) || !entries.length || entries.length > 64) fail("durable_query_invalid");
   const sourcesByRef = new Map(); let totalSources = 0, totalEvents = 0;
   for (const entry of entries) {
@@ -34,7 +34,7 @@ export function queryDurableHistories({ entries, query, now = Date.now }) {
     if (inputIndex !== inputs.length) fail("durable_query_history_invalid");
   }
   let frame = null, offset = 0, replaying = true; const identityProofs = [];
-  const services = { callerLane: "cfo" };
+  const services = { callerLane: "cfo", isCurrentIdentity: endpoint => identityCurrentness === null || identityCurrentness.get(endpoint?.proof?.request_sha256) === true };
   for (const name of CALLBACKS) services[name] = (...args) => {
     if (replaying) {
       const recorded = frame?.calls?.[offset++];

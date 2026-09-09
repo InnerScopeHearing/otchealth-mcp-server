@@ -132,8 +132,17 @@ export function createResolver(services) {
     // Fail closed for the entire bounded query if any retained source is denied, including historical/conflicting evidence.
     const current = new Map([...sources].map(([ref, source]) => { permission(source);
       return [ref, services.isCurrentSource(copy({ source_ref: ref, source_binding: source.binding })) === true]; }));
-    for (const record of records.values()) if (record.recorded_at <= as_of_recorded) state.set(record.record_id,
-      { record, status: !current.get(record.evidence.source_ref) ? "stale" : record.accepted ? "accepted" : "candidate", conflicts: [] });
+    for (let record of records.values()) if (record.recorded_at <= as_of_recorded) {
+      const sourceCurrent = current.get(record.evidence.source_ref);
+      const identityCurrent = endpoint => endpoint.status !== "resolved" || (sourceCurrent &&
+        (!services.isCurrentIdentity || services.isCurrentIdentity(endpoint) === true));
+      if (!identityCurrent(record.subject) || !identityCurrent(record.object)) record = {
+        ...record, accepted: false, assertion: null, verification: null, identity_verified: false,
+        uncertainty: { level: "unknown", qualifications: [...new Set([...record.uncertainty.qualifications,
+          "Current identity authority is unavailable or no longer verifies the saved receipt."])] },
+      };
+      state.set(record.record_id, { record, status: !sourceCurrent ? "stale" : record.accepted ? "accepted" : "candidate", conflicts: [] });
+    }
     const visibleCorrections = new Map([...corrections].filter(([, c]) => c.recorded_at <= as_of_recorded));
     for (const [targetId, correction] of visibleCorrections) {
       const target = state.get(targetId), trace = [], visited = new Set([targetId]);
@@ -285,7 +294,8 @@ export function createResolver(services) {
       return copy({ status: "unverified_candidates", epistemic_status: "candidate", semantic_verified: false,
         conclusion: null, query_scope: "this_artifact_only", matching: "exact_literal_names_not_entity_identity",
         items: matches.slice(offset, offset + limit).map(record => ({ ...record, epistemic_status: "candidate", semantic_verified: false,
-          identity_verified: record.subject.status === "resolved" && record.object.status === "resolved",
+          identity_verified: record.subject.status === "resolved" && record.object.status === "resolved" &&
+            (!services.isCurrentIdentity || services.isCurrentIdentity(record.subject) === true && services.isCurrentIdentity(record.object) === true),
           polarity_is_proposal: true })),
         total: matches.length, next_offset: offset + limit < matches.length ? offset + limit : null });
     },
