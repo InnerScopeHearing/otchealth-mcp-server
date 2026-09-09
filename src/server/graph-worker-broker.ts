@@ -1618,7 +1618,15 @@ export function registerGraphWorkerBrokerRoutes(
       );
       reply.header('cache-control', 'no-store');
       return reply.send(result);
-    } catch {
+    } catch (error) {
+      const raw = String((error as { code?: unknown; message?: unknown })?.code ??
+        (error as { message?: unknown })?.message ?? '');
+      const allowed = new Set(['cfo_text_preparation_deadline','cfo_text_preparation_corrupt',
+        'cfo_text_preparation_invalid','cfo_text_preparation_oversize','cfo_text_preparation_conflict',
+        'cfo_text_preparation_unknown','cfo_text_preparation_configuration','cfo_text_preparation_request',
+        'cfo_text_forbidden','cfo_text_source_missing','cfo_text_store_scope','policy_changed']);
+      request.log.warn({ event: 'graph_worker_text_failure', stage: 'prepare',
+        code: allowed.has(raw) ? raw : 'cfo_text_unavailable' }, 'CFO text preparation failed');
       return fail(reply, 503, 'graph_worker_text_unavailable');
     }
   });
