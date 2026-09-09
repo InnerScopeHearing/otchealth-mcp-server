@@ -61,4 +61,15 @@ await assert.rejects(() => createIdentityRegistryS3SnapshotStore(config()).read(
 badPinnedVersion = false;
 await assert.rejects(() => createIdentityRegistryS3SnapshotStore({ ...config(), requestTimeoutMs: 1, fetchImpl: async () => new Promise(() => {}) }).publish({ ...request, version: 'sirv_synthetic_timeout' }),
   error => error.code === 'identity_registry_store_deadline', 'ignored transport callback is deadline bounded');
-process.stdout.write(JSON.stringify({ store: 'identity-registry-s3', restart: true, conditional_replicas: true, lost_ack_reconciled: true, revocation: true, real_aws_calls: 0 }) + '\n');
+let chunksRead = 0, streamCancelled = false;
+await assert.rejects(createIdentityRegistryS3SnapshotStore({ ...config(), fetchImpl: async () => new Response(new ReadableStream({
+  pull(controller) { chunksRead++; controller.enqueue(new Uint8Array(65536)); }, cancel() { streamCancelled = true; },
+}), { status: 200 }) }).read(concurrentRequest), { code: 'identity_registry_store_response_too_large' });
+assert.ok(chunksRead < 20 && streamCancelled, 'unbounded body is stopped before excessive buffering');
+streamCancelled = false;
+await assert.rejects(createIdentityRegistryS3SnapshotStore({ ...config(), requestTimeoutMs: 10,
+  fetchImpl: async () => new Response(new ReadableStream({ cancel() { streamCancelled = true; } }), { status: 200 })
+}).read(concurrentRequest), { code: 'identity_registry_store_deadline' });
+assert.equal(streamCancelled, true, 'a stalled body cancels its locked reader without an unhandled rejection');
+process.stdout.write(JSON.stringify({ store: 'identity-registry-s3', replica_recreated: true, process_restart_verified: false,
+  conditional_replicas: true, lost_ack_reconciled: true, revocation: true, bounded_stream: true, real_aws_calls: 0 }) + '\n');

@@ -50,11 +50,31 @@ const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const envelopes = new Map();
 const revoked = new Set();
 const filesystemMode = process.argv[3] === '--filesystem-store';
+const s3Mode = process.argv[3] === '--s3-store';
+const persistentMode = filesystemMode || s3Mode;
 let storeDirectory, fileStore, createFileStore;
 if (filesystemMode) {
   const { createIdentityRegistrySnapshotStore } = await import('./identity-registry-store.mjs');
   storeDirectory = await mkdtemp(join(tmpdir(), 'synthetic-identity-wire-'));
   createFileStore = () => createIdentityRegistrySnapshotStore({ rootDirectory: storeDirectory, allowNonDurableWindows: true });
+  fileStore = await createFileStore();
+}
+if (s3Mode) {
+  const { createIdentityRegistryS3SnapshotStore } = await import('./identity-registry-s3-store.mjs');
+  const objects = new Map(); let revision = 0;
+  const fetchImpl = async (urlText, init) => {
+    const url = new URL(urlText), current = objects.get(url.pathname), pin = url.searchParams.get('versionId');
+    const reply = (body, status, version) => new Response(body, { status, headers: version ? {
+      'x-amz-version-id': version, 'x-amz-server-side-encryption': 'AES256' } : {} });
+    if (init.method === 'GET') return current && (!pin || current.version === pin) ? reply(current.body, 200, current.version) : reply('', 404);
+    if (init.method !== 'PUT' || new Headers(init.headers).get('if-none-match') !== '*') return reply('', 400);
+    if (current) return reply('', 412);
+    const item = { body: String(init.body), version: `synthetic-version-${++revision}` }; objects.set(url.pathname, item);
+    return reply('', 200, item.version);
+  };
+  createFileStore = async () => createIdentityRegistryS3SnapshotStore({ bucket: 'synthetic-registry-store', prefix: 'synthetic/registry',
+    region: 'us-east-1', sse: { algorithm: 'AES256' }, requestTimeoutMs: 1000, immutableTombstonePolicyAttested: true,
+    signRequest: async request => ({ url: request.url, headers: request.headers }), fetchImpl });
   fileStore = await createFileStore();
 }
 const app = Fastify({ logger: false });
@@ -87,11 +107,11 @@ registerGraphWorkerBrokerRoutes(app, {
       },
       snapshots: {
         publish: async ({ registry_id, version, envelope }, options) => {
-          if (filesystemMode) return fileStore.publish({ registry_id, version, envelope }, options);
+          if (persistentMode) return fileStore.publish({ registry_id, version, envelope }, options);
           if (envelopes.has(version)) return false;
           envelopes.set(version, envelope); return true;
         },
-        read: async ({ registry_id, version }, options) => filesystemMode ? fileStore.read({ registry_id, version }, options) : revoked.has(version) ? { status: 'revoked' } :
+        read: async ({ registry_id, version }, options) => persistentMode ? fileStore.read({ registry_id, version }, options) : revoked.has(version) ? { status: 'revoked' } :
           envelopes.has(version) ? { status: 'active', envelope: envelopes.get(version) } : { status: 'missing' },
       },
     } : null,
@@ -121,16 +141,17 @@ try {
   assert.equal(envelope.snapshot.entries.length, 1, 'ambiguous source record was not exported');
   const receipt = await gateway.publish(envelope);
   assert.equal(receipt.version, envelope.snapshot.version);
-  if (filesystemMode) fileStore = await createFileStore();
+  if (persistentMode) fileStore = await createFileStore();
   assert.deepEqual(await gateway.readSnapshot({ registry_id: 'cfo-registry', version: envelope.snapshot.version }), envelope);
-  if (filesystemMode) {
+  if (persistentMode) {
     await fileStore.revoke({ registry_id: 'cfo-registry', version: envelope.snapshot.version });
     fileStore = await createFileStore();
   } else revoked.add(envelope.snapshot.version);
   await assert.rejects(() => gateway.readSnapshot({ registry_id: 'cfo-registry', version: envelope.snapshot.version }),
     error => error.code === 'identity_registry_version_revoked');
   process.stdout.write(JSON.stringify({ wire: 'identity-registry', published: true, revoked_read_denied: true,
-    filesystem_reopen: filesystemMode, process_restart_verified: false, power_loss_durability_verified: false }) + '\n');
+    filesystem_reopen: filesystemMode, s3_replica_recreated: s3Mode, real_aws_calls: 0,
+    process_restart_verified: false, power_loss_durability_verified: false }) + '\n');
 } finally {
   await app.close();
   if (storeDirectory) {

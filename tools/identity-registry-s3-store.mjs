@@ -73,10 +73,13 @@ async function responseText(response, signal) {
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) fail('identity_registry_store_response_too_large', response.status);
   if (!response.body?.getReader) fail('identity_registry_store_response_stream_required', response.status);
   const reader = response.body.getReader(), chunks = []; let length = 0;
+  const cancel = () => { void Promise.resolve(reader.cancel()).catch(() => undefined); };
+  signal?.addEventListener('abort', cancel, { once: true });
   try {
     for (;;) { check(signal); const part = await reader.read(); check(signal); if (part.done) break; length += part.value.byteLength;
       if (length > MAX_RESPONSE_BYTES) { await reader.cancel(); fail('identity_registry_store_response_too_large', response.status); } chunks.push(Buffer.from(part.value)); }
-  } catch (error) { try { await reader.cancel(); } catch {} throw error; }
+  } catch (error) { cancel(); throw error; }
+  finally { signal?.removeEventListener('abort', cancel); }
   return Buffer.concat(chunks, length).toString('utf8');
 }
 
@@ -94,7 +97,7 @@ export function createIdentityRegistryS3SnapshotStore(config) {
     try { response = await deadline(activeSignal => fixed.fetchImpl(signed.url, { method, headers: signed.headers, body: method === 'GET' ? undefined : body, signal: activeSignal, redirect: 'error' }), signal, fixed.requestTimeoutMs); }
     catch (error) { if (error?.code === 'identity_registry_store_deadline') throw error; fail('identity_registry_store_transport_unknown'); }
     check(signal);
-    try { return { status: response.status, headers: response.headers, text: await deadline(activeSignal => responseText(response, activeSignal), signal, fixed.requestTimeoutMs, () => response.body?.cancel?.()) }; }
+    try { return { status: response.status, headers: response.headers, text: await deadline(activeSignal => responseText(response, activeSignal), signal, fixed.requestTimeoutMs) }; }
     catch (error) { if (error?.code) throw error; fail('identity_registry_store_transport_unknown'); }
   }
   function validateReadHeaders(response, expectedVersion = null) {
