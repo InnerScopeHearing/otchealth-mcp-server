@@ -622,6 +622,30 @@ test('historical repair: rejected embedding batch writes nothing and retains the
   assert.match(result.errors[0], /embedding response rejected/);
 });
 
+test('historical repair: a stalled worker that loses its renewed fence dispatches no embedding or bulk write', async () => {
+  const a = { id: 'a', agent: 'cfo', kind: 'fact', text: 'synthetic', tags: [], created_at: '2026-08-01T00:00:00Z' };
+  let embeddings = 0;
+  let bulkWrites = 0;
+  const deps = {
+    queryDocs: (async () => [a]) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async () => { embeddings += 1; return [[1]]; }) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => { embeddings += 1; return [1]; }) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const result = await withStubbedFetch(
+    (async (url: string) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [{ _id: 'cfo__a', found: false }] }), { status: 200 });
+      if (url.includes('_bulk')) { bulkWrites += 1; return new Response('{}'); }
+      throw new Error('unexpected');
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo', beforePaidDispatch: async () => false }, deps),
+  );
+  assert.equal(embeddings, 0);
+  assert.equal(bulkWrites, 0);
+  assert.equal(result.failed, 1);
+  assert.deepEqual(result.checkpoint.pending_ids, ['a']);
+  assert.match(result.errors[0], /execution fence lost/);
+});
+
 test('historical repair: malformed terminal source row advances only its stable ID and remains incomplete', async () => {
   const malformed = { id: 'z', agent: 'cfo', type: 'memory', text: 'missing kind', created_at: '2026-08-01T00:00:00Z' };
   const deps = {

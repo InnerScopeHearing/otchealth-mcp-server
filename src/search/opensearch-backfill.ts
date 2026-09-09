@@ -405,6 +405,9 @@ export interface HistoricalRepairOptions {
   embedBatchSize?: number;
   bulkBatchSize?: number;
   dryRun?: boolean;
+  /** Renew the durable execution fence before every embedding or projection write dispatch.
+   * Returning false means this worker lost authority and must stop before dispatching. */
+  beforePaidDispatch?: () => Promise<boolean>;
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -414,6 +417,7 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 class InvalidEmbeddingResponse extends Error {}
+class RepairFenceLost extends Error {}
 
 function validVector(value: unknown): value is number[] {
   return Array.isArray(value) && value.length > 0 && value.every(item => typeof item === 'number' && Number.isFinite(item));
@@ -425,10 +429,20 @@ function validVector(value: unknown): value is number[] {
  * best-effort fallback should catch and fall back to per-item embed() calls, exactly as the existing
  * per-call embed() sites already do"). Returns one vector-or-null per input row, same order.
  */
-async function embedRows(rows: MemoryRow[], deps: BackfillDeps, embedBatchSize: number): Promise<(number[] | null)[]> {
+async function requireFence(beforePaidDispatch?: () => Promise<boolean>): Promise<void> {
+  if (beforePaidDispatch && !(await beforePaidDispatch())) throw new RepairFenceLost('repair execution fence lost');
+}
+
+async function embedRows(
+  rows: MemoryRow[],
+  deps: BackfillDeps,
+  embedBatchSize: number,
+  beforePaidDispatch?: () => Promise<boolean>,
+): Promise<(number[] | null)[]> {
   const out: (number[] | null)[] = [];
   for (const part of chunk(rows, embedBatchSize)) {
     try {
+      await requireFence(beforePaidDispatch);
       const vecs = await deps.embedBatch(part.map((r) => r.text));
       if (vecs === null) {
         out.push(...part.map(() => null));
@@ -440,16 +454,17 @@ async function embedRows(rows: MemoryRow[], deps: BackfillDeps, embedBatchSize: 
       }
       throw new InvalidEmbeddingResponse('embedding provider returned an incomplete or invalid vector batch');
     } catch (error) {
-      if (error instanceof InvalidEmbeddingResponse) throw error;
+      if (error instanceof InvalidEmbeddingResponse || error instanceof RepairFenceLost) throw error;
       // Batch call failed outright -- fall back to per-item embed(), which itself never throws.
       for (const r of part) {
         try {
+          await requireFence(beforePaidDispatch);
           const vector = await deps.embed(r.text);
           if (vector === null) out.push(null);
           else if (validVector(vector)) out.push(vector);
           else throw new InvalidEmbeddingResponse('embedding provider returned an invalid vector');
         } catch (singleError) {
-          if (singleError instanceof InvalidEmbeddingResponse) throw singleError;
+          if (singleError instanceof InvalidEmbeddingResponse || singleError instanceof RepairFenceLost) throw singleError;
           out.push(null);
         }
       }
@@ -621,15 +636,26 @@ export async function runHistoricalRepair(
     return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: incomplete || pending.size > 0 || missing.length > 0, dryRun: true, errors: skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...new Set([...pending, ...missing.map(row => row.id)])].sort() } };
   }
   let vectors: (number[] | null)[];
-  try { vectors = await embedRows(missing, deps, opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE); }
+  try { vectors = await embedRows(missing, deps, opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE, opts.beforePaidDispatch); }
   catch (error) {
     for (const row of missing) pending.add(row.id);
-    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: missing.length, truncated: true, dryRun: false, errors: [`embedding response rejected: ${(error as Error).message}`], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() } };
+    const message = error instanceof RepairFenceLost
+      ? 'repair execution fence lost; worker stopped before further embedding or projection dispatch'
+      : `embedding response rejected: ${(error as Error).message}`;
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: missing.length, truncated: true, dryRun: false, errors: [message], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() } };
   }
   let indexed = 0;
   let failed = 0;
   const errors: string[] = skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [];
   for (const part of chunk(missing.map((row, i) => ({ row, vector: vectors[i] })), opts.bulkBatchSize ?? DEFAULT_BULK_BATCH_SIZE)) {
+    try {
+      await requireFence(opts.beforePaidDispatch);
+    } catch {
+      for (const row of missing) pending.add(row.id);
+      errors.push('repair execution fence lost; worker stopped before further projection dispatch');
+      failed = Math.max(failed, missing.length - indexed);
+      break;
+    }
     const outcome = await bulkIndex(rowsToBulkNdjson(part, index), part.length);
     indexed += outcome.indexed;
     failed += outcome.failed;
