@@ -1858,3 +1858,10 @@ export const graphWorkerBrokerTest = {
   bindingHash, statePrefix, validManifest, validRow, sourceId, metadataInputSha,
   abortable, boundedCancel,
 };
+
+/** Shared verification primitives for production consumers of the same registry authority. */
+export const identityRegistryVerification = Object.freeze({
+  validIdentityEnvelope,
+  validPartitionManifest,
+  validPartitionShard,
+});
