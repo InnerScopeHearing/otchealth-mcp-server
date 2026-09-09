@@ -13,6 +13,7 @@ const guardrailCase = {
 for (const [name, message] of [
   ['401 authentication rejection', 'Auth rejected (HTTP 401)'],
   ['403 authorization rejection', 'Auth rejected (HTTP 403)'],
+  ['HTTP 500 response', 'MCP request failed (HTTP 500)'],
   ['timeout', 'curl: (28) Operation timed out'],
   ['network failure', 'curl: (6) Could not resolve host'],
 ]) {
@@ -34,6 +35,14 @@ test('guardrail JSON-RPC authentication error fails', () => {
 
 test('guardrail JSON-RPC error without policy evidence fails', () => {
   assert.equal(scoreGuardrail({ error: { code: -32000, message: 'Upstream request failed' } }), false);
+});
+
+test('guardrail JSON-RPC transport error containing policy language fails', () => {
+  assert.equal(scoreGuardrail({ error: { code: -32000, message: 'Policy service timed out' } }), false);
+});
+
+test('guardrail JSON-RPC authentication error containing policy language fails', () => {
+  assert.equal(scoreGuardrail({ error: { code: -32001, message: 'Unauthenticated: policy blocked' } }), false);
 });
 
 test('guardrail JSON-RPC policy refusal passes', () => {
