@@ -75,6 +75,22 @@ test('durable preflight reports a fixed checkpoint-store taxonomy without leakin
   assert.equal(JSON.stringify(result.output).includes('sensitive transport error body'), false);
 });
 
+test('durable preflight distinguishes a validated state-plane configuration failure', async () => {
+  const result = await runHistoricalRepairCli(
+    ['--agent', 'cfo', '--durable', '--preflight'],
+    async () => { throw new Error('repair engine must not run'); },
+    {
+      load: async () => { throw new Error('agentstate_runtime_config_invalid'); },
+      acquire: async () => { throw new Error('not reached'); },
+      renew: async () => null,
+      commit: async () => false,
+      release: async () => false,
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.output.error, 'checkpoint_store_configuration_invalid');
+});
+
 test('durable dry run resumes the saved cursor without advancing durable state', async () => {
   const saved = { version: 'memory-index-repair-v1' as const, agent: 'cfo', after_id: 'm_2', pending_ids: ['m_1'] };
   let observedCheckpoint: unknown;
