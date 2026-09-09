@@ -127,7 +127,6 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         const entry = await appendShared(agent, input.type, input.text, input.tags ?? [], input.source, by || undefined, supersedes, {
           idempotencyKey: input.idempotency_key,
           authenticatedLane: by || agent,
-          idempotencyIntent: JSON.stringify({ type: input.type, text: input.text, tags: input.tags ?? [], source: input.source, supersedes: input.supersedes }),
         });
         if ('durability' in entry && entry.durability === 'UNKNOWN') {
           return {

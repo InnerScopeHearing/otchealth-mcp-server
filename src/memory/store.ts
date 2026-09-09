@@ -346,7 +346,6 @@ type SharedAppendTiming = {
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
   idempotencyKey?: string;
   authenticatedLane?: string;
-  idempotencyIntent?: string;
 };
 
 export type SharedAppendUnknown = MemoryEntry & {
@@ -383,6 +382,15 @@ function writeIntentFingerprint(authenticatedLane: string, targetLane: string, k
   return crypto.createHash('sha256').update('shared-memory-v1\0' + authenticatedLane + '\0' + targetLane + '\0' + key).digest('hex');
 }
 
+/**
+ * Cross-writer retry contract. This intentionally excludes generated row fields (id, ts), writer
+ * attribution, and lane/key fields (already covered by writeIntent). Keep this byte layout aligned
+ * with skills/kb-memory/shared-feed-append.mjs.
+ */
+function sharedLogicalIntent(type: MemoryEntry['type'], text: string, tags: string[], source?: string, supersedes?: string): string {
+  return JSON.stringify({ type, text, tags, source: source ?? null, supersedes: supersedes ?? null });
+}
+
 /** Append an entry to an agent's shared feed (the cross-agent brain). Returns the stored entry.
  * by is the authenticated WRITER; when by !== agent this is a CROSS-LANE note. */
 export async function appendShared(
@@ -407,7 +415,9 @@ export async function appendShared(
   const authenticatedLane = normalizeAgent(timingOptions.authenticatedLane || by || a);
   const idempotencyKey = timingOptions.idempotencyKey?.trim();
   const writeIntent = idempotencyKey ? writeIntentFingerprint(authenticatedLane, a, idempotencyKey) : undefined;
-  const writeIntentContent = writeIntent ? crypto.createHash('sha256').update(timingOptions.idempotencyIntent || JSON.stringify({ type, text, tags, source, supersedes })).digest('hex') : undefined;
+  const writeIntentContent = writeIntent
+    ? crypto.createHash('sha256').update(sharedLogicalIntent(type, text, tags, source, supersedes)).digest('hex')
+    : undefined;
   const entry: MemoryEntry = {
     id: newSharedId(),
     ts: new Date().toISOString(),
