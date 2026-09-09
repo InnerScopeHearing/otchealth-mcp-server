@@ -12,6 +12,7 @@ const utc = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2
  * Replays an immutable resolution-history artifact through the production resolver.  This is
  * deliberately retrieval-only: verifier results are replayed receipts, while source currentness
  * and the policy authorization are supplied fresh by the gateway on every call.
+ * @param {{entries: any[], query: any, now?: () => number, identityCurrentness?: Map<string, boolean> | null}} input
  */
 export function queryDurableHistories({ entries, query, now = Date.now, identityCurrentness = null }) {
   if (!Array.isArray(entries) || !entries.length || entries.length > 64) fail("durable_query_invalid");
