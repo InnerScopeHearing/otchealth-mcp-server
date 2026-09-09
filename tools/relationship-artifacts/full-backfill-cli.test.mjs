@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {tmpdir} from 'node:os';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import {generateKeyPairSync,sign} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+const cli=fileURLToPath(new URL('./full-backfill-cli.mjs',import.meta.url));
+const canonical=v=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
+test('ordinary executable refuses missing full-backfill configuration',()=>{const r=spawnSync(process.execPath,[cli,'--config','absent.json'],{encoding:'utf8',windowsHide:true});assert.equal(r.status,2);assert.match(r.stderr,/not-ready/);assert.doesNotMatch(r.stdout,/complete/);});
+test('ordinary executable loads real relationship factory and registry client without caller injection',{skip:!process.env.RELATIONSHIP_CTO_ROOT},async()=>{
+ const root=await mkdtemp(join(tmpdir(),'full-backfill-cli-'));
+ try{
+ const {publicKey,privateKey}=generateKeyPairSync('ed25519'),keyFile=join(root,'public.pem'),hostFile=join(root,'host.json'),configFile=join(root,'runtime.json'),preload=join(root,'transport.mjs');
+ const binary=join(root,'codex.exe');await writeFile(binary,'synthetic never executed');await writeFile(keyFile,publicKey.export({type:'spki',format:'pem'}));await writeFile(hostFile,JSON.stringify({schema:'company-catalog-controller-host-v1',seat:'cfo',binary,cohort_id:'synthetic'}));
+ const snapshot={schema:'source-identity-registry-v1',registry_id:'synthetic',version:'1',entries:[]},envelope={snapshot,signature:sign(null,Buffer.from(canonical(snapshot)),privateKey).toString('base64')};
+ await writeFile(configFile,JSON.stringify({schema:'relationship-backfill-runtime-v1',review_mode:'signed-review',cto_root:resolve(process.env.RELATIONSHIP_CTO_ROOT),host_config:hostFile,outbox_directory:join(root,'outbox'),producer:'reviewer',registry:{id:'synthetic',version:'1',public_key_file:keyFile,authority:{schema:'authenticated-structured-identity-authority-v1',scope:'cfo',adapter_id:'synthetic',source_system:'synthetic',version:'1'}}}));
+ await writeFile(preload,`globalThis.fetch=async(url,init)=>{if(new URL(url).origin!=='https://mcp.otchealth.app')throw Error('unexpected origin');if(String(url).endsWith('/snapshots/1'))return new Response(JSON.stringify(${JSON.stringify(envelope)}),{status:200});if(String(url).endsWith('/config'))return new Response(JSON.stringify({enabled:false,cohort_id:'synthetic',policy_sha256:'a'.repeat(64),max_admissions:0,controller:{catalogSourceSha256:'b'.repeat(64),purpose:'relationship-candidates',runVersion:'synthetic-v1',batchSize:1}}),{status:200});throw Error('unexpected route');};`);
+ const execute=mode=>spawnSync(process.execPath,['--import',pathToFileURL(preload).href,cli,mode,'--config',configFile],{encoding:'utf8',windowsHide:true,timeout:30000,env:{...process.env,CODEX_CFO_MCP_TOKEN:'synthetic-test-token-not-real'}});
+ const check=execute('--check');assert.equal(check.status,0,check.stderr);assert.match(check.stdout,/configured/);assert.match(check.stdout,/"live_verified":false/);
+ const result=execute('--once');assert.equal(result.status,2,result.stderr);const lines=result.stdout.trim().split('\n').map(JSON.parse);assert.ok(lines.some(x=>x.event==='relationship_recovery'),result.stdout+result.stderr);assert.ok(lines.some(x=>x.schema==='relationship-publication-monitor-v1'));assert.equal(lines.at(-1).stop,'disabled');
+ await writeFile(preload,"globalThis.fetch=async()=>new Response(null,{status:404});");const absent=execute('--once');assert.equal(absent.status,2);assert.match(absent.stderr,/not-ready/);assert.equal(absent.stdout,'');
+ if(process.env.RELATIONSHIP_CANDIDATE_CTO_ROOT){
+  const candidateConfig=JSON.parse(await (await import('node:fs/promises')).readFile(configFile,'utf8'));candidateConfig.cto_root=resolve(process.env.RELATIONSHIP_CANDIDATE_CTO_ROOT);candidateConfig.review_mode='candidate-only';candidateConfig.registry=null;await writeFile(configFile,JSON.stringify(candidateConfig));
+  await writeFile(preload,`globalThis.fetch=async(url)=>{if(String(url).includes('identity-registry'))throw Error('registry must not be consulted');if(String(url).endsWith('/config'))return new Response(JSON.stringify({enabled:false,cohort_id:'synthetic',policy_sha256:'a'.repeat(64),max_admissions:0,controller:{catalogSourceSha256:'b'.repeat(64),purpose:'relationship-candidates',runVersion:'synthetic-v1',batchSize:1}}),{status:200});throw Error('unexpected route');};`);
+  const candidate=execute('--once');assert.equal(candidate.status,2,candidate.stderr);assert.match(candidate.stdout,/candidate-only/);assert.match(candidate.stdout,/relationship_recovery/);assert.match(candidate.stdout,/disabled/);assert.equal(candidate.stderr,'');
+ }
+ }finally{await rm(root,{recursive:true,force:true});}
+});

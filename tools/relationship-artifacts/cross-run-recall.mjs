@@ -142,12 +142,12 @@ export function createCrossRunRecall({ createResolver, bindPreparedSource, verif
     async recall({ histories, query }, { signal } = {}) {
       active(signal); const loaded = await loadHistories(clone(histories), signal); const originalSources = await sourceInputs(loaded, signal);
       let sources = await refreshSources(originalSources, signal); assertFresh(sources);
-      let resolver = replay(loaded, sources); let answer = resolver.explain(clone(query));
+      let resolver = replay(loaded, sources); let answer = (query?.kind==='candidate_links'?resolver.candidateLinks(clone(query)):resolver.explain(clone(query)));
       // Last boundary: re-open each history and source through the authenticated gateway. No result survives a revoked history access.
       const finalHistories = await loadHistories(loaded.map(item => item.entry), signal);
       if (finalHistories.length !== loaded.length || finalHistories.some((item, index) => !equal(item.history, loaded[index].history))) fail("cross_run_history_changed");
       const finalSources = await refreshSources(sources, signal); assertFresh(finalSources);
-      if (!equal(sources.map(source => source.authority), finalSources.map(source => source.authority))) { sources = finalSources; resolver = replay(loaded, sources); assertFresh(sources); answer = resolver.explain(clone(query)); }
+      if (!equal(sources.map(source => source.authority), finalSources.map(source => source.authority))) { sources = finalSources; resolver = replay(loaded, sources); assertFresh(sources); answer = (query?.kind==='candidate_links'?resolver.candidateLinks(clone(query)):resolver.explain(clone(query))); }
       active(signal);
       return frozen({ schema: "cross-run-resolution-recall-v1", answer, history_refs: loaded.map(item => clone(item.entry.artifact_ref)) });
     },

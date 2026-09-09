@@ -90,6 +90,19 @@ test('KMS response headers remain available and read-time revocation withholds s
 test('unversioned discovery cannot turn an S3 null version into an immutable reference',async()=>{
  const t=await harness();try{const p=t.source();assert.equal((await t.request(p)).statusCode,200);t.mutateRead((r:any)=>r.headers.set('x-amz-version-id','null'));assert.equal((await t.request(p,'GET')).statusCode,503);}finally{await t.app.close();}
 });
+test('authorization preflight emits only a guarded authenticated-resolution-store decision',async()=>{
+ const t=await harness();try{const request=(action:'write'|'read',artifact_ref:any=null,extra:any={})=>({action,artifact_ref,run:t.f.run,caller_seat:'cfo',store_id:'relationship-gateway-v1',...extra});const url=`/relationship-artifacts/v1/${t.f.run.run_id}/${t.f.producer}/authorize`;
+  const write=await t.app.inject({method:'POST',url,headers:{authorization:'Bearer synthetic-fixture','content-type':'application/json'},payload:canonical(request('write'))});assert.equal(write.statusCode,200);assert.deepEqual(write.json().provenance,{decision_source:'authenticated_resolution_store',policy_version:'synthetic-v1',authenticated_store_id:'relationship-gateway-v1',authenticated_producer_id:t.f.producer,allowed_roles:['cfo']});assert.equal(write.json().authorization_request_sha256,hash(canonical(request('write')));
+  for(const bad of[request('write',null,{store_id:'other'}),request('write',t.source().body),request('write',null,{caller_seat:'clo'})])assert.equal((await t.app.inject({method:'POST',url,headers:{authorization:'Bearer synthetic-fixture','content-type':'application/json'},payload:canonical(bad)})).statusCode,400);
+  const p=t.source();assert.equal((await t.request(p)).statusCode,200);const ref={schema:'relationship-resolution-artifact-ref-v1',artifact_id:'resart_'+p.body.payload_sha256,bucket:'otchealth-finance-legal-dr-55c84f6b',key:`resolution-artifacts/sha256/${p.body.payload_sha256.slice(0,2)}/${p.body.payload_sha256}.json`,payload_sha256:p.body.payload_sha256,version_id:'synthetic+/=v1',size_bytes:Buffer.byteLength(canonical(p.body.payload))};assert.equal((await t.app.inject({method:'POST',url,headers:{authorization:'Bearer synthetic-fixture','content-type':'application/json'},payload:canonical(request('read',ref))})).statusCode,200);t.setCohort(false);assert.equal((await t.app.inject({method:'POST',url,headers:{authorization:'Bearer synthetic-fixture','content-type':'application/json'},payload:canonical(request('write'))})).statusCode,403);
+ }finally{await t.app.close();}
+});
+test('artifact storage authorization preflight binds get and put to the exact route scope and stored version',async()=>{
+ const t=await harness();try{const url=`/relationship-artifacts/v1/${t.f.run.run_id}/${t.f.producer}/authorize`,scope={run:t.f.run,caller_seat:'cfo',producer_id:t.f.producer},p=t.source(),base=(action:'put'|'get',extra:any={})=>({action,scope,artifact_id:'resart_'+p.body.payload_sha256,sha256:p.body.payload_sha256,...extra}),post=(body:any)=>t.app.inject({method:'POST',url,headers:{authorization:'Bearer synthetic-fixture','content-type':'application/json'},payload:canonical(body)});
+  assert.equal((await post(base('put'))).statusCode,200);assert.equal((await post(base('get',{version_id:'synthetic+/=v1'}))).statusCode,403);assert.equal((await t.request(p)).statusCode,200);assert.equal((await post(base('get',{version_id:'synthetic+/=v1'}))).statusCode,200);
+  for(const bad of[{...base('put'),action:'write'},{...base('put'),sha256:'c'.repeat(64)},{...base('get',{version_id:'null'})},{...base('put'),scope:{...scope,producer_id:'other'}}])assert.equal((await post(bad)).statusCode,400);
+ }finally{await t.app.close();}
+});
 test('actual CTO store crosses gateway mapping for KMS, conflict and lost-write recovery', {skip:!process.env.RELATIONSHIP_STORE_MODULE}, async()=>{
  const {createS3ResolutionStore}=await import(pathToFileURL(process.env.RELATIONSHIP_STORE_MODULE!).href);
  const {createGatewayRelationshipStore}=await import('../../tools/relationship-artifacts/gateway-store.mjs');
@@ -121,9 +134,13 @@ test('actual durable review and reconstructed retrieval retain original decision
  const {createSyntheticWire}=await import(new URL('./synthetic-wire-fixture.mjs',moduleUrl).href);
  const {createGatewayRelationshipStore}=await import('../../tools/relationship-artifacts/gateway-store.mjs');
  const f=createSyntheticWire(),t=await harness(f.state.run,'synthetic-reviewer-1');
+ const {createReviewHistoryAuthority}=await import('../../tools/relationship-artifacts/review-history-authority.mjs');
+ const transport=async(url:string,init:any)=>{const response=await t.app.inject({method:init.method,url:new URL(url).pathname+new URL(url).search,headers:init.headers,...(init.body===undefined?{}:{payload:init.body})});return new Response(response.rawPayload,{status:response.statusCode,headers:response.headers as Record<string,string>});};
+ const authority=createReviewHistoryAuthority({run:f.state.run,producer:t.f.producer,getAuthorization:async()=> 'Bearer synthetic-fixture-token-value',fetchImpl:transport});
+ f.options.historyTrust={store_id:'relationship-gateway-v1',producer_ids:[t.f.producer]};f.options.authorizeHistory=authority.authorizeHistory;
  try{
   const store=createGatewayRelationshipStore({createS3ResolutionStore,gatewayOrigin:'https://synthetic-gateway.invalid',run:f.state.run,producer:t.f.producer,sse:{algorithm:'AES256'},historyTrust:f.options.historyTrust,
-   authorizeArtifact:async()=>({allowed:true}),getAuthorization:async()=> 'Bearer synthetic-fixture-token-value',
+   authorizeArtifact:authority.authorizeArtifact,getAuthorization:async()=> 'Bearer synthetic-fixture-token-value',
    fetchImpl:async(url:string,init:any)=>{const response=await t.app.inject({method:init.method,url:new URL(url).pathname+new URL(url).search,headers:init.headers,...(init.body===undefined?{}:{payload:init.body})});return new Response(response.rawPayload,{status:response.statusCode,headers:response.headers as Record<string,string>});}});
   const workflow=createDurableResolution({...f.options,store,historyTrust:store.boundHistoryTrust}),batch=f.batch({withCorrection:true}),receipt=await workflow.review(batch);
   assert.equal(receipt.results[0].status,'qualified');const priorVerifiers=f.counters.verifiers;

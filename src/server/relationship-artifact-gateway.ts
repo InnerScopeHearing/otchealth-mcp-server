@@ -11,6 +11,7 @@ const SHA = /^[a-f0-9]{64}$/;
 const LABEL = /^[a-z0-9][a-z0-9_.:-]{0,95}$/;
 const PRODUCER = /^[a-z][a-z0-9-]{0,63}$/;
 const VERSION = /^[^\s\p{C}]{1,1024}$/u;
+export const RELATIONSHIP_GATEWAY_STORE_ID='relationship-gateway-v1';
 
 type RunRef = { ref_version:string; run_id:string; purpose:string; scope:string; run_version:string; manifest_sha256:string };
 type Encryption = { algorithm:'AES256'|'aws:kms'; kms_key_id?:string };
@@ -111,6 +112,9 @@ function payloadValid(value:unknown, run:RunRef):boolean {
 function envelope(value:unknown, run:RunRef, digest:string):value is {schema:'relationship-resolution-artifact-v1';payload_sha256:string;payload:unknown}{
   return exact(value,['schema','payload_sha256','payload'])&&value.schema==='relationship-resolution-artifact-v1'&&value.payload_sha256===digest&&validJson(value.payload)&&payloadValid(value.payload,run)&&Buffer.byteLength(canonical(value.payload),'utf8')<=MAX_PAYLOAD&&hash(canonical(value.payload))===digest;
 }
+function validArtifactRef(value:unknown){if(!exact(value,['schema','artifact_id','bucket','key','payload_sha256','version_id','size_bytes']))return false;const r=value as Record<string,unknown>,d=r.payload_sha256;return r.schema==='relationship-resolution-artifact-ref-v1'&&typeof d==='string'&&SHA.test(d)&&r.artifact_id==='resart_'+d&&r.bucket==='otchealth-finance-legal-dr-55c84f6b'&&r.key===`resolution-artifacts/sha256/${d.slice(0,2)}/${d}.json`&&typeof r.version_id==='string'&&r.version_id!=='null'&&VERSION.test(r.version_id)&&typeof r.size_bytes==='number'&&Number.isSafeInteger(r.size_bytes)&&r.size_bytes>=0&&r.size_bytes<=MAX_PAYLOAD;}
+function authRequest(value:unknown,run:RunRef){return exact(value,['action','artifact_ref','run','caller_seat','store_id'])&&['write','read'].includes(String((value as any).action))&&same((value as any).run,run)&&(value as any).caller_seat==='cfo'&&(value as any).store_id===RELATIONSHIP_GATEWAY_STORE_ID&&(((value as any).action==='write'&&(value as any).artifact_ref===null)||((value as any).action==='read'&&validArtifactRef((value as any).artifact_ref)));}
+function storageAuthRequest(value:unknown){if(!value||typeof value!=='object')return false;const v=value as any,base=['action','scope','artifact_id','sha256'];const keys=v.action==='get'?[...base,'version_id']:base;if(!exact(v,keys)||typeof v.action!=='string'||!['get','put'].includes(v.action)||!exact(v.scope,['run','caller_seat','producer_id'])||!validRun(v.scope.run)||v.scope.caller_seat!=='cfo'||typeof v.scope.producer_id!=='string'||!PRODUCER.test(v.scope.producer_id)||typeof v.sha256!=='string'||!SHA.test(v.sha256)||v.artifact_id!=='resart_'+v.sha256)return false;return v.action==='put'||(typeof v.version_id==='string'&&v.version_id!=='null'&&VERSION.test(v.version_id));}
 function parseBody(body:unknown):unknown|null {
   if(Buffer.isBuffer(body)){if(body.length>MAX_ENVELOPE||!Buffer.from(body.toString('utf8'),'utf8').equals(body))return null;try{return JSON.parse(body.toString('utf8'));}catch{return null;}}
   if(typeof body==='string'){const raw=Buffer.from(body,'utf8');if(raw.length>MAX_ENVELOPE)return null;try{return JSON.parse(body);}catch{return null;}}
@@ -131,6 +135,17 @@ async function finalAuth(request:FastifyRequest,reply:FastifyReply,d:Relationshi
 
 export function registerRelationshipArtifactGatewayRoutes(app:FastifyInstance,injected?:Partial<RelationshipArtifactGatewayDeps>):void {
  const d=defaultDeps(injected),url='/relationship-artifacts/v1/:runId/:producerId/sha256/:shard/:digest.json';
+ app.route({method:'POST',url:'/relationship-artifacts/v1/:runId/:producerId/authorize',bodyLimit:16*1024,handler:async(request,reply)=>{
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),45000),disconnect=()=>controller.abort();request.raw.on('aborted',disconnect);
+  try{const p=params(request),raw=request.body as any,durable=authRequest(raw,raw?.run as RunRef),storage=storageAuthRequest(raw),requestRun:any=durable?raw.run:storage?raw.scope.run:null;if(request.url.includes('?')||!/^run_[a-f0-9]{64}$/.test(p.runId)||!PRODUCER.test(p.producerId)||(!durable&&!storage)||!validRun(requestRun)||requestRun?.run_id!==p.runId||(storage&&raw.scope.producer_id!==p.producerId))return status(reply,400);
+   const ctx=await context(request,reply,d);if(!ctx||reply.sent)return;const policyText=d.policyJson(),policy=parsePolicy(policyText,d.now());if(!policy)return status(reply,404);const binding=select(policy,ctx,p);if(!binding||!same(requestRun,binding.run))return status(reply,403);
+   if(!await guard(d,ctx,binding,policyText,policy,controller.signal))return status(reply,403);
+   const body=request.body as any;
+   if(body.action==='read'||body.action==='get'){const ref=body.action==='read'?body.artifact_ref:{payload_sha256:body.sha256,version_id:body.version_id,size_bytes:null},key=artifactKey(p.runId,p.producerId,ref.payload_sha256.slice(0,2),ref.payload_sha256),saved=await d.s3({method:'GET',key,versionId:ref.version_id,signal:controller.signal,maxBytes:MAX_ENVELOPE});if(saved.status!==200||saved.body.length>MAX_ENVELOPE||!Buffer.from(saved.body.toString('utf8'),'utf8').equals(saved.body))return status(reply,403);let value:unknown;try{value=JSON.parse(saved.body.toString('utf8'));}catch{return status(reply,403);}if(header(saved.headers,'x-amz-version-id')!==ref.version_id||header(saved.headers,'x-amz-meta-resolution-producer')!==p.producerId||header(saved.headers,'x-amz-meta-resolution-run')!==p.runId||header(saved.headers,'x-amz-server-side-encryption')!==binding.encryption.algorithm||(binding.encryption.algorithm==='aws:kms'&&header(saved.headers,'x-amz-server-side-encryption-aws-kms-key-id')!==binding.encryption.kms_key_id)||!envelope(value,binding.run,ref.payload_sha256)||(ref.size_bytes!==null&&Buffer.byteLength(canonical((value as any).payload),'utf8')!==ref.size_bytes))return status(reply,403);}
+   if(!await guard(d,ctx,binding,policyText,policy,controller.signal)||!await finalAuth(request,reply,d,ctx))return status(reply,403);
+   return reply.send({allowed:true,authorization_request_sha256:hash(canonical(body)),provenance:{decision_source:'authenticated_resolution_store',policy_version:policy.policy_version,authenticated_store_id:RELATIONSHIP_GATEWAY_STORE_ID,authenticated_producer_id:p.producerId,allowed_roles:['cfo']}});
+  }catch{return !reply.sent?status(reply,503):undefined;}finally{clearTimeout(timer);controller.abort();request.raw.off('aborted',disconnect);}
+ }});
  app.route({method:['GET','PUT'],url,bodyLimit:MAX_ENVELOPE,handler:async(request,reply)=>{
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),45000),disconnect=()=>controller.abort();request.raw.on('aborted',disconnect);
   try{
