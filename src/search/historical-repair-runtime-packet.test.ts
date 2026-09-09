@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { HISTORICAL_REPAIR_RUNTIME_CONTRACT } from './historical-repair-cli.js';
 
 const packet = JSON.parse(readFileSync('tools/historical-repair/runtime-packet.json', 'utf8')) as Record<string, any>;
 const schedules = JSON.parse(readFileSync('infra/aws/data/schedules.json', 'utf8')) as Record<string, any>;
@@ -29,6 +30,11 @@ test('runtime packet uses only the compiled durable CLI and keeps execution expl
   assert.equal(commands.preflight.includes('--execute'), false);
   assert.equal(commands.dry_run.includes('--execute'), false);
   assert.equal(commands.execute.includes('--execute'), true);
+  assert.equal(packet.artifact_gate.required_runtime_contract, HISTORICAL_REPAIR_RUNTIME_CONTRACT);
+  assert.match(packet.artifact_gate.source_revision, /exact merged PR 344 commit/);
+  assert.match(packet.artifact_gate.image_reference, /immutable ECR sha256 digest/);
+  assert.equal(packet.artifact_gate.reject_mutable_or_older_image, true);
+  assert.equal('minimum_source_commit' in packet, false);
 });
 
 test('runtime packet carries identifiers and secret names without values or protected lanes', () => {
@@ -36,6 +42,8 @@ test('runtime packet carries identifiers and secret names without values or prot
   assert.equal(packet.checkpoint.dry_run_writes, false);
   assert.equal(packet.checkpoint.ttl, -1);
   assert.equal(packet.checkpoint.execute_lease_seconds, 7200);
+  assert.match(packet.checkpoint.renewal_policy, /before every embedding or projection write dispatch/);
+  assert.ok(packet.checkpoint.maximum_embedding_request_seconds < packet.checkpoint.execute_lease_seconds);
   assert.equal(packet.execute_budget.maximum_source_rows, 25);
   assert.equal(packet.execute_budget.maximum_new_embedding_texts, 25);
   assert.match(packet.execute_budget.approval_gate, /dry run/);

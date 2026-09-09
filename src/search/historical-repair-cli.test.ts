@@ -3,7 +3,7 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { parseHistoricalRepairArgs, runHistoricalRepairCli } from './historical-repair-cli.js';
+import { HISTORICAL_REPAIR_RUNTIME_CONTRACT, parseHistoricalRepairArgs, runHistoricalRepairCli } from './historical-repair-cli.js';
 import { runHistoricalRepair } from './opensearch-backfill.js';
 
 // Required configuration uses synthetic values in this isolated test process. All HTTP is stubbed.
@@ -33,7 +33,7 @@ test('compiled entrypoint executes under a native absolute Windows script path a
   const compiled = path.resolve('dist/search/historical-repair-cli.js');
   const run = spawnSync(process.execPath, [compiled, '--agent', 'INVALID'], { encoding: 'utf8' });
   assert.equal(run.status, 1);
-  assert.deepEqual(JSON.parse(run.stdout), { mode: 'historical-reconciliation', complete: false, errors_count: 1, error: 'repair_cli_failed' });
+  assert.deepEqual(JSON.parse(run.stdout), { runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT, mode: 'historical-reconciliation', complete: false, errors_count: 1, error: 'repair_cli_failed' });
 });
 
 test('durable preflight reads only checkpoint metadata and never calls the repair engine', async () => {
@@ -45,6 +45,7 @@ test('durable preflight reads only checkpoint metadata and never calls the repai
     {
       load: async () => ({ exists: true, etag: 'etag-1', checkpoint: { version: 'memory-index-repair-v1', agent: 'cfo', after_id: 'm_2', pending_ids: ['m_1'] } }),
       acquire: async () => { throw new Error('preflight must not acquire'); },
+      renew: async () => { throw new Error('preflight must not renew'); },
       commit: async () => { saves += 1; return true; },
       release: async () => true,
     },
@@ -70,6 +71,7 @@ test('durable dry run resumes the saved cursor without advancing durable state',
     {
       load: async () => ({ exists: true, etag: 'etag-1', checkpoint: saved }),
       acquire: async () => { throw new Error('dry run must not acquire'); },
+      renew: async () => { throw new Error('dry run must not renew'); },
       commit: async () => { saves += 1; return true; },
       release: async () => true,
     },
@@ -91,9 +93,10 @@ test('durable execute advances state only after the pass and fails closed on CAS
       {
         load: async () => ({ exists: false }),
         acquire: async (agent, index, runId) => ({
-          acquired: true, agent, index, run_id: runId, etag: 'etag-lease',
+          acquired: true, agent, index, run_id: runId, etag: 'etag-lease', expires_at: '2030-01-01T00:00:00.000Z',
           previous_completed_run_id: null,
         }),
+        renew: async lease => lease,
         commit: async (_lease, value) => { commits += 1; assert.deepEqual(value, terminal); return persisted; },
         release: async () => true,
       },
@@ -114,6 +117,7 @@ test('durable execute refuses an overlapping worker before the repair engine run
     {
       load: async () => ({ exists: true, lease_active: true }),
       acquire: async () => ({ acquired: false }),
+      renew: async () => null,
       commit: async () => true,
       release: async () => true,
     },
@@ -130,7 +134,8 @@ test('durable execute releases its lease when the engine throws', async () => {
     async () => { throw new Error('synthetic engine failure'); },
     {
       load: async () => ({ exists: false }),
-      acquire: async (agent, index, runId) => ({ acquired: true, agent, index, run_id: runId, etag: 'etag-lease', previous_completed_run_id: null }),
+      acquire: async (agent, index, runId) => ({ acquired: true, agent, index, run_id: runId, etag: 'etag-lease', expires_at: '2030-01-01T00:00:00.000Z', previous_completed_run_id: null }),
+      renew: async lease => lease,
       commit: async () => true,
       release: async () => { releases += 1; return true; },
     },

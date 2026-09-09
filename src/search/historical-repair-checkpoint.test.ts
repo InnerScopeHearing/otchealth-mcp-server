@@ -75,11 +75,17 @@ test('two processes cannot enter one paid repair pass and an expired lease is re
   const first = await firstProcess.acquire('cfo', 'memory-exec', RUN_A);
   assert.equal(first.acquired, true);
   assert.deepEqual(await secondProcess.acquire('cfo', 'memory-exec', RUN_B), { acquired: false });
+  if (!first.acquired) return;
+  backend.advance(HISTORICAL_REPAIR_LEASE_MS - 1);
+  const renewed = await firstProcess.renew(first);
+  assert.ok(renewed, 'first worker renews its fence before another paid dispatch');
+  backend.advance(2);
+  assert.deepEqual(await secondProcess.acquire('cfo', 'memory-exec', RUN_B), { acquired: false }, 'crossing the original expiry cannot overlap a renewed worker');
   backend.advance(HISTORICAL_REPAIR_LEASE_MS + 1);
   const recovered = await secondProcess.acquire('cfo', 'memory-exec', RUN_B);
   assert.equal(recovered.acquired, true);
-  if (!first.acquired) return;
-  assert.equal(await firstProcess.commit(first, checkpoint), false, 'stale worker cannot commit over recovered lease');
+  assert.equal(await firstProcess.renew(renewed!), null, 'stalled worker cannot renew after its fence expires');
+  assert.equal(await firstProcess.commit(renewed!, checkpoint), false, 'stale worker cannot commit over recovered lease');
 });
 
 test('commit verifies durable state after an unknown write outcome', async () => {
@@ -93,6 +99,19 @@ test('commit verifies durable state after an unknown write outcome', async () =>
   const loaded = await store.load('cfo', 'memory-exec');
   assert.deepEqual(loaded.checkpoint, checkpoint);
   assert.equal(loaded.lease_active, false);
+});
+
+test('renew verifies the exact extended fence after an unknown write outcome', async () => {
+  const backend = memoryBackend();
+  const store = createHistoricalRepairCheckpointStore(backend.deps);
+  const lease = await store.acquire('cfo', 'memory-exec', RUN_A);
+  assert.equal(lease.acquired, true);
+  if (!lease.acquired) return;
+  backend.advance(1000);
+  backend.loseNextReplaceResponse();
+  const renewed = await store.renew(lease);
+  assert.ok(renewed);
+  assert.equal(Date.parse(renewed!.expires_at), backend.deps.now() + HISTORICAL_REPAIR_LEASE_MS);
 });
 
 test('malformed or expiring durable state fails before it can become a repair cursor', async () => {

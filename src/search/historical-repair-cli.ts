@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 
 export type RepairCliOptions = Readonly<{ agent: string; index?: string; max?: number; embedBatchSize?: number; bulkBatchSize?: number; checkpoint?: HistoricalRepairCheckpoint; dryRun: boolean; durable: boolean; preflight: boolean }>;
+export const HISTORICAL_REPAIR_RUNTIME_CONTRACT = 'historical-repair-durable-fenced-v2';
 const ID = /^[a-z0-9][a-z0-9_-]{0,40}$/;
 
 function integer(value: string | undefined, name: string, maximum: number): number | undefined {
@@ -53,7 +54,7 @@ export function parseHistoricalRepairArgs(argv: string[]): RepairCliOptions {
 }
 
 export function repairOutput(result: HistoricalRepairResult): Record<string, unknown> {
-  return { mode: result.mode, agent: result.checkpoint.agent, index: result.index, dry_run: result.dryRun, checked: result.checked, already_indexed: result.already_indexed, fetched: result.fetched, indexed: result.indexed, failed: result.failed, truncated: result.truncated, errors_count: result.errors.length, pending_count: result.checkpoint.pending_ids.length, complete: !result.dryRun && result.failed === 0 && !result.truncated && result.errors.length === 0 && result.checkpoint.pending_ids.length === 0, checkpoint: result.checkpoint };
+  return { runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT, mode: result.mode, agent: result.checkpoint.agent, index: result.index, dry_run: result.dryRun, checked: result.checked, already_indexed: result.already_indexed, fetched: result.fetched, indexed: result.indexed, failed: result.failed, truncated: result.truncated, errors_count: result.errors.length, pending_count: result.checkpoint.pending_ids.length, complete: !result.dryRun && result.failed === 0 && !result.truncated && result.errors.length === 0 && result.checkpoint.pending_ids.length === 0, checkpoint: result.checkpoint };
 }
 
 export async function runHistoricalRepairCli(
@@ -67,6 +68,7 @@ export async function runHistoricalRepairCli(
   if (options.preflight) {
     return {
       output: {
+        runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT,
         mode: 'historical-reconciliation',
         agent: options.agent,
         index,
@@ -87,6 +89,7 @@ export async function runHistoricalRepairCli(
   if (lease && !lease.acquired) {
     return {
       output: {
+        runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT,
         mode: 'historical-reconciliation', agent: options.agent, index, dry_run: false,
         checkpoint_store: 'agentstate-cache-cas', checkpoint_persisted: false,
         complete: false, errors_count: 1, error: 'repair_already_running',
@@ -94,11 +97,22 @@ export async function runHistoricalRepairCli(
       exitCode: 1,
     };
   }
+  let activeLease = lease?.acquired ? lease : undefined;
+  const beforePaidDispatch = activeLease ? async (): Promise<boolean> => {
+    if (!activeLease) return false;
+    const renewed = await store.renew(activeLease);
+    if (!renewed) {
+      activeLease = undefined;
+      return false;
+    }
+    activeLease = renewed;
+    return true;
+  } : undefined;
   let result: HistoricalRepairResult;
   try {
-    result = await run({ ...options, checkpoint: lease?.checkpoint ?? loaded.checkpoint ?? options.checkpoint });
+    result = await run({ ...options, checkpoint: activeLease?.checkpoint ?? loaded.checkpoint ?? options.checkpoint, beforePaidDispatch });
   } catch (error) {
-    if (lease?.acquired) await store.release(lease).catch(() => false);
+    if (activeLease) await store.release(activeLease).catch(() => false);
     throw error;
   }
   const output = repairOutput(result);
@@ -109,7 +123,7 @@ export async function runHistoricalRepairCli(
     output.checkpoint_persisted = false;
     if (!options.dryRun) {
       try {
-        output.checkpoint_persisted = lease?.acquired === true && await store.commit(lease, result.checkpoint);
+        output.checkpoint_persisted = Boolean(activeLease) && await store.commit(activeLease!, result.checkpoint);
       } catch {
         output.checkpoint_persisted = false;
       }
@@ -129,7 +143,7 @@ async function main(): Promise<void> {
     process.exitCode = result.exitCode;
   } catch (error) {
     // Intentionally do not serialize an arbitrary Error message, which could carry a transport body.
-    process.stdout.write(`${JSON.stringify({ mode: 'historical-reconciliation', complete: false, errors_count: 1, error: 'repair_cli_failed' })}\n`);
+    process.stdout.write(`${JSON.stringify({ runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT, mode: 'historical-reconciliation', complete: false, errors_count: 1, error: 'repair_cli_failed' })}\n`);
     process.exitCode = 1;
   }
 }

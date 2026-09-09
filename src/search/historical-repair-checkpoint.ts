@@ -19,6 +19,7 @@ export type HistoricalRepairLease = Readonly<{
   index: string;
   run_id: string;
   etag: string;
+  expires_at: string;
   checkpoint?: HistoricalRepairCheckpoint;
   previous_checkpoint?: HistoricalRepairCheckpoint;
   previous_completed_run_id: string | null;
@@ -27,6 +28,7 @@ export type HistoricalRepairLease = Readonly<{
 export interface HistoricalRepairCheckpointStore {
   load(agent: string, index: string): Promise<HistoricalRepairCheckpointLoad>;
   acquire(agent: string, index: string, runId: string): Promise<HistoricalRepairLease | { acquired: false }>;
+  renew(lease: HistoricalRepairLease): Promise<HistoricalRepairLease | null>;
   commit(lease: HistoricalRepairLease, checkpoint: HistoricalRepairCheckpoint): Promise<boolean>;
   release(lease: HistoricalRepairLease): Promise<boolean>;
 }
@@ -134,13 +136,36 @@ export function createHistoricalRepairCheckpointStore(deps: HistoricalRepairChec
           : await deps.createDoc('cache', CHECKPOINT_SCOPE, next);
       } catch { /* An interrupted response can follow a committed write. Verify below. */ }
       if (response?.ok && response.etag) {
-        return { acquired: true, agent, index, run_id: runId, etag: response.etag, checkpoint: prior?.checkpoint, previous_checkpoint: prior?.checkpoint, previous_completed_run_id: prior?.last_completed_run_id ?? null };
+        return { acquired: true, agent, index, run_id: runId, etag: response.etag, expires_at: lease.expires_at, checkpoint: prior?.checkpoint, previous_checkpoint: prior?.checkpoint, previous_completed_run_id: prior?.last_completed_run_id ?? null };
       }
       const recovered = await readStored(deps, agent, index);
       if (recovered?.lease?.run_id === runId) {
-        return { acquired: true, agent, index, run_id: runId, etag: recovered.etag, checkpoint: recovered.checkpoint, previous_checkpoint: prior?.checkpoint, previous_completed_run_id: prior?.last_completed_run_id ?? null };
+        return { acquired: true, agent, index, run_id: runId, etag: recovered.etag, expires_at: recovered.lease.expires_at, checkpoint: recovered.checkpoint, previous_checkpoint: prior?.checkpoint, previous_completed_run_id: prior?.last_completed_run_id ?? null };
       }
       return { acquired: false };
+    },
+
+    async renew(current) {
+      const now = deps.now();
+      // A worker that missed its own expiry has lost authority even when no successor has claimed
+      // the record yet. It must stop before another paid or projection dispatch.
+      if (Date.parse(current.expires_at) <= now) return null;
+      const lease: LeaseDoc = {
+        run_id: current.run_id,
+        acquired_at: new Date(now).toISOString(),
+        expires_at: new Date(now + HISTORICAL_REPAIR_LEASE_MS).toISOString(),
+      };
+      const next = document(current.agent, current.index, current.checkpoint, lease, current.previous_completed_run_id, now);
+      let response: StoreResponse | undefined;
+      try {
+        response = await deps.replaceDoc('cache', CHECKPOINT_SCOPE, historicalRepairCheckpointId(current.agent, current.index), next, current.etag);
+      } catch { /* Verify an unknown write outcome before giving up the fence. */ }
+      if (response?.ok && response.etag) return { ...current, etag: response.etag, expires_at: lease.expires_at };
+      const recovered = await readStored(deps, current.agent, current.index);
+      if (recovered?.lease?.run_id === current.run_id && recovered.lease.expires_at === lease.expires_at) {
+        return { ...current, etag: recovered.etag, expires_at: recovered.lease.expires_at };
+      }
+      return null;
     },
 
     async commit(lease, checkpoint) {
