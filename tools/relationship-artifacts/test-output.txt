@@ -1,0 +1,46 @@
+✔ default registration is offline and absent or malformed cohorts never read S3 (241.3941ms)
+✔ immutable publication and ETag state reject forged proposals and authority paths (52.5ms)
+✔ reservation consumes budget before authority and lost activation remains inactive until exact retry (28.5295ms)
+✔ plans a bounded metadata-only finance page with source bridge document ids (42.2681ms)
+✔ continues from a matching cursor and resets stale cursor state (3.3843ms)
+✔ rejects invalid bounds and conflicting document versions (3.2926ms)
+✔ reads bounded JSONL only after a matching pinned HEAD and GET (67.5688ms)
+✔ fails closed on a changed pinned object or oversized line (9.0397ms)
+✔ rejects impossible HEAD size before GET and rejects truncated or invalid UTF-8 (7.0639ms)
+✔ caller cancellation bounds an unresolved transport without a later GET (10.3529ms)
+✔ broker dependency aborts and stream cancellation stay bounded (114.1313ms)
+✔ control and authorization bind exact authenticated CFO run and reject CTO/query auth (259.6964ms)
+✔ dynamic cohort recheck uses the fresh cohort resolver without a static policy match (9.8863ms)
+✔ expired policy, retired active pointer, and transport errors fail closed with safe errors (104.6704ms)
+✔ CFO text preparation persists bound refs and serves only an exact prepared chunk (21.2795ms)
+✔ prepared operations bind actual snapshot chunks, isolate snapshots, and fail closed when stale (65.1806ms)
+✔ metadata source GET refuses an unknown raw-body field outside the pinned projection (9.8412ms)
+✔ operations use legal CAS transitions and results remain create-only (24.2475ms)
+✔ fixed relationship artifact transport maps only the bounded S3 key to the authenticated gateway (33.545ms)
+✔ signed S3 and gateway routes reject query, key, header, and scope substitution (124.9572ms)
+✔ immutable source and history PUT, exact opaque version GET, and duplicate recovery (263.2425ms)
+✔ dark policy and wrong seat, credential, producer, or absent cohort fail before artifact IO (22.0065ms)
+✔ conditional write, envelope identity, scope and query tampering are refused (13.517ms)
+✔ policy, admission and credential revocation during IO withhold success and bodies (21.1482ms)
+✔ corrupt, unversioned, wrong-version and wrong-encryption stored objects fail closed (21.9765ms)
+✔ 16 MiB payload is accepted above ordinary server limit and larger payload refused (736.4495ms)
+✔ deep JSON is refused and upstream failed-write result stays uncertain without details (12.7452ms)
+✔ KMS response headers remain available and read-time revocation withholds saved evidence (43.9945ms)
+✔ unversioned discovery cannot turn an S3 null version into an immutable reference (6.9872ms)
+✔ actual CTO store crosses gateway mapping for KMS, conflict and lost-write recovery (70.3323ms)
+✔ actual durable review and reconstructed retrieval retain original decisions through gateway (620.7664ms)
+✔ relationship artifact S3 signs the exact versionId query and sends its canonical wire target (58.7868ms)
+✔ relationship artifact S3 only permits the immutable CFO namespace and pins PUT away from versions (2.7905ms)
+✔ relationship artifact S3 requires immutable PUT preconditions and never writes active-run state (1.6582ms)
+✔ relationship artifact S3 refuses an already-aborted request before resolving credentials (0.9549ms)
+✔ relationship artifact S3 rejects declared and streamed responses above the caller bound (5.4316ms)
+✔ relationship artifact S3 rejects malformed content length and uses a non-following redirect policy (1.8936ms)
+✔ relationship artifact S3 rejects a response whose declared length differs from the stream (2.3442ms)
+ℹ tests 38
+ℹ suites 0
+ℹ pass 38
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4455.9609

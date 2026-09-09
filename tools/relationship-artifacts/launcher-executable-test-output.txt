@@ -1,0 +1,10 @@
+✔ ordinary executable refuses missing full-backfill configuration (153.7082ms)
+✔ ordinary executable loads real relationship factory and registry client without caller injection (1219.4412ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1544.6122
