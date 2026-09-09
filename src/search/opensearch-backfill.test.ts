@@ -457,6 +457,13 @@ test('runBackfill: multiple bulk chunks (bulkBatchSize smaller than the fetched 
   assert.equal(result.indexed, 3, 'the other two chunks (2 + 1) still succeeded despite the first chunk failing');
 });
 
+test('parseBulkResponse: a short item list is unconfirmed and fails EVERY requested doc', () => {
+  const out = parseBulkResponse({ errors: false, items: [{ index: { status: 201 } }] }, 2);
+  assert.equal(out.indexed, 0);
+  assert.equal(out.failed, 2);
+  assert.match(out.errors[0], /expected 2 items/);
+});
+
 test('historical repair: repairs older failed A even when newer B is already indexed, without embedding B', async () => {
   const a = { id: 'a', agent: 'cfo', kind: 'fact', text: 'older failed record', tags: [], created_at: '2026-08-01T00:00:00Z' };
   const b = { id: 'b', agent: 'cfo', kind: 'fact', text: 'newer indexed record', tags: [], created_at: '2026-08-02T00:00:00Z' };
@@ -534,4 +541,62 @@ test('historical repair: a pending ID deleted from the source is removed without
   );
   assert.equal(result.checked, 0);
   assert.deepEqual(result.checkpoint.pending_ids, []);
+});
+
+test('historical repair: incomplete _mget coverage does not spend embeddings or declare omitted IDs missing', async () => {
+  const a = { id: 'a', agent: 'cfo', kind: 'fact', text: 'a', tags: [], created_at: '2026-08-01T00:00:00Z' };
+  const b = { id: 'b', agent: 'cfo', kind: 'fact', text: 'b', tags: [], created_at: '2026-08-02T00:00:00Z' };
+  const deps = {
+    queryDocs: (async () => [a, b]) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async () => { throw new Error('must not embed after incomplete mget'); }) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => { throw new Error('must not embed after incomplete mget'); }) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const result = await withStubbedFetch(
+    (async (url: string) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [{ _id: 'cfo__a', found: false }] }), { status: 200 });
+      throw new Error('must not bulk write');
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo' }, deps),
+  );
+  assert.match(result.errors[0], /existence check failed/);
+  assert.equal(result.indexed, 0);
+});
+
+test('historical repair: pending retry IDs cannot regress the ordered source cursor', async () => {
+  const b = { id: 'b', agent: 'cfo', kind: 'fact', text: 'b', tags: [], created_at: '2026-08-01T00:00:00Z' };
+  const z = { id: 'z', agent: 'cfo', kind: 'fact', text: 'z', tags: [], created_at: '2026-08-02T00:00:00Z' };
+  const deps = {
+    queryDocs: (async (_coll: string, query: string) => query.includes('c.id = @id') ? [z] : [b]) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async () => { throw new Error('must not embed existing docs'); }) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => { throw new Error('must not embed existing docs'); }) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const result = await withStubbedFetch(
+    (async (url: string) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [{ _id: 'cfo__z', found: true }, { _id: 'cfo__b', found: true }] }), { status: 200 });
+      throw new Error('must not bulk write');
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo', checkpoint: { version: 'memory-index-repair-v1', agent: 'cfo', after_id: 'c', pending_ids: ['z'] } }, deps),
+  );
+  assert.equal(result.checkpoint.after_id, 'c');
+});
+
+test('historical repair: short successful bulk response keeps all exact rows pending', async () => {
+  const a = { id: 'a', agent: 'cfo', kind: 'fact', text: 'a', tags: [], created_at: '2026-08-01T00:00:00Z' };
+  const b = { id: 'b', agent: 'cfo', kind: 'fact', text: 'b', tags: [], created_at: '2026-08-02T00:00:00Z' };
+  const deps = {
+    queryDocs: (async () => [a, b]) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async (texts: string[]) => texts.map(() => [1])) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => [1]) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const result = await withStubbedFetch(
+    (async (url: string) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [{ _id: 'cfo__a', found: false }, { _id: 'cfo__b', found: false }] }), { status: 200 });
+      if (url.includes('_bulk')) return new Response(JSON.stringify({ errors: false, items: [{ index: { status: 201 } }] }), { status: 200 });
+      throw new Error('unexpected');
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo' }, deps),
+  );
+  assert.equal(result.indexed, 0);
+  assert.equal(result.failed, 2);
+  assert.deepEqual(result.checkpoint.pending_ids, ['a', 'b']);
 });

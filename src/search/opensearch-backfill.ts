@@ -201,6 +201,9 @@ export function parseBulkResponse(json: unknown, requested: number): BulkOutcome
   if (!body || !Array.isArray(body.items)) {
     return { indexed: 0, failed: requested, errors: ['malformed _bulk response: missing "items" array'] };
   }
+  if (items.length !== requested) {
+    return { indexed: 0, failed: requested, errors: [`malformed _bulk response: expected ${requested} items, received ${items.length}`] };
+  }
   let indexed = 0;
   const errors: string[] = [];
   for (const item of items) {
@@ -285,8 +288,15 @@ export async function fetchExistingIds(rows: MemoryRow[], index: string): Promis
     if (!r.ok) return null;
     const parsed = await r.json() as { docs?: Array<{ _id?: unknown; found?: unknown }> };
     if (!Array.isArray(parsed.docs)) return null;
+    const requested = new Set(rows.map(row => memoryDocId(row.agent, row.id)));
+    const seen = new Set<string>();
     const existing = new Set<string>();
-    for (const doc of parsed.docs) if (doc?.found === true && typeof doc._id === 'string') existing.add(doc._id);
+    for (const doc of parsed.docs) {
+      if (typeof doc?._id !== 'string' || typeof doc.found !== 'boolean' || !requested.has(doc._id) || seen.has(doc._id)) return null;
+      seen.add(doc._id);
+      if (doc.found) existing.add(doc._id);
+    }
+    if (seen.size !== requested.size) return null;
     return existing;
   } catch {
     return null;
@@ -516,6 +526,11 @@ export async function runBackfill(opts: BackfillOptions = {}, deps: BackfillDeps
   return { index, since, fetched: rows.length, indexed, failed, truncated, dryRun: false, errors };
 }
 
+function advancedCursor(previous: string, scannedRows: MemoryRow[]): string {
+  const lastScannedId = scannedRows.at(-1)?.id;
+  return lastScannedId && lastScannedId > previous ? lastScannedId : previous;
+}
+
 /**
  * Bounded historical reconciliation. Unlike `runBackfill`, this compares source IDs with the
  * target projection and therefore repairs the important A-failed/B-succeeded watermark case.
@@ -549,6 +564,7 @@ export async function runHistoricalRepair(
     return { mode: 'historical-reconciliation', index, since: afterId, fetched: 0, indexed: 0, failed: 0, truncated: false, dryRun, errors: [`memory-store query failed: ${(e as Error).message}`], checked: 0, already_indexed: 0, checkpoint: checkpoint ?? { version: 'memory-index-repair-v1', agent: opts.agent, after_id: '', pending_ids: [] } };
   }
   const scannedRows = rawRows.map(normalizeRow).filter((row): row is MemoryRow => row !== null && row.agent === opts.agent);
+  const nextAfterId = advancedCursor(afterId, scannedRows);
   const pendingRows: MemoryRow[] = [];
   // Retry saved failures first, but re-read each exact source ID. A deletion or loss of access
   // removes the stale obligation rather than resurrecting content from a checkpoint.
@@ -572,12 +588,12 @@ export async function runHistoricalRepair(
   const skipped = rawRows.length - scannedRows.length;
   const existing = await fetchExistingIds(rows, index);
   if (existing === null) {
-    return { mode: 'historical-reconciliation', index, since: afterId, fetched: rows.length, indexed: 0, failed: 0, truncated: rawRows.length >= max, dryRun, errors: ['OpenSearch existence check failed; no embeddings or writes attempted'], checked: rows.length, already_indexed: 0, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id, pending_ids: [...pending].sort() } };
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: rows.length, indexed: 0, failed: 0, truncated: rawRows.length >= max, dryRun, errors: ['OpenSearch existence check failed; no embeddings or writes attempted'], checked: rows.length, already_indexed: 0, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() } };
   }
   const missing = rows.filter(row => !existing.has(memoryDocId(row.agent, row.id)));
   for (const row of rows) if (existing.has(memoryDocId(row.agent, row.id))) pending.delete(row.id);
   if (dryRun) {
-    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: rawRows.length >= max, dryRun: true, errors: skipped ? [`${skipped} row(s) skipped: malformed or outside requested agent`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: rows.at(-1)?.id ?? afterId, pending_ids: [...pending, ...missing.map(row => row.id)] } };
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: rawRows.length >= max, dryRun: true, errors: skipped ? [`${skipped} row(s) skipped: malformed or outside requested agent`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...new Set([...pending, ...missing.map(row => row.id)])].sort() } };
   }
   const vectors = await embedRows(missing, deps, opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE);
   let indexed = 0;
@@ -596,6 +612,6 @@ export async function runHistoricalRepair(
   return {
     mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed, failed,
     truncated: rawRows.length >= max, dryRun: false, errors, checked: rows.length, already_indexed: rows.length - missing.length,
-    checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: rows.at(-1)?.id ?? afterId, pending_ids: [...pending].sort() },
+    checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() },
   };
 }
