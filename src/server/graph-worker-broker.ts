@@ -929,7 +929,7 @@ export function registerGraphWorkerBrokerRoutes(
         !sameIdentityAuthority(request.body.authority, c.config.authority) ||
         !(request.body.cursor === null || bounded(request.body.cursor)) ||
         !(request.body.source_version === null || bounded(request.body.source_version)) ||
-        !Number.isSafeInteger(request.body.page_size) || request.body.page_size < 1 || request.body.page_size > 100) {
+        typeof request.body.page_size !== 'number' || !Number.isSafeInteger(request.body.page_size) || request.body.page_size < 1 || request.body.page_size > 100) {
       return c ? fail(reply, 403, 'graph_worker_forbidden') : undefined;
     }
     const authorization = { schema: IDENTITY_AUTH_SCHEMA, action: 'read_page',
@@ -1011,7 +1011,7 @@ export function registerGraphWorkerBrokerRoutes(
       // otherwise-valid signed envelope and is deliberately not inferred from source currentness.
       if (stored.status === 'revoked') return fail(reply, 410, 'identity_registry_version_revoked');
       if (stored.status === 'missing') return fail(reply, 404, 'identity_registry_version_missing');
-      if (!validIdentityEnvelope(stored.envelope, c.config, version)) return fail(reply, 503, 'identity_registry_unavailable');
+      if (stored.status !== 'active' || !validIdentityEnvelope(stored.envelope, c.config, version)) return fail(reply, 503, 'identity_registry_unavailable');
       await recheck(c);
       return reply.send(stored.envelope);
     } catch { return fail(reply, 503, 'identity_registry_unavailable'); }
