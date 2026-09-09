@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 /**
  * The commons memory store on BLOB_BACKEND=s3 — the write path that was DOWN.
@@ -23,6 +24,14 @@ process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
+process.env.NODE_ENV = 'test';
+process.env.READ_ONLY_MODE = 'false';
+process.env.ENABLE_WRITE_TOOLS = 'true';
+process.env.DRY_RUN_DEFAULT = 'false';
+process.env.GOVERNANCE_MODE = 'off';
+process.env.COMPLIANCE_MODE = 'off';
+process.env.SHIELD_MODE = 'off';
+process.env.COLD_START_MODE = 'off';
 delete process.env.AZURE_COMMONS_STORAGE_ACCOUNT;
 delete process.env.AZURE_COMMONS_STORAGE_KEY;
 process.env.BLOB_BACKEND = 's3';
@@ -31,6 +40,8 @@ process.env.AWS_ACCESS_KEY_ID = 'AKIDEXAMPLE';
 process.env.AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY';
 
 const { appendShared, readSharedAll, isConfigured } = await import('./store.js');
+const { registerMemoryRemember } = await import('../tools/memory/remember.js');
+const { requestContext } = await import('../server/request-context.js');
 
 /**
  * The commons feed's real home, corrected 2026-08-18.
@@ -54,16 +65,18 @@ interface Seen {
   url: string;
   method: string;
   body: unknown;
+  headers: HeadersInit | undefined;
+  signal: AbortSignal | null | undefined;
 }
 
 async function capture<T>(
-  handler: (call: Seen) => Response,
+  handler: (call: Seen) => Response | Promise<Response>,
   run: () => Promise<T>,
 ): Promise<{ result: T | undefined; error: unknown; calls: Seen[] }> {
   const calls: Seen[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = (async (u: string | URL | Request, init?: RequestInit) => {
-    const call: Seen = { url: String(u), method: init?.method ?? 'GET', body: init?.body };
+    const call: Seen = { url: String(u), method: init?.method ?? 'GET', body: init?.body, headers: init?.headers, signal: init?.signal };
     calls.push(call);
     return handler(call);
   }) as unknown as typeof fetch;
@@ -74,6 +87,10 @@ async function capture<T>(
   } finally {
     globalThis.fetch = original;
   }
+}
+
+function header(call: Seen, name: string): string | null {
+  return new Headers(call.headers).get(name);
 }
 
 /** appendShared does a GET (read the existing feed) then a PUT (write it back). */
@@ -122,6 +139,234 @@ test('an append PRESERVES the existing feed rather than replacing it', async () 
   assert.equal(lines.length, 2);
   assert.equal(JSON.parse(lines[0]).text, 'older');
   assert.equal(JSON.parse(lines[1]).text, 'newer');
+});
+
+test('two simultaneous writers preserve both entries and allocate distinct stable IDs', async () => {
+  let stored = '';
+  let etag: string | null = null;
+  let version = 0;
+  let initialReads = 0;
+  let releaseInitialReads!: () => void;
+  const initialReadPair = new Promise<void>((resolve) => {
+    releaseInitialReads = resolve;
+  });
+
+  const { result, error } = await capture(async (call) => {
+    if (call.method === 'GET') {
+      if (initialReads < 2) {
+        initialReads++;
+        if (initialReads === 2) releaseInitialReads();
+        await initialReadPair;
+      }
+      return stored
+        ? new Response(stored, { status: 200, headers: { etag: etag! } })
+        : new Response('NoSuchKey', { status: 404 });
+    }
+    const matches = etag ? header(call, 'if-match') === etag : header(call, 'if-none-match') === '*';
+    if (!matches) return new Response('PreconditionFailed', { status: 412 });
+    stored = String(call.body);
+    etag = `"v${++version}"`;
+    return new Response('', { status: 200, headers: { etag } });
+  }, () => Promise.all([
+    appendShared('cto', 'fact', 'writer a', []),
+    appendShared('cto', 'status', 'writer b', []),
+  ]));
+
+  assert.equal(error, undefined);
+  assert.equal(result?.[0].id === result?.[1].id, false);
+  assert.match(result?.[0].id || '', /^\d{8}-[0-9a-f]{12}$/);
+  assert.deepEqual(
+    stored.trim().split('\n').map((line) => JSON.parse(line).text).sort(),
+    ['writer a', 'writer b'],
+  );
+});
+
+test('an accepted write with an ambiguous response is recognized by stable ID and not duplicated', async () => {
+  let stored = '';
+  let putCalls = 0;
+  const { result, error } = await capture((call) => {
+    if (call.method === 'GET') {
+      return stored
+        ? new Response(stored, { status: 200, headers: { etag: '"accepted"' } })
+        : new Response('NoSuchKey', { status: 404 });
+    }
+    putCalls++;
+    if (!stored) {
+      stored = String(call.body);
+      // Model a response lost after S3 committed. fetchWithBudget retries the same conditional PUT,
+      // receives 412, and appendShared must reload and recognize its already-stored stable ID.
+      return new Response('upstream response lost', { status: 503 });
+    }
+    return new Response('PreconditionFailed', { status: 412 });
+  }, () => appendShared('cto', 'fact', 'exactly once', []));
+
+  assert.equal(error, undefined);
+  assert.equal(result?.text, 'exactly once');
+  assert.equal(putCalls, 2);
+  assert.equal(stored.trim().split('\n').length, 1);
+  assert.equal(JSON.parse(stored.trim()).id, result?.id);
+});
+
+test('the total append deadline bounds a read that never settles', async () => {
+  let clock = 1_000;
+  const scheduled: number[] = [];
+  const timers = new Set<object>();
+  const { error } = await capture(
+    () => new Promise<Response>(() => {}),
+    () => appendShared('cto', 'fact', 'bounded read', [], undefined, undefined, undefined, {
+      deadlineMs: 250,
+      now: () => clock,
+      setTimer: (callback, ms) => {
+        scheduled.push(ms);
+        const token = {};
+        timers.add(token);
+        queueMicrotask(() => {
+          if (!timers.has(token)) return;
+          clock += ms;
+          callback();
+        });
+        return token as ReturnType<typeof setTimeout>;
+      },
+      clearTimer: (timer) => { timers.delete(timer as object); },
+    }),
+  );
+  assert.match(String(error), /append deadline exceeded; durability is unknown/);
+  assert.deepEqual(scheduled, [250]);
+  assert.equal(clock, 1_250);
+});
+
+
+test('registered memory_remember fails closed for keyed writes with missing or invalid authenticated caller context', async () => {
+  const handlers = new Map<string, (args: unknown) => Promise<Record<string, unknown>>>();
+  const server = {
+    registerTool(name: string, _config: unknown, handler: (args: unknown) => Promise<Record<string, unknown>>) {
+      handlers.set(name, handler);
+      return { remove: () => handlers.delete(name) };
+    },
+  } as unknown as McpServer;
+  registerMemoryRemember(server, () => 'synthetic-caller-hash');
+  const handler = handlers.get('memory_remember');
+  assert.ok(handler, 'memory_remember must be registered through the real registerTool wrapper');
+  const args = { agent: 'cto', type: 'fact', text: 'scope boundary test', idempotency_key: 'scope-key-0001', dry_run: false };
+
+  const missing = await handler!(args);
+  assert.equal(missing.isError, true);
+  assert.match(String((missing.content as Array<{ text?: string }> | undefined)?.[0]?.text), /requires a valid authenticated caller identity/);
+
+  const invalid = await requestContext.run(
+    { callerHash: 'test-hash', correlationId: 'test-corr', callerAgent: 'INVALID LANE!' },
+    () => handler!(args),
+  );
+  assert.equal(invalid.isError, true);
+  assert.match(String((invalid.content as Array<{ text?: string }> | undefined)?.[0]?.text), /requires a valid authenticated caller identity/);
+});
+
+test('same caller key and intent replays the original row, while different intent conflicts', async () => {
+  let stored = '';
+  let etag = null;
+  let puts = 0;
+  const handler = (call: Seen) => {
+    if (call.method === 'GET') return stored
+      ? new Response(stored, { status: 200, headers: { etag: etag! } })
+      : new Response('NoSuchKey', { status: 404 });
+    puts++;
+    stored = String(call.body);
+    etag = '"v' + puts + '"';
+    return new Response('', { status: 200, headers: { etag } });
+  };
+  const options = { idempotencyKey: 'retry-key-0001', authenticatedLane: 'cto' };
+  const first = await capture(handler, () => appendShared('cto', 'fact', 'stable intent', [], undefined, undefined, undefined, options));
+  const replay = await capture(handler, () => appendShared('cto', 'fact', 'stable intent', [], undefined, undefined, undefined, options));
+  assert.equal(first.result?.id, replay.result?.id);
+  assert.equal(puts, 1);
+  assert.doesNotMatch(stored, /retry-key-0001/);
+  const conflict = await capture(handler, () => appendShared('cto', 'fact', 'different intent', [], undefined, undefined, undefined, options));
+  assert.match(String(conflict.error), /idempotency key conflict/);
+  assert.equal(puts, 1);
+});
+
+test('the same raw key is scoped to the authenticated caller lane', async () => {
+  let stored = '';
+  let etag = null;
+  const { error } = await capture((call) => {
+    if (call.method === 'GET') return stored
+      ? new Response(stored, { status: 200, headers: { etag: etag! } })
+      : new Response('NoSuchKey', { status: 404 });
+    stored = String(call.body);
+    etag = '"next"';
+    return new Response('', { status: 200, headers: { etag } });
+  }, async () => {
+    await appendShared('cto', 'fact', 'same text', [], undefined, undefined, undefined, {
+      idempotencyKey: 'same-raw-key',
+      authenticatedLane: 'cto',
+    });
+    await appendShared('cto', 'fact', 'same text', [], undefined, undefined, undefined, {
+      idempotencyKey: 'same-raw-key',
+      authenticatedLane: 'cro',
+    });
+  });
+  assert.equal(error, undefined);
+  const rows = stored.trim().split('\n').map(JSON.parse);
+  assert.equal(rows.length, 2);
+  assert.notEqual(rows[0].write_intent, rows[1].write_intent);
+});
+
+test('ambiguous PUT followed by an explicit 403 read stays UNKNOWN and same-key replay resolves the accepted row', async () => {
+  let stored = '';
+  let phase: 'first' | 'retry' = 'first';
+  let gets = 0;
+  let puts = 0;
+  const options = { idempotencyKey: 'sticky-unknown-0001', authenticatedLane: 'cto' };
+  const handler = (call: Seen): Response | Promise<Response> => {
+    if (call.method === 'GET') {
+      gets++;
+      if (phase === 'first' && gets === 1) return new Response('NoSuchKey', { status: 404 });
+      if (phase === 'first') return new Response('AccessDenied', { status: 403 });
+      return new Response(stored, { status: 200, headers: { etag: '"stored"' } });
+    }
+    puts++;
+    if (!stored) stored = String(call.body);
+    return Promise.reject(new TypeError('response lost after accept'));
+  };
+
+  const first = await capture(handler, () => appendShared('cto', 'fact', 'sticky unknown', [], undefined, undefined, undefined, options));
+  assert.equal(first.error, undefined);
+  assert.equal(first.result?.durability, 'UNKNOWN');
+  assert.equal(first.result?.retry_with_same_key, true);
+  assert.equal(stored.trim().split('\n').length, 1);
+
+  phase = 'retry';
+  const retry = await capture(handler, () => appendShared('cto', 'fact', 'sticky unknown', [], undefined, undefined, undefined, options));
+  assert.equal(retry.error, undefined);
+  assert.notEqual(retry.result?.durability, 'UNKNOWN');
+  assert.equal(retry.result?.id, first.result?.id);
+  assert.equal(puts, 2);
+  assert.equal(stored.trim().split('\n').length, 1);
+});
+test('accepted PUT followed by abort returns structured UNKNOWN and same-key retry resolves it', async () => {
+  let stored = '';
+  let observedSignal: AbortSignal | undefined;
+  const options = { idempotencyKey: 'accepted-lost-0001', authenticatedLane: 'cto', deadlineMs: 30 };
+  const first = await capture((call) => {
+    if (call.method === 'GET') return new Response('NoSuchKey', { status: 404 });
+    stored = String(call.body);
+    observedSignal = call.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      call.signal?.addEventListener('abort', () => reject(call.signal?.reason), { once: true });
+    });
+  }, () => appendShared('cto', 'fact', 'accepted then lost', [], undefined, undefined, undefined, options));
+  assert.equal(first.error, undefined);
+  assert.equal(first.result?.durability, 'UNKNOWN');
+  assert.equal(first.result?.retry_with_same_key, true);
+  assert.equal(observedSignal?.aborted, true);
+
+  const retry = await capture((call) => {
+    if (call.method === 'GET') return new Response(stored, { status: 200, headers: { etag: '"stored"' } });
+    throw new Error('retry must not write');
+  }, () => appendShared('cto', 'fact', 'accepted then lost', [], undefined, undefined, undefined, options));
+  assert.equal(retry.error, undefined);
+  assert.notEqual(retry.result?.durability, 'UNKNOWN');
+  assert.equal(retry.result?.id, JSON.parse(stored.trim()).id);
 });
 
 test('the GET that precedes the write also goes to S3, not Azure', async () => {

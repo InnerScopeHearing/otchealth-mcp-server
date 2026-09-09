@@ -407,6 +407,7 @@ interface S3ObjectRequestOpts {
   contentType?: string;
   /** Extra headers to SIGN and send (x-amz-*, if-none-match, if-match, ...). */
   extraHeaders?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 /**
@@ -445,6 +446,7 @@ async function s3ObjectRequest(opts: S3ObjectRequestOpts): Promise<Response> {
     // A Node Buffer is a Uint8Array, which fetch accepts as a body; the cast only satisfies the DOM
     // BodyInit typing this tsconfig's lib does not expose.
     ...(body ? { body: body as unknown as RequestInit['body'] } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
     // fetchWithBudget retries once on a network error / 429 / 5xx. Safe here: every write is
     // idempotent by construction -- a PUT of a fixed body to a fixed key, a DELETE of a key, a copy
     // of a pinned source version -- so none of them accumulate an effect when repeated. The one
@@ -510,6 +512,49 @@ export async function putObjectToS3(
     );
   }
   if (!r.ok) throw new Error(`s3 blob put ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  return { bytes: body.length, etag: r.headers.get('etag') };
+}
+
+/**
+ * Conditionally replace an object using the exact ETag observed by the caller, or create it only
+ * when it is still absent. Conflicts carry an HTTP-like `status` so append-by-rewrite callers can
+ * reload and retry without treating authorization or infrastructure failures as contention.
+ */
+export async function putObjectToS3Conditional(
+  account: string,
+  container: string,
+  path: string,
+  body: Buffer,
+  contentType: string,
+  etag: string | null,
+  signal?: AbortSignal,
+): Promise<{ bytes: number; etag: string | null }> {
+  const ctx = await writeContext(account, container);
+  const r = await s3ObjectRequest({
+    method: 'PUT',
+    loc: ctx.loc,
+    path,
+    credentials: ctx.credentials,
+    region: ctx.region,
+    body,
+    contentType,
+    extraHeaders: etag ? { 'if-match': etag } : { 'if-none-match': '*' },
+    signal,
+  });
+  if (r.status === 409 || r.status === 412) {
+    const error = new Error(`s3 conditional put conflict for ${container}/${path} (HTTP ${r.status})`) as Error & {
+      status: number;
+    };
+    error.status = r.status;
+    throw error;
+  }
+  if (!r.ok) {
+    const error = new Error(`s3 blob put ${r.status}: ${(await r.text()).slice(0, 160)}`) as Error & {
+      status: number;
+    };
+    error.status = r.status;
+    throw error;
+  }
   return { bytes: body.length, etag: r.headers.get('etag') };
 }
 
@@ -627,7 +672,12 @@ export async function deleteObjectFromS3(
  *
  * 404 -> null (the blob genuinely does not exist yet: a lane's first write). Anything else THROWS.
  */
-export async function getTextFromS3(account: string, container: string, path: string): Promise<string | null> {
+export async function getTextMetaFromS3(
+  account: string,
+  container: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ text: string | null; etag: string | null }> {
   const ctx = await writeContext(account, container);
   const r = await s3ObjectRequest({
     method: 'GET',
@@ -635,14 +685,21 @@ export async function getTextFromS3(account: string, container: string, path: st
     path,
     credentials: ctx.credentials,
     region: ctx.region,
+    signal,
   });
-  if (r.status === 404) return null;
+  if (r.status === 404) return { text: null, etag: null };
   if (!r.ok) {
-    throw new Error(
+    const error = new Error(
       `s3 commons get ${r.status} (refusing to report a missing feed as empty): ${(await r.text()).slice(0, 160)}`,
-    );
+    ) as Error & { status: number };
+    error.status = r.status;
+    throw error;
   }
-  return await r.text();
+  return { text: await r.text(), etag: r.headers.get('etag') };
+}
+
+export async function getTextFromS3(account: string, container: string, path: string): Promise<string | null> {
+  return (await getTextMetaFromS3(account, container, path)).text;
 }
 
 /** HEAD one mirrored object: existence + ETag + size, without downloading it. */

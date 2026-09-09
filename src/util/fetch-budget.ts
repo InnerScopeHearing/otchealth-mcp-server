@@ -84,7 +84,11 @@ export async function fetchWithBudget(
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      if (init.signal?.aborted) throw init.signal.reason ?? new Error('fetch aborted');
+      const attemptSignal = init.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs);
+      const res = await fetch(url, { ...init, signal: attemptSignal });
       if (attempt < maxRetries && isRetryableStatus(res.status)) {
         const retryAfterMs = parseRetryAfterMs(res.headers.get('retry-after'));
         await sleep(retryAfterMs ?? jitteredBackoffMs(attempt));
@@ -93,6 +97,7 @@ export async function fetchWithBudget(
       return res;
     } catch (err) {
       lastError = err;
+      if (init.signal?.aborted) throw err;
       if (attempt < maxRetries) {
         await sleep(jitteredBackoffMs(attempt));
         continue;

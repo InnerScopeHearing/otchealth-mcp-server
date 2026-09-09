@@ -33,7 +33,7 @@ export type ColdStartMode = 'off' | 'warn' | 'enforce';
 
 /** Verbatim user-facing nudge text. No em/en dashes (published-string rule). */
 export const COLD_START_MESSAGE =
-  'COLD_START: you are operating without current doctrine and state, call wake() first.';
+  'COLD_START: this gateway instance has not observed a recent wake. Call wake() if this session has not already done so.';
 
 /** ~6 hours. A session that woke more recently than this is still considered current. */
 export const WAKE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -45,6 +45,8 @@ export interface ColdStartOutcome {
    * before running the handler; when false the call proceeds (silently, or with a warning attached). */
   block: boolean;
   mode: ColdStartMode;
+  /** Wake bookkeeping is per gateway process, not a distributed session guarantee. */
+  scope: 'process';
 }
 
 /** Parse COLD_START_MODE, defaulting to 'warn' per the standing directive (fail-open on garbage input). Pure. */
@@ -63,10 +65,10 @@ export function computeColdStartOutcome(
   lastWokenAtMs: number | undefined,
   nowMs: number,
 ): ColdStartOutcome {
-  if (mode === 'off') return { cold: false, block: false, mode };
+  if (mode === 'off') return { cold: false, block: false, mode, scope: 'process' };
   const awake = lastWokenAtMs !== undefined && nowMs - lastWokenAtMs <= WAKE_TTL_MS;
-  if (awake) return { cold: false, block: false, mode };
-  return { cold: true, block: mode === 'enforce', mode };
+  if (awake) return { cold: false, block: false, mode, scope: 'process' };
+  return { cold: true, block: mode === 'enforce', mode, scope: 'process' };
 }
 
 // ---- IO shell: in-memory per-process tracking (no new external store) --------------------------
@@ -108,10 +110,10 @@ export function markWoken(identity: string): void {
 export function evaluateColdStart(identity: string): ColdStartOutcome {
   const mode = parseColdStartMode(process.env.COLD_START_MODE);
   try {
-    if (!identity) return { cold: false, block: false, mode }; // fail-open: no identity to key on
+    if (!identity) return { cold: false, block: false, mode, scope: 'process' }; // fail-open: no identity to key on
     return computeColdStartOutcome(mode, wokenAt.get(identity), Date.now());
   } catch {
-    return { cold: false, block: false, mode }; // fail-open: never block on an internal error
+    return { cold: false, block: false, mode, scope: 'process' }; // fail-open: never block on an internal error
   }
 }
 

@@ -57,11 +57,14 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         tags: z.array(z.string()).optional().describe('Optional tags for recall, e.g. ["ebay","pricing"].'),
         source: z.string().optional().describe('Optional attribution, e.g. "Matt 2026-06-20".'),
         supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES (e.g. "20260713-015"). Set it ONLY when this entry makes the older one FALSE, not merely related -- readers (wake, memory_pack) DROP the superseded entry so a retracted belief cannot resurface as a live truth. Use it whenever you correct a previously-stated fact.'),
+        idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional().describe('Stable caller-generated retry key. Reuse it only for the same intent. It is scoped to the authenticated lane and target lane; the raw key is never stored.'),
       },
       outputShape: {
         written: z.boolean(),
         entry: z.unknown(),
         note: z.string().optional(),
+        durability: z.enum(['STORED', 'UNKNOWN']).optional(),
+        retry_with_same_key: z.boolean().optional(),
       },
       handler: async (input, ctx) => {
         const sharedWriteRefusal = memoryRememberSharedWriteRefusal(ctx.callerAgent, input.agent);
@@ -87,11 +90,14 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
             summary: 'Memory store not configured; nothing written.',
           };
         }
-        const agent = normalizeAgent(input.agent || ctx.callerAgent);
         // The WRITER is the authenticated caller (from the token), never a spoofable param. When the
         // target feed (agent) differs from the writer, it's an attributed, append-only CROSS-LANE note.
         let by = '';
         try { by = ctx.callerAgent ? normalizeAgent(ctx.callerAgent) : ''; } catch { by = ''; }
+        if (input.idempotency_key && !by) {
+          throw new Error('memory_remember keyed write requires a valid authenticated caller identity');
+        }
+        const agent = normalizeAgent(input.agent || by);
         const cross = Boolean(by && by !== agent);
         if (ctx.dryRun) {
           const preview: Omit<MemoryEntry, 'id' | 'ts'> = {
@@ -118,7 +124,27 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
           ? { action: 'none' as const, reason: 'caller set supersedes', supersedeId: undefined as string | undefined }
           : await detectSupersession({ agent, kind: input.type, text: input.text, vector });
         const supersedes = input.supersedes ?? (sup.action === 'auto-link' ? sup.supersedeId : undefined);
-        const entry = await appendShared(agent, input.type, input.text, input.tags ?? [], input.source, by || undefined, supersedes);
+        const entry = await appendShared(agent, input.type, input.text, input.tags ?? [], input.source, by || undefined, supersedes, {
+          idempotencyKey: input.idempotency_key,
+          authenticatedLane: by || agent,
+          idempotencyIntent: JSON.stringify({ type: input.type, text: input.text, tags: input.tags ?? [], source: input.source, supersedes: input.supersedes }),
+        });
+        if ('durability' in entry && entry.durability === 'UNKNOWN') {
+          return {
+            data: {
+              written: false,
+              durability: 'UNKNOWN' as const,
+              entry,
+              retry_with_same_key: entry.retry_with_same_key,
+              note: entry.retry_with_same_key
+                ? 'Write outcome is unknown. Retry only with the same idempotency_key and identical intent.'
+                : 'Write outcome is unknown. This legacy call supplied no idempotency_key, so a caller retry can duplicate the intent.',
+            },
+            summary: entry.retry_with_same_key
+              ? 'Shared-memory durability is UNKNOWN. Retry the identical intent with the same idempotency key.'
+              : 'Shared-memory durability is UNKNOWN. No retry key was supplied, so safe cross-process replay is unavailable.',
+          };
+        }
         // WRITE-THROUGH: make it semantically searchable NOW, not in up to 6 hours when brain-reindex
         // next runs. Fail-open -- the entry is already durable in blob, and the 6-hourly reindex is
         // the backstop, so an index outage must never fail the write. We report the outcome rather
