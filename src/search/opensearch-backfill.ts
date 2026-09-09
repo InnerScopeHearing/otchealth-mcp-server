@@ -413,6 +413,12 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+class InvalidEmbeddingResponse extends Error {}
+
+function validVector(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 && value.every(item => typeof item === 'number' && Number.isFinite(item));
+}
+
 /**
  * Embed a batch of rows' text, falling back to per-item `embed()` when `embedBatch` throws for that
  * chunk (mirrors `azure/foundry.ts`'s own doc comment: "callers that want a same-shape-as-embed
@@ -424,17 +430,26 @@ async function embedRows(rows: MemoryRow[], deps: BackfillDeps, embedBatchSize: 
   for (const part of chunk(rows, embedBatchSize)) {
     try {
       const vecs = await deps.embedBatch(part.map((r) => r.text));
-      if (vecs) {
+      if (vecs === null) {
+        out.push(...part.map(() => null));
+        continue;
+      }
+      if (Array.isArray(vecs) && vecs.length === part.length && vecs.every(validVector)) {
         out.push(...vecs);
         continue;
       }
-      out.push(...part.map(() => null)); // embeddings unconfigured -- degrade, never drop the row
-    } catch {
+      throw new InvalidEmbeddingResponse('embedding provider returned an incomplete or invalid vector batch');
+    } catch (error) {
+      if (error instanceof InvalidEmbeddingResponse) throw error;
       // Batch call failed outright -- fall back to per-item embed(), which itself never throws.
       for (const r of part) {
         try {
-          out.push(await deps.embed(r.text));
-        } catch {
+          const vector = await deps.embed(r.text);
+          if (vector === null) out.push(null);
+          else if (validVector(vector)) out.push(vector);
+          else throw new InvalidEmbeddingResponse('embedding provider returned an invalid vector');
+        } catch (singleError) {
+          if (singleError instanceof InvalidEmbeddingResponse) throw singleError;
           out.push(null);
         }
       }
@@ -526,8 +541,8 @@ export async function runBackfill(opts: BackfillOptions = {}, deps: BackfillDeps
   return { index, since, fetched: rows.length, indexed, failed, truncated, dryRun: false, errors };
 }
 
-function advancedCursor(previous: string, scannedRows: MemoryRow[]): string {
-  const lastScannedId = scannedRows.at(-1)?.id;
+function advancedCursor(previous: string, scannedIds: string[]): string {
+  const lastScannedId = scannedIds.at(-1);
   return lastScannedId && lastScannedId > previous ? lastScannedId : previous;
 }
 
@@ -563,8 +578,9 @@ export async function runHistoricalRepair(
   } catch (e) {
     return { mode: 'historical-reconciliation', index, since: afterId, fetched: 0, indexed: 0, failed: 0, truncated: false, dryRun, errors: [`memory-store query failed: ${(e as Error).message}`], checked: 0, already_indexed: 0, checkpoint: checkpoint ?? { version: 'memory-index-repair-v1', agent: opts.agent, after_id: '', pending_ids: [] } };
   }
+  const scannedIds = rawRows.flatMap(raw => typeof raw.id === 'string' && raw.id && raw.agent === opts.agent ? [raw.id] : []);
   const scannedRows = rawRows.map(normalizeRow).filter((row): row is MemoryRow => row !== null && row.agent === opts.agent);
-  const nextAfterId = advancedCursor(afterId, scannedRows);
+  const nextAfterId = advancedCursor(afterId, scannedIds);
   const pendingRows: MemoryRow[] = [];
   // Retry saved failures first, but re-read each exact source ID. A deletion or loss of access
   // removes the stale obligation rather than resurrecting content from a checkpoint.
@@ -578,7 +594,7 @@ export async function runHistoricalRepair(
       );
       const row = normalizeRow(found[0] ?? {});
       if (row?.agent === opts.agent) pendingRows.push(row);
-      else pending.delete(id);
+      else if (found.length === 0) pending.delete(id);
     } catch {
       // Preserve the obligation when the source cannot be read. Do not infer deletion from an IO
       // failure, and do not attempt a projection write from stale checkpoint data.
@@ -586,19 +602,26 @@ export async function runHistoricalRepair(
   }
   const rows = [...new Map([...pendingRows, ...scannedRows].map(row => [row.id, row])).values()];
   const skipped = rawRows.length - scannedRows.length;
+  const incomplete = rawRows.length >= max || skipped > 0;
   const existing = await fetchExistingIds(rows, index);
   if (existing === null) {
-    return { mode: 'historical-reconciliation', index, since: afterId, fetched: rows.length, indexed: 0, failed: 0, truncated: rawRows.length >= max, dryRun, errors: ['OpenSearch existence check failed; no embeddings or writes attempted'], checked: rows.length, already_indexed: 0, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() } };
+    for (const row of scannedRows) pending.add(row.id);
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: rows.length, indexed: 0, failed: 0, truncated: true, dryRun, errors: ['OpenSearch existence check failed; no embeddings or writes attempted'], checked: rows.length, already_indexed: 0, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: afterId, pending_ids: [...pending].sort() } };
   }
   const missing = rows.filter(row => !existing.has(memoryDocId(row.agent, row.id)));
   for (const row of rows) if (existing.has(memoryDocId(row.agent, row.id))) pending.delete(row.id);
   if (dryRun) {
-    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: rawRows.length >= max, dryRun: true, errors: skipped ? [`${skipped} row(s) skipped: malformed or outside requested agent`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...new Set([...pending, ...missing.map(row => row.id)])].sort() } };
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: incomplete, dryRun: true, errors: skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...new Set([...pending, ...missing.map(row => row.id)])].sort() } };
   }
-  const vectors = await embedRows(missing, deps, opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE);
+  let vectors: (number[] | null)[];
+  try { vectors = await embedRows(missing, deps, opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE); }
+  catch (error) {
+    for (const row of missing) pending.add(row.id);
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: missing.length, truncated: true, dryRun: false, errors: [`embedding response rejected: ${(error as Error).message}`], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() } };
+  }
   let indexed = 0;
   let failed = 0;
-  const errors: string[] = skipped ? [`${skipped} row(s) skipped: malformed or outside requested agent`] : [];
+  const errors: string[] = skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [];
   for (const part of chunk(missing.map((row, i) => ({ row, vector: vectors[i] })), opts.bulkBatchSize ?? DEFAULT_BULK_BATCH_SIZE)) {
     const outcome = await bulkIndex(rowsToBulkNdjson(part, index), part.length);
     indexed += outcome.indexed;
@@ -611,7 +634,7 @@ export async function runHistoricalRepair(
   }
   return {
     mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed, failed,
-    truncated: rawRows.length >= max, dryRun: false, errors, checked: rows.length, already_indexed: rows.length - missing.length,
+    truncated: incomplete, dryRun: false, errors, checked: rows.length, already_indexed: rows.length - missing.length,
     checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() },
   };
 }

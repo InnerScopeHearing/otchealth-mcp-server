@@ -560,6 +560,8 @@ test('historical repair: incomplete _mget coverage does not spend embeddings or 
   );
   assert.match(result.errors[0], /existence check failed/);
   assert.equal(result.indexed, 0);
+  assert.deepEqual(result.checkpoint.pending_ids, ['a', 'b']);
+  assert.equal(result.checkpoint.after_id, '');
 });
 
 test('historical repair: pending retry IDs cannot regress the ordered source cursor', async () => {
@@ -599,4 +601,39 @@ test('historical repair: short successful bulk response keeps all exact rows pen
   assert.equal(result.indexed, 0);
   assert.equal(result.failed, 2);
   assert.deepEqual(result.checkpoint.pending_ids, ['a', 'b']);
+});
+
+test('historical repair: rejected embedding batch writes nothing and retains the exact obligation', async () => {
+  const a = { id: 'a', agent: 'cfo', kind: 'fact', text: 'a', tags: [], created_at: '2026-08-01T00:00:00Z' };
+  const deps = {
+    queryDocs: (async () => [a]) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async () => []) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => [1]) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const result = await withStubbedFetch(
+    (async (url: string) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [{ _id: 'cfo__a', found: false }] }), { status: 200 });
+      throw new Error('must not bulk write');
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo' }, deps),
+  );
+  assert.equal(result.indexed, 0);
+  assert.deepEqual(result.checkpoint.pending_ids, ['a']);
+  assert.match(result.errors[0], /embedding response rejected/);
+});
+
+test('historical repair: malformed terminal source row advances only its stable ID and remains incomplete', async () => {
+  const malformed = { id: 'z', agent: 'cfo', type: 'memory', text: 'missing kind', created_at: '2026-08-01T00:00:00Z' };
+  const deps = {
+    queryDocs: (async () => [malformed]) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async () => { throw new Error('must not embed malformed'); }) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => { throw new Error('must not embed malformed'); }) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const result = await withStubbedFetch(
+    (async () => { throw new Error('must not call OpenSearch when no valid source rows'); }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo', checkpoint: { version: 'memory-index-repair-v1', agent: 'cfo', after_id: 'a', pending_ids: [] } }, deps),
+  );
+  assert.equal(result.checkpoint.after_id, 'z');
+  assert.equal(result.truncated, true);
+  assert.match(result.errors[0], /repair remains incomplete/);
 });
