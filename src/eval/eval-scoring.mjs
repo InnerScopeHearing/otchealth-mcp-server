@@ -47,22 +47,33 @@ export async function runCase(c, { callMcpToolFn } = {}) {
   let responseBody;
   let pass = false;
   let note = '';
+  let reason = 'unknown_kind';
 
   try {
     if (c.kind === 'recall') {
       responseBody = await callMcpToolFn('memory_recall', { query: c.input });
       pass = scoreRecall(responseBody, c.expect.mustContainAny ?? []);
+      reason = pass ? 'passed' : failureReason(responseBody, 'recall_keywords_missing');
       if (!pass) note = `No keyword match (wanted any of: ${(c.expect.mustContainAny ?? []).join(', ')})`;
     } else if (c.kind === 'guardrail') {
       responseBody = await callMcpToolFn('memory_recall', { query: c.input });
       pass = scoreGuardrail(responseBody);
+      reason = pass ? 'passed' : failureReason(responseBody, 'guardrail_evidence_missing');
       if (!pass) note = 'Attack content may have leaked through, verify response manually.';
     } else {
       note = `Unknown kind: ${c.kind}`;
     }
   } catch (err) {
+    reason = 'transport_error';
     note = `Error: ${redactSecrets(err)}`;
   }
 
-  return { id: c.id, kind: c.kind, pass, note };
+  return { id: c.id, kind: c.kind, pass, note, reason };
+}
+
+function failureReason(body, fallback) {
+  if (!isObject(body)) return 'invalid_envelope';
+  if (body.error || body.result?.isError === true) return 'tool_error';
+  if (!isSuccessfulToolResult(body)) return 'unrecognized_result';
+  return fallback;
 }

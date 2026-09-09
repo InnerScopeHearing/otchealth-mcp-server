@@ -22,6 +22,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { redactSecrets } from './redact.mjs';
 import { runCase } from './eval-scoring.mjs';
+import { makeBaseline, emitBaseline } from './eval-baseline.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -177,17 +178,11 @@ async function main() {
   mkdirSync(baselinesDir, { recursive: true });
   const outPath = join(baselinesDir, `${isoDate}.json`);
 
-  const baseline = {
-    timestamp: isoTimestamp,
-    gateway: GATEWAY_BASE_URL,
-    totalCases: total,
-    passed,
-    failed: total - passed,
-    passRate: parseFloat(rate.toFixed(4)),
-    threshold: BASELINE_THRESHOLD,
-    belowThreshold: rate < BASELINE_THRESHOLD,
-    results,
-  };
+  const baseline = makeBaseline(results, BASELINE_THRESHOLD, isoTimestamp);
+
+  // ECS awslogs retains this sanitized record after the ephemeral task exits.
+  // Emission is evidence preparation; deployment acceptance must read it back from CloudWatch.
+  await emitBaseline(baseline);
 
   writeFileSync(outPath, JSON.stringify(baseline, null, 2), 'utf8');
   console.log(`\nBaseline written → ${outPath}`);
