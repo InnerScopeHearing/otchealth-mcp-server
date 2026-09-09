@@ -43,7 +43,7 @@ try {
   await writeFile(largePath, 'x'.repeat(identityRegistrySnapshotStoreTest.MAX_RECORD_BYTES + 1), 'utf8');
   await assert.rejects(() => first.read({ registry_id: request.registry_id, version: 'sirv_large_001' }),
     /identity_registry_store_record_too_large/, 'oversized corrupt records are rejected before allocation');
-  process.stdout.write(JSON.stringify({ store: 'identity-registry', restart: true, concurrent_create_only: true, revocation: true, integrity_fail_closed: true }) + '\n');
+  process.stdout.write(JSON.stringify({ store: 'identity-registry', reopened: true, process_restart_verified: false, concurrent_create_only: true, revocation: true, integrity_fail_closed: true }) + '\n');
 } finally {
   await rm(root, { recursive: true, force: true });
 }
