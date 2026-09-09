@@ -22,7 +22,7 @@ function identityCurrentnessMap(proofs:Array<{proof?:Json}>,decisions:Array<unkn
  const current=new Map<string,boolean>();
  for(let index=0;index<proofs.length;index++){
   const key=proofs[index]?.proof?.request_sha256;if(!SHA.test(key??''))continue;
-  current.set(key,(current.get(key)??true)&&decisions[index]!==null);
+  current.set(key,(current.get(key)??true)&&decisions[index]!=null);
  }
  return current;
 }
