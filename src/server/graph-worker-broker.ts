@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { requireConnectorAuth, type AuthContext } from '../auth/bearer.js';
 import { loadEnv } from '../config/env.js';
@@ -40,6 +40,11 @@ const PREPARED_SOURCE_SCHEMA = 'cfo-prepared-chunk-source-v1';
 const PREPARED_SOURCE_ID = /^cfotext_[a-f0-9]{64}$/;
 const PREPARED_SOURCE_VERSION = /^txtchunk_[a-f0-9]{64}$/;
 const PREPARED_SNAPSHOT_ID = /^txtsnap_[a-f0-9]{64}$/;
+const IDENTITY_REGISTRY_SCHEMA = 'source-identity-registry-v1';
+const IDENTITY_AUTHORITY_SCHEMA = 'authenticated-structured-identity-authority-v1';
+const IDENTITY_PAGE_SCHEMA = 'structured-identity-source-page-v1';
+const IDENTITY_AUTH_SCHEMA = 'source-identity-registry-authorization-v1';
+const MAX_IDENTITY_ENVELOPE_BYTES = 256 * 1024;
 const ROW_FIELDS = new Set(['path','sha256','sidecar','enriched','enriched_sha256','err',
   'doc_date','entity','entities','named_entities_orgs','named_entities_people',
   'signatories','counterparty']);
@@ -79,6 +84,33 @@ type RawRequest = {
   method: 'GET' | 'PUT'; key: string; headers?: Record<string, string>;
   body?: Buffer; signal: AbortSignal;
 };
+type IdentityAuthority = {
+  schema: 'authenticated-structured-identity-authority-v1';
+  adapter_id: string; source_system: string; scope: 'cfo'; version: string;
+};
+type IdentityRegistryConfig = {
+  registry_id: string;
+  authority: IdentityAuthority;
+  binding: Binding;
+  /** Deployment-owned Ed25519 public key. Its private counterpart never enters this process. */
+  public_key: string | Buffer;
+  source: {
+    page: (request: { cursor: string | null; source_version: string | null; page_size: number },
+      options: { signal: AbortSignal }) => Promise<unknown>;
+    current: (request: { source_version: string }, options: { signal: AbortSignal }) => Promise<boolean>;
+  };
+  /** The store is the current revocation authority. Immutable signatures alone do not authorize old pins. */
+  snapshots: {
+    publish: (request: { registry_id: string; version: string; envelope: unknown },
+      options: { signal: AbortSignal }) => Promise<boolean>;
+    read: (request: { registry_id: string; version: string }, options: { signal: AbortSignal }) =>
+      Promise<{ status: 'active'; envelope: unknown } | { status: 'revoked' | 'missing' }>;
+  };
+};
+type IdentityRegistryResolver = {
+  resolve: (request: { registry_id: string; caller: AuthContext }, options: { signal: AbortSignal }) =>
+    Promise<IdentityRegistryConfig | null>;
+};
 export interface GraphWorkerBrokerDeps {
   authenticate: (request: FastifyRequest, reply: FastifyReply) => Promise<AuthContext | undefined>;
   bindingsJson: () => string;
@@ -89,6 +121,11 @@ export interface GraphWorkerBrokerDeps {
   ) => Promise<CfoTextSnapshotResult>;
   /** A dark cohort can supply a binding only from its durable server-issued receipt. */
   resolveCohortBinding: (ctx: AuthContext, runId: string, signal: AbortSignal) => Promise<{ policy: Policy; binding: Binding } | null>;
+  /**
+   * Optional, deployment-owned bridge for source-version-bound explicit identity IDs.
+   * Absent configuration intentionally leaves identity-registry routes unavailable.
+   */
+  identityRegistry?: IdentityRegistryResolver;
 }
 function digest(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
@@ -254,6 +291,7 @@ function depsOf(injected?: Partial<GraphWorkerBrokerDeps>): GraphWorkerBrokerDep
         maxSourceBytes: CFO_TEXT_CANARY_MAX_BYTES,
       }).readVersionPinnedPage(source, { signal })),
     resolveCohortBinding,
+    identityRegistry: injected?.identityRegistry,
   };
 }
 function fail(reply: FastifyReply, status: number, code: string) {
@@ -547,6 +585,94 @@ function decisionRef(policyVersion: string, request: unknown): string {
     policy_version: policyVersion, request_sha256: digest(canonical(request)),
   }));
 }
+function sameIdentityAuthority(value: unknown, expected: IdentityAuthority): boolean {
+  return canonical(value) === canonical(expected);
+}
+function validIdentityAuthority(value: unknown): value is IdentityAuthority {
+  return exact(value, ['adapter_id','schema','scope','source_system','version']) &&
+    value.schema === IDENTITY_AUTHORITY_SCHEMA && value.scope === 'cfo' &&
+    bounded(value.adapter_id) && bounded(value.source_system) && bounded(value.version);
+}
+function validIdentityRecord(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      !bounded((value as Record<string, unknown>).source_record_id) ||
+      !bounded((value as Record<string, unknown>).source_document_version) ||
+      !SHA.test(String((value as Record<string, unknown>).source_sha256)) ||
+      !bounded((value as Record<string, unknown>).mention)) return false;
+  const row = value as Record<string, unknown>;
+  if (row.disposition === 'unresolved') {
+    return exact(row, ['source_record_id','source_document_version','source_sha256','mention','disposition']);
+  }
+  if (row.disposition === 'revoked') {
+    return exact(row, ['source_record_id','source_document_version','source_sha256','mention','disposition','revocation_id']) &&
+      bounded(row.revocation_id);
+  }
+  if (row.disposition !== 'resolved' || !exact(row, [
+    'source_record_id','source_document_version','source_sha256','mention','disposition','endpoint',
+  ])) return false;
+  const endpoint = row.endpoint as Record<string, unknown>;
+  if (!exact(endpoint, ['display_name','entity_type','identifier']) || endpoint.display_name !== row.mention ||
+      !bounded(endpoint.display_name) || !bounded(endpoint.entity_type) || !endpoint.identifier ||
+      typeof endpoint.identifier !== 'object' || Array.isArray(endpoint.identifier)) return false;
+  const identifier = endpoint.identifier as Record<string, unknown>;
+  return exact(identifier, ['namespace','scope','value']) &&
+    bounded(identifier.namespace) && bounded(identifier.scope) && bounded(identifier.value);
+}
+function validIdentityPage(value: unknown, config: IdentityRegistryConfig,
+  requested: { cursor: string | null; source_version: string | null; page_size: number },
+): value is Record<string, unknown> {
+  if (!exact(value, ['authority','current','next_cursor','records','schema','source_version']) ||
+      value.schema !== IDENTITY_PAGE_SCHEMA || value.current !== true ||
+      !sameIdentityAuthority(value.authority, config.authority) || !bounded(value.source_version) ||
+      (requested.source_version !== null && value.source_version !== requested.source_version) ||
+      !(value.next_cursor === null || bounded(value.next_cursor)) ||
+      (requested.cursor !== null && value.next_cursor === requested.cursor) ||
+      !Array.isArray(value.records) || value.records.length > 100 || !value.records.every(validIdentityRecord)) return false;
+  return true;
+}
+function identityRecordKey(record: Record<string, unknown>) {
+  return canonical({ source_document_version: record.source_document_version,
+    source_sha256: record.source_sha256, mention: record.mention });
+}
+function validIdentityEnvelope(value: unknown, config: IdentityRegistryConfig, expectedVersion?: string): boolean {
+  if (!exact(value, ['signature','snapshot']) || typeof value.signature !== 'string' ||
+      value.signature.length !== 88 || !value.snapshot || typeof value.snapshot !== 'object') return false;
+  const snapshot = value.snapshot as Record<string, unknown>;
+  if (!exact(snapshot, ['entries','public_key_sha256','registry_id','revocations','schema',
+    'source_authority','source_version','version']) || snapshot.schema !== IDENTITY_REGISTRY_SCHEMA ||
+      snapshot.registry_id !== config.registry_id || !bounded(snapshot.version) ||
+      (expectedVersion !== undefined && snapshot.version !== expectedVersion) ||
+      !sameIdentityAuthority(snapshot.source_authority, config.authority) || !bounded(snapshot.source_version) ||
+      !SHA.test(String(snapshot.public_key_sha256)) || !Array.isArray(snapshot.entries) ||
+      !Array.isArray(snapshot.revocations) || snapshot.entries.length > 1000 || snapshot.revocations.length > 1000 ||
+      Buffer.byteLength(canonical(value), 'utf8') > MAX_IDENTITY_ENVELOPE_BYTES) return false;
+  let publicKey;
+  try { publicKey = createPublicKey(config.public_key); } catch { return false; }
+  if (publicKey.asymmetricKeyType !== 'ed25519' ||
+      digest(publicKey.export({ type: 'spki', format: 'der' })) !== snapshot.public_key_sha256) return false;
+  const entries = snapshot.entries as Record<string, unknown>[];
+  const revocations = snapshot.revocations as Record<string, unknown>[];
+  const entryKeys = new Set<string>();
+  for (const entry of entries) {
+    if (!exact(entry, ['endpoint','mention','source_document_version','source_sha256']) ||
+        !validIdentityRecord({ ...entry, source_record_id: 'snapshot', disposition: 'resolved' }) ||
+        entryKeys.has(identityRecordKey(entry))) return false;
+    entryKeys.add(identityRecordKey(entry));
+  }
+  const revocationKeys = new Set<string>();
+  for (const revocation of revocations) {
+    if (!exact(revocation, ['mention','revocation_id','source_document_version','source_record_id','source_sha256']) ||
+        !validIdentityRecord({ ...revocation, disposition: 'revoked' }) ||
+        revocationKeys.has(identityRecordKey(revocation)) || entryKeys.has(identityRecordKey(revocation))) return false;
+    revocationKeys.add(identityRecordKey(revocation));
+  }
+  const version = 'sirv_' + digest(canonical({ registry_id: snapshot.registry_id,
+    source_authority: snapshot.source_authority, source_version: snapshot.source_version,
+    entries: snapshot.entries, revocations: snapshot.revocations }));
+  if (snapshot.version !== version) return false;
+  const signature = Buffer.from(value.signature, 'base64');
+  return signature.length === 64 && verify(null, Buffer.from(canonical(snapshot), 'utf8'), publicKey, signature);
+}
 const SPEC_KEYS = ['authorization_ref','authorization_sha256','extractor_bundle_sha256',
   'extractor_version','input_sha256','login_before_model_contract','model','provider',
   'purpose','source_id','source_version'];
@@ -708,6 +834,188 @@ export function registerGraphWorkerBrokerRoutes(
     }
     await assertActive(deps, control.binding, control.signal);
   }
+
+  async function identityContext(request: FastifyRequest, reply: FastifyReply, registryId: string) {
+    const ctx = await authenticate(request, reply, deps);
+    if (!ctx) return null;
+    if (ctx.caller_agent !== 'cfo' || !deps.identityRegistry || !LABEL.test(registryId)) {
+      await fail(reply, deps.identityRegistry ? 403 : 503,
+        deps.identityRegistry ? 'graph_worker_forbidden' : 'identity_registry_unavailable');
+      return null;
+    }
+    const signal = AbortSignal.timeout(15_000);
+    let config: IdentityRegistryConfig | null;
+    try { config = await deps.identityRegistry.resolve({ registry_id: registryId, caller: ctx }, { signal }); }
+    catch { await fail(reply, 503, 'identity_registry_unavailable'); return null; }
+    if (!config || config.registry_id !== registryId || !validIdentityAuthority(config.authority) ||
+        config.authority.scope !== 'cfo' || !validRun(config.binding.run) ||
+        config.binding.authenticated_caller !== 'cfo' || config.binding.room !== 'finance' ||
+        config.binding.source_index !== ROOM.finance.index || typeof config.source?.page !== 'function' ||
+        typeof config.source?.current !== 'function' || typeof config.snapshots?.publish !== 'function' ||
+        typeof config.snapshots?.read !== 'function') {
+      await fail(reply, 503, 'identity_registry_unavailable'); return null;
+    }
+    let publicKey;
+    try { publicKey = createPublicKey(config.public_key); } catch {
+      await fail(reply, 503, 'identity_registry_unavailable'); return null;
+    }
+    if (publicKey.asymmetricKeyType !== 'ed25519') {
+      await fail(reply, 503, 'identity_registry_unavailable'); return null;
+    }
+    let policy = parsePolicy(deps.bindingsJson(), deps.now());
+    let binding = policy?.bindings.find((item) => canonical(item) === canonical(config!.binding));
+    let cohort = false;
+    if (!binding) {
+      try {
+        const dynamic = await deps.resolveCohortBinding(ctx, config.binding.run.run_id, signal);
+        if (dynamic && canonical(dynamic.binding) === canonical(config.binding)) {
+          policy = dynamic.policy; binding = dynamic.binding; cohort = true;
+        }
+      } catch { /* treated as unavailable below */ }
+    }
+    if (!policy || !binding || !isLaneAllowed(binding.source_index, ctx.caller_agent)) {
+      await fail(reply, 503, 'identity_registry_unavailable'); return null;
+    }
+    try { await assertActive(deps, binding, signal); }
+    catch { await fail(reply, 503, 'identity_registry_unavailable'); return null; }
+    return { ctx, policy, binding, signal, cohort, config };
+  }
+  function identityAuthorization(request: unknown, control: NonNullable<Awaited<ReturnType<typeof identityContext>>>,
+    action: 'read_page' | 'assert_current',
+  ): boolean {
+    if (!exact(request, ['action','authenticated_caller','authority','cursor','schema','source_version']) ||
+        request.schema !== IDENTITY_AUTH_SCHEMA || request.action !== action ||
+        request.authenticated_caller !== control.ctx.caller_agent ||
+        !sameIdentityAuthority(request.authority, control.config.authority) ||
+        !(request.cursor === null || bounded(request.cursor)) ||
+        !(request.source_version === null || bounded(request.source_version))) return false;
+    return action === 'read_page' || (request.cursor === null && typeof request.source_version === 'string');
+  }
+  function identityReceipt(request: unknown, control: NonNullable<Awaited<ReturnType<typeof identityContext>>>) {
+    return {
+      allowed: true,
+      authorization_request_sha256: digest(canonical(request)),
+      decision_ref: decisionRef(control.policy.policy_version, request),
+      policy_version: control.policy.policy_version,
+      provenance: { authenticated_caller: control.ctx.caller_agent, decision_source: 'authenticated_gateway' },
+    };
+  }
+  function hasIdentityReceipt(value: unknown, request: unknown,
+    control: NonNullable<Awaited<ReturnType<typeof identityContext>>>,
+  ): boolean {
+    return exact(value, ['decision_ref','policy_version']) &&
+      value.policy_version === control.policy.policy_version &&
+      value.decision_ref === decisionRef(control.policy.policy_version, request);
+  }
+
+  app.post('/graph-worker/v1/identity-registry/:registryId/authorize', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const c = await identityContext(request, reply, String((request.params as { registryId?: string }).registryId));
+    if (!c) return;
+    const action = (request.body as Record<string, unknown> | undefined)?.action;
+    if (action !== 'read_page' && action !== 'assert_current' || !identityAuthorization(request.body, c, action)) {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    try { await recheck(c); return reply.send(identityReceipt(request.body, c)); }
+    catch { return fail(reply, 503, 'identity_registry_unavailable'); }
+  });
+
+  app.post('/graph-worker/v1/identity-registry/:registryId/page', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const c = await identityContext(request, reply, String((request.params as { registryId?: string }).registryId));
+    if (!c || !exact(request.body, ['authority','authorization','cursor','page_size','source_version']) ||
+        !sameIdentityAuthority(request.body.authority, c.config.authority) ||
+        !(request.body.cursor === null || bounded(request.body.cursor)) ||
+        !(request.body.source_version === null || bounded(request.body.source_version)) ||
+        !Number.isSafeInteger(request.body.page_size) || request.body.page_size < 1 || request.body.page_size > 100) {
+      return c ? fail(reply, 403, 'graph_worker_forbidden') : undefined;
+    }
+    const authorization = { schema: IDENTITY_AUTH_SCHEMA, action: 'read_page',
+      authenticated_caller: c.ctx.caller_agent, authority: c.config.authority,
+      cursor: request.body.cursor, source_version: request.body.source_version };
+    if (!hasIdentityReceipt(request.body.authorization, authorization, c)) return fail(reply, 403, 'graph_worker_forbidden');
+    try {
+      const page = await c.config.source.page({ cursor: request.body.cursor as string | null,
+        source_version: request.body.source_version as string | null, page_size: request.body.page_size as number }, { signal: c.signal });
+      if (!validIdentityPage(page, c.config, { cursor: request.body.cursor as string | null,
+        source_version: request.body.source_version as string | null, page_size: request.body.page_size as number })) {
+        return fail(reply, 503, 'identity_registry_unavailable');
+      }
+      await recheck(c); return reply.send(page);
+    } catch { return fail(reply, 503, 'identity_registry_unavailable'); }
+  });
+
+  app.post('/graph-worker/v1/identity-registry/:registryId/current', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const c = await identityContext(request, reply, String((request.params as { registryId?: string }).registryId));
+    if (!c || !exact(request.body, ['authority','authorization','source_version']) ||
+        !sameIdentityAuthority(request.body.authority, c.config.authority) || !bounded(request.body.source_version)) {
+      return c ? fail(reply, 403, 'graph_worker_forbidden') : undefined;
+    }
+    const authorization = { schema: IDENTITY_AUTH_SCHEMA, action: 'assert_current',
+      authenticated_caller: c.ctx.caller_agent, authority: c.config.authority,
+      cursor: null, source_version: request.body.source_version };
+    if (!hasIdentityReceipt(request.body.authorization, authorization, c)) return fail(reply, 403, 'graph_worker_forbidden');
+    try {
+      if (await c.config.source.current({ source_version: request.body.source_version as string }, { signal: c.signal }) !== true) {
+        return fail(reply, 503, 'identity_registry_unavailable');
+      }
+      await recheck(c);
+      return reply.send({ authority: c.config.authority, current: true, source_version: request.body.source_version });
+    } catch { return fail(reply, 503, 'identity_registry_unavailable'); }
+  });
+
+  app.put('/graph-worker/v1/identity-registry/:registryId/snapshots/:version', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const registryId = String((request.params as { registryId?: string }).registryId);
+    const version = String((request.params as { version?: string }).version);
+    const c = await identityContext(request, reply, registryId);
+    if (!c) return;
+    if (!LABEL.test(version) || request.headers['if-none-match'] !== '*' ||
+        Buffer.byteLength(canonical(request.body), 'utf8') > MAX_IDENTITY_ENVELOPE_BYTES ||
+        !validIdentityEnvelope(request.body, c.config, version)) return fail(reply, 403, 'graph_worker_forbidden');
+    const snapshot = (request.body as Record<string, unknown>).snapshot as Record<string, unknown>;
+    try {
+      // Publish only while the exact source version remains current. This check is repeated
+      // after store I/O so a source change cannot race an otherwise valid signature.
+      if (await c.config.source.current({ source_version: snapshot.source_version as string }, { signal: c.signal }) !== true) {
+        return fail(reply, 503, 'identity_registry_unavailable');
+      }
+      await recheck(c);
+      const published = await c.config.snapshots.publish({ registry_id: registryId, version, envelope: request.body }, { signal: c.signal });
+      if (!published) return fail(reply, 412, 'identity_registry_publication_conflict');
+      if (await c.config.source.current({ source_version: snapshot.source_version as string }, { signal: c.signal }) !== true) {
+        return fail(reply, 503, 'identity_registry_unavailable');
+      }
+      await recheck(c);
+      return reply.code(201).send({ published: true, registry_id: registryId, version,
+        snapshot_sha256: digest(canonical(snapshot)) });
+    } catch { return fail(reply, 503, 'identity_registry_publication_unavailable'); }
+  });
+
+  app.get('/graph-worker/v1/identity-registry/:registryId/snapshots/:version', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const registryId = String((request.params as { registryId?: string }).registryId);
+    const version = String((request.params as { version?: string }).version);
+    const c = await identityContext(request, reply, registryId);
+    if (!c) return;
+    if (!LABEL.test(version)) return fail(reply, 400, 'graph_worker_request_invalid');
+    try {
+      const stored = await c.config.snapshots.read({ registry_id: registryId, version }, { signal: c.signal });
+      // A revocation is current authorization state. It takes precedence over an immutable,
+      // otherwise-valid signed envelope and is deliberately not inferred from source currentness.
+      if (stored.status === 'revoked') return fail(reply, 410, 'identity_registry_version_revoked');
+      if (stored.status === 'missing') return fail(reply, 404, 'identity_registry_version_missing');
+      if (!validIdentityEnvelope(stored.envelope, c.config, version)) return fail(reply, 503, 'identity_registry_unavailable');
+      await recheck(c);
+      return reply.send(stored.envelope);
+    } catch { return fail(reply, 503, 'identity_registry_unavailable'); }
+  });
 
   app.post('/graph-worker/v1/control', {
     config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
