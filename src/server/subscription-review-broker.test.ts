@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
   isSubscriptionReviewOperationSpec,
-  subscriptionReviewBundleForRequest,
+  REVIEWED_SUBSCRIPTION_REVIEW_PROVIDER_PAIRS,
+  subscriptionReviewBundlesForRequest,
   validSubscriptionReviewOutput,
 } from './subscription-review-broker.js';
 
@@ -14,7 +15,7 @@ const requestSha256 = sha('review request');
 const spec = {
   provider: 'codex-chatgpt-subscription-review',
   extractor_version: 'codex-subscription-review-provider-v1',
-  extractor_bundle_sha256: subscriptionReviewBundleForRequest(requestSha256)!,
+  extractor_bundle_sha256: subscriptionReviewBundlesForRequest(requestSha256)[0]!,
   login_before_model_contract: 'codex-login-status-before-model-exec-v1',
   model: 'gpt-5.6-luna',
 };
@@ -57,7 +58,7 @@ test('actual provider negative and uncertain forms retain exact request and evid
   const negativeSource = { text: negativeText, textSha256: sha(negativeText) };
   const negativeRequest = sha('negative review request');
   const negativeSpec = { ...spec,
-    extractor_bundle_sha256: subscriptionReviewBundleForRequest(negativeRequest)! };
+    extractor_bundle_sha256: subscriptionReviewBundlesForRequest(negativeRequest)[0]! };
   const negative = {
     ...output, source_sha256: negativeSource.textSha256,
     review: { ...output.review, request_sha256: negativeRequest, verdict: 'supported',
@@ -68,4 +69,16 @@ test('actual provider negative and uncertain forms retain exact request and evid
     ...output, review: { ...output.review, verdict: 'uncertain', qualifications: ['source is conditional'] },
   };
   assert.equal(validSubscriptionReviewOutput(uncertain, spec, source), true);
+});
+
+test('review bundles accept only the two reviewed PR198 and PR200 source/version pairs', () => {
+  const bundles = subscriptionReviewBundlesForRequest(requestSha256);
+  assert.equal(bundles.length, 2);
+  assert.equal(new Set(bundles).size, 2);
+  assert.equal(REVIEWED_SUBSCRIPTION_REVIEW_PROVIDER_PAIRS.every((pair) =>
+    pair.verifier_version === 'codex-subscription-review-provider-v1'), true);
+  assert.deepEqual(subscriptionReviewBundlesForRequest('not-a-hash'), []);
+  assert.equal(validSubscriptionReviewOutput(output, {
+    ...spec, extractor_bundle_sha256: '9'.repeat(64),
+  }, source), false);
 });

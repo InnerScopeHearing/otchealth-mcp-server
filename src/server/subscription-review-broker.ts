@@ -10,10 +10,18 @@ import { createHash } from 'node:crypto';
  */
 export const SUBSCRIPTION_REVIEW_PROVIDER = 'codex-chatgpt-subscription-review';
 export const SUBSCRIPTION_REVIEW_EXTRACTOR_VERSION = 'codex-subscription-review-provider-v1';
-// SHA-256 of PR198's reviewed tools/neptune-trial/subscription-review/provider.mjs bytes.
-// A provider source change therefore needs an explicit gateway review and update.
-export const SUBSCRIPTION_REVIEW_PROVIDER_SOURCE_SHA256 =
-  '4e204c24fc2f70671a2a4f8896fbcd3b9e446c3917d7dd3934a783cf3a81c3f6';
+// Exact reviewed provider source/version pairs. A source change cannot become
+// usable merely by presenting a different hash in an operation or result.
+export const REVIEWED_SUBSCRIPTION_REVIEW_PROVIDER_PAIRS = Object.freeze([
+  Object.freeze({
+    provider_source_sha256: '4e204c24fc2f70671a2a4f8896fbcd3b9e446c3917d7dd3934a783cf3a81c3f6',
+    verifier_version: SUBSCRIPTION_REVIEW_EXTRACTOR_VERSION,
+  }),
+  Object.freeze({
+    provider_source_sha256: '0b749a25a2ae439c13ede05014f9fbea080080399aa8e458f4396d732f634371',
+    verifier_version: SUBSCRIPTION_REVIEW_EXTRACTOR_VERSION,
+  }),
+]);
 
 const SHA = /^[a-f0-9]{64}$/;
 const LOGIN_CONTRACT = 'codex-login-status-before-model-exec-v1';
@@ -46,13 +54,13 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-export function subscriptionReviewBundleForRequest(requestSha256: string): string | null {
-  if (!SHA.test(requestSha256)) return null;
-  return sha256(canonical({
-    provider_source_sha256: SUBSCRIPTION_REVIEW_PROVIDER_SOURCE_SHA256,
+export function subscriptionReviewBundlesForRequest(requestSha256: string): readonly string[] {
+  if (!SHA.test(requestSha256)) return Object.freeze([]);
+  return Object.freeze(REVIEWED_SUBSCRIPTION_REVIEW_PROVIDER_PAIRS.map((pair) => sha256(canonical({
+    provider_source_sha256: pair.provider_source_sha256,
     request_sha256: requestSha256,
-    verifier_version: SUBSCRIPTION_REVIEW_EXTRACTOR_VERSION,
-  }));
+    verifier_version: pair.verifier_version,
+  }))));
 }
 
 export function isSubscriptionReviewOperationSpec(spec: Record<string, unknown>, prepared: boolean): boolean {
@@ -94,9 +102,9 @@ function validReview(value: unknown, source: SubscriptionReviewSourceProof): boo
 
 /**
  * Validates the exact provider envelope after the graph broker has independently
- * resolved the source proof. The operation's immutable provider bundle has the
- * reviewed provider source hash and this exact `request_sha256`, so a reply for
- * one review request cannot be persisted or replayed for another request.
+ * resolved the source proof. The operation's immutable provider bundle must
+ * match one reviewed provider/version pair and this exact `request_sha256`, so
+ * a reply for one review request cannot persist or replay for another request.
  */
 export function validSubscriptionReviewOutput(
   value: unknown, spec: Record<string, unknown>, source: SubscriptionReviewSourceProof | null,
@@ -109,7 +117,7 @@ export function validSubscriptionReviewOutput(
     value.billing_route === 'chatgpt_subscription' && value.paid_fallback === false &&
     value.source_sha256 === source.textSha256 && Array.isArray(value.candidates) &&
     value.candidates.length === 0 && validReview(value.review, source) &&
-    spec.extractor_bundle_sha256 === subscriptionReviewBundleForRequest(
+    subscriptionReviewBundlesForRequest(
       String((value.review as Record<string, unknown>).request_sha256),
-    );
+    ).includes(String(spec.extractor_bundle_sha256));
 }

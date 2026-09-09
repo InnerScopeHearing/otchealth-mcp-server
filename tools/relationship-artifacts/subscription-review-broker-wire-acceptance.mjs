@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  subscriptionReviewBundleForRequest,
+  subscriptionReviewBundlesForRequest,
   validSubscriptionReviewOutput,
 } from '../../src/server/subscription-review-broker.js';
 
@@ -106,8 +106,8 @@ const firstProvider = providerFor(firstRequest);
 const first = await reconcilerFor(firstProvider).run(job);
 assert.equal(first.status, 'complete');
 assert.equal(first.result.review.polarity, 'negative');
-assert.equal(firstProvider.identity.extractor_bundle_sha256,
-  subscriptionReviewBundleForRequest(first.result.review.request_sha256));
+assert.ok(subscriptionReviewBundlesForRequest(first.result.review.request_sha256)
+  .includes(firstProvider.identity.extractor_bundle_sha256));
 assert.equal(validSubscriptionReviewOutput(first.result, {
   provider: firstProvider.provider, model: firstProvider.identity.model,
   extractor_bundle_sha256: firstProvider.identity.extractor_bundle_sha256,
