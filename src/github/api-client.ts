@@ -102,7 +102,7 @@ function githubPullRequestPathNumber(value: unknown): string {
   if (!isGitHubPullRequestNumber(value)) {
     throw new GitHubApiError({ code: 'github_invalid_pull_request_number', status: 0, message: 'Refusing an invalid GitHub pull request number.', nextStep: 'Use a positive integer pull request number.' });
   }
-  return String(value);
+  return String(Number(value));
 }
 
 /**
@@ -114,7 +114,7 @@ async function githubApiFetch(urlPath: string, init: RequestInit, retries: numbe
     throw new GitHubApiError({ code: 'github_invalid_path', status: 0, message: 'Refusing an invalid GitHub API path.', nextStep: 'Use a validated GitHub repository selector.' });
   }
   const url = new URL(urlPath, GITHUB_API_ORIGIN);
-  if (url.protocol !== 'https:' || url.origin !== GITHUB_API_ORIGIN) {
+  if (url.protocol !== 'https:' || url.origin !== GITHUB_API_ORIGIN || url.hostname !== 'api.github.com' || url.port !== '' || url.username !== '' || url.password !== '') {
     throw new GitHubApiError({ code: 'github_invalid_origin', status: 0, message: 'Refusing a non-GitHub API origin.', nextStep: 'Use the fixed GitHub API origin.' });
   }
   const response = await fetchWithBudget(url, { ...init, redirect: 'error' }, { retries });
