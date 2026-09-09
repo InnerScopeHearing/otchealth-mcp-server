@@ -580,6 +580,10 @@ export async function runHistoricalRepair(
   }
   const scannedIds = rawRows.flatMap(raw => typeof raw.id === 'string' && raw.id && raw.agent === opts.agent ? [raw.id] : []);
   const scannedRows = rawRows.map(normalizeRow).filter((row): row is MemoryRow => row !== null && row.agent === opts.agent);
+  const normalizedIds = new Set(scannedRows.map(row => row.id));
+  // Moving the scan cursor past a malformed record must not lose the obligation.
+  // Its exact source ID can be reread on later passes after the record is repaired.
+  for (const id of scannedIds) if (!normalizedIds.has(id)) pending.add(id);
   const nextAfterId = advancedCursor(afterId, scannedIds);
   const pendingRows: MemoryRow[] = [];
   // Retry saved failures first, but re-read each exact source ID. A deletion or loss of access
@@ -611,7 +615,7 @@ export async function runHistoricalRepair(
   const missing = rows.filter(row => !existing.has(memoryDocId(row.agent, row.id)));
   for (const row of rows) if (existing.has(memoryDocId(row.agent, row.id))) pending.delete(row.id);
   if (dryRun) {
-    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: incomplete, dryRun: true, errors: skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...new Set([...pending, ...missing.map(row => row.id)])].sort() } };
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: incomplete || pending.size > 0 || missing.length > 0, dryRun: true, errors: skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...new Set([...pending, ...missing.map(row => row.id)])].sort() } };
   }
   let vectors: (number[] | null)[];
   try { vectors = await embedRows(missing, deps, opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE); }
@@ -634,7 +638,8 @@ export async function runHistoricalRepair(
   }
   return {
     mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed, failed,
-    truncated: incomplete, dryRun: false, errors, checked: rows.length, already_indexed: rows.length - missing.length,
+    truncated: incomplete || pending.size > 0, dryRun: false, errors, checked: rows.length, already_indexed: rows.length - missing.length,
     checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() },
   };
 }
+

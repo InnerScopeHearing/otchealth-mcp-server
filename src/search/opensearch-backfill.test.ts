@@ -637,3 +637,34 @@ test('historical repair: malformed terminal source row advances only its stable 
   assert.equal(result.truncated, true);
   assert.match(result.errors[0], /repair remains incomplete/);
 });
+
+test('historical repair: malformed scanned ID survives cursor advancement and is indexed after source correction', async () => {
+  let corrected = false;
+  let embeddings = 0;
+  const record = () => ({ id: 'z', agent: 'cfo', type: 'memory', text: 'synthetic repair', created_at: '2026-08-01T00:00:00Z', ...(corrected ? {kind:'fact',tags:[]} : {}) });
+  const deps = {
+    queryDocs: (async (_coll: string, query: string) => query.includes('c.id = @id') ? [record()] : corrected ? [] : [record()]) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async (texts: string[]) => { embeddings += texts.length; return texts.map(() => [1]); }) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => { embeddings++; return [1]; }) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const first = await withStubbedFetch((async () => { throw new Error('malformed row must not reach index'); }) as typeof fetch,
+    () => runHistoricalRepair({agent:'cfo'},deps));
+  assert.equal(first.checkpoint.after_id,'z');
+  assert.deepEqual(first.checkpoint.pending_ids,['z']);
+  assert.equal(first.truncated,true);
+  assert.equal(embeddings,0);
+  const stillMalformed = await withStubbedFetch((async () => { throw new Error('malformed pending must not reach index'); }) as typeof fetch,
+    () => runHistoricalRepair({agent:'cfo',checkpoint:first.checkpoint}, {...deps,queryDocs:(async (_coll:string,query:string)=>query.includes('c.id = @id')?[record()]:[]) as typeof deps.queryDocs}));
+  assert.deepEqual(stillMalformed.checkpoint.pending_ids,['z']);
+  assert.equal(stillMalformed.truncated,true);
+  corrected=true;
+  const final = await withStubbedFetch((async (input: RequestInfo|URL) => {
+    if(String(input).includes('_mget')) return new Response(JSON.stringify({docs:[{_id:'cfo__z',found:false}]}));
+    if(String(input).includes('_bulk')) return new Response(JSON.stringify({errors:false,items:[{index:{status:201}}]}));
+    throw new Error('unexpected request');
+  }) as typeof fetch, () => runHistoricalRepair({agent:'cfo',checkpoint:stillMalformed.checkpoint},deps));
+  assert.equal(final.indexed,1);
+  assert.deepEqual(final.checkpoint.pending_ids,[]);
+  assert.equal(final.truncated,false);
+  assert.equal(embeddings,1);
+});
