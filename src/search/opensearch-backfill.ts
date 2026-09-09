@@ -101,7 +101,7 @@ import { embed as realEmbed, embedBatch as realEmbedBatch } from '../azure/found
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { resolveAwsCredentials, signRequest } from './sigv4.js';
 import { buildOpenSearchMemoryDoc } from './opensearch-write.js';
-import { memoryDocId } from '../azure/search-write.js';
+import { memoryDocId } from './memory-doc-id.js';
 
 const DEFAULT_INDEX = 'memory-exec';
 const DEFAULT_MAX = 5000;

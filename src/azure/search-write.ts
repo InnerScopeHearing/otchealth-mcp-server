@@ -46,10 +46,8 @@ export interface IndexResult {
   vector?: boolean;
 }
 
-/** Same key derivation as semantic.mjs docId() — MUST match, or the reindex would create a duplicate. */
-export function memoryDocId(agent: string, id: string): string {
-  return `${agent}__${id}`.replace(/[^A-Za-z0-9_\-=]/g, '_');
-}
+import { memoryDocId } from '../search/memory-doc-id.js';
+export { memoryDocId } from '../search/memory-doc-id.js';
 
 /** Derive the Search SERVICE name from the endpoint (https://<service>.search.windows.net). Pure.
  *  Parses via `URL` and requires an EXACT (anchored) hostname match, not a prefix match: the
