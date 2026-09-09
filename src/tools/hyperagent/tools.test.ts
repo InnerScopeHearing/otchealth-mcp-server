@@ -24,7 +24,7 @@ Object.assign(process.env, {
 });
 
 const { requestContext } = await import('../../server/request-context.js');
-const { registerHyperagentTools } = await import('./tools.js');
+const { registerHyperagentTools, sanitizeHyperagentCapabilities } = await import('./tools.js');
 const { __resetInvocationBudgetForTests } = await import('./rate-limit.js');
 type HyperagentToolTransport = import('./tools.js').HyperagentToolTransport;
 
@@ -77,6 +77,71 @@ function resultOf(response: Response): Record<string, unknown> {
   assert.ok(result && typeof result === 'object');
   return result as Record<string, unknown>;
 }
+
+test('capability discovery returns only validated tool schemas and declared paging fields', async () => {
+  const provider = {
+    tools: [{
+      name: 'list_threads',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          cursor: { type: 'string' },
+          pageSize: { type: 'integer', minimum: 1, maximum: 100 },
+          agentId: { type: 'string' },
+        },
+        required: ['cursor'],
+        additionalProperties: false,
+      },
+    }],
+  };
+  const { server, tools } = fakeServer();
+  registerHyperagentTools(server, () => 'synthetic-hash', {
+    configured: () => true,
+    call: async () => { throw new Error('capability discovery must not call tools/call'); },
+    listCapabilities: async () => ({ ok: true, status: 200, data: provider }),
+  });
+  const response = await invoke(tools.get('hyperagent_discover_capabilities')!, {});
+  assert.deepEqual(resultOf(response), {
+    ok: true,
+    tools: [{
+      name: 'list_threads',
+      inputSchema: provider.tools[0].inputSchema,
+      declaredPaging: [
+        { name: 'cursor', type: 'string', required: true },
+        { name: 'pageSize', type: 'integer', required: false },
+      ],
+    }],
+  });
+});
+
+test('capability discovery is CTO-only and provider failures never return provider text', async () => {
+  const { server, tools } = fakeServer();
+  let calls = 0;
+  registerHyperagentTools(server, () => 'synthetic-hash', {
+    configured: () => true,
+    call: async () => ({ ok: true, status: 200, data: null }),
+    listCapabilities: async () => {
+      calls += 1;
+      return { ok: false, status: 503, data: null, error: 'private provider details' };
+    },
+  });
+  const forbidden = await invoke(tools.get('hyperagent_discover_capabilities')!, {}, WEFUNDER_LANE);
+  assert.deepEqual(resultOf(forbidden), { ok: false, error: 'forbidden_lane' });
+  assert.equal(calls, 0);
+  const failed = await invoke(tools.get('hyperagent_discover_capabilities')!, {});
+  assert.deepEqual(resultOf(failed), { ok: false, error: 'provider_error' });
+  assert.equal(JSON.stringify(failed).includes('private provider details'), false);
+  assert.equal(calls, 1);
+});
+
+test('capability discovery refuses unsafe and oversized schema shapes', () => {
+  const unsafeName = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', description: 'must not pass through' } }] });
+  assert.deepEqual(unsafeName, { ok: false, error: 'unsafe_capabilities_metadata' });
+  const oversized = sanitizeHyperagentCapabilities({ tools: Array.from({ length: 65 }, () => ({ name: 'list_threads', inputSchema: { type: 'object' } })) });
+  assert.deepEqual(oversized, { ok: false, error: 'unsafe_capabilities_metadata' });
+  const unsafeReference = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { $ref: '#/unsafe' } } } }] });
+  assert.deepEqual(unsafeReference, { ok: false, error: 'unsafe_capabilities_metadata' });
+});
 
 test('get_thread permits current namedAgentId shape with exact thread id and ring match', async () => {
   const provider = {
