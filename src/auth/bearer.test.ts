@@ -31,6 +31,7 @@ before(() => {
     NODE_ENV: 'test',
     REVOCATION_MEMORY_ONLY_MODE: 'development',
     OAUTH_TOKEN_SIGNING_SECRET: 'o'.repeat(48),
+    OAUTH_DEFAULT_AGENT: 'cto',
     // Set before the FIRST dynamic import of bearer.js in this file, since bearer.ts's
     // `m365StaticAgentTokens()` reads `env.M365_CTO_MCP_TOKEN` via the module-level `loadEnv()`
     // call, which only ever runs once per process.

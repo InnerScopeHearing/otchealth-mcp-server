@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import {
   isConfigured as sharedConfigured,
-  normalizeAgent,
   readSharedAll,
   readInbound,
   readReconcileMarker,
@@ -11,13 +10,14 @@ import {
 } from '../../memory/store.js';
 import { searchMemory } from '../../agentstate/memory.js';
 import { listTasks } from '../../agentstate/ledger.js';
+import { canReadPersonalTasks, taskVisibleToCaller } from '../agentstate/task-read-access.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
 type TaskStatus = (typeof TASK_STATUSES)[number];
 import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
 import { isConfigured as inboxConfigured, readMessages } from '../../agentstate/queue.js';
 import { isM365StaticAuth } from '../../server/request-context.js';
 import { retractedIdsForAgent } from '../../memory/retractions.js';
-import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from '../hyperagent/ring.js';
+import { resolveAgentReadScope } from './agent-scope.js';
 
 /**
  * wake — ONE federated boot call for any agent on any platform. Composes, server-side, everything
@@ -550,6 +550,29 @@ export function buildBriefWake(
   };
 }
 
+/** Apply the task access policy before the storage cap and every derived wake field. */
+export async function readWakeTasks(
+  agent: string,
+  callerAgent: string,
+  taskLimit: number,
+  readTasks: typeof listTasks = listTasks,
+): Promise<WakeTasks> {
+  const rows = await readTasks({
+    owner_agent: agent,
+    limit: 50,
+    exclude_personal_legal: !canReadPersonalTasks(callerAgent),
+  });
+  // Defense against legacy/malformed adapters. Hidden rows cannot affect counts or previews.
+  const visible = rows.filter((task) => taskVisibleToCaller(task, callerAgent));
+  const counts: Record<string, number> = {};
+  for (const task of visible) counts[task.status] = (counts[task.status] ?? 0) + 1;
+  const active = visible
+    .filter((task) => (ACTIVE_STATUSES as string[]).includes(String(task.status)))
+    .slice(0, taskLimit)
+    .map((task) => capText(task as unknown as Record<string, unknown>, 600));
+  return { configured: true, active, counts };
+}
+
 export function registerWake(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -566,7 +589,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         openWorldHint: false,
       },
       inputShape: {
-        agent: z.string().optional().describe('Agent lane to wake; defaults to your token identity (lowercase id, e.g. "cto").'),
+        agent: z.string().optional().describe('Agent lane to wake. Authenticated calls default to and may select only their token identity (lowercase id, e.g. "cto").'),
         recent_limit: z.number().int().min(1).max(40).optional().describe('Max recent shared-feed entries (default 10).'),
         memory_limit: z.number().int().min(1).max(40).optional().describe('Max agent-state memory-of-record entries (default 12).'),
         task_limit: z.number().int().min(1).max(50).optional().describe('Max active tasks (default 15).'),
@@ -588,8 +611,8 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         doctrine: z.unknown(),
       },
       handler: async (input, ctx) => {
-        const agentRaw = input.agent || ctx.callerAgent;
-        if (!agentRaw) {
+        const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
+        if (!scope) {
           return {
             data: {
               agent: '',
@@ -604,14 +627,14 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
             summary: 'wake: no agent identity.',
           };
         }
-        const agent = normalizeAgent(agentRaw);
-        if (ctx.callerAgent === WEFUNDER_CAMPAIGN_DIRECTOR_LANE && agent !== ctx.callerAgent) {
+        if (!scope.allowed) {
           return {
-            data: { agent: ctx.callerAgent, pack: null, memory_records: [], tasks: null, inbox: null,
+            data: { agent: scope.agent, pack: null, memory_records: [], tasks: null, inbox: null,
               inbound: null, errors: ['forbidden_agent'], doctrine: buildDoctrine() },
-            summary: 'wake: this dedicated seat can load only its own agent context.',
+            summary: 'wake: authenticated callers can load only their own agent context.',
           };
         }
+        const agent = scope.agent;
         const recentLimit = input.recent_limit ?? 10;
         const memoryLimit = input.memory_limit ?? 12;
         const taskLimit = input.task_limit ?? 15;
@@ -662,14 +685,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
 
         const tasksP = (async () => {
           if (!cosmosConfigured()) return { configured: false, active: [] as Record<string, unknown>[], counts: {} as Record<string, number> };
-          const all = await listTasks({ owner_agent: agent, limit: 50 });
-          const counts: Record<string, number> = {};
-          for (const t of all) counts[t.status] = (counts[t.status] ?? 0) + 1;
-          const active = all
-            .filter((t) => (ACTIVE_STATUSES as string[]).includes(String(t.status)))
-            .slice(0, taskLimit)
-            .map((t) => capText(t as unknown as Record<string, unknown>, 600));
-          return { configured: true, active, counts };
+          return readWakeTasks(agent, ctx.callerAgent, taskLimit);
         })();
 
         const inboxP = (async () => {

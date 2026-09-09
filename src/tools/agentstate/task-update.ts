@@ -5,6 +5,7 @@ import { isConfigured } from '../../agentstate/store.js';
 import { updateTask } from '../../agentstate/ledger.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
 import { resolveAttribution } from './attribution.js';
+import { taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -28,12 +29,28 @@ export interface TaskUpdateInput {
 
 /** Exported standalone (mirroring memory-write.ts's handleMemoryWrite) so the attribution binding
  *  is directly testable through the actual registered entry point. */
-export async function handleTaskUpdate(input: TaskUpdateInput, ctx: ToolContext): Promise<ToolResultPayload> {
-  if (!isConfigured()) return { data: { updated: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
+export interface TaskUpdateDependencies {
+  isConfigured: typeof isConfigured;
+  updateTask: typeof updateTask;
+  taskVisibleToCaller: typeof taskVisibleToCaller;
+}
+const DEFAULT_TASK_UPDATE_DEPENDENCIES: TaskUpdateDependencies = { isConfigured, updateTask, taskVisibleToCaller };
+export async function handleTaskUpdate(
+  input: TaskUpdateInput,
+  ctx: ToolContext,
+  deps: TaskUpdateDependencies = DEFAULT_TASK_UPDATE_DEPENDENCIES,
+): Promise<ToolResultPayload> {
+  if (!deps.isConfigured()) return { data: { updated: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
   if (input.status === 'done') {
     return { data: { updated: false, reason: 'use task_complete for done (it enforces done=artifact).' }, summary: 'Rejected: mark done via task_complete.' };
   }
   const { actor, claimed_actor } = resolveAttribution(ctx.callerAgent, input.actor);
+  if (input.owner_agent && !deps.taskVisibleToCaller({ owner_agent: input.owner_agent, created_by: actor }, actor)) {
+    return {
+      data: { updated: false, reason: 'owner reassignment is not permitted by task visibility policy' },
+      summary: 'Task not updated: owner reassignment is not permitted by task visibility policy.',
+    };
+  }
   if (ctx.dryRun) {
     return {
       data: { updated: false, preview: { ...input, actor }, claimed_actor, note: 'dry_run: pass dry_run=false to persist.' },
@@ -47,7 +64,15 @@ export async function handleTaskUpdate(input: TaskUpdateInput, ctx: ToolContext)
     owner_agent: input.owner_agent,
     artifact_uri: input.artifact_uri,
   };
-  const res = await updateTask(input.task_id, patch, actor, input.board, input.expected_lease_version, claimed_actor);
+  const res = await deps.updateTask(
+    input.task_id,
+    patch,
+    actor,
+    input.board,
+    input.expected_lease_version,
+    claimed_actor,
+    (task) => deps.taskVisibleToCaller(task, actor),
+  );
   if (res.task) return { data: { updated: true, task: res.task, claimed_actor }, summary: `Updated ${input.task_id}.`, audit: { after: res.task } };
   return { data: { updated: false, fenced: res.fenced, reason: res.reason }, summary: `Not updated: ${res.reason}` };
 }

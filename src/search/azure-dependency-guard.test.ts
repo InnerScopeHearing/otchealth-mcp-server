@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -26,7 +27,7 @@ import { join, relative } from 'node:path';
  * honours SEARCH_BACKEND / BLOB_BACKEND / EMBEDDINGS_PROVIDER like everything else.
  */
 
-const SRC = new URL('..', import.meta.url).pathname;
+const SRC = fileURLToPath(new URL('..', import.meta.url));
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -40,7 +41,7 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const FILES = sourceFiles(SRC).map((f) => ({ path: relative(SRC, f), text: readFileSync(f, 'utf8') }));
+const FILES = sourceFiles(SRC).map((f) => ({ path: relative(SRC, f).replaceAll('\\', '/'), text: readFileSync(f, 'utf8') }));
 
 /** Files allowed to import the Azure writer directly, with the reason each one is legitimate. */
 const AZURE_WRITE_ALLOWED: Readonly<Record<string, string>> = Object.freeze({
