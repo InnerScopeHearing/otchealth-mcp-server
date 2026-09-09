@@ -29,3 +29,7 @@ test('rejects a same-ETag catalog whose version changes after GET',async()=>{
   const s3:GraphCatalogRawS3=async r=>{const version=r.method==='HEAD'&&++heads===2?'version-2':'version-1';return{status:200,headers:new Headers({etag:'"stable"','last-modified':createdAt,'content-length':String(Buffer.byteLength(body)),'x-amz-version-id':version}),body:r.method==='HEAD'?null:new Response(body).body};};
  await assert.rejects(readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,expectedVersionId:'version-1',s3}),/catalog_changed/);
 });
+test('rejects a GET version change even when both HEADs would agree',async()=>{
+ const body='{"path":"a"}\n';let calls=0;const s3:GraphCatalogRawS3=async r=>{calls++;const version=r.method==='GET'?'version-2':'version-1';return{status:200,headers:new Headers({etag:'"stable"','last-modified':createdAt,'content-length':String(Buffer.byteLength(body)),'x-amz-version-id':version}),body:r.method==='HEAD'?null:new Response(body).body};};
+ await assert.rejects(readPinnedGraphCatalog({key:'graph-trial/catalog.jsonl',sourceSha256:source,expectedVersionId:'version-1',s3}),/catalog_get_failed|catalog_version_changed/);assert.equal(calls,2);
+});

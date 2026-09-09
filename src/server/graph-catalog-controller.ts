@@ -81,10 +81,10 @@ async function sourceHead(d:GraphCatalogDeps,expectedVersion:string,s:AbortSigna
  return version;
 }
 function sourceRowAllowed(c:Cfg,row:Record<string,unknown>):boolean{
- if(typeof row.path!=='string')return false;
- if(c.source_scope!=='all_cfo_source_documents')return c.source_prefixes.some(prefix=>row.path.startsWith(prefix));
- if(!validPath(row.path))return false;
- return !['_text','_catalog','_review','_memory','_state','_archive'].includes(row.path.split('/')[0].toLowerCase());
+ const pathValue=row.path;if(typeof pathValue!=='string')return false;
+ if(c.source_scope!=='all_cfo_source_documents')return c.source_prefixes.some(prefix=>pathValue.startsWith(prefix));
+ if(!validPath(pathValue))return false;
+ return !['_text','_catalog','_review','_memory','_state','_archive'].includes(pathValue.split('/')[0].toLowerCase());
 }
 async function catalog(d:GraphCatalogDeps,c:Cfg,s:AbortSignal){
  const pin=c.materialization;
@@ -159,7 +159,7 @@ export function registerGraphCatalogControllerRoutes(app:FastifyInstance,i?:Part
  route('GET','/state/*',async(r,p,c,s)=>{const key=(r.params as Json)['*'];if(!/^(cursor|versions\/[a-f0-9]{64})$/.test(key))fail(400,'graph_catalog_request_invalid');const v=await get(d,path(c,`controller/${key}.json`),s);if(!v)return p.code(404).send({error:'graph_catalog_state_missing'});return{revision:v.etag,value:v.value};});
  route('PUT','/state/*',async(r,p,c,s)=>{const key=(r.params as Json)['*'],b=r.body as Json;if(!/^(cursor|versions\/[a-f0-9]{64})$/.test(key)||!exact(b,['key','revision','value'])||b.key!==key||!(b.revision===null||ETAG.test(b.revision)))fail(400,'graph_catalog_request_invalid');const old=await get(d,path(c,`controller/${key}.json`),s);if((old?.etag??null)!==b.revision)return p.code(409).send({committed:false});if(!live(c,d)){if(key==='cursor'||!old||!['dispatching','held'].includes(old.value.status)||b.value?.status!=='complete'||!equal(old.value.proposal,b.value.proposal))fail(403,'graph_catalog_recovery_forbidden');await receipt(d,c,old.value.proposal.run.run_id,s);}await validateState(d,c,key,b.value,old?.value??null,s);if(!await cas(d,path(c,`controller/${key}.json`),old,b.value,s))return p.code(409).send({committed:false});const saved=await get(d,path(c,`controller/${key}.json`),s);if(!saved||!equal(saved.value,b.value))fail();return{committed:true,revision:saved.etag};});
  route('POST','/admit',async(r,_p,c,s)=>{const b=r.body as Json;if(!exact(b,['key','manifest_sha256'])||!SHA.test(b.key)||!SHA.test(b.manifest_sha256))fail(400,'graph_catalog_request_invalid');const p=await serverProposal(d,c,b.key,s);if(p.manifest.manifest_sha256!==b.manifest_sha256)fail(409,'graph_catalog_proposal_missing');let ctl=await control(d,c,s);const same=ctl?.value.current.key===b.key;
- if(same&&ctl!.value.current.status==='active')return(await receipt(d,c,p.run.run_id,s)).receipt;
+ if(same&&ctl!.value.current.status==='active'){if(!await current(d,c,p.manifest.documents[0],s))fail(409,'graph_catalog_source_changed');return(await receipt(d,c,p.run.run_id,s)).receipt;}
  if(!same){if(!await current(d,c,p.manifest.documents[0],s))fail(409,'graph_catalog_source_changed');if(ctl){const prior=await receipt(d,c,ctl.value.current.run_id,s),progress=await get(d,path(c,`controller/versions/${prior.proposal.key}.json`),s);if(!progress||!await completed(d,c,prior.proposal,progress.value,s))fail(409,'graph_catalog_prior_run_held');}
  if((ctl?.value.used??0)>=c.max_admissions)fail(409,'graph_catalog_budget_exhausted');const reserved={schema:'graph-catalog-control-v1',policy_sha256:c.policy_sha256,used:(ctl?.value.used??0)+1,current:{status:'reserved',key:b.key,run_id:p.run.run_id,manifest_sha256:b.manifest_sha256}};if(!await cas(d,path(c,'server/control.json'),ctl,reserved,s))fail(409,'graph_catalog_admission_conflict');ctl=await control(d,c,s);}
  if(!ctl||ctl.value.current.key!==b.key||ctl.value.current.status!=='reserved')fail();if(!live(c,d))fail(403,'graph_catalog_disabled');

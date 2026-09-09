@@ -58,7 +58,8 @@ export async function readPinnedGraphCatalog(input:Readonly<{key:string;sourceSh
     if(input.expectedVersionId!==undefined&&versionId!==input.expectedVersionId)throw new Error('catalog_version_changed');
     const response=await bounded(()=>s3({method:'GET',key:input.key,headers:{'if-match':etag},signal}),signal);active(signal);
     if(response.status===412)throw new Error('catalog_changed');
-    if(response.status!==200||response.headers.get('etag')!==etag||!response.body)throw new Error('catalog_get_failed');
+    if(response.status!==200||response.headers.get('etag')!==etag||response.headers.get('x-amz-version-id')!==versionId||!response.body)throw new Error('catalog_get_failed');
+    if(input.expectedVersionId!==undefined&&response.headers.get('x-amz-version-id')!==input.expectedVersionId)throw new Error('catalog_version_changed');
     if(response.headers.has('content-length')&&Number(response.headers.get('content-length'))!==size)throw new Error('catalog_length_changed');
     reader=response.body.getReader();const decoder=new TextDecoder('utf-8',{fatal:true}),contentHash=createHash('sha256');
     const rows:Record<string,unknown>[]=[];let count=0,pending='';
