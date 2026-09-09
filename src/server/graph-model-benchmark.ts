@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 export type Assertion = Readonly<{ id: string; subject: string; predicate: string; object: string; citations: string[]; causation?: boolean }>;
 export type Candidate = Readonly<{ subject: string; predicate: string; object: string; citations: string[]; causation?: boolean }>;
 export type ModelRun = Readonly<{ provider: string; model: string; candidates: Candidate[]; elapsed_ms: number; attempts: number }>;
-export type Score = Readonly<{ assertion_count: number; precision: number; recall: number; citation_validity: number; false_merges: number; unsupported_causation: number; missing_expected_causation: number; elapsed_ms: number; attempts: number }>;
+export type Score = Readonly<{ assertion_count: number; input_valid: boolean; invalid_assertion_count: number; invalid_candidate_count: number; precision: number; recall: number; citation_validity: number; false_merges: number; unsupported_causation: number; missing_expected_causation: number; elapsed_ms: number; attempts: number }>;
 export type SubscriptionModel = Readonly<{ provider: string; model: string; extractor_version: string; extractor_bundle_sha256: string }>;
 export type SyntheticRunPlan = Readonly<{
   schema: 'graph-model-benchmark-run-v1';
@@ -23,16 +23,40 @@ export type SyntheticRunPlan = Readonly<{
 const SHA256 = /^[a-f0-9]{64}$/;
 const key = (x: { subject: string; predicate: string; object: string }) => `${x.subject}\u0000${x.predicate}\u0000${x.object}`;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+const nonBlank = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+const validCitations = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && value.every(nonBlank);
+const validAssertion = (value: unknown): value is Assertion => {
+  if (!value || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  return nonBlank(row.id) && nonBlank(row.subject) && nonBlank(row.predicate) && nonBlank(row.object) && validCitations(row.citations) &&
+    (row.causation === undefined || typeof row.causation === 'boolean');
+};
+const validCandidate = (value: unknown): value is Candidate => {
+  if (!value || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  return nonBlank(row.subject) && nonBlank(row.predicate) && nonBlank(row.object) && validCitations(row.citations) &&
+    (row.causation === undefined || typeof row.causation === 'boolean');
+};
 
 /** Scores independently recorded candidates. A duplicate candidate cannot inflate recall. */
 export function scoreGraphRun(assertions: Assertion[], run: ModelRun): Score {
-  const truth = new Map(assertions.map((x) => [key(x), x]));
+  const truth = new Map<string, Assertion>();
+  const assertionIds = new Set<string>();
+  let invalidAssertions = 0;
+  for (const assertion of assertions) {
+    const assertionKey = validAssertion(assertion) ? key(assertion) : '';
+    if (!validAssertion(assertion) || assertionIds.has(assertion.id) || truth.has(assertionKey)) { invalidAssertions++; continue; }
+    assertionIds.add(assertion.id);
+    truth.set(assertionKey, assertion);
+  }
   const matched = new Set<string>();
   let citations = 0;
   let merges = 0;
   let causation = 0;
   let missingExpectedCausation = 0;
+  let invalidCandidates = 0;
   for (const candidate of run.candidates) {
+    if (!validCandidate(candidate)) { invalidCandidates++; continue; }
     const candidateKey = key(candidate);
     const expected = truth.get(candidateKey);
     if (!expected) {
@@ -47,6 +71,9 @@ export function scoreGraphRun(assertions: Assertion[], run: ModelRun): Score {
   }
   return {
     assertion_count: assertions.length,
+    input_valid: invalidAssertions === 0 && invalidCandidates === 0,
+    invalid_assertion_count: invalidAssertions,
+    invalid_candidate_count: invalidCandidates,
     precision: run.candidates.length ? matched.size / run.candidates.length : 1,
     recall: assertions.length ? matched.size / assertions.length : 1,
     citation_validity: run.candidates.length ? citations / run.candidates.length : 1,
@@ -59,7 +86,7 @@ export function scoreGraphRun(assertions: Assertion[], run: ModelRun): Score {
 }
 
 export function qualityGate(score: Score): boolean {
-  return score.assertion_count > 0 && score.precision >= .95 && score.recall >= .9 && score.citation_validity >= .98 &&
+  return score.assertion_count > 0 && score.input_valid && score.invalid_assertion_count === 0 && score.invalid_candidate_count === 0 && score.precision >= .95 && score.recall >= .9 && score.citation_validity >= .98 &&
     score.false_merges === 0 && score.unsupported_causation === 0 && score.missing_expected_causation === 0 && Number.isInteger(score.attempts) &&
     score.attempts >= 1 && score.attempts <= 2 && Number.isFinite(score.elapsed_ms) && score.elapsed_ms >= 0;
 }

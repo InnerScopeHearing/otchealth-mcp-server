@@ -80,3 +80,17 @@ test('extractor changes cannot reuse a synthetic operation identity', () => {
   const two = createSyntheticSubscriptionPlans(SHA, [{ provider: 'p', model: 'm', extractor_version: 'v2', extractor_bundle_sha256: 'c'.repeat(64) }]);
   assert.notEqual(one[0].idempotency_key, two[0].idempotency_key);
 });
+
+test('rejects malformed and duplicate assertions or candidates', () => {
+  const blankAssertion = [{ id: ' ', subject: ' ', predicate: ' ', object: ' ', citations: [''] }];
+  const blankScore = scoreGraphRun(blankAssertion, { provider: 'subscription', model: 'test', elapsed_ms: 1, attempts: 1, candidates: [{ subject: ' ', predicate: ' ', object: ' ', citations: [''] }] });
+  assert.equal(blankScore.input_valid, false);
+  assert.equal(blankScore.invalid_assertion_count, 1);
+  assert.equal(blankScore.invalid_candidate_count, 1);
+  assert.equal(qualityGate(blankScore), false);
+  const duplicateTruth = Array.from({ length: 10 }, (_, index) => ({ id: `id-${index}`, subject: index === 9 ? 's-0' : `s-${index}`, predicate: 'p', object: index === 9 ? 'o-0' : `o-${index}`, citations: ['c'] }));
+  const duplicateScore = scoreGraphRun(duplicateTruth, { provider: 'subscription', model: 'test', elapsed_ms: 1, attempts: 1, candidates: duplicateTruth.slice(0, 9).map(({ subject, predicate, object, citations }) => ({ subject, predicate, object, citations })) });
+  assert.equal(duplicateScore.input_valid, false);
+  assert.equal(duplicateScore.invalid_assertion_count, 1);
+  assert.equal(qualityGate(duplicateScore), false);
+});
