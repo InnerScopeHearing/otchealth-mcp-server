@@ -90,13 +90,13 @@ function safeStringArray(value: unknown, max: number): string[] | null {
 
 /**
  * Keep a compact, data-free JSON Schema subset. Unsupported composition, references, descriptions,
- * and unknown keys are refused instead of relaying arbitrary provider metadata to the caller.
+ * enumerations, and unknown keys are refused instead of relaying arbitrary provider metadata to the caller.
  */
 function sanitizeInputSchema(value: unknown, depth = 0, state = { nodes: 0 }): SafeSchema | null {
   if (depth > MAX_SCHEMA_DEPTH || ++state.nodes > MAX_SCHEMA_NODES) return null;
   const source = plainRecord(value);
   if (!source) return null;
-  const allowed = new Set(['type', 'properties', 'required', 'items', 'enum', 'additionalProperties', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems']);
+  const allowed = new Set(['type', 'properties', 'required', 'items', 'additionalProperties', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems']);
   if (Object.keys(source).some(key => !allowed.has(key))) return null;
   const type = source.type;
   if (typeof type !== 'string' || !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(type)) return null;
@@ -106,10 +106,6 @@ function sanitizeInputSchema(value: unknown, depth = 0, state = { nodes: 0 }): S
       if (typeof source[key] !== 'number' || !Number.isFinite(source[key] as number)) return null;
       out[key] = source[key];
     }
-  }
-  if (source.enum !== undefined) {
-    if (!Array.isArray(source.enum) || source.enum.length > 64 || source.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item))) return null;
-    out.enum = [...source.enum];
   }
   if (type === 'object') {
     if (source.properties !== undefined) {
@@ -152,22 +148,28 @@ function declaredPagingMetadata(schema: SafeSchema): Array<{ name: string; type:
 }
 
 export function sanitizeHyperagentCapabilities(data: unknown):
-  | { ok: true; tools: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }> }
+  | { ok: true; tools: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }>; omittedUnsupportedSchemas: number }
   | { ok: false; error: 'unsafe_capabilities_metadata' } {
   const root = plainRecord(data);
   const tools = root?.tools;
   if (!Array.isArray(tools) || tools.length > MAX_CAPABILITY_TOOLS) return { ok: false, error: 'unsafe_capabilities_metadata' };
   const clean: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }> = [];
+  let omittedUnsupportedSchemas = 0;
   for (const candidate of tools) {
     const tool = plainRecord(candidate);
     if (!tool || Object.keys(tool).some(key => !['name', 'inputSchema'].includes(key))) return { ok: false, error: 'unsafe_capabilities_metadata' };
     const name = tool.name;
     if (typeof name !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(name)) return { ok: false, error: 'unsafe_capabilities_metadata' };
     const inputSchema = sanitizeInputSchema(tool.inputSchema);
-    if (!inputSchema) return { ok: false, error: 'unsafe_capabilities_metadata' };
+    // Do not strip unsafe facets from a schema: that would misrepresent the source tool's contract.
+    // Omit the complete schema and expose only an aggregate count, never its name or contents.
+    if (!inputSchema) {
+      omittedUnsupportedSchemas += 1;
+      continue;
+    }
     clean.push({ name, inputSchema, declaredPaging: declaredPagingMetadata(inputSchema) });
   }
-  return { ok: true, tools: clean };
+  return { ok: true, tools: clean, omittedUnsupportedSchemas };
 }
 
 /** Log/journal only routing metadata, never the investor-sensitive prompt sent to the source. */
@@ -203,6 +205,7 @@ export function registerHyperagentTools(
       outputShape: {
         ok: z.boolean(),
         tools: z.array(z.unknown()).optional(),
+        omittedUnsupportedSchemas: z.number().int().nonnegative().optional(),
         error: z.string().optional(),
       },
       handler: async (_input, ctx) => {
@@ -221,7 +224,10 @@ export function registerHyperagentTools(
         if (!safe.ok) {
           return { data: { ok: false, error: safe.error }, summary: 'Refused unsafe Hyperagent capability metadata.' };
         }
-        return { data: { ok: true, tools: safe.tools }, summary: `Read ${safe.tools.length} validated Hyperagent tool schema(s) for migration planning.` };
+        return {
+          data: { ok: true, tools: safe.tools, omittedUnsupportedSchemas: safe.omittedUnsupportedSchemas },
+          summary: `Read ${safe.tools.length} validated Hyperagent tool schema(s) for migration planning.`,
+        };
       },
     },
     callerHash,

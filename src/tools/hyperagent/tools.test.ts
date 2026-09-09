@@ -111,6 +111,7 @@ test('capability discovery returns only validated tool schemas and declared pagi
         { name: 'pageSize', type: 'integer', required: false },
       ],
     }],
+    omittedUnsupportedSchemas: 0,
   });
 });
 
@@ -140,7 +141,9 @@ test('capability discovery refuses unsafe and oversized schema shapes', () => {
   const oversized = sanitizeHyperagentCapabilities({ tools: Array.from({ length: 65 }, () => ({ name: 'list_threads', inputSchema: { type: 'object' } })) });
   assert.deepEqual(oversized, { ok: false, error: 'unsafe_capabilities_metadata' });
   const unsafeReference = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { $ref: '#/unsafe' } } } }] });
-  assert.deepEqual(unsafeReference, { ok: false, error: 'unsafe_capabilities_metadata' });
+  assert.deepEqual(unsafeReference, { ok: true, tools: [], omittedUnsupportedSchemas: 1 });
+  const sourceSpecificEnum = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { status: { type: 'string', enum: ['private-source-value'] } } } }] });
+  assert.deepEqual(sourceSpecificEnum, { ok: true, tools: [], omittedUnsupportedSchemas: 1 });
 });
 
 // Exercise the real registry connector filter and the resulting guarded handlers. Transport is
