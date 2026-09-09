@@ -7,6 +7,8 @@ param(
  [Parameter(Mandatory)][string]$CodexPath,
  [Parameter(Mandatory)][string]$CohortId,
  [Parameter(Mandatory)][string]$Producer,
+ [Parameter(Mandatory)][ValidateSet('gpt-5.6-luna','gpt-5.6-sol','gpt-6-astra')][string]$ReviewModel,
+ [Parameter(Mandatory)][ValidateSet('gpt-5.6-luna','gpt-5.6-terra','gpt-5.6-sol')][string]$ExtractorModel,
  [ValidateSet('signed-review','partitioned-signed-review','candidate-only')][string]$ReviewMode='candidate-only',
  [string]$RegistryId,
  [string]$RegistryVersion,
@@ -32,7 +34,7 @@ $runtimeRoot=[IO.Path]::GetFullPath($InstallDirectory)
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 $hostFile=Join-Path $runtimeRoot 'host.json'
 @{schema='company-catalog-controller-host-v1';seat='cfo';binary=$codexBinary;cohort_id=$CohortId} | ConvertTo-Json | Write-Utf8File -Path $hostFile
-@{schema='relationship-backfill-runtime-v1';cto_root=$ctoDirectory;host_config=$hostFile;outbox_directory=(Join-Path $runtimeRoot 'outbox');cfo_project_config=$cfoConfig;producer=$Producer;review_mode=$ReviewMode;registry=$registryConfig} | ConvertTo-Json -Depth 8 | Write-Utf8File -Path (Join-Path $runtimeRoot 'runtime.json')
+@{schema='relationship-backfill-runtime-v1';cto_root=$ctoDirectory;host_config=$hostFile;outbox_directory=(Join-Path $runtimeRoot 'outbox');cfo_project_config=$cfoConfig;producer=$Producer;review_mode=$ReviewMode;review_model=$ReviewModel;extractor_model=$ExtractorModel;registry=$registryConfig} | ConvertTo-Json -Depth 8 | Write-Utf8File -Path (Join-Path $runtimeRoot 'runtime.json')
 @{node_path=$nodeBinary;launcher_path=(Join-Path $PSScriptRoot 'full-backfill-cli.mjs')} | ConvertTo-Json | Write-Utf8File -Path (Join-Path $runtimeRoot 'installation.json')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Start-RelationshipBackfill.ps1') -Destination (Join-Path $runtimeRoot 'Start-RelationshipBackfill.ps1') -Force
 # Preparation performs local validation only. It does not register or start a scheduled job.

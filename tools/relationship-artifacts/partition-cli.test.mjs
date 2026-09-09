@@ -32,7 +32,7 @@ test('ordinary partition CLI validates every shard before controller startup and
     await mkdir(dirname(project),{recursive:true});await writeFile(project,'[mcp_servers.otchealth.http_headers]\nAuthorization = "Bearer synthetic-only-not-real"\n');
     await writeFile(binary,'synthetic never executed');await writeFile(key,pem);
     await writeFile(host,JSON.stringify({schema:'company-catalog-controller-host-v1',seat:'cfo',binary,cohort_id:'synthetic'}));
-    await writeFile(config,JSON.stringify({schema:'relationship-backfill-runtime-v1',review_mode:'partitioned-signed-review',cto_root:ctoRoot,host_config:host,
+    await writeFile(config,JSON.stringify({schema:'relationship-backfill-runtime-v1',review_mode:'partitioned-signed-review',review_model:'gpt-5.6-luna',extractor_model:'gpt-5.6-luna',cto_root:ctoRoot,host_config:host,
       outbox_directory:join(directory,'outbox'),cfo_project_config:project,producer:'reviewer',registry:{id:'synthetic',version:manifest.snapshot.version,public_key_file:key,authority}}));
     const transport=missing=>`import {writeFileSync,readFileSync} from 'node:fs';
       const envelopes=${JSON.stringify(envelopes)},manifest=${JSON.stringify(manifest)};let shards=0,pages=0;
@@ -56,11 +56,11 @@ test('ordinary partition CLI validates every shard before controller startup and
       const prepared=spawnSync(process.env.RELATIONSHIP_POWERSHELL||'pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File',
         fileURLToPath(new URL('./Prepare-RelationshipBackfill.ps1',import.meta.url)),'-InstallDirectory',installation,
         '-NodePath',process.execPath,'-CtoRoot',ctoRoot,'-CfoProjectConfig',project,'-CodexPath',binary,'-CohortId','synthetic',
-        '-Producer','reviewer','-ReviewMode','partitioned-signed-review','-RegistryId','synthetic','-RegistryVersion',manifest.snapshot.version,
+        '-Producer','reviewer','-ReviewModel','gpt-5.6-sol','-ExtractorModel','gpt-5.6-terra','-ReviewMode','partitioned-signed-review','-RegistryId','synthetic','-RegistryVersion',manifest.snapshot.version,
         '-RegistryPublicKeyFile',key,'-RegistryAuthorityFile',authorityFile],{encoding:'utf8',windowsHide:true,timeout:30000});
       assert.equal(prepared.status,0,prepared.stderr||prepared.error?.message);
       const saved=JSON.parse(await readFile(join(installation,'runtime.json'),'utf8'));
-      assert.equal(saved.review_mode,'partitioned-signed-review');assert.equal(saved.registry.version,manifest.snapshot.version);
+      assert.equal(saved.review_mode,'partitioned-signed-review');assert.equal(saved.review_model,'gpt-5.6-sol');assert.equal(saved.extractor_model,'gpt-5.6-terra');assert.equal(saved.registry.version,manifest.snapshot.version);
       assert.match(prepared.stdout,/Scheduler not registered or activated/);
     }
     const result=execute('--once');assert.equal(result.status,2,result.stderr);assert.match(result.stdout,/disabled/);

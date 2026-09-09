@@ -21,7 +21,7 @@ import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
 import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
-import { shouldOffload, offloadResult, extractResultSummary } from './result-store.js';
+import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult } from './result-store.js';
 import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from './hyperagent/ring.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
 import {
@@ -1288,7 +1288,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // one consumer confirmed not to support it, not a global behavior change.
         // The dedicated source may contain investor material. The shared result cache has no
         // caller binding, so this principal must keep its payload inline, never in that cache.
-        if (callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE && shouldOffload(text) && !isM365StaticAuth()) {
+        // gateway_fetch_result is already the terminal, bounded pagination transport. Re-offloading
+        // one of its pages creates an unusable result-id chain instead of delivering that page.
+        if (
+          mayOffloadToolResult(canonicalName) &&
+          callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE &&
+          shouldOffload(text) &&
+          !isM365StaticAuth()
+        ) {
           const off = await offloadResult(text, result, correlationId, callerHash);
           if (off) {
             text = off.preview;

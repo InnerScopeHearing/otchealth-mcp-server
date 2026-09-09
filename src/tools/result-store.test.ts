@@ -14,6 +14,7 @@ const {
   pageCount,
   pageSlice,
   shouldOffload,
+  mayOffloadToolResult,
   extractResultSummary,
   offloadResult,
   fetchStoredResult,
@@ -95,8 +96,57 @@ test('pageSlice: clamps out-of-range pages and returns the right chunk', () => {
   assert.equal(last.chunk, 'c'.repeat(500));
 });
 
-test('PAGE_CHARS stays below the offload threshold so a fetched page never re-offloads', () => {
+test('PAGE_CHARS stays below the offload threshold', () => {
   assert.ok(PAGE_CHARS < 40000);
+});
+
+test('gateway_fetch_result is a terminal transport that cannot recursively offload', () => {
+  assert.equal(mayOffloadToolResult('gateway_fetch_result'), false);
+  assert.equal(mayOffloadToolResult('catalog_list_tools'), true);
+});
+
+test('escape-heavy Unicode JSON pages stay bounded and reassemble to the exact UTF-8 bytes', async () => {
+  const store = fakeResultStore();
+  const callerHash = '9'.repeat(64);
+  const data = {
+    history: ('quote=" slash=\\ newline=\n tab=\t nul=\u0000 emoji=😀 musical=𝄞 ').repeat(5000),
+  };
+  const serialized = JSON.stringify(data, null, 2);
+  const outcome = await offloadResult(serialized, data, 'corr_escape_heavy', callerHash, store.deps);
+  assert.ok(outcome);
+
+  const first = await fetchStoredResult(outcome.resultId, 0, callerHash, store.deps);
+  assert.equal(first.found, true);
+  assert.ok(first.pages! > Math.ceil(serialized.length / PAGE_CHARS), 'fixture exercises JSON escape expansion');
+  const chunks: string[] = [];
+  for (let page = 0; page < first.pages!; page++) {
+    const response = await handleGatewayFetchResult(
+      { result_id: outcome.resultId, page },
+      { callerHash },
+      { fetchStoredResult: (id, requestedPage, hash) => fetchStoredResult(id, requestedPage, hash, store.deps) },
+    );
+    const fetched = response.data as {
+      found: boolean;
+      total_bytes?: number;
+      page?: number;
+      pages?: number;
+      chunk?: string;
+    };
+    assert.equal(fetched.found, true);
+    assert.ok(fetched.chunk !== undefined);
+    const renderedText = JSON.stringify(fetched, null, 2) + '\n\n' + response.summary;
+    const renderedBytes = Buffer.byteLength(renderedText, 'utf8');
+    assert.ok(renderedBytes < 40000, 'page ' + page + ' rendered ' + renderedBytes + ' UTF-8 bytes');
+    assert.equal(/[\uD800-\uDBFF]$/.test(fetched.chunk), false, 'page ' + page + ' ends with a split surrogate');
+    assert.equal(/^[\uDC00-\uDFFF]/.test(fetched.chunk), false, 'page ' + page + ' starts with a split surrogate');
+    chunks.push(fetched.chunk);
+  }
+
+  const reassembled = chunks.join('');
+  assert.equal(reassembled, serialized);
+  assert.deepEqual(Buffer.from(reassembled, 'utf8'), Buffer.from(serialized, 'utf8'));
+  assert.equal(first.total_bytes, Buffer.byteLength(serialized, 'utf8'));
+  assert.equal(outcome.totalBytes, Buffer.byteLength(serialized, 'utf8'));
 });
 
 function fakeResultStore(nowValue = Date.parse('2026-09-08T00:00:00.000Z')) {
