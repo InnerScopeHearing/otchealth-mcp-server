@@ -1,6 +1,7 @@
 import { canonical, sha256 } from "./aws-http.mjs";
 import { documentVersion, createTypedSemanticAssertion, validTime } from "./graph-assertion-contract.mjs";
 import { preparedTextIdentity, validatePreparedTextBinding } from "./prepared-text-binding.mjs";
+import { parseIdentityCurrentnessPointer } from "./identity-currentness-proof.mjs";
 
 export const SCHEMA = "relationship-resolution-v1";
 // Match the complete prepared-text contract. Chunks remain 16 KiB; never truncate a document to fit.
@@ -21,8 +22,12 @@ function verifiedProof(proof, request) {
   return proof?.verified === true && proof.request_sha256 === verificationRequestHash(request) &&
     bounded(proof.verifier_id) && bounded(proof.verifier_version) && bounded(proof.basis);
 }
-const keepProof = proof => copy({ request_sha256: proof.request_sha256, verifier_id: proof.verifier_id, verifier_version: proof.verifier_version, basis: proof.basis,
-  ...(proof.epistemic_status === "source_attributed" ? { epistemic_status: "source_attributed" } : {}) });
+const keepProof = proof => {
+  const identityCurrentness = parseIdentityCurrentnessPointer(proof.identity_currentness, proof.request_sha256);
+  return copy({ request_sha256: proof.request_sha256, verifier_id: proof.verifier_id, verifier_version: proof.verifier_version, basis: proof.basis,
+    ...(proof.epistemic_status === "source_attributed" ? { epistemic_status: "source_attributed" } : {}),
+    ...(identityCurrentness ? { identity_currentness: identityCurrentness } : {}) });
+};
 const exactPlain = (value, keys) => !!value && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).sort().join() === [...keys].sort().join();
 function utc(value) {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
