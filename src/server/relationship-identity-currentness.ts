@@ -77,11 +77,21 @@ async function partitionCurrent(config: IdentityRegistryConfig, pointer: Json,
   const bindingHash = digest(canonical({ source_document_version: identity.binding.source_document_version,
     source_sha256: identity.binding.chunk_sha256 }));
   const coverage = manifest.catalog_coverage as Json;
-  const covered = await partitions.binding_covered({ registry_id: pointer.registry_id,
+  const coverageRequest = { registry_id: pointer.registry_id,
     manifest_version: pointer.manifest_version, source_generation: manifest.source_generation,
     catalog_version: coverage.catalog_version, coverage_sha256: coverage.coverage_sha256,
-    source_binding_hash: bindingHash }, { signal });
-  return covered === true && matchingEntry(snapshot, identity, pointer.entry_sha256) !== null &&
+    source_binding_hash: bindingHash };
+  const covered = await partitions.binding_covered(coverageRequest, { signal });
+  if (covered !== true || !matchingEntry(snapshot, identity, pointer.entry_sha256)) return false;
+  const secondManifest = await partitions.read_manifest({ registry_id: pointer.registry_id,
+    manifest_version: pointer.manifest_version }, { signal });
+  if (secondManifest.status !== 'active' || !same(secondManifest.envelope, storedManifest.envelope) ||
+      !identityRegistryVerification.validPartitionManifest(secondManifest.envelope, config, pointer.manifest_version)) return false;
+  const secondShard = await partitions.read_shard(shardRequest, { signal });
+  if (secondShard.status !== 'active' || !same(secondShard.envelope, storedShard.envelope) ||
+      !identityRegistryVerification.validPartitionShard(secondShard.envelope, config, manifest, descriptor) ||
+      !matchingEntry((secondShard.envelope as Json).snapshot as Json, identity, pointer.entry_sha256)) return false;
+  return await partitions.binding_covered(coverageRequest, { signal }) === true &&
     await partitions.shard_current(shardRequest, { signal }) === true &&
     await partitions.manifest_current({ registry_id: pointer.registry_id, manifest_version: pointer.manifest_version,
       source_generation: manifest.source_generation }, { signal }) === true;
