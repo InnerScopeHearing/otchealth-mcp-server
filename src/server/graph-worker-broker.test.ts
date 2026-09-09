@@ -484,6 +484,7 @@ test('prepared operations bind actual snapshot chunks, isolate snapshots, and fa
   });
   assert.equal(tamperedAuthorization.statusCode, 403);
 
+  const reviewRequestSha256 = H('exact synthetic review request');
   const spec = {
     authorization_ref: decision.decision_ref,
     authorization_sha256: H(helper.canonical({
@@ -491,12 +492,16 @@ test('prepared operations bind actual snapshot chunks, isolate snapshots, and fa
       decision_ref: decision.decision_ref,
       source_binding: first.sourceBinding,
     })),
-    extractor_bundle_sha256: H('reviewed prepared extractor bundle'),
-    extractor_version: 'codex-subscription-extractor-v1',
+    extractor_bundle_sha256: H(helper.canonical({
+      provider_source_sha256: '4e204c24fc2f70671a2a4f8896fbcd3b9e446c3917d7dd3934a783cf3a81c3f6',
+      request_sha256: reviewRequestSha256,
+      verifier_version: 'codex-subscription-review-provider-v1',
+    })),
+    extractor_version: 'codex-subscription-review-provider-v1',
     input_sha256: first.request.source.canonical_input_sha256,
     login_before_model_contract: 'codex-login-status-before-model-exec-v1',
     model: 'gpt-5.6-luna',
-    provider: 'codex-chatgpt-subscription',
+    provider: 'codex-chatgpt-subscription-review',
     purpose: h.f.run.purpose,
     source_id: first.sourceId,
     source_version: first.sourceVersion,
@@ -569,6 +574,52 @@ test('prepared operations bind actual snapshot chunks, isolate snapshots, and fa
     payload: helper.canonical(wrongResultEnvelope),
   });
   assert.equal(rejectedResult.statusCode, 403);
+
+  const crossRunResult = await h.app.inject({
+    method: 'PUT',
+    url: resultUrl.replace(h.f.run.run_id, 'run_' + H('other admitted-looking run')),
+    headers: { ...authHeaders, 'if-none-match': '*' },
+    payload: helper.canonical(wrongResultEnvelope),
+  });
+  assert.equal(crossRunResult.statusCode, 403);
+
+  const reviewResult = {
+    operation_id: operationId,
+    spec_sha256: H(helper.canonical(spec)),
+    output: {
+      provider: 'codex-chatgpt-subscription-review', model: 'gpt-5.6-luna',
+      billing_route: 'chatgpt_subscription', paid_fallback: false,
+      source_sha256: H(text), candidates: [],
+      review: {
+        request_sha256: reviewRequestSha256, verdict: 'supported',
+        subject_index: 0, object_index: 1, predicate: 'depends_on', polarity: 'positive',
+        qualifications: [], evidence: { start_utf16: 0, end_utf16: text.length, quote: text },
+        reason_code: 'synthetic_source_witness',
+      },
+    },
+  };
+  const reviewEnvelope = {
+    schema: 'subscription-model-result-v1', operation_id: operationId,
+    result_sha256: H(helper.canonical(reviewResult)), result: reviewResult,
+  };
+  const storedReview = await h.app.inject({
+    method: 'PUT', url: resultUrl,
+    headers: { ...authHeaders, 'if-none-match': '*' },
+    payload: helper.canonical(reviewEnvelope),
+  });
+  assert.equal(storedReview.statusCode, 201);
+
+  const complete = { ...dispatched, state: 'complete', revision: 2,
+    result_sha256: reviewEnvelope.result_sha256 };
+  const completeEnvelope = {
+    ...dispatchedEnvelope, operation_sha256: H(helper.canonical(complete)), operation: complete,
+  };
+  const completed = await h.app.inject({
+    method: 'PUT', url: operationUrl,
+    headers: { ...authHeaders, 'if-match': updated.headers.etag as string },
+    payload: helper.canonical(completeEnvelope),
+  });
+  assert.equal(completed.statusCode, 201);
 
   const bundleEntry = [...h.objects.entries()].find(([key]) =>
     key.includes('/text-snapshots/' + firstReceipt.snapshot_id + '/bundles/'));

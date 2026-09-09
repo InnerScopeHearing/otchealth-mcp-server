@@ -10,6 +10,11 @@ import {
   type CfoTextSource,
 } from '../graph/cfo-text-snapshot.js';
 import { createCfoTextPreparationController } from '../graph/cfo-text-preparation.js';
+import {
+  isSubscriptionReviewOperationSpec,
+  SUBSCRIPTION_REVIEW_PROVIDER,
+  validSubscriptionReviewOutput,
+} from './subscription-review-broker.js';
 
 const BUCKET = 'otchealth-finance-legal-dr-55c84f6b';
 const REGION = 'us-east-1';
@@ -583,10 +588,12 @@ function operationSource(
       ![spec.authorization_sha256,spec.extractor_bundle_sha256,spec.input_sha256]
         .every((entry) => SHA.test(String(entry))) ||
       spec.login_before_model_contract !== 'codex-login-status-before-model-exec-v1' ||
-      spec.provider !== 'codex-chatgpt-subscription' ||
+      !['codex-chatgpt-subscription', SUBSCRIPTION_REVIEW_PROVIDER].includes(String(spec.provider)) ||
       ![spec.authorization_ref,spec.extractor_version,spec.model,spec.purpose,
         spec.source_id,spec.source_version].every((entry) => bounded(entry)) ||
       spec.purpose !== binding.run.purpose) return null;
+  if (spec.provider === SUBSCRIPTION_REVIEW_PROVIDER &&
+      !isSubscriptionReviewOperationSpec(spec, isPrepared)) return null;
   if (Object.hasOwn(value, 'dispatched_at') && !utc(value.dispatched_at)) return null;
   if (Object.hasOwn(value, 'outcome_code') && !bounded(value.outcome_code)) return null;
   if (Object.hasOwn(value, 'result_sha256') && !SHA.test(String(value.result_sha256))) return null;
@@ -859,7 +866,7 @@ export function registerGraphWorkerBrokerRoutes(
 
   async function resolvePreparedChunk(
     control: BrokerControl, sourceBinding: PreparedBinding,
-  ): Promise<{ inputSha256: string; textSha256: string } | null> {
+  ): Promise<{ inputSha256: string; textSha256: string; text: string } | null> {
     const result = await cfoTextController(control).readChunk({
       snapshot_id: sourceBinding.snapshot_id,
       ordinal: sourceBinding.chunk_ordinal,
@@ -884,12 +891,13 @@ export function registerGraphWorkerBrokerRoutes(
     return {
       inputSha256: digest(canonical(document)),
       textSha256: digest(result.text),
+      text: result.text,
     };
   }
   async function resolveOperationSourceProof(
     control: BrokerControl, manifest: Manifest,
     operation: Record<string, unknown>, source: OperationSource,
-  ): Promise<{ inputSha256: string; textSha256: string | null } | null> {
+  ): Promise<{ inputSha256: string; textSha256: string | null; text: string | null } | null> {
     const spec = operation.spec as Record<string, unknown>;
     if (source.kind === 'metadata') {
       const loaded = await loadRow(
@@ -899,7 +907,7 @@ export function registerGraphWorkerBrokerRoutes(
         loaded.value.row, source.item, control.binding.room,
       );
       return actual !== null && actual === spec.input_sha256
-        ? { inputSha256: actual, textSha256: null } : null;
+        ? { inputSha256: actual, textSha256: null, text: null } : null;
     }
     const current = preparedBinding(source.sourceBinding, control.binding, manifest);
     if (!current ||
@@ -936,9 +944,17 @@ export function registerGraphWorkerBrokerRoutes(
     operation: Awaited<ReturnType<typeof readStoredOperation>>,
   ): boolean {
     if (!operation) return false;
-    if (operation.source.kind === 'metadata') return true;
+    const spec = operation.operation.spec as Record<string, unknown>;
     const inner = result.result as Record<string, unknown>;
     const output = inner.output as Record<string, unknown>;
+    if (spec.provider === SUBSCRIPTION_REVIEW_PROVIDER) {
+      return isSubscriptionReviewOperationSpec(spec, operation.source.kind === 'prepared') &&
+        validSubscriptionReviewOutput(output, spec,
+          operation.sourceProof.textSha256 && operation.sourceProof.text
+            ? { textSha256: operation.sourceProof.textSha256, text: operation.sourceProof.text }
+            : null);
+    }
+    if (operation.source.kind === 'metadata') return true;
     return output.source_sha256 === operation.sourceProof.textSha256 &&
       output.source_sha256 === operation.source.sourceBinding.chunk_sha256;
   }
