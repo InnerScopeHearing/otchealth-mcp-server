@@ -59,7 +59,7 @@ test('redactSecrets: preserves the specific marker instead of collapsing to the 
   assert.match(out, /<REDACTED:GATEWAY_BEARER>/);
 });
 
-test('every log and note site in eval-runner.mjs routes through redactSecrets', async () => {
+test('runner logs and extracted scoring notes route through redactSecrets', async () => {
   // A behavioural guard on the CALL SITES, not on the redactor. redactSecrets being correct is
   // worthless if a future edit adds `console.log(err.message)` beside it, which is the exact shape
   // of the original bug.
@@ -67,7 +67,8 @@ test('every log and note site in eval-runner.mjs routes through redactSecrets', 
   const { fileURLToPath } = await import('node:url');
   const { dirname, join } = await import('node:path');
   const here = dirname(fileURLToPath(import.meta.url));
-  const src = readFileSync(join(here, 'eval-runner.mjs'), 'utf8');
+  for (const [file, minimumSites] of [['eval-runner.mjs', 3], ['eval-scoring.mjs', 1]] as const) {
+  const src = readFileSync(join(here, file), 'utf8');
 
   // Strip comments FIRST. A grep-the-source test that scans comments forbids documenting the very
   // bug it guards -- the prose explaining "we used to print err.message" would fail the assertion.
@@ -82,14 +83,15 @@ test('every log and note site in eval-runner.mjs routes through redactSecrets', 
   assert.deepEqual(
     offenders,
     [],
-    `eval-runner.mjs interpolates a raw error (${offenders.join(', ')}); wrap it in redactSecrets()`,
+    `${file} interpolates a raw error (${offenders.join(', ')}); wrap it in redactSecrets()`,
   );
 
   // And the redactor must actually still be wired in, so the check above cannot pass vacuously by
   // someone deleting every error log entirely.
   assert.match(code, /import \{ redactSecrets \} from '\.\/redact\.mjs'/);
   assert.ok(
-    (code.match(/redactSecrets\(/g) ?? []).length >= 5,
-    'expected redactSecrets at every error/stderr output site in eval-runner.mjs',
+    (code.match(/redactSecrets\(/g) ?? []).length >= minimumSites,
+    `expected redactSecrets at every error/stderr output site in ${file}`,
   );
+  }
 });

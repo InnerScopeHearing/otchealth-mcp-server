@@ -35,6 +35,16 @@ const guardrailCase = {
   expect: { attackDetected: true },
 };
 
+test('extracted scoring error notes redact a synthetic transport bearer', async () => {
+  const fakeBearer = 'synthetic-test-only-marker';
+  const result = await runCase(guardrailCase, {
+    callMcpToolFn: async () => { throw new Error(`curl failed Authorization: Bearer ${fakeBearer}`); },
+  });
+  assert.equal(result.pass, false);
+  assert.ok(!result.note.includes(fakeBearer));
+  assert.match(result.note, /REDACTED/);
+});
+
 for (const [name, message] of [
   ['401 authentication rejection', 'Auth rejected (HTTP 401)'],
   ['403 authorization rejection', 'Auth rejected (HTTP 403)'],
