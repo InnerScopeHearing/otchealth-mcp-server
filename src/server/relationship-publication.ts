@@ -4,7 +4,7 @@ import {loadEnv} from '../config/env.js';
 import {relationshipHistoricalAuthority as h,type RelationshipHistoricalReadDeps} from './relationship-historical-read.js';
 import {resolveRelationshipPublicationAdmission} from './graph-catalog-controller.js';
 import {createRelationshipPublicationStore} from './relationship-publication-store.js';
-import {queryDurableHistory} from './relationship-query/durable-query.mjs';
+import {queryDurableHistories} from './relationship-query/durable-query.mjs';
 
 type Json=Record<string,any>;
 type Stored={found:boolean;body?:Buffer;versionId?:string};
@@ -61,8 +61,7 @@ async function queryPublishedHistory(d:RelationshipPublicationDeps,policy:Json,c
  }
  const current=await h.current(d,b,sources,ctx,signal);
  const authorization={allowed:true,provenance:{decision_source:'authenticated_gateway',policy_version:policy.policy_version,allowed_roles:['cfo']},decision_ref:`relationship-publication:${c.producer_id}:${policy.policy_version}`,expires_at:new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()};
- const answer=queryDurableHistory({history:historyArtifact.payload,inputs:sources.map(source=>source.payload.input),query,authorization,sourceCurrent:current,now:d.now});
- return {answer,refresh:()=>h.current(d,b,sources,ctx,signal)};
+ return {entry:{history:historyArtifact.payload,inputs:sources.map(source=>source.payload.input),authorization,sourceCurrent:current},refresh:()=>h.current(d,b,sources,ctx,signal)};
 }
 export function registerRelationshipPublicationRoutes(app:FastifyInstance,injected?:Partial<RelationshipPublicationDeps>){
  const base=h.deps(injected),d:RelationshipPublicationDeps={...base,policyJson:injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON),storeFor:injected?.storeFor??((cohort,producer)=>createRelationshipPublicationStore({cohort,producer})),resolveAdmission:injected?.resolveAdmission??(r=>resolveRelationshipPublicationAdmission({...r,run:{run_id:r.run.run_id}}))};
@@ -98,10 +97,11 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
  });
  route('POST',prefix+'/query',async(req,reply,c,policy,ctx,signal,recheck)=>{
   if(new URL(req.url,'http://local').search)fail(400);const input=req.body as Json;
-  if(!h.exact(input,['run_id','artifact_ref','query'])||!RUN.test(input.run_id)||!h.artifactRef(input.artifact_ref)||!input.query||Object.getPrototypeOf(input.query)!==Object.prototype||Buffer.byteLength(h.canonical(input))>16384)fail(400);
-  const g=stored(await d.storeFor(c.cohort_id,c.producer_id).get(input.run_id,signal));binding(policy,c,g,d.now());if(g.run.run_id!==input.run_id||!equal(g.artifact_ref,input.artifact_ref))fail();
-  const result=await queryPublishedHistory(d,policy,c,g,ctx,signal,input.query);await recheck();await result.refresh();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
-  return reply.send({schema:'relationship-publication-query-v1',artifact_ref:g.artifact_ref,answer:result.answer});
+  if(!h.exact(input,['histories','query'])||!Array.isArray(input.histories)||!input.histories.length||input.histories.length>64||!input.query||Object.getPrototypeOf(input.query)!==Object.prototype||Buffer.byteLength(h.canonical(input))>16384)fail(400);const queryKeys=Object.keys(input.query);if(input.query.kind==='candidate_links'?queryKeys.some(k=>!['kind','subject_name','object_name','predicate','offset','limit','include_stale'].includes(k)):queryKeys.some(k=>!['subject_id','object_id','premise_ids','as_of_recorded','valid_at'].includes(k))||!Object.hasOwn(input.query,'subject_id')||!Object.hasOwn(input.query,'object_id'))fail(400);
+  const seen=new Set<string>(),items:Json[]=[];for(const item of input.histories){if(!h.exact(item,['run_id','artifact_ref'])||!RUN.test(item.run_id)||!h.artifactRef(item.artifact_ref)||seen.has(item.run_id+'\0'+h.canonical(item.artifact_ref)))fail(400);seen.add(item.run_id+'\0'+h.canonical(item.artifact_ref));items.push(item);}
+  const loaded=[];for(const item of items){const g=stored(await d.storeFor(c.cohort_id,c.producer_id).get(item.run_id,signal));binding(policy,c,g,d.now());if(g.run.run_id!==item.run_id||!equal(g.artifact_ref,item.artifact_ref))fail();loaded.push(await queryPublishedHistory(d,policy,c,g,ctx,signal,input.query));}
+  const answer=queryDurableHistories({entries:loaded.map(result=>result.entry),query:input.query,now:d.now});await recheck();for(const result of loaded)await result.refresh();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
+  return reply.send({schema:'relationship-publication-query-v1',history_refs:items.map(item=>item.artifact_ref),answer});
  });
  route('GET',prefix+'/artifacts/:runId/sha256/:shard/:digest.json',async(req,reply,c,policy,ctx,signal,recheck)=>{
   const p=req.params as Json,q=new URL(req.url,'http://local').searchParams,v=q.get('versionId');if(!RUN.test(p.runId)||!SHA.test(p.digest)||p.shard!==p.digest.slice(0,2)||q.size!==1||!h.version(v))fail(400);
