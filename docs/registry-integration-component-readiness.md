@@ -25,9 +25,13 @@ The S3 adapter adds conditional immutable snapshots, version-pinned receipts, pe
 ## Still required before operational certification
 
 1. Configure and verify the production explicit-ID source adapter, catalog membership/coverage authority, signer and source-currentness/revocation lifecycle. Source bindings must match actual prepared versions and chunks. Do not replace these with invented identifiers or names.
-2. Wire partition manifest and shard publication/read routes and ordinary runtime selection. The current broker's single-snapshot validator does not yet accept the partition manifest or partition_binding_hashes schema. The signed partition component alone does not activate partitioned runtime processing.
+2. Deploy and verify the implemented partition manifest/shard publication, read, currentness and coverage routes. The ordinary CLI now selects `partitioned-signed-review`, validates every shard before controller startup, and refreshes credentials from the same authorized source for each request. Local wiring does not activate production processing.
 3. Configure the S3 adapter using the intended bucket and prefix, with independently verified versioning and immutable/delete-protection policy for snapshots, receipts and tombstones. immutableTombstonePolicyAttested is a configuration assertion, not cloud policy evidence.
 4. Integrate paired gateway and CTO source revisions through the owning review/release task, then verify hosted checks, running revisions, real authorized downstream artifacts, recovery and monitoring. Nothing here establishes a successful release.
 5. Preserve page/query coverage scope. A source-backed X-Y-Z assertion is not independent proof of every real-world claim. Missing authority or incomplete coverage must remain explicit uncertainty.
 
 Independent review identified and corrected candidate-only uncertainty wording, final identity I/O ordering, filesystem corruption/regular-file handling, partition coverage and missing-binding handling, and S3 bounded-read/integrity issues. Final source hashes and final review confirmations are supplied in the coordinating task handoff.
+
+## Recovered integration validation
+
+The paired CTO source is PR191 head `18d94eac8b51f009fca54b8da967577769e54096`, with 460 local Graph tests and all four hosted workflows passing. Root compiled this gateway and passed 23 gateway/catalog tests using the strict TypeScript loader. Eight credential and actual CLI tests passed without skips, including rotation between manifest and shard requests, complete 16-shard preflight, missing-shard refusal and Windows preparation. The synthetic cross-repository wire passed bootstrap publication, duplicate rejection, S3 snapshot pins, qualified path and revoked-shard invalidation. No real AWS requests or document processing occurred. Source adapters, signing and storage policy configuration remain outstanding.
