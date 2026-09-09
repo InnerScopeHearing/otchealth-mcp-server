@@ -567,8 +567,10 @@ export async function runHistoricalRepair(
   }
   const afterId = checkpoint?.after_id ?? '';
   const pending = new Set(checkpoint?.pending_ids ?? []);
-  let rawRows: Record<string, unknown>[];
-  try {
+  // Drain retry obligations before opening another source page.  Otherwise repeated failed pages
+  // grow pending_ids without bound and eventually make their own valid checkpoint unparseable.
+  let rawRows: Record<string, unknown>[] = [];
+  if (pending.size === 0) try {
     rawRows = await deps.queryDocs(
       'memory',
       "SELECT * FROM c WHERE c.type = 'memory' AND c.agent = @agent AND c.id > @after ORDER BY c.id ASC",
@@ -606,7 +608,7 @@ export async function runHistoricalRepair(
   }
   const rows = [...new Map([...pendingRows, ...scannedRows].map(row => [row.id, row])).values()];
   const skipped = rawRows.length - scannedRows.length;
-  const incomplete = rawRows.length >= max || skipped > 0;
+  const incomplete = rawRows.length >= max || skipped > 0 || pending.size > 0;
   const existing = await fetchExistingIds(rows, index);
   if (existing === null) {
     for (const row of scannedRows) pending.add(row.id);

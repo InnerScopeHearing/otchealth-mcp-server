@@ -2,6 +2,7 @@
  * deliberately defaults to preview mode.  Output contains operational counts and source IDs for
  * checkpoint resumption, never memory text, vectors, credentials, or backend error bodies. */
 import { runHistoricalRepair, type HistoricalRepairCheckpoint, type HistoricalRepairResult } from './opensearch-backfill.js';
+import path from 'node:path';
 
 export type RepairCliOptions = Readonly<{ agent: string; index?: string; max?: number; embedBatchSize?: number; bulkBatchSize?: number; checkpoint?: HistoricalRepairCheckpoint; dryRun: boolean }>;
 const ID = /^[a-z0-9][a-z0-9_-]{0,40}$/;
@@ -21,7 +22,7 @@ function checkpoint(raw: string | undefined, agent: string): HistoricalRepairChe
   try { value = JSON.parse(raw); } catch { throw new Error('checkpoint_invalid'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('checkpoint_invalid');
   const c = value as Record<string, unknown>;
-  if (Object.keys(c).sort().join(',') !== 'after_id,agent,pending_ids,version' || c.version !== 'memory-index-repair-v1' || c.agent !== agent || typeof c.after_id !== 'string' || !SOURCE_ID.test(c.after_id || 'x') || !Array.isArray(c.pending_ids) || c.pending_ids.length > 200 || c.pending_ids.some(id => typeof id !== 'string' || !SOURCE_ID.test(id))) throw new Error('checkpoint_invalid');
+  if (Object.keys(c).sort().join(',') !== 'after_id,agent,pending_ids,version' || c.version !== 'memory-index-repair-v1' || c.agent !== agent || typeof c.after_id !== 'string' || !SOURCE_ID.test(c.after_id || 'x') || !Array.isArray(c.pending_ids) || c.pending_ids.some(id => typeof id !== 'string' || !SOURCE_ID.test(id))) throw new Error('checkpoint_invalid');
   return { version: 'memory-index-repair-v1', agent, after_id: c.after_id, pending_ids: [...new Set(c.pending_ids as string[])].sort() };
 }
 
@@ -59,9 +60,10 @@ async function main(): Promise<void> {
     process.exitCode = result.exitCode;
   } catch (error) {
     // Intentionally do not serialize an arbitrary Error message, which could carry a transport body.
-    process.stdout.write(`${JSON.stringify({ mode: 'historical-reconciliation', complete: false, errors_count: 1, error: error instanceof Error && /^[a-z_]+$/.test(error.message) ? error.message : 'repair_cli_failed' })}\n`);
+    process.stdout.write(`${JSON.stringify({ mode: 'historical-reconciliation', complete: false, errors_count: 1, error: 'repair_cli_failed' })}\n`);
     process.exitCode = 1;
   }
 }
 
-if (process.argv[1]?.endsWith('/historical-repair-cli.js')) void main();
+const invoked = process.argv[1] && (path.basename(process.argv[1]) === 'historical-repair-cli.js' || path.win32.basename(process.argv[1]) === 'historical-repair-cli.js');
+if (invoked) void main();
