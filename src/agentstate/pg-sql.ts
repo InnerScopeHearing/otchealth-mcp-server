@@ -99,8 +99,8 @@ function comparison(fieldName: string, op: string, value: unknown, placeholder: 
  *     [WHERE <cond> (AND <cond>)*]
  *     [ORDER BY c.field [ASC|DESC]]
  *
- *   <cond> := c.field  = |<= |>= |< |>  @param
- *           | c.field  =                'literal'
+ *   <cond> := c.field  = |!= |<= |>= |< |>  @param
+ *           | c.field  = |!= |<= |>= |< |>  'literal'
  *           | CONTAINS(LOWER(c.field), @param)
  *           | IS_DEFINED(c.field)
  *
@@ -172,14 +172,14 @@ export function translate(input: TranslateInput): TranslateResult {
       }
 
       // c.field <op> @param
-      if ((cm = /^c\.([A-Za-z_][A-Za-z0-9_]*)\s*(=|<=|>=|<|>)\s*(@[A-Za-z0-9_]+)$/.exec(cond))) {
+      if ((cm = /^c\.([A-Za-z_][A-Za-z0-9_]*)\s*(!=|=|<=|>=|<|>)\s*(@[A-Za-z0-9_]+)$/.exec(cond))) {
         const v = param(cm[3]);
         conds.push(comparison(cm[1], cm[2], v, bind(v)));
         continue;
       }
 
-      // c.field = 'literal'  (bound as a parameter, never interpolated)
-      if ((cm = /^c\.([A-Za-z_][A-Za-z0-9_]*)\s*(=|<=|>=|<|>)\s*'([^']*)'$/.exec(cond))) {
+      // c.field <op> 'literal'  (bound as a parameter, never interpolated)
+      if ((cm = /^c\.([A-Za-z_][A-Za-z0-9_]*)\s*(!=|=|<=|>=|<|>)\s*'([^']*)'$/.exec(cond))) {
         conds.push(comparison(cm[1], cm[2], cm[3], bind(cm[3])));
         continue;
       }
