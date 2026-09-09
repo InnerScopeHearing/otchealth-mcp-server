@@ -31,7 +31,7 @@
  * no new PHI path: it only ever journals gateway tool-call metadata, never clo-personal content,
  * and privileged/legal tools are stripped down to {tool, outcome} as above.
  */
-import { writeMemory } from '../agentstate/memory.js';
+import { writeMemory, recordMemoryIndexOutcome } from '../agentstate/memory.js';
 import { indexMemory as indexMemoryNow } from '../search/index.js';
 import { isConfigured as cosmosConfigured } from '../agentstate/store.js';
 
@@ -253,7 +253,7 @@ export async function journalMutation(input: JournalMutationInput): Promise<void
       tags: ['auto-journal', input.tool],
       source: `correlation:${input.correlationId}`,
     });
-    await indexMemoryNow({
+    const indexed = await indexMemoryNow({
       agent: record.agent,
       id: record.id,
       type: record.kind,
@@ -261,6 +261,7 @@ export async function journalMutation(input: JournalMutationInput): Promise<void
       tags: record.tags,
       text: record.text,
     });
+    await recordMemoryIndexOutcome(record, indexed.indexed);
   } catch {
     /* FAIL-OPEN: a journaling failure must be completely invisible to the caller. */
   }

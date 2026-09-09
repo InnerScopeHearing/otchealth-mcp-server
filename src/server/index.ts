@@ -10,6 +10,12 @@ import { registerOAuthRoutes } from './oauth.js';
 import { registerHeyGenPairingRoute } from './heygen-pairing.js';
 import { registerHeyGenApprovalCallback } from './heygen-approval-callback.js';
 import { registerWebhookRoutes } from './webhooks.js';
+import { registerGraphWorkerBrokerRoutes } from './graph-worker-broker.js';
+import { createProductionIdentityRegistryResolver } from './identity-registry-production.js';
+import { registerGraphCatalogControllerRoutes } from './graph-catalog-controller.js';
+import { registerRelationshipArtifactGatewayRoutes } from './relationship-artifact-gateway.js';
+import { registerRelationshipHistoricalReadRoutes } from './relationship-historical-read.js';
+import { registerRelationshipPublicationRoutes } from './relationship-publication.js';
 import {
   getRevocationStoreStatus,
   loadRevocations,
@@ -93,6 +99,11 @@ async function main(): Promise<void> {
   registerHeyGenPairingRoute(app);
   registerHeyGenApprovalCallback(app);
   registerMcpRoutes(app);
+  registerGraphWorkerBrokerRoutes(app, { identityRegistry: createProductionIdentityRegistryResolver() });
+  registerGraphCatalogControllerRoutes(app);
+  registerRelationshipArtifactGatewayRoutes(app);
+  registerRelationshipHistoricalReadRoutes(app);
+  registerRelationshipPublicationRoutes(app);
   registerWebhookRoutes(app);
 
   app.setNotFoundHandler(async (_req, reply) => {

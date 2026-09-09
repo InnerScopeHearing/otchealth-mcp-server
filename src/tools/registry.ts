@@ -1022,7 +1022,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // outright (mode=enforce). Reads are NEVER gated -- evaluateColdStart isn't even called for
       // them. Fail-open by construction (evaluateColdStart never throws; see safety/cold-start.ts).
       const coldStart = def.category === 'read'
-        ? { cold: false, block: false, mode: 'off' as const }
+        ? { cold: false, block: false, mode: 'off' as const, scope: 'process' as const }
         : evaluateColdStart(callerHash);
       if (coldStart.block) {
         const cmsg = `${COLD_START_MESSAGE} (COLD_START_MODE=enforce; tool "${def.name}" was refused.)`;
@@ -1043,7 +1043,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             compliance_warning: null,
             correlation_id: correlationId,
             dry_run: dryRun,
-            cold_start: { cold: true, blocked: true, mode: coldStart.mode },
+            cold_start: { cold: true, blocked: true, mode: coldStart.mode, scope: coldStart.scope },
             error: { code: 'cold_start_enforced', message: cmsg },
           },
         };
@@ -1245,7 +1245,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // the text block (mirrors how compliance_warning is prepended) so it is maximally visible.
         let capturePressure: CapturePressureOutcome | null = null;
         if (def.category !== 'read') {
-          structured.cold_start = { cold: coldStart.cold, blocked: false, mode: coldStart.mode };
+          structured.cold_start = { cold: coldStart.cold, blocked: false, mode: coldStart.mode, scope: coldStart.scope };
           // CAPTURE-PRESSURE (Phase 2): always surfaced for a mutating call (informational, mirrors
           // cold_start above) regardless of whether THIS call was journaled -- the counter tracks
           // mutation VOLUME since the last checkpoint(), not per-call journaling success. Never

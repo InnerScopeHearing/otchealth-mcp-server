@@ -70,6 +70,62 @@ const GITHUB_HEADERS = {
   'X-GitHub-Api-Version': '2022-11-28',
 };
 
+const GITHUB_API_ORIGIN = 'https://api.github.com';
+const GITHUB_REPOSITORY_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+export interface GitHubRepositoryReference {
+  owner: string;
+  repo: string;
+  fullName: string;
+}
+
+/**
+ * Accept only the two path segments GitHub permits for a repository selector.
+ * Webhook payloads are externally supplied, so this check happens before a
+ * selector can reach a GitHub API path.
+ */
+export function parseGitHubRepositoryFullName(value: unknown): GitHubRepositoryReference | null {
+  if (typeof value !== 'string') return null;
+  const parts = value.split('/');
+  if (parts.length !== 2) return null;
+  const [owner, repo] = parts;
+  if (!owner || !repo || !GITHUB_REPOSITORY_SEGMENT.test(owner) || !GITHUB_REPOSITORY_SEGMENT.test(repo)) return null;
+  return { owner, repo, fullName: `${owner}/${repo}` };
+}
+
+/** GitHub pull-request numbers are positive safe integers, never arbitrary URL text. */
+export function isGitHubPullRequestNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function githubPullRequestPathNumber(value: unknown): string {
+  if (!isGitHubPullRequestNumber(value)) {
+    throw new GitHubApiError({ code: 'github_invalid_pull_request_number', status: 0, message: 'Refusing an invalid GitHub pull request number.', nextStep: 'Use a positive integer pull request number.' });
+  }
+  return String(Number(value));
+}
+
+/**
+ * Construct a request only against the fixed GitHub REST origin. Redirects are
+ * refused because an App token must never be forwarded to another authority.
+ */
+async function githubApiFetch(urlPath: string, init: RequestInit, retries: number): Promise<Response> {
+  if (!urlPath.startsWith('/') || urlPath.startsWith('//') || urlPath.includes('\\') || urlPath.includes('\0')) {
+    throw new GitHubApiError({ code: 'github_invalid_path', status: 0, message: 'Refusing an invalid GitHub API path.', nextStep: 'Use a validated GitHub repository selector.' });
+  }
+  const url = new URL(urlPath, GITHUB_API_ORIGIN);
+  if (url.protocol !== 'https:' || url.origin !== GITHUB_API_ORIGIN || url.hostname !== 'api.github.com' || url.port !== '' || url.username !== '' || url.password !== '') {
+    throw new GitHubApiError({ code: 'github_invalid_origin', status: 0, message: 'Refusing a non-GitHub API origin.', nextStep: 'Use the fixed GitHub API origin.' });
+  }
+  const response = await fetchWithBudget(url, { ...init, redirect: 'error' }, { retries });
+  // Native fetch rejects a redirect with redirect:'error'. Keep this guard as
+  // defense in depth for alternate fetch implementations and test doubles.
+  if (response.status >= 300 && response.status < 400) {
+    throw new GitHubApiError({ code: 'github_redirect_refused', status: response.status, message: 'Refusing a redirect from the GitHub API.', nextStep: 'Investigate the GitHub API response before retrying.' });
+  }
+  return response;
+}
+
 // Installation token cache
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
@@ -83,13 +139,13 @@ async function getInstallationToken(): Promise<string> {
   if (!installationId) throw new GitHubApiError({ code: 'github_not_configured', status: 0, message: 'GITHUB_APP_INSTALLATION_ID not set.', nextStep: 'Add GITHUB_APP_INSTALLATION_ID to the vault.' });
 
   const jwt = mintJwt();
-  const url = `https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
+  const accessTokenPath = `/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
   // Token mint is a POST but has no side effect on GitHub state; still, be conservative
   // and do not retry (a second identical mint is wasted, not harmful, but avoids doubt).
-  const res = await fetchWithBudget(url, {
+  const res = await githubApiFetch(accessTokenPath, {
     method: 'POST',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${jwt}` },
-  }, { retries: 0 });
+  }, 0);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -106,10 +162,10 @@ async function getInstallationToken(): Promise<string> {
 async function githubGet<T = any>(path: string): Promise<T> {
   const token = await getInstallationToken();
   // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
-  const res = await fetchWithBudget(`https://api.github.com${path}`, {
+  const res = await githubApiFetch(path, {
     method: 'GET',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  }, { retries: 1 });
+  }, 1);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -163,11 +219,11 @@ async function githubSend<T = any>(method: 'POST' | 'PATCH' | 'PUT', path: strin
   const token = await getInstallationToken();
   // Non-idempotent write (creates/updates a branch, file, PR, comment, merge, etc.):
   // retries:0 so a timeout never causes a duplicate GitHub mutation.
-  const res = await fetchWithBudget(`https://api.github.com${path}`, {
+  const res = await githubApiFetch(path, {
     method,
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }, { retries: 0 });
+  }, 0);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -229,8 +285,9 @@ export async function getCommit(owner: string, repo: string, sha: string): Promi
   return githubGet(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}`);
 }
 
-export async function getPullRequest(owner: string, repo: string, number: number): Promise<any> {
-  return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${number}`);
+export async function getPullRequest(owner: string, repo: string, number: unknown): Promise<any> {
+  const pullRequestNumber = githubPullRequestPathNumber(number);
+  return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${pullRequestNumber}`);
 }
 
 export async function createIssueComment(owner: string, repo: string, number: number, body: string): Promise<void> {
@@ -245,8 +302,9 @@ export async function createPullRequest(
 }
 
 export async function mergePullRequest(
-  owner: string, repo: string, number: number, method: 'merge' | 'squash' | 'rebase' = 'squash', title?: string,
+  owner: string, repo: string, number: unknown, method: 'merge' | 'squash' | 'rebase' = 'squash', title?: string,
 ): Promise<{ merged: boolean; sha: string; message: string }> {
-  const r = await githubSend<any>('PUT', `/repos/${O(owner)}/${O(repo)}/pulls/${number}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+  const pullRequestNumber = githubPullRequestPathNumber(number);
+  const r = await githubSend<any>('PUT', `/repos/${O(owner)}/${O(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
   return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
 }

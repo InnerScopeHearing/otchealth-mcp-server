@@ -28,7 +28,7 @@ test('parseColdStartMode: unset or garbage defaults to warn', () => {
 
 test('computeColdStartOutcome: mode off never warns or blocks, even when never woken', () => {
   const out = computeColdStartOutcome('off', undefined, 1_000_000);
-  assert.deepEqual(out, { cold: false, block: false, mode: 'off' });
+  assert.deepEqual(out, { cold: false, block: false, mode: 'off', scope: 'process' });
 });
 
 test('computeColdStartOutcome: warn mode + never woken -> cold, NOT blocked (warns-not-refuses)', () => {
@@ -36,12 +36,13 @@ test('computeColdStartOutcome: warn mode + never woken -> cold, NOT blocked (war
   assert.equal(out.cold, true);
   assert.equal(out.block, false, 'warn mode must never set block=true');
   assert.equal(out.mode, 'warn');
+  assert.equal(out.scope, 'process');
 });
 
 test('computeColdStartOutcome: warn mode + woken recently -> not cold', () => {
   const now = 10_000_000;
   const out = computeColdStartOutcome('warn', now - 1000, now);
-  assert.deepEqual(out, { cold: false, block: false, mode: 'warn' });
+  assert.deepEqual(out, { cold: false, block: false, mode: 'warn', scope: 'process' });
 });
 
 test('computeColdStartOutcome: warn mode + woken but TTL expired -> cold again, still not blocked', () => {
@@ -67,7 +68,7 @@ test('computeColdStartOutcome: enforce mode + never woken -> cold AND blocked', 
 test('computeColdStartOutcome: enforce mode + woken recently -> not cold, not blocked', () => {
   const now = 10_000_000;
   const out = computeColdStartOutcome('enforce', now - 5000, now);
-  assert.deepEqual(out, { cold: false, block: false, mode: 'enforce' });
+  assert.deepEqual(out, { cold: false, block: false, mode: 'enforce', scope: 'process' });
 });
 
 test('computeColdStartOutcome: enforce mode + TTL expired -> cold AND blocked again', () => {
@@ -131,7 +132,7 @@ test('evaluateColdStart: mode=off is a full no-op even for a never-woken identit
   const prev = process.env.COLD_START_MODE;
   process.env.COLD_START_MODE = 'off';
   const out = evaluateColdStart('never-woken-either');
-  assert.deepEqual(out, { cold: false, block: false, mode: 'off' });
+  assert.deepEqual(out, { cold: false, block: false, mode: 'off', scope: 'process' });
   if (prev !== undefined) process.env.COLD_START_MODE = prev; else delete process.env.COLD_START_MODE;
 });
 
@@ -145,6 +146,7 @@ test('COLD_START_MESSAGE carries no em/en dash (published user-facing string rul
   assert.ok(!COLD_START_MESSAGE.includes('—'), 'no em dash');
   assert.ok(!COLD_START_MESSAGE.includes('–'), 'no en dash');
   assert.match(COLD_START_MESSAGE, /^COLD_START:/);
+  assert.match(COLD_START_MESSAGE, /gateway instance/);
   assert.match(COLD_START_MESSAGE, /wake\(\)/);
 });
 

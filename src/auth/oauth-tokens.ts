@@ -135,6 +135,9 @@ export async function createAuthCode(
 
 /** One-time consume: returns the record and deletes it. Null if missing/expired/malformed. */
 export async function consumeAuthCode(code: string): Promise<AuthCodeRecord | null> {
+  // Auth codes are created as randomBytes(32).toString('hex'). Validate that wire contract before
+  // using request input as either a durable-store selector or a Cosmos URL path component.
+  if (!/^[0-9a-f]{64}$/.test(code)) return null;
   if (cosmosConfigured()) {
     let found: { doc: Record<string, unknown> } | null;
     try {

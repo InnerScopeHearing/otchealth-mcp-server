@@ -33,7 +33,8 @@ import { embed } from '../azure/foundry.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { resolveAwsCredentials, signRequest } from './sigv4.js';
 import { vectorFieldFor } from './opensearch.js';
-import { memoryDocId, type IndexResult } from '../azure/search-write.js';
+import type { IndexResult } from '../azure/search-write.js';
+import { memoryDocId } from './memory-doc-id.js';
 
 /** Mirrors MAX_TEXT in the Azure writer (and semantic.mjs) so a memory is truncated identically
  *  regardless of which backend stores it. Divergence here would make the two copies differ. */

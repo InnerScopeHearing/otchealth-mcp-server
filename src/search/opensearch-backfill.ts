@@ -101,6 +101,7 @@ import { embed as realEmbed, embedBatch as realEmbedBatch } from '../azure/found
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { resolveAwsCredentials, signRequest } from './sigv4.js';
 import { buildOpenSearchMemoryDoc } from './opensearch-write.js';
+import { memoryDocId } from './memory-doc-id.js';
 
 const DEFAULT_INDEX = 'memory-exec';
 const DEFAULT_MAX = 5000;
@@ -200,6 +201,9 @@ export function parseBulkResponse(json: unknown, requested: number): BulkOutcome
   if (!body || !Array.isArray(body.items)) {
     return { indexed: 0, failed: requested, errors: ['malformed _bulk response: missing "items" array'] };
   }
+  if (items.length !== requested) {
+    return { indexed: 0, failed: requested, errors: [`malformed _bulk response: expected ${requested} items, received ${items.length}`] };
+  }
   let indexed = 0;
   const errors: string[] = [];
   for (const item of items) {
@@ -266,6 +270,36 @@ export async function bulkIndex(ndjson: string, requested: number): Promise<Bulk
     return parseBulkResponse(await r.json(), requested);
   } catch (e) {
     return { indexed: 0, failed: requested, errors: [(e as Error).message] };
+  }
+}
+
+/**
+ * Ask OpenSearch only whether the exact source IDs already have a projection.  This deliberately
+ * happens before embedding: a lost acknowledgement or a repeated sweep must cost an inexpensive
+ * metadata read, not another paid embedding request.  `found:false` is the only state eligible
+ * for a replacement write.  Orphaned index documents are never deleted here because the durable
+ * source, ownership, and deletion policy are authoritative outside this projection worker.
+ */
+export async function fetchExistingIds(rows: MemoryRow[], index: string): Promise<Set<string> | null> {
+  if (!rows.length) return new Set();
+  try {
+    const body = JSON.stringify({ ids: rows.map(row => memoryDocId(row.agent, row.id)) });
+    const r = await signedFetch('POST', `/${encodeURIComponent(index)}/_mget`, body, { contentType: 'application/json' });
+    if (!r.ok) return null;
+    const parsed = await r.json() as { docs?: Array<{ _id?: unknown; found?: unknown }> };
+    if (!Array.isArray(parsed.docs)) return null;
+    const requested = new Set(rows.map(row => memoryDocId(row.agent, row.id)));
+    const seen = new Set<string>();
+    const existing = new Set<string>();
+    for (const doc of parsed.docs) {
+      if (typeof doc?._id !== 'string' || typeof doc.found !== 'boolean' || !requested.has(doc._id) || seen.has(doc._id)) return null;
+      seen.add(doc._id);
+      if (doc.found) existing.add(doc._id);
+    }
+    if (seen.size !== requested.size) return null;
+    return existing;
+  } catch {
+    return null;
   }
 }
 
@@ -345,10 +379,44 @@ export interface BackfillResult {
   preview?: Array<{ agent: string; id: string; kind: string; created_at: string }>;
 }
 
+/** Opaque, serialisable resume marker. Persist this alongside the scheduled job, never in an LLM
+ * ledger. Pending IDs are source IDs, not document text, and are re-read from the source on the
+ * next pass before use so deletion and changed access cannot be bypassed by an old checkpoint. */
+export interface HistoricalRepairCheckpoint {
+  version: 'memory-index-repair-v1';
+  agent: string;
+  after_id: string;
+  pending_ids: string[];
+}
+
+export interface HistoricalRepairResult extends BackfillResult {
+  mode: 'historical-reconciliation';
+  checked: number;
+  already_indexed: number;
+  checkpoint: HistoricalRepairCheckpoint;
+}
+
+export interface HistoricalRepairOptions {
+  index?: string;
+  /** Required to preserve the source agent partition boundary and its stable id ordering. */
+  agent: string;
+  max?: number;
+  checkpoint?: HistoricalRepairCheckpoint;
+  embedBatchSize?: number;
+  bulkBatchSize?: number;
+  dryRun?: boolean;
+}
+
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+class InvalidEmbeddingResponse extends Error {}
+
+function validVector(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 && value.every(item => typeof item === 'number' && Number.isFinite(item));
 }
 
 /**
@@ -362,17 +430,26 @@ async function embedRows(rows: MemoryRow[], deps: BackfillDeps, embedBatchSize: 
   for (const part of chunk(rows, embedBatchSize)) {
     try {
       const vecs = await deps.embedBatch(part.map((r) => r.text));
-      if (vecs) {
+      if (vecs === null) {
+        out.push(...part.map(() => null));
+        continue;
+      }
+      if (Array.isArray(vecs) && vecs.length === part.length && vecs.every(validVector)) {
         out.push(...vecs);
         continue;
       }
-      out.push(...part.map(() => null)); // embeddings unconfigured -- degrade, never drop the row
-    } catch {
+      throw new InvalidEmbeddingResponse('embedding provider returned an incomplete or invalid vector batch');
+    } catch (error) {
+      if (error instanceof InvalidEmbeddingResponse) throw error;
       // Batch call failed outright -- fall back to per-item embed(), which itself never throws.
       for (const r of part) {
         try {
-          out.push(await deps.embed(r.text));
-        } catch {
+          const vector = await deps.embed(r.text);
+          if (vector === null) out.push(null);
+          else if (validVector(vector)) out.push(vector);
+          else throw new InvalidEmbeddingResponse('embedding provider returned an invalid vector');
+        } catch (singleError) {
+          if (singleError instanceof InvalidEmbeddingResponse) throw singleError;
           out.push(null);
         }
       }
@@ -463,3 +540,106 @@ export async function runBackfill(opts: BackfillOptions = {}, deps: BackfillDeps
 
   return { index, since, fetched: rows.length, indexed, failed, truncated, dryRun: false, errors };
 }
+
+function advancedCursor(previous: string, scannedIds: string[]): string {
+  const lastScannedId = scannedIds.at(-1);
+  return lastScannedId && lastScannedId > previous ? lastScannedId : previous;
+}
+
+/**
+ * Bounded historical reconciliation. Unlike `runBackfill`, this compares source IDs with the
+ * target projection and therefore repairs the important A-failed/B-succeeded watermark case.
+ * It is intentionally per-agent: a durable source partition gives stable ordering and prevents a
+ * worker from crossing an agent boundary while resuming. The caller persists the returned opaque
+ * checkpoint after each pass; a failed projection remains listed in `pending_ids` until an exact
+ * source row still exists and OpenSearch confirms it.
+ */
+export async function runHistoricalRepair(
+  opts: HistoricalRepairOptions,
+  deps: BackfillDeps = defaultDeps,
+): Promise<HistoricalRepairResult> {
+  const index = opts.index || DEFAULT_INDEX;
+  const max = Math.max(1, Math.min(opts.max ?? 200, DEFAULT_MAX));
+  const dryRun = Boolean(opts.dryRun);
+  const checkpoint = opts.checkpoint;
+  if (checkpoint && (checkpoint.version !== 'memory-index-repair-v1' || checkpoint.agent !== opts.agent)) {
+    return { mode: 'historical-reconciliation', index, since: '', fetched: 0, indexed: 0, failed: 0, truncated: false, dryRun, errors: ['invalid repair checkpoint for requested agent'], checked: 0, already_indexed: 0, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: '', pending_ids: [] } };
+  }
+  const afterId = checkpoint?.after_id ?? '';
+  const pending = new Set(checkpoint?.pending_ids ?? []);
+  let rawRows: Record<string, unknown>[];
+  try {
+    rawRows = await deps.queryDocs(
+      'memory',
+      "SELECT * FROM c WHERE c.type = 'memory' AND c.agent = @agent AND c.id > @after ORDER BY c.id ASC",
+      [{ name: '@agent', value: opts.agent }, { name: '@after', value: afterId }],
+      { pk: opts.agent, max },
+    );
+  } catch (e) {
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: 0, indexed: 0, failed: 0, truncated: false, dryRun, errors: [`memory-store query failed: ${(e as Error).message}`], checked: 0, already_indexed: 0, checkpoint: checkpoint ?? { version: 'memory-index-repair-v1', agent: opts.agent, after_id: '', pending_ids: [] } };
+  }
+  const scannedIds = rawRows.flatMap(raw => typeof raw.id === 'string' && raw.id && raw.agent === opts.agent ? [raw.id] : []);
+  const scannedRows = rawRows.map(normalizeRow).filter((row): row is MemoryRow => row !== null && row.agent === opts.agent);
+  const normalizedIds = new Set(scannedRows.map(row => row.id));
+  // Moving the scan cursor past a malformed record must not lose the obligation.
+  // Its exact source ID can be reread on later passes after the record is repaired.
+  for (const id of scannedIds) if (!normalizedIds.has(id)) pending.add(id);
+  const nextAfterId = advancedCursor(afterId, scannedIds);
+  const pendingRows: MemoryRow[] = [];
+  // Retry saved failures first, but re-read each exact source ID. A deletion or loss of access
+  // removes the stale obligation rather than resurrecting content from a checkpoint.
+  for (const id of [...pending].slice(0, max)) {
+    try {
+      const found = await deps.queryDocs(
+        'memory',
+        "SELECT * FROM c WHERE c.type = 'memory' AND c.agent = @agent AND c.id = @id",
+        [{ name: '@agent', value: opts.agent }, { name: '@id', value: id }],
+        { pk: opts.agent, max: 1 },
+      );
+      const row = normalizeRow(found[0] ?? {});
+      if (row?.agent === opts.agent) pendingRows.push(row);
+      else if (found.length === 0) pending.delete(id);
+    } catch {
+      // Preserve the obligation when the source cannot be read. Do not infer deletion from an IO
+      // failure, and do not attempt a projection write from stale checkpoint data.
+    }
+  }
+  const rows = [...new Map([...pendingRows, ...scannedRows].map(row => [row.id, row])).values()];
+  const skipped = rawRows.length - scannedRows.length;
+  const incomplete = rawRows.length >= max || skipped > 0;
+  const existing = await fetchExistingIds(rows, index);
+  if (existing === null) {
+    for (const row of scannedRows) pending.add(row.id);
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: rows.length, indexed: 0, failed: 0, truncated: true, dryRun, errors: ['OpenSearch existence check failed; no embeddings or writes attempted'], checked: rows.length, already_indexed: 0, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: afterId, pending_ids: [...pending].sort() } };
+  }
+  const missing = rows.filter(row => !existing.has(memoryDocId(row.agent, row.id)));
+  for (const row of rows) if (existing.has(memoryDocId(row.agent, row.id))) pending.delete(row.id);
+  if (dryRun) {
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: 0, truncated: incomplete || pending.size > 0 || missing.length > 0, dryRun: true, errors: skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...new Set([...pending, ...missing.map(row => row.id)])].sort() } };
+  }
+  let vectors: (number[] | null)[];
+  try { vectors = await embedRows(missing, deps, opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE); }
+  catch (error) {
+    for (const row of missing) pending.add(row.id);
+    return { mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed: 0, failed: missing.length, truncated: true, dryRun: false, errors: [`embedding response rejected: ${(error as Error).message}`], checked: rows.length, already_indexed: rows.length - missing.length, checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() } };
+  }
+  let indexed = 0;
+  let failed = 0;
+  const errors: string[] = skipped ? [`${skipped} row(s) excluded: malformed or outside requested agent; repair remains incomplete`] : [];
+  for (const part of chunk(missing.map((row, i) => ({ row, vector: vectors[i] })), opts.bulkBatchSize ?? DEFAULT_BULK_BATCH_SIZE)) {
+    const outcome = await bulkIndex(rowsToBulkNdjson(part, index), part.length);
+    indexed += outcome.indexed;
+    failed += outcome.failed;
+    // Map outcomes conservatively. A partial bulk response cannot identify successes from the
+    // aggregate, so keep the whole chunk pending unless every item was confirmed.
+    if (outcome.failed === 0) for (const item of part) pending.delete(item.row.id);
+    else for (const item of part) pending.add(item.row.id);
+    for (const error of outcome.errors) if (errors.length < MAX_ERRORS_KEPT) errors.push(error);
+  }
+  return {
+    mode: 'historical-reconciliation', index, since: afterId, fetched: missing.length, indexed, failed,
+    truncated: incomplete || pending.size > 0, dryRun: false, errors, checked: rows.length, already_indexed: rows.length - missing.length,
+    checkpoint: { version: 'memory-index-repair-v1', agent: opts.agent, after_id: nextAfterId, pending_ids: [...pending].sort() },
+  };
+}
+
