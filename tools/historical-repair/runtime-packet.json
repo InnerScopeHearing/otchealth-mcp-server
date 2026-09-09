@@ -1,0 +1,105 @@
+{
+  "version": "memory-index-repair-runtime-v1",
+  "compiled_entrypoint": "/app/dist/search/historical-repair-cli.js",
+  "artifact_gate": {
+    "source_revision": "the exact merged PR 344 commit, built by commit tag",
+    "image_reference": "resolve that commit tag to an immutable ECR sha256 digest and pin the task definition to the digest",
+    "required_runtime_contract": "historical-repair-durable-fenced-v2",
+    "preflight_acceptance": "stdout runtime_contract must equal required_runtime_contract and ready must be true",
+    "reject_mutable_or_older_image": true
+  },
+  "existing_job": {
+    "task_definition_family": "otchealth-job-brain-reindex",
+    "schedule_name": "otchealth-brain-reindex",
+    "required_schedule_state": "DISABLED",
+    "container_source": "copy image, roles, environment, secrets, network and logging from the deployed gateway task definition",
+    "retired_task_definition_is_not_a_source": true
+  },
+  "partition": {
+    "agent": "cfo",
+    "index": "memory-exec",
+    "max": 25
+  },
+  "checkpoint": {
+    "store": "agentstate-cache-cas",
+    "scope": "memory-index-repair-v1",
+    "record_id": "checkpoint.cfo.memory-exec",
+    "contains_source_text": false,
+    "dry_run_writes": false,
+    "ttl": -1,
+    "execute_lease_seconds": 7200,
+    "overlap_policy": "one active lease per agent and index, acquired by etag CAS before the repair engine",
+    "renewal_policy": "renew by etag CAS before every embedding or projection write dispatch; stop the worker when renewal fails",
+    "maximum_embedding_request_seconds": 21
+  },
+  "execute_budget": {
+    "maximum_source_rows": 25,
+    "maximum_new_embedding_texts": 25,
+    "actual_new_embedding_texts": "dry-run fetched count after exact OpenSearch existence checks",
+    "approval_gate": "review one durable dry run before the first manual execute"
+  },
+  "commands": {
+    "preflight": [
+      "node",
+      "/app/dist/search/historical-repair-cli.js",
+      "--agent",
+      "cfo",
+      "--index",
+      "memory-exec",
+      "--max",
+      "25",
+      "--durable",
+      "--preflight"
+    ],
+    "dry_run": [
+      "node",
+      "/app/dist/search/historical-repair-cli.js",
+      "--agent",
+      "cfo",
+      "--index",
+      "memory-exec",
+      "--max",
+      "25",
+      "--durable"
+    ],
+    "execute": [
+      "node",
+      "/app/dist/search/historical-repair-cli.js",
+      "--agent",
+      "cfo",
+      "--index",
+      "memory-exec",
+      "--max",
+      "25",
+      "--durable",
+      "--execute"
+    ]
+  },
+  "required_environment_names": [
+    "STATE_BACKEND",
+    "PG_HOST",
+    "PG_PORT",
+    "PG_DATABASE",
+    "PG_USER",
+    "PG_SSL_VERIFY",
+    "SEARCH_BACKEND",
+    "OPENSEARCH_ENDPOINT",
+    "OPENSEARCH_REGION",
+    "EMBEDDINGS_PROVIDER"
+  ],
+  "required_secret_names": [
+    "PG_PASSWORD",
+    "OPENAI_API_KEY"
+  ],
+  "activation_order": [
+    "build the exact merged PR 344 commit tag and resolve its immutable ECR sha256 digest",
+    "register a digest-pinned task definition revision with the preflight command",
+    "run preflight and require ready true, exit code zero, and runtime_contract historical-repair-durable-fenced-v2",
+    "run the durable dry run, verify fetched is at most 25, and retain the prior durable checkpoint",
+    "register the execute command only after reviewing dry-run counts and the maximum 25 new embedding texts",
+    "keep the schedule disabled until one bounded execute pass and its persisted checkpoint are verified"
+  ],
+  "excluded_agents": [
+    "clo-personal"
+  ]
+}

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { parseHistoricalRepairArgs, runHistoricalRepairCli } from './historical-repair-cli.js';
+import { HISTORICAL_REPAIR_RUNTIME_CONTRACT, parseHistoricalRepairArgs, runHistoricalRepairCli } from './historical-repair-cli.js';
 import { runHistoricalRepair } from './opensearch-backfill.js';
 
 // Required configuration uses synthetic values in this isolated test process. All HTTP is stubbed.
@@ -16,6 +16,9 @@ test('repair CLI defaults to dry run and rejects unbounded or malformed options'
   assert.equal(parseHistoricalRepairArgs(['--agent', 'cfo', '--max', '25']).dryRun, true);
   assert.throws(() => parseHistoricalRepairArgs(['--agent', 'cfo', '--max', '201']), /max_invalid/);
   assert.throws(() => parseHistoricalRepairArgs(['--agent', 'cfo', '--unknown', 'x']), /args_invalid/);
+  assert.throws(() => parseHistoricalRepairArgs(['--agent', 'cfo', '--durable', '--checkpoint', '{}']), /args_invalid/);
+  assert.throws(() => parseHistoricalRepairArgs(['--agent', 'cfo', '--preflight']), /args_invalid/);
+  assert.throws(() => parseHistoricalRepairArgs(['--agent', 'cfo', '--durable', '--preflight', '--execute']), /args_invalid/);
 });
 
 test('repair CLI emits metadata only and fails closed until complete', async () => {
@@ -30,7 +33,114 @@ test('compiled entrypoint executes under a native absolute Windows script path a
   const compiled = path.resolve('dist/search/historical-repair-cli.js');
   const run = spawnSync(process.execPath, [compiled, '--agent', 'INVALID'], { encoding: 'utf8' });
   assert.equal(run.status, 1);
-  assert.deepEqual(JSON.parse(run.stdout), { mode: 'historical-reconciliation', complete: false, errors_count: 1, error: 'repair_cli_failed' });
+  assert.deepEqual(JSON.parse(run.stdout), { runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT, mode: 'historical-reconciliation', complete: false, errors_count: 1, error: 'repair_cli_failed' });
+});
+
+test('durable preflight reads only checkpoint metadata and never calls the repair engine', async () => {
+  let runs = 0;
+  let saves = 0;
+  const result = await runHistoricalRepairCli(
+    ['--agent', 'cfo', '--durable', '--preflight', '--max', '25'],
+    async () => { runs += 1; throw new Error('repair engine must not run'); },
+    {
+      load: async () => ({ exists: true, etag: 'etag-1', checkpoint: { version: 'memory-index-repair-v1', agent: 'cfo', after_id: 'm_2', pending_ids: ['m_1'] } }),
+      acquire: async () => { throw new Error('preflight must not acquire'); },
+      renew: async () => { throw new Error('preflight must not renew'); },
+      commit: async () => { saves += 1; return true; },
+      release: async () => true,
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.output.ready, true);
+  assert.equal(result.output.pending_count, 1);
+  assert.equal('checkpoint' in result.output, false);
+  assert.equal(runs, 0);
+  assert.equal(saves, 0);
+});
+
+test('durable dry run resumes the saved cursor without advancing durable state', async () => {
+  const saved = { version: 'memory-index-repair-v1' as const, agent: 'cfo', after_id: 'm_2', pending_ids: ['m_1'] };
+  let observedCheckpoint: unknown;
+  let saves = 0;
+  const result = await runHistoricalRepairCli(
+    ['--agent', 'cfo', '--durable', '--max', '25'],
+    async options => {
+      observedCheckpoint = options.checkpoint;
+      return { mode: 'historical-reconciliation', index: 'memory-exec', since: 'm_2', fetched: 1, indexed: 0, failed: 0, truncated: true, dryRun: true, errors: [], checked: 1, already_indexed: 0, checkpoint: { ...saved, after_id: 'm_3' } };
+    },
+    {
+      load: async () => ({ exists: true, etag: 'etag-1', checkpoint: saved }),
+      acquire: async () => { throw new Error('dry run must not acquire'); },
+      renew: async () => { throw new Error('dry run must not renew'); },
+      commit: async () => { saves += 1; return true; },
+      release: async () => true,
+    },
+  );
+  assert.deepEqual(observedCheckpoint, saved);
+  assert.equal(result.output.checkpoint_persisted, false);
+  assert.equal('checkpoint' in result.output, false);
+  assert.equal(saves, 0);
+});
+
+test('durable execute advances state only after the pass and fails closed on CAS conflict', async () => {
+  const terminal = { version: 'memory-index-repair-v1' as const, agent: 'cfo', after_id: 'm_9', pending_ids: [] };
+  const run = async () => ({ mode: 'historical-reconciliation' as const, index: 'memory-exec', since: 'm_8', fetched: 0, indexed: 0, failed: 0, truncated: false, dryRun: false, errors: [], checked: 0, already_indexed: 0, checkpoint: terminal });
+  for (const [persisted, expectedExit] of [[true, 0], [false, 1]] as const) {
+    let commits = 0;
+    const result = await runHistoricalRepairCli(
+      ['--agent', 'cfo', '--durable', '--execute'],
+      run,
+      {
+        load: async () => ({ exists: false }),
+        acquire: async (agent, index, runId) => ({
+          acquired: true, agent, index, run_id: runId, etag: 'etag-lease', expires_at: '2030-01-01T00:00:00.000Z',
+          previous_completed_run_id: null,
+        }),
+        renew: async lease => lease,
+        commit: async (_lease, value) => { commits += 1; assert.deepEqual(value, terminal); return persisted; },
+        release: async () => true,
+      },
+    );
+    assert.equal(result.exitCode, expectedExit);
+    assert.equal(result.output.checkpoint_persisted, persisted);
+    assert.equal(result.output.complete, persisted);
+    assert.equal(result.output.errors_count, persisted ? 0 : 1);
+    assert.equal(commits, 1);
+  }
+});
+
+test('durable execute refuses an overlapping worker before the repair engine runs', async () => {
+  let runs = 0;
+  const result = await runHistoricalRepairCli(
+    ['--agent', 'cfo', '--durable', '--execute'],
+    async () => { runs += 1; throw new Error('must not run'); },
+    {
+      load: async () => ({ exists: true, lease_active: true }),
+      acquire: async () => ({ acquired: false }),
+      renew: async () => null,
+      commit: async () => true,
+      release: async () => true,
+    },
+  );
+  assert.equal(runs, 0);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.output.error, 'repair_already_running');
+});
+
+test('durable execute releases its lease when the engine throws', async () => {
+  let releases = 0;
+  await assert.rejects(() => runHistoricalRepairCli(
+    ['--agent', 'cfo', '--durable', '--execute'],
+    async () => { throw new Error('synthetic engine failure'); },
+    {
+      load: async () => ({ exists: false }),
+      acquire: async (agent, index, runId) => ({ acquired: true, agent, index, run_id: runId, etag: 'etag-lease', expires_at: '2030-01-01T00:00:00.000Z', previous_completed_run_id: null }),
+      renew: async lease => lease,
+      commit: async () => true,
+      release: async () => { releases += 1; return true; },
+    },
+  ), /synthetic engine failure/);
+  assert.equal(releases, 1);
 });
 
 test('repair drains a legacy multi-page pending backlog before opening a new source page', async () => {
