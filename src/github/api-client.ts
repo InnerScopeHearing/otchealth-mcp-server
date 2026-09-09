@@ -98,6 +98,13 @@ export function isGitHubPullRequestNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
+function githubPullRequestPathNumber(value: unknown): string {
+  if (!isGitHubPullRequestNumber(value)) {
+    throw new GitHubApiError({ code: 'github_invalid_pull_request_number', status: 0, message: 'Refusing an invalid GitHub pull request number.', nextStep: 'Use a positive integer pull request number.' });
+  }
+  return String(value);
+}
+
 /**
  * Construct a request only against the fixed GitHub REST origin. Redirects are
  * refused because an App token must never be forwarded to another authority.
@@ -278,8 +285,9 @@ export async function getCommit(owner: string, repo: string, sha: string): Promi
   return githubGet(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}`);
 }
 
-export async function getPullRequest(owner: string, repo: string, number: number): Promise<any> {
-  return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${number}`);
+export async function getPullRequest(owner: string, repo: string, number: unknown): Promise<any> {
+  const pullRequestNumber = githubPullRequestPathNumber(number);
+  return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${pullRequestNumber}`);
 }
 
 export async function createIssueComment(owner: string, repo: string, number: number, body: string): Promise<void> {
@@ -294,8 +302,9 @@ export async function createPullRequest(
 }
 
 export async function mergePullRequest(
-  owner: string, repo: string, number: number, method: 'merge' | 'squash' | 'rebase' = 'squash', title?: string,
+  owner: string, repo: string, number: unknown, method: 'merge' | 'squash' | 'rebase' = 'squash', title?: string,
 ): Promise<{ merged: boolean; sha: string; message: string }> {
-  const r = await githubSend<any>('PUT', `/repos/${O(owner)}/${O(repo)}/pulls/${number}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+  const pullRequestNumber = githubPullRequestPathNumber(number);
+  const r = await githubSend<any>('PUT', `/repos/${O(owner)}/${O(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
   return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
 }

@@ -23,7 +23,7 @@ before(() => {
   process.env.GITHUB_APP_PRIVATE_KEY ??= privateKey;
 });
 
-const { isGitHubPullRequestNumber, listWorkflowRuns, parseGitHubRepositoryFullName } = await import('./api-client.js');
+const { getPullRequest, isGitHubPullRequestNumber, listWorkflowRuns, mergePullRequest, parseGitHubRepositoryFullName } = await import('./api-client.js');
 
 // This repo's ESM build does not allow node:test's mock.method() to override another module's
 // live named export, but globalThis.fetch is a genuine global -- direct reassignment works fine.
@@ -153,4 +153,40 @@ test('GitHub API calls reject a redirect response without making a follow-up req
   });
   assert.equal(urls.length, 1, 'a redirect response must not result in a second request');
   assert.equal(new URL(urls[0]!).origin, 'https://api.github.com');
+});
+
+test('GitHub pull-request routes reject malformed numbers before credentials or network access', async () => {
+  let calls = 0;
+  await withStubbedFetch((async () => {
+    calls++;
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch, async () => {
+    for (const invalid of [0, -1, 1.5, Number.NaN, '42', null]) {
+      await assert.rejects(
+        () => getPullRequest('InnerScopeHearing', 'otchealth-mcp-server', invalid),
+        (error: unknown) => (error as { code?: string }).code === 'github_invalid_pull_request_number',
+      );
+      await assert.rejects(
+        () => mergePullRequest('InnerScopeHearing', 'otchealth-mcp-server', invalid),
+        (error: unknown) => (error as { code?: string }).code === 'github_invalid_pull_request_number',
+      );
+    }
+  });
+  assert.equal(calls, 0);
+});
+
+test('GitHub pull-request routes use canonical numeric path segments', async () => {
+  const seen: string[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL) => {
+    seen.push(String(input));
+    if (String(input).endsWith('/merge')) return new Response(JSON.stringify({ merged: false, sha: '', message: 'not merged' }), { status: 200 });
+    return new Response(JSON.stringify({ number: 42 }), { status: 200 });
+  }) as typeof fetch, async () => {
+    await getPullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42);
+    await mergePullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42);
+  });
+  assert.deepEqual(seen.map((url) => new URL(url).pathname), [
+    '/repos/InnerScopeHearing/otchealth-mcp-server/pulls/42',
+    '/repos/InnerScopeHearing/otchealth-mcp-server/pulls/42/merge',
+  ]);
 });
