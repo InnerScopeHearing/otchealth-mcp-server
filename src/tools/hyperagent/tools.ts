@@ -157,7 +157,10 @@ export function sanitizeHyperagentCapabilities(data: unknown):
   let omittedUnsupportedSchemas = 0;
   for (const candidate of tools) {
     const tool = plainRecord(candidate);
-    if (!tool || Object.keys(tool).some(key => !['name', 'inputSchema'].includes(key))) return { ok: false, error: 'unsafe_capabilities_metadata' };
+    // MCP tool descriptors normally include descriptive and annotation fields. They are neither
+    // needed for migration planning nor safe to relay, so require only the two fields we project
+    // and discard every other top-level field before it reaches a lane.
+    if (!tool || !Object.hasOwn(tool, 'name') || !Object.hasOwn(tool, 'inputSchema')) return { ok: false, error: 'unsafe_capabilities_metadata' };
     const name = tool.name;
     if (typeof name !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(name)) return { ok: false, error: 'unsafe_capabilities_metadata' };
     const inputSchema = sanitizeInputSchema(tool.inputSchema);

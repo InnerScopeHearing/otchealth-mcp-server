@@ -157,6 +157,24 @@ test('capability discovery refuses unsafe and oversized schema shapes', () => {
   assert.equal(JSON.stringify(sourceSpecificEnum).includes('private-source-value'), false);
 });
 
+test('capability discovery projects required descriptor fields while dropping provider metadata', () => {
+  const privateMarker = 'PRIVATE_PROVIDER_DESCRIPTION_MARKER';
+  const result = sanitizeHyperagentCapabilities({
+    tools: [{
+      name: 'list_threads',
+      description: privateMarker,
+      annotations: { title: privateMarker, readOnlyHint: true },
+      inputSchema: { type: 'object', properties: { cursor: { type: 'string' } } },
+    }],
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { type: 'string' } } }, declaredPaging: [{ name: 'cursor', type: 'string', required: false }] }],
+    omittedUnsupportedSchemas: 0,
+  });
+  assert.equal(JSON.stringify(result).includes(privateMarker), false);
+});
+
 // Exercise the real registry connector filter and the resulting guarded handlers. Transport is
 // synthetic throughout; adding catalog visibility must not grant a new source or executive ring.
 function registerConnectorBroker(lane: string, transport: HyperagentToolTransport) {
