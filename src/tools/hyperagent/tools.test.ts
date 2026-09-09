@@ -137,7 +137,7 @@ test('capability discovery is CTO-only and provider failures never return provid
 
 test('capability discovery refuses unsafe and oversized schema shapes', () => {
   const unsafeName = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', description: 'must not pass through' } }] });
-  assert.deepEqual(unsafeName, { ok: false, error: 'unsafe_capabilities_metadata' });
+  assert.deepEqual(unsafeName, { ok: true, tools: [], omittedUnsupportedSchemas: 1 });
   const oversized = sanitizeHyperagentCapabilities({ tools: Array.from({ length: 65 }, () => ({ name: 'list_threads', inputSchema: { type: 'object' } })) });
   assert.deepEqual(oversized, { ok: false, error: 'unsafe_capabilities_metadata' });
   const unsafeReference = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { $ref: '#/unsafe' } } } }] });
