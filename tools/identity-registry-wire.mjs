@@ -130,7 +130,7 @@ try {
   await assert.rejects(() => gateway.readSnapshot({ registry_id: 'cfo-registry', version: envelope.snapshot.version }),
     error => error.code === 'identity_registry_version_revoked');
   process.stdout.write(JSON.stringify({ wire: 'identity-registry', published: true, revoked_read_denied: true,
-    filesystem_restart: filesystemMode, power_loss_durability_verified: false }) + '\n');
+    filesystem_reopen: filesystemMode, process_restart_verified: false, power_loss_durability_verified: false }) + '\n');
 } finally {
   await app.close();
   if (storeDirectory) {
