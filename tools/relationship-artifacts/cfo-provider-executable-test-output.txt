@@ -1,0 +1,15 @@
+✔ reads one designated CFO bearer only into the returned closure (9.5741ms)
+✔ accepts the existing inline header form (23.8733ms)
+✔ rejects arbitrary locations, duplicate headers, and escaped values (6.1895ms)
+✔ rejects inline authorization from a different server section (2.2709ms)
+✔ does not mix another server inline header with the CFO otchealth bearer (1.6077ms)
+✔ ordinary executable refuses missing full-backfill configuration (3159.6456ms)
+✔ ordinary executable loads real relationship factory and registry client without caller injection (15002.0566ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 20966.3253

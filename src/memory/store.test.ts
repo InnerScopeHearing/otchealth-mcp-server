@@ -138,7 +138,7 @@ describe('memory store on the DEFAULT (Azure) backend, with BLOB_BACKEND unset',
           ? new Response('AuthenticationFailed', { status: 403 })
           : new Response('', { status: 404 })) as unknown as typeof fetch,
       async () => {
-        await assert.rejects(() => appendShared('cto', 'fact', 'x', []), /commons put 403/);
+        await assert.rejects(() => appendShared('cto', 'fact', 'x', []), /commons (?:conditional )?put 403/);
       },
     );
   });

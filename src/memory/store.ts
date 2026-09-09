@@ -56,7 +56,9 @@ import { loadEnv } from '../config/env.js';
 import {
   s3BlobBackendActive,
   getTextFromS3,
+  getTextMetaFromS3,
   putObjectToS3,
+  putObjectToS3Conditional,
   listBlobsFromS3,
 } from '../legal/s3-blob-store.js';
 
@@ -91,6 +93,8 @@ export interface MemoryEntry {
    * before this the field did not exist, so the collapse logic could never fire.
    */
   supersedes?: string;
+  write_intent?: string;
+  write_intent_content?: string;
 }
 
 /** Privilege wall (EMPTY as of 2026-07-07, CEO directive -- see file header). */
@@ -186,6 +190,54 @@ async function putText(name: string, body: string): Promise<void> {
   if (!r.ok) throw new Error(`commons put ${r.status}: ${(await r.text()).slice(0, 160)}`);
 }
 
+async function getTextMeta(name: string, signal?: AbortSignal): Promise<{ text: string | null; etag: string | null }> {
+  if (s3BlobBackendActive()) return getTextMetaFromS3(commonsAccount(), CONTAINER, name, signal);
+
+  const c = creds();
+  if (!c) throw new Error('commons store not configured');
+  const sas = buildSas(c.account, c.key, 'rl');
+  const r = await fetch(blobUrl(c.account, sas, name), { signal });
+  if (r.status === 404) return { text: null, etag: null };
+  if (!r.ok) throw new Error(`commons get ${r.status}`);
+  return { text: await r.text(), etag: r.headers.get('etag') };
+}
+
+async function putTextConditional(name: string, body: string, etag: string | null, signal?: AbortSignal): Promise<void> {
+  if (s3BlobBackendActive()) {
+    await putObjectToS3Conditional(
+      commonsAccount(),
+      CONTAINER,
+      name,
+      Buffer.from(body, 'utf8'),
+      'application/x-ndjson',
+      etag,
+      signal,
+    );
+    return;
+  }
+
+  const c = creds();
+  if (!c) throw new Error('commons store not configured');
+  const sas = buildSas(c.account, c.key, 'rwlc');
+  const r = await fetch(blobUrl(c.account, sas, name), {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type': 'application/x-ndjson',
+      ...(etag ? { 'If-Match': etag } : { 'If-None-Match': '*' }),
+    },
+    body,
+    signal,
+  });
+  if (!r.ok) {
+    const error = new Error(`commons conditional put ${r.status}: ${(await r.text()).slice(0, 160)}`) as Error & {
+      status: number;
+    };
+    error.status = r.status;
+    throw error;
+  }
+}
+
 async function listShared(): Promise<string[]> {
   // listBlobsFromS3 returns keys RELATIVE to the mirror prefix, which is exactly the shape Azure's
   // listing returns here (`_MEMORY/_exec/<agent>.jsonl`), so readSharedAll's slice() needs no branch.
@@ -264,15 +316,85 @@ function parseRows(text: string | null, agent: string): MemoryEntry[] {
   return rows;
 }
 
-function nextId(rows: MemoryEntry[]): string {
+function newSharedId(): string {
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const n = rows.filter((r) => (r.id || '').startsWith(day)).length + 1;
-  return `${day}-${String(n).padStart(3, '0')}`;
+  return `${day}-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+}
+
+function sameEntry(a: MemoryEntry, b: MemoryEntry): boolean {
+  return (
+    a.id === b.id &&
+    a.ts === b.ts &&
+    a.type === b.type &&
+    a.text === b.text &&
+    JSON.stringify(a.tags || []) === JSON.stringify(b.tags || []) &&
+    a.agent === b.agent &&
+    a.source === b.source &&
+    a.by === b.by &&
+    a.supersedes === b.supersedes &&
+    a.write_intent === b.write_intent &&
+    a.write_intent_content === b.write_intent_content
+  );
+}
+
+const DEFAULT_SHARED_APPEND_DEADLINE_MS = 15_000;
+
+type SharedAppendTiming = {
+  deadlineMs?: number;
+  now?: () => number;
+  setTimer?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+  idempotencyKey?: string;
+  authenticatedLane?: string;
+};
+
+export type SharedAppendUnknown = MemoryEntry & {
+  durability: 'UNKNOWN';
+  reason: string;
+  retry_with_same_key: boolean;
+};
+
+export type SharedAppendResult = MemoryEntry | SharedAppendUnknown;
+
+async function withinSharedAppendDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  deadlineAt: number,
+  timing: Required<Pick<SharedAppendTiming, 'now' | 'setTimer' | 'clearTimer'>>,
+): Promise<T> {
+  const remainingMs = deadlineAt - timing.now();
+  if (remainingMs <= 0) throw new Error('shared feed append deadline exceeded; durability is unknown');
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = timing.setTimer(() => {
+      controller.abort(new Error('shared feed append deadline exceeded'));
+      reject(new Error('shared feed append deadline exceeded; durability is unknown'));
+    }, remainingMs);
+  });
+  try {
+    return await Promise.race([operation(controller.signal), expired]);
+  } finally {
+    if (timer !== undefined) timing.clearTimer(timer);
+  }
+}
+
+function writeIntentFingerprint(authenticatedLane: string, targetLane: string, key: string): string {
+  return crypto.createHash('sha256').update('shared-memory-v1\0' + authenticatedLane + '\0' + targetLane + '\0' + key).digest('hex');
+}
+
+/**
+ * Cross-writer retry contract. This intentionally excludes generated row fields (id, ts), writer
+ * attribution, and lane/key fields (already covered by writeIntent). Keep this byte layout aligned
+ * with skills/kb-memory/shared-feed-append.mjs.
+ */
+function sharedLogicalIntent(type: MemoryEntry['type'], text: string, tags: string[], source?: string, supersedes?: string): string {
+  // appendShared omits empty optional fields from the durable row, so make an explicit empty value
+  // retry-compatible with that row rather than assigning it a distinct logical intent.
+  return JSON.stringify({ type, text, tags, source: source || null, supersedes: supersedes || null });
 }
 
 /** Append an entry to an agent's shared feed (the cross-agent brain). Returns the stored entry.
- * `by` is the authenticated WRITER; when by !== agent this is a CROSS-LANE note (append-only,
- * attributed) that the target sees via memory_inbound and acks via memory_reconcile on wake. */
+ * by is the authenticated WRITER; when by !== agent this is a CROSS-LANE note. */
 export async function appendShared(
   agent: string,
   type: MemoryEntry['type'],
@@ -281,11 +403,25 @@ export async function appendShared(
   source?: string,
   by?: string,
   supersedes?: string,
-): Promise<MemoryEntry> {
+  timingOptions: SharedAppendTiming = {},
+): Promise<SharedAppendResult> {
+  const timing = {
+    now: timingOptions.now ?? Date.now,
+    setTimer: timingOptions.setTimer ?? setTimeout,
+    clearTimer: timingOptions.clearTimer ?? clearTimeout,
+  };
+  const deadlineMs = timingOptions.deadlineMs ?? DEFAULT_SHARED_APPEND_DEADLINE_MS;
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new Error('shared feed append deadline must be positive');
+  const deadlineAt = timing.now() + deadlineMs;
   const a = normalizeAgent(agent);
-  const existing = parseRows(await getText(sharedKey(a)), a);
+  const authenticatedLane = normalizeAgent(timingOptions.authenticatedLane || by || a);
+  const idempotencyKey = timingOptions.idempotencyKey?.trim();
+  const writeIntent = idempotencyKey ? writeIntentFingerprint(authenticatedLane, a, idempotencyKey) : undefined;
+  const writeIntentContent = writeIntent
+    ? crypto.createHash('sha256').update(sharedLogicalIntent(type, text, tags, source, supersedes)).digest('hex')
+    : undefined;
   const entry: MemoryEntry = {
-    id: nextId(existing),
+    id: newSharedId(),
     ts: new Date().toISOString(),
     type,
     text,
@@ -294,10 +430,73 @@ export async function appendShared(
     ...(source ? { source } : {}),
     ...(by && by !== a ? { by } : {}),
     ...(supersedes ? { supersedes } : {}),
+    ...(writeIntent ? { write_intent: writeIntent, write_intent_content: writeIntentContent } : {}),
   };
-  existing.push(entry);
-  await putText(sharedKey(a), `${existing.map((r) => JSON.stringify(r)).join('\n')}\n`);
-  return entry;
+  const key = sharedKey(a);
+  let lastError: unknown;
+  let writeStarted = false;
+  let ambiguousWriteSeen = false;
+  try {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const { text: current, etag } = await withinSharedAppendDeadline((signal) => getTextMeta(key, signal), deadlineAt, timing);
+      const existing = parseRows(current, a);
+      const replay = writeIntent ? existing.find((row) => row.write_intent === writeIntent) : undefined;
+      if (replay) {
+        if (replay.write_intent_content !== entry.write_intent_content) throw new Error('idempotency key conflict: the authenticated caller already used this key for a different shared-memory intent');
+        return replay;
+      }
+      const alreadyStored = existing.find((row) => row.id === entry.id);
+      if (alreadyStored) {
+        if (!sameEntry(alreadyStored, entry)) throw new Error('shared feed id collision for ' + entry.id);
+        return alreadyStored;
+      }
+      existing.push(entry);
+      try {
+        writeStarted = true;
+        await withinSharedAppendDeadline(
+          (signal) => putTextConditional(key, existing.map((r) => JSON.stringify(r)).join('\n') + '\n', etag, signal),
+          deadlineAt,
+          timing,
+        );
+        return entry;
+      } catch (error) {
+        lastError = error;
+        const status = Number((error as { status?: number }).status);
+        const uncertainWrite = !Number.isFinite(status) || status === 408 || status === 429 || status >= 500;
+        if (uncertainWrite) ambiguousWriteSeen = true;
+        if (status !== 409 && status !== 412 && Number.isFinite(status)) throw error;
+        await withinSharedAppendDeadline(
+          () => new Promise<void>((resolve) => timing.setTimer(() => resolve(), 20 * (attempt + 1))),
+          deadlineAt,
+          timing,
+        );
+      }
+    }
+
+    const storedRows = parseRows((await withinSharedAppendDeadline((signal) => getTextMeta(key, signal), deadlineAt, timing)).text, a);
+    const stored = writeIntent
+      ? storedRows.find((row) => row.write_intent === writeIntent)
+      : storedRows.find((row) => row.id === entry.id);
+    if (stored) {
+      if (stored.write_intent_content !== entry.write_intent_content) throw new Error('idempotency key conflict: stored intent differs');
+      return stored;
+    }
+    throw new Error('shared feed append lost the concurrency race after 6 attempts: ' + String(lastError));
+  } catch (error) {
+    const status = Number((error as { status?: number }).status);
+    const uncertain = !Number.isFinite(status) || status === 408 || status === 429 || status >= 500;
+    // Once any PUT outcome is ambiguous, a later read failure cannot prove that PUT did not commit.
+    // Preserve UNKNOWN until a read positively finds the intent or proves a conflict.
+    if ((ambiguousWriteSeen || (writeStarted && uncertain)) && !String(error).includes('idempotency key conflict') && !String(error).includes('id collision')) {
+      return {
+        ...entry,
+        durability: 'UNKNOWN',
+        reason: String(error),
+        retry_with_same_key: Boolean(idempotencyKey),
+      };
+    }
+    throw error;
+  }
 }
 
 // ---- Cross-lane INBOUND + wake reconciliation (mirrors skills/kb-memory/mem.mjs) ----

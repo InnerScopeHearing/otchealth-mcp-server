@@ -1,0 +1,22 @@
+✔ replays two immutable histories into one resolver without fresh verifier callbacks (85.9178ms)
+✔ a callback transcript mismatch and duplicate source are rejected (5.7817ms)
+✔ final fresh authority change rederives and preserves history refs (12.4879ms)
+✔ an authority that expires while artifacts are loading cannot reach explain (6.1147ms)
+✔ fixed relationship artifact transport maps only the bounded S3 key to the authenticated gateway (150.2446ms)
+✔ signed S3 and gateway routes reject query, key, header, and scope substitution (3.9743ms)
+✔ reader performs one authenticated GET and returns only verified payload plus gateway authority (142.2439ms)
+✔ wrong refs, corrupt payloads, headers, expiry, and oversized responses fail closed (42.1716ms)
+✔ authorization and streaming reads have internal deadlines, and expiry is checked after the body (28.0617ms)
+✔ the fetch signal stays live until a delayed body is consumed (40.556ms)
+✔ caller aborts and rejected responses cancel their bodies (24.7524ms)
+✔ create-only journal append preserves previous sealed commits and CAS rejects a concurrent writer (285.5666ms)
+✔ admission 2 without publication 2 leaves history 1 selected after reconstructing the host (278.3581ms)
+✔ changed sealed journal bytes and denied admission fail closed (72.7321ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1377.7373

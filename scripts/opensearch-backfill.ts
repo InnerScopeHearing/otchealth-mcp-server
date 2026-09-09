@@ -32,7 +32,7 @@
  * truncated (re-run needed), or a hard error prevented the run from starting at all -- so this is
  * safe to wire into a scheduled/CI-gated reconciler job, not only a one-off manual catch-up.
  */
-import { runBackfill } from '../src/search/opensearch-backfill.js';
+import { runBackfill, runHistoricalRepair, type HistoricalRepairCheckpoint } from '../src/search/opensearch-backfill.js';
 
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -51,7 +51,17 @@ async function main(): Promise<void> {
     dryRun: flag('--dry-run'),
   };
 
-  const result = await runBackfill(opts);
+  const historicalRepair = flag('--historical-repair');
+  const checkpointRaw = arg('--checkpoint');
+  let checkpoint: HistoricalRepairCheckpoint | undefined;
+  if (checkpointRaw) {
+    try { checkpoint = JSON.parse(checkpointRaw) as HistoricalRepairCheckpoint; }
+    catch { throw new Error('--checkpoint must be the JSON object returned by a prior historical repair pass'); }
+  }
+  if (historicalRepair && !opts.agent) throw new Error('--historical-repair requires --agent to preserve the source partition boundary');
+  const result = historicalRepair
+    ? await runHistoricalRepair({ ...opts, agent: opts.agent!, checkpoint })
+    : await runBackfill(opts);
   console.log(JSON.stringify(result, null, 2));
 
   if (result.errors.length && result.fetched === 0 && result.indexed === 0 && result.failed === 0) {

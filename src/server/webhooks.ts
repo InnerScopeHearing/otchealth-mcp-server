@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
-import { getPullRequest, mergePullRequest, createIssueComment } from '../github/api-client.js';
+import { getPullRequest, mergePullRequest, createIssueComment, isGitHubPullRequestNumber, parseGitHubRepositoryFullName, type GitHubRepositoryReference } from '../github/api-client.js';
 import { resolveAwsCredentials, signRequest } from '../search/sigv4.js';
 
 const env = loadEnv();
@@ -112,10 +112,9 @@ const AGENT_LOGIN = /(?:^|[-/])(?:openai-code-agent|anthropic-code-agent)$|copil
  * squash merge via the App token. GitHub branch protection (required checks/reviews) is the real
  * gate — if it isn't satisfied the merge call fails harmlessly. Only agent PRs; humans unaffected.
  */
-async function tryAutoMerge(repoFull: string, prNumbers: number[]): Promise<void> {
+async function tryAutoMerge(repository: GitHubRepositoryReference, prNumbers: number[]): Promise<void> {
   if (!env.FLEET_MEDIC_AUTOMERGE) return;
-  const [owner, repo] = repoFull.split('/');
-  if (!owner || !repo) return;
+  const { owner, repo, fullName: repoFull } = repository;
   for (const n of prNumbers.slice(0, 5)) {
     try {
       const pr = await getPullRequest(owner, repo, n);
@@ -166,7 +165,8 @@ export function registerWebhookRoutes(app: FastifyInstance): void {
 
     const event = (request.headers['x-github-event'] as string) || 'unknown';
     const p = (request.body ?? {}) as Record<string, any>;
-    const repo = p.repository?.full_name ?? 'unknown';
+    const repository = parseGitHubRepositoryFullName(p.repository?.full_name);
+    const repo = repository?.fullName ?? 'unknown';
     const action = p.action ?? '';
     const delivery = request.headers['x-github-delivery'] as string | undefined;
 
@@ -178,8 +178,8 @@ export function registerWebhookRoutes(app: FastifyInstance): void {
       const conclusion = node?.conclusion;
       // v2: on GREEN, attempt auto-merge of any agent-authored PR tied to this run.
       if (conclusion === 'success') {
-        const prNums = (node?.pull_requests ?? []).map((x: any) => x?.number).filter((x: any) => typeof x === 'number');
-        if (prNums.length) void tryAutoMerge(repo, prNums);
+        const prNums = (node?.pull_requests ?? []).map((x: any) => x?.number).filter(isGitHubPullRequestNumber);
+        if (repository && prNums.length) void tryAutoMerge(repository, prNums);
       }
       if (conclusion && FAIL_CONCLUSIONS.has(conclusion)) {
         logger.warn(

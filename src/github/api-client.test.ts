@@ -23,7 +23,7 @@ before(() => {
   process.env.GITHUB_APP_PRIVATE_KEY ??= privateKey;
 });
 
-const { listWorkflowRuns } = await import('./api-client.js');
+const { getPullRequest, isGitHubPullRequestNumber, listWorkflowRuns, mergePullRequest, parseGitHubRepositoryFullName } = await import('./api-client.js');
 
 // This repo's ESM build does not allow node:test's mock.method() to override another module's
 // live named export, but globalThis.fetch is a genuine global -- direct reassignment works fine.
@@ -106,4 +106,87 @@ test('listWorkflowRuns: every other filter (branch/event/actor/created/exclude_p
   assert.equal(q.get('head_sha'), 'deadbeefcafefeed');
   assert.equal(q.get('per_page'), '5');
   assert.equal(q.get('page'), '2');
+});
+
+test('GitHub repository selectors reject authority and path injection before an API path is built', () => {
+  assert.deepEqual(parseGitHubRepositoryFullName('InnerScopeHearing/otchealth-mcp-server'), {
+    owner: 'InnerScopeHearing', repo: 'otchealth-mcp-server', fullName: 'InnerScopeHearing/otchealth-mcp-server',
+  });
+  for (const invalid of ['https://evil.example/repo', 'owner/repo/extra', 'owner//repo', 'owner/repo?x=1', 'owner/repo\\path']) {
+    assert.equal(parseGitHubRepositoryFullName(invalid), null, invalid);
+  }
+  assert.equal(isGitHubPullRequestNumber(42), true);
+  assert.equal(isGitHubPullRequestNumber(0), false);
+  assert.equal(isGitHubPullRequestNumber(1.5), false);
+  assert.equal(isGitHubPullRequestNumber('42'), false);
+});
+
+test('GitHub API calls keep the fixed API origin and refuse redirects', async () => {
+  const seen: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
+  await withStubbedFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    seen.push({ url, redirect: init?.redirect });
+    if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) {
+      return new Response(JSON.stringify({ token: 'ghs_fake', expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ workflow_runs: [] }), { status: 200 });
+  }) as typeof fetch, async () => {
+    await listWorkflowRuns('InnerScopeHearing', 'otchealth-mcp-server');
+  });
+  assert.ok(seen.length > 0);
+  for (const request of seen) {
+    assert.equal(new URL(request.url).origin, 'https://api.github.com');
+    assert.equal(request.redirect, 'error');
+  }
+});
+
+test('GitHub API calls reject a redirect response without making a follow-up request', async () => {
+  const urls: string[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    return new Response('', { status: 302, headers: { location: 'https://unexpected.example/' } });
+  }) as typeof fetch, async () => {
+    await assert.rejects(
+      () => listWorkflowRuns('InnerScopeHearing', 'otchealth-mcp-server'),
+      (error: unknown) => (error as { code?: string }).code === 'github_redirect_refused',
+    );
+  });
+  assert.equal(urls.length, 1, 'a redirect response must not result in a second request');
+  assert.equal(new URL(urls[0]!).origin, 'https://api.github.com');
+});
+
+test('GitHub pull-request routes reject malformed numbers before credentials or network access', async () => {
+  let calls = 0;
+  await withStubbedFetch((async () => {
+    calls++;
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch, async () => {
+    for (const invalid of [0, -1, 1.5, Number.NaN, '42', null]) {
+      await assert.rejects(
+        () => getPullRequest('InnerScopeHearing', 'otchealth-mcp-server', invalid),
+        (error: unknown) => (error as { code?: string }).code === 'github_invalid_pull_request_number',
+      );
+      await assert.rejects(
+        () => mergePullRequest('InnerScopeHearing', 'otchealth-mcp-server', invalid),
+        (error: unknown) => (error as { code?: string }).code === 'github_invalid_pull_request_number',
+      );
+    }
+  });
+  assert.equal(calls, 0);
+});
+
+test('GitHub pull-request routes use canonical numeric path segments', async () => {
+  const seen: string[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL) => {
+    seen.push(String(input));
+    if (String(input).endsWith('/merge')) return new Response(JSON.stringify({ merged: false, sha: '', message: 'not merged' }), { status: 200 });
+    return new Response(JSON.stringify({ number: 42 }), { status: 200 });
+  }) as typeof fetch, async () => {
+    await getPullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42);
+    await mergePullRequest('InnerScopeHearing', 'otchealth-mcp-server', 42);
+  });
+  assert.deepEqual(seen.map((url) => new URL(url).pathname), [
+    '/repos/InnerScopeHearing/otchealth-mcp-server/pulls/42',
+    '/repos/InnerScopeHearing/otchealth-mcp-server/pulls/42/merge',
+  ]);
 });

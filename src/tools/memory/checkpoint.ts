@@ -1,30 +1,12 @@
-/**
- * checkpoint — platform-agnostic session-end capture, so ANY engine (Claude Code, ChatGPT,
- * Copilot, Hyperagent) can persist durable memory at session end, not just the Claude Code Stop
- * hook (which only exists on one platform). Part of the Phase 2 capture plane alongside the
- * auto-journal (safety/journal.ts, wired into every mutating tool call) and the capture-pressure
- * nudge (safety/capture-pressure.ts, which THIS tool resets).
- *
- * Three things happen, in order, each independently fail-open:
- *  (a) any EXPLICIT `memories` the caller supplies are written VERBATIM (no LLM in the loop) via
- *      the same writeMemory + indexMemoryNow path every other durable memory uses.
- *  (b) if a `summary` is given and the configured shared LLM provider (azure/foundry.ts chat()) is configured,
- *      it is distilled server-side into 0-3 atomic durable memories (fact/decision/correction/
- *      pitfall) and those are written too.
- *  (c) an "episode" marker tagged "checkpoint" is ALWAYS written, and the caller's capture-pressure
- *      counter is ALWAYS reset (recordCheckpoint) -- this happens even if (a) or (b) partially or
- *      fully failed, because the checkpoint ACT itself (the caller took the time to call this
- *      tool) is what relieves capture pressure, independent of how much got persisted.
- *
- * FAIL-OPEN: an LLM or index error must still write what it can and still reset the counter; this
- * handler never throws out of a distillation/index failure (each memory-write attempt and the
- * distillation call are individually try/caught so ONE bad item never blocks the rest).
+/** Checkpoint preserves confirmed writes and reports storage/index delivery separately.
+ * Partial delivery must not reset capture pressure or count as a successful checkpoint.
+ * Individual failures do not prevent remaining entries from being attempted.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
-import { writeMemory } from '../../agentstate/memory.js';
+import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { chat, chatConfigured, type ChatMessage } from '../../azure/foundry.js';
@@ -32,6 +14,7 @@ import { buildEpisodeText } from '../../safety/journal.js';
 import { recordCheckpoint } from '../../safety/capture-pressure.js';
 import { captureGatewayEvent } from '../../telemetry/gateway-ops.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
+import { deliverCheckpointMemory, checkpointDeliveryStatus, type Delivery } from './checkpoint-delivery.js';
 
 const DISTILL_KINDS = ['fact', 'decision', 'correction', 'pitfall'] as const;
 type DistillKind = (typeof DISTILL_KINDS)[number];
@@ -98,35 +81,58 @@ export async function distillSummary(summary: string): Promise<DistilledMemory[]
     { role: 'user', content: summary.slice(0, MAX_SUMMARY_INPUT_CHARS) },
   ];
   const res = await chat(messages, { maxTokens: 700, jsonMode: true, tier: 'router' });
+  // A malformed reply is not evidence that the summary contains no durable facts.
+  let envelope: unknown;
+  try { envelope = JSON.parse(res.text); } catch { throw new Error('checkpoint_distillation_invalid'); }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
+      Object.keys(envelope).join(',') !== 'memories') throw new Error('checkpoint_distillation_invalid');
+  const memories = (envelope as { memories: unknown }).memories;
+  if (!Array.isArray(memories) || memories.length > MAX_DISTILLED || memories.some(item =>
+    !item || typeof item !== 'object' || Array.isArray(item) ||
+    Object.keys(item).sort().join(',') !== 'kind,text' || !DISTILL_KIND_SET.has(item.kind) ||
+    typeof item.text !== 'string' || !item.text.trim() || item.text.length > MAX_DISTILL_TEXT_CHARS)) {
+    throw new Error('checkpoint_distillation_invalid');
+  }
   return parseDistillResponse(res.text);
 }
 
-/** Write one memory + best-effort write-through index it. Returns the new record id, or null on
+/** Write one memory and report confirmed storage separately from best-effort indexing. On
  *  any failure (fail-open per item: one bad entry must never block the rest of the checkpoint). */
 async function writeAndIndex(
   agent: string,
   kind: (typeof MEMORY_KINDS)[number],
   text: string,
   opts: { tags?: string[]; source?: string; supersedes?: string } = {},
-): Promise<string | null> {
-  try {
-    const record = await writeMemory({ agent, kind, text, tags: opts.tags, source: opts.source, supersedes: opts.supersedes });
-    await indexMemoryNow({
-      agent: record.agent,
-      id: record.id,
-      type: record.kind,
-      ts: record.created_at,
-      tags: record.tags,
-      text: record.text,
-    });
-    return record.id;
-  } catch {
-    return null;
-  }
+): Promise<Delivery> {
+  return deliverCheckpointMemory(
+    () => writeMemory({ agent, kind, text, tags: opts.tags, source: opts.source, supersedes: opts.supersedes }),
+    async record => {
+      const indexed = await indexMemoryNow({
+        agent: record.agent,
+        id: record.id,
+        type: record.kind,
+        ts: record.created_at,
+        tags: record.tags,
+        text: record.text,
+      });
+      await recordMemoryIndexOutcome(record, indexed.indexed).catch(() => undefined);
+      return indexed;
+    },
+  );
 }
 
-export function registerCheckpoint(server: McpServer, callerHash: CallerHashProvider): void {
-  registerTool(
+type CheckpointDependencies = {
+  register: typeof registerTool;
+  configured: typeof isConfigured;
+  deliver: typeof writeAndIndex;
+  reset: typeof recordCheckpoint;
+};
+
+export function registerCheckpoint(server: McpServer, callerHash: CallerHashProvider,
+  overrides: Partial<CheckpointDependencies> = {}): void {
+  const deps: CheckpointDependencies = { register: registerTool, configured: isConfigured,
+    deliver: writeAndIndex, reset: recordCheckpoint, ...overrides };
+  deps.register(
     server,
     {
       name: 'checkpoint',
@@ -134,7 +140,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
-          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes up to 20 explicit "memories" verbatim (sequentially, one write+index per entry -- this is for a handful of session takeaways, not a bulk import), server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the selected LLM provider is configured, always writes an episode marker, and always resets the capture-pressure counter for this caller. Fail-open: an LLM or index error still persists what it can. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
+          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes up to 20 explicit "memories" verbatim (sequentially, one write+index per entry -- this is for a handful of session takeaways, not a bulk import), server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the selected LLM provider is configured, attempts an episode marker, and resets capture pressure only when delivery is confirmed. Partial failure preserves confirmed IDs and reports indexing and unconfirmed storage separately; do not blindly repeat stored memories. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -170,6 +176,10 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         written: z.array(z.string()),
         distilled: z.number(),
         checkpoint: z.boolean(),
+        indexed: z.array(z.string()).optional(),
+        unindexed: z.array(z.string()).optional(),
+        storage_unconfirmed: z.number().optional(),
+        distillation_complete: z.boolean().optional(),
       },
       handler: async (input, ctx) => {
         // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
@@ -185,7 +195,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
             summary: `Refused: ${mnpiGate.reason}`,
           };
         }
-        if (!isConfigured()) {
+        if (!deps.configured()) {
           return {
             data: { written: [], distilled: 0, checkpoint: false, note: 'selected agent-state backend not configured.' },
             summary: 'checkpoint unavailable: selected agent-state backend not configured on the gateway.',
@@ -208,13 +218,13 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
           };
         }
 
-        const written: string[] = [];
+        const deliveries: Delivery[] = [];
         let distilled = 0;
+        let distillationComplete = !input.summary?.trim() || chatConfigured();
 
         // (a) explicit memories, verbatim -- one failure never blocks the rest.
         for (const m of memoriesIn) {
-          const id = await writeAndIndex(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes });
-          if (id) written.push(id);
+          deliveries.push(await deps.deliver(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }));
         }
 
         // (b) server-side distillation of the summary, best-effort. A distillation failure (LLM
@@ -224,44 +234,47 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
           try {
             const items = await distillSummary(input.summary);
             for (const dm of items) {
-              const id = await writeAndIndex(input.agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
-              if (id) {
-                written.push(id);
+              const delivery = await deps.deliver(input.agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
+              deliveries.push(delivery);
+              if (delivery.stored) {
                 distilled += 1;
               }
             }
           } catch {
-            /* fail-open: a distillation failure must not fail the checkpoint */
+            distillationComplete = false;
           }
         }
 
-        // (c) ALWAYS write an episode marker and ALWAYS reset capture pressure, even if (a)/(b)
-        // partially or fully failed above -- the checkpoint ACT is what relieves capture pressure.
+        // (c) Attempt an episode marker after the entries. Only confirmed complete delivery resets pressure.
+        // An episode alone cannot hide a failed explicit memory or requested distillation.
         const episodeText = buildEpisodeText({
           tool: 'checkpoint',
           actor: input.agent,
-          outcome: 'success',
+          outcome: distillationComplete && deliveries.every(item => item.stored && item.indexed) ? 'delivery_pending_episode' : 'partial',
           redactedArgs: { memories: memoriesIn.length, has_summary: Boolean(input.summary) },
         });
-        const episodeId = await writeAndIndex(input.agent, 'episode', episodeText, {
+        const episode = await deps.deliver(input.agent, 'episode', episodeText, {
           tags: ['checkpoint'],
           source: `correlation:${ctx.correlationId}`,
         });
-        if (episodeId) written.push(episodeId);
-        recordCheckpoint(ctx.callerHash);
+        deliveries.push(episode);
+        const deliveryStatus = checkpointDeliveryStatus(deliveries);
+        const { written } = deliveryStatus;
+        const checkpoint = deliveryStatus.checkpoint && distillationComplete;
+        if (checkpoint) deps.reset(ctx.callerHash);
 
         // PHASE 2 SLO TELEMETRY (observe-only): the numerator for the capture-rate SLO
         // (gw_checkpoint / gw_mutation, computed downstream in PostHog). Only reached on a real
         // (non-dry-run) checkpoint -- the dry_run branch returns early above. captureGatewayEvent is
         // fire-and-forget, inert unless POSTHOG_GATEWAYOPS_KEY is set, and never throws, so it cannot
         // add latency or a new failure mode to this response.
-        captureGatewayEvent('gw_checkpoint', { agent: input.agent, written: written.length, distilled }, ctx.callerHash);
+        if (checkpoint) captureGatewayEvent('gw_checkpoint', { agent: input.agent, written: written.length, distilled }, ctx.callerHash);
 
         return {
-          data: { written, distilled, checkpoint: true },
+          data: { ...deliveryStatus, distilled, checkpoint, distillation_complete: distillationComplete },
           summary:
             `checkpoint(${input.agent}): wrote ${written.length} memor${written.length === 1 ? 'y' : 'ies'}` +
-            ` (${distilled} distilled from summary). Capture pressure reset.`,
+            ` (${distilled} distilled from summary). ` + (checkpoint ? 'Capture pressure reset.' : 'Delivery incomplete; capture pressure retained. Preserve written IDs, do not blindly repeat stored memories.'),
           audit: { after: { agent: input.agent, written, distilled } },
         };
       },

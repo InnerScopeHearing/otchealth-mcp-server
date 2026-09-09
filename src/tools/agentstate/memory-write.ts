@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, isShipLane, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
-import { writeMemory } from '../../agentstate/memory.js';
+import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
 import { MEMORY_KINDS, normalizeAgent } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { embed } from '../../azure/foundry.js';
@@ -169,6 +169,9 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
     text: record.text,
     vector,
   });
+  // Best effort only. The initial source write already recorded a pending obligation, so an
+  // outcome-write outage cannot make an accepted memory silently disappear from reconciliation.
+  await recordMemoryIndexOutcome(record, idx.indexed).catch(() => undefined);
   const supNote =
     sup.action === 'auto-link'
       ? ` Auto-superseded ${sup.supersedeId} (contradiction detected).`

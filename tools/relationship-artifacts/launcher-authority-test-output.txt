@@ -1,0 +1,23 @@
+✔ fixed relationship artifact transport maps only the bounded S3 key to the authenticated gateway (135.9389ms)
+✔ signed S3 and gateway routes reject query, key, header, and scope substitution (378.8107ms)
+✔ immutable source and history PUT, exact opaque version GET, and duplicate recovery (1014.8765ms)
+✔ dark policy and wrong seat, credential, producer, or absent cohort fail before artifact IO (60.488ms)
+✔ conditional write, envelope identity, scope and query tampering are refused (43.9085ms)
+✔ policy, admission and credential revocation during IO withhold success and bodies (66.6641ms)
+✔ corrupt, unversioned, wrong-version and wrong-encryption stored objects fail closed (118.7912ms)
+✔ 16 MiB payload is accepted above ordinary server limit and larger payload refused (1601.3932ms)
+✔ deep JSON is refused and upstream failed-write result stays uncertain without details (26.6166ms)
+✔ KMS response headers remain available and read-time revocation withholds saved evidence (17.9737ms)
+✔ unversioned discovery cannot turn an S3 null version into an immutable reference (14.1839ms)
+✔ authorization preflight emits only a guarded authenticated-resolution-store decision (35.1905ms)
+✔ artifact storage authorization preflight binds get and put to the exact route scope and stored version (26.8977ms)
+✔ actual CTO store crosses gateway mapping for KMS, conflict and lost-write recovery (158.6092ms)
+✔ actual durable review and reconstructed retrieval retain original decisions through gateway (1222.182ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 11279.0996

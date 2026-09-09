@@ -156,3 +156,22 @@ jobs:
               || { echo "MISSING platform $want under tag $TAG -- multi-arch push did not complete as expected"; exit 1; }
           done
           echo "Confirmed: both linux/amd64 and linux/arm64 are present under otchealth-mcp-gateway:$TAG"
+
+      - name: Verify evaluator bytes in immutable ARM64 image without execution
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          INDEX=$(aws ecr describe-images --repository-name otchealth-mcp-gateway --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          aws ecr batch-get-image --repository-name otchealth-mcp-gateway --image-ids imageDigest="$INDEX" --query 'images[0].imageManifest' --output text > /tmp/eval-index.json
+          ARM=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else error("Expected exactly one ARM64 manifest") end' /tmp/eval-index.json)
+          node --test src/eval/verify-image.test.mjs
+          node src/eval/verify-image.mjs "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$ARM" "$INDEX" eval-image-hashes.json
+
+      - name: Retain evaluator hash receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-image-hashes
+          path: eval-image-hashes.json
+          if-no-files-found: error
+          retention-days: 30
