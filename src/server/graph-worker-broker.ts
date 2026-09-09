@@ -627,7 +627,7 @@ function validIdentityPage(value: unknown, config: IdentityRegistryConfig,
       (requested.source_version !== null && value.source_version !== requested.source_version) ||
       !(value.next_cursor === null || bounded(value.next_cursor)) ||
       (requested.cursor !== null && value.next_cursor === requested.cursor) ||
-      !Array.isArray(value.records) || value.records.length > 100 || !value.records.every(validIdentityRecord)) return false;
+      !Array.isArray(value.records) || value.records.length > Math.min(100, requested.page_size) || !value.records.every(validIdentityRecord)) return false;
   return true;
 }
 function identityRecordKey(record: Record<string, unknown>) {

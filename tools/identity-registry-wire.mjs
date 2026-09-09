@@ -109,6 +109,11 @@ try {
     callerSeat: 'cfo', bearerTokenProvider: async () => 'synthetic-token', transport });
   const adapter = exporterModule.createAuthenticatedStructuredIdentityAdapter({ authority, callerSeat: 'cfo',
     authorize: gateway.authorize, listPage: gateway.listPage, assertCurrent: gateway.assertCurrent });
+  const grant = await gateway.authorize({ schema: exporterModule.AUTHORIZATION_SCHEMA, action: 'read_page',
+    authenticated_caller: 'cfo', authority, cursor: null, source_version: null });
+  await assert.rejects(gateway.listPage({ authority, cursor: null, source_version: null, page_size: 1,
+    authorization: { decision_ref: grant.decision_ref, policy_version: grant.policy_version } }),
+    error => error.code === 'identity_gateway_source_unavailable');
   const exporter = exporterModule.createSourceIdentityRegistryExporter({ registryId: 'cfo-registry', adapter,
     signer: { publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(), keyId: 'synthetic-ed25519', sign: async ({ payload }) =>
       sign(null, payload, privateKey).toString('base64') } });
