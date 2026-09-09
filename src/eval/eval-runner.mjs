@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { redactSecrets } from './redact.mjs';
 import { runCase } from './eval-scoring.mjs';
 import { makeBaseline, emitBaseline } from './eval-baseline.mjs';
+import { callMcpTool as callValidatedMcpTool, parseCurlJsonOutput } from './eval-transport.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,19 +78,7 @@ async function curlJson(url, opts = {}) {
     console.warn(`[eval] curl stderr: ${redactSecrets(stderr.trim())}`);
   }
 
-  // Extract status appended by --write-out
-  const statusMatch = stdout.match(/\n__HTTP_STATUS__(\d+)$/);
-  const status = statusMatch ? parseInt(statusMatch[1], 10) : 0;
-  const rawBody = stdout.replace(/\n__HTTP_STATUS__\d+$/, '').trim();
-
-  let parsed;
-  try {
-    parsed = rawBody ? JSON.parse(rawBody) : null;
-  } catch {
-    parsed = rawBody; // return raw string if not JSON
-  }
-
-  return { status, body: parsed };
+  return parseCurlJsonOutput(stdout);
 }
 
 // ── MCP JSON-RPC call helper ─────────────────────────────────────────────────
@@ -102,31 +91,13 @@ async function curlJson(url, opts = {}) {
  * @returns {Promise<unknown>}
  */
 async function callMcpTool(toolName, toolArgs) {
-  const envelope = {
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'tools/call',
-    params: {
-      name: toolName,
-      arguments: toolArgs,
-    },
-  };
-
-  const { status, body } = await curlJson(`${GATEWAY_BASE_URL}/mcp`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${GATEWAY_BEARER}` },
-    body: envelope,
+  return callValidatedMcpTool({
+    gatewayBaseUrl: GATEWAY_BASE_URL,
+    bearer: GATEWAY_BEARER,
+    toolName,
+    toolArgs,
+    curlJsonFn: curlJson,
   });
-
-  if (status === 401 || status === 403) {
-    throw new Error(`Auth rejected (HTTP ${status}) — check GATEWAY_BEARER.`);
-  }
-
-  if (status < 200 || status >= 300) {
-    throw new Error(`MCP request failed (HTTP ${status || 'no response'}).`);
-  }
-
-  return body;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -179,9 +150,7 @@ async function main() {
   const outPath = join(baselinesDir, `${isoDate}.json`);
 
   const baseline = makeBaseline(results, BASELINE_THRESHOLD, isoTimestamp);
-
-  // ECS awslogs retains this sanitized record after the ephemeral task exits.
-  // Emission is evidence preparation; deployment acceptance must read it back from CloudWatch.
+  // Await sanitized awslogs record; verify live retention at deployment acceptance.
   await emitBaseline(baseline);
 
   writeFileSync(outPath, JSON.stringify(baseline, null, 2), 'utf8');

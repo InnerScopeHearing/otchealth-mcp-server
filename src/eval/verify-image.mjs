@@ -25,7 +25,7 @@ export function verifyImage({ repo, source, digest, indexDigest }, execute = com
     container = execute('docker', ['create', '--platform', 'linux/arm64', '--entrypoint', '/bin/true', image]).toString().trim();
     if (!/^[a-f0-9]{64}$/.test(container)) throw new Error('Invalid container identifier');
     const files = [];
-    for (const file of ['eval-runner.mjs', 'eval-scoring.mjs', 'eval-baseline.mjs', 'redact.mjs', 'cases.json']) {
+    for (const file of ['eval-runner.mjs', 'eval-scoring.mjs', 'eval-baseline.mjs', 'eval-transport.mjs', 'redact.mjs', 'cases.json']) {
       execute('docker', ['cp', `${container}:/app/eval/${file}`, join(directory, file)]);
       const expected = sha256(execute('git', ['-C', repo, 'show', `${source}:src/eval/${file}`]));
       const actual = sha256(readFileSync(join(directory, file)));
