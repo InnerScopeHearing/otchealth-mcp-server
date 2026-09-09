@@ -6,6 +6,12 @@ import path from 'node:path';
 import { parseHistoricalRepairArgs, runHistoricalRepairCli } from './historical-repair-cli.js';
 import { runHistoricalRepair } from './opensearch-backfill.js';
 
+// Required configuration uses synthetic values in this isolated test process. All HTTP is stubbed.
+for (const name of ['CIO_SITE_ID', 'CIO_TRACK_KEY', 'CIO_APP_API_BEARER', 'FOUNDRY_KEY']) process.env[name] = 'synthetic-test';
+for (const name of ['PERPLEXITY_CONNECTOR_TOKEN', 'ADMIN_REVOKE_TOKEN', 'N8N_WEBHOOK_SECRET']) process.env[name] = 'x'.repeat(32);
+process.env.FOUNDRY_OPENAI_ENDPOINT = 'https://synthetic.example.invalid';
+process.env.OPENSEARCH_REGION = 'us-east-1';
+
 test('repair CLI defaults to dry run and rejects unbounded or malformed options', () => {
   assert.equal(parseHistoricalRepairArgs(['--agent', 'cfo', '--max', '25']).dryRun, true);
   assert.throws(() => parseHistoricalRepairArgs(['--agent', 'cfo', '--max', '201']), /max_invalid/);
@@ -30,8 +36,14 @@ test('compiled entrypoint executes under a native absolute Windows script path a
 test('repair drains a legacy multi-page pending backlog before opening a new source page', async () => {
   const rows = ['a', 'b', 'c'].map(id => ({ id, agent: 'cfo', kind: 'fact', text: id, tags: [], created_at: '2026-09-01T00:00:00Z' }));
   let scans = 0;
+  const priorAccess = process.env.AWS_ACCESS_KEY_ID;
+  const priorSecret = process.env.AWS_SECRET_ACCESS_KEY;
+  const priorEndpoint = process.env.OPENSEARCH_ENDPOINT;
+  process.env.AWS_ACCESS_KEY_ID = 'AKIDEXAMPLE';
+  process.env.AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY';
+  process.env.OPENSEARCH_ENDPOINT = 'search-test.example.invalid';
   let checkpoint = { version: 'memory-index-repair-v1' as const, agent: 'cfo', after_id: 'prior', pending_ids: rows.map(row => row.id) };
-  for (let pass = 0; pass < 3; pass += 1) {
+  try { for (let pass = 0; pass < 3; pass += 1) {
     const deps = {
       queryDocs: (async (_coll: string, query: string, params: Array<{ name: string; value: unknown }>) => {
         if (query.includes('c.id >')) { scans += 1; return []; }
@@ -52,4 +64,9 @@ test('repair drains a legacy multi-page pending backlog before opening a new sou
     assert.equal(checkpoint.pending_ids.length, 2 - pass);
   }
   assert.equal(scans, 0);
+  } finally {
+    if (priorAccess === undefined) delete process.env.AWS_ACCESS_KEY_ID; else process.env.AWS_ACCESS_KEY_ID = priorAccess;
+    if (priorSecret === undefined) delete process.env.AWS_SECRET_ACCESS_KEY; else process.env.AWS_SECRET_ACCESS_KEY = priorSecret;
+    if (priorEndpoint === undefined) delete process.env.OPENSEARCH_ENDPOINT; else process.env.OPENSEARCH_ENDPOINT = priorEndpoint;
+  }
 });

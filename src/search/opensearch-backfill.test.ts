@@ -665,6 +665,25 @@ test('historical repair: malformed scanned ID survives cursor advancement and is
   }) as typeof fetch, () => runHistoricalRepair({agent:'cfo',checkpoint:stillMalformed.checkpoint},deps));
   assert.equal(final.indexed,1);
   assert.deepEqual(final.checkpoint.pending_ids,[]);
-  assert.equal(final.truncated,false);
+  assert.equal(final.truncated,true);
+  const terminal = await withStubbedFetch((async () => { throw new Error('empty terminal page must not reach index'); }) as typeof fetch,
+    () => runHistoricalRepair({agent:'cfo',checkpoint:final.checkpoint},deps));
+  assert.equal(terminal.truncated,false);
   assert.equal(embeddings,1);
+});
+
+test('historical repair: deleting the last pending source still requires the remaining scan', async () => {
+  let scans = 0;
+  const deps = {
+    queryDocs: (async (_coll: string, query: string) => { if (query.includes('c.id >')) scans++; return []; }) as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async () => { throw new Error('no embeddings expected'); }) as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => { throw new Error('no embeddings expected'); }) as typeof import('../azure/foundry.js').embed,
+  };
+  const first = await runHistoricalRepair({agent:'cfo',checkpoint:{version:'memory-index-repair-v1',agent:'cfo',after_id:'a',pending_ids:['a']}},deps);
+  assert.deepEqual(first.checkpoint.pending_ids,[]);
+  assert.equal(first.truncated,true);
+  assert.equal(scans,0);
+  const terminal = await runHistoricalRepair({agent:'cfo',checkpoint:first.checkpoint},deps);
+  assert.equal(scans,1);
+  assert.equal(terminal.truncated,false);
 });
