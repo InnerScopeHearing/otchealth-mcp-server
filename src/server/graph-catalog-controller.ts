@@ -5,17 +5,19 @@ import { requireConnectorAuth, type AuthContext } from '../auth/bearer.js';
 import { loadEnv } from '../config/env.js';
 import { canonicalUri, resolveAwsCredentials, signRequest } from '../search/sigv4.js';
 import { planGraphCatalogPage } from './graph-catalog-planner.js';
-import { readPinnedGraphCatalog, type GraphCatalogRawS3 } from './graph-catalog-reader.js';
+import { defaultGraphCatalogS3, readPinnedGraphCatalog, type GraphCatalogRawS3 } from './graph-catalog-reader.js';
+import { CFO_SOURCE_CATALOG_KEY, MATERIALIZED_CATALOG_PREFIX, parseMaterializationPin, verifyMaterializationReceipt, type MaterializationPin } from './materialized-catalog-pin.js';
 const BASE='graph-trial/20260908/catalog-cohorts', SOURCE='graph-trial/20260908/source-pilot/snapshots';
 const WORKERS='graph-trial/20260908/workers/cfo',BUCKET='otchealth-finance-legal-dr-55c84f6b',REGION='us-east-1';
 const SHA=/^[a-f0-9]{64}$/, ID=/^[a-z0-9][a-z0-9_.:-]{0,95}$/, ETAG=/^"[A-Za-z0-9-]{1,128}"$/,MAX=512*1024;
 type Json=Record<string,any>;
 type Raw={method:'GET'|'PUT';key:string;headers?:Record<string,string>;body?:Buffer;signal:AbortSignal};
+type SourceHeadRaw={method:'HEAD';key:string;signal:AbortSignal};
 type Res={status:number;headers:Headers;body:Buffer};
 type Run={ref_version:string;run_id:string;purpose:string;scope:string;run_version:string;manifest_sha256:string};
 type Binding={authenticated_caller:'cfo';run:Run;room:'finance';source_index:'finance-cfo-source-docs'};
-type Cfg={cohort_id:string;catalog_key:string;catalog_source_sha256:string;source_prefixes:string[];purpose:string;run_version:string;batch_size:number;max_admissions:number;policy_sha256:string;expires_at:string;recovery_policy_sha256?:string;recovery_expires_at?:string};
-export interface GraphCatalogDeps{authenticate:(r:FastifyRequest,p:FastifyReply)=>Promise<AuthContext|undefined>;configs:()=>string;s3:(r:Raw)=>Promise<Res>;now:()=>number;catalogS3?:GraphCatalogRawS3;}
+type Cfg={cohort_id:string;catalog_key:string;catalog_source_sha256:string;source_prefixes:string[];source_scope?:'all_cfo_source_documents';purpose:string;run_version:string;batch_size:number;max_admissions:number;policy_sha256:string;expires_at:string;recovery_policy_sha256?:string;recovery_expires_at?:string;materialization?:MaterializationPin};
+export interface GraphCatalogDeps{authenticate:(r:FastifyRequest,p:FastifyReply)=>Promise<AuthContext|undefined>;configs:()=>string;s3:(r:Raw)=>Promise<Res>;sourceHead?:(r:SourceHeadRaw)=>Promise<Res>;now:()=>number;catalogS3?:GraphCatalogRawS3;}
 const hash=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex');
 const canonical=(v:any):string=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
 const equal=(a:any,b:any)=>canonical(a)===canonical(b);
@@ -29,13 +31,25 @@ async function bounded<T>(fn:()=>Promise<T>,signal:AbortSignal):Promise<T>{
 }
 function configFor(text:string,id:string):Cfg|null{
  try{if(text.length>65536)return null;const all=JSON.parse(text);if(!Array.isArray(all)||all.length>32)return null;const found=all.filter(x=>x?.cohort_id===id);if(found.length!==1)return null;const c=found[0],keys=['cohort_id','catalog_key','catalog_source_sha256','source_prefixes','purpose','run_version','batch_size','max_admissions','policy_sha256','expires_at'];
- if(!exact(c,keys)&&!exact(c,[...keys,'recovery_policy_sha256','recovery_expires_at']))return null;
+ const recovery=['recovery_policy_sha256','recovery_expires_at'],materialization=['materialization'],scope=['source_scope'];
+ if(![keys,[...keys,...recovery],[...keys,...materialization],[...keys,...recovery,...materialization],[...keys,...scope],[...keys,...scope,...materialization],[...keys,...scope,...recovery],[...keys,...scope,...recovery,...materialization]].some(shape=>exact(c,shape)))return null;
  const date=(v:unknown)=>typeof v==='string'&&Number.isFinite(Date.parse(v))&&new Date(v).toISOString()===v;
- if(!ID.test(c.cohort_id)||!validPath(c.catalog_key)||!c.catalog_key.startsWith('graph-trial/')||!c.catalog_key.endsWith('.jsonl')||!SHA.test(c.catalog_source_sha256)||!ID.test(c.purpose)||!ID.test(c.run_version)||!SHA.test(c.policy_sha256)||!date(c.expires_at)||!Number.isInteger(c.batch_size)||c.batch_size<1||c.batch_size>10||!Number.isInteger(c.max_admissions)||c.max_admissions<0||c.max_admissions>1000||!Array.isArray(c.source_prefixes)||c.source_prefixes.length<1||c.source_prefixes.length>16||!c.source_prefixes.every((p:any)=>typeof p==='string'&&p.endsWith('/')&&validPath(p.slice(0,-1)))||new Set(c.source_prefixes).size!==c.source_prefixes.length)return null;
+ if(!ID.test(c.cohort_id)||!validPath(c.catalog_key)||!c.catalog_key.startsWith('graph-trial/')||!c.catalog_key.endsWith('.jsonl')||!SHA.test(c.catalog_source_sha256)||!ID.test(c.purpose)||!ID.test(c.run_version)||!SHA.test(c.policy_sha256)||!date(c.expires_at)||!Number.isInteger(c.batch_size)||c.batch_size<1||c.batch_size>10||!Number.isInteger(c.max_admissions)||c.max_admissions<0||c.max_admissions>1000||!Array.isArray(c.source_prefixes))return null;
+ const allScope=c.source_scope==='all_cfo_source_documents';
+ if(c.source_scope!==undefined&&!allScope)return null;
+  const invalidPrefixes = c.source_prefixes.length<1 || c.source_prefixes.length>16 ||
+    !c.source_prefixes.every((p:any)=>typeof p==='string'&&p.endsWith('/')&&validPath(p.slice(0,-1))) ||
+    new Set(c.source_prefixes).size!==c.source_prefixes.length;
+  if(allScope ? c.source_prefixes.length!==0 : invalidPrefixes)return null;
  if(c.recovery_policy_sha256!==undefined&&(!SHA.test(c.recovery_policy_sha256)||!date(c.recovery_expires_at)))return null;
+ const pin=c.materialization===undefined?undefined:parseMaterializationPin(c.materialization);
+ if(c.materialization!==undefined&&!pin)return null;
+ if(c.catalog_key.startsWith(MATERIALIZED_CATALOG_PREFIX)!==!!pin||allScope&&!pin)return null;
+ if(pin)c.materialization=pin;
  return c;}catch{return null;}
 }
 async function defaultS3(r:Raw):Promise<Res>{
+ if(!r.key.startsWith('graph-trial/'))fail(403,'graph_catalog_forbidden');
  active(r.signal);const credentials=await bounded(()=>resolveAwsCredentials(),r.signal);if(!credentials)fail();active(r.signal);
  const host=`${BUCKET}.s3.${REGION}.amazonaws.com`,signed=signRequest({method:r.method,host,path:'/'+r.key,region:REGION,service:'s3',credentials,...(r.body?{body:r.body}:{}),extraHeaders:{'x-amz-content-sha256':hash(r.body??Buffer.alloc(0)),...(r.headers??{})}});
  const response=await bounded(()=>fetch('https://'+host+canonicalUri('/'+r.key),{method:r.method,headers:signed.headers,body:r.body,signal:r.signal,redirect:'error'}),r.signal);
@@ -43,7 +57,13 @@ async function defaultS3(r:Raw):Promise<Res>{
  try{if(reader)for(;;){const x=await bounded(()=>reader.read(),r.signal);active(r.signal);if(x.done)break;size+=x.value.byteLength;if(size>MAX)fail();parts.push(Buffer.from(x.value));}return{status:response.status,headers:response.headers,body:Buffer.concat(parts,size)};}
  finally{if(reader){let timer:ReturnType<typeof setTimeout>|undefined;await Promise.race([reader.cancel().catch(()=>undefined),new Promise(resolve=>{timer=setTimeout(resolve,100);})]);clearTimeout(timer);}}
 }
-function depsOf(i?:Partial<GraphCatalogDeps>):GraphCatalogDeps{return{authenticate:i?.authenticate??requireConnectorAuth,configs:i?.configs??(()=>loadEnv().GRAPH_CATALOG_COHORTS_JSON),s3:i?.s3??defaultS3,now:i?.now??Date.now,catalogS3:i?.catalogS3};}
+async function defaultSourceHead(r:SourceHeadRaw):Promise<Res>{
+ if(r.key!==CFO_SOURCE_CATALOG_KEY)fail(403,'graph_catalog_forbidden');active(r.signal);const credentials=await bounded(()=>resolveAwsCredentials(),r.signal);if(!credentials)fail();
+ const host=`${BUCKET}.s3.${REGION}.amazonaws.com`,signed=signRequest({method:'HEAD',host,path:'/'+r.key,region:REGION,service:'s3',credentials,extraHeaders:{'x-amz-content-sha256':hash(Buffer.alloc(0))}});
+ const response=await bounded(()=>fetch('https://'+host+canonicalUri('/'+r.key),{method:'HEAD',headers:signed.headers,signal:r.signal,redirect:'error'}),r.signal);
+ return {status:response.status,headers:response.headers,body:Buffer.alloc(0)};
+}
+function depsOf(i?:Partial<GraphCatalogDeps>):GraphCatalogDeps{return{authenticate:i?.authenticate??requireConnectorAuth,configs:i?.configs??(()=>loadEnv().GRAPH_CATALOG_COHORTS_JSON),s3:i?.s3??defaultS3,sourceHead:i?.sourceHead??defaultSourceHead,now:i?.now??Date.now,catalogS3:i?.catalogS3};}
 async function get(d:GraphCatalogDeps,k:string,s:AbortSignal):Promise<{value:Json;etag:string;raw:Res}|null>{
  const r=await bounded(()=>d.s3({method:'GET',key:k,signal:s}),s);active(s);if(r.status===404)return null;if(r.status!==200||r.body.length>MAX||!ETAG.test(r.headers.get('etag')??''))fail();let v;try{v=JSON.parse(r.body.toString('utf8'));}catch{fail();}if(!v||typeof v!=='object'||Array.isArray(v))fail();return{value:v,etag:r.headers.get('etag')!,raw:r};
 }
@@ -55,7 +75,28 @@ function controllerId(c:Cfg){return hash(canonical({schema:'catalog-controller-v
 function run(c:Cfg,m:string):Run{const x={ref_version:'neptune-trial-active-run-ref-v1',purpose:c.purpose,scope:'finance',run_version:c.run_version,manifest_sha256:m};return{...x,run_id:'run_'+hash(canonical(x))};}
 function validItem(x:any){return exact(x,['ordinal','room','document_version_id','source_version','source_path_hash','enrichment_row_sha256','extractor_version','retract_event_ids'])&&x.ordinal===0&&x.room==='finance'&&/^docv_[a-f0-9]{64}$/.test(x.document_version_id)&&['source_version','source_path_hash','enrichment_row_sha256'].every(k=>SHA.test(x[k]))&&x.extractor_version==='catalog-mention-snapshot-v1'&&Array.isArray(x.retract_event_ids)&&x.retract_event_ids.length===0;}
 function validManifest(m:any){if(!exact(m,['version','created_at','documents','manifest_sha256'])||m.version!=='graph-backfill-runner-v1'||!Array.isArray(m.documents)||m.documents.length!==1||!validItem(m.documents[0])||!SHA.test(m.manifest_sha256))return false;const{manifest_sha256,...body}=m;return manifest_sha256===hash(canonical(body));}
-async function catalog(d:GraphCatalogDeps,c:Cfg,s:AbortSignal){const read=await readPinnedGraphCatalog({key:c.catalog_key,sourceSha256:c.catalog_source_sha256,s3:d.catalogS3,signal:s});return{...read,rows:read.rows.filter(r=>typeof r.path==='string'&&c.source_prefixes.some(p=>(r.path as string).startsWith(p)))};}
+async function sourceHead(d:GraphCatalogDeps,expectedVersion:string,s:AbortSignal){
+ const raw=await bounded(()=>(d.sourceHead??defaultSourceHead)({method:'HEAD',key:CFO_SOURCE_CATALOG_KEY,signal:s}),s),version=raw.headers.get('x-amz-version-id');
+ if(raw.status!==200||version!==expectedVersion)fail(409,'graph_catalog_source_changed');
+ return version;
+}
+function sourceRowAllowed(c:Cfg,row:Record<string,unknown>):boolean{
+ if(typeof row.path!=='string')return false;
+ if(c.source_scope!=='all_cfo_source_documents')return c.source_prefixes.some(prefix=>row.path.startsWith(prefix));
+ if(!validPath(row.path))return false;
+ return !['_text','_catalog','_review','_memory','_state','_archive'].includes(row.path.split('/')[0].toLowerCase());
+}
+async function catalog(d:GraphCatalogDeps,c:Cfg,s:AbortSignal){
+ const pin=c.materialization;
+ if(!pin){const read=await readPinnedGraphCatalog({key:c.catalog_key,sourceSha256:c.catalog_source_sha256,s3:d.catalogS3,signal:s});return{...read,rows:read.rows.filter(row=>sourceRowAllowed(c,row))};}
+ await verifyMaterializationReceipt({cohort_id:c.cohort_id,policy_sha256:c.policy_sha256,source_prefixes:c.source_prefixes,source_scope:c.source_scope,catalog_key:c.catalog_key,catalog_source_sha256:c.catalog_source_sha256,materialization:pin},async request=>{
+  return await bounded(()=>d.s3({method:'GET',key:request.key,signal:request.signal}),request.signal);
+ },s);
+ await sourceHead(d,pin.source_catalog_version_id,s);
+ const read=await readPinnedGraphCatalog({key:c.catalog_key,sourceSha256:c.catalog_source_sha256,expectedContentSha256:pin.catalog_content_sha256,expectedVersionId:pin.catalog_version_id,s3:d.catalogS3??defaultGraphCatalogS3,signal:s});
+ await sourceHead(d,pin.source_catalog_version_id,s);
+ return {...read,rows:read.rows.filter(row=>sourceRowAllowed(c,row))};
+}
 function proposal(c:Cfg,cat:any,m:any){const item=m.documents[0],id=controllerId(c),key=hash(canonical({controller_id:id,document_version_id:item.document_version_id,source_version:item.source_version,enrichment_row_sha256:item.enrichment_row_sha256,extractor_version:item.extractor_version}));return{controller_id:id,key,catalog_snapshot_sha256:hash(canonical({source:c.catalog_source_sha256,etag:cat.catalogEtag,createdAt:cat.createdAt})),catalog_source_sha256:c.catalog_source_sha256,catalog_etag_sha256:hash(cat.catalogEtag),manifest:m,run:run(c,m.manifest_sha256),max_documents:1,document_ordinal:0,paid_fallback:false,requires_review:true};}
 async function current(d:GraphCatalogDeps,c:Cfg,item:any,s:AbortSignal){const cat=await catalog(d,c,s);for(const row of cat.rows){if(hash(String(row.path))!==item.source_path_hash)continue;const p=planGraphCatalogPage({...cat,rows:[row],limit:1});if(p.page.manifest&&equal(p.page.manifest.documents[0],item))return true;}return false;}
 async function serverProposal(d:GraphCatalogDeps,c:Cfg,key:string,s:AbortSignal){if(!SHA.test(key))fail(400,'graph_catalog_request_invalid');const p=await get(d,path(c,`server/proposals/${key}.json`),s);if(!p||p.value.key!==key||p.value.controller_id!==controllerId(c)||!validManifest(p.value.manifest)||!equal(p.value.run,run(c,p.value.manifest.manifest_sha256)))fail(409,'graph_catalog_proposal_missing');return p.value;}

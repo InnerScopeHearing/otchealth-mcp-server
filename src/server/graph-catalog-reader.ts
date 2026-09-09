@@ -9,7 +9,7 @@ const REGION = 'us-east-1';
 export type GraphCatalogRawRequest = Readonly<{ method:'HEAD'|'GET';key:string;headers?:Record<string,string>;signal:AbortSignal }>;
 export type GraphCatalogRawResponse = Readonly<{status:number;headers:Headers;body:ReadableStream<Uint8Array>|null}>;
 export type GraphCatalogRawS3 = (request:GraphCatalogRawRequest)=>Promise<GraphCatalogRawResponse>;
-export type PinnedCatalog = Readonly<{rows:readonly Record<string,unknown>[];catalogEtag:string;catalogSourceSha256:string;createdAt:string}>;
+export type PinnedCatalog = Readonly<{rows:readonly Record<string,unknown>[];catalogEtag:string;catalogSourceSha256:string;catalogContentSha256:string;catalogVersionId:string|null;createdAt:string}>;
 function safeKey(key:string):boolean {
   return typeof key==='string' && key.startsWith('graph-trial/') && key.length<=1024 &&
     !/[\\%?#\u0000-\u001f\u007f]/.test(key) && key===key.normalize('NFC') && !key.split('/').some(p=>p===''||p==='.'||p==='..');
@@ -41,23 +41,26 @@ export const defaultGraphCatalogS3:GraphCatalogRawS3=async(request)=>{
     method:request.method,headers:signed.headers,signal:request.signal,redirect:'error'}),request.signal);
   return {status:response.status,headers:response.headers,body:response.body};
 };
-export async function readPinnedGraphCatalog(input:Readonly<{key:string;sourceSha256:string;createdAt?:string;s3?:GraphCatalogRawS3;signal?:AbortSignal}>):Promise<PinnedCatalog>{
-  if(!safeKey(input.key)||!/^[a-f0-9]{64}$/.test(input.sourceSha256))throw new Error('catalog_reader_request_invalid');
+export async function readPinnedGraphCatalog(input:Readonly<{key:string;sourceSha256:string;expectedContentSha256?:string;expectedVersionId?:string;createdAt?:string;s3?:GraphCatalogRawS3;signal?:AbortSignal}>):Promise<PinnedCatalog>{
+  if(!safeKey(input.key)||!/^[a-f0-9]{64}$/.test(input.sourceSha256)||
+    (input.expectedContentSha256!==undefined&&!/^[a-f0-9]{64}$/.test(input.expectedContentSha256))||
+    (input.expectedVersionId!==undefined&&(!/^[A-Za-z0-9._-]{1,1024}$/.test(input.expectedVersionId)||input.expectedVersionId==='null')))throw new Error('catalog_reader_request_invalid');
   const internal=new AbortController(),timer=setTimeout(()=>internal.abort(),45000);
   const signal=input.signal?AbortSignal.any([input.signal,internal.signal]):internal.signal,s3=input.s3??defaultGraphCatalogS3;
   let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
   try{
     const head=await bounded(()=>s3({method:'HEAD',key:input.key,signal}),signal);active(signal);
-    const etag=head.headers.get('etag'),size=Number(head.headers.get('content-length')),modified=head.headers.get('last-modified');
+    const etag=head.headers.get('etag'),size=Number(head.headers.get('content-length')),modified=head.headers.get('last-modified'),versionId=head.headers.get('x-amz-version-id');
     if(head.status!==200||!etag||etag.length>160||!modified||!Number.isFinite(Date.parse(modified))||
       !Number.isSafeInteger(size)||size<1||size>GRAPH_CATALOG_MAX_BYTES)throw new Error('catalog_head_failed');
     const createdAt=new Date(modified).toISOString();
     if(input.createdAt!==undefined&&input.createdAt!==createdAt)throw new Error('catalog_timestamp_changed');
+    if(input.expectedVersionId!==undefined&&versionId!==input.expectedVersionId)throw new Error('catalog_version_changed');
     const response=await bounded(()=>s3({method:'GET',key:input.key,headers:{'if-match':etag},signal}),signal);active(signal);
     if(response.status===412)throw new Error('catalog_changed');
     if(response.status!==200||response.headers.get('etag')!==etag||!response.body)throw new Error('catalog_get_failed');
     if(response.headers.has('content-length')&&Number(response.headers.get('content-length'))!==size)throw new Error('catalog_length_changed');
-    reader=response.body.getReader();const decoder=new TextDecoder('utf-8',{fatal:true});
+    reader=response.body.getReader();const decoder=new TextDecoder('utf-8',{fatal:true}),contentHash=createHash('sha256');
     const rows:Record<string,unknown>[]=[];let count=0,pending='';
     const parse=(line:string)=>{
       if(!line.trim())return;
@@ -69,12 +72,18 @@ export async function readPinnedGraphCatalog(input:Readonly<{key:string;sourceSh
     };
     for(;;){
       const part=await bounded(()=>reader!.read(),signal);active(signal);if(part.done)break;
-      count+=part.value.byteLength;if(count>size)throw new Error('catalog_length_changed');
+      count+=part.value.byteLength;if(count>size)throw new Error('catalog_length_changed');contentHash.update(part.value);
       pending+=decoder.decode(part.value,{stream:true});let end:number;
       while((end=pending.indexOf('\n'))>=0){parse(pending.slice(0,end));pending=pending.slice(end+1);}
       if(Buffer.byteLength(pending)>GRAPH_CATALOG_MAX_LINE_BYTES)throw new Error('catalog_line_too_large');
     }
     pending+=decoder.decode();parse(pending);if(count!==size)throw new Error('catalog_length_changed');
-    return Object.freeze({rows:Object.freeze(rows),catalogEtag:etag,catalogSourceSha256:input.sourceSha256,createdAt});
+    const catalogContentSha256=contentHash.digest('hex');if(input.expectedContentSha256!==undefined&&catalogContentSha256!==input.expectedContentSha256)throw new Error('catalog_content_changed');
+    // An If-Match GET narrows the race, but a final HEAD makes the current-version proof
+    // explicit for callers that bind materialized artifacts to an upstream version.
+    const after=await bounded(()=>s3({method:'HEAD',key:input.key,signal}),signal);active(signal);
+    if(after.status!==200||after.headers.get('etag')!==etag||after.headers.get('content-length')!==String(size)||after.headers.get('last-modified')!==modified||after.headers.get('x-amz-version-id')!==versionId)throw new Error('catalog_changed');
+    if(input.expectedVersionId!==undefined&&after.headers.get('x-amz-version-id')!==input.expectedVersionId)throw new Error('catalog_version_changed');
+    return Object.freeze({rows:Object.freeze(rows),catalogEtag:etag,catalogSourceSha256:input.sourceSha256,catalogContentSha256,catalogVersionId:versionId,createdAt});
   }finally{clearTimeout(timer);internal.abort();if(reader)await cancel(reader);}
 }
