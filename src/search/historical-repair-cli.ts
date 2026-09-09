@@ -2,6 +2,7 @@
  * deliberately defaults to preview mode.  Output contains operational counts and source IDs for
  * checkpoint resumption, never memory text, vectors, credentials, or backend error bodies. */
 import { runHistoricalRepair, type HistoricalRepairCheckpoint, type HistoricalRepairResult } from './opensearch-backfill.js';
+import { historicalRepairEmbeddingsConfigured } from '../azure/foundry.js';
 import {
   historicalRepairCheckpointStore,
   normalizeHistoricalRepairCheckpoint,
@@ -85,6 +86,7 @@ export async function runHistoricalRepairCli(
     };
   }
   if (options.preflight) {
+    const embeddingsReady = historicalRepairEmbeddingsConfigured();
     return {
       output: {
         runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT,
@@ -97,9 +99,22 @@ export async function runHistoricalRepairCli(
         checkpoint_present: loaded.exists,
         lease_active: loaded.lease_active ?? false,
         pending_count: loaded.checkpoint?.pending_ids.length ?? 0,
-        ready: loaded.lease_active !== true,
+        embeddings_ready: embeddingsReady,
+        ready: loaded.lease_active !== true && embeddingsReady,
+        ...(embeddingsReady ? {} : { error: 'repair_embeddings_unavailable' }),
       },
-      exitCode: loaded.lease_active === true ? 1 : 0,
+      exitCode: loaded.lease_active === true || !embeddingsReady ? 1 : 0,
+    };
+  }
+  if (!options.dryRun && !historicalRepairEmbeddingsConfigured()) {
+    return {
+      output: {
+        runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT,
+        mode: 'historical-reconciliation', agent: options.agent, index, dry_run: false,
+        checkpoint_store: 'agentstate-cache-cas', checkpoint_persisted: false,
+        complete: false, errors_count: 1, error: 'repair_embeddings_unavailable',
+      },
+      exitCode: 1,
     };
   }
   const lease = options.durable && !options.dryRun

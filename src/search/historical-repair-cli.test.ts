@@ -11,6 +11,8 @@ for (const name of ['CIO_SITE_ID', 'CIO_TRACK_KEY', 'CIO_APP_API_BEARER', 'FOUND
 for (const name of ['PERPLEXITY_CONNECTOR_TOKEN', 'ADMIN_REVOKE_TOKEN', 'N8N_WEBHOOK_SECRET']) process.env[name] = 'x'.repeat(32);
 process.env.FOUNDRY_OPENAI_ENDPOINT = 'https://synthetic.example.invalid';
 process.env.OPENSEARCH_REGION = 'us-east-1';
+process.env.EMBEDDINGS_PROVIDER = 'openai';
+process.env.OPENAI_API_KEY = 'synthetic-key';
 
 test('repair CLI defaults to dry run and rejects unbounded or malformed options', () => {
   assert.equal(parseHistoricalRepairArgs(['--agent', 'cfo', '--max', '25']).dryRun, true);
@@ -56,6 +58,24 @@ test('durable preflight reads only checkpoint metadata and never calls the repai
   assert.equal('checkpoint' in result.output, false);
   assert.equal(runs, 0);
   assert.equal(saves, 0);
+});
+
+test('compiled preflight needs no gateway-only credentials', { skip: !existsSync('dist/search/historical-repair-cli.js') }, () => {
+  const compiled = path.resolve('dist/search/historical-repair-cli.js');
+  const run = spawnSync(process.execPath, [compiled, '--agent', 'cfo', '--index', 'memory-exec', '--max', '25', '--durable', '--preflight'], {
+    encoding: 'utf8', timeout: 20_000,
+    env: {
+      PATH: process.env.PATH ?? '',
+      SYSTEMROOT: process.env.SYSTEMROOT ?? '',
+      STATE_BACKEND: 'postgres', PG_HOST: '127.0.0.1', PG_PORT: '1', PG_DATABASE: 'agentstate',
+      PG_USER: 'worker', PG_PASSWORD: 'synthetic-password', PG_SSL_VERIFY: 'true',
+      SEARCH_BACKEND: 'opensearch', OPENSEARCH_ENDPOINT: 'search.example.invalid',
+      OPENSEARCH_REGION: 'us-east-1', EMBEDDINGS_PROVIDER: 'openai', OPENAI_API_KEY: 'synthetic-key',
+    },
+  });
+  assert.equal(run.status, 1);
+  assert.equal(JSON.parse(run.stdout).error, 'checkpoint_store_unavailable');
+  assert.equal(run.stdout.includes('CIO_SITE_ID'), false);
 });
 
 test('durable preflight reports a fixed checkpoint-store taxonomy without leaking an error body', async () => {

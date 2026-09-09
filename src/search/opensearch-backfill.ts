@@ -95,9 +95,9 @@
  * reconciliation tool, not a request-serving path, so its whole point is to surface "how much did
  * NOT make it" rather than to swallow that the way a fire-and-forget write-through must.
  */
-import { loadEnv } from '../config/env.js';
 import { queryDocs as realQueryDocs } from '../agentstate/store.js';
-import { embed as realEmbed, embedBatch as realEmbedBatch } from '../azure/foundry.js';
+import { loadOpenSearchRuntimeConfig } from '../agentstate/runtime-config.js';
+import { embed as realEmbed, embedBatch as realEmbedBatch, historicalRepairEmbed, historicalRepairEmbedBatch } from '../azure/foundry.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { resolveAwsCredentials, signRequest } from './sigv4.js';
 import { buildOpenSearchMemoryDoc } from './opensearch-write.js';
@@ -221,7 +221,7 @@ export function parseBulkResponse(json: unknown, requested: number): BulkOutcome
 // ============================ IO: signed OpenSearch calls ============================
 
 function openSearchHost(): string {
-  return (loadEnv().OPENSEARCH_ENDPOINT || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return loadOpenSearchRuntimeConfig().endpoint;
 }
 
 async function signedFetch(
@@ -230,7 +230,7 @@ async function signedFetch(
   body: string | undefined,
   opts: { timeoutMs?: number; retries?: number; contentType?: string } = {},
 ): Promise<Response> {
-  const e = loadEnv();
+  const e = loadOpenSearchRuntimeConfig();
   const host = openSearchHost();
   if (!host) throw new Error('OPENSEARCH_ENDPOINT not configured');
   const credentials = await resolveAwsCredentials();
@@ -240,7 +240,7 @@ async function signedFetch(
     host,
     path,
     body,
-    region: e.OPENSEARCH_REGION || 'us-east-1',
+    region: e.region,
     service: 'es',
     credentials,
     // content-type must be a SIGNED header (see opensearch-write.ts's identical warning): send
@@ -338,6 +338,7 @@ export interface BackfillDeps {
 }
 
 const defaultDeps: BackfillDeps = { queryDocs: realQueryDocs, embed: realEmbed, embedBatch: realEmbedBatch };
+const historicalRepairDeps: BackfillDeps = { queryDocs: realQueryDocs, embed: historicalRepairEmbed, embedBatch: historicalRepairEmbedBatch };
 
 export interface BackfillOptions {
   /** Target OpenSearch index. Default 'memory-exec' -- see the module doc comment's "ROOM SCOPE". */
@@ -571,7 +572,7 @@ function advancedCursor(previous: string, scannedIds: string[]): string {
  */
 export async function runHistoricalRepair(
   opts: HistoricalRepairOptions,
-  deps: BackfillDeps = defaultDeps,
+  deps: BackfillDeps = historicalRepairDeps,
 ): Promise<HistoricalRepairResult> {
   const index = opts.index || DEFAULT_INDEX;
   const max = Math.max(1, Math.min(opts.max ?? 200, DEFAULT_MAX));
