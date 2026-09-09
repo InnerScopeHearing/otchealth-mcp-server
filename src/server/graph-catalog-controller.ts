@@ -138,9 +138,9 @@ async function validateState(d:GraphCatalogDeps,c:Cfg,key:string,value:Json,prio
  if(value.preparation&&!await preparation(d,c,p,value,s))fail(409,'graph_catalog_preparation_unconfirmed');
  if(value.status==='complete'&&(value.chunks.some((x:any)=>x.status!=='complete')||!await completed(d,c,p,value,s)))fail(409,'graph_catalog_completion_unconfirmed');
 }
-export async function resolveCatalogCohortBinding(ctx:AuthContext,runId:string,signal:AbortSignal,i?:Partial<GraphCatalogDeps>):Promise<{policy:{schema:'graph-worker-bindings-v1';policy_version:string;expires_at:string;bindings:Binding[]};binding:Binding}|null>{
+export async function resolveCatalogCohortBinding(ctx:AuthContext,runId:string,signal:AbortSignal,i?:Partial<GraphCatalogDeps>):Promise<{cohort_id:string;policy:{schema:'graph-worker-bindings-v1';policy_version:string;expires_at:string;bindings:Binding[]};binding:Binding}|null>{
  if(ctx.caller_agent!=='cfo'||!ctx.connector_surface)return null;const d=depsOf(i);let all;try{all=JSON.parse(d.configs());}catch{return null;}if(!Array.isArray(all)||all.length>32)return null;
- for(const raw of all){const c=configFor(d.configs(),raw?.cohort_id);if(!c||!live(c,d))continue;const ctl=await control(d,c,signal);if(ctl?.value.current.status!=='active'||ctl.value.current.run_id!==runId)continue;const a=await receipt(d,c,runId,signal);if(a.receipt.key!==ctl.value.current.key||a.receipt.manifest_sha256!==ctl.value.current.manifest_sha256)fail();const binding:Binding={authenticated_caller:'cfo',run:a.proposal.run,room:'finance',source_index:'finance-cfo-source-docs'};return{binding,policy:{schema:'graph-worker-bindings-v1',policy_version:c.policy_sha256,expires_at:c.expires_at,bindings:[binding]}};}return null;
+ for(const raw of all){const c=configFor(d.configs(),raw?.cohort_id);if(!c||!live(c,d))continue;const ctl=await control(d,c,signal);if(ctl?.value.current.status!=='active'||ctl.value.current.run_id!==runId)continue;const a=await receipt(d,c,runId,signal);if(a.receipt.key!==ctl.value.current.key||a.receipt.manifest_sha256!==ctl.value.current.manifest_sha256)fail();const binding:Binding={authenticated_caller:'cfo',run:a.proposal.run,room:'finance',source_index:'finance-cfo-source-docs'};return{cohort_id:c.cohort_id,binding,policy:{schema:'graph-worker-bindings-v1',policy_version:c.policy_sha256,expires_at:c.expires_at,bindings:[binding]}};}return null;
 }
 export function registerGraphCatalogControllerRoutes(app:FastifyInstance,i?:Partial<GraphCatalogDeps>):void{
  const d=depsOf(i),prefix='/graph-catalog/v1/:cohortId';
@@ -180,9 +180,11 @@ export const graphCatalogControllerTest={canonical,hash,configFor,validManifest,
 export async function resolveRelationshipPublicationAdmission(input:{cohortId:string;run:{run_id:string};ctx:AuthContext;signal:AbortSignal},injected?:Partial<GraphCatalogDeps>){
  const {cohortId,run,ctx,signal}=input;
  if(ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash)||!ID.test(cohortId)||!validPath(cohortId)||!/^run_[a-f0-9]{64}$/.test(run.run_id))fail(403);
- const d=depsOf(injected),admissionKey=`${BASE}/${cohortId}/server/admissions/${run.run_id}.json`;
- const admission=await get(d,admissionKey,signal);if(!admission||!SHA.test(admission.value.key))fail(403);
- const proposalKey=`${BASE}/${cohortId}/server/proposals/${admission.value.key}.json`,proposal=await get(d,proposalKey,signal);if(!proposal)fail(403);
+ const d=depsOf(injected),c=configFor(d.configs(),cohortId);if(!c||!live(c,d))fail(403);
+ const ctl=await control(d,c,signal);if(!ctl||ctl.value.current.status!=='active'||ctl.value.current.run_id!==run.run_id)fail(403);
+ const checked=await receipt(d,c,run.run_id,signal),admissionKey=`${BASE}/${cohortId}/server/admissions/${run.run_id}.json`;
+ const admission=await get(d,admissionKey,signal);if(!admission||!equal(admission.value,checked.receipt)||!SHA.test(admission.value.key))fail(403);
+ const proposalKey=`${BASE}/${cohortId}/server/proposals/${admission.value.key}.json`,proposal=await get(d,proposalKey,signal);if(!proposal||!equal(proposal.value,checked.proposal))fail(403);
  const pin=(key:string,r:NonNullable<typeof admission>)=>{const version_id=r.raw.headers.get('x-amz-version-id');if(!version_id||version_id==='null'||version_id.length>1024||/[\s\p{C}]/u.test(version_id))fail();return{key,version_id,sha256:hash(r.raw.body)};};
  return{admission:pin(admissionKey,admission),proposal:pin(proposalKey,proposal)};
 }

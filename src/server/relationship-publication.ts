@@ -37,6 +37,17 @@ function stored(r:Stored):Json{
  if(!r.found||!r.body||!r.versionId||!h.version(r.versionId)||r.body.length>128*1024||!Buffer.from(r.body.toString('utf8')).equals(r.body))fail(503);
  try{return JSON.parse(r.body!.toString('utf8'));}catch{fail(503);}
 }
+/** Derive artifact access from the current CFO session and immutable, server-issued catalog records. */
+export async function resolveRelationshipArtifactAutomaticBinding(input:{run_id:string;producer_id:string;ctx:AuthContext;signal:AbortSignal},injected?:{policyJson?:()=>string;now?:()=>number}){
+ const now=injected?.now??Date.now,policy=parse((injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON))(),now());
+ if(!policy||input.ctx.caller_agent!=='cfo'||!input.ctx.connector_surface||!SHA.test(input.ctx.caller_hash)||!RUN.test(input.run_id)||!PRODUCER.test(input.producer_id))return null;
+ const catalog=await import('./graph-catalog-controller.js'),current=await catalog.resolveCatalogCohortBinding(input.ctx,input.run_id,input.signal);
+ if(!current)return null;
+ const c=policy.bindings.find((row:Json)=>row.cohort_id===current.cohort_id&&row.caller_hash===input.ctx.caller_hash&&row.producer_id===input.producer_id&&row.purpose===current.binding.run.purpose&&row.run_version===current.binding.run.run_version);
+ if(!c)return null;
+ const pins=await catalog.resolveRelationshipPublicationAdmission({cohortId:c.cohort_id,run:{run_id:input.run_id},ctx:input.ctx,signal:input.signal});
+ return {binding:{authenticated_caller:'cfo' as const,caller_hash:input.ctx.caller_hash,producer_id:c.producer_id,run:current.binding.run,encryption:c.encryption},cohort_id:c.cohort_id,policy_version:policy.policy_version,expires_at:policy.expires_at,admission:pins.admission,proposal:pins.proposal,source_policy:c.source_policy};
+}
 async function bounded<T>(f:()=>Promise<T>,signal:AbortSignal):Promise<T>{
  if(signal.aborted)fail(503);return new Promise((resolve,reject)=>{const abort=()=>{signal.removeEventListener('abort',abort);reject(Object.assign(Error('publication_cancelled'),{status:503}));};signal.addEventListener('abort',abort,{once:true});Promise.resolve().then(()=>{if(signal.aborted)fail(503);return f();}).then(v=>{signal.removeEventListener('abort',abort);resolve(v);},e=>{signal.removeEventListener('abort',abort);reject(e);});if(signal.aborted)abort();});
 }

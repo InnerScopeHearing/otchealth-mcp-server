@@ -18,13 +18,14 @@ function fixture(runOverride?:any,producer='synthetic-producer'){
  return {run,producer,ctx,binding,policy,now,state};
 }
 async function harness(runOverride?:any,producer?:string){
- const f=fixture(runOverride,producer);let now=f.now,policy:any=f.policy,ctx:any=f.ctx,cohort=true,authCalls=0;
+ const f=fixture(runOverride,producer);let now=f.now,policy:any=f.policy,ctx:any=f.ctx,cohort=true,authCalls=0,automatic=false,automaticExpires=f.policy.expires_at;
  const objects=new Map<string,{body:Buffer;headers:Headers}>(),calls:any[]=[];
  let onIo:((r:any)=>void)|undefined,mutateRead:((r:any)=>void)|undefined,putStatus=200,revokeFinal=false;
  const app=Fastify({logger:false,bodyLimit:4*1024*1024});
  registerRelationshipArtifactGatewayRoutes(app,{
   authenticate:async()=>{authCalls++;return revokeFinal&&authCalls%2===0?undefined:ctx;},policyJson:()=>typeof policy==='string'?policy:canonical(policy),now:()=>now,
   resolveCohortBinding:async()=>cohort?{policy:{schema:'graph-worker-bindings-v1',expires_at:f.policy.expires_at},binding:{authenticated_caller:'cfo',run:f.run,room:'finance',source_index:'finance-cfo-source-docs'}}:null,
+  resolveAutomaticBinding:async(c:any,runId:string,producerId:string)=>(automatic&&cohort&&c.caller_agent==='cfo'&&c.caller_hash===f.ctx.caller_hash&&runId===f.run.run_id&&producerId===f.producer)?{binding:f.binding,cohort_id:'synthetic-cohort',policy_version:'synthetic-publication-v1',expires_at:automaticExpires,admission:{key:`graph-trial/20260908/catalog-cohorts/synthetic-cohort/server/admissions/${f.run.run_id}.json`,version_id:'admission-v1',sha256:hash('admission')},proposal:{key:'graph-trial/20260908/catalog-cohorts/synthetic-cohort/server/proposals/'+hash('proposal')+'.json',version_id:'proposal-v1',sha256:hash('proposal')},source_policy:{catalog_key:'graph-trial/synthetic/catalog.jsonl',catalog_source_sha256:hash('catalog'),source_prefixes:['synthetic/']}}:null,
   s3:async(r:any)=>{calls.push(r);assert.equal(r.signal.aborted,false);
    if(r.key.includes('/active-runs/'))return{status:200,headers:new Headers({etag:'"active-v1"'}),body:Buffer.from(canonical({schema:'neptune-trial-active-run-state-v1',state_sha256:hash(canonical(f.state)),state:f.state}))};
    onIo?.(r);
@@ -40,7 +41,7 @@ async function harness(runOverride?:any,producer?:string){
  const pack=(payload:any)=>{const digest=hash(canonical(payload));return{url:`/relationship-artifacts/v1/${f.run.run_id}/${f.producer}/sha256/${digest.slice(0,2)}/${digest}.json`,body:{schema:'relationship-resolution-artifact-v1',payload_sha256:digest,payload}};};
  const source=(input:any={text:'synthetic full evidence'})=>pack({schema:'resolution-source-input-v1',run:f.run,input});
  const request=(p:ReturnType<typeof pack>,method:'GET'|'PUT'='PUT',extra:any={})=>app.inject({method,url:p.url,headers:{authorization:'Bearer synthetic-fixture','content-type':'application/json',...(method==='PUT'?{'if-none-match':'*'}:{}),...extra.headers},...(method==='PUT'?{payload:canonical(p.body)}:{}),...Object.fromEntries(Object.entries(extra).filter(([k])=>k!=='headers'))});
- return{f,app,objects,calls,pack,source,request,setPolicy:(p:any)=>policy=p,setCtx:(c:any)=>ctx=c,setCohort:(c:boolean)=>cohort=c,setNow:(n:number)=>now=n,onIo:(fn:any)=>onIo=fn,mutateRead:(fn:any)=>mutateRead=fn,putStatus:(n:number)=>putStatus=n,revokeFinal:()=>revokeFinal=true};
+ return{f,app,objects,calls,pack,source,request,setPolicy:(p:any)=>policy=p,setCtx:(c:any)=>ctx=c,setCohort:(c:boolean)=>cohort=c,setNow:(n:number)=>now=n,setAutomatic:(v:boolean)=>automatic=v,setAutomaticExpires:(v:string)=>automaticExpires=v,onIo:(fn:any)=>onIo=fn,mutateRead:(fn:any)=>mutateRead=fn,putStatus:(n:number)=>putStatus=n,revokeFinal:()=>revokeFinal=true};
 }
 test('immutable source and history PUT, exact opaque version GET, and duplicate recovery',async()=>{
  const t=await harness();try{for(const p of[t.source(),t.pack({schema:'resolution-history-v1',run:t.f.run,caller_seat:'cfo',sources:[],events:[],queries:[]})]){
@@ -53,6 +54,17 @@ test('dark policy and wrong seat, credential, producer, or absent cohort fail be
  for(const change of[(t:any)=>t.setPolicy(''),(t:any)=>t.setCtx({...t.f.ctx,caller_agent:'cto'}),(t:any)=>t.setCtx({...t.f.ctx,caller_hash:hash('other')}),(t:any)=>t.setPolicy({...t.f.policy,bindings:[{...t.f.binding,producer_id:'other'}]}),(t:any)=>t.setCohort(false)]){
   const t=await harness();try{change(t);assert.ok([403,404].includes((await t.request(t.source())).statusCode));assert.equal(t.calls.filter(r=>!r.key.includes('/active-runs/')).length,0);}finally{await t.app.close();}
  }
+});
+test('automatic authorization is derived per admitted CFO run and fails closed for unrelated, stale, or disabled records',async()=>{
+ const t=await harness();try{
+  t.setPolicy('');t.setAutomatic(true);const p=t.source();const allowed=await t.request(p);assert.equal(allowed.statusCode,200,allowed.body);
+  const provenance=(await t.app.inject({method:'POST',url:`/relationship-artifacts/v1/${t.f.run.run_id}/${t.f.producer}/authorize`,headers:{authorization:'Bearer synthetic-fixture','content-type':'application/json'},payload:canonical({action:'write',artifact_ref:null,run:t.f.run,caller_seat:'cfo',store_id:'relationship-gateway-v1'})})).json().provenance;
+  assert.equal(provenance.decision_source,'automatic_catalog_publication_admission');assert.equal(provenance.authenticated_producer_id,t.f.producer);assert.equal(provenance.cohort_id,'synthetic-cohort');
+  for(const change of[(x:any)=>x.setAutomatic(false),(x:any)=>x.setCtx({...x.f.ctx,caller_hash:hash('foreign')}),(x:any)=>x.setAutomaticExpires(new Date(x.f.now-1).toISOString())]){
+   const x=await harness();try{x.setPolicy('');x.setAutomatic(true);change(x);assert.equal((await x.request(x.source())).statusCode,403);}finally{await x.app.close();}
+  }
+  const foreign=`/relationship-artifacts/v1/${t.f.run.run_id}/other-producer/sha256/${p.body.payload_sha256.slice(0,2)}/${p.body.payload_sha256}.json`;assert.equal((await t.request(p,'PUT',{url:foreign})).statusCode,403);
+ }finally{await t.app.close();}
 });
 test('conditional write, envelope identity, scope and query tampering are refused',async()=>{
  const t=await harness();try{const p=t.source();
