@@ -25,7 +25,35 @@ process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 process.env.FOUNDRY_ROUTER_ENDPOINT ||= 'https://otchealth-router.example.invalid';
 process.env.FOUNDRY_ROUTER_KEY ||= 'test-router-key';
 
-const { parseDistillResponse, distillSummary } = await import('./checkpoint.js');
+const { parseDistillResponse, distillSummary, registerCheckpoint } = await import('./checkpoint.js');
+
+test('actual checkpoint handler preserves partial IDs and resets pressure only for complete delivery', async () => {
+  for (const mode of ['stored-unindexed', 'storage-unknown', 'complete'] as const) {
+    let handler: import('../registry.js').ToolHandler<never> | undefined;
+    let writes = 0, resets = 0;
+    registerCheckpoint({} as import('@modelcontextprotocol/sdk/server/mcp.js').McpServer, () => 'fixture', {
+      register: (_server, definition) => { handler = definition.handler; },
+      configured: () => true,
+      reset: () => { resets++; },
+      deliver: async () => {
+        writes++;
+        if (writes === 1 && mode === 'storage-unknown') return {id:null,stored:false,indexed:false};
+        return {id: writes === 1 ? 'explicit' : 'episode',stored:true,indexed:writes !== 1 || mode === 'complete'};
+      },
+    });
+    assert.ok(handler);
+    const result = await handler({agent:'cto',memories:[{kind:'fact',text:'Synthetic checkpoint fixture'}]} as never,
+      {callerHash:'fixture',callerAgent:'cto',correlationId:'fixture',dryRun:false,acknowledgeWarning:false});
+    const data = result.data as {written:string[];unindexed:string[];storage_unconfirmed:number;checkpoint:boolean};
+    assert.equal(writes, 2);
+    assert.equal(resets, mode === 'complete' ? 1 : 0);
+    assert.equal(data.checkpoint, mode === 'complete');
+    assert.deepEqual(data.written, mode === 'storage-unknown' ? ['episode'] : ['explicit','episode']);
+    assert.deepEqual(data.unindexed, mode === 'stored-unindexed' ? ['explicit'] : []);
+    assert.equal(data.storage_unconfirmed, mode === 'storage-unknown' ? 1 : 0);
+    assert.match(result.summary ?? '', mode === 'complete' ? /Capture pressure reset/ : /capture pressure retained/);
+  }
+});
 
 // Pure network mocking via globalThis.fetch, the same seam src/memory/deep-retrieval.test.ts and
 // src/memory/agentic.test.ts use.

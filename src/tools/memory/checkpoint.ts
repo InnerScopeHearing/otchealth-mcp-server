@@ -105,8 +105,18 @@ async function writeAndIndex(
   );
 }
 
-export function registerCheckpoint(server: McpServer, callerHash: CallerHashProvider): void {
-  registerTool(
+type CheckpointDependencies = {
+  register: typeof registerTool;
+  configured: typeof isConfigured;
+  deliver: typeof writeAndIndex;
+  reset: typeof recordCheckpoint;
+};
+
+export function registerCheckpoint(server: McpServer, callerHash: CallerHashProvider,
+  overrides: Partial<CheckpointDependencies> = {}): void {
+  const deps: CheckpointDependencies = { register: registerTool, configured: isConfigured,
+    deliver: writeAndIndex, reset: recordCheckpoint, ...overrides };
+  deps.register(
     server,
     {
       name: 'checkpoint',
@@ -169,7 +179,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
             summary: `Refused: ${mnpiGate.reason}`,
           };
         }
-        if (!isConfigured()) {
+        if (!deps.configured()) {
           return {
             data: { written: [], distilled: 0, checkpoint: false, note: 'selected agent-state backend not configured.' },
             summary: 'checkpoint unavailable: selected agent-state backend not configured on the gateway.',
@@ -198,7 +208,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
 
         // (a) explicit memories, verbatim -- one failure never blocks the rest.
         for (const m of memoriesIn) {
-          deliveries.push(await writeAndIndex(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }));
+          deliveries.push(await deps.deliver(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }));
         }
 
         // (b) server-side distillation of the summary, best-effort. A distillation failure (LLM
@@ -208,7 +218,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
           try {
             const items = await distillSummary(input.summary);
             for (const dm of items) {
-              const delivery = await writeAndIndex(input.agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
+              const delivery = await deps.deliver(input.agent, dm.kind, dm.text, { tags: ['checkpoint-distilled'], source: 'checkpoint distillation' });
               deliveries.push(delivery);
               if (delivery.stored) {
                 distilled += 1;
@@ -227,7 +237,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
           outcome: distillationComplete && deliveries.every(item => item.stored && item.indexed) ? 'delivery_pending_episode' : 'partial',
           redactedArgs: { memories: memoriesIn.length, has_summary: Boolean(input.summary) },
         });
-        const episode = await writeAndIndex(input.agent, 'episode', episodeText, {
+        const episode = await deps.deliver(input.agent, 'episode', episodeText, {
           tags: ['checkpoint'],
           source: `correlation:${ctx.correlationId}`,
         });
@@ -235,7 +245,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         const deliveryStatus = checkpointDeliveryStatus(deliveries);
         const { written } = deliveryStatus;
         const checkpoint = deliveryStatus.checkpoint && distillationComplete;
-        if (checkpoint) recordCheckpoint(ctx.callerHash);
+        if (checkpoint) deps.reset(ctx.callerHash);
 
         // PHASE 2 SLO TELEMETRY (observe-only): the numerator for the capture-rate SLO
         // (gw_checkpoint / gw_mutation, computed downstream in PostHog). Only reached on a real
