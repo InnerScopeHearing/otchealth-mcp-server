@@ -67,6 +67,32 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
   }
 }
 
+test('distillation distinguishes valid empty output from malformed or dropped memories', async () => {
+  for (const raw of ['broken', '{}', '{"memories":{}}', '{"memories":[{"kind":"unknown","text":"fixture"}]}']) {
+    await withStubbedFetch(async () => new Response(JSON.stringify({choices:[{message:{content:raw}}]})),
+      () => assert.rejects(distillSummary('Synthetic summary'), /checkpoint_distillation_invalid/));
+  }
+  await withStubbedFetch(async () => new Response(JSON.stringify({choices:[{message:{content:'{"memories":[]}'}}]})),
+    async () => assert.deepEqual(await distillSummary('Synthetic summary'), []));
+});
+
+test('actual checkpoint handler retains pressure on malformed distillation while preserving explicit writes', async () => {
+  let handler: import('../registry.js').ToolHandler<never> | undefined;
+  let resets = 0, writes = 0;
+  registerCheckpoint({} as import('@modelcontextprotocol/sdk/server/mcp.js').McpServer, () => 'fixture', {
+    register: (_server, definition) => { handler = definition.handler; }, configured: () => true,
+    reset: () => { resets++; }, deliver: async () => ({id:`saved-${++writes}`,stored:true,indexed:true}),
+  });
+  await withStubbedFetch(async () => new Response(JSON.stringify({choices:[{message:{content:'invalid'}}]})), async () => {
+    assert.ok(handler);
+    const result = await handler({agent:'cto',summary:'Synthetic summary',memories:[{kind:'fact',text:'Synthetic explicit memory'}]} as never,
+      {callerHash:'fixture',callerAgent:'cto',correlationId:'fixture',dryRun:false,acknowledgeWarning:false});
+    const data = result.data as {checkpoint:boolean;distillation_complete:boolean;written:string[]};
+    assert.equal(data.checkpoint,false);assert.equal(data.distillation_complete,false);
+    assert.deepEqual(data.written,['saved-1','saved-2']);assert.equal(resets,0);
+  });
+});
+
 test('parseDistillResponse: parses a well-formed reply', () => {
   const out = parseDistillResponse(
     JSON.stringify({ memories: [{ kind: 'fact', text: 'ASC key id is 9MR7PJHRYH' }, { kind: 'decision', text: 'ship build 46' }] }),

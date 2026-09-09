@@ -81,6 +81,18 @@ export async function distillSummary(summary: string): Promise<DistilledMemory[]
     { role: 'user', content: summary.slice(0, MAX_SUMMARY_INPUT_CHARS) },
   ];
   const res = await chat(messages, { maxTokens: 700, jsonMode: true, tier: 'router' });
+  // A malformed reply is not evidence that the summary contains no durable facts.
+  let envelope: unknown;
+  try { envelope = JSON.parse(res.text); } catch { throw new Error('checkpoint_distillation_invalid'); }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
+      Object.keys(envelope).join(',') !== 'memories') throw new Error('checkpoint_distillation_invalid');
+  const memories = (envelope as { memories: unknown }).memories;
+  if (!Array.isArray(memories) || memories.length > MAX_DISTILLED || memories.some(item =>
+    !item || typeof item !== 'object' || Array.isArray(item) ||
+    Object.keys(item).sort().join(',') !== 'kind,text' || !DISTILL_KIND_SET.has(item.kind) ||
+    typeof item.text !== 'string' || !item.text.trim() || item.text.length > MAX_DISTILL_TEXT_CHARS)) {
+    throw new Error('checkpoint_distillation_invalid');
+  }
   return parseDistillResponse(res.text);
 }
 
