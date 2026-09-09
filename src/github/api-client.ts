@@ -110,7 +110,13 @@ async function githubApiFetch(urlPath: string, init: RequestInit, retries: numbe
   if (url.protocol !== 'https:' || url.origin !== GITHUB_API_ORIGIN) {
     throw new GitHubApiError({ code: 'github_invalid_origin', status: 0, message: 'Refusing a non-GitHub API origin.', nextStep: 'Use the fixed GitHub API origin.' });
   }
-  return fetchWithBudget(url, { ...init, redirect: 'error' }, { retries });
+  const response = await fetchWithBudget(url, { ...init, redirect: 'error' }, { retries });
+  // Native fetch rejects a redirect with redirect:'error'. Keep this guard as
+  // defense in depth for alternate fetch implementations and test doubles.
+  if (response.status >= 300 && response.status < 400) {
+    throw new GitHubApiError({ code: 'github_redirect_refused', status: response.status, message: 'Refusing a redirect from the GitHub API.', nextStep: 'Investigate the GitHub API response before retrying.' });
+  }
+  return response;
 }
 
 // Installation token cache

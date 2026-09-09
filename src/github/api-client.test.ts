@@ -139,3 +139,18 @@ test('GitHub API calls keep the fixed API origin and refuse redirects', async ()
     assert.equal(request.redirect, 'error');
   }
 });
+
+test('GitHub API calls reject a redirect response without making a follow-up request', async () => {
+  const urls: string[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    return new Response('', { status: 302, headers: { location: 'https://unexpected.example/' } });
+  }) as typeof fetch, async () => {
+    await assert.rejects(
+      () => listWorkflowRuns('InnerScopeHearing', 'otchealth-mcp-server'),
+      (error: unknown) => (error as { code?: string }).code === 'github_redirect_refused',
+    );
+  });
+  assert.equal(urls.length, 1, 'a redirect response must not result in a second request');
+  assert.equal(new URL(urls[0]!).origin, 'https://api.github.com');
+});
