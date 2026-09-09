@@ -9,6 +9,7 @@ const bindPreparedSource = input => ({ source_ref: `src_${input.binding.id}`, bi
 function createMockResolver(services) {
   const sources = new Map(), records = [];
   return {
+    identity_currentness_supported: true,
     registerSource(input) { const source = bindPreparedSource(input), request = { caller_lane: "cfo", source_ref: source.source_ref, source_binding: source.binding };
       services.authorizeSource(request); services.isCurrentSource({ source_ref: source.source_ref, source_binding: source.binding });
       services.verifyPreparedSource({ caller_lane: "cfo", source }); sources.set(source.source_ref, source); return source.source_ref; },

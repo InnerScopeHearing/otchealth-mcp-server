@@ -55,7 +55,7 @@ function page(value, expectedAfter, producer, limit) {
 }
 
 export function createPagedRecallHost({ gatewayOrigin, cohortId, producer, historyTrust, sse, getAuthorization, fetchImpl,
-  createResolver, bindPreparedSource, verificationRequestHash, now = Date.now } = {}) {
+  createResolver, bindPreparedSource, verificationRequestHash, refreshIdentityReceipts, revalidateIdentity, now = Date.now } = {}) {
   const fixedOrigin = origin(gatewayOrigin);
   if (typeof cohortId !== "string" || !/^[a-z][a-z0-9-]{0,95}$/.test(cohortId) || !PRODUCER.test(producer || "") || !historyTrust || !sse ||
       typeof getAuthorization !== "function" || typeof fetchImpl !== "function" || typeof createResolver !== "function" || typeof bindPreparedSource !== "function" ||
@@ -98,7 +98,7 @@ export function createPagedRecallHost({ gatewayOrigin, cohortId, producer, histo
     list: listPage,
     async retrievePage(query, { after: rawAfter = null, limit = MAX_PAGE, signal } = {}) {
       const result = await listPage({ after: rawAfter, limit, signal });
-      const recall = createCrossRunRecall({ createResolver, bindPreparedSource, verificationRequestHash, readers: result.items.map(publicationReader), now });
+      const recall = createCrossRunRecall({ createResolver, bindPreparedSource, verificationRequestHash, refreshIdentityReceipts, revalidateIdentity, readers: result.items.map(publicationReader), now });
       return Object.freeze({ recall: await recall.recall({ histories: result.items, query: clone(query) }, { signal }), page: result });
     },
   });

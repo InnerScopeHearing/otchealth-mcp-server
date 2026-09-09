@@ -35,7 +35,7 @@ function validHistory(value, run) {
  * Retrieval only. It never calls a new identity, semantic, lineage, or supersession verifier.
  * Every reader is fixed at construction and must be an authenticated, run-bound gateway reader.
  */
-export function createCrossRunRecall({ createResolver, bindPreparedSource, verificationRequestHash, readers, now = Date.now } = {}) {
+export function createCrossRunRecall({ createResolver, bindPreparedSource, verificationRequestHash, refreshIdentityReceipts, revalidateIdentity = null, readers, now = Date.now } = {}) {
   if (typeof createResolver !== "function" || typeof bindPreparedSource !== "function" || typeof verificationRequestHash !== "function" ||
       !Array.isArray(readers) || !readers.length || readers.length > 64 || readers.some(reader => !validReader(reader)) || typeof now !== "function") fail("cross_run_configuration");
   const fixedReaders = new Map();
@@ -80,11 +80,11 @@ export function createCrossRunRecall({ createResolver, bindPreparedSource, verif
     }
     return all;
   }
-  function replay(loaded, sources) {
+  function replay(loaded, sources, identityChecks) {
     const byHistory = new Map(loaded.map(item => [item, sources.filter(source => source.history === item.history)]));
     let frame = null, callOffset = 0, replaying = true;
     const live = new Map(sources.map(source => [source.bound.source_ref, source]));
-    const services = { callerLane: "cfo" };
+    const services = { callerLane: "cfo", isCurrentIdentity: endpoint => identityChecks.get(endpoint.proof?.request_sha256) === true };
     for (const name of CALLBACKS) services[name] = (...args) => {
       if (replaying) {
         const call = frame?.calls?.[callOffset++];
@@ -106,6 +106,7 @@ export function createCrossRunRecall({ createResolver, bindPreparedSource, verif
       fail("cross_run_replay_only_callback");
     };
     const resolver = createResolver(services);
+    if (resolver.identity_currentness_supported !== true) fail("cross_run_identity_refresh_required");
     for (const item of loaded) {
       let index = 0;
       for (const event of item.history.events) {
@@ -142,12 +143,15 @@ export function createCrossRunRecall({ createResolver, bindPreparedSource, verif
     async recall({ histories, query }, { signal } = {}) {
       active(signal); const loaded = await loadHistories(clone(histories), signal); const originalSources = await sourceInputs(loaded, signal);
       let sources = await refreshSources(originalSources, signal); assertFresh(sources);
-      let resolver = replay(loaded, sources); let answer = (query?.kind==='candidate_links'?resolver.candidateLinks(clone(query)):resolver.explain(clone(query)));
-      // Last boundary: re-open each history and source through the authenticated gateway. No result survives a revoked history access.
+      const identities = typeof refreshIdentityReceipts === "function" ? await refreshIdentityReceipts(loaded.map(item => item.history), revalidateIdentity, { signal }) : new Map();
+      let resolver = replay(loaded, sources, identities); let answer = (query?.kind==='candidate_links'?resolver.candidateLinks(clone(query)):resolver.explain(clone(query)));
+      // Refresh identity first, then re-open history/source access after that I/O.
+      // Sequential live checks do not establish an atomic lease across authorities.
+      const finalIdentities = typeof refreshIdentityReceipts === "function" ? await refreshIdentityReceipts(loaded.map(item => item.history), revalidateIdentity, { signal }) : new Map();
       const finalHistories = await loadHistories(loaded.map(item => item.entry), signal);
       if (finalHistories.length !== loaded.length || finalHistories.some((item, index) => !equal(item.history, loaded[index].history))) fail("cross_run_history_changed");
       const finalSources = await refreshSources(sources, signal); assertFresh(finalSources);
-      if (!equal(sources.map(source => source.authority), finalSources.map(source => source.authority))) { sources = finalSources; resolver = replay(loaded, sources); assertFresh(sources); answer = (query?.kind==='candidate_links'?resolver.candidateLinks(clone(query)):resolver.explain(clone(query))); }
+      if (!equal(sources.map(source => source.authority), finalSources.map(source => source.authority)) || !equal([...identities], [...finalIdentities])) { sources = finalSources; resolver = replay(loaded, sources, finalIdentities); assertFresh(sources); answer = (query?.kind==='candidate_links'?resolver.candidateLinks(clone(query)):resolver.explain(clone(query))); }
       active(signal);
       return frozen({ schema: "cross-run-resolution-recall-v1", answer, history_refs: loaded.map(item => clone(item.entry.artifact_ref)) });
     },
