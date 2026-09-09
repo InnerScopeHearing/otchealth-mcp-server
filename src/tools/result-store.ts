@@ -22,8 +22,9 @@ const TAIL_CHARS = 1000;
 // carries the full `data`) risks exceeding that, so we don't attempt offload and keep the result
 // inline (fail-open). Env-overridable.
 const MAX_OFFLOAD_CHARS = Number(process.env.JIT_RESULT_MAX_CHARS) || 1_600_000;
-// Page size for gateway_fetch_result. MUST stay below THRESHOLD_CHARS so a fetched page never
-// itself re-triggers offload (no recursion).
+// Maximum JSON-escaped UTF-8 bytes carried by one gateway_fetch_result chunk. A raw 30K slice can
+// expand past the 40K offload threshold when it contains quotes, backslashes, control characters,
+// or lone surrogates. Paging by encoded size keeps the rendered fetch response bounded.
 export const PAGE_CHARS = 30000;
 export interface ResultStoreDeps {
   newId: (prefix: string) => string;
@@ -74,15 +75,51 @@ export function buildPreview(fullText: string, resultId: string): string {
   return tail ? head + marker + tail : head + marker;
 }
 
-export function pageCount(len: number): number {
-  return Math.max(1, Math.ceil(len / PAGE_CHARS));
+function jsonEscapedUtf8Bytes(symbol: string): number {
+  const code = symbol.charCodeAt(0);
+  if (symbol === '"' || symbol === '\\') return 2;
+  if (code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) return 2;
+  if (code <= 0x1f || (code >= 0xd800 && code <= 0xdfff)) return 6;
+  return Buffer.byteLength(symbol, 'utf8');
 }
 
-/** Clamp + slice a serialized string into a page. Pure/testable. */
+/** gateway_fetch_result is the terminal retrieval transport and must never produce another id. */
+export function mayOffloadToolResult(canonicalName: string): boolean {
+  return canonicalName !== 'gateway_fetch_result';
+}
+
+function pageBoundaries(s: string): Array<{ start: number; end: number }> {
+  const boundaries: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  let cursor = 0;
+  let escapedBytes = 0;
+  for (const symbol of s) {
+    const cost = jsonEscapedUtf8Bytes(symbol);
+    if (escapedBytes > 0 && escapedBytes + cost > PAGE_CHARS) {
+      boundaries.push({ start, end: cursor });
+      start = cursor;
+      escapedBytes = 0;
+    }
+    escapedBytes += cost;
+    cursor += symbol.length;
+  }
+  if (cursor > start || boundaries.length === 0) boundaries.push({ start, end: cursor });
+  return boundaries;
+}
+
+/** Page count for serialized text. Numeric input retains the legacy ASCII-size helper contract. */
+export function pageCount(value: string | number): number {
+  if (typeof value === 'number') return Math.max(1, Math.ceil(value / PAGE_CHARS));
+  return pageBoundaries(value).length;
+}
+
+/** Clamp + slice serialized text without splitting a Unicode code point. Pure/testable. */
 export function pageSlice(s: string, page: number): { page: number; pages: number; chunk: string } {
-  const pages = pageCount(s.length);
+  const boundaries = pageBoundaries(s);
+  const pages = boundaries.length;
   const p = Math.min(Math.max(0, Math.floor(page || 0)), pages - 1);
-  return { page: p, pages, chunk: s.slice(p * PAGE_CHARS, (p + 1) * PAGE_CHARS) };
+  const { start, end } = boundaries[p]!;
+  return { page: p, pages, chunk: s.slice(start, end) };
 }
 
 export interface OffloadOutcome {
@@ -162,12 +199,16 @@ export async function offloadResult(
       caller_hash: callerHash,
       correlation_id: correlationId,
       data,
-      total_bytes: fullText.length,
+      total_bytes: Buffer.byteLength(fullText, 'utf8'),
       created: new Date(now).toISOString(),
       expiresAt: now + TTL_SECONDS * 1000,
       ttl: TTL_SECONDS + 60,
     });
-    return { preview: buildPreview(fullText, resultId), resultId, totalBytes: fullText.length };
+    return {
+      preview: buildPreview(fullText, resultId),
+      resultId,
+      totalBytes: Buffer.byteLength(fullText, 'utf8'),
+    };
   } catch {
     return null; // fail-open: caller keeps the full inline result
   }
@@ -204,7 +245,7 @@ export async function fetchStoredResult(
   const sliced = pageSlice(serialized, page);
   return {
     found: true,
-    total_bytes: serialized.length,
+    total_bytes: Buffer.byteLength(serialized, 'utf8'),
     page: sliced.page,
     pages: sliced.pages,
     chunk: sliced.chunk,

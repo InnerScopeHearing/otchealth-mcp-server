@@ -34,7 +34,7 @@ export async function handleGatewayFetchResult(
   const r = await deps.fetchStoredResult(input.result_id, input.page ?? 0, ctx.callerHash);
   const summary = r.found
     ? 'result ' + input.result_id + ': page ' + String((r.page ?? 0) + 1) + '/' +
-      String(r.pages) + ' (' + String(r.total_bytes) + ' chars total)'
+      String(r.pages) + ' (' + String(r.total_bytes) + ' UTF-8 bytes total)'
     : r.expired
       ? 'result ' + input.result_id + ' has expired (offloaded results are short-lived).'
       : 'no stored result for ' + input.result_id + ' (invalid id, unauthorized, or expired).';
