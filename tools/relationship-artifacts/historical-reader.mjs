@@ -16,7 +16,12 @@ const same = (a, b) => canonical(a) === canonical(b);
 function active(signal) { if (signal?.aborted) fail("relationship_history_deadline"); }
 function abortable(value, signal) { active(signal); return new Promise((resolve, reject) => { const abort = () => reject(Object.assign(new Error("relationship_history_deadline"), { code: "relationship_history_deadline" })); signal?.addEventListener("abort", abort, { once: true }); Promise.resolve(value).then(resolve, reject).finally(() => signal?.removeEventListener("abort", abort)); }); }
 async function boundedCancel(reader) { let timer; try { await Promise.race([Promise.resolve().then(() => reader.cancel()).catch(() => {}), new Promise(resolve => { timer = setTimeout(resolve, 100); })]); } finally { clearTimeout(timer); } }
-async function deadline(signal, timeoutMs, operation) { active(signal); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal; try { return await abortable(operation(combined), combined); } catch (error) { if (combined.aborted) fail("relationship_history_deadline"); throw error; } finally { clearTimeout(timer); controller.abort(); } }
+function deadlineScope(signal, timeoutMs) {
+  active(signal); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  return Object.freeze({ signal: combined, async wait(value) { try { return await abortable(value, combined); } catch (error) { if (combined.aborted) fail("relationship_history_deadline"); throw error; } }, close() { clearTimeout(timer); controller.abort(); } });
+}
+async function deadline(signal, timeoutMs, operation) { const scope = deadlineScope(signal, timeoutMs); try { return await scope.wait(operation(scope.signal)); } finally { scope.close(); } }
+async function boundedCancelResponse(response) { const body = response?.body; if (!body) return; const reader = body.getReader?.(); if (reader) return boundedCancel(reader); if (typeof body.cancel === "function") return boundedCancel({ cancel: () => body.cancel() }); }
 function validRun(value) {
   if (!exact(value, ["ref_version", "run_id", "purpose", "scope", "run_version", "manifest_sha256"])) return false;
   const content = { ref_version: value.ref_version, purpose: value.purpose, scope: value.scope, run_version: value.run_version, manifest_sha256: value.manifest_sha256 };
@@ -37,8 +42,8 @@ function json(value, seen = new Set(), depth = 0) {
 }
 async function bounded(response, signal) {
   const rawDeclared = response.headers?.get?.("content-length"); const declared = rawDeclared === null || rawDeclared === undefined ? null : Number(rawDeclared);
-  if (declared !== null && (!Number.isSafeInteger(declared) || declared < 0)) fail("relationship_history_response_invalid");
-  if (declared !== null && declared > MAX_PAYLOAD + 1024) fail("relationship_history_response_too_large");
+  if (declared !== null && (!Number.isSafeInteger(declared) || declared < 0)) { await boundedCancelResponse(response); fail("relationship_history_response_invalid"); }
+  if (declared !== null && declared > MAX_PAYLOAD + 1024) { await boundedCancelResponse(response); fail("relationship_history_response_too_large"); }
   const reader = response.body?.getReader?.(); if (!reader) { const bytes = Buffer.from(await abortable(response.arrayBuffer(), signal)); if (bytes.length > MAX_PAYLOAD + 1024) fail("relationship_history_response_too_large"); if (declared !== null && bytes.length !== declared) fail("relationship_history_response_invalid"); return bytes; }
   const chunks = []; let size = 0; try { for (;;) { active(signal); const next = await abortable(reader.read(), signal); active(signal); if (next.done) break; size += next.value.byteLength; if (size > MAX_PAYLOAD + 1024) { await boundedCancel(reader); fail("relationship_history_response_too_large"); } chunks.push(Buffer.from(next.value)); } } catch (error) { await boundedCancel(reader); throw error; }
   if (declared !== null && size !== declared) fail("relationship_history_response_invalid"); return Buffer.concat(chunks, size);
@@ -68,13 +73,17 @@ export function createHistoricalRelationshipReader({ gatewayOrigin, run, produce
     try { authorization = await deadline(signal, timeoutMs, requestSignal => getAuthorization(Object.freeze({ run: fixedRun, caller_seat: "cfo", producer_id: producer }), { signal: requestSignal })); } catch (error) { if (error?.code === "relationship_history_deadline") throw error; fail("relationship_history_auth_failed"); }
     if (typeof authorization !== "string" || !/^Bearer [^\s]{16,8192}$/.test(authorization)) fail("relationship_history_auth_failed");
     const url = `${origin}/relationship-history/v1/${fixedRun.run_id}/${producer}/sha256/${ref.payload_sha256.slice(0, 2)}/${ref.payload_sha256}.json?versionId=${encodeURIComponent(ref.version_id)}`;
-    let response; try { response = await deadline(signal, timeoutMs, requestSignal => fetchImpl(url, { method: "GET", headers: Object.freeze({ authorization }), signal: requestSignal, redirect: "error" })); } catch (error) { if (error?.code === "relationship_history_deadline" || signal?.aborted || error?.name === "AbortError") fail("relationship_history_deadline"); fail("relationship_history_transport_unknown"); }
-    active(signal); if (response.status !== 200) fail(response.status === 401 || response.status === 403 ? "relationship_history_forbidden" : "relationship_history_unavailable");
-    const policyVersion = header(response, "x-relationship-policy-version"), expiresAt = header(response, "x-relationship-policy-expires-at"), current = header(response, "x-relationship-source-current");
-    if (header(response, "x-amz-version-id") !== ref.version_id || header(response, "x-amz-server-side-encryption") !== encryption.algorithm ||
-        (encryption.algorithm === "aws:kms" && header(response, "x-amz-server-side-encryption-aws-kms-key-id") !== encryption.kmsKeyId) || header(response, "x-relationship-producer") !== producer ||
-        !policyVersion || !utc(expiresAt) || Date.parse(expiresAt) <= now() || Date.parse(expiresAt) - now() > 300000 || !["true", "false"].includes(current)) fail("relationship_history_gateway_invalid");
-    const bytes = await deadline(signal, timeoutMs, requestSignal => bounded(response, requestSignal)); if (!Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes)) fail("relationship_history_corrupt");
+    const request = deadlineScope(signal, timeoutMs); let response, bytes, policyVersion, expiresAt, current;
+    try {
+      try { response = await request.wait(fetchImpl(url, { method: "GET", headers: Object.freeze({ authorization }), signal: request.signal, redirect: "error" })); } catch (error) { if (error?.code === "relationship_history_deadline" || signal?.aborted || error?.name === "AbortError") fail("relationship_history_deadline"); fail("relationship_history_transport_unknown"); }
+      active(request.signal); if (response.status !== 200) { await boundedCancelResponse(response); fail(response.status === 401 || response.status === 403 ? "relationship_history_forbidden" : "relationship_history_unavailable"); }
+      policyVersion = header(response, "x-relationship-policy-version"); expiresAt = header(response, "x-relationship-policy-expires-at"); current = header(response, "x-relationship-source-current");
+      if (header(response, "x-amz-version-id") !== ref.version_id || header(response, "x-amz-server-side-encryption") !== encryption.algorithm ||
+          (encryption.algorithm === "aws:kms" && header(response, "x-amz-server-side-encryption-aws-kms-key-id") !== encryption.kmsKeyId) || header(response, "x-relationship-producer") !== producer ||
+          !policyVersion || !utc(expiresAt) || Date.parse(expiresAt) <= now() || Date.parse(expiresAt) - now() > 300000 || !["true", "false"].includes(current)) { await boundedCancelResponse(response); fail("relationship_history_gateway_invalid"); }
+      bytes = await request.wait(bounded(response, request.signal));
+    } finally { request.close(); }
+    if (!Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes)) fail("relationship_history_corrupt");
     let envelope; try { envelope = JSON.parse(bytes.toString("utf8")); } catch { fail("relationship_history_corrupt"); }
     if (!exact(envelope, ["schema", "payload_sha256", "payload"]) || envelope.schema !== "relationship-resolution-artifact-v1" || envelope.payload_sha256 !== ref.payload_sha256) fail("relationship_history_corrupt");
     json(envelope.payload); const payloadText = canonical(envelope.payload);
