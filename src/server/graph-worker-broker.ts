@@ -45,6 +45,10 @@ const IDENTITY_AUTHORITY_SCHEMA = 'authenticated-structured-identity-authority-v
 const IDENTITY_PAGE_SCHEMA = 'structured-identity-source-page-v1';
 const IDENTITY_AUTH_SCHEMA = 'source-identity-registry-authorization-v1';
 const MAX_IDENTITY_ENVELOPE_BYTES = 256 * 1024;
+const PARTITION_MANIFEST_SCHEMA = 'source-identity-registry-partition-manifest-v1';
+const COVERAGE_PAGE_SCHEMA = 'source-identity-catalog-coverage-page-v1';
+const PARTITION_VERSION = /^sirm_[a-f0-9]{64}$/;
+const PARTITION_PREFIX = /^[a-f0-9]{1,64}$/;
 const ROW_FIELDS = new Set(['path','sha256','sidecar','enriched','enriched_sha256','err',
   'doc_date','entity','entities','named_entities_orgs','named_entities_people',
   'signatories','counterparty']);
@@ -88,7 +92,28 @@ type IdentityAuthority = {
   schema: 'authenticated-structured-identity-authority-v1';
   adapter_id: string; source_system: string; scope: 'cfo'; version: string;
 };
-type IdentityRegistryConfig = {
+export type IdentityRegistryPartitionConfig = {
+  manifest_version: string;
+  publish_manifest: (request: { registry_id: string; manifest_version: string; envelope: unknown },
+    options: { signal: AbortSignal }) => Promise<boolean>;
+  publish_shard: (request: { registry_id: string; manifest_version: string; shard_id: string;
+    registry_version: string; source_version: string; envelope: unknown }, options: { signal: AbortSignal }) => Promise<boolean>;
+  read_manifest: (request: { registry_id: string; manifest_version: string },
+    options: { signal: AbortSignal }) => Promise<{ status: 'active'; envelope: unknown } | { status: 'revoked' | 'missing' }>;
+  read_shard: (request: { registry_id: string; manifest_version: string; shard_id: string;
+    registry_version: string; source_version: string }, options: { signal: AbortSignal }) =>
+    Promise<{ status: 'active'; envelope: unknown } | { status: 'revoked' | 'missing' }>;
+  manifest_current: (request: { registry_id: string; manifest_version: string; source_generation: string },
+    options: { signal: AbortSignal }) => Promise<boolean>;
+  shard_current: (request: { registry_id: string; manifest_version: string; shard_id: string;
+    registry_version: string; source_version: string }, options: { signal: AbortSignal }) => Promise<boolean>;
+  binding_covered: (request: { registry_id: string; manifest_version: string; source_generation: string;
+    catalog_version: string; coverage_sha256: string; source_binding_hash: string }, options: { signal: AbortSignal }) => Promise<boolean>;
+  coverage_page: (request: { registry_id: string; manifest_version: string; source_generation: string;
+    catalog_version: string; coverage_sha256: string; cursor: string | null; page_size: number },
+    options: { signal: AbortSignal }) => Promise<unknown>;
+};
+export type IdentityRegistryConfig = {
   registry_id: string;
   authority: IdentityAuthority;
   binding: Binding;
@@ -106,8 +131,14 @@ type IdentityRegistryConfig = {
     read: (request: { registry_id: string; version: string }, options: { signal: AbortSignal }) =>
       Promise<{ status: 'active'; envelope: unknown } | { status: 'revoked' | 'missing' }>;
   };
+  /**
+   * Deployment-owned partition authority. It is deliberately optional for the
+   * pre-partition registry routes, but all partition routes stay dark unless
+   * every callback and the immutable manifest pin are configured.
+   */
+  partitions?: IdentityRegistryPartitionConfig;
 };
-type IdentityRegistryResolver = {
+export type IdentityRegistryResolver = {
   resolve: (request: { registry_id: string; caller: AuthContext }, options: { signal: AbortSignal }) =>
     Promise<IdentityRegistryConfig | null>;
 };
@@ -673,6 +704,96 @@ function validIdentityEnvelope(value: unknown, config: IdentityRegistryConfig, e
   const signature = Buffer.from(value.signature, 'base64');
   return signature.length === 64 && verify(null, Buffer.from(canonical(snapshot), 'utf8'), publicKey, signature);
 }
+function partitionText(value: unknown): value is string { return bounded(value, 240); }
+function partitionKey(config: IdentityRegistryConfig) {
+  try {
+    const key = createPublicKey(config.public_key);
+    return key.asymmetricKeyType === 'ed25519' ? key : null;
+  } catch { return null; }
+}
+function partitionEnvelope(value: unknown, config: IdentityRegistryConfig, snapshotCheck: (snapshot: Record<string, unknown>) => boolean): boolean {
+  if (!exact(value, ['snapshot','signature']) || typeof value.signature !== 'string' ||
+      Buffer.byteLength(canonical(value), 'utf8') > MAX_IDENTITY_ENVELOPE_BYTES ||
+      !value.snapshot || typeof value.snapshot !== 'object' || Array.isArray(value.snapshot)) return false;
+  const key = partitionKey(config);
+  const signature = Buffer.from(value.signature, 'base64');
+  return !!key && signature.length === 64 && snapshotCheck(value.snapshot as Record<string, unknown>) &&
+    verify(null, Buffer.from(canonical(value.snapshot), 'utf8'), key, signature);
+}
+function partitionDescriptor(value: unknown): value is Record<string, unknown> {
+  return exact(value, ['binding_count','binding_set_sha256','partition_prefix','registry_version','shard_id','snapshot_sha256','source_version']) &&
+    partitionText(value.shard_id) && partitionText(value.registry_version) && partitionText(value.source_version) &&
+    PARTITION_PREFIX.test(String(value.partition_prefix)) && SHA.test(String(value.snapshot_sha256)) && SHA.test(String(value.binding_set_sha256)) &&
+    Number.isSafeInteger(value.binding_count) && Number(value.binding_count) >= 0 && Number(value.binding_count) <= 1000;
+}
+function completePartition(prefixes: string[]): boolean {
+  const leaves = new Set(prefixes);
+  const has = (prefix: string) => prefixes.some(value => value.startsWith(prefix));
+  const covers = (prefix: string): boolean => leaves.has(prefix) ||
+    (has(prefix) && '0123456789abcdef'.split('').every(nibble => covers(prefix + nibble)));
+  return '0123456789abcdef'.split('').every(covers);
+}
+function validPartitionManifest(value: unknown, config: IdentityRegistryConfig, expectedVersion: string): boolean {
+  return partitionEnvelope(value, config, snapshot => {
+    if (!exact(snapshot, ['catalog_coverage','public_key_sha256','registry_id','schema','shards','source_authority','source_generation','version']) ||
+        snapshot.schema !== PARTITION_MANIFEST_SCHEMA || snapshot.registry_id !== config.registry_id || snapshot.version !== expectedVersion ||
+        !PARTITION_VERSION.test(expectedVersion) || !sameIdentityAuthority(snapshot.source_authority, config.authority) ||
+        !partitionText(snapshot.source_generation) || !SHA.test(String(snapshot.public_key_sha256)) || !Array.isArray(snapshot.shards) ||
+        snapshot.shards.length < 1 || snapshot.shards.length > 1000 || !snapshot.shards.every(partitionDescriptor) ||
+        digest(partitionKey(config)!.export({ type: 'spki', format: 'der' })) !== snapshot.public_key_sha256) return false;
+    const coverage = snapshot.catalog_coverage as Record<string, unknown>;
+    if (!exact(coverage, ['catalog_version','complete','coverage_sha256','expected_shard_count','schema','source_binding_count','source_binding_set_sha256']) ||
+        coverage.schema !== 'source-identity-catalog-coverage-v1' || coverage.complete !== true || !partitionText(coverage.catalog_version) ||
+        !SHA.test(String(coverage.coverage_sha256)) || !SHA.test(String(coverage.source_binding_set_sha256)) ||
+        !Number.isSafeInteger(coverage.expected_shard_count) || Number(coverage.expected_shard_count) !== snapshot.shards.length ||
+        !Number.isSafeInteger(coverage.source_binding_count) || Number(coverage.source_binding_count) < 0 || Number(coverage.source_binding_count) > 100000) return false;
+    const shards = snapshot.shards as Record<string, unknown>[];
+    const ids = new Set(shards.map(shard => String(shard.shard_id)));
+    const prefixes = shards.map(shard => String(shard.partition_prefix));
+    const sorted = [...shards].sort((left, right) => String(left.partition_prefix) < String(right.partition_prefix) ? -1 :
+      String(left.partition_prefix) > String(right.partition_prefix) ? 1 : 0);
+    const unsigned = { schema: PARTITION_MANIFEST_SCHEMA, registry_id: snapshot.registry_id, source_authority: snapshot.source_authority,
+      source_generation: snapshot.source_generation, catalog_coverage: snapshot.catalog_coverage, shards: sorted,
+      public_key_sha256: snapshot.public_key_sha256 };
+    return ids.size === shards.length && new Set(prefixes).size === prefixes.length && completePartition(prefixes) &&
+      shards.reduce((sum, shard) => sum + Number(shard.binding_count), 0) === Number(coverage.source_binding_count) &&
+      !prefixes.some((prefix, i) => prefixes.some((other, j) => i !== j && other.startsWith(prefix))) &&
+      expectedVersion === 'sirm_' + digest(canonical(unsigned)) && canonical(snapshot) === canonical({ ...unsigned, version: expectedVersion });
+  });
+}
+function bindingSetHash(values: string[]): string { return digest(canonical([...values].sort())); }
+function validPartitionShard(value: unknown, config: IdentityRegistryConfig, manifest: Record<string, unknown>, descriptor: Record<string, unknown>): boolean {
+  return partitionEnvelope(value, config, snapshot => {
+    if (!exact(snapshot, ['entries','partition_binding_hashes','public_key_sha256','registry_id','revocations','schema','source_authority','source_version','version']) ||
+        snapshot.schema !== IDENTITY_REGISTRY_SCHEMA || snapshot.registry_id !== config.registry_id ||
+        snapshot.version !== descriptor.registry_version || snapshot.source_version !== descriptor.source_version ||
+        !sameIdentityAuthority(snapshot.source_authority, config.authority) ||
+        snapshot.public_key_sha256 !== manifest.public_key_sha256 || !Array.isArray(snapshot.entries) || !Array.isArray(snapshot.revocations) ||
+        snapshot.entries.length > 1000 || snapshot.revocations.length > 1000 || !Array.isArray(snapshot.partition_binding_hashes) ||
+        snapshot.partition_binding_hashes.length !== descriptor.binding_count || snapshot.partition_binding_hashes.some(hash => !SHA.test(String(hash))) ||
+        new Set(snapshot.partition_binding_hashes).size !== snapshot.partition_binding_hashes.length ||
+        bindingSetHash(snapshot.partition_binding_hashes as string[]) !== descriptor.binding_set_sha256 ||
+        (snapshot.partition_binding_hashes as string[]).some(hash => !hash.startsWith(String(descriptor.partition_prefix))) ||
+        digest(canonical(snapshot)) !== descriptor.snapshot_sha256) return false;
+    const records = [...snapshot.entries as unknown[], ...snapshot.revocations as unknown[]];
+    return records.every(record => {
+      if (!record || typeof record !== 'object' || Array.isArray(record) || !partitionText((record as Record<string, unknown>).source_document_version) ||
+          !SHA.test(String((record as Record<string, unknown>).source_sha256)) || !partitionText((record as Record<string, unknown>).mention)) return false;
+      const binding = digest(canonical({ source_document_version: (record as Record<string, unknown>).source_document_version,
+        source_sha256: (record as Record<string, unknown>).source_sha256 }));
+      return (snapshot.partition_binding_hashes as string[]).includes(binding);
+    });
+  });
+}
+function validCoveragePage(value: unknown, request: Record<string, unknown>): boolean {
+  return exact(value, ['binding_hashes','catalog_version','coverage_sha256','next_cursor','schema','source_generation']) &&
+    value.schema === COVERAGE_PAGE_SCHEMA && value.catalog_version === request.catalog_version &&
+    value.coverage_sha256 === request.coverage_sha256 && value.source_generation === request.source_generation &&
+    Array.isArray(value.binding_hashes) && value.binding_hashes.length <= Number(request.page_size) &&
+    value.binding_hashes.every(hash => SHA.test(String(hash))) && new Set(value.binding_hashes).size === value.binding_hashes.length &&
+    (value.next_cursor === null || partitionText(value.next_cursor)) &&
+    !(request.cursor !== null && value.next_cursor === request.cursor);
+}
 const SPEC_KEYS = ['authorization_ref','authorization_sha256','extractor_bundle_sha256',
   'extractor_version','input_sha256','login_before_model_contract','model','provider',
   'purpose','source_id','source_version'];
@@ -1015,6 +1136,193 @@ export function registerGraphWorkerBrokerRoutes(
       await recheck(c);
       return reply.send(stored.envelope);
     } catch { return fail(reply, 503, 'identity_registry_unavailable'); }
+  });
+
+  async function partitionContext(request: FastifyRequest, reply: FastifyReply, registryId: string, manifestVersion: string) {
+    const c = await identityContext(request, reply, registryId);
+    if (!c) return null;
+    const partitions = c.config.partitions;
+    if (!partitions || !PARTITION_VERSION.test(manifestVersion) || partitions.manifest_version !== manifestVersion ||
+        typeof partitions.publish_manifest !== 'function' || typeof partitions.publish_shard !== 'function' ||
+        typeof partitions.read_manifest !== 'function' || typeof partitions.read_shard !== 'function' ||
+        typeof partitions.manifest_current !== 'function' || typeof partitions.shard_current !== 'function' ||
+        typeof partitions.binding_covered !== 'function' || typeof partitions.coverage_page !== 'function') {
+      await fail(reply, 503, 'identity_registry_partitions_unavailable');
+      return null;
+    }
+    return { ...c, partitions };
+  }
+  async function partitionCall<T>(control: NonNullable<Awaited<ReturnType<typeof partitionContext>>>,
+    callback: (options: { signal: AbortSignal }) => Promise<T>): Promise<T> {
+    const timer = new AbortController();
+    const signal = AbortSignal.any([control.signal, timer.signal]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => { timer.abort(); reject(new Error('partition_deadline')); }, 15_000);
+    });
+    try { return await Promise.race([Promise.resolve().then(() => callback({ signal })), expired]); }
+    finally { if (timeout) clearTimeout(timeout); timer.abort(); }
+  }
+  async function pinnedManifest(c: NonNullable<Awaited<ReturnType<typeof partitionContext>>>, manifestVersion: string) {
+    const stored = await partitionCall(c, options => c.partitions.read_manifest({ registry_id: c.config.registry_id, manifest_version: manifestVersion }, options));
+    if (stored.status !== 'active' || !validPartitionManifest(stored.envelope, c.config, manifestVersion)) throw new Error('partition_manifest');
+    const snapshot = (stored.envelope as Record<string, unknown>).snapshot as Record<string, unknown>;
+    const request = { registry_id: c.config.registry_id, manifest_version: manifestVersion, source_generation: snapshot.source_generation as string };
+    if (await partitionCall(c, options => c.partitions.manifest_current(request, options)) !== true) throw new Error('partition_manifest_current');
+    await recheck(c);
+    return { envelope: stored.envelope, snapshot, current: request };
+  }
+  function shardRequest(value: unknown, registryId: string, manifestVersion: string): Record<string, unknown> | null {
+    if (!exact(value, ['action','manifest_version','registry_id','registry_version','shard_id','source_version']) ||
+        value.action !== 'shard' || value.registry_id !== registryId || value.manifest_version !== manifestVersion ||
+        !partitionText(value.shard_id) || !partitionText(value.registry_version) || !partitionText(value.source_version)) return null;
+    return value;
+  }
+  function manifestRequest(value: unknown, registryId: string, manifestVersion: string): Record<string, unknown> | null {
+    if (!exact(value, ['action','manifest_version','registry_id','source_generation']) || value.action !== 'manifest' ||
+        value.registry_id !== registryId || value.manifest_version !== manifestVersion || !partitionText(value.source_generation)) return null;
+    return value;
+  }
+
+  app.put('/graph-worker/v1/identity-registry/:registryId/partitions/:manifestVersion', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const params = request.params as { registryId?: string; manifestVersion?: string };
+    const registryId = String(params.registryId), manifestVersion = String(params.manifestVersion);
+    const c = await partitionContext(request, reply, registryId, manifestVersion);
+    if (!c) return;
+    if (request.headers['if-none-match'] !== '*' || !validPartitionManifest(request.body, c.config, manifestVersion)) {
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    }
+    try {
+      const snapshot = (request.body as Record<string, unknown>).snapshot as Record<string, unknown>;
+      const current = { registry_id: registryId, manifest_version: manifestVersion, source_generation: snapshot.source_generation as string };
+      if (await partitionCall(c, options => c.partitions.manifest_current(current, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
+      await recheck(c);
+      if (await partitionCall(c, options => c.partitions.publish_manifest({ registry_id: registryId, manifest_version: manifestVersion, envelope: request.body }, options)) !== true) {
+        return fail(reply, 412, 'identity_registry_publication_conflict');
+      }
+      if (await partitionCall(c, options => c.partitions.manifest_current(current, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
+      await recheck(c);
+      return reply.code(201).send({ published: true, registry_id: registryId, manifest_version: manifestVersion });
+    } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
+  });
+
+  app.put('/graph-worker/v1/identity-registry/:registryId/partitions/:manifestVersion/shards/:shardId', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const params = request.params as { registryId?: string; manifestVersion?: string; shardId?: string };
+    const registryId = String(params.registryId), manifestVersion = String(params.manifestVersion), shardId = String(params.shardId);
+    const c = await partitionContext(request, reply, registryId, manifestVersion);
+    if (!c || !partitionText(shardId)) return c ? fail(reply, 400, 'graph_worker_request_invalid') : undefined;
+    try {
+      const manifest = await pinnedManifest(c, manifestVersion);
+      const descriptor = (manifest.snapshot.shards as Record<string, unknown>[]).find(item => item.shard_id === shardId);
+      if (!descriptor) return fail(reply, 403, 'graph_worker_forbidden');
+      if (request.headers['if-none-match'] !== '*' || !validPartitionShard(request.body, c.config, manifest.snapshot, descriptor)) {
+        return fail(reply, 400, 'graph_worker_request_invalid');
+      }
+      const query = { registry_id: registryId, manifest_version: manifestVersion, shard_id: shardId,
+        registry_version: descriptor.registry_version as string, source_version: descriptor.source_version as string };
+      if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
+      await recheck(c);
+      if (await partitionCall(c, options => c.partitions.publish_shard({ ...query, envelope: request.body }, options)) !== true) {
+        return fail(reply, 412, 'identity_registry_publication_conflict');
+      }
+      if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
+      await recheck(c);
+      return reply.code(201).send({ published: true, registry_id: registryId, manifest_version: manifestVersion, shard_id: shardId });
+    } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
+  });
+
+  app.get('/graph-worker/v1/identity-registry/:registryId/partitions/:manifestVersion', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const registryId = String((request.params as { registryId?: string }).registryId);
+    const manifestVersion = String((request.params as { manifestVersion?: string }).manifestVersion);
+    const c = await partitionContext(request, reply, registryId, manifestVersion);
+    if (!c) return;
+    try { return reply.send((await pinnedManifest(c, manifestVersion)).envelope); }
+    catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
+  });
+
+  app.get('/graph-worker/v1/identity-registry/:registryId/partitions/:manifestVersion/shards/:shardId', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const params = request.params as { registryId?: string; manifestVersion?: string; shardId?: string };
+    const registryId = String(params.registryId), manifestVersion = String(params.manifestVersion), shardId = String(params.shardId);
+    const c = await partitionContext(request, reply, registryId, manifestVersion);
+    if (!c || !partitionText(shardId)) return c ? fail(reply, 400, 'graph_worker_request_invalid') : undefined;
+    try {
+      const manifest = await pinnedManifest(c, manifestVersion);
+      const descriptor = (manifest.snapshot.shards as Record<string, unknown>[]).find(item => item.shard_id === shardId);
+      if (!descriptor) return fail(reply, 404, 'identity_registry_partition_missing');
+      const query = { registry_id: registryId, manifest_version: manifestVersion, shard_id: shardId,
+        registry_version: descriptor.registry_version as string, source_version: descriptor.source_version as string };
+      if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
+      const stored = await partitionCall(c, options => c.partitions.read_shard(query, options));
+      if (stored.status !== 'active' || !validPartitionShard(stored.envelope, c.config, manifest.snapshot, descriptor)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
+      if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
+      await recheck(c);
+      return reply.send(stored.envelope);
+    } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
+  });
+
+  app.post('/graph-worker/v1/identity-registry/:registryId/partitions/:manifestVersion/current', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const params = request.params as { registryId?: string; manifestVersion?: string };
+    const registryId = String(params.registryId), manifestVersion = String(params.manifestVersion);
+    const c = await partitionContext(request, reply, registryId, manifestVersion);
+    if (!c) return;
+    const manifestAction = manifestRequest(request.body, registryId, manifestVersion);
+    const shardAction = shardRequest(request.body, registryId, manifestVersion);
+    try {
+      const manifest = await pinnedManifest(c, manifestVersion);
+      if (manifestAction) {
+        const check = { registry_id: registryId, manifest_version: manifestVersion, source_generation: manifestAction.source_generation as string };
+        if (manifestAction.source_generation !== manifest.snapshot.source_generation ||
+            await partitionCall(c, options => c.partitions.manifest_current(check, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
+      } else if (shardAction) {
+        const descriptor = (manifest.snapshot.shards as Record<string, unknown>[]).find(item => item.shard_id === shardAction.shard_id);
+        const check = { registry_id: registryId, manifest_version: manifestVersion, shard_id: shardAction.shard_id as string,
+          registry_version: shardAction.registry_version as string, source_version: shardAction.source_version as string };
+        if (!descriptor || descriptor.registry_version !== shardAction.registry_version || descriptor.source_version !== shardAction.source_version ||
+            await partitionCall(c, options => c.partitions.shard_current(check, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
+      } else return fail(reply, 400, 'graph_worker_request_invalid');
+      await recheck(c);
+      return reply.send({ current: true });
+    } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
+  });
+
+  app.post('/graph-worker/v1/identity-registry/:registryId/partitions/:manifestVersion/coverage', {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const params = request.params as { registryId?: string; manifestVersion?: string };
+    const registryId = String(params.registryId), manifestVersion = String(params.manifestVersion);
+    const c = await partitionContext(request, reply, registryId, manifestVersion);
+    if (!c || !request.body || typeof request.body !== 'object') return c ? fail(reply, 400, 'graph_worker_request_invalid') : undefined;
+    try {
+      const manifest = await pinnedManifest(c, manifestVersion), coverage = manifest.snapshot.catalog_coverage as Record<string, unknown>;
+      const body = request.body as Record<string, unknown>;
+      const common = body.registry_id === registryId && body.manifest_version === manifestVersion &&
+        body.source_generation === manifest.snapshot.source_generation && body.catalog_version === coverage.catalog_version && body.coverage_sha256 === coverage.coverage_sha256;
+      if (body.action === 'member' && exact(body, ['action','catalog_version','coverage_sha256','manifest_version','registry_id','source_binding_hash','source_generation']) && common && SHA.test(String(body.source_binding_hash))) {
+        const check = { registry_id: registryId, manifest_version: manifestVersion, source_generation: body.source_generation as string,
+          catalog_version: body.catalog_version as string, coverage_sha256: body.coverage_sha256 as string, source_binding_hash: body.source_binding_hash as string };
+        if (await partitionCall(c, options => c.partitions.binding_covered(check, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
+        await recheck(c); return reply.send({ covered: true });
+      }
+      if (body.action === 'page' && exact(body, ['action','catalog_version','coverage_sha256','cursor','manifest_version','page_size','registry_id','source_generation']) && common &&
+          (body.cursor === null || partitionText(body.cursor)) && Number.isSafeInteger(body.page_size) && Number(body.page_size) >= 1 && Number(body.page_size) <= 1000) {
+        const query = { registry_id: registryId, manifest_version: manifestVersion, source_generation: body.source_generation as string,
+          catalog_version: body.catalog_version as string, coverage_sha256: body.coverage_sha256 as string, cursor: body.cursor as string | null, page_size: body.page_size as number };
+        const page = await partitionCall(c, options => c.partitions.coverage_page(query, options));
+        if (!validCoveragePage(page, query)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
+        await recheck(c); return reply.send(page);
+      }
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
   });
 
   app.post('/graph-worker/v1/control', {
