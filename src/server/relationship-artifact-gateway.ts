@@ -149,7 +149,7 @@ type Authority = { mode:'static'; binding:Binding; policy:Policy; policyText:str
 async function authority(d:RelationshipArtifactGatewayDeps,ctx:AuthContext,p:Record<string,string>,run:RunRef|null,signal:AbortSignal):Promise<Authority|null>{
  const policyText=d.policyJson(),policy=parsePolicy(policyText,d.now());
  if(policy){const binding=select(policy,ctx,p);return binding&&(!run||same(run,binding.run))?{mode:'static',binding,policy,policyText}:null;}
- if(policyText.trim()!=='')return null;
+ if(policyText!=='')return null;
  const automatic=await d.resolveAutomaticBinding(ctx,p.runId,p.producerId,signal);
  return validAutomatic(automatic,ctx,p.runId,p.producerId,d.now())&&(!run||same(run,automatic.binding.run))?{mode:'automatic',binding:automatic.binding,automatic}:null;
 }

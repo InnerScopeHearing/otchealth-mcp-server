@@ -63,6 +63,7 @@ test('automatic authorization is derived per admitted CFO run and fails closed f
   for(const change of[(x:any)=>x.setAutomatic(false),(x:any)=>x.setCtx({...x.f.ctx,caller_hash:hash('foreign')}),(x:any)=>x.setAutomaticExpires(new Date(x.f.now-1).toISOString())]){
    const x=await harness();try{x.setPolicy('');x.setAutomatic(true);change(x);assert.equal((await x.request(x.source())).statusCode,403);}finally{await x.app.close();}
   }
+  for(const staticPolicy of[' ','{']){const x=await harness();try{x.setPolicy(staticPolicy);x.setAutomatic(true);assert.equal((await x.request(x.source())).statusCode,403);}finally{await x.app.close();}}
   const foreign=`/relationship-artifacts/v1/${t.f.run.run_id}/other-producer/sha256/${p.body.payload_sha256.slice(0,2)}/${p.body.payload_sha256}.json`;assert.equal((await t.request(p,'PUT',{url:foreign})).statusCode,403);
  }finally{await t.app.close();}
 });
