@@ -25,6 +25,7 @@ const {
   fetchIndexMaxTs,
   bulkIndex,
   runBackfill,
+  runHistoricalRepair,
 } = await import('./opensearch-backfill.js');
 
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
@@ -454,4 +455,83 @@ test('runBackfill: multiple bulk chunks (bulkBatchSize smaller than the fetched 
   assert.equal(result.fetched, 5);
   assert.equal(result.failed, 2, 'the permanently-failed first chunk of 2');
   assert.equal(result.indexed, 3, 'the other two chunks (2 + 1) still succeeded despite the first chunk failing');
+});
+
+test('historical repair: repairs older failed A even when newer B is already indexed, without embedding B', async () => {
+  const a = { id: 'a', agent: 'cfo', kind: 'fact', text: 'older failed record', tags: [], created_at: '2026-08-01T00:00:00Z' };
+  const b = { id: 'b', agent: 'cfo', kind: 'fact', text: 'newer indexed record', tags: [], created_at: '2026-08-02T00:00:00Z' };
+  const embedTexts: string[] = [];
+  let pass = 0;
+  const deps = {
+    queryDocs: (async (_coll: string, query: string) => query.includes('c.id = @id') ? [a] : (pass === 0 ? [a, b] : [])) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async (texts: string[]) => { embedTexts.push(...texts); return texts.map(() => [1]); }) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => [1]) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  let bulkBodies = 0;
+  const result = await withStubbedFetch(
+    (async (url: string, init?: RequestInit) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [
+        { _id: 'cfo__a', found: false }, { _id: 'cfo__b', found: true },
+      ] }), { status: 200 });
+      if (url.includes('_bulk')) {
+        bulkBodies += 1;
+        assert.match(String(init?.body), /cfo__a/);
+        assert.doesNotMatch(String(init?.body), /cfo__b/);
+        return new Response(JSON.stringify({ errors: false, items: [{ index: { status: 201 } }] }), { status: 200 });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo' }, deps),
+  );
+  assert.equal(result.indexed, 1);
+  assert.equal(result.already_indexed, 1);
+  assert.deepEqual(embedTexts, ['older failed record']);
+  assert.equal(bulkBodies, 1);
+  assert.deepEqual(result.checkpoint.pending_ids, []);
+});
+
+test('historical repair: failed A is retained in checkpoint and retried from exact source after cursor advanced past B', async () => {
+  const a = { id: 'a', agent: 'cfo', kind: 'fact', text: 'older failed record', tags: [], created_at: '2026-08-01T00:00:00Z' };
+  const b = { id: 'b', agent: 'cfo', kind: 'fact', text: 'newer indexed record', tags: [], created_at: '2026-08-02T00:00:00Z' };
+  let pass = 0;
+  const deps = {
+    queryDocs: (async (_coll: string, query: string) => query.includes('c.id = @id') ? [a] : (pass === 0 ? [a, b] : [])) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async (texts: string[]) => texts.map(() => [1])) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => [1]) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const first = await withStubbedFetch(
+    (async (url: string) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [{ _id: 'cfo__a', found: false }, { _id: 'cfo__b', found: true }] }), { status: 200 });
+      if (url.includes('_bulk')) return new Response('down', { status: 503 });
+      throw new Error('unexpected');
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo' }, deps),
+  );
+  assert.deepEqual(first.checkpoint.pending_ids, ['a']);
+  assert.equal(first.checkpoint.after_id, 'b');
+  pass = 1;
+  const second = await withStubbedFetch(
+    (async (url: string) => {
+      if (url.includes('_mget')) return new Response(JSON.stringify({ docs: [{ _id: 'cfo__a', found: false }] }), { status: 200 });
+      if (url.includes('_bulk')) return new Response(JSON.stringify({ errors: false, items: [{ index: { status: 201 } }] }), { status: 200 });
+      throw new Error('unexpected');
+    }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo', checkpoint: first.checkpoint }, deps),
+  );
+  assert.equal(second.indexed, 1);
+  assert.deepEqual(second.checkpoint.pending_ids, []);
+});
+
+test('historical repair: a pending ID deleted from the source is removed without write or embedding', async () => {
+  const deps = {
+    queryDocs: (async () => []) as unknown as typeof import('../agentstate/store.js').queryDocs,
+    embedBatch: (async () => { throw new Error('must not embed deleted source'); }) as unknown as typeof import('../azure/foundry.js').embedBatch,
+    embed: (async () => { throw new Error('must not embed deleted source'); }) as unknown as typeof import('../azure/foundry.js').embed,
+  };
+  const result = await withStubbedFetch(
+    (async () => { throw new Error('must not query OpenSearch for absent source'); }) as unknown as typeof fetch,
+    () => runHistoricalRepair({ agent: 'cfo', checkpoint: { version: 'memory-index-repair-v1', agent: 'cfo', after_id: 'z', pending_ids: ['a'] } }, deps),
+  );
+  assert.equal(result.checked, 0);
+  assert.deepEqual(result.checkpoint.pending_ids, []);
 });

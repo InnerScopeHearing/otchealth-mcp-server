@@ -9,7 +9,7 @@
  * Recall here is deterministic keyword/field filtering. Semantic recall stays in company-brain.
  */
 
-import { createDoc, readDoc, queryDocs, newId } from './store.js';
+import { createDoc, readDoc, queryDocs, replaceDoc, newId } from './store.js';
 import { normalizeAgent, type MemoryKind } from './agents.js';
 
 const MEMORY = 'memory';
@@ -25,6 +25,12 @@ export interface MemoryRecord {
   /** id of a record this one REPLACES (correction chain). See MemoryEntry.supersedes. */
   supersedes?: string | null;
   created_at: string;
+  /**
+   * The source record is accepted before its search projection.  Keep that obligation on the
+   * source record so a transient projection failure survives a worker restart.  This is metadata
+   * only: it deliberately never stores the index error, which could contain transport details.
+   */
+  indexing?: { state: 'pending' | 'indexed'; attempts: number; updated_at: string };
 }
 
 export async function writeMemory(input: {
@@ -46,9 +52,38 @@ export async function writeMemory(input: {
     source: input.source ?? null,
     ...(input.supersedes ? { supersedes: input.supersedes } : {}),
     created_at: new Date().toISOString(),
+    indexing: { state: 'pending', attempts: 0, updated_at: new Date().toISOString() },
   };
   await createDoc(MEMORY, agent, rec as unknown as Record<string, unknown>);
   return rec;
+}
+
+/**
+ * Record the outcome of a projection attempt without changing the memory payload.  A failed
+ * projection remains pending; an acknowledgement that is lost after OpenSearch accepted a write
+ * merely leaves a harmless pending obligation, which the reconciler resolves with an existence
+ * check before it ever spends another embedding call.
+ */
+export async function recordMemoryIndexOutcome(record: MemoryRecord, indexed: boolean): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await readDoc(MEMORY, record.agent, record.id);
+    if (!current) return; // Source was deleted or is no longer accessible. Never recreate it.
+    const doc = current.doc as unknown as MemoryRecord;
+    if (doc.type !== 'memory' || doc.agent !== record.agent) return;
+    const previous = doc.indexing;
+    if (indexed && previous?.state === 'indexed') return;
+    const next: MemoryRecord = {
+      ...doc,
+      indexing: {
+        state: indexed ? 'indexed' : 'pending',
+        attempts: (previous?.attempts ?? 0) + 1,
+        updated_at: new Date().toISOString(),
+      },
+    };
+    const result = await replaceDoc(MEMORY, record.agent, record.id, next as unknown as Record<string, unknown>, current.etag ?? undefined);
+    if (result.ok) return;
+    if (result.status !== 412) return;
+  }
 }
 
 export async function getMemory(id: string, agent: string): Promise<MemoryRecord | null> {

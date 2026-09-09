@@ -84,7 +84,7 @@
  * `runShadowEvalIfSampled` skips even RUNNING the shadow re-run for a ring-gated index (no cost, no
  * capture), and `captureShadowComparison` repeats the same check as defense in depth.
  */
-import { writeMemory } from '../agentstate/memory.js';
+import { writeMemory, recordMemoryIndexOutcome } from '../agentstate/memory.js';
 import { indexMemory as indexMemoryNow } from '../search/index.js';
 import { isConfigured as cosmosConfigured } from '../agentstate/store.js';
 import { looksLikeSecretValue } from './journal.js';
@@ -360,7 +360,7 @@ export async function captureShadowComparison(input: ShadowComparisonInput): Pro
       tags: ['shadow-eval', input.index, input.strategy],
       source: `shadow-eval:${input.index}`,
     });
-    await indexMemoryNow({
+    const indexed = await indexMemoryNow({
       agent: record.agent,
       id: record.id,
       type: record.kind,
@@ -368,6 +368,7 @@ export async function captureShadowComparison(input: ShadowComparisonInput): Pro
       tags: record.tags,
       text: record.text,
     });
+    await recordMemoryIndexOutcome(record, indexed.indexed);
   } catch {
     /* FAIL-OPEN: a shadow-eval capture failure must be completely invisible to the caller. */
   }

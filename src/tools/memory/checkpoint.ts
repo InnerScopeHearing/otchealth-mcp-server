@@ -6,7 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
-import { writeMemory } from '../../agentstate/memory.js';
+import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { chat, chatConfigured, type ChatMessage } from '../../azure/foundry.js';
@@ -106,14 +106,18 @@ async function writeAndIndex(
 ): Promise<Delivery> {
   return deliverCheckpointMemory(
     () => writeMemory({ agent, kind, text, tags: opts.tags, source: opts.source, supersedes: opts.supersedes }),
-    record => indexMemoryNow({
-      agent: record.agent,
-      id: record.id,
-      type: record.kind,
-      ts: record.created_at,
-      tags: record.tags,
-      text: record.text,
-    }),
+    async record => {
+      const indexed = await indexMemoryNow({
+        agent: record.agent,
+        id: record.id,
+        type: record.kind,
+        ts: record.created_at,
+        tags: record.tags,
+        text: record.text,
+      });
+      await recordMemoryIndexOutcome(record, indexed.indexed).catch(() => undefined);
+      return indexed;
+    },
   );
 }
 
