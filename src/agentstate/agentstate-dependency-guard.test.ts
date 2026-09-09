@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -23,7 +24,7 @@ import { join, relative } from 'node:path';
  * src/agentstate/store.ts (the dispatcher) so the call honours STATE_BACKEND like everything else.
  */
 
-const SRC = new URL('..', import.meta.url).pathname;
+const SRC = fileURLToPath(new URL('..', import.meta.url));
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -34,7 +35,7 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const FILES = sourceFiles(SRC).map((f) => ({ path: relative(SRC, f), text: readFileSync(f, 'utf8') }));
+const FILES = sourceFiles(SRC).map((f) => ({ path: relative(SRC, f).replaceAll('\\', '/'), text: readFileSync(f, 'utf8') }));
 
 /** The only files allowed to reach a concrete state backend, each with the reason it is legitimate. */
 const BACKEND_IMPORT_ALLOWED: Readonly<Record<string, string>> = Object.freeze({

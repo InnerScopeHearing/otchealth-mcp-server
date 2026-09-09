@@ -4,6 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured } from '../../agentstate/store.js';
 import { claimTask } from '../../agentstate/ledger.js';
 import { resolveAttribution } from './attribution.js';
+import { taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -23,8 +24,18 @@ export interface TaskClaimInput {
 
 /** Exported standalone (mirroring memory-write.ts's handleMemoryWrite) so the attribution binding
  *  is directly testable through the actual registered entry point. */
-export async function handleTaskClaim(input: TaskClaimInput, ctx: ToolContext): Promise<ToolResultPayload> {
-  if (!isConfigured()) {
+export interface TaskClaimDependencies {
+  isConfigured: typeof isConfigured;
+  claimTask: typeof claimTask;
+  taskVisibleToCaller: typeof taskVisibleToCaller;
+}
+const DEFAULT_TASK_CLAIM_DEPENDENCIES: TaskClaimDependencies = { isConfigured, claimTask, taskVisibleToCaller };
+export async function handleTaskClaim(
+  input: TaskClaimInput,
+  ctx: ToolContext,
+  deps: TaskClaimDependencies = DEFAULT_TASK_CLAIM_DEPENDENCIES,
+): Promise<ToolResultPayload> {
+  if (!deps.isConfigured()) {
     return { data: { claimed: false, note: 'agent-state Cosmos not configured.' }, summary: 'Ledger not configured.' };
   }
   const { actor, claimed_actor } = resolveAttribution(ctx.callerAgent, input.agent);
@@ -34,7 +45,13 @@ export async function handleTaskClaim(input: TaskClaimInput, ctx: ToolContext): 
       summary: `DRY RUN: would claim ${input.task_id} for ${actor}.`,
     };
   }
-  const res = await claimTask(input.task_id, actor, input.board, claimed_actor);
+  const res = await deps.claimTask(
+    input.task_id,
+    actor,
+    input.board,
+    claimed_actor,
+    (task) => deps.taskVisibleToCaller(task, actor),
+  );
   // A14-DEAD-LETTER: check dead_lettered FIRST -- claimTask returns `task` set in BOTH the
   // normal-success case and the dead-letter case, so checking `res.task` alone would wrongly
   // report a dead-lettered task as "Claimed".

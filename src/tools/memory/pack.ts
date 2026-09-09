@@ -1,9 +1,10 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
+import { isConfigured, readSharedAll } from '../../memory/store.js';
 import { computeRetractedIds, boundRecord } from './wake.js';
 import { retractedIdsForAgent } from '../../memory/retractions.js';
+import { resolveAgentReadScope } from './agent-scope.js';
 
 /**
  * memory_pack — one-call working-set loader for ANY client/platform. Given an agent lane, returns
@@ -192,7 +193,7 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
         openWorldHint: false,
       },
       inputShape: {
-        agent: z.string().optional().describe('Agent lane to load; defaults to your token identity (lowercase id, e.g. "cto", "developer").'),
+        agent: z.string().optional().describe('Agent lane to load. Authenticated calls default to and may select only their token identity (lowercase id, e.g. "cto", "developer").'),
         recent_limit: z.number().int().min(1).max(80).optional().describe('Max recent entries to include (default 30).'),
         brief: z
           .boolean()
@@ -210,11 +211,17 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
         count: z.number(),
       },
       handler: async (input, ctx) => {
-        const agentRaw = input.agent || ctx.callerAgent;
-        if (!agentRaw) {
+        const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
+        if (!scope) {
           return { data: { agent: '', status: null, corrections: [], decisions: [], recent: [], count: 0 }, summary: 'No agent specified and no caller identity; pass agent.' };
         }
-        const agent = normalizeAgent(agentRaw);
+        if (!scope.allowed) {
+          return {
+            data: { agent: scope.agent, status: null, corrections: [], decisions: [], recent: [], count: 0 },
+            summary: 'memory_pack: authenticated callers can load only their own agent context (forbidden_agent).',
+          };
+        }
+        const agent = scope.agent;
         if (!isConfigured()) {
           return {
             data: { agent, status: null, corrections: [], decisions: [], recent: [], count: 0 },

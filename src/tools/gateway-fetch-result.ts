@@ -1,14 +1,45 @@
 /**
- * gateway_fetch_result — retrieve a JIT-offloaded tool result by id.
- *
- * When a tool result is too large it is offloaded (see result-store.ts) and the inline response is
- * replaced with a preview + result_id. This read tool pulls the full payload back on demand, paged
- * so even very large payloads can be walked without blowing the context in one shot.
+ * gateway_fetch_result retrieves a caller-bound JIT-offloaded tool result by id.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { registerTool, type CallerHashProvider } from './registry.js';
-import { fetchStoredResult } from './result-store.js';
+import {
+  registerTool,
+  type CallerHashProvider,
+  type ToolContext,
+  type ToolResultPayload,
+} from './registry.js';
+import { fetchStoredResult, type FetchOutcome } from './result-store.js';
+
+export interface GatewayFetchResultInput {
+  result_id: string;
+  page?: number;
+}
+
+export interface GatewayFetchResultDeps {
+  fetchStoredResult: (
+    resultId: string,
+    page: number,
+    callerHash: string,
+  ) => Promise<FetchOutcome>;
+}
+
+const DEFAULT_DEPS: GatewayFetchResultDeps = { fetchStoredResult };
+
+export async function handleGatewayFetchResult(
+  input: GatewayFetchResultInput,
+  ctx: Pick<ToolContext, 'callerHash'>,
+  deps: GatewayFetchResultDeps = DEFAULT_DEPS,
+): Promise<ToolResultPayload> {
+  const r = await deps.fetchStoredResult(input.result_id, input.page ?? 0, ctx.callerHash);
+  const summary = r.found
+    ? 'result ' + input.result_id + ': page ' + String((r.page ?? 0) + 1) + '/' +
+      String(r.pages) + ' (' + String(r.total_bytes) + ' chars total)'
+    : r.expired
+      ? 'result ' + input.result_id + ' has expired (offloaded results are short-lived).'
+      : 'no stored result for ' + input.result_id + ' (invalid id, unauthorized, or expired).';
+  return { data: r, summary };
+}
 
 export function registerGatewayFetchResult(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -19,14 +50,14 @@ export function registerGatewayFetchResult(server: McpServer, callerHash: Caller
       annotations: {
         title: 'Fetch a JIT-offloaded tool result',
         description:
-          'Retrieve the full payload of a large tool result that was offloaded (JIT) to keep the agent context small. Pass the result_id shown in the truncated response, plus page (0-based) to page through a large payload. Read/compute; mutates nothing.',
+          'Retrieve your caller-bound payload from a large tool result that was offloaded to keep context small. Pass the result_id shown in your truncated response, plus page (0-based) to page through it. Another authenticated caller cannot use the id.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: false,
       },
       inputShape: {
-        result_id: z.string().min(1).describe('The result_id from a JIT-offloaded tool response.'),
+        result_id: z.string().min(1).describe('The result_id from your JIT-offloaded tool response.'),
         page: z.number().int().min(0).optional().describe('0-based page for large payloads (default 0).'),
       },
       outputShape: {
@@ -37,15 +68,7 @@ export function registerGatewayFetchResult(server: McpServer, callerHash: Caller
         chunk: z.string().optional(),
         expired: z.boolean().optional(),
       },
-      handler: async (input) => {
-        const r = await fetchStoredResult(input.result_id, input.page ?? 0);
-        const summary = r.found
-          ? `result ${input.result_id}: page ${(r.page ?? 0) + 1}/${r.pages} (${r.total_bytes} chars total)`
-          : r.expired
-            ? `result ${input.result_id} has expired (offloaded results are short-lived).`
-            : `no stored result for ${input.result_id} (invalid id or expired).`;
-        return { data: r, summary };
-      },
+      handler: handleGatewayFetchResult,
     },
     callerHash,
   );

@@ -2,8 +2,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
-import { createTask } from '../../agentstate/ledger.js';
+import { createTask, TaskAccessDeniedError } from '../../agentstate/ledger.js';
 import { resolveAttribution } from './attribution.js';
+import { taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -27,11 +28,28 @@ export interface TaskCreateInput {
 /** Exported standalone (mirroring memory-write.ts's handleMemoryWrite) so the attribution binding
  *  is directly testable through the actual registered entry point, not only through
  *  resolveAttribution's own pure-function tests. */
-export async function handleTaskCreate(input: TaskCreateInput, ctx: ToolContext): Promise<ToolResultPayload> {
-  if (!isConfigured()) {
+export interface TaskCreateDependencies {
+  isConfigured: typeof isConfigured;
+  createTask: typeof createTask;
+  taskVisibleToCaller: typeof taskVisibleToCaller;
+}
+const DEFAULT_TASK_CREATE_DEPENDENCIES: TaskCreateDependencies = { isConfigured, createTask, taskVisibleToCaller };
+export async function handleTaskCreate(
+  input: TaskCreateInput,
+  ctx: ToolContext,
+  deps: TaskCreateDependencies = DEFAULT_TASK_CREATE_DEPENDENCIES,
+): Promise<ToolResultPayload> {
+  if (!deps.isConfigured()) {
     return { data: { created: false, task: null, note: 'agent-state Cosmos not configured on the gateway.' }, summary: 'Ledger not configured; nothing written.' };
   }
   const { actor, claimed_actor } = resolveAttribution(ctx.callerAgent, input.created_by);
+  const accessGuard = (task: { owner_agent: string; created_by: string }) => deps.taskVisibleToCaller(task, actor);
+  if (!accessGuard({ owner_agent: input.owner_agent, created_by: actor })) {
+    return {
+      data: { created: false, task: null, reason: 'task not found or unavailable' },
+      summary: 'Task not created: task not found or unavailable.',
+    };
+  }
   if (ctx.dryRun) {
     return {
       data: {
@@ -43,7 +61,22 @@ export async function handleTaskCreate(input: TaskCreateInput, ctx: ToolContext)
       summary: `DRY RUN: would create task "${input.title}" for ${input.owner_agent} (created_by=${actor}).`,
     };
   }
-  const { task, deduped } = await createTask({ ...input, created_by: actor, claimed_created_by: claimed_actor });
+  let created;
+  try {
+    created = await deps.createTask(
+      { ...input, created_by: actor, claimed_created_by: claimed_actor },
+      accessGuard,
+    );
+  } catch (error) {
+    if (error instanceof TaskAccessDeniedError) {
+      return {
+        data: { created: false, task: null, reason: error.message },
+        summary: `Task not created: ${error.message}.`,
+      };
+    }
+    throw error;
+  }
+  const { task, deduped } = created;
   return {
     data: { created: !deduped, task, deduped, claimed_actor },
     summary: deduped

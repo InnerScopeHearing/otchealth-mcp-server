@@ -362,7 +362,7 @@ test('FND-20260829-e454: both ingest tool handlers actually surface ingestHeyGen
   // (its handlers are defined inline, with a large injected `deps` object covering billing/
   // owner-approval/spend-controller machinery unrelated to this fix), so this locks the SHAPE of
   // the one-line passthrough this fix adds to each handler, catching an accidental deletion of it.
-  const source = readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('./production-tools.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const existingStart = source.indexOf("name: 'heygen_existing_video_ingest_qa'");
   const waitStart = source.indexOf("name: 'heygen_video_wait_ingest_qa'");
   const waitEnd = source.indexOf('}, callerHash);\n}', waitStart); // end of registerHeyGenProductionTools

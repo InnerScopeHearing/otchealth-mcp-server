@@ -110,6 +110,47 @@ async function appendEvent(
   }
 }
 
+export type TaskAccessGuard = (task: Readonly<Task>) => boolean;
+
+export interface TaskMutationDependencies {
+  readDoc: typeof readDoc;
+  createDoc: typeof createDoc;
+  replaceDoc: typeof replaceDoc;
+  resolveArtifact: typeof resolveArtifact;
+  appendEvent: (
+    taskId: string,
+    kind: string,
+    actor: string,
+    detail: string,
+    claimedActor?: string,
+  ) => Promise<void>;
+}
+
+const DEFAULT_TASK_MUTATION_DEPENDENCIES: TaskMutationDependencies = {
+  readDoc,
+  createDoc,
+  replaceDoc,
+  resolveArtifact,
+  appendEvent,
+};
+
+function taskAccessAllowed(task: Task, guard?: TaskAccessGuard): boolean {
+  return guard ? guard(task) : true;
+}
+
+export class TaskAccessDeniedError extends Error {
+  readonly code = 'task_access_denied';
+
+  constructor() {
+    super('task not found or unavailable');
+    this.name = 'TaskAccessDeniedError';
+  }
+}
+
+function assertTaskAccess(task: Task, guard?: TaskAccessGuard): void {
+  if (!taskAccessAllowed(task, guard)) throw new TaskAccessDeniedError();
+}
+
 /** Deterministic id from an idempotency key, so retried creates with the SAME key never duplicate
  *  a task — the caller gets the original task back instead. Same charset the Cosmos client allows. */
 function idFromIdempotencyKey(key: string): string {
@@ -132,7 +173,7 @@ export async function createTask(input: {
    *  from their authenticated token identity. `created_by` above is ALREADY the token-bound value
    *  by the time it reaches here -- this is audit-only, threaded to the 'created' event. */
   claimed_created_by?: string;
-}): Promise<{ task: Task; deduped: boolean }> {
+}, accessGuard?: TaskAccessGuard, deps: TaskMutationDependencies = DEFAULT_TASK_MUTATION_DEPENDENCIES): Promise<{ task: Task; deduped: boolean }> {
   const owner = normalizeAgent(input.owner_agent);
   const board = (input.board || DEFAULT_BOARD).trim().toLowerCase();
 
@@ -140,8 +181,12 @@ export async function createTask(input: {
   // instead of creating a duplicate. This is the "retried dispatch must not double-work" guard.
   if (input.idempotency_key) {
     const existingId = idFromIdempotencyKey(`${board}:${input.idempotency_key}`);
-    const hit = await readDoc(TASKS, board, existingId);
-    if (hit) return { task: hit.doc as unknown as Task, deduped: true };
+    const hit = await deps.readDoc(TASKS, board, existingId);
+    if (hit) {
+      const existing = hit.doc as unknown as Task;
+      assertTaskAccess(existing, accessGuard);
+      return { task: existing, deduped: true };
+    }
   }
 
   const now = new Date().toISOString();
@@ -167,18 +212,23 @@ export async function createTask(input: {
     notes: [],
     attempt_count: 0, // A14-DEAD-LETTER
   };
+  assertTaskAccess(task, accessGuard);
   try {
-    await createDoc(TASKS, board, task as unknown as Record<string, unknown>);
+    await deps.createDoc(TASKS, board, task as unknown as Record<string, unknown>);
   } catch (e) {
     // Race: two callers with the same idempotency_key created concurrently — the loser re-reads
     // and returns the winner's doc instead of erroring (still idempotent from the caller's view).
     if (input.idempotency_key) {
-      const hit = await readDoc(TASKS, board, task.id);
-      if (hit) return { task: hit.doc as unknown as Task, deduped: true };
+      const hit = await deps.readDoc(TASKS, board, task.id);
+      if (hit) {
+        const existing = hit.doc as unknown as Task;
+        assertTaskAccess(existing, accessGuard);
+        return { task: existing, deduped: true };
+      }
     }
     throw e;
   }
-  await appendEvent(task.id, 'created', input.created_by, `created for ${owner} (${task.priority})`, input.claimed_created_by);
+  await deps.appendEvent(task.id, 'created', input.created_by, `created for ${owner} (${task.priority})`, input.claimed_created_by);
   return { task, deduped: false };
 }
 
@@ -208,12 +258,15 @@ export async function claimTask(
   /** FND-20260829-878f: audit-only, see createTask's claimed_created_by doc comment -- `agent`
    *  above is already the token-bound value by the time it reaches here. */
   claimedActor?: string,
+  accessGuard?: TaskAccessGuard,
+  deps: TaskMutationDependencies = DEFAULT_TASK_MUTATION_DEPENDENCIES,
 ): Promise<{ task?: Task; conflict?: boolean; reason?: string; dead_lettered?: boolean }> {
   const who = normalizeAgent(agent);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const hit = await readDoc(TASKS, board, id);
+    const hit = await deps.readDoc(TASKS, board, id);
     if (!hit) return { reason: 'not found' };
     const task = hit.doc as unknown as Task;
+    if (!taskAccessAllowed(task, accessGuard)) return { reason: 'not found' };
     if (task.status === 'done' || task.status === 'cancelled' || task.status === 'dead_letter') {
       return { reason: `task already ${task.status}` };
     }
@@ -239,10 +292,10 @@ export async function claimTask(
         ...(task.notes ?? []),
         `[${now.toISOString()}] ${who}: claim refused — attempt_count (${currentAttemptCount}) reached MAX_CLAIM_ATTEMPTS (${MAX_CLAIM_ATTEMPTS}); dead-lettered instead of reclaimed.`,
       ];
-      const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
+      const res = await deps.replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
       if (res.status === 412) continue; // lost the race; re-read and retry
       if (!res.ok) return { reason: `dead-letter transition failed: ${res.status}` };
-      await appendEvent(
+      await deps.appendEvent(
         id,
         'dead_lettered',
         who,
@@ -267,10 +320,10 @@ export async function claimTask(
     task.lease_until = new Date(now.getTime() + LEASE_MINUTES * 60000).toISOString();
     task.lease_version = (task.lease_version ?? 0) + 1;
     task.updated_at = now.toISOString();
-    const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
+    const res = await deps.replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
     if (res.status === 412) continue; // lost the race; re-read and retry
     if (!res.ok) return { reason: `claim failed: ${res.status}` };
-    await appendEvent(
+    await deps.appendEvent(
       id,
       'claimed',
       who,
@@ -293,11 +346,14 @@ export async function heartbeatTask(
   /** FND-20260829-878f: audit-only, see createTask's claimed_created_by doc comment -- `agent`
    *  above is already the token-bound value by the time it reaches here. */
   claimedActor?: string,
+  accessGuard?: TaskAccessGuard,
+  deps: TaskMutationDependencies = DEFAULT_TASK_MUTATION_DEPENDENCIES,
 ): Promise<{ task?: Task; reason?: string; fenced?: boolean }> {
   const who = normalizeAgent(agent);
-  const hit = await readDoc(TASKS, board, id);
+  const hit = await deps.readDoc(TASKS, board, id);
   if (!hit) return { reason: 'not found' };
   const task = hit.doc as unknown as Task;
+  if (!taskAccessAllowed(task, accessGuard)) return { reason: 'not found' };
   if (task.status !== 'claimed' && task.status !== 'in_progress') {
     return { reason: `cannot heartbeat a task in status "${task.status}"` };
   }
@@ -310,10 +366,10 @@ export async function heartbeatTask(
   const now = new Date();
   task.lease_until = new Date(now.getTime() + LEASE_MINUTES * 60000).toISOString();
   task.updated_at = now.toISOString();
-  const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
+  const res = await deps.replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
   if (res.status === 412) return { reason: 'conflict, re-read and retry' };
   if (!res.ok) return { reason: `heartbeat failed: ${res.status}` };
-  await appendEvent(id, 'heartbeat', who, `lease extended to ${task.lease_until}`, claimedActor);
+  await deps.appendEvent(id, 'heartbeat', who, `lease extended to ${task.lease_until}`, claimedActor);
   return { task };
 }
 
@@ -327,10 +383,14 @@ export async function updateTask(
    *  above is already the token-bound value by the time it reaches here. Unrelated to
    *  patch.owner_agent, a legitimate caller-controlled reassignment target, untouched by this fix. */
   claimedActor?: string,
+  accessGuard?: TaskAccessGuard,
+  deps: TaskMutationDependencies = DEFAULT_TASK_MUTATION_DEPENDENCIES,
 ): Promise<{ task?: Task; reason?: string; fenced?: boolean }> {
-  const hit = await readDoc(TASKS, board, id);
+  const hit = await deps.readDoc(TASKS, board, id);
   if (!hit) return { reason: 'not found' };
-  const task = hit.doc as unknown as Task;
+  const current = hit.doc as unknown as Task;
+  if (!taskAccessAllowed(current, accessGuard)) return { reason: 'not found' };
+  const task: Task = { ...current, tags: [...(current.tags ?? [])], notes: [...(current.notes ?? [])] };
   if (expectedLeaseVersion !== undefined && task.lease_version !== expectedLeaseVersion) {
     return { reason: `stale lease_version (task is now at ${task.lease_version}) — your lease was reclaimed`, fenced: true };
   }
@@ -339,11 +399,14 @@ export async function updateTask(
   if (patch.artifact_uri !== undefined) task.artifact_uri = patch.artifact_uri;
   if (patch.owner_agent) task.owner_agent = normalizeAgent(patch.owner_agent);
   if (patch.note) task.notes = [...(task.notes ?? []), `[${new Date().toISOString()}] ${actor}: ${patch.note}`];
+  if (!taskAccessAllowed(task, accessGuard)) {
+    return { reason: 'owner reassignment is not permitted by task visibility policy' };
+  }
   task.updated_at = new Date().toISOString();
-  const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
+  const res = await deps.replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
   if (res.status === 412) return { reason: 'conflict, re-read and retry' };
   if (!res.ok) return { reason: `update failed: ${res.status}` };
-  await appendEvent(id, 'updated', actor, JSON.stringify(patch).slice(0, 240), claimedActor);
+  await deps.appendEvent(id, 'updated', actor, JSON.stringify(patch).slice(0, 240), claimedActor);
   return { task };
 }
 
@@ -358,20 +421,33 @@ export async function completeTask(
   /** FND-20260829-878f: audit-only, see createTask's claimed_created_by doc comment -- `agent`
    *  above is already the token-bound value by the time it reaches here. */
   claimedActor?: string,
+  accessGuard?: TaskAccessGuard,
+  deps: TaskMutationDependencies = DEFAULT_TASK_MUTATION_DEPENDENCIES,
 ): Promise<{ task?: Task; rejected?: boolean; reason?: string; resolution?: unknown; fenced?: boolean }> {
   const who = normalizeAgent(agent);
-  const resolution = await resolveArtifact(artifactUri);
+  let hit = await deps.readDoc(TASKS, board, id);
+  if (!hit) return { reason: 'not found' };
+  let current = hit.doc as unknown as Task;
+  if (!taskAccessAllowed(current, accessGuard)) return { reason: 'not found' };
+
+  const resolution = await deps.resolveArtifact(artifactUri);
+
+  // Artifact resolution can take network time. Re-read both state and authorization before any
+  // event or task write so a concurrent protected reassignment cannot expose or mutate the row.
+  hit = await deps.readDoc(TASKS, board, id);
+  if (!hit) return { reason: 'not found' };
+  current = hit.doc as unknown as Task;
+  if (!taskAccessAllowed(current, accessGuard)) return { reason: 'not found' };
+
   if (!resolution.resolved) {
-    await appendEvent(id, 'complete_rejected', who, `${artifactUri} :: ${resolution.detail}`, claimedActor);
+    await deps.appendEvent(id, 'complete_rejected', who, `${artifactUri} :: ${resolution.detail}`, claimedActor);
     return {
       rejected: true,
       reason: `done = artifact landed. artifact_uri did not resolve (${resolution.scheme}: ${resolution.detail}). Land the work-product first (commons blob:, a resolvable URL, a cosmos: doc, or gh:).`,
       resolution,
     };
   }
-  const hit = await readDoc(TASKS, board, id);
-  if (!hit) return { reason: 'not found' };
-  const task = hit.doc as unknown as Task;
+  const task: Task = { ...current, tags: [...(current.tags ?? [])], notes: [...(current.notes ?? [])] };
   if (expectedLeaseVersion !== undefined && task.lease_version !== expectedLeaseVersion) {
     return { reason: `stale lease_version (task is now at ${task.lease_version}) — your lease was reclaimed, work may be duplicated`, fenced: true };
   }
@@ -381,32 +457,63 @@ export async function completeTask(
   task.done_ts = now;
   task.updated_at = now;
   if (note) task.notes = [...(task.notes ?? []), `[${now}] ${who} (done): ${note}`];
-  const res = await replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
+  const res = await deps.replaceDoc(TASKS, board, id, task as unknown as Record<string, unknown>, hit.etag ?? undefined);
   if (res.status === 412) return { reason: 'conflict, re-read and retry' };
   if (!res.ok) return { reason: `complete failed: ${res.status}` };
-  await appendEvent(id, 'completed', who, `artifact ${artifactUri} (${resolution.detail})`, claimedActor);
+  await deps.appendEvent(id, 'completed', who, `artifact ${artifactUri} (${resolution.detail})`, claimedActor);
   return { task, resolution };
 }
 
-export async function listTasks(filter: {
+export interface TaskListFilter {
   owner_agent?: string;
   status?: TaskStatus;
   board?: string;
   limit?: number;
-}): Promise<Task[]> {
+  /** Internal read policy. Never exposed in the MCP input schema. */
+  exclude_personal_legal?: boolean;
+}
+
+export interface TaskListQuery {
+  board: string;
+  query: string;
+  parameters: { name: string; value: unknown }[];
+  max: number;
+}
+
+/** Build the complete storage query so personal exclusions run before the database result limit. */
+export function buildTaskListQuery(filter: TaskListFilter): TaskListQuery {
   const board = (filter.board || DEFAULT_BOARD).trim().toLowerCase();
   const conds: string[] = ['c.board = @board', "c.type = 'task'"];
-  const params: { name: string; value: unknown }[] = [{ name: '@board', value: board }];
+  const parameters: { name: string; value: unknown }[] = [{ name: '@board', value: board }];
   if (filter.owner_agent) {
     conds.push('c.owner_agent = @owner');
-    params.push({ name: '@owner', value: normalizeAgent(filter.owner_agent) });
+    parameters.push({ name: '@owner', value: normalizeAgent(filter.owner_agent) });
   }
   if (filter.status) {
     conds.push('c.status = @status');
-    params.push({ name: '@status', value: filter.status });
+    parameters.push({ name: '@status', value: filter.status });
   }
-  const query = `SELECT * FROM c WHERE ${conds.join(' AND ')} ORDER BY c.created_at DESC`;
-  const rows = await queryDocs(TASKS, query, params, { pk: board, max: filter.limit ?? 50 });
+  if (filter.exclude_personal_legal) {
+    conds.push('c.owner_agent != @personal_agent');
+    conds.push('c.created_by != @personal_agent');
+    parameters.push({ name: '@personal_agent', value: 'clo-personal' });
+  }
+  return {
+    board,
+    query: 'SELECT * FROM c WHERE ' + conds.join(' AND ') + ' ORDER BY c.created_at DESC',
+    parameters,
+    max: filter.limit ?? 50,
+  };
+}
+
+export async function listTasks(filter: TaskListFilter): Promise<Task[]> {
+  const built = buildTaskListQuery(filter);
+  const rows = await queryDocs(
+    TASKS,
+    built.query,
+    built.parameters,
+    { pk: built.board, max: built.max },
+  );
   return rows as unknown as Task[];
 }
 
