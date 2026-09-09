@@ -1,0 +1,35 @@
+import {createHash,randomUUID} from 'node:crypto';
+import {mkdir,open,opendir,lstat,readFile,link,unlink} from 'node:fs/promises';
+import {join,resolve,dirname,toNamespacedPath} from 'node:path';
+const MAX=131072,HASH=/^[a-f0-9]{64}$/,LABEL=/^[a-z][a-z0-9-]{0,63}$/;
+const canonical=v=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
+const sha=v=>createHash('sha256').update(v).digest('hex');
+function fail(code){throw Object.assign(Error(code),{code});}
+const exact=(v,k)=>!!v&&Object.getPrototypeOf(v)===Object.prototype&&Object.keys(v).sort().join(',')===[...k].sort().join(',');
+function identity(v){if(!exact(v,['cohort_id','producer_id','run'])||!LABEL.test(v.cohort_id)||!LABEL.test(v.producer_id))fail('outbox_identity');const r=v.run;if(!exact(r,['ref_version','run_id','purpose','scope','run_version','manifest_sha256'])||r.ref_version!=='neptune-trial-active-run-ref-v1'||r.scope!=='finance'||!HASH.test(r.manifest_sha256)||!['purpose','run_version'].every(k=>/^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(r[k])))fail('outbox_identity');const{run_id,...core}=r;if(run_id!=='run_'+sha(canonical(core)))fail('outbox_identity');return structuredClone(v);}
+function receipt(v){if(!exact(v,['artifact_ref']))fail('outbox_receipt');const r=v.artifact_ref;if(!exact(r,['schema','artifact_id','bucket','key','payload_sha256','version_id','size_bytes'])||r.schema!=='relationship-resolution-artifact-ref-v1'||r.bucket!=='otchealth-finance-legal-dr-55c84f6b'||!HASH.test(r.payload_sha256)||r.artifact_id!=='resart_'+r.payload_sha256||r.key!==`resolution-artifacts/sha256/${r.payload_sha256.slice(0,2)}/${r.payload_sha256}.json`||typeof r.version_id!=='string'||r.version_id==='null'||! /^[^\s\p{C}]{1,1024}$/u.test(r.version_id)||!Number.isSafeInteger(r.size_bytes)||r.size_bytes<0||r.size_bytes>16777216)fail('outbox_receipt');return structuredClone(v);}
+export function createPublicationOutbox(directory,{now=Date.now,maxNodes=256}={}){
+ if(typeof directory!=='string'||!directory||typeof now!=='function'||!Number.isInteger(maxNodes)||maxNodes<64||maxNodes>4096)fail('outbox_configuration');const root=toNamespacedPath(resolve(directory));
+ const path=(key,state)=>join(root,...key,state+'.json');
+ async function directorySafe(p,create=false){if(create)await mkdir(p,{recursive:true});const s=await lstat(p);if(!s.isDirectory()||s.isSymbolicLink())fail('outbox_path');}
+ async function parents(key,create){await directorySafe(root,create);let p=root;for(const x of key){p=join(p,x);await directorySafe(p,create);}}
+ async function readFileRecord(file){let s;try{s=await lstat(file);}catch(e){if(e.code==='ENOENT')return null;throw e;}if(!s.isFile()||s.isSymbolicLink()||s.size>MAX)fail('outbox_corrupt');const bytes=await readFile(file);if(bytes.length>MAX||!Buffer.from(bytes.toString('utf8')).equals(bytes))fail('outbox_corrupt');let v;try{v=JSON.parse(bytes);}catch{fail('outbox_corrupt');}if(!exact(v,['schema','identity','created_at','receipt','sha256']))fail('outbox_corrupt');const{sha256,...core}=v;if(sha(canonical(core))!==sha256||!Number.isFinite(Date.parse(v.created_at))||new Date(v.created_at).toISOString()!==v.created_at)fail('outbox_corrupt');return v;}
+ async function read(id,state){const k=sha(canonical(id));try{await parents(k,false);}catch(e){if(e.code==='ENOENT')return null;throw e;}const v=await readFileRecord(path(k,state));if(!v)return null;if(v.schema!==`publication-outbox-${state}-v1`||canonical(v.identity)!==canonical(id))fail('outbox_corrupt');if(state==='intent'){if(!exact(v.receipt,[]))fail('outbox_corrupt');}else receipt(v.receipt);return v;}
+ async function write(id,state,value){const k=sha(canonical(id));await parents(k,true);const file=path(k,state),temp=join(dirname(file),'.pending-'+randomUUID()),core={schema:`publication-outbox-${state}-v1`,identity:id,created_at:new Date(now()).toISOString(),receipt:value},bytes=Buffer.from(canonical({...core,sha256:sha(canonical(core))}));if(bytes.length>MAX)fail('outbox_receipt');let handle;
+ try{handle=await open(temp,'wx',0o600);await handle.writeFile(bytes);await handle.sync();await handle.close();handle=null;try{await link(temp,file);}catch(e){if(e.code!=='EEXIST')throw e;const old=await read(id,state);if(!old||canonical(old.receipt)!==canonical(value))fail('outbox_conflict');return{created:false};}return{created:true};}finally{await handle?.close();await unlink(temp).catch(()=>{});}}
+ async function get(raw){const id=identity(raw),published=await read(id,'published'),reviewed=await read(id,'reviewed'),intent=await read(id,'intent');if(!intent){if(reviewed||published)fail('outbox_corrupt');return null;}if(published&&(!reviewed||canonical(published.receipt)!==canonical(reviewed.receipt)))fail('outbox_corrupt');return{identity:id,state:published?'published':reviewed?'reviewed':'intent_only',created_at:intent.created_at,receipt:(published??reviewed)?.receipt??null};}
+ return Object.freeze({get,
+  async createIntent(raw){const id=identity(raw);return write(id,'intent',{});},
+  async createReviewed(raw,value){const id=identity(raw),r=receipt(value);if(!await read(id,'intent'))fail('outbox_no_intent');return write(id,'reviewed',r);},
+  async markPublished(raw,value){const id=identity(raw),r=receipt(value),prior=await read(id,'reviewed');if(!prior||canonical(prior.receipt)!==canonical(r))fail('outbox_receipt_mismatch');return write(id,'published',r);},
+  async pagePending({after=null,limit=64}={}){
+   if(!Number.isInteger(limit)||limit<1||limit>64)fail('outbox_cursor');let stack=[''];if(after!==null){if(typeof after!=='string'||after.length>131072||!/^[A-Za-z0-9_-]+$/.test(after))fail('outbox_cursor');try{stack=JSON.parse(Buffer.from(after,'base64url').toString());}catch{fail('outbox_cursor');}if(!Array.isArray(stack)||stack.length>961||new Set(stack).size!==stack.length||stack.some(p=>typeof p!=='string'||! /^[a-f0-9]{0,64}$/.test(p)))fail('outbox_cursor');}
+   await directorySafe(root,true);const items=[];let scanned=0;
+   while(stack.length&&scanned<maxNodes&&items.length<limit){const prefix=stack.pop(),dir=join(root,...prefix);try{await directorySafe(dir);}catch(e){if(e.code==='ENOENT')continue;throw e;}scanned++;
+    if(prefix.length===64){const raw=await readFileRecord(join(dir,'intent.json'));if(raw){const id=identity(raw.identity);if(sha(canonical(id))!==prefix)fail('outbox_corrupt');const item=await get(id);if(item.state!=='published')items.push(item);}continue;}
+    const children=[],handle=await opendir(dir);let entries=0;for await(const entry of handle){if(++entries>16||! /^[a-f0-9]$/.test(entry.name)||!entry.isDirectory()||entry.isSymbolicLink())fail('outbox_corrupt');children.push(prefix+entry.name);}children.sort().reverse();stack.push(...children);
+   }
+   return{items,next_after:stack.length?Buffer.from(JSON.stringify(stack)).toString('base64url'):null,scanned_nodes:scanned,scope:'page'};
+  }
+ });
+}
