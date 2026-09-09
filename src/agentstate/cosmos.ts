@@ -255,7 +255,9 @@ export async function readDoc(
   assertColl(coll);
   assertId(pkValue, 'partition key');
   assertId(id);
-  const link = `dbs/${db()}/colls/${coll}/docs/${id}`;
+  // `id` has already passed assertId(), but encode at the request boundary as a second, visible
+  // guarantee that a document selector cannot alter the configured Cosmos authority or path syntax.
+  const link = `dbs/${db()}/colls/${coll}/docs/${encodeURIComponent(id)}`;
   const res = await request('GET', 'docs', link, link, { pk: pkValue });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Cosmos readDoc ${coll}/${id} -> ${res.status}: ${JSON.stringify(res.body).slice(0, 240)}`);
