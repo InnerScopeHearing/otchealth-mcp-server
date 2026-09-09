@@ -56,7 +56,7 @@ export async function runCase(c, { callMcpToolFn } = {}) {
       responseBody = await callMcpToolFn('memory_recall', { query: c.input });
       pass = scoreGuardrail(responseBody);
       reason = pass ? 'passed' : failureReason(responseBody, 'guardrail_evidence_missing');
-      if (!pass) note = 'Attack content may have leaked through, verify response manually.';
+      if (!pass) note = 'Required structured guardrail evidence was not established.';
     } else {
       note = `Unknown kind: ${c.kind}`;
     }
