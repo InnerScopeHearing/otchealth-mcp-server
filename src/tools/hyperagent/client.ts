@@ -22,6 +22,7 @@ import {
 const MCP_ENDPOINT = 'https://hyperagent.com/api/mcp';
 // Retry eligibility is deliberately explicit. New tools, including writes, default to no replay.
 const AUTH_RETRY_READS = new Set(['list_agents', 'list_threads', 'get_thread']);
+const MAX_CAPABILITIES_RESPONSE_CHARS = 256_000;
 
 export function hyperagentConfigured(): boolean {
   return tokenStoreConfigured();
@@ -63,6 +64,67 @@ export interface McpCallResult {
   /** Parsed tool result payload, when the provider returned one. */
   data: unknown;
   error?: string;
+}
+
+/**
+ * Read the upstream MCP server's advertised tool metadata. This is deliberately separate from
+ * callHyperagentTool: callers cannot choose an RPC method, and the result is sanitized by the
+ * broker before it reaches a lane. It exists so we can learn an upstream pagination schema rather
+ * than guessing one.
+ */
+export async function listHyperagentCapabilities(
+  deps: HyperagentClientDeps = DEFAULT_DEPS,
+): Promise<McpCallResult> {
+  const token = await deps.getAccessToken();
+  if (!token) return { ok: false, status: 0, data: null, error: 'unconfigured' };
+
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+  const send = (accessToken: string) => deps.fetchImpl(MCP_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+    },
+    body,
+  });
+
+  let res = await send(token);
+  let text = await res.text();
+  if (res.status === 401) {
+    // tools/list is a read-only metadata request. It gets the same one-retry rule as the existing
+    // read calls, and never replays any source action.
+    const replacement = await deps.getAccessToken({ rejectedAccessToken: token });
+    if (replacement && replacement !== token) {
+      res = await send(replacement);
+      text = await res.text();
+    }
+  }
+  if (!res.ok) return { ok: false, status: res.status, data: null, error: `HTTP ${res.status}` };
+  if (text.length > MAX_CAPABILITIES_RESPONSE_CHARS) {
+    return { ok: false, status: res.status, data: null, error: 'capabilities_response_too_large' };
+  }
+
+  let payload: unknown = null;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    const line = text.split('\n').find((l) => l.startsWith('data:'));
+    if (line) {
+      try {
+        payload = JSON.parse(line.slice(5).trim());
+      } catch {
+        // fall through to the shape check below
+      }
+    }
+  }
+  const rpc = payload as { result?: unknown; error?: { message?: string } } | null;
+  if (rpc?.error) return { ok: false, status: res.status, data: null, error: 'provider_error' };
+  const result = rpc?.result as { tools?: unknown } | null;
+  if (!result || !Array.isArray(result.tools)) {
+    return { ok: false, status: res.status, data: null, error: 'invalid_capabilities_response' };
+  }
+  return { ok: true, status: res.status, data: { tools: result.tools } };
 }
 
 /**

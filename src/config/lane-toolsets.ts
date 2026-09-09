@@ -210,7 +210,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // auth caller); a Claude Code/Hyperagent cto session is unaffected either way today. If universal
   // 'curate' mode is ever armed for the cto lane specifically, this same narrower list would then also
   // apply there -- a deliberate call to make at that time, not implied by this change.
-  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...HEYGEN, 'agent_persona'],
+  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...HEYGEN, 'agent_persona', 'hyperagent_discover_capabilities'],
   // Engineering IC: its OWN app-repo ship cycle (branch/commit/PR/CI/dispatch) plus the shared
   // read/memory/task surface. No Azure control plane, no finance, no legal -- infra and the two
   // genuinely sensitive corpora (MNPI finance, privileged legal) are CTO/EXEC_RING-owned, not
