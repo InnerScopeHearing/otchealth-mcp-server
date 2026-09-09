@@ -23,7 +23,7 @@ before(() => {
   process.env.GITHUB_APP_PRIVATE_KEY ??= privateKey;
 });
 
-const { listWorkflowRuns } = await import('./api-client.js');
+const { isGitHubPullRequestNumber, listWorkflowRuns, parseGitHubRepositoryFullName } = await import('./api-client.js');
 
 // This repo's ESM build does not allow node:test's mock.method() to override another module's
 // live named export, but globalThis.fetch is a genuine global -- direct reassignment works fine.
@@ -106,4 +106,36 @@ test('listWorkflowRuns: every other filter (branch/event/actor/created/exclude_p
   assert.equal(q.get('head_sha'), 'deadbeefcafefeed');
   assert.equal(q.get('per_page'), '5');
   assert.equal(q.get('page'), '2');
+});
+
+test('GitHub repository selectors reject authority and path injection before an API path is built', () => {
+  assert.deepEqual(parseGitHubRepositoryFullName('InnerScopeHearing/otchealth-mcp-server'), {
+    owner: 'InnerScopeHearing', repo: 'otchealth-mcp-server', fullName: 'InnerScopeHearing/otchealth-mcp-server',
+  });
+  for (const invalid of ['https://evil.example/repo', 'owner/repo/extra', 'owner//repo', 'owner/repo?x=1', 'owner/repo\\path']) {
+    assert.equal(parseGitHubRepositoryFullName(invalid), null, invalid);
+  }
+  assert.equal(isGitHubPullRequestNumber(42), true);
+  assert.equal(isGitHubPullRequestNumber(0), false);
+  assert.equal(isGitHubPullRequestNumber(1.5), false);
+  assert.equal(isGitHubPullRequestNumber('42'), false);
+});
+
+test('GitHub API calls keep the fixed API origin and refuse redirects', async () => {
+  const seen: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
+  await withStubbedFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    seen.push({ url, redirect: init?.redirect });
+    if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) {
+      return new Response(JSON.stringify({ token: 'ghs_fake', expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ workflow_runs: [] }), { status: 200 });
+  }) as typeof fetch, async () => {
+    await listWorkflowRuns('InnerScopeHearing', 'otchealth-mcp-server');
+  });
+  assert.ok(seen.length > 0);
+  for (const request of seen) {
+    assert.equal(new URL(request.url).origin, 'https://api.github.com');
+    assert.equal(request.redirect, 'error');
+  }
 });
