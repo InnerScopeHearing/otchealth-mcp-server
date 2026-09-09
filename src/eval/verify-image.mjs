@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,23 +17,32 @@ export function verifyImage({ repo, source, digest, indexDigest }, execute = com
   if (!/^[a-f0-9]{40}$/.test(source ?? '')
       || !/^sha256:[a-f0-9]{64}$/.test(digest ?? '')
       || !/^sha256:[a-f0-9]{64}$/.test(indexDigest ?? '')) throw new Error('Invalid immutable identity');
+  if (execute('git', ['-C', repo, 'cat-file', '-t', source]).toString().trim() !== 'commit') {
+    throw new Error('Source object must be a commit');
+  }
   const image = `900915535335.dkr.ecr.us-east-1.amazonaws.com/otchealth-mcp-gateway@${digest}`;
   const directory = mkdtempSync(join(tmpdir(), 'eval-image-'));
   let container;
   try {
     execute('docker', ['pull', '--platform', 'linux/arm64', image]);
+    const identity = JSON.parse(execute('docker', ['image', 'inspect', image, '--format', '{{json .}}']).toString());
+    if (identity.Os !== 'linux' || identity.Architecture !== 'arm64' || !identity.RepoDigests?.includes(image)) {
+      throw new Error('Pulled image does not match required ARM64 digest');
+    }
     container = execute('docker', ['create', '--platform', 'linux/arm64', '--entrypoint', '/bin/true', image]).toString().trim();
     if (!/^[a-f0-9]{64}$/.test(container)) throw new Error('Invalid container identifier');
     const files = [];
     for (const file of ['eval-runner.mjs', 'eval-scoring.mjs', 'eval-baseline.mjs', 'eval-transport.mjs', 'redact.mjs', 'cases.json']) {
       execute('docker', ['cp', `${container}:/app/eval/${file}`, join(directory, file)]);
+      const stat = lstatSync(join(directory, file));
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Non-regular extracted path: ${file}`);
       const expected = sha256(execute('git', ['-C', repo, 'show', `${source}:src/eval/${file}`]));
       const actual = sha256(readFileSync(join(directory, file)));
       if (actual !== expected) throw new Error(`Image/source mismatch: ${file}`);
       files.push({ file, sha256: actual });
     }
     return { source, indexDigest, platformDigest: digest, platform: 'linux/arm64', files, match: true,
-      scope: 'Four evaluator files only; no runtime acceptance or cryptographic build attestation.' };
+      scope: 'Six evaluator runtime files only; index membership is established by the caller, not this file comparison. No runtime acceptance or cryptographic build attestation.' };
   } finally {
     try {
       if (/^[a-f0-9]{64}$/.test(container ?? '')) execute('docker', ['rm', container]);
