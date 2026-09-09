@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -32,7 +33,7 @@ import { join } from 'node:path';
  * fixture that is provably not a real credential, and it must say why.
  */
 
-const REPO_ROOT = new URL('../..', import.meta.url).pathname;
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const NUL = String.fromCharCode(0);
 
 /**

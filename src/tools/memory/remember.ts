@@ -8,6 +8,26 @@ import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
 
 const TYPES = ['fact', 'decision', 'correction', 'pitfall', 'status'] as const;
+const PERSONAL_SHARED_MEMORY_LANE = 'clo-personal';
+
+/**
+ * The commons feed and its write-through search index are visible to company lanes. The dedicated
+ * personal-legal identity must therefore use its separate private storage tools, whether it is the
+ * authenticated writer or a caller-selected cross-lane target. Kept local to memory_remember so
+ * legitimate reads and private storage paths for that identity remain unchanged.
+ */
+export function memoryRememberSharedWriteRefusal(callerAgent: string, requestedAgent?: string): string | null {
+  let caller = '';
+  try { caller = callerAgent ? normalizeAgent(callerAgent) : ''; } catch { caller = ''; }
+  if (caller === PERSONAL_SHARED_MEMORY_LANE) {
+    return 'the privilege-walled personal-legal lane may not write to, or be targeted by, memory_remember because its destination is the company shared-memory feed; use the separate private storage tooling for that lane';
+  }
+  const target = normalizeAgent(requestedAgent || callerAgent);
+  if (target === PERSONAL_SHARED_MEMORY_LANE) {
+    return 'the privilege-walled personal-legal lane may not write to, or be targeted by, memory_remember because its destination is the company shared-memory feed; use the separate private storage tooling for that lane';
+  }
+  return null;
+}
 
 export function registerMemoryRemember(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -18,7 +38,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
       annotations: {
         title: 'Write to the shared brain',
         description:
-          'Append an entry to the cross-agent shared memory (kb-memory commons feed) so every connected AI sees it. Use for a fact, decision, correction, pitfall, or status. Set "agent" to write ON ANOTHER lane\'s feed (a cross-lane note / hand-off): it is APPEND-ONLY and auto-attributed to YOUR token identity (by=<you>), and the target lane sees it via memory_inbound and acks with memory_reconcile on wake. Omit "agent" to write your own feed. Writes ONLY to the shared, non-sensitive commons feed: never put MNPI (INND) or PHI (MedReview) detail here. CORRECTED 2026-07-29 (a prior version of this description said the 2026-07-07 clo-personal change "suspended ring-gating fleet-wide" -- that was inaccurate and is retracted here: it does not describe the enforcement below, which was never suspended). MNPI GATE (hard, code-level, not just this instruction, enforced for every caller with no exception and no suspension, past or present): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused for every caller, because the commons feed is always broadly shared and non-privileged.',
+          'Append an entry to the cross-agent shared memory (kb-memory commons feed) so every connected AI sees it. Use for a fact, decision, correction, pitfall, or status. Set "agent" to write ON ANOTHER company lane\'s feed (a cross-lane note / hand-off): it is APPEND-ONLY and auto-attributed to YOUR token identity (by=<you>), and the target lane sees it via memory_inbound and acks with memory_reconcile on wake. Omit "agent" to write your own feed. The privilege-walled personal-legal lane cannot call or be targeted by this shared-feed tool and must use its separate private storage tooling. Writes ONLY to the shared, non-sensitive commons feed: never put MNPI (INND) or PHI (MedReview) detail here. CORRECTED 2026-07-29 (a prior version of this description said the 2026-07-07 clo-personal change "suspended ring-gating fleet-wide" -- that was inaccurate and is retracted here: it does not describe the enforcement below, which was never suspended). MNPI GATE (hard, code-level, not just this instruction, enforced for every caller with no exception and no suspension, past or present): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused for every caller, because the commons feed is always broadly shared and non-privileged.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -44,6 +64,13 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         note: z.string().optional(),
       },
       handler: async (input, ctx) => {
+        const sharedWriteRefusal = memoryRememberSharedWriteRefusal(ctx.callerAgent, input.agent);
+        if (sharedWriteRefusal) {
+          return {
+            data: { written: false, entry: null, note: sharedWriteRefusal },
+            summary: `Refused: ${sharedWriteRefusal}`,
+          };
+        }
         // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
         // store write. The commons feed is, by construction, always broadly shared/non-privileged:
         // a match is a HARD BLOCK for every caller, including an EXEC_RING lane writing its own feed.
