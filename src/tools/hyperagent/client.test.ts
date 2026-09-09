@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { callHyperagentTool, type HyperagentClientDeps } from './client.js';
+import { callHyperagentTool, listHyperagentCapabilities, type HyperagentClientDeps } from './client.js';
 
 // Every request and token operation is injected. No environment credentials or live services.
 const OLD_TOKEN = 'synthetic-rejected-access';
@@ -127,4 +127,25 @@ test('successful SSE responses retain structured MCP result parsing', async () =
   });
   assert.equal(h.requests.length, 1);
   assert.equal(h.tokenRequests.length, 1);
+});
+
+test('capability discovery sends only the fixed tools/list method and retries one 401', async () => {
+  const capabilities = JSON.stringify({ result: { tools: [{ name: 'list_threads', inputSchema: { type: 'object' } }] } });
+  const h = harness([{ status: 401 }, { status: 200, body: capabilities }]);
+  assert.deepEqual(await listHyperagentCapabilities(h.deps), {
+    ok: true, status: 200, data: { tools: [{ name: 'list_threads', inputSchema: { type: 'object' } }] },
+  });
+  assert.deepEqual(h.tokenRequests, [undefined, { rejectedAccessToken: OLD_TOKEN }]);
+  assert.equal(h.requests.length, 2);
+  assert.deepEqual(JSON.parse(h.requests[0].body), { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+  assert.equal(h.requests[0].body, h.requests[1].body);
+});
+
+test('capability discovery refuses invalid, provider-error, and oversized responses', async () => {
+  const invalid = harness([{ status: 200, body: JSON.stringify({ result: { unexpected: [] } }) }], [OLD_TOKEN]);
+  assert.deepEqual(await listHyperagentCapabilities(invalid.deps), { ok: false, status: 200, data: null, error: 'invalid_capabilities_response' });
+  const providerError = harness([{ status: 200, body: JSON.stringify({ error: { message: 'private provider detail' } }) }], [OLD_TOKEN]);
+  assert.deepEqual(await listHyperagentCapabilities(providerError.deps), { ok: false, status: 200, data: null, error: 'provider_error' });
+  const oversized = harness([{ status: 200, body: JSON.stringify({ result: { tools: [] } }) + ' '.repeat(256_000) }], [OLD_TOKEN]);
+  assert.deepEqual(await listHyperagentCapabilities(oversized.deps), { ok: false, status: 200, data: null, error: 'capabilities_response_too_large' });
 });

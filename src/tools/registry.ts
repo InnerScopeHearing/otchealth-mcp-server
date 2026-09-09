@@ -422,7 +422,11 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
         : lane === 'wefunder-campaign-director'
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
-  return new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
+  // owns the migration bridge, while not advertising it to other ship lanes.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('hyperagent_discover_capabilities');
+  return tools;
 }
 
 export type ConnectorAnnotationsMode = 'off' | 'on';

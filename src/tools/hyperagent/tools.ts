@@ -15,7 +15,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { loadEnv } from '../../config/env.js';
-import { callHyperagentTool, hyperagentConfigured, type McpCallResult } from './client.js';
+import {
+  callHyperagentTool,
+  hyperagentConfigured,
+  listHyperagentCapabilities,
+  type McpCallResult,
+} from './client.js';
 import { checkInvocationBudget } from './rate-limit.js';
 import { ownerAgentIdOf } from './thread-owner.js';
 import {
@@ -55,12 +60,117 @@ function extractAgents(data: unknown): Array<{ id?: string; name?: string; descr
 export interface HyperagentToolTransport {
   configured(): boolean;
   call(name: string, args: Record<string, unknown>): Promise<McpCallResult>;
+  /** Fixed upstream tools/list call. No caller-supplied RPC method is ever accepted. */
+  listCapabilities?(): Promise<McpCallResult>;
 }
 
 const DEFAULT_TRANSPORT: HyperagentToolTransport = {
   configured: hyperagentConfigured,
   call: callHyperagentTool,
+  listCapabilities: listHyperagentCapabilities,
 };
+
+const MAX_CAPABILITY_TOOLS = 64;
+const MAX_SCHEMA_DEPTH = 8;
+const MAX_SCHEMA_NODES = 512;
+const DECLARED_PAGING_FIELD_NAMES = new Set(['cursor', 'after', 'before', 'page', 'offset', 'limit', 'pageSize', 'page_size']);
+
+type SafeSchema = Record<string, unknown>;
+
+function plainRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null ? value as Record<string, unknown> : null;
+}
+
+function safeStringArray(value: unknown, max: number): string[] | null {
+  if (!Array.isArray(value) || value.length > max || value.some(item => typeof item !== 'string' || item.length > 128)) return null;
+  return [...value];
+}
+
+/**
+ * Keep a compact, data-free JSON Schema subset. Unsupported composition, references, descriptions,
+ * enumerations, and unknown keys are refused instead of relaying arbitrary provider metadata to the caller.
+ */
+function sanitizeInputSchema(value: unknown, depth = 0, state = { nodes: 0 }): SafeSchema | null {
+  if (depth > MAX_SCHEMA_DEPTH || ++state.nodes > MAX_SCHEMA_NODES) return null;
+  const source = plainRecord(value);
+  if (!source) return null;
+  const allowed = new Set(['type', 'properties', 'required', 'items', 'additionalProperties', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems']);
+  if (Object.keys(source).some(key => !allowed.has(key))) return null;
+  const type = source.type;
+  if (typeof type !== 'string' || !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(type)) return null;
+  const out: SafeSchema = { type };
+  for (const key of ['minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems'] as const) {
+    if (source[key] !== undefined) {
+      if (typeof source[key] !== 'number' || !Number.isFinite(source[key] as number)) return null;
+      out[key] = source[key];
+    }
+  }
+  if (type === 'object') {
+    if (source.properties !== undefined) {
+      const properties = plainRecord(source.properties);
+      if (!properties || Object.keys(properties).length > 64) return null;
+      const clean: Record<string, SafeSchema> = {};
+      for (const [name, schema] of Object.entries(properties)) {
+        if (!/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(name)) return null;
+        const nested = sanitizeInputSchema(schema, depth + 1, state);
+        if (!nested) return null;
+        clean[name] = nested;
+      }
+      out.properties = clean;
+    }
+    if (source.required !== undefined) {
+      const required = safeStringArray(source.required, 64);
+      if (!required) return null;
+      out.required = required;
+    }
+    if (source.additionalProperties !== undefined) {
+      if (typeof source.additionalProperties !== 'boolean') return null;
+      out.additionalProperties = source.additionalProperties;
+    }
+  }
+  if (type === 'array' && source.items !== undefined) {
+    const items = sanitizeInputSchema(source.items, depth + 1, state);
+    if (!items) return null;
+    out.items = items;
+  }
+  return out;
+}
+
+function declaredPagingMetadata(schema: SafeSchema): Array<{ name: string; type: string; required: boolean }> {
+  if (schema.type !== 'object') return [];
+  const properties = plainRecord(schema.properties) ?? {};
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((name): name is string => typeof name === 'string') : []);
+  return Object.entries(properties)
+    .filter(([name]) => DECLARED_PAGING_FIELD_NAMES.has(name))
+    .map(([name, child]) => ({ name, type: String(plainRecord(child)?.type ?? 'unknown'), required: required.has(name) }));
+}
+
+export function sanitizeHyperagentCapabilities(data: unknown):
+  | { ok: true; tools: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }>; omittedUnsupportedSchemas: number }
+  | { ok: false; error: 'unsafe_capabilities_metadata' } {
+  const root = plainRecord(data);
+  const tools = root?.tools;
+  if (!Array.isArray(tools) || tools.length > MAX_CAPABILITY_TOOLS) return { ok: false, error: 'unsafe_capabilities_metadata' };
+  const clean: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }> = [];
+  let omittedUnsupportedSchemas = 0;
+  for (const candidate of tools) {
+    const tool = plainRecord(candidate);
+    if (!tool || Object.keys(tool).some(key => !['name', 'inputSchema'].includes(key))) return { ok: false, error: 'unsafe_capabilities_metadata' };
+    const name = tool.name;
+    if (typeof name !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(name)) return { ok: false, error: 'unsafe_capabilities_metadata' };
+    const inputSchema = sanitizeInputSchema(tool.inputSchema);
+    // Do not strip unsafe facets from a schema: that would misrepresent the source tool's contract.
+    // Omit the complete schema and expose only an aggregate count, never its name or contents.
+    if (!inputSchema) {
+      omittedUnsupportedSchemas += 1;
+      continue;
+    }
+    clean.push({ name, inputSchema, declaredPaging: declaredPagingMetadata(inputSchema) });
+  }
+  return { ok: true, tools: clean, omittedUnsupportedSchemas };
+}
 
 /** Log/journal only routing metadata, never the investor-sensitive prompt sent to the source. */
 export function hyperagentInvocationMetadata(input: Record<string, unknown>): Record<string, unknown> {
@@ -76,6 +186,53 @@ export function registerHyperagentTools(
   callerHash: CallerHashProvider,
   transport: HyperagentToolTransport = DEFAULT_TRANSPORT,
 ): void {
+  // ------------------------------------------------------- discover_capabilities (CTO metadata only)
+  registerTool(
+    server,
+    {
+      name: 'hyperagent_discover_capabilities',
+      category: 'read',
+      annotations: {
+        title: 'Read the Hyperagent MCP tool schemas for migration planning',
+        description:
+          'CTO-only metadata discovery. Calls the fixed upstream MCP tools/list method and returns only validated tool names, compact input schemas, and declared paging field names. It never reads agents, threads, messages, files, or artifacts, and it accepts no upstream method or arguments from the caller.',
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: {},
+      outputShape: {
+        ok: z.boolean(),
+        tools: z.array(z.unknown()).optional(),
+        omittedUnsupportedSchemas: z.number().int().nonnegative().optional(),
+        error: z.string().optional(),
+      },
+      handler: async (_input, ctx) => {
+        if (ctx.callerAgent !== 'cto') {
+          return { data: { ok: false, error: 'forbidden_lane' }, summary: 'Refused: Hyperagent capability metadata is available only to the CTO lane.' };
+        }
+        if (!transport.configured()) return unconfigured('discovering provider capabilities');
+        if (!transport.listCapabilities) {
+          return { data: { ok: false, error: 'capability_transport_unavailable' }, summary: 'Hyperagent capability metadata transport is unavailable.' };
+        }
+        const result = await transport.listCapabilities();
+        if (!result.ok) {
+          return { data: { ok: false, error: 'provider_error' }, summary: 'Hyperagent capability metadata could not be read.' };
+        }
+        const safe = sanitizeHyperagentCapabilities(result.data);
+        if (!safe.ok) {
+          return { data: { ok: false, error: safe.error }, summary: 'Refused unsafe Hyperagent capability metadata.' };
+        }
+        return {
+          data: { ok: true, tools: safe.tools, omittedUnsupportedSchemas: safe.omittedUnsupportedSchemas },
+          summary: `Read ${safe.tools.length} validated Hyperagent tool schema(s) for migration planning.`,
+        };
+      },
+    },
+    callerHash,
+  );
+
   // ---------------------------------------------------------------- list_agents (read, filtered)
   registerTool(
     server,

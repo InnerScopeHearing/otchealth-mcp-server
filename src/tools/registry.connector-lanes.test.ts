@@ -44,7 +44,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, 'hyperagent_discover_capabilities'].sort());
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
   // Regression guard (Task G-3, 2026-09-03): web_research/web_extract were added in the SAME
@@ -93,6 +93,7 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
     'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
     'hyperagent_create_thread', 'hyperagent_send_message',
   ]) assert.ok(set.has(hyperagentTool), `ship lane must expose ${hyperagentTool}`);
+  assert.ok(set.has('hyperagent_discover_capabilities'), 'CTO connector must expose fixed Hyperagent schema discovery');
   // Regression guard (2026-08-04): mail_archive_* -- built for the CFO's Exchange Online Archive
   // problem, EXEC_RING-gated in-handler, but never added to this ship set, so it was invisible on
   // every connector even though it already solves a problem the CFO reported as unsolvable by any
@@ -164,6 +165,13 @@ test('(e) Wefunder Campaign Director gets exact-source migration tools without p
     'memory_write', 'memory_remember', 'checkpoint', 'legal_blob_put', 'legal_blob_get',
     'kb_get_document', 'kb_list_documents', 'xero_manual_journals', 'heygen_pairing_start', 'gateway_fetch_result',
   ]) assert.equal(set.has(forbidden), false, `Wefunder connector must not expose ${forbidden}`);
+});
+
+test('(f) Hyperagent schema discovery is only advertised to the CTO connector', () => {
+  assert.equal(connectorToolset(testEnv(), 'cto').has('hyperagent_discover_capabilities'), true);
+  for (const lane of ['developer', 'exec', 'cfo', 'clo', 'coo', 'cro', 'wefunder-campaign-director']) {
+    assert.equal(connectorToolset(testEnv(), lane).has('hyperagent_discover_capabilities'), false, lane);
+  }
 });
 
 test("(f) 'external-read' lane set is EXACTLY the 13 read tools (incl. Phase 6 search/fetch and Task G-3's web_research/web_extract) and excludes every privileged/write tool", () => {
