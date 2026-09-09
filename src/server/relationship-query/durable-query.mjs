@@ -33,12 +33,13 @@ export function queryDurableHistories({ entries, query, now = Date.now }) {
     }
     if (inputIndex !== inputs.length) fail("durable_query_history_invalid");
   }
-  let frame = null, offset = 0, replaying = true;
+  let frame = null, offset = 0, replaying = true; const identityProofs = [];
   const services = { callerLane: "cfo" };
   for (const name of CALLBACKS) services[name] = (...args) => {
     if (replaying) {
       const recorded = frame?.calls?.[offset++];
       if (!recorded || recorded.method !== name || !equal(recorded.args, args)) fail("durable_query_replay_divergence");
+      if (name === "verifyIdentity" && recorded.result?.verified === true) identityProofs.push({ request: clone(args[0]), proof: clone(recorded.result) });
       return clone(recorded.result);
     }
     if (name === "recordedAt") return new Date(now()).toISOString();
@@ -68,7 +69,8 @@ export function queryDurableHistories({ entries, query, now = Date.now }) {
    if (sourceIndex !== inputs.length) fail("durable_query_history_invalid");
   }
   replaying = false;
-  return clone(query?.kind === "candidate_links" ? resolver.candidateLinks(clone(query)) : resolver.explain(clone(query)));
+  const answer = clone(query?.kind === "candidate_links" ? resolver.candidateLinks(clone(query)) : resolver.explain(clone(query)));
+  Object.defineProperty(answer, "identityProofs", { value: identityProofs, enumerable: false }); return answer;
 }
 
 export function queryDurableHistory(input) { return queryDurableHistories({entries:[input],query:input.query,now:input.now}); }

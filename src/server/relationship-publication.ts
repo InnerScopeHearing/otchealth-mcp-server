@@ -5,6 +5,7 @@ import {relationshipHistoricalAuthority as h,type RelationshipHistoricalReadDeps
 import {resolveRelationshipPublicationAdmission} from './graph-catalog-controller.js';
 import {createRelationshipPublicationStore} from './relationship-publication-store.js';
 import {queryDurableHistories} from './relationship-query/durable-query.mjs';
+import {createProductionRelationshipIdentityCurrentnessResolver,type RelationshipIdentityCurrentnessResolver} from './relationship-identity-currentness.js';
 
 type Json=Record<string,any>;
 type Stored={found:boolean;body?:Buffer;versionId?:string};
@@ -13,6 +14,7 @@ export interface RelationshipPublicationDeps extends Omit<RelationshipHistorical
  policyJson:()=>string;
  storeFor:(cohortId:string,producerId:string)=>Store;
  resolveAdmission:(input:{cohortId:string;run:Json;ctx:AuthContext;signal:AbortSignal})=>Promise<{admission:Json;proposal:Json}>;
+ identityCurrentness?:RelationshipIdentityCurrentnessResolver;
 }
 const SHA=/^[a-f0-9]{64}$/,RUN=/^run_[a-f0-9]{64}$/,LABEL=/^[a-z0-9][a-z0-9_.:-]{0,95}$/,PRODUCER=/^[a-z][a-z0-9-]{0,63}$/;
 const equal=(a:any,b:any)=>h.canonical(a)===h.canonical(b);
@@ -64,7 +66,7 @@ async function queryPublishedHistory(d:RelationshipPublicationDeps,policy:Json,c
  return {entry:{history:historyArtifact.payload,inputs:sources.map(source=>source.payload.input),authorization,sourceCurrent:current},refresh:()=>h.current(d,b,sources,ctx,signal)};
 }
 export function registerRelationshipPublicationRoutes(app:FastifyInstance,injected?:Partial<RelationshipPublicationDeps>){
- const base=h.deps(injected),d:RelationshipPublicationDeps={...base,policyJson:injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON),storeFor:injected?.storeFor??((cohort,producer)=>createRelationshipPublicationStore({cohort,producer})),resolveAdmission:injected?.resolveAdmission??(r=>resolveRelationshipPublicationAdmission({...r,run:{run_id:r.run.run_id}}))};
+ const base=h.deps(injected),d:RelationshipPublicationDeps={...base,policyJson:injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON),storeFor:injected?.storeFor??((cohort,producer)=>createRelationshipPublicationStore({cohort,producer})),resolveAdmission:injected?.resolveAdmission??(r=>resolveRelationshipPublicationAdmission({...r,run:{run_id:r.run.run_id}})),identityCurrentness:injected?.identityCurrentness??createProductionRelationshipIdentityCurrentnessResolver()};
  const budgets=new WeakMap<AbortSignal,{bytes:number;reads:number}>(),rawRead=d.readVersion;d.readVersion=async r=>{const budget=budgets.get(r.signal)??{bytes:0,reads:0};budgets.set(r.signal,budget);if(r.signal.aborted||++budget.reads>256||budget.bytes>=64*1024*1024)fail(503);const result=await rawRead({...r,maxBytes:Math.min(r.maxBytes,64*1024*1024-budget.bytes)});budget.bytes+=result.body.length;if(budget.bytes>64*1024*1024||r.signal.aborted)fail(503);return result;};
  const prefix='/relationship-publications/v1/:cohortId/:producerId';
  const route=(method:'GET'|'POST',url:string,operation:(r:FastifyRequest,p:FastifyReply,c:Json,policy:Json,ctx:AuthContext,s:AbortSignal,recheck:()=>Promise<void>)=>Promise<any>)=>app.route({method,url,bodyLimit:16384,handler:async(req,reply)=>{
@@ -100,7 +102,7 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   if(!h.exact(input,['histories','query'])||!Array.isArray(input.histories)||!input.histories.length||input.histories.length>64||!input.query||Object.getPrototypeOf(input.query)!==Object.prototype||Buffer.byteLength(h.canonical(input))>16384)fail(400);const queryKeys=Object.keys(input.query);if(input.query.kind==='candidate_links'?queryKeys.some(k=>!['kind','subject_name','object_name','predicate','offset','limit','include_stale'].includes(k)):queryKeys.some(k=>!['subject_id','object_id','premise_ids','as_of_recorded','valid_at'].includes(k))||!Object.hasOwn(input.query,'subject_id')||!Object.hasOwn(input.query,'object_id'))fail(400);
   const seen=new Set<string>(),items:Json[]=[];for(const item of input.histories){if(!h.exact(item,['run_id','artifact_ref'])||!RUN.test(item.run_id)||!h.artifactRef(item.artifact_ref)||seen.has(item.run_id+'\0'+h.canonical(item.artifact_ref)))fail(400);seen.add(item.run_id+'\0'+h.canonical(item.artifact_ref));items.push(item);}
   const loaded=[];for(const item of items){const g=stored(await d.storeFor(c.cohort_id,c.producer_id).get(item.run_id,signal));binding(policy,c,g,d.now());if(g.run.run_id!==item.run_id||!equal(g.artifact_ref,item.artifact_ref))fail();loaded.push(await queryPublishedHistory(d,policy,c,g,ctx,signal));}
-  const answer=queryDurableHistories({entries:loaded.map(result=>result.entry),query:input.query,now:d.now});await recheck();for(const result of loaded)if(!(await result.refresh()))fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
+  const answer=queryDurableHistories({entries:loaded.map(result=>result.entry),query:input.query,now:d.now});const proofs=(answer as any).identityProofs as Array<{request:unknown;proof:unknown}>;if(answer.status==='qualified'&&(!d.identityCurrentness||!proofs.length||!(await Promise.all(proofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal})))).every(Boolean)))fail();await recheck();for(const result of loaded)if(!(await result.refresh()))fail();if(answer.status==='qualified'&&!(await Promise.all(proofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal})))).every(Boolean))fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
   return reply.send({schema:'relationship-publication-query-v1',history_refs:items.map(item=>item.artifact_ref),answer});
  });
  route('GET',prefix+'/artifacts/:runId/sha256/:shard/:digest.json',async(req,reply,c,policy,ctx,signal,recheck)=>{
