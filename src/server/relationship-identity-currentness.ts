@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AuthContext } from '../auth/bearer.js';
-import { identityRegistryVerification, type IdentityRegistryConfig, type IdentityRegistryResolver } from './graph-worker-broker.js';
+import type { IdentityRegistryConfig, IdentityRegistryResolver } from './graph-worker-broker.js';
+import { identityRegistryVerification } from './identity-registry-verification.js';
 import { createProductionIdentityRegistryResolver } from './identity-registry-production.js';
 import { parseIdentityCurrentnessPointer } from './relationship-query/identity-currentness-proof.mjs';
 
