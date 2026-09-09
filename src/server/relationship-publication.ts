@@ -23,7 +23,7 @@ function parse(text:string,now:number):Json|null{
   const seen=new Set();for(const b of p.bindings){
    if(!h.exact(b,['authenticated_caller','caller_hash','producer_id','cohort_id','purpose','run_version','encryption','source_policy'])||b.authenticated_caller!=='cfo'||!SHA.test(b.caller_hash)||!PRODUCER.test(b.producer_id)||!LABEL.test(b.cohort_id)||!h.path(b.cohort_id)||!LABEL.test(b.purpose)||!LABEL.test(b.run_version))return null;
    const e=b.encryption;if(!(e?.algorithm==='AES256'&&h.exact(e,['algorithm'])||e?.algorithm==='aws:kms'&&h.exact(e,['algorithm','kms_key_id'])&&typeof e.kms_key_id==='string'&&e.kms_key_id.length>0&&e.kms_key_id.length<=1024&&!/[\r\n]/.test(e.kms_key_id)))return null;
-   const s=b.source_policy;if(!h.exact(s,['catalog_key','catalog_source_sha256','source_prefixes'])||!h.path(s.catalog_key)||!s.catalog_key.startsWith('graph-trial/')||!s.catalog_key.endsWith('.jsonl')||!SHA.test(s.catalog_source_sha256)||!Array.isArray(s.source_prefixes)||!s.source_prefixes.length||s.source_prefixes.length>32||!s.source_prefixes.every((x:any)=>typeof x==='string'&&x.endsWith('/')&&h.path(x.slice(0,-1)))||new Set(s.source_prefixes).size!==s.source_prefixes.length)return null;
+   const s=b.source_policy;if(!h.validSourcePolicy(s))return null;
    const key=b.caller_hash+'/'+b.cohort_id+'/'+b.producer_id;if(seen.has(key))return null;seen.add(key);
   }return p;
  }catch{return null;}

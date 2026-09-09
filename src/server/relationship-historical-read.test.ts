@@ -9,12 +9,12 @@ import '../../tools/relationship-artifacts/recall-journal.test.mjs';
 for (const [key,value] of Object.entries({CIO_SITE_ID:'synthetic',CIO_TRACK_KEY:'synthetic',CIO_APP_API_BEARER:'synthetic',PERPLEXITY_CONNECTOR_TOKEN:'synthetic-placeholder-value-000000000',ADMIN_REVOKE_TOKEN:'synthetic-placeholder-value-000000000',N8N_WEBHOOK_SECRET:'synthetic-placeholder-value-000000000'})) process.env[key]??=value;
 
 const {relationshipHistoricalReadTest:h,registerRelationshipHistoricalReadRoutes}=await import('./relationship-historical-read.js');
-const {canonical,hash,parse,validRun,admissionChain,sourceBound}=h;
+const {canonical,hash,parse,validRun,admissionChain,sourceBound,sourcePathAllowed}=h;
 const now=Date.parse('2026-09-08T12:00:00.000Z'), sha=(s:string)=>hash(s);
-function policy(){
+function policy(sourcePolicy?:any){
  const content={ref_version:'neptune-trial-active-run-ref-v1',purpose:'company_graph_backfill',scope:'finance',run_version:'synthetic-v1',manifest_sha256:sha('manifest')};
  const run={...content,run_id:'run_'+hash(canonical(content))}, cohort='synthetic-cohort', proposalKey=sha('proposal'), caller=sha('caller');
- return {schema:'relationship-history-policy-v1',policy_version:'synthetic-v1',expires_at:new Date(now+60000).toISOString(),bindings:[{authenticated_caller:'cfo',caller_hash:caller,producer_id:'synthetic-producer',run,encryption:{algorithm:'AES256'},cohort_id:cohort,admission:{key:`graph-trial/20260908/catalog-cohorts/${cohort}/server/admissions/${run.run_id}.json`,version_id:'v1',sha256:sha('admission')},proposal:{key:`graph-trial/20260908/catalog-cohorts/${cohort}/server/proposals/${proposalKey}.json`,version_id:'v2',sha256:sha('proposal-body')},approved_artifacts:[{digest:sha('artifact'),version_id:'v3'}],source_policy:{catalog_key:'graph-trial/synthetic/catalog.jsonl',catalog_source_sha256:sha('catalog'),source_prefixes:['finance/']}}]};
+ return {schema:'relationship-history-policy-v1',policy_version:'synthetic-v1',expires_at:new Date(now+60000).toISOString(),bindings:[{authenticated_caller:'cfo',caller_hash:caller,producer_id:'synthetic-producer',run,encryption:{algorithm:'AES256'},cohort_id:cohort,admission:{key:`graph-trial/20260908/catalog-cohorts/${cohort}/server/admissions/${run.run_id}.json`,version_id:'v1',sha256:sha('admission')},proposal:{key:`graph-trial/20260908/catalog-cohorts/${cohort}/server/proposals/${proposalKey}.json`,version_id:'v2',sha256:sha('proposal-body')},approved_artifacts:[{digest:sha('artifact'),version_id:'v3'}],source_policy:sourcePolicy??{catalog_key:'graph-trial/synthetic/catalog.jsonl',catalog_source_sha256:sha('catalog'),source_prefixes:['finance/']}}]};
 }
 test('historical policy parser rejects duplicate authority, traversal, null versions, and oversized allowlists',()=>{
  const valid=policy(); assert.ok(validRun(valid.bindings[0].run)); assert.ok(parse(canonical(valid),now));
@@ -26,8 +26,15 @@ test('historical policy parser rejects duplicate authority, traversal, null vers
  cases.push({...valid,bindings:[{...valid.bindings[0],source_policy:{...valid.bindings[0].source_policy,source_prefixes:['finance/','finance/']}}]});
  for(const value of cases) assert.equal(parse(canonical(value),now),null);
 });
-function evidence(){
- const b:any=policy().bindings[0],row={path:'finance/synthetic.pdf',sha256:sha('binary'),enriched_sha256:sha('binary'),sidecar:true,enriched:true,err:null};
+test('historical policy accepts explicit all-CFO scope only with empty prefixes',()=>{
+ const base={catalog_key:'graph-trial/synthetic/catalog.jsonl',catalog_source_sha256:sha('catalog')};
+ assert.ok(parse(canonical(policy({...base,source_prefixes:[],source_scope:'all_cfo_source_documents'})),now));
+ assert.equal(parse(canonical(policy({...base,source_prefixes:[]})),now),null);
+ assert.equal(parse(canonical(policy({...base,source_prefixes:['finance/'],source_scope:'all_cfo_source_documents'})),now),null);
+ assert.equal(parse(canonical(policy({...base,source_prefixes:[],source_scope:'all_company_documents'})),now),null);
+});
+function evidence({rowPath='finance/synthetic.pdf',sourcePolicy}:any={}){
+ const b:any=policy(sourcePolicy).bindings[0],row={path:rowPath,sha256:sha('binary'),enriched_sha256:sha('binary'),sidecar:true,enriched:true,err:null};
  const manifest=planGraphCatalogPage({rows:[row],catalogEtag:'synthetic',catalogSourceSha256:b.source_policy.catalog_source_sha256,createdAt:'2026-09-08T12:00:00.000Z'}).page.manifest!;
  const runBody={ref_version:b.run.ref_version,purpose:b.run.purpose,scope:'finance',run_version:b.run.run_version,manifest_sha256:manifest.manifest_sha256};b.run={...runBody,run_id:'run_'+hash(canonical(runBody))};
  const controller=hash(canonical({schema:'catalog-controller-v1',room:'finance',catalogSourceSha256:b.source_policy.catalog_source_sha256,purpose:b.run.purpose,runVersion:b.run.run_version})),item=manifest.documents[0];
@@ -45,6 +52,17 @@ test('valid pinned admission chain refuses cross-run and proposal substitutions'
 test('valid prepared source refuses run, manifest, chunk and text substitutions',()=>{
  const {b,proposal,source}=evidence();assert.equal(sourceBound(source,b,proposal),true);
  for(const mutate of[(s:any)=>s.payload.input.binding.run_id='run_'+sha('other'),(s:any)=>s.payload.input.binding.catalog_manifest_sha256=sha('other'),(s:any)=>s.payload.input.binding.chunk_sha256=sha('other'),(s:any)=>s.payload.input.prepared_text='other', (s:any)=>s.payload.input.catalog_row.path='legal/other.pdf']){const s=structuredClone(source);mutate(s);assert.equal(sourceBound(s,b,proposal),false);}
+});
+test('root-level CFO source is allowed only by explicit all-source scope',()=>{
+ const base={catalog_key:'graph-trial/synthetic/catalog.jsonl',catalog_source_sha256:sha('catalog')};
+ const all=evidence({rowPath:'root-document.pdf',sourcePolicy:{...base,source_prefixes:[],source_scope:'all_cfo_source_documents'}});
+ assert.equal(sourceBound(all.source,all.b,all.proposal),true);
+ assert.equal(sourcePathAllowed({...base,source_prefixes:[],source_scope:'all_cfo_source_documents'},'_catalog/internal.json'),false);
+ assert.equal(sourcePathAllowed({...base,source_prefixes:['finance/']},'legal/other.pdf'),false);
+ const scoped=evidence({rowPath:'root-document.pdf',sourcePolicy:{...base,source_prefixes:['finance/']}});
+ assert.equal(sourceBound(scoped.source,scoped.b,scoped.proposal),false);
+ const foreign=structuredClone(all.source);foreign.payload.input.binding.room='legal_company';
+ assert.equal(sourceBound(foreign,all.b,all.proposal),false);
 });
 test('historical GET verifies pinned records and fresh source policy without execution authority',async()=>{
  const {b,proposal,admission,source}=evidence(),objects=new Map<string,any>();
