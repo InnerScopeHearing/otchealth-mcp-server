@@ -18,6 +18,8 @@ function integer(value: string | undefined, name: string, maximum: number): numb
 
 function checkpoint(raw: string | undefined, agent: string): HistoricalRepairCheckpoint | undefined {
   if (raw === undefined) return undefined;
+  // Bound attacker-controlled argv memory without silently discarding any valid source ID.
+  if (Buffer.byteLength(raw, 'utf8') > 1024 * 1024) throw new Error('checkpoint_invalid');
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new Error('checkpoint_invalid'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('checkpoint_invalid');
