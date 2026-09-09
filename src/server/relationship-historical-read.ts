@@ -7,7 +7,7 @@ import {createRelationshipHistoryS3} from './relationship-history-s3.js';
 import {readPinnedGraphCatalog} from './graph-catalog-reader.js';
 import {planGraphCatalogPage} from './graph-catalog-planner.js';
 type Json=Record<string,any>;
-type Source={catalog_key:string;catalog_source_sha256:string;source_prefixes:string[]};
+type Source={catalog_key:string;catalog_source_sha256:string;source_prefixes:string[];source_scope?:'all_cfo_source_documents'};
 export type HistoricalReadResult={status:number;headers:Headers|Record<string,string|undefined>;body:Buffer};
 export interface RelationshipHistoricalReadDeps{
  authenticate:(r:FastifyRequest,p:FastifyReply)=>Promise<AuthContext|undefined>;policyJson:()=>string;now:()=>number;
@@ -17,6 +17,7 @@ export interface RelationshipHistoricalReadDeps{
 }
 const BUCKET='otchealth-finance-legal-dr-55c84f6b',BASE='graph-trial/20260908/workers/cfo',MAX_PAYLOAD=16*1024*1024,MAX=MAX_PAYLOAD+1024;
 const SHA=/^[a-f0-9]{64}$/,LABEL=/^[a-z0-9][a-z0-9_.:-]{0,95}$/,PRODUCER=/^[a-z][a-z0-9-]{0,63}$/;
+const RESERVED_CFO_ROOTS=new Set(['_text','_catalog','_review','_memory','_state','_archive']);
 const hash=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex');
 const canonical=(v:any):string=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
 const same=(a:unknown,b:unknown)=>canonical(a)===canonical(b);
@@ -24,6 +25,18 @@ const exact=(v:any,k:string[])=>!!v&&Object.getPrototypeOf(v)===Object.prototype
 const version=(v:unknown):v is string=>typeof v==='string'&&v!=='null'&&/^[^\s\p{C}]{1,1024}$/u.test(v);
 const utc=(v:unknown):v is string=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v)&&Number.isFinite(Date.parse(v))&&new Date(v).toISOString()===v;
 const path=(v:unknown):v is string=>typeof v==='string'&&v.length>0&&v.length<=1024&&v===v.normalize('NFC')&&!/[\\%?#:\u0000-\u001f\u007f]/.test(v)&&v.split('/').every(p=>p!==''&&p!=='.'&&p!=='..');
+function validSourcePolicy(value:unknown):value is Source{
+ if(!value||Object.getPrototypeOf(value)!==Object.prototype)return false;const s=value as Json,all=s.source_scope==='all_cfo_source_documents';
+ if(!hExactSourcePolicy(s,all)||!path(s.catalog_key)||!s.catalog_key.startsWith('graph-trial/')||!s.catalog_key.endsWith('.jsonl')||!SHA.test(s.catalog_source_sha256)||!Array.isArray(s.source_prefixes))return false;
+ if(all)return s.source_prefixes.length===0;
+ return s.source_scope===undefined&&s.source_prefixes.length>0&&s.source_prefixes.length<=32&&s.source_prefixes.every((q:any)=>typeof q==='string'&&q.endsWith('/')&&path(q.slice(0,-1)))&&new Set(s.source_prefixes).size===s.source_prefixes.length;
+}
+function hExactSourcePolicy(s:Json,all:boolean){return exact(s,all?['catalog_key','catalog_source_sha256','source_prefixes','source_scope']:['catalog_key','catalog_source_sha256','source_prefixes']);}
+function sourcePathAllowed(source:Source,value:unknown):value is string{
+ if(!path(value))return false;
+ if(source.source_scope==='all_cfo_source_documents')return !RESERVED_CFO_ROOTS.has(value.split('/')[0].toLowerCase());
+ return source.source_prefixes.some(prefix=>value.startsWith(prefix));
+}
 function validJson(v:any,depth=0):boolean{if(depth>128)return false;if(v===null||typeof v==='boolean'||typeof v==='string')return true;if(typeof v==='number')return Number.isFinite(v);if(Array.isArray(v))return v.every(x=>validJson(x,depth+1));return !!v&&Object.getPrototypeOf(v)===Object.prototype&&Object.values(v).every(x=>validJson(x,depth+1));}
 function validRun(r:any){if(!exact(r,['ref_version','run_id','purpose','scope','run_version','manifest_sha256']))return false;const{run_id,...body}=r;return r.ref_version==='neptune-trial-active-run-ref-v1'&&r.scope==='finance'&&LABEL.test(r.purpose)&&LABEL.test(r.run_version)&&SHA.test(r.manifest_sha256)&&run_id==='run_'+hash(canonical(body));}
 function validRef(r:any){return exact(r,['key','version_id','sha256'])&&path(r.key)&&version(r.version_id)&&SHA.test(r.sha256);}
@@ -35,7 +48,7 @@ function parse(text:string,now:number):Json|null{
   const prefix=`graph-trial/20260908/catalog-cohorts/${b.cohort_id}/server/`;
   if(b.admission.key!==prefix+`admissions/${b.run.run_id}.json`||!b.proposal.key.startsWith(prefix+'proposals/')||!SHA.test(b.proposal.key.slice((prefix+'proposals/').length,-5))||!b.proposal.key.endsWith('.json'))return null;
   const e=b.encryption;if(!(e?.algorithm==='AES256'&&exact(e,['algorithm'])||e?.algorithm==='aws:kms'&&exact(e,['algorithm','kms_key_id'])&&typeof e.kms_key_id==='string'&&e.kms_key_id.length>0&&e.kms_key_id.length<=1024&&!/[\r\n]/.test(e.kms_key_id)))return null;
-  const s=b.source_policy;if(!exact(s,['catalog_key','catalog_source_sha256','source_prefixes'])||!path(s.catalog_key)||!s.catalog_key.startsWith('graph-trial/')||!s.catalog_key.endsWith('.jsonl')||!SHA.test(s.catalog_source_sha256)||!Array.isArray(s.source_prefixes)||!s.source_prefixes.length||s.source_prefixes.length>32||!s.source_prefixes.every((q:any)=>typeof q==='string'&&q.endsWith('/')&&path(q.slice(0,-1)))||new Set(s.source_prefixes).size!==s.source_prefixes.length)return null;
+  const s=b.source_policy;if(!validSourcePolicy(s))return null;
   if(!Array.isArray(b.approved_artifacts)||!b.approved_artifacts.length||b.approved_artifacts.length>256||!b.approved_artifacts.every((a:any)=>exact(a,['digest','version_id'])&&SHA.test(a.digest)&&version(a.version_id))||new Set(b.approved_artifacts.map((a:any)=>a.digest+'\0'+a.version_id)).size!==b.approved_artifacts.length)return null;
   const id=b.caller_hash+'\0'+b.producer_id+'\0'+b.run.run_id;if(seen.has(id))return null;seen.add(id);
  }return p;
@@ -63,13 +76,13 @@ function parseArtifact(r:HistoricalReadResult,b:Json,digest:string,v:string):Jso
 function sourceBound(source:Json,b:Json,proposal:Json){
  const i=source.payload.input;if(!exact(i,['binding','catalog_row','prepared_text','chunk_start_utf16','chunk_end_utf16','purpose'])||i.purpose!==b.run.purpose)return false;
  const x=i.binding;if(!exact(x,['schema','run_id','room','source_index','catalog_manifest_sha256','document_ordinal','source_document_version','catalog_source_sha256','snapshot_id','prepared_manifest_sha256','sidecar_content_sha256','chunk_ordinal','chunk_sha256'])||x.schema!=='cfo-prepared-chunk-binding-v1'||x.run_id!==b.run.run_id||x.room!=='finance'||x.source_index!=='finance-cfo-source-docs'||x.catalog_manifest_sha256!==b.run.manifest_sha256||x.document_ordinal!==0||!/^txtsnap_[a-f0-9]{64}$/.test(x.snapshot_id)||!SHA.test(x.prepared_manifest_sha256)||!SHA.test(x.sidecar_content_sha256)||!SHA.test(x.chunk_sha256)||!Number.isSafeInteger(x.chunk_ordinal)||x.chunk_ordinal<0)return false;
- const row=i.catalog_row;if(!row||!path(row.path)||!b.source_policy.source_prefixes.some((p:string)=>row.path.startsWith(p)))return false;
+ const row=i.catalog_row;if(!row||!sourcePathAllowed(b.source_policy,row.path))return false;
  const plan=planGraphCatalogPage({rows:[row],catalogEtag:'historical-projection',catalogSourceSha256:b.source_policy.catalog_source_sha256,createdAt:proposal.manifest.created_at,limit:1});if(!plan.page.manifest||!same(plan.page.manifest,proposal.manifest)||x.source_document_version!==proposal.manifest.documents[0].document_version_id||x.catalog_source_sha256!==proposal.manifest.documents[0].source_version)return false;
  const text=i.prepared_text,start=i.chunk_start_utf16,end=i.chunk_end_utf16;if(typeof text!=='string'||!text.length||Buffer.byteLength(text)>1024*1024||Buffer.from(text).toString('utf8')!==text||hash(text)!==x.sidecar_content_sha256||!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end>text.length||end<=start||x.chunk_ordinal===0&&start!==0)return false;const chunk=text.slice(start,end);return chunk.length<=16000&&Buffer.byteLength(chunk)<=16384&&Buffer.from(chunk).toString('utf8')===chunk&&hash(chunk)===x.chunk_sha256;
 }
 async function defaultSource(row:Json,binding:Json,ctx:AuthContext,signal:AbortSignal){const source={room:'finance' as const,source_index:'finance-cfo-source-docs' as const,path:row.path,source_path_hash:hash(row.path),document_version_id:binding.source_document_version,source_version:binding.catalog_source_sha256};const result=await createCfoTextSnapshotReader({callerContext:ctx,maxSourceBytes:1024*1024}).readVersionPinnedPage(source,{signal});return result.outcome==='ready'&&result.descriptor.sidecar_content_sha256===binding.sidecar_content_sha256;}
 function deps(i?:Partial<RelationshipHistoricalReadDeps>):RelationshipHistoricalReadDeps{const transport=createRelationshipHistoryS3();return{authenticate:i?.authenticate??requireConnectorAuth,policyJson:i?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_HISTORY_POLICY_JSON),now:i?.now??Date.now,readVersion:i?.readVersion??(r=>transport.readVersion(r)),readCatalog:i?.readCatalog??(async(s,signal)=>(await readPinnedGraphCatalog({key:s.catalog_key,sourceSha256:s.catalog_source_sha256,signal})).rows),checkSource:i?.checkSource??defaultSource};}
-async function current(d:RelationshipHistoricalReadDeps,b:Json,sources:Json[],ctx:AuthContext,signal:AbortSignal){const rows=await d.readCatalog(b.source_policy,signal);let all=true;for(const source of sources){const i=source.payload.input,row=i.catalog_row,matches=rows.filter((r:any)=>r?.path===row.path);if(matches.length!==1||!b.source_policy.source_prefixes.some((p:string)=>row.path.startsWith(p)))throw Error('source_denied');if(!same(matches[0],row)){all=false;continue;}const isCurrent=await d.checkSource(row,i.binding,ctx,signal);all=isCurrent&&all;}return all;}
+async function current(d:RelationshipHistoricalReadDeps,b:Json,sources:Json[],ctx:AuthContext,signal:AbortSignal){const rows=await d.readCatalog(b.source_policy,signal);let all=true;for(const source of sources){const i=source.payload.input,row=i.catalog_row,matches=rows.filter((r:any)=>r?.path===row.path);if(matches.length!==1||!sourcePathAllowed(b.source_policy,row.path))throw Error('source_denied');if(!same(matches[0],row)){all=false;continue;}const isCurrent=await d.checkSource(row,i.binding,ctx,signal);all=isCurrent&&all;}return all;}
 const fail=(p:FastifyReply,n:number)=>p.code(n).send();
 export function registerRelationshipHistoricalReadRoutes(app:FastifyInstance,injected?:Partial<RelationshipHistoricalReadDeps>):void{
  const d=deps(injected);app.get('/relationship-history/v1/:runId/:producerId/sha256/:shard/:digest.json',async(req,reply)=>{
@@ -87,7 +100,7 @@ export function registerRelationshipHistoricalReadRoutes(app:FastifyInstance,inj
   }catch(error){return !reply.sent?fail(reply,(error as Error).message==='source_denied'?403:503):undefined;}finally{clearTimeout(timer);internal.abort();req.raw.off('aborted',aborted);reply.raw.off('close',disconnected);}
  });
 }
-export const relationshipHistoricalReadTest={canonical,hash,parse,validRun,artifactKey,admissionChain,sourceBound};
+export const relationshipHistoricalReadTest={canonical,hash,parse,validRun,artifactKey,admissionChain,sourceBound,validSourcePolicy,sourcePathAllowed};
 
 // Shared validation is used by both explicit grants and automatic server publication.
-export const relationshipHistoricalAuthority={canonical,hash,parse,validRun,artifactKey,admissionChain,sourceBound,artifactRef,pinned,parseArtifact,current,deps,exact,path,version,utc};
+export const relationshipHistoricalAuthority={canonical,hash,parse,validRun,artifactKey,admissionChain,sourceBound,artifactRef,pinned,parseArtifact,current,deps,exact,path,version,utc,validSourcePolicy,sourcePathAllowed};
