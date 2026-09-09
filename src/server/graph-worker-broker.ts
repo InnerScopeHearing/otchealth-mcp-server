@@ -1202,6 +1202,9 @@ export function registerGraphWorkerBrokerRoutes(
       if (await partitionCall(c, options => c.partitions.publish_manifest({ registry_id: registryId, manifest_version: manifestVersion, envelope: request.body }, options)) !== true) {
         return fail(reply, 412, 'identity_registry_publication_conflict');
       }
+      const stored = await partitionCall(c, options => c.partitions.read_manifest({ registry_id: registryId, manifest_version: manifestVersion }, options));
+      if (stored.status !== 'active' || !validPartitionManifest(stored.envelope, c.config, manifestVersion) ||
+          canonical(stored.envelope) !== canonical(request.body)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
       if (await partitionCall(c, options => c.partitions.manifest_current(current, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
       await recheck(c);
       return reply.code(201).send({ published: true, registry_id: registryId, manifest_version: manifestVersion });
@@ -1229,6 +1232,9 @@ export function registerGraphWorkerBrokerRoutes(
       if (await partitionCall(c, options => c.partitions.publish_shard({ ...query, envelope: request.body }, options)) !== true) {
         return fail(reply, 412, 'identity_registry_publication_conflict');
       }
+      const stored = await partitionCall(c, options => c.partitions.read_shard(query, options));
+      if (stored.status !== 'active' || !validPartitionShard(stored.envelope, c.config, manifest.snapshot, descriptor) ||
+          canonical(stored.envelope) !== canonical(request.body)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
       if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
       await recheck(c);
       return reply.code(201).send({ published: true, registry_id: registryId, manifest_version: manifestVersion, shard_id: shardId });
