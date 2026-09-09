@@ -20,14 +20,14 @@
  * only genuinely available while the gateway can still mint an Azure credential.
  */
 
-import { loadEnv } from '../config/env.js';
 import * as cosmos from './cosmos.js';
 import * as postgres from './postgres.js';
+import { loadAgentStateBackend, type AgentStateBackend } from './runtime-config.js';
 
-export type StateBackend = 'cosmos' | 'postgres';
+export type StateBackend = AgentStateBackend;
 
 export function activeBackend(): StateBackend {
-  return loadEnv().STATE_BACKEND;
+  return loadAgentStateBackend();
 }
 
 /** True when the ACTIVE backend is usable. A configured-but-inactive backend does not count. */

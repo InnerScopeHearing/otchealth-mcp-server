@@ -28,8 +28,8 @@
 
 import crypto from 'node:crypto';
 import pg from 'pg';
-import { loadEnv } from '../config/env.js';
 import { translate } from './pg-sql.js';
+import { loadAgentStatePostgresConfig } from './runtime-config.js';
 
 /** Same allow-list as the Cosmos client: a caller-supplied container must never reach SQL. */
 const CONTAINERS = new Set(['tasks', 'memory', 'events', 'oauthcodes', 'cache']);
@@ -58,20 +58,20 @@ export interface PgResponse<T = Record<string, unknown>> {
 let pool: pg.Pool | null = null;
 
 export function isConfigured(): boolean {
-  return Boolean(loadEnv().PG_HOST);
+  return Boolean(loadAgentStatePostgresConfig().host);
 }
 
 function getPool(): pg.Pool {
   if (pool) return pool;
-  const env = loadEnv();
-  if (!env.PG_HOST) throw new Error('Postgres agent-state not configured (PG_HOST unset).');
+  const env = loadAgentStatePostgresConfig();
+  if (!env.host) throw new Error('Postgres agent-state not configured (PG_HOST unset).');
   pool = new pg.Pool({
-    host: env.PG_HOST,
-    port: env.PG_PORT,
-    database: env.PG_DATABASE,
-    user: env.PG_USER,
-    password: env.PG_PASSWORD,
-    ssl: { rejectUnauthorized: env.PG_SSL_VERIFY },
+    host: env.host,
+    port: env.port,
+    database: env.database,
+    user: env.user,
+    password: env.password,
+    ssl: { rejectUnauthorized: env.sslVerify },
     // Bounded so one wedged query cannot exhaust the gateway's request slots, matching the
     // fetch-budget discipline the Cosmos client uses for the same reason.
     max: 10,

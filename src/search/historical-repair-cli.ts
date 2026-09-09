@@ -57,6 +57,12 @@ export function repairOutput(result: HistoricalRepairResult): Record<string, unk
   return { runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT, mode: result.mode, agent: result.checkpoint.agent, index: result.index, dry_run: result.dryRun, checked: result.checked, already_indexed: result.already_indexed, fetched: result.fetched, indexed: result.indexed, failed: result.failed, truncated: result.truncated, errors_count: result.errors.length, pending_count: result.checkpoint.pending_ids.length, complete: !result.dryRun && result.failed === 0 && !result.truncated && result.errors.length === 0 && result.checkpoint.pending_ids.length === 0, checkpoint: result.checkpoint };
 }
 
+function checkpointStoreError(error: unknown): 'checkpoint_store_configuration_invalid' | 'checkpoint_store_unavailable' {
+  return error instanceof Error && error.message === 'agentstate_runtime_config_invalid'
+    ? 'checkpoint_store_configuration_invalid'
+    : 'checkpoint_store_unavailable';
+}
+
 export async function runHistoricalRepairCli(
   argv: string[],
   run = runHistoricalRepair,
@@ -64,7 +70,20 @@ export async function runHistoricalRepairCli(
 ): Promise<{ output: Record<string, unknown>; exitCode: number }> {
   const options = parseHistoricalRepairArgs(argv);
   const index = options.index || 'memory-exec';
-  const loaded = options.durable ? await store.load(options.agent, index) : { exists: false };
+  let loaded: Awaited<ReturnType<HistoricalRepairCheckpointStore['load']>>;
+  try {
+    loaded = options.durable ? await store.load(options.agent, index) : { exists: false };
+  } catch (error) {
+    return {
+      output: {
+        runtime_contract: HISTORICAL_REPAIR_RUNTIME_CONTRACT,
+        mode: 'historical-reconciliation', agent: options.agent, index, dry_run: options.dryRun,
+        checkpoint_store: 'agentstate-cache-cas', checkpoint_persisted: false,
+        complete: false, errors_count: 1, error: checkpointStoreError(error),
+      },
+      exitCode: 1,
+    };
+  }
   if (options.preflight) {
     return {
       output: {
