@@ -44,6 +44,17 @@ test('reservation consumes budget before authority and lost activation remains i
  h.expire();assert.equal(await resolveCatalogCohortBinding(ctx,p.run.run_id,AbortSignal.timeout(5000),h.deps),null);assert.equal((await h.request('/recovery',{key:p.key,run_id:p.run.run_id})).statusCode,200);assert.equal((await h.request('/page',{cursor:null,limit:1})).statusCode,403);
  }finally{await h.app.close();}});
 
+test('scoped recovery resumes only a null-preparation active admission and repeat admit stays idempotent',async()=>{const h=await harness();try{const p=await h.publish(),key=`versions/${p.key}`,prepared={schema:'catalog-controller-version-v1',proposal:p,status:'prepared',outcome:null,chunks:[],preparation:null};
+ const created=await h.request('/state/'+key,{key,revision:null,value:prepared},'PUT');assert.equal(created.statusCode,200,created.body);
+ const admission=await h.request('/admit',{key:p.key,manifest_sha256:p.manifest.manifest_sha256});assert.equal(admission.statusCode,200,admission.body);
+ const dispatching=await h.request('/state/'+key,{key,revision:created.json().revision,value:{...prepared,status:'dispatching'}},'PUT');assert.equal(dispatching.statusCode,200,dispatching.body);
+ const resumed=await h.request('/state/'+key,{key,revision:dispatching.json().revision,value:prepared},'PUT');assert.equal(resumed.statusCode,200,resumed.body);
+ assert.deepEqual((await h.request('/admit',{key:p.key,manifest_sha256:p.manifest.manifest_sha256})).json(),admission.json());
+ const dispatchedAgain=await h.request('/state/'+key,{key,revision:resumed.json().revision,value:{...prepared,status:'dispatching'}},'PUT');assert.equal(dispatchedAgain.statusCode,200,dispatchedAgain.body);
+ const {recovery_policy_sha256,recovery_expires_at,...withoutRecovery}=h.cfg;h.setConfigs([withoutRecovery]);
+ assert.equal((await h.request('/state/'+key,{key,revision:dispatchedAgain.json().revision,value:prepared},'PUT')).statusCode,409);
+ }finally{await h.app.close();}});
+
 
 
 async function materializedHarness(){
