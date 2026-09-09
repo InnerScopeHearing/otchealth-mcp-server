@@ -66,3 +66,17 @@ test('rejects nonfinite timing telemetry', () => {
   const score = scoreGraphRun(assertions, { provider: 'subscription', model: 'test', elapsed_ms: Number.POSITIVE_INFINITY, attempts: 1, candidates: [{ subject: 'x', predicate: 'owns', object: 'y', citations: ['c1'] }] });
   assert.equal(qualityGate(score), false);
 });
+
+test('fails closed when expected causation is omitted by a candidate', () => {
+  const causalTruth = [{ id: 'causal', subject: 'x', predicate: 'causes', object: 'y', citations: ['c1'], causation: true }];
+  const score = scoreGraphRun(causalTruth, { provider: 'subscription', model: 'test', elapsed_ms: 1, attempts: 1, candidates: [{ subject: 'x', predicate: 'causes', object: 'y', citations: ['c1'] }] });
+  assert.equal(score.missing_expected_causation, 1);
+  assert.equal(score.recall, 0);
+  assert.equal(qualityGate(score), false);
+});
+
+test('extractor changes cannot reuse a synthetic operation identity', () => {
+  const one = createSyntheticSubscriptionPlans(SHA, [{ provider: 'p', model: 'm', extractor_version: 'v1', extractor_bundle_sha256: 'b'.repeat(64) }]);
+  const two = createSyntheticSubscriptionPlans(SHA, [{ provider: 'p', model: 'm', extractor_version: 'v2', extractor_bundle_sha256: 'c'.repeat(64) }]);
+  assert.notEqual(one[0].idempotency_key, two[0].idempotency_key);
+});

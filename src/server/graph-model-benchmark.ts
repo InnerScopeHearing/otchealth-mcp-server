@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 export type Assertion = Readonly<{ id: string; subject: string; predicate: string; object: string; citations: string[]; causation?: boolean }>;
 export type Candidate = Readonly<{ subject: string; predicate: string; object: string; citations: string[]; causation?: boolean }>;
 export type ModelRun = Readonly<{ provider: string; model: string; candidates: Candidate[]; elapsed_ms: number; attempts: number }>;
-export type Score = Readonly<{ assertion_count: number; precision: number; recall: number; citation_validity: number; false_merges: number; unsupported_causation: number; elapsed_ms: number; attempts: number }>;
+export type Score = Readonly<{ assertion_count: number; precision: number; recall: number; citation_validity: number; false_merges: number; unsupported_causation: number; missing_expected_causation: number; elapsed_ms: number; attempts: number }>;
 export type SubscriptionModel = Readonly<{ provider: string; model: string; extractor_version: string; extractor_bundle_sha256: string }>;
 export type SyntheticRunPlan = Readonly<{
   schema: 'graph-model-benchmark-run-v1';
@@ -31,6 +31,7 @@ export function scoreGraphRun(assertions: Assertion[], run: ModelRun): Score {
   let citations = 0;
   let merges = 0;
   let causation = 0;
+  let missingExpectedCausation = 0;
   for (const candidate of run.candidates) {
     const candidateKey = key(candidate);
     const expected = truth.get(candidateKey);
@@ -39,9 +40,10 @@ export function scoreGraphRun(assertions: Assertion[], run: ModelRun): Score {
       if (candidate.causation === true) causation++;
       continue;
     }
+    if (candidate.causation === true && expected.causation !== true) { causation++; continue; }
+    if (expected.causation === true && candidate.causation !== true) { missingExpectedCausation++; continue; }
     matched.add(candidateKey);
     if (candidate.citations.length > 0 && candidate.citations.every((id) => expected.citations.includes(id))) citations++;
-    if (candidate.causation === true && expected.causation !== true) causation++;
   }
   return {
     assertion_count: assertions.length,
@@ -50,6 +52,7 @@ export function scoreGraphRun(assertions: Assertion[], run: ModelRun): Score {
     citation_validity: run.candidates.length ? citations / run.candidates.length : 1,
     false_merges: merges,
     unsupported_causation: causation,
+    missing_expected_causation: missingExpectedCausation,
     elapsed_ms: run.elapsed_ms,
     attempts: run.attempts,
   };
@@ -57,7 +60,7 @@ export function scoreGraphRun(assertions: Assertion[], run: ModelRun): Score {
 
 export function qualityGate(score: Score): boolean {
   return score.assertion_count > 0 && score.precision >= .95 && score.recall >= .9 && score.citation_validity >= .98 &&
-    score.false_merges === 0 && score.unsupported_causation === 0 && Number.isInteger(score.attempts) &&
+    score.false_merges === 0 && score.unsupported_causation === 0 && score.missing_expected_causation === 0 && Number.isInteger(score.attempts) &&
     score.attempts >= 1 && score.attempts <= 2 && Number.isFinite(score.elapsed_ms) && score.elapsed_ms >= 0;
 }
 
@@ -86,7 +89,7 @@ export function createSyntheticSubscriptionPlans(inputSha256: string, models: re
       billing_route: 'chatgpt_subscription' as const,
       paid_fallback: false as const,
       max_attempts: 2 as const,
-      idempotency_key: digest(`graph-model-benchmark-v1\u0000${inputSha256}\u0000${identity}`),
+      idempotency_key: digest(`graph-model-benchmark-v1\u0000${inputSha256}\u0000${identity}\u0000${model.extractor_version}\u0000${model.extractor_bundle_sha256}`),
     });
   });
 }
