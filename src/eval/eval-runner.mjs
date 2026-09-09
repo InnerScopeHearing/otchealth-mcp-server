@@ -119,6 +119,9 @@ async function main() {
   }
 
   // Run all cases sequentially (avoids rate-limiting the live gateway)
+  // Validate bounded baseline configuration before any live tool call.
+  if (!Array.isArray(cases)) throw new Error('Invalid eval cases');
+  makeBaseline(cases, BASELINE_THRESHOLD);
   const results = [];
   for (const c of cases) {
     process.stdout.write(`  Running ${c.id} (${c.kind})... `);
@@ -146,13 +149,13 @@ async function main() {
   const isoDate = new Date().toISOString().split('T')[0];
   const isoTimestamp = new Date().toISOString();
   const baselinesDir = join(__dirname, 'baselines');
-  mkdirSync(baselinesDir, { recursive: true });
   const outPath = join(baselinesDir, `${isoDate}.json`);
 
   const baseline = makeBaseline(results, BASELINE_THRESHOLD, isoTimestamp);
   // Await sanitized awslogs record; verify live retention at deployment acceptance.
   await emitBaseline(baseline);
 
+  mkdirSync(baselinesDir, { recursive: true });
   writeFileSync(outPath, JSON.stringify(baseline, null, 2), 'utf8');
   console.log(`\nBaseline written → ${outPath}`);
 
