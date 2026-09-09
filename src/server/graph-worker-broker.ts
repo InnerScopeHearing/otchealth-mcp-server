@@ -966,7 +966,8 @@ export function registerGraphWorkerBrokerRoutes(
     }
     const signal = AbortSignal.timeout(15_000);
     let config: IdentityRegistryConfig | null;
-    try { config = await deps.identityRegistry.resolve({ registry_id: registryId, caller: ctx }, { signal }); }
+    try { config = await abortable(Promise.resolve().then(() =>
+      deps.identityRegistry!.resolve({ registry_id: registryId, caller: ctx }, { signal })), signal); }
     catch { await fail(reply, 503, 'identity_registry_unavailable'); return null; }
     if (!config || config.registry_id !== registryId || !validIdentityAuthority(config.authority) ||
         config.authority.scope !== 'cfo' || !validRun(config.binding.run) ||
@@ -997,7 +998,7 @@ export function registerGraphWorkerBrokerRoutes(
     if (!policy || !binding || !isLaneAllowed(binding.source_index, ctx.caller_agent)) {
       await fail(reply, 503, 'identity_registry_unavailable'); return null;
     }
-    try { await assertActive(deps, binding, signal); }
+    try { await abortable(Promise.resolve().then(() => assertActive(deps, binding, signal)), signal); }
     catch { await fail(reply, 503, 'identity_registry_unavailable'); return null; }
     return { ctx, policy, binding, signal, cohort, config };
   }
@@ -1154,14 +1155,27 @@ export function registerGraphWorkerBrokerRoutes(
   }
   async function partitionCall<T>(control: NonNullable<Awaited<ReturnType<typeof partitionContext>>>,
     callback: (options: { signal: AbortSignal }) => Promise<T>): Promise<T> {
+    if (control.signal.aborted) throw new Error('partition_deadline');
     const timer = new AbortController();
     const signal = AbortSignal.any([control.signal, timer.signal]);
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let removeAbort: () => void = () => undefined;
     const expired = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => { timer.abort(); reject(new Error('partition_deadline')); }, 15_000);
     });
-    try { return await Promise.race([Promise.resolve().then(() => callback({ signal })), expired]); }
-    finally { if (timeout) clearTimeout(timeout); timer.abort(); }
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(new Error('partition_deadline'));
+      signal.addEventListener('abort', abort, { once: true });
+      removeAbort = () => signal.removeEventListener('abort', abort);
+    });
+    try {
+      const value = await Promise.race([Promise.resolve().then(() => callback({ signal })), expired, cancelled]);
+      if (signal.aborted) throw new Error('partition_deadline');
+      return value;
+    } finally { if (timeout) clearTimeout(timeout); removeAbort(); timer.abort(); }
+  }
+  async function partitionRecheck(c: NonNullable<Awaited<ReturnType<typeof partitionContext>>>) {
+    await partitionCall(c, async () => { await recheck(c); return true; });
   }
   async function pinnedManifest(c: NonNullable<Awaited<ReturnType<typeof partitionContext>>>, manifestVersion: string) {
     const stored = await partitionCall(c, options => c.partitions.read_manifest({ registry_id: c.config.registry_id, manifest_version: manifestVersion }, options));
@@ -1169,7 +1183,7 @@ export function registerGraphWorkerBrokerRoutes(
     const snapshot = (stored.envelope as Record<string, unknown>).snapshot as Record<string, unknown>;
     const request = { registry_id: c.config.registry_id, manifest_version: manifestVersion, source_generation: snapshot.source_generation as string };
     if (await partitionCall(c, options => c.partitions.manifest_current(request, options)) !== true) throw new Error('partition_manifest_current');
-    await recheck(c);
+    await partitionRecheck(c);
     return { envelope: stored.envelope, snapshot, current: request };
   }
   function shardRequest(value: unknown, registryId: string, manifestVersion: string): Record<string, unknown> | null {
@@ -1198,7 +1212,7 @@ export function registerGraphWorkerBrokerRoutes(
       const snapshot = (request.body as Record<string, unknown>).snapshot as Record<string, unknown>;
       const current = { registry_id: registryId, manifest_version: manifestVersion, source_generation: snapshot.source_generation as string };
       if (await partitionCall(c, options => c.partitions.manifest_current(current, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
-      await recheck(c);
+      await partitionRecheck(c);
       if (await partitionCall(c, options => c.partitions.publish_manifest({ registry_id: registryId, manifest_version: manifestVersion, envelope: request.body }, options)) !== true) {
         return fail(reply, 412, 'identity_registry_publication_conflict');
       }
@@ -1206,7 +1220,7 @@ export function registerGraphWorkerBrokerRoutes(
       if (stored.status !== 'active' || !validPartitionManifest(stored.envelope, c.config, manifestVersion) ||
           canonical(stored.envelope) !== canonical(request.body)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
       if (await partitionCall(c, options => c.partitions.manifest_current(current, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
-      await recheck(c);
+      await partitionRecheck(c);
       return reply.code(201).send({ published: true, registry_id: registryId, manifest_version: manifestVersion });
     } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
   });
@@ -1228,7 +1242,7 @@ export function registerGraphWorkerBrokerRoutes(
       const query = { registry_id: registryId, manifest_version: manifestVersion, shard_id: shardId,
         registry_version: descriptor.registry_version as string, source_version: descriptor.source_version as string };
       if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
-      await recheck(c);
+      await partitionRecheck(c);
       if (await partitionCall(c, options => c.partitions.publish_shard({ ...query, envelope: request.body }, options)) !== true) {
         return fail(reply, 412, 'identity_registry_publication_conflict');
       }
@@ -1236,7 +1250,7 @@ export function registerGraphWorkerBrokerRoutes(
       if (stored.status !== 'active' || !validPartitionShard(stored.envelope, c.config, manifest.snapshot, descriptor) ||
           canonical(stored.envelope) !== canonical(request.body)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
       if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
-      await recheck(c);
+      await partitionRecheck(c);
       return reply.code(201).send({ published: true, registry_id: registryId, manifest_version: manifestVersion, shard_id: shardId });
     } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
   });
@@ -1269,7 +1283,7 @@ export function registerGraphWorkerBrokerRoutes(
       const stored = await partitionCall(c, options => c.partitions.read_shard(query, options));
       if (stored.status !== 'active' || !validPartitionShard(stored.envelope, c.config, manifest.snapshot, descriptor)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
       if (await partitionCall(c, options => c.partitions.shard_current(query, options)) !== true) return fail(reply, 503, 'identity_registry_partitions_unavailable');
-      await recheck(c);
+      await partitionRecheck(c);
       return reply.send(stored.envelope);
     } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
   });
@@ -1296,7 +1310,7 @@ export function registerGraphWorkerBrokerRoutes(
         if (!descriptor || descriptor.registry_version !== shardAction.registry_version || descriptor.source_version !== shardAction.source_version ||
             await partitionCall(c, options => c.partitions.shard_current(check, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
       } else return fail(reply, 400, 'graph_worker_request_invalid');
-      await recheck(c);
+      await partitionRecheck(c);
       return reply.send({ current: true });
     } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
   });
@@ -1317,7 +1331,7 @@ export function registerGraphWorkerBrokerRoutes(
         const check = { registry_id: registryId, manifest_version: manifestVersion, source_generation: body.source_generation as string,
           catalog_version: body.catalog_version as string, coverage_sha256: body.coverage_sha256 as string, source_binding_hash: body.source_binding_hash as string };
         if (await partitionCall(c, options => c.partitions.binding_covered(check, options)) !== true) return fail(reply, 403, 'graph_worker_forbidden');
-        await recheck(c); return reply.send({ covered: true });
+        await partitionRecheck(c); return reply.send({ covered: true });
       }
       if (body.action === 'page' && exact(body, ['action','catalog_version','coverage_sha256','cursor','manifest_version','page_size','registry_id','source_generation']) && common &&
           (body.cursor === null || partitionText(body.cursor)) && Number.isSafeInteger(body.page_size) && Number(body.page_size) >= 1 && Number(body.page_size) <= 1000) {
@@ -1325,7 +1339,7 @@ export function registerGraphWorkerBrokerRoutes(
           catalog_version: body.catalog_version as string, coverage_sha256: body.coverage_sha256 as string, cursor: body.cursor as string | null, page_size: body.page_size as number };
         const page = await partitionCall(c, options => c.partitions.coverage_page(query, options));
         if (!validCoveragePage(page, query)) return fail(reply, 503, 'identity_registry_partitions_unavailable');
-        await recheck(c); return reply.send(page);
+        await partitionRecheck(c); return reply.send(page);
       }
       return fail(reply, 400, 'graph_worker_request_invalid');
     } catch { return fail(reply, 503, 'identity_registry_partitions_unavailable'); }
