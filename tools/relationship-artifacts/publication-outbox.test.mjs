@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join,resolve} from 'node:path';
+import test from 'node:test';
+import {createPublicationOutbox} from './publication-outbox.mjs';
+const canonical=v=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
+const sha=v=>createHash('sha256').update(v).digest('hex');
+function run(n='a'){const core={ref_version:'neptune-trial-active-run-ref-v1',purpose:'relationship-candidates',scope:'finance',run_version:'synthetic-v1',manifest_sha256:n.length===64?n:n.repeat(64)};return{...core,run_id:'run_'+sha(canonical(core))};}
+function id(n='a'){return{cohort_id:'synthetic',producer_id:'reviewer',run:run(n)}}
+function receipt(n='b'){const digest=n.repeat(64);return{artifact_ref:{schema:'relationship-resolution-artifact-ref-v1',artifact_id:'resart_'+digest,bucket:'otchealth-finance-legal-dr-55c84f6b',key:`resolution-artifacts/sha256/${n+n}/${digest}.json`,payload_sha256:digest,version_id:'version-'+n,size_bytes:1}};}
+async function temp(){return mkdtemp(join(tmpdir(),'publication-outbox-'));}
+async function clean(root){assert.ok(resolve(root).startsWith(resolve(tmpdir())));await rm(root,{recursive:true,force:true});}
+test('create-only intent is concurrent, durable state transitions are idempotent, and conflicts reject',async()=>{const root=await temp();try{const box=createPublicationOutbox(root);const key=id();const results=await Promise.all(Array.from({length:12},()=>box.createIntent(key)));assert.equal(results.filter(x=>x.created).length,1);assert.equal((await box.get(key)).state,'intent_only');await box.createReviewed(key,receipt());assert.equal((await box.get(key)).state,'reviewed');await box.markPublished(key,receipt());assert.equal((await box.get(key)).state,'published');await assert.rejects(box.createReviewed(key,receipt('c')),{code:'outbox_conflict'});}finally{await clean(root);}});
+test('pending paging retains more than 64 entries with bounded cursor work',async()=>{const root=await temp();try{const box=createPublicationOutbox(root,{maxNodes:4096});for(let i=0;i<66;i++)await box.createIntent(id(i.toString(16).padStart(64,'0')));let after=null,total=0,pages=0;do{const page=await box.pagePending({after,limit:64});total+=page.items.length;after=page.next_after;pages++;assert.ok(page.scanned_nodes<=4096);}while(after);assert.equal(total,66);assert.ok(pages>=2);}finally{await clean(root);}});
+test('concurrent reads never observe a corrupt reviewed or published transition, and leaf pending files are ignored',async()=>{const root=await temp();try{const box=createPublicationOutbox(root);const key=id();await box.createIntent(key);const digest=sha(canonical(key)),leaf=join(root,...digest);const {writeFile}=await import('node:fs/promises');await writeFile(join(leaf,'.pending-00000000-0000-4000-8000-000000000000'),'partial');const reads=[];const observe=async()=>{for(let i=0;i<20;i++)reads.push(await box.get(key));};await Promise.all([observe(),box.createReviewed(key,receipt()),observe()]);await Promise.all([observe(),box.markPublished(key,receipt()),observe()]);assert.ok(reads.every(v=>v===null||['intent_only','reviewed','published'].includes(v.state)));const page=await box.pagePending();assert.equal(page.items.length,0);}finally{await clean(root);}});
