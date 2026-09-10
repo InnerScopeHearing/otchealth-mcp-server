@@ -76,6 +76,19 @@ const MAX_SCHEMA_NODES = 512;
 const DECLARED_PAGING_FIELD_NAMES = new Set(['cursor', 'after', 'before', 'page', 'offset', 'limit', 'pageSize', 'page_size']);
 const FIXED_METADATA_TOOL_NAMES = new Set(['get_thread', 'list_threads']);
 const PRIMITIVE_SCHEMA_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'null']);
+const FIXED_INPUT_CONSTRAINT_FIELDS: Record<string, ReadonlySet<string>> = {
+  get_thread: new Set(['messageLimit']),
+  list_threads: new Set(['cursor', 'limit']),
+};
+const FIXED_OUTPUT_PAGING_TYPES: Record<string, string> = {
+  cursor: 'string',
+  nextCursor: 'string',
+  next_cursor: 'string',
+  continuation: 'string',
+  hasMore: 'boolean',
+  has_more: 'boolean',
+  hasNextPage: 'boolean',
+};
 
 type SafeSchema = Record<string, unknown>;
 
@@ -169,14 +182,99 @@ function fixedNamedInputMetadata(name: string, value: unknown): Array<{ name: st
   return projected.length ? projected.sort((left, right) => left.name.localeCompare(right.name)) : null;
 }
 
+type FixedInputConstraint = { name: string; minLength?: number; maxLength?: number; minimum?: number; maximum?: number };
+
+/**
+ * This is intentionally a much narrower projection than the existing input metadata. It records only
+ * declared primitive bounds for the three pagination-related inputs whose names and types have already
+ * been observed. Descriptions, defaults, examples, enums, and constraints for every other input stay
+ * provider-private.
+ */
+function fixedNamedInputConstraints(name: string, value: unknown): FixedInputConstraint[] | null {
+  if (!Object.hasOwn(FIXED_INPUT_CONSTRAINT_FIELDS, name)) return null;
+  const allowedNames = FIXED_INPUT_CONSTRAINT_FIELDS[name]!;
+  const schema = plainRecord(value);
+  if (!schema || schema.type !== 'object') return null;
+  const properties = plainRecord(schema.properties);
+  if (!properties) return null;
+  const out: FixedInputConstraint[] = [];
+  for (const propertyName of allowedNames) {
+    if (!Object.hasOwn(properties, propertyName)) continue;
+    const property = plainRecord(properties[propertyName]);
+    if (!property) continue;
+    const type = property.type;
+    const candidate: FixedInputConstraint = { name: propertyName };
+    if (propertyName === 'cursor' && type === 'string') {
+      let valid = true;
+      for (const key of ['minLength', 'maxLength'] as const) {
+        if (!Object.hasOwn(property, key)) continue;
+        const raw = property[key];
+        if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) {
+          valid = false;
+          break;
+        }
+        candidate[key] = raw;
+      }
+      if (!valid || Object.keys(candidate).length === 1) continue;
+      if (candidate.minLength !== undefined && candidate.maxLength !== undefined && candidate.minLength > candidate.maxLength) continue;
+    } else if ((propertyName === 'messageLimit' || propertyName === 'limit') && (type === 'number' || type === 'integer')) {
+      let valid = true;
+      for (const key of ['minimum', 'maximum'] as const) {
+        if (!Object.hasOwn(property, key)) continue;
+        const raw = property[key];
+        if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+          valid = false;
+          break;
+        }
+        candidate[key] = raw;
+      }
+      if (!valid || Object.keys(candidate).length === 1) continue;
+      if (candidate.minimum !== undefined && candidate.maximum !== undefined && candidate.minimum > candidate.maximum) continue;
+    } else {
+      continue;
+    }
+    if (Object.keys(candidate).length > 1) out.push(candidate);
+  }
+  return out.length ? out.sort((left, right) => left.name.localeCompare(right.name)) : null;
+}
+
+type FixedOutputPaging = { name: string; declared: boolean; fields: Array<{ name: string; type: string; required: boolean }> };
+
+/**
+ * Output schemas are metadata only. Never pass an arbitrary output shape through the broker: retain
+ * direct, primitive fields only when both their spelling and declared type match this reviewed paging
+ * allowlist. This tells the CTO whether a provider continuation is declared without exposing any value.
+ */
+function fixedNamedOutputPaging(name: string, value: unknown): FixedOutputPaging | null {
+  if (!FIXED_METADATA_TOOL_NAMES.has(name)) return null;
+  const tool = plainRecord(value);
+  if (!tool) return null;
+  const declared = Object.hasOwn(tool, 'outputSchema');
+  if (!declared) return { name, declared: false, fields: [] };
+  const schema = plainRecord(tool.outputSchema);
+  const properties = plainRecord(schema?.properties);
+  if (!schema || schema.type !== 'object' || !properties || Object.keys(properties).length > 64) {
+    return { name, declared: true, fields: [] };
+  }
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === 'string') : []);
+  const fields: Array<{ name: string; type: string; required: boolean }> = [];
+  for (const [propertyName, expectedType] of Object.entries(FIXED_OUTPUT_PAGING_TYPES)) {
+    const property = plainRecord(properties[propertyName]);
+    if (property?.type === expectedType) fields.push({ name: propertyName, type: expectedType, required: required.has(propertyName) });
+  }
+  return { name, declared: true, fields };
+}
+
 export function sanitizeHyperagentCapabilities(data: unknown):
-  | { ok: true; tools: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }>; omittedUnsupportedSchemas: number; fixedNamedInputs?: Array<{ name: string; inputs: Array<{ name: string; type: string; required: boolean }> }> }
+  | { ok: true; tools: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }>; omittedUnsupportedSchemas: number; fixedNamedInputs?: Array<{ name: string; inputs: Array<{ name: string; type: string; required: boolean }> }>; fixedNamedInputConstraints?: Array<{ name: string; constraints: FixedInputConstraint[] }>; fixedNamedOutputPaging?: FixedOutputPaging[] }
   | { ok: false; error: 'unsafe_capabilities_metadata' } {
   const root = plainRecord(data);
   const tools = root?.tools;
   if (!Array.isArray(tools) || tools.length > MAX_CAPABILITY_TOOLS) return { ok: false, error: 'unsafe_capabilities_metadata' };
   const clean: Array<{ name: string; inputSchema: SafeSchema; declaredPaging: Array<{ name: string; type: string; required: boolean }> }> = [];
   const fixedNamedInputs: Array<{ name: string; inputs: Array<{ name: string; type: string; required: boolean }> }> = [];
+  const fixedInputConstraintMetadata: Array<{ name: string; constraints: FixedInputConstraint[] }> = [];
+  const fixedOutputPagingMetadata: FixedOutputPaging[] = [];
   let omittedUnsupportedSchemas = 0;
   for (const candidate of tools) {
     const tool = plainRecord(candidate);
@@ -186,6 +284,10 @@ export function sanitizeHyperagentCapabilities(data: unknown):
     if (!tool || !Object.hasOwn(tool, 'name') || !Object.hasOwn(tool, 'inputSchema')) return { ok: false, error: 'unsafe_capabilities_metadata' };
     const name = tool.name;
     if (typeof name !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(name)) return { ok: false, error: 'unsafe_capabilities_metadata' };
+    const constraints = fixedNamedInputConstraints(name, tool.inputSchema);
+    if (constraints) fixedInputConstraintMetadata.push({ name, constraints });
+    const outputPaging = fixedNamedOutputPaging(name, tool);
+    if (outputPaging) fixedOutputPagingMetadata.push(outputPaging);
     const inputSchema = sanitizeInputSchema(tool.inputSchema);
     // Do not strip unsafe facets from a schema: that would misrepresent the source tool's contract.
     // Omit the complete schema and expose only an aggregate count, never its name or contents.
@@ -197,7 +299,14 @@ export function sanitizeHyperagentCapabilities(data: unknown):
     }
     clean.push({ name, inputSchema, declaredPaging: declaredPagingMetadata(inputSchema) });
   }
-  return { ok: true, tools: clean, omittedUnsupportedSchemas, ...(fixedNamedInputs.length ? { fixedNamedInputs } : {}) };
+  return {
+    ok: true,
+    tools: clean,
+    omittedUnsupportedSchemas,
+    ...(fixedNamedInputs.length ? { fixedNamedInputs } : {}),
+    ...(fixedInputConstraintMetadata.length ? { fixedNamedInputConstraints: fixedInputConstraintMetadata } : {}),
+    ...(fixedOutputPagingMetadata.length ? { fixedNamedOutputPaging: fixedOutputPagingMetadata } : {}),
+  };
 }
 
 /** Log/journal only routing metadata, never the investor-sensitive prompt sent to the source. */
@@ -234,6 +343,8 @@ export function registerHyperagentTools(
         ok: z.boolean(),
         tools: z.array(z.unknown()).optional(),
         fixedNamedInputs: z.array(z.unknown()).optional(),
+        fixedNamedInputConstraints: z.array(z.unknown()).optional(),
+        fixedNamedOutputPaging: z.array(z.unknown()).optional(),
         omittedUnsupportedSchemas: z.number().int().nonnegative().optional(),
         error: z.string().optional(),
       },
@@ -254,7 +365,14 @@ export function registerHyperagentTools(
           return { data: { ok: false, error: safe.error }, summary: 'Refused unsafe Hyperagent capability metadata.' };
         }
         return {
-          data: { ok: true, tools: safe.tools, omittedUnsupportedSchemas: safe.omittedUnsupportedSchemas, ...(safe.fixedNamedInputs ? { fixedNamedInputs: safe.fixedNamedInputs } : {}) },
+          data: {
+            ok: true,
+            tools: safe.tools,
+            omittedUnsupportedSchemas: safe.omittedUnsupportedSchemas,
+            ...(safe.fixedNamedInputs ? { fixedNamedInputs: safe.fixedNamedInputs } : {}),
+            ...(safe.fixedNamedInputConstraints ? { fixedNamedInputConstraints: safe.fixedNamedInputConstraints } : {}),
+            ...(safe.fixedNamedOutputPaging ? { fixedNamedOutputPaging: safe.fixedNamedOutputPaging } : {}),
+          },
           summary: `Read ${safe.tools.length} validated Hyperagent tool schema(s) for migration planning.`,
         };
       },
