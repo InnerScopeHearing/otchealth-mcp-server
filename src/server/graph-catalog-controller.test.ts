@@ -55,6 +55,26 @@ test('scoped recovery resumes only a null-preparation active admission and repea
  assert.equal((await h.request('/state/'+key,{key,revision:dispatchedAgain.json().revision,value:prepared},'PUT')).statusCode,409);
  }finally{await h.app.close();}});
 
+test('source-evidence retry clears one Luna chunk only for terminal validation failure without a result',async()=>{
+ async function attempt(operationState:string,outcomeCode:string,resultPresent:'valid'|'malformed'|null=null){const h=await harness();try{const p=await h.publish(),key=`versions/${p.key}`;assert.equal((await h.request('/admit',{key:p.key,manifest_sha256:p.manifest.manifest_sha256})).statusCode,200);
+  const chunkSha=hash('prepared chunk'),sidecarSha=hash('sidecar'),identity={schema:'cfo-text-preparation-v1',run_id:p.run.run_id,document_ordinal:0,descriptor:{source_document_version:p.manifest.documents[0].document_version_id,sidecar_content_sha256:sidecarSha},chunks:[{ordinal:0,text_sha256:chunkSha}]},snapshotId=`txtsnap_${hash(canonical(identity))}`;
+  const manifestContent={schema:'cfo-text-prepared-manifest-v1',snapshot_id:snapshotId,identity,bundles:[],chunks:[{ordinal:0,text_sha256:chunkSha}]},manifest={...manifestContent,manifest_sha256:hash(canonical(manifestContent))};
+  h.objects.set(`graph-trial/20260908/workers/cfo/${p.run.run_id}/text-snapshots/${snapshotId}/manifest.json`,{body:Buffer.from(canonical(manifest)),etag:'"manifest"'});
+  const binding={schema:'cfo-prepared-chunk-binding-v1',run_id:p.run.run_id,room:'finance',source_index:'finance-cfo-source-docs',catalog_manifest_sha256:p.run.manifest_sha256,document_ordinal:0,source_document_version:p.manifest.documents[0].document_version_id,catalog_source_sha256:p.manifest.documents[0].source_version,snapshot_id:snapshotId,prepared_manifest_sha256:manifest.manifest_sha256,sidecar_content_sha256:sidecarSha,chunk_ordinal:0,chunk_sha256:chunkSha};
+  const spec={provider:'codex-chatgpt-subscription',model:'gpt-5.6-luna',purpose:p.run.purpose,source_binding:binding},operationId=`subop_${hash(canonical(spec))}`,operation={operation_id:operationId,spec,state:operationState,claim_token:'synthetic-claim-token',revision:2,outcome_code:outcomeCode};
+  h.objects.set(`graph-trial/20260908/workers/cfo/${p.run.run_id}/subscription-jobs/operations/${operationId}.json`,{body:Buffer.from(canonical({schema:'subscription-model-operation-v1',operation_id:operationId,operation_sha256:hash(canonical(operation)),operation})),etag:'"operation"'});
+  if(resultPresent){const output={provider:spec.provider,model:spec.model,billing_route:'chatgpt_subscription',paid_fallback:false,source_sha256:chunkSha,candidates:[]},result={operation_id:operationId,spec_sha256:hash(canonical(spec)),output},body=resultPresent==='valid'?{schema:'subscription-model-result-v1',operation_id:operationId,result_sha256:hash(canonical(result)),result}:{schema:'malformed-present-result'};h.objects.set(`graph-trial/20260908/workers/cfo/${p.run.run_id}/subscription-jobs/results/${operationId}.json`,{body:Buffer.from(canonical(body)),etag:'"result"'});}
+  const chunks=[{chunk_ordinal:0,operation_id:operationId,status:'unknown',receipt_sha256:hash('receipt')}],preparation={snapshot_id:snapshotId,prepared_manifest_sha256:manifest.manifest_sha256,sidecar_content_sha256:sidecarSha,chunk_count:1},outcome={status:'held',code:'dispatch_outcome_unknown',receipt_sha256:hash('held'),run_id:p.run.run_id,document_ordinal:0,recorded_at:'2026-09-09T23:30:00.000Z',chunk_receipts_sha256:hash(canonical(chunks))};
+  const held={schema:'catalog-controller-version-v1',proposal:p,status:'held',outcome,chunks,preparation};h.objects.set(`${internals.BASE}/synthetic/controller/${key}.json`,{body:Buffer.from(canonical(held)),etag:'"held"'});
+  const target={...held,status:'prepared',outcome:null,chunks:[]},reply=await h.request('/state/'+key,{key,revision:'"held"',value:target},'PUT');return reply.statusCode;
+ }finally{await h.app.close();}}
+ assert.equal(await attempt('unknown','evidence_not_in_source'),200);
+ assert.equal(await attempt('dispatched','evidence_not_in_source'),409);
+ assert.equal(await attempt('unknown','gateway_transport_unknown'),409);
+ assert.equal(await attempt('unknown','evidence_not_in_source','valid'),409);
+ assert.equal(await attempt('unknown','evidence_not_in_source','malformed'),409);
+});
+
 
 
 async function materializedHarness(){
