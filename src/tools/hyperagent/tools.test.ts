@@ -112,6 +112,7 @@ test('capability discovery returns only validated tool schemas and declared pagi
       ],
     }],
     omittedUnsupportedSchemas: 0,
+    fixedNamedOutputPaging: [{ name: 'list_threads', declared: false, fields: [] }],
   });
 });
 
@@ -137,11 +138,11 @@ test('capability discovery is CTO-only and provider failures never return provid
 
 test('capability discovery refuses unsafe and oversized schema shapes', () => {
   const unsafeName = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', description: 'must not pass through' } }] });
-  assert.deepEqual(unsafeName, { ok: true, tools: [], omittedUnsupportedSchemas: 1 });
+  assert.deepEqual(unsafeName, { ok: true, tools: [], omittedUnsupportedSchemas: 1, fixedNamedOutputPaging: [{ name: 'list_threads', declared: false, fields: [] }] });
   const oversized = sanitizeHyperagentCapabilities({ tools: Array.from({ length: 65 }, () => ({ name: 'list_threads', inputSchema: { type: 'object' } })) });
   assert.deepEqual(oversized, { ok: false, error: 'unsafe_capabilities_metadata' });
   const unsafeReference = sanitizeHyperagentCapabilities({ tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { $ref: '#/unsafe' } } } }] });
-  assert.deepEqual(unsafeReference, { ok: true, tools: [], omittedUnsupportedSchemas: 1 });
+  assert.deepEqual(unsafeReference, { ok: true, tools: [], omittedUnsupportedSchemas: 1, fixedNamedOutputPaging: [{ name: 'list_threads', declared: false, fields: [] }] });
   const sourceSpecificEnum = sanitizeHyperagentCapabilities({
     tools: [
       { name: 'list_agents', inputSchema: { type: 'object' } },
@@ -171,6 +172,7 @@ test('capability discovery projects required descriptor fields while dropping pr
     ok: true,
     tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { type: 'string' } } }, declaredPaging: [{ name: 'cursor', type: 'string', required: false }] }],
     omittedUnsupportedSchemas: 0,
+    fixedNamedOutputPaging: [{ name: 'list_threads', declared: false, fields: [] }],
   });
   assert.equal(JSON.stringify(result).includes(privateMarker), false);
 });
@@ -187,9 +189,163 @@ test('capability discovery falls back only to fixed named primitive thread metad
   assert.deepEqual(result, { ok: true, tools: [], omittedUnsupportedSchemas: 3, fixedNamedInputs: [
     { name: 'list_threads', inputs: [{ name: 'cursor', type: 'string', required: false }, { name: 'limit', type: 'integer', required: true }] },
     { name: 'get_thread', inputs: [{ name: 'threadId', type: 'string', required: true }] },
+  ], fixedNamedOutputPaging: [
+    { name: 'list_threads', declared: false, fields: [] },
+    { name: 'get_thread', declared: false, fields: [] },
   ] });
   assert.equal(JSON.stringify(result).includes(marker), false);
   assert.equal(JSON.stringify(result).includes('nested'), false);
+});
+
+test('capability discovery reports absent fixed output schemas without inventing a continuation key', () => {
+  const result = sanitizeHyperagentCapabilities({
+    tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { type: 'string' } } } }],
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    tools: [{ name: 'list_threads', inputSchema: { type: 'object', properties: { cursor: { type: 'string' } } }, declaredPaging: [{ name: 'cursor', type: 'string', required: false }] }],
+    omittedUnsupportedSchemas: 0,
+    fixedNamedOutputPaging: [{ name: 'list_threads', declared: false, fields: [] }],
+  });
+});
+
+test('capability discovery projects only reviewed direct output paging fields and observed input bounds', () => {
+  const privateMarker = 'PRIVATE_OUTPUT_DESCRIPTION_MARKER';
+  const result = sanitizeHyperagentCapabilities({
+    tools: [
+      {
+        name: 'get_thread',
+        inputSchema: {
+          type: 'object', description: privateMarker,
+          properties: { threadId: { type: 'string' }, messageLimit: { type: 'number', minimum: 1, maximum: 50, default: privateMarker } },
+          required: ['threadId'],
+        },
+        outputSchema: {
+          type: 'object', description: privateMarker,
+          properties: {
+            continuation: { type: 'string', description: privateMarker },
+            hasMore: { type: 'boolean', example: privateMarker },
+            nested: { type: 'object', properties: { nextCursor: { type: 'string' } } },
+            cursor: { type: 'number' },
+          },
+          required: ['continuation'],
+        },
+      },
+      {
+        name: 'list_threads',
+        inputSchema: {
+          type: 'object', description: privateMarker,
+          properties: {
+            cursor: { type: 'string', minLength: 1, maxLength: 4096, examples: [privateMarker] },
+            limit: { type: 'integer', minimum: 1, maximum: 100, description: privateMarker },
+          },
+        },
+        outputSchema: {
+          type: 'object', description: privateMarker,
+          properties: {
+            nextCursor: { type: 'string', description: privateMarker },
+            has_more: { type: 'boolean', title: privateMarker },
+            offset: { type: 'number' },
+            pageInfo: { type: 'object', properties: { endCursor: { type: 'string' } } },
+          },
+          required: ['nextCursor'],
+        },
+      },
+    ],
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    tools: [],
+    omittedUnsupportedSchemas: 2,
+    fixedNamedInputs: [
+      { name: 'get_thread', inputs: [{ name: 'messageLimit', type: 'number', required: false }, { name: 'threadId', type: 'string', required: true }] },
+      { name: 'list_threads', inputs: [{ name: 'cursor', type: 'string', required: false }, { name: 'limit', type: 'integer', required: false }] },
+    ],
+    fixedNamedInputConstraints: [
+      { name: 'get_thread', constraints: [{ name: 'messageLimit', minimum: 1, maximum: 50 }] },
+      { name: 'list_threads', constraints: [{ name: 'cursor', minLength: 1, maxLength: 4096 }, { name: 'limit', minimum: 1, maximum: 100 }] },
+    ],
+    fixedNamedOutputPaging: [
+      { name: 'get_thread', declared: true, fields: [{ name: 'continuation', type: 'string', required: true }, { name: 'hasMore', type: 'boolean', required: false }] },
+      { name: 'list_threads', declared: true, fields: [{ name: 'nextCursor', type: 'string', required: true }, { name: 'has_more', type: 'boolean', required: false }] },
+    ],
+  });
+  assert.equal(JSON.stringify(result).includes(privateMarker), false);
+  assert.equal(JSON.stringify(result).includes('nested'), false);
+  assert.equal(JSON.stringify(result).includes('pageInfo'), false);
+  assert.equal(JSON.stringify(result).includes('offset'), false);
+});
+
+test('capability discovery marks malformed output schemas declared but exposes no fields', () => {
+  const result = sanitizeHyperagentCapabilities({
+    tools: [{
+      name: 'list_threads',
+      inputSchema: { type: 'object' },
+      outputSchema: { type: 'array', items: { type: 'string' }, description: 'provider text must not cross the boundary' },
+    }],
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    tools: [{ name: 'list_threads', inputSchema: { type: 'object' }, declaredPaging: [] }],
+    omittedUnsupportedSchemas: 0,
+    fixedNamedOutputPaging: [{ name: 'list_threads', declared: true, fields: [] }],
+  });
+  assert.equal(JSON.stringify(result).includes('provider text must not cross the boundary'), false);
+});
+
+test('capability discovery does not inherit fixed constraint names from Object.prototype', () => {
+  for (const name of ['constructor']) {
+    const result = sanitizeHyperagentCapabilities({
+      tools: [{ name, inputSchema: { type: 'object', properties: { limit: { type: 'number', minimum: 1, maximum: 2 } } } }],
+    });
+    assert.deepEqual(result, {
+      ok: true,
+      tools: [{ name, inputSchema: { type: 'object', properties: { limit: { type: 'number', minimum: 1, maximum: 2 } } }, declaredPaging: [{ name: 'limit', type: 'number', required: false }] }],
+      omittedUnsupportedSchemas: 0,
+    });
+  }
+});
+
+test('capability discovery refuses malformed roots and invalid fixed bounds as constraint evidence', () => {
+  const malformedRoot = sanitizeHyperagentCapabilities({
+    tools: [{ name: 'list_threads', inputSchema: { type: 'array', properties: { limit: { type: 'number', minimum: 1, maximum: 5 } } } }],
+  });
+  assert.deepEqual(malformedRoot, {
+    ok: true,
+    tools: [{ name: 'list_threads', inputSchema: { type: 'array' }, declaredPaging: [] }],
+    omittedUnsupportedSchemas: 0,
+    fixedNamedOutputPaging: [{ name: 'list_threads', declared: false, fields: [] }],
+  });
+  assert.equal(Object.hasOwn(malformedRoot, 'fixedNamedInputConstraints'), false);
+
+  const invalidBounds = sanitizeHyperagentCapabilities({
+    tools: [
+      { name: 'get_thread', inputSchema: { type: 'object', properties: { messageLimit: { type: 'number', minimum: Infinity, maximum: 50 } } } },
+      { name: 'list_threads', inputSchema: { type: 'object', properties: {
+        cursor: { type: 'string', minLength: 4, maxLength: 3 },
+        limit: { type: 'integer', minimum: 10, maximum: 2 },
+      } } },
+    ],
+  });
+  assert.equal(Object.hasOwn(invalidBounds, 'fixedNamedInputConstraints'), false);
+});
+
+test('capability discovery drops every output field when output properties exceed the fixed bound', () => {
+  const privateMarker = 'PRIVATE_OVERSIZED_OUTPUT_MARKER';
+  const properties = Object.fromEntries(Array.from({ length: 65 }, (_, index) => [
+    index === 0 ? 'nextCursor' : `field${index}`,
+    { type: 'string', description: privateMarker },
+  ]));
+  const result = sanitizeHyperagentCapabilities({
+    tools: [{ name: 'list_threads', inputSchema: { type: 'object' }, outputSchema: { type: 'object', properties } }],
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    tools: [{ name: 'list_threads', inputSchema: { type: 'object' }, declaredPaging: [] }],
+    omittedUnsupportedSchemas: 0,
+    fixedNamedOutputPaging: [{ name: 'list_threads', declared: true, fields: [] }],
+  });
+  assert.equal(JSON.stringify(result).includes(privateMarker), false);
 });
 
 // Exercise the real registry connector filter and the resulting guarded handlers. Transport is
