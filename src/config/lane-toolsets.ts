@@ -235,7 +235,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.
   cfo: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'xero_*', 'stripe_*', 'docintel_*', 'graph_drive_*', ...GRAPH_MAIL,
+    'xero_*', 'stripe_*', 'docintel_*', 'graph_drive_*', 'graph_relationship_query', ...GRAPH_MAIL,
   ],
   // Company legal: legal_blob_* (company ring), contract/document intelligence, comms, plus the
   // shared read/memory/task surface.
