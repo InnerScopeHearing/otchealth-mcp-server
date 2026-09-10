@@ -175,6 +175,23 @@ test('capability discovery projects required descriptor fields while dropping pr
   assert.equal(JSON.stringify(result).includes(privateMarker), false);
 });
 
+test('capability discovery falls back only to fixed named primitive thread metadata', () => {
+  const marker = 'PRIVATE_PROVIDER_DESCRIPTION_MARKER';
+  const result = sanitizeHyperagentCapabilities({ tools: [
+    { name: 'list_threads', inputSchema: { type: 'object', description: marker, properties: {
+      cursor: { type: 'string', default: marker }, limit: { type: 'integer', description: marker }, nested: { type: 'object', properties: {} },
+    }, required: ['limit'] } },
+    { name: 'get_thread', inputSchema: { type: 'object', $schema: marker, properties: { threadId: { type: 'string', description: marker } }, required: ['threadId'] } },
+    { name: 'create_thread', inputSchema: { type: 'object', description: marker, properties: { agentId: { type: 'string' } } } },
+  ] });
+  assert.deepEqual(result, { ok: true, tools: [], omittedUnsupportedSchemas: 3, fixedNamedInputs: [
+    { name: 'list_threads', inputs: [{ name: 'cursor', type: 'string', required: false }, { name: 'limit', type: 'integer', required: true }] },
+    { name: 'get_thread', inputs: [{ name: 'threadId', type: 'string', required: true }] },
+  ] });
+  assert.equal(JSON.stringify(result).includes(marker), false);
+  assert.equal(JSON.stringify(result).includes('nested'), false);
+});
+
 // Exercise the real registry connector filter and the resulting guarded handlers. Transport is
 // synthetic throughout; adding catalog visibility must not grant a new source or executive ring.
 function registerConnectorBroker(lane: string, transport: HyperagentToolTransport) {
