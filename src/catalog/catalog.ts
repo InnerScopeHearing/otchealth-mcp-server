@@ -102,8 +102,8 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     rule: 'graph_drive_* are gated by folder-name role prefix: a caller may only touch its OWN role folders. Uploads are fail-closed against silent overwrite.',
   },
   legal: {
-    description: 'Legal document store on Azure Blob (account otchealthlegalstore): containers company + personal. RING-GATED — personal = attorney-privileged CA divorce/civil matters, the most sensitive corpus in the fleet.',
-    ring: 'non-phi', auth: 'AZURE_LEGAL_STORAGE_ACCOUNT / AZURE_LEGAL_STORAGE_KEY (SharedKey)', status: 'wired',
+    description: 'Legal document stores on AWS S3, split into company and privileged personal rings. Personal matters remain attorney-privileged and are isolated from the CTO lane.',
+    ring: 'non-phi', auth: 'AWS IAM for the ring-specific S3 stores', status: 'wired',
     available: [],
     rule: 'container=personal requires the legal-personal executive ring; container=company requires the legal-company ring (derived from kb/search-privileged INDEX_LANES). The cto/default/external identity is refused. legal_blob_put is fail-closed against silent overwrite.',
   },
