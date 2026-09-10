@@ -21,6 +21,8 @@ test('published relationship query replays qualified X-to-Y-to-Z evidence and de
   assert.equal((await discover({scope:'legal_company',query:f.query})).statusCode,403);
   for(const offset of [-1,0.5,'1',102401])assert.equal((await discover({query:{kind:'candidate_links',offset}})).statusCode,400);
   for(const limit of [-1,0,0.5,'1',101])assert.equal((await discover({query:{kind:'candidate_links',limit}})).statusCode,400);
+  flags.sourceChecks=0;assert.equal((await discover({query:{kind:'candidate_links'}})).statusCode,200);const totalCandidateChecks=flags.sourceChecks;assert.ok(totalCandidateChecks>3);
+  flags.sourceChecks=0;flags.revokeAfterChecks=totalCandidateChecks-1;assert.equal((await discover({query:{kind:'candidate_links'}})).statusCode,403);delete flags.revokeAfterChecks;
   flags.callerAgent='clo';assert.equal((await discover({scope:'finance',query:f.query})).statusCode,403);flags.callerAgent='clo-personal';assert.equal((await discover({scope:'legal_company',query:f.query})).statusCode,403);delete flags.callerAgent;
   const malformed=await post({...body,query:{cypher:'MATCH (n) RETURN n'}});assert.equal(malformed.statusCode,400);
   const foreign=await post({...body,histories:[{...histories[0],run_id:histories[1]!.run_id}]});assert.equal(foreign.statusCode,403);

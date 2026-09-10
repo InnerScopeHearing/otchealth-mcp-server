@@ -135,6 +135,7 @@ export function createRelationshipPublicationDiscoveryService(injected?:Partial<
   }else if(!complete)answer={status:'incomplete',reason:'publication_history_limit_reached',conclusion:null,evidence:[],semantic_verified:false};else{
    selected=[...relevantVerifiedHistories(records,corrections,input.query)].sort((a,b)=>a-b);if(selected.length>64)answer={status:'incomplete',reason:'relevant_history_limit_exceeded',conclusion:null,evidence:[],semantic_verified:false};else if(!selected.length)answer={status:'unsupported',reason:'no_accepted_dependency_path',conclusion:null,evidence:[]};else answer=await queryEntries(d,policy,ctx,signal,selected.map(index=>loaded[index]),input.query,recheck);
   }
+  await recheck();for(const result of loaded)if((await result.refresh())!==result.entry.sourceCurrent)fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();
   return{schema:'relationship-publication-discovery-query-v1',discovery:{schema:'relationship-publication-history-index-page-v1',history_refs:selected.map(index=>refs[index]),scanned_histories:refs.length,queried_histories:selected.length,next_after:next??null,scan_complete:complete},answer};
  }};
 }
