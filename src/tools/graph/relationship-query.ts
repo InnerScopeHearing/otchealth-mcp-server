@@ -9,7 +9,7 @@ const candidateQuery = z.object({
   subject_name: z.string().min(1).max(1200).optional(),
   object_name: z.string().min(1).max(1200).optional(),
   predicate: z.string().min(1).max(1200).optional(),
-  offset: z.number().int().min(0).max(400).optional(),
+  offset: z.number().int().min(0).max(256 * 400).optional(),
   limit: z.number().int().min(1).max(100).optional(),
   include_stale: z.boolean().optional(),
 }).strict();

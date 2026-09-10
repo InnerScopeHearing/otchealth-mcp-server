@@ -19,6 +19,8 @@ test('published relationship query replays qualified X-to-Y-to-Z evidence and de
   const crossPage=await discover({scan_limit:2,query:f.query});assert.equal(crossPage.statusCode,200,crossPage.body);assert.equal(crossPage.json().answer.status,'qualified');assert.equal(crossPage.json().discovery.scanned_histories,3);assert.equal(crossPage.json().discovery.scan_complete,true);
   const partial=await discover({scan_limit:2,history_limit:2,query:f.query});assert.equal(partial.statusCode,200,partial.body);assert.equal(partial.json().answer.status,'incomplete');assert.equal(partial.json().answer.conclusion,null);assert.equal(partial.json().discovery.scan_complete,false);assert.match(partial.json().discovery.next_after,/^run_[a-f0-9]{64}$/);
   assert.equal((await discover({scope:'legal_company',query:f.query})).statusCode,403);
+  for(const offset of [-1,0.5,'1',102401])assert.equal((await discover({query:{kind:'candidate_links',offset}})).statusCode,400);
+  for(const limit of [-1,0,0.5,'1',101])assert.equal((await discover({query:{kind:'candidate_links',limit}})).statusCode,400);
   flags.callerAgent='clo';assert.equal((await discover({scope:'finance',query:f.query})).statusCode,403);flags.callerAgent='clo-personal';assert.equal((await discover({scope:'legal_company',query:f.query})).statusCode,403);delete flags.callerAgent;
   const malformed=await post({...body,query:{cypher:'MATCH (n) RETURN n'}});assert.equal(malformed.statusCode,400);
   const foreign=await post({...body,histories:[{...histories[0],run_id:histories[1]!.run_id}]});assert.equal(foreign.statusCode,403);
