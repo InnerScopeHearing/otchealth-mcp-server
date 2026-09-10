@@ -59,13 +59,25 @@ test('both Postgres pools actually WIRE PG_SSL_VERIFY into rejectUnauthorized, v
   // either side (a hardcoded `rejectUnauthorized: true` with no flag would break every
   // CI run against the runner's snakeoil Postgres; a hardcoded `false` would silently disable
   // verification regardless of what the schema says).
-  for (const relative of ['./postgres.ts', './queue-postgres.ts']) {
-    const source = readFileSync(new URL(relative, import.meta.url), 'utf8');
-    assert.match(
-      source,
-      /ssl:\s*\{\s*rejectUnauthorized:\s*env\.PG_SSL_VERIFY\s*\}/,
-      `${relative} must read PG_SSL_VERIFY into rejectUnauthorized, not hardcode either value`,
-    );
+  const postgres = readFileSync(new URL('./postgres.ts', import.meta.url), 'utf8');
+  const scopedConfig = readFileSync(new URL('./runtime-config.ts', import.meta.url), 'utf8');
+  assert.match(
+    postgres,
+    /const env = loadAgentStatePostgresConfig\(\);[\s\S]*ssl:\s*\{\s*rejectUnauthorized:\s*env\.sslVerify\s*\}/,
+    './postgres.ts must pass the scoped PG_SSL_VERIFY value into rejectUnauthorized',
+  );
+  assert.match(
+    scopedConfig,
+    /const rawVerify = process\.env\.PG_SSL_VERIFY \?\? 'true';[\s\S]*sslVerify: rawVerify === 'true'/,
+    './runtime-config.ts must derive the scoped TLS value from PG_SSL_VERIFY with verification enabled by default',
+  );
+  const queue = readFileSync(new URL('./queue-postgres.ts', import.meta.url), 'utf8');
+  assert.match(
+    queue,
+    /ssl:\s*\{\s*rejectUnauthorized:\s*env\.PG_SSL_VERIFY\s*\}/,
+    './queue-postgres.ts must read PG_SSL_VERIFY into rejectUnauthorized, not hardcode either value',
+  );
+  for (const source of [postgres, queue]) {
     // `ssl: 'require'` (or similar) would encrypt while accepting any cert -- the exact trap
     // Flatstick's own version of this test guards against.
     assert.doesNotMatch(source, /ssl:\s*['"]require['"]/);

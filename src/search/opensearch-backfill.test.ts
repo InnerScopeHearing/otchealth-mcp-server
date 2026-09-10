@@ -22,6 +22,7 @@ const {
   toIndexInput,
   rowsToBulkNdjson,
   parseBulkResponse,
+  fetchExistingIds,
   fetchIndexMaxTs,
   bulkIndex,
   runBackfill,
@@ -47,6 +48,24 @@ function isHost(u: string, host: string): boolean {
     return false;
   }
 }
+
+test('fetchExistingIds uses only the repair OpenSearch settings, not gateway-only configuration', async () => {
+  const unrelated = ['CIO_SITE_ID', 'CIO_TRACK_KEY', 'CIO_APP_API_BEARER', 'PERPLEXITY_CONNECTOR_TOKEN', 'ADMIN_REVOKE_TOKEN', 'N8N_WEBHOOK_SECRET'] as const;
+  const previous = new Map(unrelated.map(name => [name, process.env[name]]));
+  try {
+    for (const name of unrelated) delete process.env[name];
+    const existing = await withStubbedFetch(async (url, init) => {
+      assert.match(String(url), /_mget$/);
+      const ids = JSON.parse(String(init?.body)).ids as string[];
+      return new Response(JSON.stringify({ docs: ids.map(_id => ({ _id, found: true })) }), { status: 200 });
+    }, () => fetchExistingIds([{ id: 'minimal_1', agent: 'cfo', kind: 'fact', text: 'synthetic', tags: [], created_at: '2026-09-09T00:00:00Z' }], 'memory-exec'));
+    assert.deepEqual(existing, new Set(['cfo__minimal_1']));
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+});
 
 // ============================ normalizeRow ============================
 

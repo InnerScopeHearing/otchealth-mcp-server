@@ -19,6 +19,7 @@
  */
 import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { loadHistoricalRepairEmbeddingsConfig } from '../agentstate/runtime-config.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { recordOpenAIUsage } from '../telemetry/openai-cost.js';
 
@@ -119,6 +120,21 @@ export function embeddingsTarget(): EmbeddingsTarget | null {
     headers: { 'Content-Type': 'application/json', 'api-key': c.key },
     model: null,
   };
+}
+
+/** A least-privilege embeddings target for the bounded historical repair worker only. */
+export function historicalRepairEmbeddingsTarget(): EmbeddingsTarget | null {
+  const config = loadHistoricalRepairEmbeddingsConfig();
+  if (!config) return null;
+  return {
+    url: 'https://api.openai.com/v1/embeddings',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+    model: config.model,
+  };
+}
+
+export function historicalRepairEmbeddingsConfigured(): boolean {
+  return historicalRepairEmbeddingsTarget() !== null;
 }
 
 /**
@@ -381,6 +397,27 @@ export async function embedBatch(texts: string[]): Promise<number[][] | null> {
   return [...data]
     .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
     .map((d) => d.embedding);
+}
+
+/**
+ * Historical repair uses the same pinned vector model as normal OpenAI embeddings, but never
+ * resolves the gateway-wide provider configuration or its Azure fallback.
+ */
+export async function historicalRepairEmbed(text: string): Promise<number[] | null> {
+  const target = historicalRepairEmbeddingsTarget();
+  if (!target) return null;
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: text });
+  recordOpenAIUsage({ model: target.model!, kind: 'embedding', promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0, caller: 'historical-repair-embed' });
+  return j.data?.[0]?.embedding ?? null;
+}
+
+export async function historicalRepairEmbedBatch(texts: string[]): Promise<number[][] | null> {
+  const target = historicalRepairEmbeddingsTarget();
+  if (!target) return null;
+  if (texts.length === 0) return [];
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[]; index?: number }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: texts });
+  recordOpenAIUsage({ model: target.model!, kind: 'embedding', promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0, caller: 'historical-repair-embed-batch' });
+  return [...(j.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map((d) => d.embedding);
 }
 
 export interface ChatMessage {
