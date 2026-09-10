@@ -52,26 +52,14 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "building tag: $TAG"
 
-      # ── Multi-arch (Graviton prep) ──────────────────────────────────────────────
-      # Audited 2026-08-29: every base image in this Dockerfile (node:22, node:22-slim,
-      # datadog/serverless-init:1.9.16) already publishes a linux/arm64/v8 manifest, the apt
-      # packages (curl, ca-certificates) are ordinary multi-arch Debian bookworm packages, the
-      # RDS cert ADD is a plain-text PEM (architecture-independent), and dd-trace's only native
-      # transitive deps (@datadog/native-appsec, -native-iast-taint-tracking, -native-metrics,
-      # -pprof, -libdatadog) ship prebuildify binaries for linuxglibc-arm64 bundled in the SAME
-      # npm tarball (confirmed by downloading and inspecting each tgz), so npm ci's normal
-      # per-platform selection at require-time handles arm64 with zero Dockerfile changes. No
-      # --platform pin or arch-conditional logic exists anywhere in this Dockerfile.
-      # So the ONLY change needed is here: emulate + build for both platforms and push ONE
-      # multi-arch manifest under the same tag. ECS/Fargate already resolves the correct
-      # platform-specific manifest from a multi-arch tag at pull time based on each task
-      # definition's runtimePlatform, so this is safe to land and push before any task
-      # definition is touched -- the currently-running amd64 service keeps pulling amd64 from
-      # this exact tag until a task definition is deliberately switched to ARM64/Graviton.
-      # Depot's remote builders are native linux/amd64 AND linux/arm64 hardware, so this no longer
-      # needs docker/setup-qemu-action (arm64 emulation) or docker/setup-buildx-action at all --
-      # depot/build-push-action drives the build on Depot's own infrastructure and only pushes the
-      # resulting manifest through this runner's already-authenticated ECR docker credential.
+      # GitHub-hosted ARM emulation and Buildx produce the same immutable two-platform
+      # manifest in ECR without requiring external Depot project trust or a static Depot token.
+      # The resulting image still passes the ECR manifest and evaluator-byte verification below.
+      - name: Set up ARM emulation for the isolated build
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up isolated multi-platform Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # OIDC role when the repo variable is configured; the pre-existing static ECR-push IAM
       # user's key as a fallback otherwise. Exactly one of role-to-assume / access-key-id ever
@@ -97,34 +85,13 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@aded0d722166a37980e030aa969dda0bfe6b6947 # v2.1.7
 
-      - name: Set up Depot CLI
-        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
+      - name: Build and push (linux/amd64 + linux/arm64) with Buildx
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64,linux/arm64 --push \
+            --provenance=false --sbom=false \
+            --tag "${{ steps.ecr.outputs.registry }}/otchealth-mcp-gateway:${{ steps.tag.outputs.tag }}" .
 
-      - name: Build and push (linux/amd64 + linux/arm64) via Depot
-        uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1.18.0
-        with:
-          # The account's one existing Depot project (confirmed live via the gateway's
-          # depot_list_projects on 2026-09-03: id p5k0c551zm, name "default" -- it is the ONLY
-          # project in the account, already shared across whatever else runs through Depot Build
-          # here). Overridable via a repo variable if the CTO later splits the gateway onto its
-          # own dedicated Depot project; falls back to the one confirmed-live project otherwise.
-          project: ${{ vars.DEPOT_PROJECT_ID || 'p5k0c551zm' }}
-          token: ${{ secrets.DEPOT_TOKEN }}
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.ecr.outputs.registry }}/otchealth-mcp-gateway:${{ steps.tag.outputs.tag }}
-          # No cache-from/cache-to: Depot's remote builders maintain their own persistent
-          # per-project build cache automatically; the GHA-cache inputs the buildx path needed are
-          # Depot-irrelevant and removed rather than carried over as dead configuration.
-          # Keep the pushed artifact a plain two-platform manifest list, matching today's shape
-          # (one manifest per tag) just widened to two platforms. Provenance/SBOM attestations
-          # add extra referrer manifests to the index that nothing downstream has ever had to
-          # parse before; that is a real, separate supply-chain hardening step worth doing
-          # deliberately later, not as a side effect of a Graviton-prep PR on the production
-          # gateway's registry.
-          provenance: false
-          sbom: false
 
       - name: Report the pushed digest + confirm both platforms landed
         env:
