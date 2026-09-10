@@ -134,7 +134,7 @@ async function validateState(d:GraphCatalogDeps,c:Cfg,key:string,value:Json,prio
    try{const a=await receipt(d,c,p.run.run_id,s),ctl=await control(d,c,s);resume=a.receipt.key===p.key&&ctl?.value.current.status==='active'&&ctl.value.current.key===p.key&&ctl.value.current.run_id===p.run.run_id;}catch{resume=false;}
   }
   if(recoveryLive(c,d)&&prior.status==='held'&&prior.outcome?.code==='dispatch_outcome_unknown'&&value.status==='prepared'&&value.outcome===null&&prior.preparation&&equal(prior.preparation,value.preparation)&&prior.chunks.length===1&&prior.chunks[0].status==='unknown'&&value.chunks.length===0){
-   try{const a=await receipt(d,c,p.run.run_id,s),ctl=await control(d,c,s),op=await boundOperation(d,c,p,prior,0,s),result=op?await resultFor(d,p,op,s):null,o=op?.raw.value.operation;
+   try{const a=await receipt(d,c,p.run.run_id,s),ctl=await control(d,c,s),op=await boundOperation(d,c,p,prior,0,s),result=op?await get(d,`${WORKERS}/${p.run.run_id}/subscription-jobs/results/${op.chunk.operation_id}.json`,s):undefined,o=op?.raw.value.operation;
     retry=a.receipt.key===p.key&&ctl?.value.current.status==='active'&&ctl.value.current.key===p.key&&ctl.value.current.run_id===p.run.run_id&&o?.state==='unknown'&&o?.outcome_code==='evidence_not_in_source'&&op?.spec.model==='gpt-5.6-luna'&&op?.spec.provider==='codex-chatgpt-subscription'&&result===null;
    }catch{retry=false;}
   }
