@@ -25,6 +25,7 @@ export const REVIEWED_SUBSCRIPTION_REVIEW_PROVIDER_PAIRS = Object.freeze([
 
 const SHA = /^[a-f0-9]{64}$/;
 const LOGIN_CONTRACT = 'codex-login-status-before-model-exec-v1';
+const REVIEW_MODELS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-terra']);
 const REVIEW_KEYS = [
   'evidence', 'object_index', 'polarity', 'predicate', 'qualifications',
   'reason_code', 'request_sha256', 'subject_index', 'verdict',
@@ -67,7 +68,7 @@ export function isSubscriptionReviewOperationSpec(spec: Record<string, unknown>,
   return prepared &&
     spec.provider === SUBSCRIPTION_REVIEW_PROVIDER &&
     spec.extractor_version === SUBSCRIPTION_REVIEW_EXTRACTOR_VERSION &&
-    spec.model === 'gpt-5.6-luna' &&
+    REVIEW_MODELS.includes(String(spec.model)) &&
     spec.login_before_model_contract === LOGIN_CONTRACT &&
     SHA.test(String(spec.extractor_bundle_sha256 ?? '')) &&
     !/^([a-f0-9])\1{63}$/.test(String(spec.extractor_bundle_sha256));
@@ -113,7 +114,7 @@ export function validSubscriptionReviewOutput(
     'provider', 'model', 'billing_route', 'paid_fallback', 'source_sha256', 'candidates', 'review',
   ])) return false;
   return value.provider === SUBSCRIPTION_REVIEW_PROVIDER &&
-    value.provider === spec.provider && value.model === 'gpt-5.6-luna' && value.model === spec.model &&
+    value.provider === spec.provider && REVIEW_MODELS.includes(String(value.model)) && value.model === spec.model &&
     value.billing_route === 'chatgpt_subscription' && value.paid_fallback === false &&
     value.source_sha256 === source.textSha256 && Array.isArray(value.candidates) &&
     value.candidates.length === 0 && validReview(value.review, source) &&
