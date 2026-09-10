@@ -51,17 +51,19 @@ test('ordinary partition CLI validates every shard before controller startup and
     await writeFile(preload,transport(false));
     const check=execute('--check');assert.equal(check.status,0,check.stderr);assert.match(check.stdout,/partitioned-signed-review/);
     if(process.platform==='win32'){
-      const authorityFile=join(directory,'authority.json'),installation=join(directory,'prepared');
+      const authorityFile=join(directory,'authority.json'),installation=join(directory,'prepared runtime');
       await writeFile(authorityFile,JSON.stringify(authority));
       const prepared=spawnSync(process.env.RELATIONSHIP_POWERSHELL||'pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File',
         fileURLToPath(new URL('./Prepare-RelationshipBackfill.ps1',import.meta.url)),'-InstallDirectory',installation,
         '-NodePath',process.execPath,'-CtoRoot',ctoRoot,'-CfoProjectConfig',project,'-CodexPath',binary,'-CohortId','synthetic',
-        '-Producer','reviewer','-ReviewModel','gpt-5.6-sol','-ExtractorModel','gpt-5.6-terra','-ReviewMode','partitioned-signed-review','-RegistryId','synthetic','-RegistryVersion',manifest.snapshot.version,
+        '-Producer','reviewer','-ReviewModel','gpt-5.6-terra','-ExtractorModel','gpt-5.6-terra','-ReviewMode','partitioned-signed-review','-RegistryId','synthetic','-RegistryVersion',manifest.snapshot.version,
         '-RegistryPublicKeyFile',key,'-RegistryAuthorityFile',authorityFile],{encoding:'utf8',windowsHide:true,timeout:30000});
       assert.equal(prepared.status,0,prepared.stderr||prepared.error?.message);
       const saved=JSON.parse(await readFile(join(installation,'runtime.json'),'utf8'));
-      assert.equal(saved.review_mode,'partitioned-signed-review');assert.equal(saved.review_model,'gpt-5.6-sol');assert.equal(saved.extractor_model,'gpt-5.6-terra');assert.equal(saved.registry.version,manifest.snapshot.version);
+      assert.equal(saved.review_mode,'partitioned-signed-review');assert.equal(saved.review_model,'gpt-5.6-terra');assert.equal(saved.extractor_model,'gpt-5.6-terra');assert.equal(saved.registry.version,manifest.snapshot.version);
       assert.match(prepared.stdout,/Scheduler not registered or activated/);
+      const starter=spawnSync(process.env.RELATIONSHIP_POWERSHELL||'pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File',join(installation,'Start-RelationshipBackfill.ps1'),'-RuntimeDirectory',installation,'-Mode','Check'],{encoding:'utf8',windowsHide:true,timeout:30000});
+      assert.equal(starter.status,0,starter.stderr||starter.error?.message);assert.match(starter.stdout,/"status":"configured"/);
     }
     const result=execute('--once');assert.equal(result.status,2,result.stderr);assert.match(result.stdout,/disabled/);
     assert.deepEqual(JSON.parse(await readFile(audit,'utf8')),{shards:16,pages:1});

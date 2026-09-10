@@ -31,6 +31,7 @@ const output = {
 
 test('review provider requires its fixed identity and a prepared operation', () => {
   assert.equal(isSubscriptionReviewOperationSpec(spec, true), true);
+  assert.equal(isSubscriptionReviewOperationSpec({ ...spec, model: 'gpt-5.6-terra' }, true), true);
   for (const changed of [
     { ...spec, provider: 'codex-chatgpt-subscription' },
     { ...spec, extractor_version: 'other' },
@@ -42,6 +43,7 @@ test('review provider requires its fixed identity and a prepared operation', () 
 
 test('review output is exact, source-bound, and has no candidate side channel', () => {
   assert.equal(validSubscriptionReviewOutput(output, spec, source), true);
+  assert.equal(validSubscriptionReviewOutput({ ...output, model: 'gpt-5.6-terra' }, { ...spec, model: 'gpt-5.6-terra' }, source), true);
   for (const changed of [
     { ...output, provider: 'other' },
     { ...output, source_sha256: sha('other') },
