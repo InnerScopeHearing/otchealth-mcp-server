@@ -1596,7 +1596,7 @@ export function registerGraphWorkerBrokerRoutes(
   }
 
   app.post('/graph-worker/v1/source/:runId/cfo-text-snapshots', {
-    config: { rateLimit: { max: 4, timeWindow: '1 minute' } },
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
   }, async (request, reply) => {
     if (!exact(request.body, ['run','document_ordinal']) ||
         !validRun(request.body.run) ||

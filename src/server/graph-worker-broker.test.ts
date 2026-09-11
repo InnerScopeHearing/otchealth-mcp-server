@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Fastify from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import type { GraphWorkerBrokerDeps } from './graph-worker-broker.js';
+import { publicErrorResponse } from './public-error-response.js';
 
 const SYNTHETIC_REQUIRED_ENV = Object.freeze({
   CIO_SITE_ID: 'synthetic',
@@ -103,6 +105,7 @@ async function harness(options: {
   readCfoText?: GraphWorkerBrokerDeps['readCfoText'];
   resolveCohortBinding?: GraphWorkerBrokerDeps['resolveCohortBinding'];
   now?: () => number;
+  rateLimit?: boolean;
 } = {}) {
   const f = fixture();
   let revision = 1;
@@ -139,6 +142,13 @@ async function harness(options: {
     (request as typeof request & { rawBody?: string }).rawBody = body as string;
     try { done(null, JSON.parse(body as string)); } catch (error) { done(error as Error); }
   });
+  if (options.rateLimit) {
+    await app.register(rateLimit, { global: true, max: 1000, timeWindow: '1 minute' });
+    app.setErrorHandler(async (error, _request, reply) => {
+      const response = publicErrorResponse(error);
+      await reply.code(response.statusCode).send(response.body);
+    });
+  }
   registerGraphWorkerBrokerRoutes(app, {
     authenticate: async (request) => ({
       caller_hash: H('caller'), raw_token: 'test-only',
@@ -353,6 +363,31 @@ test('CFO text preparation persists bound refs and serves only an exact prepared
   });
   assert.equal(cto.statusCode, 403);
   assert.equal(calls.length, 1);
+  await h.app.close();
+});
+
+test('CFO text preparation permits a bounded review batch and reports rate limiting safely', async () => {
+  const h = await harness({ rateLimit: true });
+  const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-snapshots';
+  const request = () => h.app.inject({
+    method: 'POST', url, headers: authHeaders,
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+
+  for (let count = 0; count < 30; count++) {
+    const response = await request();
+    assert.equal(response.statusCode, 200);
+  }
+
+  const limited = await request();
+  assert.equal(limited.statusCode, 429);
+  assert.deepEqual(limited.json(), {
+    error: 'rate_limited', message: 'Too many requests. Retry later.',
+  });
+  assert.equal(limited.headers['x-ratelimit-limit'], '30');
+  assert.equal(limited.headers['x-ratelimit-remaining'], '0');
+  assert.match(limited.headers['x-ratelimit-reset'] ?? '', /^\d+$/);
+  assert.match(limited.headers['retry-after'] ?? '', /^\d+$/);
   await h.app.close();
 });
 

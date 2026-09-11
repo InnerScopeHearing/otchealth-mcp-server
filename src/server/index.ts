@@ -1,6 +1,7 @@
 import '../instrument.js'; // Datadog APM, must be first; no-ops unless DD_API_KEY is set.
 import Fastify from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+import { publicErrorResponse } from './public-error-response.js';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import { registerHealth } from './health.js';
@@ -125,10 +126,8 @@ async function main(): Promise<void> {
       'unhandled fastify error',
     );
     if (!reply.sent) {
-      await reply.code(500).send({
-        error: 'internal_error',
-        message: 'Unexpected server error. Check logs for details.',
-      });
+      const response = publicErrorResponse(error);
+      await reply.code(response.statusCode).send(response.body);
     }
   });
 
