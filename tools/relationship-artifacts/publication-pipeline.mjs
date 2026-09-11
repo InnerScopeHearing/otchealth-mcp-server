@@ -43,12 +43,12 @@ export function createRelationshipPublicationPipeline({cohort_id,producer_id,out
   if(old?.state==='reviewed')return publish(id,old,signal);
   if(old?.state==='intent_only'){
    if(!recoveryOnly||!resumeCandidateOnly)return status(id,'held','relationship_review_unknown');
-   const claim=await outbox.claimReview(id);if(!claim.claimed)return status(id,'held','relationship_review_in_progress');
+   const claim=await outbox.claimReview(id);if(!claim.claimed)return status(id,'held','relationship_review_unknown');
    try{const current=await outbox.get(id);if(current?.state==='reviewed')return publish(id,current,signal);if(current?.state!=='intent_only')return status(id,'held','relationship_review_unknown');return await review(id,proposal,signal);}finally{await outbox.releaseReview(id,claim.token);}
   }
   if(recoveryOnly)return status(id,'held','relationship_review_not_started');
   const input=await loadExtracted(proposal,{signal});active(signal);const claim=await outbox.createIntent(id);if(!claim.created)return status(id,'held','relationship_review_unknown');
-  const reviewClaim=await outbox.claimReview(id);if(!reviewClaim.claimed)return status(id,'held','relationship_review_in_progress');
+  const reviewClaim=await outbox.claimReview(id);if(!reviewClaim.claimed)return status(id,'held','relationship_review_unknown');
   try{const current=await outbox.get(id);if(current?.state!=='intent_only')return current?.state==='reviewed'?await publish(id,current,signal):status(id,'held','relationship_review_unknown');return await review(id,proposal,signal,input);}finally{await outbox.releaseReview(id,reviewClaim.token);}
  }
  let recoveryCursor=null;
