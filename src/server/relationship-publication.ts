@@ -19,6 +19,8 @@ export interface RelationshipPublicationDeps extends Omit<RelationshipHistorical
  identityCurrentness?:RelationshipIdentityCurrentnessResolver;
 }
 const SHA=/^[a-f0-9]{64}$/,RUN=/^run_[a-f0-9]{64}$/,LABEL=/^[a-z0-9][a-z0-9_.:-]{0,95}$/,PRODUCER=/^[a-z][a-z0-9-]{0,63}$/;
+const FAILURE_STAGES=new Set(['store_get','admission','artifact_read','inspect','prewrite','store_put','postwriteinspect','unknown']);
+const FAILURE_CODES=new Set(['get','put','size','credentials','deadline','record','conflict','verify','xml','artifact','pinned','source_denied','publication_cancelled','unknown']);
 const equal=(a:any,b:any)=>h.canonical(a)===h.canonical(b);
 function identityCurrentnessMap(proofs:Array<{proof?:Json}>,decisions:Array<unknown>){
  const current=new Map<string,boolean>();
@@ -29,6 +31,8 @@ function identityCurrentnessMap(proofs:Array<{proof?:Json}>,decisions:Array<unkn
  return current;
 }
 function fail(status=403):never{throw Object.assign(Error('relationship_publication_denied'),{status});}
+function failureCode(error:unknown){const value=typeof error==='object'&&error!==null&&typeof (error as {code?:unknown}).code==='string'?(error as {code:string}).code:error instanceof Error?error.message:'';return FAILURE_CODES.has(value)?value:'unknown';}
+function failureUpstreamStatus(error:unknown){if(!error||typeof error!=='object'||(error as {publicationStoreError?:unknown}).publicationStoreError!==true)return null;const status=(error as {upstreamStatus?:unknown}).upstreamStatus;return typeof status==='number'&&Number.isInteger(status)&&status>=100&&status<=599?status:null;}
 function parse(text:string,now:number):Json|null{
  try{
   if(Buffer.byteLength(text)>65536)return null;const p=JSON.parse(text);
@@ -142,27 +146,28 @@ export function createRelationshipPublicationDiscoveryService(injected?:Partial<
 export function registerRelationshipPublicationRoutes(app:FastifyInstance,injected?:Partial<RelationshipPublicationDeps>){
  const d=budgeted(publicationDeps(injected)),discovery=createRelationshipPublicationDiscoveryService(d);
  const prefix='/relationship-publications/v1/:cohortId/:producerId';
- const route=(method:'GET'|'POST',url:string,operation:(r:FastifyRequest,p:FastifyReply,c:Json,policy:Json,ctx:AuthContext,s:AbortSignal,recheck:()=>Promise<void>)=>Promise<any>)=>app.route({method,url,bodyLimit:16384,handler:async(req,reply)=>{
+ const route=(method:'GET'|'POST',url:string,operation:(r:FastifyRequest,p:FastifyReply,c:Json,policy:Json,ctx:AuthContext,s:AbortSignal,recheck:()=>Promise<void>,setStage:(stage:string)=>void)=>Promise<any>)=>app.route({method,url,bodyLimit:16384,handler:async(req,reply)=>{
   const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),45000),abort=()=>ctl.abort(),close=()=>{if(!reply.raw.writableFinished)ctl.abort();};req.raw.on('aborted',abort);reply.raw.on('close',close);
+  let authenticatedBinding=false,stage='unknown';const setStage=(value:string)=>{stage=FAILURE_STAGES.has(value)?value:'unknown';};
   try{
    const params=req.params as Json;if(!LABEL.test(params.cohortId)||!h.path(params.cohortId)||!PRODUCER.test(params.producerId))fail(400);
    const ctx=await bounded(()=>d.authenticate(req,reply),ctl.signal);if(!ctx||ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
-   const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===params.cohortId&&x.producer_id===params.producerId&&x.caller_hash===ctx.caller_hash);if(!c)fail();
+   const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===params.cohortId&&x.producer_id===params.producerId&&x.caller_hash===ctx.caller_hash);if(!c)fail();authenticatedBinding=true;
    const recheck=async()=>{const auth=await d.authenticate(req,reply);if(!auth||auth.caller_agent!=='cfo'||!auth.connector_surface||auth.caller_hash!==ctx.caller_hash||!equal(parse(d.policyJson(),d.now()),policy)||ctl.signal.aborted)fail();};
-   return await bounded(()=>operation(req,reply,c,policy,ctx,ctl.signal,recheck),ctl.signal);
-  }catch(e){if(!reply.sent)return reply.code((e as any).status??((e as Error).message==='source_denied'?403:503)).send();}finally{clearTimeout(timer);ctl.abort();req.raw.off('aborted',abort);reply.raw.off('close',close);}
+   return await bounded(()=>operation(req,reply,c,policy,ctx,ctl.signal,recheck,setStage),ctl.signal);
+  }catch(e){if(!reply.sent){if(authenticatedBinding&&method==='POST'){reply.header('x-relationship-failure-stage',stage).header('x-relationship-failure-code',failureCode(e));const upstreamStatus=failureUpstreamStatus(e);if(upstreamStatus!==null)reply.header('x-relationship-failure-upstream-status',String(upstreamStatus));}return reply.code((e as any).status??((e as Error).message==='source_denied'?403:503)).send();}}finally{clearTimeout(timer);ctl.abort();req.raw.off('aborted',abort);reply.raw.off('close',close);}
  }});
- route('POST',prefix,async(req,reply,c,policy,ctx,signal,recheck)=>{
+ route('POST',prefix,async(req,reply,c,policy,ctx,signal,recheck,setStage)=>{
   if(new URL(req.url,'http://local').search)fail(400);const input=req.body as Json;if(!h.exact(input,['run','artifact_ref'])||!h.validRun(input.run)||!h.artifactRef(input.artifact_ref)||input.run.purpose!==c.purpose||input.run.run_version!==c.run_version)fail(400);
-  const store=d.storeFor(c.cohort_id,c.producer_id),existing=await store.get(input.run.run_id,signal);let grant:Json;
+  const store=d.storeFor(c.cohort_id,c.producer_id);setStage('store_get');const existing=await store.get(input.run.run_id,signal);let grant:Json;
   if(existing.found){grant=stored(existing);if(!equal(grant.run,input.run)||!equal(grant.artifact_ref,input.artifact_ref))fail(409);}
   else{
-   const pins=await d.resolveAdmission({cohortId:c.cohort_id,run:input.run,ctx,signal}),ref=input.artifact_ref;
+   setStage('admission');const pins=await d.resolveAdmission({cohortId:c.cohort_id,run:input.run,ctx,signal}),ref=input.artifact_ref;
    grant={schema:'relationship-publication-grant-v1',cohort_id:c.cohort_id,producer_id:c.producer_id,caller_hash:ctx.caller_hash,run:input.run,...pins,artifact_ref:ref,approved_artifacts:[{digest:ref.payload_sha256,version_id:ref.version_id}],issued_under_policy_version:policy.policy_version};
-   const b=binding(policy,c,grant,d.now()),r=await d.readVersion({key:h.artifactKey(input.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);if(history.payload.schema!=='resolution-history-v1')fail();grant.approved_artifacts.push(...history.payload.sources.map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id})));
+   const b=binding(policy,c,grant,d.now());setStage('artifact_read');const r=await d.readVersion({key:h.artifactKey(input.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);if(history.payload.schema!=='resolution-history-v1')fail();grant.approved_artifacts.push(...history.payload.sources.map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id})));
   }
-  if(!(await inspect(d,policy,c,grant,ctx,signal)).current)fail();await recheck();
-  const saved=stored(await store.putCreateOnly({runId:input.run.run_id,body:Buffer.from(h.canonical(grant))},signal));if(!equal(saved,grant))fail(409);await recheck();if(!(await inspect(d,policy,c,grant,ctx,signal)).current)fail();await recheck();
+  setStage('inspect');if(!(await inspect(d,policy,c,grant,ctx,signal)).current)fail();setStage('prewrite');await recheck();
+  setStage('store_put');const saved=stored(await store.putCreateOnly({runId:input.run.run_id,body:Buffer.from(h.canonical(grant))},signal));if(!equal(saved,grant))fail(409);setStage('postwriteinspect');await recheck();if(!(await inspect(d,policy,c,grant,ctx,signal)).current)fail();await recheck();
   return reply.code(200).send({schema:'relationship-publication-receipt-v1',item:{run:grant.run,producer_id:c.producer_id,artifact_ref:grant.artifact_ref}});
  });
  route('GET',prefix,async(req,reply,c,policy,ctx,signal,recheck)=>{

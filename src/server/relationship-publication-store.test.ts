@@ -24,6 +24,10 @@ test('publication store rejects invalid namespace, records, and cursors before n
  await assert.rejects(store.putCreateOnly({runId:run,body:Buffer.from('[]')},new AbortController().signal),/record/);
  await assert.rejects(store.list({after:'bad',limit:1,signal:new AbortController().signal}),/cursor/);
 });
+test('publication store marks a failed grant GET with a safe typed upstream status',async()=>{
+ const store=createRelationshipPublicationStore({cohort:'synthetic',producer:'synthetic-producer',resolveCredentials:async()=>({accessKeyId:'synthetic',secretAccessKey:'synthetic'}),fetch:async()=>new Response('',{status:403})});
+ await assert.rejects(store.get(run,new AbortController().signal),(error:any)=>error?.code==='get'&&error?.publicationStoreError===true&&error?.upstreamStatus===403);
+});
 
 
 test('publication S3 pages 66 retained records using the real bounded list parser',async()=>{
