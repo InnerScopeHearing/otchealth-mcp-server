@@ -27,8 +27,40 @@ export function createCandidatePromotionPlanner({readParent,refreshSource,assert
  }});
 }
 
-/** Uses the existing signed reviewer only after the planner has reconstructed a fresh, covered input. */
-export function createCandidatePromotionReview({planner,createSignedReview}={}){
- if(typeof planner?.plan!=='function'||typeof createSignedReview!=='function')fail('candidate_promotion_configuration');
- return Object.freeze({async reviewCandidates(request,{signal}={}){const plan=await planner.plan(request,{signal}),review=await createSignedReview({run:plan.lineage.target_run,signal});if(typeof review?.reviewCandidates!=='function')fail('candidate_promotion_review_configuration');const receipt=await review.reviewCandidates(plan.review_input,{signal});if(receipt?.schema!=='resolution-review-receipt-v1'||!receipt.artifact_ref)fail('candidate_promotion_review_invalid');return Object.freeze({...receipt,promotion_lineage:plan.lineage});}});
+
+/** Obtains a target-run binding from the catalog controller, then asks the existing
+ * prepared-source factory to verify and return its authoritative binding. */
+export function createPreparedPromotionSourceRefresher({findPreparedBinding,sourceAdapter}={}){
+ if(typeof findPreparedBinding!=='function'||typeof sourceAdapter?.load!=='function')fail('candidate_promotion_configuration');
+ return async({source_ref,run:target},{signal}={})=>{
+  const requested=await findPreparedBinding({source_ref:structuredClone(source_ref),run:structuredClone(target)},{signal});
+  const loaded=await sourceAdapter.load(requested,{signal}),binding=loaded?.input?.binding;
+  return promotedBinding(binding,target,source_ref);
+ };
+}
+/** The partition registry's lookup performs manifest, currentness, and exact catalog-coverage checks before returning. */
+export function createPartitionCoverageAdapter({registry}={}){
+ if(typeof registry?.lookup!=='function')fail('candidate_promotion_configuration');
+ return async(binding,{signal}={})=>{
+  try { await registry.lookup({source_binding:binding,mention:'promotion-coverage-probe'},{signal}); return true; }
+  catch(error){if(['partition_binding_not_covered','partition_binding_unrouted','partition_manifest_not_current','partition_shard_not_current'].includes(error?.code))return false;throw error;}
+ };
+}
+
+/** Reads the existing authenticated immutable resolution-history envelope. Only unverified
+ * accepted-candidate records are selected, and their exact prepared-source binding is retained. */
+export function createHistoricalCandidateParentReader({reader}={}){
+ if(typeof reader?.readArtifact!=='function')fail('candidate_promotion_configuration');
+ return async(parent,{signal}={})=>{
+  const result=await reader.readArtifact(parent.artifact_ref,{signal}),payload=result?.payload;
+  if(result?.authority?.authenticated_gateway!==true||result.authority.current!==true||!exact(payload,['schema','run','caller_seat','sources','events','queries'])||payload.schema!=='resolution-history-v1'||payload.caller_seat!=='cfo'||canonical(run(payload.run))!==canonical(parent.run)||!Array.isArray(payload.events))fail('candidate_promotion_parent_invalid');
+  const candidates=[];for(const event of payload.events){const record=event?.operation==='accept'?event.output:null,source=record?.evidence?.source_binding;if(record?.accepted===false&&record?.candidate&&source&&text(source.source_document_version)&&HASH.test(source.chunk_sha256))candidates.push({source_ref:{source_document_version:source.source_document_version,chunk_sha256:source.chunk_sha256},candidate:record.candidate});}
+  return Object.freeze({schema:'candidate-promotion-parent-v1',artifact_ref:parent.artifact_ref,run:parent.run,candidates:Object.freeze(candidates)});
+ };
+}
+
+/** Records lineage separately before delegating to the unchanged signed-review receipt contract. */
+export function createCandidatePromotionReview({planner,createSignedReview,recordLineage}={}){
+ if(typeof planner?.plan!=='function'||typeof createSignedReview!=='function'||typeof recordLineage!=='function')fail('candidate_promotion_configuration');
+ return Object.freeze({async reviewCandidates(request,{signal}={}){const plan=await planner.plan(request,{signal});if(await recordLineage(plan.lineage,{signal})!==true)fail('candidate_promotion_intent_unavailable');const review=await createSignedReview({run:plan.lineage.target_run,signal});if(typeof review?.reviewCandidates!=='function')fail('candidate_promotion_review_configuration');const receipt=await review.reviewCandidates(plan.review_input,{signal});if(receipt?.schema!=='resolution-review-receipt-v1'||!receipt.artifact_ref)fail('candidate_promotion_review_invalid');return receipt;}});
 }
