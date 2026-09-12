@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import test from 'node:test';
+import { resolve } from 'node:path';
 import { createExplicitExportImmutableStore } from './identity-registry-explicit-export-ports.js';
 import {
   bindImmutableXeroOrganisationProjection,
@@ -206,7 +207,7 @@ test('retries an exact source handoff and exports each renewed handoff through t
   const exportObjects = new Map<string, Readonly<{ body: Buffer; version_id: string }>>();
   let exportedSequence = 0, output: string | undefined;
   const result = await runXeroOrganisationExplicitExport({
-    argv: ['--handoff', 'C:\\handoff.json', '--ports', 'C:\\ports.json', '--output', 'C:\\result.json'],
+    argv: ['--handoff', resolve('handoff.json'), '--ports', resolve('ports.json'), '--output', resolve('result.json')],
     read: async path => path.endsWith('handoff.json') ? JSON.stringify(first.handoff) : JSON.stringify(ports),
     write: async (_path, value) => { output = value; },
     runtimeFactory: () => ({
