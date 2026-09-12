@@ -5,15 +5,18 @@ import { createCfoIdentityRegistryKmsSigner, createExplicitExportImmutableStore 
 
 test('KMS signer obtains only an Ed25519 public key and verifies the returned signature', async () => {
   const keys = generateKeyPairSync('ed25519');
+  const keyId = 'arn:aws:kms:us-east-1:900915535335:key/11111111-1111-4111-8111-111111111111';
   const calls: string[] = [];
   const signer = await createCfoIdentityRegistryKmsSigner({
-    region: 'us-east-1', keyId: 'alias/cfo-identity-registry-pilot', resolveCredentials: async () => ({ accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }),
+    region: 'us-east-1', keyId, resolveCredentials: async () => ({ accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }),
     signRequest: input => ({ headers: input.extraHeaders ?? {} }),
     fetch: async (_url, init) => {
       const headers = new Headers(init.headers); const target = headers.get('x-amz-target')!; calls.push(target);
-      if (target === 'TrentService.GetPublicKey') return new Response(JSON.stringify({ KeySpec: 'ED25519', KeyUsage: 'SIGN_VERIFY', PublicKey: keys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64') }), { status: 200 });
+      if (target === 'TrentService.GetPublicKey') return new Response(JSON.stringify({ KeyId: keyId, KeySpec: 'ECC_NIST_EDWARDS25519', KeyUsage: 'SIGN_VERIFY', SigningAlgorithms: ['ED25519_SHA_512'], PublicKey: keys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64') }), { status: 200 });
       const body = JSON.parse(String(init.body)) as { Message: string };
-      return new Response(JSON.stringify({ SigningAlgorithm: 'EDDSA', Signature: sign(null, Buffer.from(body.Message, 'base64'), keys.privateKey).toString('base64') }), { status: 200 });
+      assert.equal(body.MessageType, 'RAW');
+      assert.equal(body.SigningAlgorithm, 'ED25519_SHA_512');
+      return new Response(JSON.stringify({ KeyId: keyId, SigningAlgorithm: 'ED25519_SHA_512', Signature: sign(null, Buffer.from(body.Message, 'base64'), keys.privateKey).toString('base64') }), { status: 200 });
     },
   });
   const payload = Buffer.from('synthetic signed payload');
@@ -21,6 +24,19 @@ test('KMS signer obtains only an Ed25519 public key and verifies the returned si
   assert.equal(verify(null, payload, signer.publicKey, signature), true);
   assert.deepEqual(calls, ['TrentService.GetPublicKey', 'TrentService.Sign']);
   assert.equal(signer.publicKey.includes('PRIVATE'), false);
+  assert.equal(signer.maxMessageBytes, 4096);
+  await assert.rejects(() => signer.sign(Buffer.alloc(4097)), { code: 'identity_export_signature_invalid' });
+  assert.equal(calls.length, 2, 'oversized RAW input is refused before a KMS Sign request');
+});
+
+test('KMS signer rejects a mutable alias result whose immutable key ARN differs from the configured pin', async () => {
+  const key = generateKeyPairSync('ed25519');
+  const expected = 'arn:aws:kms:us-east-1:900915535335:key/22222222-2222-4222-8222-222222222222';
+  await assert.rejects(() => createCfoIdentityRegistryKmsSigner({
+    region: 'us-east-1', keyId: expected, resolveCredentials: async () => ({ accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }),
+    signRequest: input => ({ headers: input.extraHeaders ?? {} }),
+    fetch: async () => new Response(JSON.stringify({ KeyId: 'arn:aws:kms:us-east-1:900915535335:key/33333333-3333-4333-8333-333333333333', KeySpec: 'ECC_NIST_EDWARDS25519', KeyUsage: 'SIGN_VERIFY', SigningAlgorithms: ['ED25519_SHA_512'], PublicKey: key.publicKey.export({ type: 'spki', format: 'der' }).toString('base64') }), { status: 200 }),
+  }), { code: 'identity_export_kms_unavailable' });
 });
 
 test('immutable source export store conditionally creates then reconciles an exact retry', async () => {

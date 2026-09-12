@@ -11,14 +11,14 @@ function fixture() {
   const binding = { source_document_version: 'docv_' + 'b'.repeat(64), chunk_sha256: 'c'.repeat(64) };
   const input = { registry_id: 'cfo-pilot', authority: { schema: 'authenticated-structured-identity-authority-v1', adapter_id: 'cfo-source-owner', source_system: 'cfo-ledger', scope: 'cfo', version: 'v1' }, run: { ...runBase, run_id: 'run_' + sha(runBase) }, catalog: { catalog_version: 'catalog-v1', catalog_sha256: 'd'.repeat(64) }, partition_manifest_version: 'sirm_' + 'e'.repeat(64), source_generation: 'generation-1', source_version: 'source-v1', prefix: 'graph-trial/cfo-identity-pilot', expires_at: '2030-01-01T00:00:00.000Z', bindings: [binding], shards: [{ shard_id: 'shard-0', registry_version: 'registry-v1' }], records: [{ source_record_id: 'cfo-native-record-1', source_document_version: binding.source_document_version, source_sha256: binding.chunk_sha256, mention: 'Synthetic Supplier Inc', disposition: 'resolved', endpoint: { display_name: 'Synthetic Supplier Inc', entity_type: 'organization', identifier: { namespace: 'cfo-system', scope: 'supplier', value: 'synthetic-1' } } }] };
   const objects = new Map(); let sequence = 0;
-  const store = { putImmutable: async ({ key, body }) => { const found = objects.get(key); if (found) { assert.deepEqual(found.body, body, 'a retry may only reuse byte-identical immutable content'); return { version_id: found.version_id }; } const version_id = `v-${++sequence}`; objects.set(key, { body, version_id }); return { version_id }; } };
-  const signer = { publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), sign: async bytes => sign(null, bytes, keys.privateKey) };
+  const store = { maxVersionIdBytes: 128, putImmutable: async ({ key, body }) => { const found = objects.get(key); if (found) { assert.deepEqual(found.body, body, 'a retry may only reuse byte-identical immutable content'); return { version_id: found.version_id }; } const version_id = `v-${++sequence}`; objects.set(key, { body, version_id }); return { version_id }; } };
+  const signer = { publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), maxMessageBytes: 4096, sign: async bytes => sign(null, bytes, keys.privateKey) };
   return { input, objects, signer, store };
 }
 
 test('publishes a signed explicit-ID manifest, pages, coverage, shard currentness and pointer through an immutable port', async () => {
   const f = fixture();
-  const published = await publishExplicitIdentityRegistryExport({ input: f.input, signer: f.signer, store: { putImmutable: async item => f.store?.putImmutable(item) } });
+  const published = await publishExplicitIdentityRegistryExport({ input: f.input, signer: f.signer, store: f.store });
   assert.equal(published.receipt.page_count, 1);
   assert.equal(published.receipt.coverage_binding_count, 1);
   assert.equal(published.public_config.public_key.includes('PRIVATE'), false);
@@ -64,12 +64,19 @@ test('refuses invalid records, keys, duplicate IDs, private keys and forged sign
   const duplicateRecord = structuredClone(f.input); duplicateRecord.records.push(structuredClone(duplicateRecord.records[0]));
   await assert.rejects(() => publishExplicitIdentityRegistryExport({ input: duplicateRecord, signer: f.signer, store: f.store }), { code: 'identity_export_record_duplicate' });
   const duplicateShard = structuredClone(f.input); duplicateShard.shards.push(structuredClone(duplicateShard.shards[0]));
-  await assert.rejects(() => publishExplicitIdentityRegistryExport({ input: duplicateShard, signer: f.signer, store: f.store }), { code: 'identity_export_shard_invalid' });
+  await assert.rejects(() => publishExplicitIdentityRegistryExport({ input: duplicateShard, signer: f.signer, store: f.store }), { code: 'identity_export_input_invalid' });
   const unsafeShard = structuredClone(f.input); unsafeShard.shards[0].shard_id = '../escape';
   await assert.rejects(() => publishExplicitIdentityRegistryExport({ input: unsafeShard, signer: f.signer, store: f.store }), { code: 'identity_export_shard_invalid' });
   const privateKeySigner = { ...f.signer, publicKey: f.signer.privateKey ?? generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() };
   await assert.rejects(() => publishExplicitIdentityRegistryExport({ input: f.input, signer: privateKeySigner, store: f.store }), { code: 'identity_export_signer_invalid' });
   const forgedSigner = { ...f.signer, sign: async () => Buffer.alloc(64) };
   await assert.rejects(() => publishExplicitIdentityRegistryExport({ input: f.input, signer: forgedSigner, store: f.store }), { code: 'identity_export_signature_invalid' });
+  assert.equal(f.objects.size, 0);
+});
+
+test('refuses a manifest that exceeds the KMS RAW signing limit before any immutable write', async () => {
+  const f = fixture();
+  const limitedSigner = { ...f.signer, maxMessageBytes: 128 };
+  await assert.rejects(() => publishExplicitIdentityRegistryExport({ input: f.input, signer: limitedSigner, store: f.store }), { code: 'identity_export_signature_too_large' });
   assert.equal(f.objects.size, 0);
 });

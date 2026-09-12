@@ -43,12 +43,14 @@ function normalizedPublicKey(value) {
 }
 async function signed(snapshot, signer, publicKey) {
   const bytes = Buffer.from(canonicalJson(snapshot), 'utf8');
+  if (bytes.length > signer.maxMessageBytes) fail('identity_export_signature_too_large');
   let signature;
   try { signature = await signer.sign(bytes); } catch { fail('identity_export_signature_invalid'); }
   if (!Buffer.isBuffer(signature) || signature.length !== 64 || !verify(null, bytes, publicKey, signature)) fail('identity_export_signature_invalid');
   return { snapshot, signature: signature.toString('base64') };
 }
 function validShard(value) { return exact(value, ['registry_version', 'shard_id']) && LABEL.test(value.shard_id) && text(value.registry_version); }
+function signable(snapshot, signer) { if (Buffer.byteLength(canonicalJson(snapshot), 'utf8') > signer.maxMessageBytes) fail('identity_export_signature_too_large'); }
 
 /**
  * Publishes an explicit-ID source export through injected CFO-owned ports.
@@ -58,10 +60,10 @@ function validShard(value) { return exact(value, ['registry_version', 'shard_id'
  */
 export async function publishExplicitIdentityRegistryExport({ input, signer, store }) {
   if (!input || !exact(input, ['authority', 'bindings', 'catalog', 'expires_at', 'partition_manifest_version', 'prefix', 'records', 'registry_id', 'run', 'shards', 'source_generation', 'source_version'])) fail('identity_export_input_invalid');
-  if (!LABEL.test(input.registry_id) || !validAuthority(input.authority) || !validRun(input.run) || !exact(input.catalog, ['catalog_sha256', 'catalog_version']) || !text(input.catalog.catalog_version) || !HASH.test(input.catalog.catalog_sha256) || !/^sirm_[a-f0-9]{64}$/.test(input.partition_manifest_version) || !text(input.source_generation) || !text(input.source_version) || !validKey(input.prefix) || !input.prefix.startsWith('graph-trial/') || !Array.isArray(input.records) || !Array.isArray(input.bindings) || !Array.isArray(input.shards) || input.records.length > 100000 || input.bindings.length > 100000 || input.shards.length < 1 || input.shards.length > 1000 || !Number.isFinite(Date.parse(input.expires_at)) || Date.parse(input.expires_at) <= Date.now() + 1000) fail('identity_export_input_invalid');
-  if (!signer || typeof signer.sign !== 'function' || typeof signer.publicKey !== 'string') fail('identity_export_signer_invalid');
+  if (!LABEL.test(input.registry_id) || !validAuthority(input.authority) || !validRun(input.run) || !exact(input.catalog, ['catalog_sha256', 'catalog_version']) || !text(input.catalog.catalog_version) || !HASH.test(input.catalog.catalog_sha256) || !/^sirm_[a-f0-9]{64}$/.test(input.partition_manifest_version) || !text(input.source_generation) || !text(input.source_version) || !validKey(input.prefix) || !input.prefix.startsWith('graph-trial/') || !Array.isArray(input.records) || !Array.isArray(input.bindings) || !Array.isArray(input.shards) || input.records.length > 100 || input.bindings.length > 100 || input.shards.length !== 1 || !Number.isFinite(Date.parse(input.expires_at)) || Date.parse(input.expires_at) <= Date.now() + 1000) fail('identity_export_input_invalid');
+  if (!signer || typeof signer.sign !== 'function' || typeof signer.publicKey !== 'string' || !Number.isSafeInteger(signer.maxMessageBytes) || signer.maxMessageBytes < 128 || signer.maxMessageBytes > 512 * 1024) fail('identity_export_signer_invalid');
   const publicKey = normalizedPublicKey(signer.publicKey);
-  if (!store || typeof store.putImmutable !== 'function') fail('identity_export_store_invalid');
+  if (!store || typeof store.putImmutable !== 'function' || !Number.isSafeInteger(store.maxVersionIdBytes) || store.maxVersionIdBytes < 1 || store.maxVersionIdBytes > 1024) fail('identity_export_store_invalid');
   if (!input.records.every(validRecord)) fail('identity_export_record_not_explicit');
   if (new Set(input.records.map(record => record.source_record_id)).size !== input.records.length) fail('identity_export_record_duplicate');
   const bindingHashes = input.bindings.map(bindingHash).sort();
@@ -69,8 +71,16 @@ export async function publishExplicitIdentityRegistryExport({ input, signer, sto
   const knownBindings = new Set(bindingHashes);
   if (input.records.some(record => !knownBindings.has(digest({ source_document_version: record.source_document_version, source_sha256: record.source_sha256 })))) fail('identity_export_record_binding_missing');
   if (!input.shards.every(validShard) || new Set(input.shards.map(shard => shard.shard_id)).size !== input.shards.length) fail('identity_export_shard_invalid');
-  const prefix = input.prefix, pageRows = chunks(input.records, 1000), coverageRows = chunks(bindingHashes, 1000);
+  const prefix = input.prefix, pageRows = chunks(input.records, 100), coverageRows = chunks(bindingHashes, 100);
   if (!pageRows.length || !coverageRows.length) fail('identity_export_input_empty');
+  const public_key_sha256 = digest(publicKey.key.export({ type: 'spki', format: 'der' }));
+  const predictedVersion = 'v'.repeat(store.maxVersionIdBytes);
+  const pagesPreview = pageRows.map((_, index) => ({ cursor: index === 0 ? null : `page-${index}`, key: `${prefix}/pages/${index}.json`, version_id: predictedVersion, sha256: '0'.repeat(64), source_version: input.source_version }));
+  const coveragePreview = coverageRows.map((_, index) => ({ cursor: index === 0 ? null : `coverage-${index}`, key: `${prefix}/coverage/${index}.json`, version_id: predictedVersion, sha256: '0'.repeat(64), source_version: input.source_version }));
+  const shardsPreview = input.shards.map(item => ({ shard_id: item.shard_id, key: `${prefix}/shards/${item.shard_id}.json`, version_id: predictedVersion, sha256: '0'.repeat(64), registry_version: item.registry_version, source_version: input.source_version }));
+  const unsignedPreview = { registry_id: input.registry_id, source_authority: input.authority, run: input.run, catalog: input.catalog, partition_manifest_version: input.partition_manifest_version, source_generation: input.source_generation, pages: pagesPreview, coverage_pages: coveragePreview, shards: shardsPreview, coverage_binding_count: bindingHashes.length, coverage_binding_sha256: digest(bindingHashes), public_key_sha256 };
+  signable({ schema: 'source-identity-registry-explicit-export-manifest-v1', ...unsignedPreview, version: 'siex_' + digest(unsignedPreview) }, signer);
+  signable({ schema: 'source-identity-registry-explicit-export-current-v1', registry_id: input.registry_id, manifest_version: 'siex_' + '0'.repeat(64), source_generation: input.source_generation, expires_at: input.expires_at, revoked: false }, signer);
   // Prove the configured signing authority returns a valid Ed25519 signature
   // before the first immutable write. This preflight envelope is never stored.
   await signed({ schema: 'source-identity-registry-explicit-export-signer-preflight-v1' }, signer, publicKey.key);
@@ -78,7 +88,7 @@ export async function publishExplicitIdentityRegistryExport({ input, signer, sto
     if (!validKey(keyName) || !keyName.startsWith(prefix + '/')) fail('identity_export_key_invalid');
     const body = Buffer.from(canonicalJson(value), 'utf8');
     const written = await store.putImmutable({ key: keyName, body });
-    if (!written || !VERSION.test(written.version_id) || written.version_id === 'null') fail('identity_export_store_invalid');
+    if (!written || !VERSION.test(written.version_id) || written.version_id === 'null' || written.version_id.length > store.maxVersionIdBytes) fail('identity_export_store_invalid');
     return { key: keyName, version_id: written.version_id, sha256: digest(body) };
   };
   const pages = [];
@@ -101,7 +111,6 @@ export async function publishExplicitIdentityRegistryExport({ input, signer, sto
     const pin = await put(`${prefix}/shards/${item.shard_id}.json`, current);
     shards.push({ shard_id: item.shard_id, ...pin, registry_version: item.registry_version, source_version: input.source_version });
   }
-  const public_key_sha256 = digest(publicKey.key.export({ type: 'spki', format: 'der' }));
   const unsigned = { registry_id: input.registry_id, source_authority: input.authority, run: input.run, catalog: input.catalog, partition_manifest_version: input.partition_manifest_version, source_generation: input.source_generation, pages, coverage_pages, shards, coverage_binding_count: bindingHashes.length, coverage_binding_sha256: digest(bindingHashes), public_key_sha256 };
   const manifest = await signed({ schema: 'source-identity-registry-explicit-export-manifest-v1', ...unsigned, version: 'siex_' + digest(unsigned) }, signer, publicKey.key);
   const manifestPin = await put(`${prefix}/exports/manifest.json`, manifest);

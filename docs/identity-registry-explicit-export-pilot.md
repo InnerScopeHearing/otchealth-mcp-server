@@ -12,7 +12,7 @@ The ports config is public metadata only:
 ```json
 {
   "schema": "cfo-identity-registry-explicit-export-ports-v1",
-  "kms": { "region": "us-east-1", "key_id": "alias/cfo-identity-registry-pilot" },
+  "kms": { "region": "us-east-1", "key_id": "arn:aws:kms:us-east-1:900915535335:key/<new-dedicated-key-id>" },
   "source_storage": {
     "bucket": "otchealth-finance-legal-dr-55c84f6b",
     "region": "us-east-1",
@@ -24,7 +24,7 @@ The ports config is public metadata only:
 }
 ```
 
-The example identifiers above are placeholders, not a deployed configuration. Source owner supplies actual approved metadata in its own ring. No bucket, KMS key, policy, source record, or gateway deployment is provisioned by this change.
+The example identifiers above are placeholders, not a deployed configuration. The KMS reference must be the immutable dedicated key ARN, never a mutable alias. Source owner supplies actual approved metadata in its own ring. No bucket, KMS key, policy, source record, or gateway deployment is provisioned by this change.
 
 The input is `source-identity-registry-explicit-export-input-v1` in practice, enforced by exact field validation. It carries one CFO registry identifier, source authority descriptor, exact active run, catalog pins, partition-manifest version, source generation and version, output prefix, expiry, prepared source bindings, explicit identity records, and current partition shard versions.
 
@@ -49,3 +49,18 @@ node .\tools\identity-registry-explicit-export-run.mjs --input C:\approved-sourc
 ```
 
 The output has the public production-config source fields and immutable object pins. The release owner adds the separate storage section to `identity-registry-production-v1`, runs preflight, and deploys only after the documented live acceptance checks.
+
+## Proposed bootstrap, pending CTO review
+
+The CFO prerequisites receipt dated 2026-09-12 confirms that the existing finance source bucket is not an approved registry destination, and that no compatible signer, source-native export, or registry prefix was discovered. This proposal creates those resources only after review. It does not reuse unrelated RSA or application signing references.
+
+| Resource | Proposed public reference | Required control |
+| --- | --- | --- |
+| Source export prefix | `graph-trial/20260912/identity-registry/cfo-pilot/source` | Dedicated versioned source prefix, disjoint from existing CFO source and worker prefixes. |
+| Registry snapshots prefix | `graph-trial/20260912/identity-registry/cfo-pilot/snapshots` | Separate prefix for gateway partition and relationship snapshots. |
+| Signer | New asymmetric KMS key, `ECC_NIST_EDWARDS25519`, `SIGN_VERIFY` | Pin the generated key ARN in public config. The exporter role receives only `kms:GetPublicKey` and `kms:Sign` constrained to `ED25519_SHA_512`. |
+| Source owner bridge | New CFO source-ring scheduled job | It fetches source-native records from the approved source system, emits an explicit namespace/scope/value only when the source supplies all three fields, and marks every other record unresolved. It calculates the version/hash binding before calling the runner. |
+
+The first run is intentionally one native opaque identifier, one prepared binding, and one shard. The runner limits the pilot to 100 records and bindings, one page each, one shard, 128-byte object-version IDs, and a 4096-byte manifest or pointer signing payload. It computes the worst-case manifest size before any storage write. A larger rollout needs a separately reviewed signed-digest envelope contract before increasing those limits.
+
+Provisioning review must approve the exact S3 policy and its canonical hash, the scope hash, KMS key policy, source-owner task role, lifecycle and recovery controls, and the bridge’s native source endpoint. The code does not create any of them. The public result contains only the generated KMS public SPKI, object pins, and production configuration fields.
