@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {planGraphCatalogPage} from './graph-catalog-planner.js';
+import {createCfoTextSnapshotReader} from '../graph/cfo-text-snapshot.js';
 import Fastify from 'fastify';
 import '../../tools/relationship-artifacts/historical-reader.test.mjs';
 import '../../tools/relationship-artifacts/cross-run-recall.test.mjs';
@@ -9,7 +10,7 @@ import '../../tools/relationship-artifacts/recall-journal.test.mjs';
 for (const [key,value] of Object.entries({CIO_SITE_ID:'synthetic',CIO_TRACK_KEY:'synthetic',CIO_APP_API_BEARER:'synthetic',PERPLEXITY_CONNECTOR_TOKEN:'synthetic-placeholder-value-000000000',ADMIN_REVOKE_TOKEN:'synthetic-placeholder-value-000000000',N8N_WEBHOOK_SECRET:'synthetic-placeholder-value-000000000'})) process.env[key]??=value;
 
 const {relationshipHistoricalReadTest:h,registerRelationshipHistoricalReadRoutes}=await import('./relationship-historical-read.js');
-const {canonical,hash,parse,validRun,admissionChain,sourceBound,sourcePathAllowed}=h;
+const {canonical,hash,parse,validRun,admissionChain,sourceBound,sourcePathAllowed,defaultSource}=h;
 const now=Date.parse('2026-09-08T12:00:00.000Z'), sha=(s:string)=>hash(s);
 function policy(sourcePolicy?:any){
  const content={ref_version:'neptune-trial-active-run-ref-v1',purpose:'company_graph_backfill',scope:'finance',run_version:'synthetic-v1',manifest_sha256:sha('manifest')};
@@ -63,6 +64,13 @@ test('root-level CFO source is allowed only by explicit all-source scope',()=>{
  assert.equal(sourceBound(scoped.source,scoped.b,scoped.proposal),false);
  const foreign=structuredClone(all.source);foreign.payload.input.binding.room='legal_company';
  assert.equal(sourceBound(foreign,all.b,all.proposal),false);
+});
+test('default source currentness uses the frozen descriptor required by the real CFO snapshot reader',async()=>{
+ const text='Synthetic current CFO source.';const row={path:'finance/synthetic.txt'};
+ const binding={source_document_version:'docv_'+sha('source'),catalog_source_sha256:sha('catalog'),sidecar_content_sha256:sha(text)};
+ const reader=createCfoTextSnapshotReader({callerContext:{caller_agent:'cfo',connector_surface:true},maxSourceBytes:1024*1024,credentialProvider:async()=>({accessKeyId:'synthetic',secretAccessKey:'synthetic'}),signer:input=>({headers:input.extraHeaders??{}}),fetchImpl:async(_url,init)=>init.method==='HEAD'?new Response('',{status:200,headers:{etag:'"synthetic"','x-amz-version-id':'synthetic-v1','content-length':String(Buffer.byteLength(text))}}):new Response(text,{status:200,headers:{etag:'"synthetic"','x-amz-version-id':'synthetic-v1','content-length':String(Buffer.byteLength(text))}})});
+ const current=await defaultSource(row,binding,{caller_agent:'cfo',caller_hash:sha('caller'),connector_surface:true,raw_token:'synthetic',m365_static_auth:false},new AbortController().signal,reader);
+ assert.equal(current,true);
 });
 test('historical GET verifies pinned records and fresh source policy without execution authority',async()=>{
  const {b,proposal,admission,source}=evidence(),objects=new Map<string,any>();
