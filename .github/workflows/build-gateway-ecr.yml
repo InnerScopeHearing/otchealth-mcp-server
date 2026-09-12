@@ -135,6 +135,28 @@ jobs:
           node --test src/eval/verify-image.test.mjs
           node src/eval/verify-image.mjs "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$ARM" "$INDEX" eval-image-hashes.json
 
+      - name: Verify source handoff runtime bytes on both platforms without execution
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/otchealth-mcp-gateway:$TAG"
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "$image"
+            cid=$(docker create --platform "$platform" "$image")
+            trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+            mkdir -p "$work/$platform"
+            docker cp "$cid:/app/tools/identity-registry-source-handoff-task.mjs" "$work/$platform/source-task.mjs"
+            docker cp "$cid:/app/tools/xero-organisation-source-handoff-run.mjs" "$work/$platform/source-run.mjs"
+            test "$(sha256sum "$work/$platform/source-task.mjs" | awk '{print $1}')" = "$(sha256sum tools/identity-registry-source-handoff-task.mjs | awk '{print $1}')"
+            test "$(sha256sum "$work/$platform/source-run.mjs" | awk '{print $1}')" = "$(sha256sum tools/xero-organisation-source-handoff-run.mjs | awk '{print $1}')"
+            docker rm "$cid" >/dev/null
+            echo "Verified source handoff runtime bytes for $platform"
+          done
+
       - name: Retain evaluator hash receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
