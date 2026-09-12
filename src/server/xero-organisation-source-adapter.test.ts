@@ -122,6 +122,12 @@ test('uses the source-owned Xero connector and readback-verified immutable write
   for (const mode of ['corrupt-bytes', 'corrupt-version'] as const) {
     await assert.rejects(persistProvisionedXeroOrganisationSource({ ...deployment() }, sourceOwnerDeps(mode)), { code: 'identity_export_store_invalid' });
   }
+  await assert.rejects(persistProvisionedXeroOrganisationSource({ ...deployment() }, {
+    getOrganisation: async () => ({
+      status: 304, body: response(), tenantId: 'tenant-native-001', dayLimitRemaining: null, minuteLimitRemaining: null,
+    }),
+    createImmutableStore: immutableStore('ok'),
+  }), { code: 'xero_organisation_connector_response_invalid' });
   await assert.rejects(persistProvisionedXeroOrganisationSource({
     ...deployment(), source_storage: { ...deployment().source_storage, prefix: 'graph-trial/not-approved' },
   }, sourceOwnerDeps('ok')), { code: 'xero_organisation_deployment_invalid' });

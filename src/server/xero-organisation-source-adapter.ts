@@ -217,7 +217,7 @@ export async function persistProvisionedXeroOrganisationSource(input: unknown, d
   const deployment = checkedDeployment(input);
   const writer = deps.createImmutableStore(deployment.source_storage);
   const source = await deps.getOrganisation(deployment.org, '/Organisation');
-  if (!text(source.tenantId)) fail('xero_organisation_connector_response_invalid');
+  if (source.status !== 200 || !text(source.tenantId)) fail('xero_organisation_connector_response_invalid');
   const projection = projectXeroOrganisation({ tenantId: source.tenantId, response: source.body });
   const pinned = canonicalXeroOrganisationProjection(projection);
   const key = `${deployment.source_storage.prefix}/identity-registries/xero-organisation/${pinned.sha256}.json`;
