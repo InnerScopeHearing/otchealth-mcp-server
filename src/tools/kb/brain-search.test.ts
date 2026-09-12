@@ -110,6 +110,8 @@ test('a domain filter cannot escalate: cto asking for finance gets NO finance ro
 test('domain filter narrows correctly for a permitted caller', () => {
   // Option B (2026-07-16): cfo reaches company-legal but NOT the personal-legal rooms (clo-personal/exec only).
   assert.deepEqual(roomsFor('cfo', 'legal').sort(), ['legal-company']);
+  assert.deepEqual(roomsFor('clo', 'legal').sort(), ['legal-company'],
+    'corporate CLO search must never fan out to legal-personal fixtures');
   // the personal-legal lane DOES reach all three legal rooms
   assert.deepEqual(roomsFor('clo-personal', 'legal').sort(), ['legal-company', 'legal-personal', 'legal-personal-memory']);
   assert.deepEqual(roomsFor('cto', 'exec'), ['memory-exec']);

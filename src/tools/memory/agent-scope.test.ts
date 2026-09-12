@@ -50,6 +50,8 @@ test('authenticated company callers can select only their own normalized lane', 
   assert.deepEqual(resolveAgentReadScope(' SYNTHETIC-COMPANY ', 'synthetic-company'), { allowed: true, agent: 'synthetic-company' });
   assert.deepEqual(resolveAgentReadScope('synthetic-protected', 'synthetic-company'), { allowed: false, agent: 'synthetic-company' });
   assert.deepEqual(resolveAgentReadScope('cto', 'synthetic-company'), { allowed: false, agent: 'synthetic-company' });
+  assert.deepEqual(resolveAgentReadScope('clo-personal', 'clo'), { allowed: false, agent: 'clo' },
+    'corporate CLO startup must never select the personal-legal wake/pack lane');
 });
 
 test('a protected-lane caller retains own-lane access but cannot select a company lane', () => {

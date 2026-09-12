@@ -29,8 +29,10 @@ test('SAFETY-CRITICAL: one role cannot browse another role\'s folders by default
   assert.equal(isDriveFolderAllowed('developer', 'CTO Outgoing'), false, 'developer must not reach CTO folders');
 });
 
-test('clo-personal shares the CLO OneDrive exchange folders (not stranded), still cannot reach others', () => {
-  assert.equal(isDriveFolderAllowed('clo-personal', 'CLO Incoming'), true);
+test('personal legal uses a separate CLO Personal namespace that company CLO cannot browse', () => {
+  assert.equal(isDriveFolderAllowed('clo-personal', 'CLO Personal Incoming'), true);
+  assert.equal(isDriveFolderAllowed('clo', 'CLO Personal Incoming'), false);
+  assert.equal(isDriveFolderAllowed('clo-personal', 'CLO Incoming'), false);
   assert.equal(isDriveFolderAllowed('clo-personal', 'CFO Outgoing'), false);
 });
 
