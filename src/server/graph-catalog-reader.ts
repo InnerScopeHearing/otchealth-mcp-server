@@ -5,10 +5,10 @@ import { canonicalUri, resolveAwsCredentials, signRequest } from '../search/sigv
 export const GRAPH_CATALOG_MAX_BYTES = 192 * 1024 * 1024;
 export const GRAPH_CATALOG_MAX_ROWS = 100_000;
 export const GRAPH_CATALOG_MAX_LINE_BYTES = 1024 * 1024;
-/** Cache only modest catalogs. Larger valid catalogs keep the original fresh HEAD + GET behavior. */
-export const GRAPH_CATALOG_CACHE_MAX_SOURCE_BYTES = 8 * 1024 * 1024;
-export const GRAPH_CATALOG_CACHE_MAX_ROWS = 20_000;
-export const GRAPH_CATALOG_CACHE_MAX_ENTRIES = 2;
+/** Cache one bounded materialized catalog while retaining a fresh HEAD on every call. */
+export const GRAPH_CATALOG_CACHE_MAX_SOURCE_BYTES = 24 * 1024 * 1024;
+export const GRAPH_CATALOG_CACHE_MAX_ROWS = 50_000;
+export const GRAPH_CATALOG_CACHE_MAX_ENTRIES = 1;
 export const GRAPH_CATALOG_CACHE_MAX_IN_FLIGHT = 2;
 export const GRAPH_CATALOG_CACHE_MAX_WAITERS = 32;
 export const GRAPH_CATALOG_CACHE_MAX_SHARED_WAITERS = 32;

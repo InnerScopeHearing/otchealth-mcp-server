@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import {
   GRAPH_CATALOG_CACHE_MAX_ENTRIES,
   GRAPH_CATALOG_CACHE_MAX_IN_FLIGHT,
+  GRAPH_CATALOG_CACHE_MAX_SOURCE_BYTES,
   GRAPH_CATALOG_CACHE_MAX_ROWS,
   GRAPH_CATALOG_CACHE_MAX_SHARED_WAITERS,
   readPinnedGraphCatalog,
@@ -278,6 +279,48 @@ test('cache entry and row caps retain bounded state and bypass oversized catalog
   await readKey('graph-trial/synthetic/many.jsonl');
   await readKey('graph-trial/synthetic/many.jsonl');
   assert.equal(gets, beforeMany + 2);
+});
+
+test('caches a bounded materialized catalog at the CFO backfill scale after a fresh HEAD', async () => {
+  const text = Array.from({ length: 47_000 }, (_, ordinal) => JSON.stringify({
+    path: `finance/row-${ordinal}`,
+    padding: 'x'.repeat(450),
+  })).join('\n') + '\n';
+  assert.ok(Buffer.byteLength(text) > 20 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(text) < GRAPH_CATALOG_CACHE_MAX_SOURCE_BYTES);
+  let heads = 0;
+  let gets = 0;
+  const s3: GraphCatalogRawS3 = async request => {
+    const headers = new Headers({
+      etag: '"materialized"',
+      'content-length': String(Buffer.byteLength(text)),
+      'last-modified': createdAt,
+      'x-amz-version-id': 'materialized-v1',
+    });
+    if (request.method === 'HEAD') {
+      heads++;
+      return { status: 200, headers, body: null };
+    }
+    gets++;
+    return { status: 200, headers, body: new Response(text).body };
+  };
+
+  const first = await readPinnedGraphCatalog({
+    key: 'graph-trial/synthetic/materialized-scale.jsonl',
+    sourceSha256: source,
+    expectedVersionId: 'materialized-v1',
+    s3,
+  });
+  const second = await readPinnedGraphCatalog({
+    key: 'graph-trial/synthetic/materialized-scale.jsonl',
+    sourceSha256: source,
+    expectedVersionId: 'materialized-v1',
+    s3,
+  });
+
+  assert.equal(first, second);
+  assert.equal(first.rows.length, 47_000);
+  assert.deepEqual({ heads, gets }, { heads: 3, gets: 1 });
 });
 
 test('cache entries never cross distinct raw S3 authority adapters', async () => {
