@@ -39,7 +39,7 @@ function ref(value) {
       value.key !== `resolution-artifacts/sha256/${value.payload_sha256.slice(0, 2)}/${value.payload_sha256}.json` || typeof value.version_id !== "string" || !/^[^\s\p{C}]{1,1024}$/u.test(value.version_id) || value.version_id === "null" || !Number.isSafeInteger(value.size_bytes) || value.size_bytes < 0 || value.size_bytes > 16 * 1024 * 1024) fail("paged_recall_publication_invalid");
   return clone(value);
 }
-function run(value) { if (!exact(value, ["ref_version", "run_id", "purpose", "scope", "run_version", "manifest_sha256"]) || value.ref_version !== "neptune-trial-active-run-ref-v1" || !RUN.test(value.run_id || "") || value.scope !== "finance" || !HASH.test(value.manifest_sha256 || "") || !/^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.purpose || "") || !/^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.run_version || "") || value.run_id !== `run_${sha256(canonical({ ref_version: value.ref_version, purpose: value.purpose, scope: value.scope, run_version: value.run_version, manifest_sha256: value.manifest_sha256 }))}`) fail("paged_recall_publication_invalid"); return clone(value); }
+function run(value) { if (!exact(value, ["ref_version", "run_id", "purpose", "scope", "run_version", "manifest_sha256"]) || value.ref_version !== "neptune-trial-active-run-ref-v1" || !RUN.test(value.run_id || "") || !["finance","legal_company"].includes(value.scope) || !HASH.test(value.manifest_sha256 || "") || !/^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.purpose || "") || !/^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.run_version || "") || value.run_id !== `run_${sha256(canonical({ ref_version: value.ref_version, purpose: value.purpose, scope: value.scope, run_version: value.run_version, manifest_sha256: value.manifest_sha256 }))}`) fail("paged_recall_publication_invalid"); return clone(value); }
 function after(value) { if (value !== null && value !== undefined && !RUN.test(value)) fail("paged_recall_cursor_invalid"); return value ?? null; }
 function page(value, expectedAfter, producer, limit) {
   if (!exact(value, ["schema", "items", "next_after"]) || value.schema !== "relationship-publication-page-v1" || !Array.isArray(value.items) || value.items.length > MAX_PAGE ||
@@ -54,15 +54,15 @@ function page(value, expectedAfter, producer, limit) {
   return Object.freeze({ schema: value.schema, items: Object.freeze(items), next_after: value.next_after });
 }
 
-export function createPagedRecallHost({ gatewayOrigin, cohortId, producer, historyTrust, sse, getAuthorization, fetchImpl,
+export function createPagedRecallHost({ gatewayOrigin, cohortId, producer, callerSeat = 'cfo', historyTrust, sse, getAuthorization, fetchImpl,
   createResolver, bindPreparedSource, verificationRequestHash, refreshIdentityReceipts, revalidateIdentity, now = Date.now } = {}) {
   const fixedOrigin = origin(gatewayOrigin);
-  if (typeof cohortId !== "string" || !/^[a-z][a-z0-9-]{0,95}$/.test(cohortId) || !PRODUCER.test(producer || "") || !historyTrust || !sse ||
+  if (typeof cohortId !== "string" || !/^[a-z][a-z0-9-]{0,95}$/.test(cohortId) || !PRODUCER.test(producer || "") || !['cfo','clo'].includes(callerSeat) || !historyTrust || !sse ||
       typeof getAuthorization !== "function" || typeof fetchImpl !== "function" || typeof createResolver !== "function" || typeof bindPreparedSource !== "function" ||
       typeof verificationRequestHash !== "function" || typeof now !== "function") fail("paged_recall_configuration");
   const base = `${fixedOrigin}/relationship-publications/v1/${encodeURIComponent(cohortId)}/${encodeURIComponent(producer)}`;
   async function authorization(signal) {
-    let token; try { token = await deadline(signal, requestSignal => getAuthorization(Object.freeze({ cohort_id: cohortId, producer_id: producer, caller_seat: "cfo" }), { signal: requestSignal })); }
+    let token; try { token = await deadline(signal, requestSignal => getAuthorization(Object.freeze({ cohort_id: cohortId, producer_id: producer, caller_seat: callerSeat }), { signal: requestSignal })); }
     catch (error) { if (error?.code === "paged_recall_deadline") throw error; fail("paged_recall_auth_failed"); }
     if (typeof token !== "string" || !/^Bearer [^\s]{16,8192}$/.test(token)) fail("paged_recall_auth_failed"); return token;
   }

@@ -9,7 +9,7 @@ import {readPinnedGraphCatalog} from './graph-catalog-reader.js';
 import {planGraphCatalogPage} from './graph-catalog-planner.js';
 import {resolveCompanyGraphScope} from './company-graph-scope.js';
 type Json=Record<string,any>;
-type Source={catalog_key:string;catalog_source_sha256:string;source_prefixes:string[];source_scope?:'all_cfo_source_documents'};
+type Source={catalog_key:string;catalog_source_sha256:string;source_prefixes:string[];source_scope?:'all_cfo_source_documents';deployment_profile?:'legal_company';source_catalog_version_id?:string};
 export type HistoricalReadResult={status:number;headers:Headers|Record<string,string|undefined>;body:Buffer};
 export interface RelationshipHistoricalReadDeps{
  authenticate:(r:FastifyRequest,p:FastifyReply)=>Promise<AuthContext|undefined>;policyJson:()=>string;now:()=>number;
@@ -17,7 +17,7 @@ export interface RelationshipHistoricalReadDeps{
  readCatalog:(s:Source,signal:AbortSignal)=>Promise<readonly unknown[]>;
  checkSource:(row:Json,binding:Json,ctx:AuthContext,signal:AbortSignal)=>Promise<boolean>;
 }
-const BUCKET='otchealth-finance-legal-dr-55c84f6b',BASE='graph-trial/20260908/workers/cfo',MAX_PAYLOAD=16*1024*1024,MAX=MAX_PAYLOAD+1024;
+const BUCKET='otchealth-finance-legal-dr-55c84f6b',MAX_PAYLOAD=16*1024*1024,MAX=MAX_PAYLOAD+1024;
 const SHA=/^[a-f0-9]{64}$/,LABEL=/^[a-z0-9][a-z0-9_.:-]{0,95}$/,PRODUCER=/^[a-z][a-z0-9-]{0,63}$/;
 const RESERVED_CFO_ROOTS=new Set(['_text','_catalog','_review','_memory','_state','_archive']);
 const hash=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex');
@@ -28,12 +28,12 @@ const version=(v:unknown):v is string=>typeof v==='string'&&v!=='null'&&/^[^\s\p
 const utc=(v:unknown):v is string=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v)&&Number.isFinite(Date.parse(v))&&new Date(v).toISOString()===v;
 const path=(v:unknown):v is string=>typeof v==='string'&&v.length>0&&v.length<=1024&&v===v.normalize('NFC')&&!/[\\%?#:\u0000-\u001f\u007f]/.test(v)&&v.split('/').every(p=>p!==''&&p!=='.'&&p!=='..');
 function validSourcePolicy(value:unknown):value is Source{
- if(!value||Object.getPrototypeOf(value)!==Object.prototype)return false;const s=value as Json,all=s.source_scope==='all_cfo_source_documents';
- if(!hExactSourcePolicy(s,all)||!path(s.catalog_key)||!s.catalog_key.startsWith('graph-trial/')||!s.catalog_key.endsWith('.jsonl')||!SHA.test(s.catalog_source_sha256)||!Array.isArray(s.source_prefixes))return false;
+ if(!value||Object.getPrototypeOf(value)!==Object.prototype)return false;const s=value as Json,all=s.source_scope==='all_cfo_source_documents',legal=s.deployment_profile==='legal_company';
+ if(!hExactSourcePolicy(s,all,legal)||!path(s.catalog_key)||!s.catalog_key.startsWith('graph-trial/')||!s.catalog_key.endsWith('.jsonl')||!SHA.test(s.catalog_source_sha256)||!Array.isArray(s.source_prefixes)||legal&&!path(s.source_catalog_version_id)||legal&&all)return false;
  if(all)return s.source_prefixes.length===0;
  return s.source_scope===undefined&&s.source_prefixes.length>0&&s.source_prefixes.length<=32&&s.source_prefixes.every((q:any)=>typeof q==='string'&&q.endsWith('/')&&path(q.slice(0,-1)))&&new Set(s.source_prefixes).size===s.source_prefixes.length;
 }
-function hExactSourcePolicy(s:Json,all:boolean){return exact(s,all?['catalog_key','catalog_source_sha256','source_prefixes','source_scope']:['catalog_key','catalog_source_sha256','source_prefixes']);}
+function hExactSourcePolicy(s:Json,all:boolean,legal:boolean){return exact(s,legal?['catalog_key','catalog_source_sha256','source_prefixes','deployment_profile','source_catalog_version_id']:all?['catalog_key','catalog_source_sha256','source_prefixes','source_scope']:['catalog_key','catalog_source_sha256','source_prefixes']);}
 function sourcePathAllowed(source:Source,value:unknown):value is string{
  if(!path(value))return false;
  if(source.source_scope==='all_cfo_source_documents')return !RESERVED_CFO_ROOTS.has(value.split('/')[0].toLowerCase());
@@ -57,7 +57,7 @@ function parse(text:string,now:number):Json|null{
  }return p;
 }
 function header(h:HistoricalReadResult['headers'],n:string){return h instanceof Headers?h.get(n)??undefined:Object.entries(h).find(([k])=>k.toLowerCase()===n)?.[1];}
-function artifactKey(run:string,producer:string,digest:string){return `${BASE}/${run}/relationship-producers/${producer}/resolution-artifacts/sha256/${digest.slice(0,2)}/${digest}.json`;}
+function artifactKey(binding:any,producer:string,digest:string){const scope=scopeFor(binding);if(!scope)throw Error('scope');return `${scope.workerStore.prefix}${binding.run.run_id}/relationship-producers/${producer}/resolution-artifacts/sha256/${digest.slice(0,2)}/${digest}.json`;}
 function jsonBody(r:HistoricalReadResult,max:number){if(r.body.length>max||!Buffer.from(r.body.toString('utf8')).equals(r.body))throw Error('body');const v=JSON.parse(r.body.toString('utf8'));if(!validJson(v,-1))throw Error('depth');return v;}
 async function pinned(d:RelationshipHistoricalReadDeps,ref:Json,signal:AbortSignal){const r=await d.readVersion({key:ref.key,versionId:ref.version_id,signal,maxBytes:512*1024});if(r.status!==200||header(r.headers,'x-amz-version-id')!==ref.version_id||hash(r.body)!==ref.sha256)throw Error('pinned');return jsonBody(r,512*1024);}
 function admissionChain(a:Json,p:Json,b:Json){
@@ -65,7 +65,7 @@ function admissionChain(a:Json,p:Json,b:Json){
  const{decision_sha256,...unsigned}=a;if(decision_sha256!==hash(canonical(unsigned)))return false;
  if(!exact(p,['controller_id','key','catalog_snapshot_sha256','catalog_source_sha256','catalog_etag_sha256','manifest','run','max_documents','document_ordinal','paid_fallback','requires_review'])||p.key!==a.key||!same(p.run,b.run)||p.max_documents!==1||p.document_ordinal!==0||p.paid_fallback!==false||p.requires_review!==true||p.catalog_source_sha256!==b.source_policy.catalog_source_sha256||!SHA.test(p.catalog_snapshot_sha256)||!SHA.test(p.catalog_etag_sha256))return false;
  if(b.proposal.key!==`graph-trial/20260908/catalog-cohorts/${b.cohort_id}/server/proposals/${p.key}.json`)return false;
- const scope=scopeFor(b);if(!scope)return false;const controller=hash(canonical({schema:'catalog-controller-v1',room:scope.room,catalogSourceSha256:p.catalog_source_sha256,purpose:b.run.purpose,runVersion:b.run.run_version})),m=p.manifest;
+ const scope=scopeFor(b);if(!scope)return false;const controller=b.source_policy.deployment_profile==='legal_company'?hash(canonical({schema:'catalog-controller-v2',deploymentProfile:'legal_company',room:scope.room,catalogSourceSha256:p.catalog_source_sha256,purpose:b.run.purpose,runVersion:b.run.run_version,sourceCatalogVersionId:b.source_policy.source_catalog_version_id})):hash(canonical({schema:'catalog-controller-v1',room:scope.room,catalogSourceSha256:p.catalog_source_sha256,purpose:b.run.purpose,runVersion:b.run.run_version})),m=p.manifest;
  if(p.controller_id!==controller||!exact(m,['version','created_at','documents','manifest_sha256'])||m.version!=='graph-backfill-runner-v1'||!utc(m.created_at)||!Array.isArray(m.documents)||m.documents.length!==1||m.manifest_sha256!==b.run.manifest_sha256)return false;
  const{manifest_sha256,...content}=m;if(hash(canonical(content))!==manifest_sha256)return false;
  const item=m.documents[0];return item?.ordinal===0&&item.room===scope.room&&p.key===hash(canonical({controller_id:controller,document_version_id:item.document_version_id,source_version:item.source_version,enrichment_row_sha256:item.enrichment_row_sha256,extractor_version:item.extractor_version}));
@@ -102,8 +102,8 @@ export function registerRelationshipHistoricalReadRoutes(app:FastifyInstance,inj
    const ctx=await d.authenticate(req,reply);if(!ctx||!ctx.connector_surface||!SHA.test(ctx.caller_hash))return reply.sent?undefined:fail(reply,403);
    const policy=parse(d.policyJson(),d.now());if(!policy)return fail(reply,404);const b=policy.bindings.find((x:Json)=>x.caller_hash===ctx.caller_hash&&x.authenticated_caller===ctx.caller_agent&&x.producer_id===p.producerId&&x.run.run_id===p.runId);if(!b||!scopeFor(b)||!b.approved_artifacts.some((a:Json)=>a.digest===p.digest&&a.version_id===v))return fail(reply,403);
    const signal=internal.signal,[admission,proposal]=await Promise.all([pinned(d,b.admission,signal),pinned(d,b.proposal,signal)]);if(!admissionChain(admission,proposal,b))return fail(reply,403);
-   const response=await d.readVersion({key:artifactKey(p.runId,p.producerId,p.digest),versionId:v,signal,maxBytes:MAX}),artifact=parseArtifact(response,b,p.digest,v),sources:Json[]=[];
-   if(artifact.payload.schema==='resolution-source-input-v1')sources.push(artifact);else for(const ref of artifact.payload.sources){if(!b.approved_artifacts.some((a:Json)=>a.digest===ref.payload_sha256&&a.version_id===ref.version_id))return fail(reply,403);const child=parseArtifact(await d.readVersion({key:artifactKey(p.runId,p.producerId,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:MAX}),b,ref.payload_sha256,ref.version_id);if(child.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(canonical(child.payload))!==ref.size_bytes)return fail(reply,403);sources.push(child);}
+   const response=await d.readVersion({key:artifactKey(b,p.producerId,p.digest),versionId:v,signal,maxBytes:MAX}),artifact=parseArtifact(response,b,p.digest,v),sources:Json[]=[];
+   if(artifact.payload.schema==='resolution-source-input-v1')sources.push(artifact);else for(const ref of artifact.payload.sources){if(!b.approved_artifacts.some((a:Json)=>a.digest===ref.payload_sha256&&a.version_id===ref.version_id))return fail(reply,403);const child=parseArtifact(await d.readVersion({key:artifactKey(b,p.producerId,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:MAX}),b,ref.payload_sha256,ref.version_id);if(child.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(canonical(child.payload))!==ref.size_bytes)return fail(reply,403);sources.push(child);}
    if(!sources.every(s=>sourceBound(s,b,proposal)))return fail(reply,403);await current(d,b,sources,ctx,signal);
    const sourceCurrent=await current(d,b,sources,ctx,signal),auth=await d.authenticate(req,reply);if(!auth||auth.caller_agent!==ctx.caller_agent||auth.caller_hash!==ctx.caller_hash||!auth.connector_surface||!same(parse(d.policyJson(),d.now()),policy)||signal.aborted)return reply.sent?undefined:fail(reply,403);
    reply.header('x-relationship-source-current',String(sourceCurrent)).header('x-relationship-policy-version',policy.policy_version).header('x-relationship-policy-expires-at',new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()).header('x-relationship-producer',b.producer_id).header('x-amz-version-id',v).header('x-amz-server-side-encryption',b.encryption.algorithm);if(b.encryption.algorithm==='aws:kms')reply.header('x-amz-server-side-encryption-aws-kms-key-id',b.encryption.kms_key_id!);return reply.code(200).type('application/json').send(response.body);
