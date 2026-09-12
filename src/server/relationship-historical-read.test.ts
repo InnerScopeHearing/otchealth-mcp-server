@@ -38,6 +38,7 @@ test('historical policy accepts a synthetic corporate CLO legal-company run, nev
  const value=policy(),binding=value.bindings[0];
  const body={...binding.run,scope:'legal_company'};delete (body as any).run_id;
  binding.run={...body,run_id:'run_'+hash(canonical(body))};binding.authenticated_caller='clo';
+ binding.admission.key=`graph-trial/20260908/catalog-cohorts/${binding.cohort_id}/server/admissions/${binding.run.run_id}.json`;
  assert.ok(parse(canonical(value),now));
  binding.authenticated_caller='clo-personal';
  assert.equal(parse(canonical(value),now),null);
