@@ -445,6 +445,64 @@ test('CFO text preparation persists bound refs and serves only an exact prepared
   await h.app.close();
 });
 
+test('CFO prepared binding page validates the target run and never returns prepared text', async () => {
+  const expected = fixture();
+  const text = 'Synthetic target-run source excerpt.';
+  const h = await harness({
+    readCfoText: async (source) => Object.freeze({
+      outcome: 'ready' as const,
+      descriptor: Object.freeze({
+        schema: 'cfo-version-pinned-text-snapshot-v1' as const,
+        room: 'finance' as const,
+        source_index: 'finance-cfo-source-docs' as const,
+        source_document_version: source.document_version_id,
+        catalog_source_sha256: source.source_version,
+        source_lineage_status: 'catalog_association_only' as const,
+        source_path_hash: source.source_path_hash,
+        sidecar_path_hash: H('_TEXT/' + source.path + '.txt'),
+        sidecar_etag: '"synthetic-etag"', sidecar_version_id: 'synthetic-version',
+        sidecar_content_sha256: H(text), total_bytes: Buffer.byteLength(text),
+        total_chars_utf16: text.length, chunk_count: 1, chunk_overlap_chars: 200,
+      }),
+      chunks: Object.freeze([Object.freeze({
+        ordinal: 0, start_utf16: 0, end_utf16: text.length,
+        start_byte: 0, end_byte: Buffer.byteLength(text), text_sha256: H(text), text,
+      })]),
+    }),
+  });
+  const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-bindings';
+  const response = await h.app.inject({
+    method: 'POST', url, headers: authHeaders,
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  const page = response.json();
+  assert.deepEqual(Object.keys(page).sort(), ['bindings', 'run_id', 'schema']);
+  assert.equal(page.schema, 'cfo-prepared-binding-page-v1');
+  assert.equal(page.run_id, h.f.run.run_id);
+  assert.equal(page.bindings.length, 1);
+  assert.deepEqual(page.bindings[0], {
+    schema: 'cfo-prepared-chunk-binding-v1', run_id: h.f.run.run_id, room: 'finance',
+    source_index: 'finance-cfo-source-docs', catalog_manifest_sha256: h.f.run.manifest_sha256,
+    document_ordinal: 0, source_document_version: expected.item.document_version_id,
+    catalog_source_sha256: expected.item.source_version,
+    snapshot_id: page.bindings[0].snapshot_id,
+    prepared_manifest_sha256: page.bindings[0].prepared_manifest_sha256,
+    sidecar_content_sha256: H(text), chunk_ordinal: 0, chunk_sha256: H(text),
+  });
+  assert.equal(JSON.stringify(page).includes(text), false);
+
+  const wrongRun = { ...h.f.run, run_id: 'run_' + H('wrong') };
+  const forbidden = await h.app.inject({ method: 'POST', url, headers: authHeaders,
+    payload: { run: wrongRun, document_ordinal: 0 } });
+  assert.equal(forbidden.statusCode, 400);
+  const cto = await h.app.inject({ method: 'POST', url, headers: { ...authHeaders, authorization: 'Bearer cto' },
+    payload: { run: h.f.run, document_ordinal: 0 } });
+  assert.equal(cto.statusCode, 403);
+  await h.app.close();
+});
+
 test('CFO text preparation permits a bounded review batch and reports rate limiting safely', async () => {
   const h = await harness({ rateLimit: true });
   const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-snapshots';
