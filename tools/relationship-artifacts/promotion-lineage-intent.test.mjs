@@ -11,7 +11,7 @@ const sha=v=>createHash('sha256').update(canonical(v)).digest('hex');
 const run=(purpose,mark)=>{const core={ref_version:'neptune-trial-active-run-ref-v1',purpose,scope:'finance',run_version:'synthetic-v1',manifest_sha256:mark.repeat(64)};return{...core,run_id:'run_'+sha(core)}};
 const parent=run('relationship-candidates','a'),target=run('relationship-promotion','b');
 const ref={schema:'relationship-resolution-artifact-ref-v1',artifact_id:'resart_'+'c'.repeat(64),bucket:'synthetic-bucket',key:'synthetic/candidate.json',payload_sha256:'c'.repeat(64),version_id:'synthetic-v1',size_bytes:1};
-const refs=[{source_document_version:'docv-synthetic',chunk_sha256:'d'.repeat(64)}];
+const refs=[{source_document_version:'docv-synthetic',catalog_source_sha256:'f'.repeat(64),chunk_sha256:'d'.repeat(64)}];
 const lineage={schema:'candidate-promotion-lineage-v2',parent_artifact_ref:ref,parent_run:parent,target_run:target,source_refs:refs,source_refs_sha256:sha(refs)};
 const id={cohort_id:'synthetic',producer_id:'reviewer',run:target};
 async function temp(){return mkdtemp(join(tmpdir(),'promotion-lineage-'));}
