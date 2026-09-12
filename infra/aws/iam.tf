@@ -52,6 +52,21 @@ resource "aws_iam_role_policy" "task_runtime_access" {
           "${aws_s3_bucket.finance_legal_dr.arn}/*",
         ]
       },
+      {
+        # Documentation of the live read-modify-write change required for the
+        # second CFO relationship run. Do not run terraform apply for this
+        # imported estate. The artifact store discovers an existing object with
+        # GetObject, then validates that exact immutable object version with
+        # GetObjectVersion before accepting a conditional-write collision.
+        #
+        # Scope is intentionally one admitted CFO run and producer only. It
+        # grants neither ListBucket nor any write or delete action, and does
+        # not broaden version reads to the finance bucket or another cohort.
+        Sid      = "ReadCfoRelationshipArtifactVersionsForRun88fc625a"
+        Effect   = "Allow"
+        Action   = ["s3:GetObjectVersion"]
+        Resource = "${aws_s3_bucket.finance_legal_dr.arn}/graph-trial/20260908/workers/cfo/run_88fc625a2b155c04d116762c4e4308501cb308a8ea81ad7c41451689fa7e0f3d/relationship-producers/cfo-relationship-worker/resolution-artifacts/*"
+      },
       # 2026-08-28: adjacent gap closed alongside the PersonalLegalRingReadWrite edit below (same
       # underlying cause -- Azure's permanent deletion made every S3-mirror write path load-bearing
       # instead of best-effort). `company` is already in S3_WRITABLE_CONTAINERS
