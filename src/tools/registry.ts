@@ -182,7 +182,10 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'github_repo_list_branches', 'github_commit_get', 'github_commit_compare',
   // issues (file + close follow-ups without leaving the seat)
   'github_create_issue', 'github_issue_get', 'github_issue_update',
-  'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read', 'cio_get_customer',
+  'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read',
+  // CFO connector-only, independently lane-gated in its handler.
+  'graph_relationship_query',
+  'cio_get_customer',
   // Bounded Customer.io administrative control plane (2026-08-09): explicit names, not a generic
   // proxy. Read tools are cto/cro/exec; write tools are visible for planning but live execution is
   // re-gated in-handler to cto/exec with owner_approval_ref. The canonical cro client_credentials
