@@ -32,6 +32,20 @@ test('history S3 signs an opaque versionId exactly and emits the canonical wire 
   assert.equal(url, `https://${helper.BUCKET}.s3.${helper.REGION}.amazonaws.com/${ARTIFACT}?versionId=opaque%2B%2F%3D%25%E2%9C%93`);
 });
 
+test('history S3 sends the required empty payload hash through the actual SigV4 signer', async () => {
+  let headers: Headers | undefined;
+  const transport = createRelationshipHistoryS3({
+    resolveCredentials: async () => CREDS,
+    fetch: async (_input, init) => {
+      headers = new Headers(init?.headers);
+      return new Response('ok');
+    },
+  });
+  await transport.readVersion({ key: ARTIFACT, versionId: 'v1', maxBytes: 32, signal: new AbortController().signal });
+  assert.equal(headers?.get('x-amz-content-sha256'),'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  assert.match(headers?.get('authorization') ?? '',/^AWS4-HMAC-SHA256 /);
+});
+
 test('history S3 allows only pinned artifact and explicit cohort receipt paths', async () => {
   const readVersion = reader();
   for (const key of [ARTIFACT, ADMISSION, PROPOSAL]) {

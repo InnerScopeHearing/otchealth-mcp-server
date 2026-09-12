@@ -23,29 +23,38 @@ export function createCatalogExtractionLoader({store,operationStoreForRun}){
 }
 /** The injected reviewer is the actual subscription candidate adapter, not verifier defaults. */
 export function createRelationshipPublicationPipeline({cohort_id,producer_id,outbox,publisher,loadExtracted,createReview,now=Date.now,onMonitor=()=>{}}={}){
- if(!/^[a-z][a-z0-9-]{0,63}$/.test(cohort_id)||! /^[a-z][a-z0-9-]{0,63}$/.test(producer_id)||['get','createIntent','createReviewed','markPublished','pagePending'].some(k=>typeof outbox?.[k]!=='function')||typeof publisher?.publish!=='function'||typeof createReview!=='function'||typeof loadExtracted!=='function'||typeof now!=='function'||typeof onMonitor!=='function')fail('relationship_pipeline_configuration');
+ if(!/^[a-z][a-z0-9-]{0,63}$/.test(cohort_id)||! /^[a-z][a-z0-9-]{0,63}$/.test(producer_id)||['get','createIntent','createReviewed','markPublished','claimReview','releaseReview','pagePending'].some(k=>typeof outbox?.[k]!=='function')||typeof publisher?.publish!=='function'||typeof createReview!=='function'||typeof loadExtracted!=='function'||typeof now!=='function'||typeof onMonitor!=='function')fail('relationship_pipeline_configuration');
  const identity=run=>({cohort_id,producer_id,run:structuredClone(run)});
  const status=(id,state,code)=>({status:state,code,run_id:id.run.run_id});
  async function publish(id,item,signal){
   active(signal);try{const receipt=await publisher.publish({run:id.run,artifact_ref:item.receipt.artifact_ref},{signal});active(signal);if(!same(receipt.run,id.run)||receipt.producer_id!==producer_id||!same(receipt.artifact_ref,item.receipt.artifact_ref))fail('relationship_publication_receipt_mismatch');await outbox.markPublished(id,item.receipt);return status(id,'complete','relationship_published');}
   catch(error){return status(id,signal?.aborted?'cancelled':error?.code==='paged_recall_forbidden'?'denied':'unknown',signal?.aborted?'relationship_cancelled':error?.code==='paged_recall_forbidden'?'relationship_publication_denied':'relationship_publication_pending');}
  }
- async function process(proposal,{signal,recoveryOnly=false}={}){
-  const id=identity(proposal.run);active(signal);const old=await outbox.get(id);
-  if(old?.state==='published')return status(id,'complete','relationship_published');
-  if(old?.state==='reviewed')return publish(id,old,signal);
-  if(old?.state==='intent_only')return status(id,'held','relationship_review_unknown');
-  if(recoveryOnly)return status(id,'held','relationship_review_not_started');
-  const input=await loadExtracted(proposal,{signal});active(signal);const claim=await outbox.createIntent(id);if(!claim.created)return status(id,'held','relationship_review_unknown');
-  let reviewed;
+ async function review(id,proposal,signal,input){
+  input??=await loadExtracted(proposal,{signal});active(signal);let reviewed;
   try{const adapter=await createReview({run:id.run,signal});if(typeof adapter?.reviewCandidates!=='function')fail('relationship_review_configuration');reviewed=await adapter.reviewCandidates(input,{signal});active(signal);if(reviewed?.schema!=='resolution-review-receipt-v1'||!reviewed.artifact_ref)fail('relationship_review_receipt_invalid');await outbox.createReviewed(id,{artifact_ref:reviewed.artifact_ref});}
   catch(error){const paused=error?.code==='subscription_review_incomplete'&&error.review_status==='paused';return status(id,signal?.aborted?'cancelled':paused?'paused':'held',signal?.aborted?'relationship_cancelled':paused?'relationship_review_paused':'relationship_review_unknown');}
   return publish(id,await outbox.get(id),signal);
  }
+ async function process(proposal,{signal,recoveryOnly=false,resumeCandidateOnly=false}={}){
+  if(typeof recoveryOnly!=='boolean'||typeof resumeCandidateOnly!=='boolean')fail('relationship_pipeline_configuration');
+  const id=identity(proposal.run);active(signal);const old=await outbox.get(id);
+  if(old?.state==='published')return status(id,'complete','relationship_published');
+  if(old?.state==='reviewed')return publish(id,old,signal);
+  if(old?.state==='intent_only'){
+   if(!recoveryOnly||!resumeCandidateOnly)return status(id,'held','relationship_review_unknown');
+   const claim=await outbox.claimReview(id);if(!claim.claimed)return status(id,'held','relationship_review_unknown');
+   try{const current=await outbox.get(id);if(current?.state==='reviewed')return publish(id,current,signal);if(current?.state!=='intent_only')return status(id,'held','relationship_review_unknown');return await review(id,proposal,signal);}finally{await outbox.releaseReview(id,claim.token);}
+  }
+  if(recoveryOnly)return status(id,'held','relationship_review_not_started');
+  const input=await loadExtracted(proposal,{signal});active(signal);const claim=await outbox.createIntent(id);if(!claim.created)return status(id,'held','relationship_review_unknown');
+  const reviewClaim=await outbox.claimReview(id);if(!reviewClaim.claimed)return status(id,'held','relationship_review_unknown');
+  try{const current=await outbox.get(id);if(current?.state!=='intent_only')return current?.state==='reviewed'?await publish(id,current,signal):status(id,'held','relationship_review_unknown');return await review(id,proposal,signal,input);}finally{await outbox.releaseReview(id,reviewClaim.token);}
+ }
  let recoveryCursor=null;
- async function recover({signal,limit=10,after=recoveryCursor}={}){
-  if(!Number.isInteger(limit)||limit<1||limit>10)fail('relationship_pipeline_limit');active(signal);const page=await outbox.pagePending({after,limit}),events=[];let oldest=0;
-  for(const item of page.items){active(signal);if(item.identity.cohort_id!==cohort_id||item.identity.producer_id!==producer_id)fail('relationship_outbox_scope');oldest=Math.max(oldest,now()-Date.parse(item.created_at));const result=item.state==='reviewed'?await publish(item.identity,item,signal):status(item.identity,'held','relationship_review_unknown');events.push(result);}
+ async function recover({signal,limit=10,after=recoveryCursor,skipIntentOnly=false}={}){
+  if(!Number.isInteger(limit)||limit<1||limit>10||typeof skipIntentOnly!=='boolean')fail('relationship_pipeline_limit');active(signal);const page=await outbox.pagePending({after,limit}),events=[];let oldest=0;
+  for(const item of page.items){active(signal);if(item.identity.cohort_id!==cohort_id||item.identity.producer_id!==producer_id)fail('relationship_outbox_scope');oldest=Math.max(oldest,now()-Date.parse(item.created_at));if(item.state==='intent_only'&&skipIntentOnly)continue;const result=item.state==='reviewed'?await publish(item.identity,item,signal):status(item.identity,'held','relationship_review_unknown');events.push(result);}
   const monitor={schema:'relationship-publication-monitor-v1',scope:'page',observed_at:new Date(now()).toISOString(),scanned_nodes:page.scanned_nodes,pending_observed:page.items.length,oldest_pending_age_ms:Math.max(0,oldest),published:events.filter(x=>x.status==='complete').length,held:events.filter(x=>x.status!=='complete').length,scan_complete:page.next_after===null};await onMonitor(monitor);
   recoveryCursor=page.next_after;return{status:events.find(x=>x.status!=='complete')?.status??(page.next_after?'dispatching':'complete'),code:events.some(x=>x.status!=='complete')?'relationship_recovery_held':page.next_after?'relationship_recovery_page':'relationship_recovery_complete',events,next_after:page.next_after,monitor};
  }
