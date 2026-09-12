@@ -503,6 +503,44 @@ test('CFO prepared binding page validates the target run and never returns prepa
   await h.app.close();
 });
 
+test('CFO prepared binding page reconstructs a bounded 100-chunk target snapshot without rereading the source', async () => {
+  const chunks = Array.from({ length: 100 }, (_, ordinal) => {
+    const text = `synthetic-${ordinal.toString().padStart(3, '0')}`;
+    const start = ordinal * text.length;
+    return Object.freeze({ ordinal, start_utf16: start, end_utf16: start + text.length,
+      start_byte: start, end_byte: start + Buffer.byteLength(text), text_sha256: H(text), text });
+  });
+  const sourceText = chunks.map(chunk => chunk.text).join('');
+  let reads = 0;
+  const h = await harness({
+    readCfoText: async (source, _caller, signal) => {
+      reads++;
+      assert.equal(signal.aborted, false);
+      return Object.freeze({ outcome: 'ready' as const, descriptor: Object.freeze({
+        schema: 'cfo-version-pinned-text-snapshot-v1' as const, room: 'finance' as const,
+        source_index: 'finance-cfo-source-docs' as const,
+        source_document_version: source.document_version_id, catalog_source_sha256: source.source_version,
+        source_lineage_status: 'catalog_association_only' as const, source_path_hash: source.source_path_hash,
+        sidecar_path_hash: H('_TEXT/' + source.path + '.txt'), sidecar_etag: '"synthetic-etag"',
+        sidecar_version_id: 'synthetic-version', sidecar_content_sha256: H(sourceText),
+        total_bytes: Buffer.byteLength(sourceText), total_chars_utf16: sourceText.length,
+        chunk_count: chunks.length, chunk_overlap_chars: 200,
+      }), chunks });
+    },
+  });
+  const response = await h.app.inject({ method: 'POST',
+    url: '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-bindings', headers: authHeaders,
+    payload: { run: h.f.run, document_ordinal: 0 } });
+  assert.equal(response.statusCode, 200);
+  const page = response.json();
+  assert.equal(page.bindings.length, 100);
+  assert.equal(page.bindings[0].chunk_sha256, chunks[0].text_sha256);
+  assert.equal(page.bindings[99].chunk_sha256, chunks[99].text_sha256);
+  assert.equal(reads, 1);
+  assert.equal(JSON.stringify(page).includes(chunks[50].text), false);
+  await h.app.close();
+});
+
 test('CFO text preparation permits a bounded review batch and reports rate limiting safely', async () => {
   const h = await harness({ rateLimit: true });
   const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-snapshots';
