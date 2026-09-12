@@ -10,6 +10,7 @@ import {
   type CfoTextSource,
 } from '../graph/cfo-text-snapshot.js';
 import { createCfoTextPreparationController } from '../graph/cfo-text-preparation.js';
+import { createCompanyTextPreparationController } from '../graph/cfo-text-preparation.js';
 import {
   createCompanyTextSnapshotReader,
   type CompanyTextSnapshotResult,
@@ -25,6 +26,7 @@ import {
 const BUCKET = 'otchealth-finance-legal-dr-55c84f6b';
 const REGION = 'us-east-1';
 const SOURCE_PREFIX = 'graph-trial/20260908/source-pilot/snapshots';
+const COMPANY_SOURCE_PREFIX = 'graph-trial/20260912/legal-company/catalog-snapshots';
 const STATE_BASE = 'graph-trial/20260908/workers';
 const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -419,11 +421,18 @@ function validManifest(value: unknown, binding: Binding): value is Manifest {
       .every((entry) => SHA.test(entry)) &&
     item.extractor_version === SOURCE_SCHEMA && Array.isArray(item.retract_event_ids));
 }
+function sourcePrefix(binding: Binding): string {
+  const scope = resolveCompanyGraphScope(binding.authenticated_caller, binding.run.scope);
+  if (!scope.ok || !companyGraphScopeOwnsBinding(scope.scope, binding)) {
+    throw new Error('source_scope');
+  }
+  return scope.scope.scope === 'legal_company' ? COMPANY_SOURCE_PREFIX : SOURCE_PREFIX;
+}
 async function loadManifest(
   deps: GraphWorkerBrokerDeps, binding: Binding, signal: AbortSignal,
 ) {
   const loaded = await jsonGet(
-    deps, SOURCE_PREFIX + '/manifests/' + binding.run.manifest_sha256 + '.json', signal,
+    deps, sourcePrefix(binding) + '/manifests/' + binding.run.manifest_sha256 + '.json', signal,
   );
   if (!validManifest(loaded.value, binding)) throw new Error('manifest');
   return { manifest: loaded.value, response: loaded.response };
@@ -481,7 +490,7 @@ async function loadRow(
   deps: GraphWorkerBrokerDeps, binding: Binding, item: ManifestItem, signal: AbortSignal,
 ) {
   const loaded = await jsonGet(
-    deps, SOURCE_PREFIX + '/rows/' + binding.room + '/' + item.enrichment_row_sha256 + '.json',
+    deps, sourcePrefix(binding) + '/rows/' + binding.room + '/' + item.enrichment_row_sha256 + '.json',
     signal,
   );
   if (!validRow(loaded.value, binding, item)) throw new Error('row');
@@ -1592,7 +1601,7 @@ export function registerGraphWorkerBrokerRoutes(
       sidecar_content_sha256: null,
     });
   }
-  function cfoTextStore(control: BrokerControl) {
+  function preparedTextStore(control: BrokerControl) {
     const prefix = statePrefix(control.binding) + '/text-snapshots/';
     return async (input: RawRequest): Promise<RawResponse> => {
       if (input.signal !== control.signal || !input.key.startsWith(prefix)) {
@@ -1630,7 +1639,22 @@ export function registerGraphWorkerBrokerRoutes(
       resolveSource: (ordinal, options) =>
         resolveBoundCfoTextSource(control, ordinal, options.signal),
       recheck: (options) => recheck({ ...control, signal: options.signal }),
-      store: cfoTextStore(control),
+      store: preparedTextStore(control),
+      maxPreparedBytes: CFO_TEXT_CANARY_MAX_BYTES,
+    });
+  }
+  function companyTextController(control: BrokerControl) {
+    return createCompanyTextPreparationController({
+      runId: control.binding.run.run_id,
+      sourceReader: Object.freeze({
+        readVersionPinnedPage: (
+          source: CompanyTextSource, options: { signal: AbortSignal },
+        ) => deps.readCompanyText(source, control.ctx, options.signal),
+      }),
+      resolveSource: (ordinal, options) =>
+        resolveBoundCompanyTextSource(control, ordinal, options.signal),
+      recheck: (options) => recheck({ ...control, signal: options.signal }),
+      store: preparedTextStore(control),
       maxPreparedBytes: CFO_TEXT_CANARY_MAX_BYTES,
     });
   }
@@ -1754,6 +1778,61 @@ export function registerGraphWorkerBrokerRoutes(
       return fail(reply, 503, 'graph_worker_text_unavailable');
     }
   });
+
+  /** CLO-only prepared text route. Source identity and storage prefix come from the closed binding. */
+  app.post('/graph-worker/v1/source/:runId/company-text-snapshots', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    if (!exact(request.body, ['run','document_ordinal']) ||
+        !validRun(request.body.run) || request.body.document_ordinal !== 0) {
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    }
+    const params = request.params as { runId: string };
+    const c = await context(request, reply, params.runId);
+    if (!c) return;
+    const scope = resolveCompanyGraphScope(c.ctx.caller_agent, c.binding.run.scope);
+    if (!sameRun(request.body.run, c.binding.run) || !scope.ok ||
+        scope.scope.scope !== 'legal_company' ||
+        !companyGraphScopeOwnsBinding(scope.scope, c.binding)) {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    try {
+      const result = await companyTextController(c).prepare(
+        { document_ordinal: request.body.document_ordinal }, { signal: c.signal },
+      );
+      reply.header('cache-control', 'no-store');
+      return reply.send(result);
+    } catch {
+      return fail(reply, 503, 'graph_worker_text_unavailable');
+    }
+  });
+
+  app.get(
+    '/graph-worker/v1/source/:runId/company-text-snapshots/:snapshotId/chunks/:ordinal',
+    { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      const params = request.params as { runId: string; snapshotId: string; ordinal: string };
+      if (!/^(?:0|[1-9]\d?)$/.test(params.ordinal)) {
+        return fail(reply, 400, 'graph_worker_request_invalid');
+      }
+      const c = await context(request, reply, params.runId);
+      if (!c) return;
+      const scope = resolveCompanyGraphScope(c.ctx.caller_agent, c.binding.run.scope);
+      if (!scope.ok || scope.scope.scope !== 'legal_company' ||
+          !companyGraphScopeOwnsBinding(scope.scope, c.binding)) {
+        return fail(reply, 403, 'graph_worker_forbidden');
+      }
+      try {
+        const result = await companyTextController(c).readChunk({
+          snapshot_id: params.snapshotId, ordinal: Number(params.ordinal),
+        }, { signal: c.signal });
+        reply.header('cache-control', 'no-store');
+        return reply.send(result);
+      } catch {
+        return fail(reply, 503, 'graph_worker_text_unavailable');
+      }
+    },
+  );
 
   app.post('/graph-worker/v1/source/:runId/cfo-text-snapshots', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
@@ -2062,7 +2141,7 @@ export function registerGraphWorkerBrokerRoutes(
 }
 
 export const graphWorkerBrokerTest = {
-  BUCKET, SOURCE_PREFIX, STATE_BASE, canonical, digest, parsePolicy,
+  BUCKET, SOURCE_PREFIX, COMPANY_SOURCE_PREFIX, STATE_BASE, sourcePrefix, canonical, digest, parsePolicy,
   bindingHash, statePrefix, validManifest, validRow, sourceId, metadataInputSha,
   abortable, boundedCancel,
 };

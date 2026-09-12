@@ -120,9 +120,9 @@ async function harness(options: {
     objects.set(key, { body: Buffer.from(helper.canonical(value)), etag });
   put(helper.statePrefix(f.binding) + '/active-runs/' +
     helper.bindingHash(f.run) + '.json', options.active ?? f.active);
-  put(helper.SOURCE_PREFIX + '/manifests/' + f.manifest.manifest_sha256 + '.json',
+  put(helper.sourcePrefix(f.binding) + '/manifests/' + f.manifest.manifest_sha256 + '.json',
     f.manifest);
-  put(helper.SOURCE_PREFIX + '/rows/' + f.item.room + '/' + f.item.enrichment_row_sha256 + '.json',
+  put(helper.sourcePrefix(f.binding) + '/rows/' + f.item.room + '/' + f.item.enrichment_row_sha256 + '.json',
     options.row ?? f.sourceEnvelope);
   const s3: GraphWorkerBrokerDeps['s3'] = async (request) => {
     if (options.transportError) throw new Error('sensitive upstream text');
@@ -435,6 +435,77 @@ test('CLO company-text currentness uses only the legal-company tuple and never r
   });
   assert.equal(denied.statusCode, 403);
   assert.equal(calls, 1);
+  await h.app.close();
+});
+
+test('CLO prepared text loads the legal catalog prefix and serves the bound company chunk', async () => {
+  const expected = fixture('legal_company');
+  const text = 'Synthetic legal company source excerpt.';
+  const h = await harness({
+    scope: 'legal_company',
+    readCompanyText: async (source, callerContext, signal) => {
+      assert.equal(signal.aborted, false);
+      assert.equal(callerContext.caller_agent, 'clo');
+      assert.deepEqual(source, {
+        room: 'legal_company', source_index: 'legal-company',
+        path: 'company/synthetic-contract.txt',
+        source_path_hash: expected.item.source_path_hash,
+        document_version_id: expected.item.document_version_id,
+        source_version: expected.item.source_version,
+      });
+      return Object.freeze({
+        outcome: 'ready' as const,
+        descriptor: Object.freeze({
+          schema: 'company-version-pinned-text-snapshot-v1' as const,
+          room: 'legal_company' as const, source_index: 'legal-company' as const,
+          source_document_version: source.document_version_id,
+          catalog_source_sha256: source.source_version,
+          source_lineage_status: 'catalog_association_only' as const,
+          source_path_hash: source.source_path_hash,
+          sidecar_path_hash: H('_TEXT/' + source.path + '.txt'),
+          sidecar_etag: '"synthetic-etag"', sidecar_version_id: 'synthetic-version',
+          sidecar_content_sha256: H(text), total_bytes: Buffer.byteLength(text),
+          total_chars_utf16: text.length, chunk_count: 1, chunk_overlap_chars: 200,
+        }),
+        chunks: Object.freeze([Object.freeze({
+          ordinal: 0, start_utf16: 0, end_utf16: text.length,
+          start_byte: 0, end_byte: Buffer.byteLength(text), text_sha256: H(text), text,
+        })]),
+      });
+    },
+  });
+  assert.ok(h.objects.has(helper.COMPANY_SOURCE_PREFIX + '/manifests/' + h.f.manifest.manifest_sha256 + '.json'));
+  assert.ok(h.objects.has(helper.COMPANY_SOURCE_PREFIX + '/rows/legal_company/' + h.f.item.enrichment_row_sha256 + '.json'));
+  const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/company-text-snapshots';
+  const receipt = await h.app.inject({
+    method: 'POST', url,
+    headers: { authorization: 'Bearer clo', 'content-type': 'application/json' },
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(receipt.statusCode, 200);
+  assert.equal(receipt.headers['cache-control'], 'no-store');
+  assert.deepEqual(Object.keys(receipt.json()).sort(), [
+    'chunk_count', 'document_ordinal', 'manifest_sha256', 'observed_bytes', 'outcome',
+    'paid_fallback', 'run_id', 'schema', 'sidecar_content_sha256', 'snapshot_id',
+    'source_document_version',
+  ]);
+  assert.equal(receipt.json().schema, 'company-text-preparation-v1');
+  assert.equal(receipt.json().outcome, 'ready');
+  const chunk = await h.app.inject({
+    method: 'GET', url: url + '/' + receipt.json().snapshot_id + '/chunks/0',
+    headers: { authorization: 'Bearer clo' },
+  });
+  assert.equal(chunk.statusCode, 200);
+  assert.equal(chunk.headers['cache-control'], 'no-store');
+  assert.equal(chunk.json().schema, 'company-text-prepared-chunk-v1');
+  assert.equal(chunk.json().text, text);
+  assert.equal(chunk.json().manifest_sha256, receipt.json().manifest_sha256);
+  const denied = await h.app.inject({
+    method: 'POST', url,
+    headers: { authorization: 'Bearer cfo', 'content-type': 'application/json' },
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(denied.statusCode, 403);
   await h.app.close();
 });
 
