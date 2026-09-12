@@ -79,3 +79,18 @@ export function createPromotionLineageRecorder({store,cohort_id,producer_id}={})
   return true;
  };
 }
+
+/** Drives the promotion-only transition. Preparation may materialize the exact target text
+ * snapshot, but this runner has no worker/model dependency and never invokes extraction. */
+export function createCandidatePromotionRunner({prepareTarget,admit,prepareText,pipeline}={}){
+ if(typeof prepareTarget!=='function'||typeof admit!=='function'||typeof prepareText!=='function'||typeof pipeline?.process!=='function')fail('candidate_promotion_configuration');
+ return Object.freeze({async run({target,...request},{signal}={}){
+  if(!target||!exact(target,['source_document_version','catalog_source_sha256'])||!text(target.source_document_version)||!HASH.test(target.catalog_source_sha256))fail('candidate_promotion_target_invalid');
+  const proposal=await prepareTarget({source_document_version:target.source_document_version,catalog_source_sha256:target.catalog_source_sha256},{signal});
+  const targetRun=run(proposal?.run);if(!HASH.test(proposal?.key||'')||proposal.status!=='prepared'||proposal.manifest?.documents?.length!==1||proposal.manifest.documents[0].document_version_id!==target.source_document_version||proposal.manifest.documents[0].source_version!==target.catalog_source_sha256)fail('candidate_promotion_target_invalid');
+  const admission=await admit(proposal,{signal});if(admission?.allowed!==true||admission.run_id!==targetRun.run_id||admission.key!==proposal.key||admission.manifest_sha256!==targetRun.manifest_sha256)fail('candidate_promotion_admission_required');
+  const preparation=await prepareText(targetRun,{signal});if(preparation?.run_id!==targetRun.run_id||preparation.outcome!=='ready'||!/^txtsnap_[a-f0-9]{64}$/.test(preparation.snapshot_id||''))fail('candidate_promotion_preparation_required');
+  const result=await pipeline.process(proposal,{signal,request:{...request,run:targetRun}});if(result?.status!=='complete'||result.run_id!==targetRun.run_id)fail('candidate_promotion_publication_incomplete');
+  return Object.freeze({run:targetRun,publication:structuredClone(result)});
+ }});
+}
