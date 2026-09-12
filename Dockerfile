@@ -72,6 +72,7 @@ COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export.m
 COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export-ports.mjs ./tools/identity-registry-explicit-export-ports.mjs
 COPY --from=build --chown=app:app /app/tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
 COPY --from=build --chown=app:app /app/tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
+COPY --from=build --chown=app:app /app/tools/identity-registry-source-handoff-task.mjs ./tools/identity-registry-source-handoff-task.mjs
 # Ship the standalone eval harness (.mjs, not compiled) so the nightly eval Container Apps Job
 # can run `node eval/eval-runner.mjs` against the gateway for the regression baseline.
 COPY --from=build --chown=app:app /app/src/eval ./eval
