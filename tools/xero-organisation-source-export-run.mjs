@@ -52,6 +52,8 @@ export async function runXeroOrganisationSourceExport({ argv, persist, read = re
 
 async function main() {
   try {
+    const { xeroConfigured } = await import('../dist/tools/xero/client.js');
+    if (!xeroConfigured()) fail('xero_organisation_connector_unavailable');
     const { persistProvisionedXeroOrganisationSource } = await import('../dist/server/xero-organisation-source-adapter.js');
     await runXeroOrganisationSourceExport({ argv: process.argv.slice(2), persist: persistProvisionedXeroOrganisationSource });
     process.stdout.write(JSON.stringify({ schema: 'cfo-xero-organisation-source-export-run-v1', status: 'persisted', output_written: true }) + '\n');
