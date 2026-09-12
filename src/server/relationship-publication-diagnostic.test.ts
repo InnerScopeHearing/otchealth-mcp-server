@@ -20,6 +20,15 @@ async function appFor(error:Error,authenticated=true){
  await app.ready();return app;
 }
 
+async function appForPinnedInspectionError(){
+ const app=Fastify();
+ const admission={key:`graph-trial/20260908/catalog-cohorts/${cohort}/server/admissions/${run.run_id}.json`,version_id:'synthetic-admission',sha256:'e'.repeat(64)};
+ const proposal={key:`graph-trial/20260908/catalog-cohorts/${cohort}/server/proposals/${'f'.repeat(64)}.json`,version_id:'synthetic-proposal',sha256:'f'.repeat(64)};
+ const grant={schema:'relationship-publication-grant-v1',cohort_id:cohort,producer_id:producer,caller_hash,run,admission,proposal,artifact_ref,approved_artifacts:[{digest:artifact_ref.payload_sha256,version_id:artifact_ref.version_id}],issued_under_policy_version:'synthetic-policy'};
+ registerRelationshipPublicationRoutes(app,{authenticate:async()=>({caller_agent:'cfo',caller_hash,raw_token:'synthetic-token',connector_surface:true,m365_static_auth:false}),now:()=>Date.parse('2026-09-11T00:00:00.000Z'),policyJson:()=>policy,storeFor:()=>({get:async()=>({found:true,body:Buffer.from(canonical(grant)),versionId:'synthetic-grant'}),putCreateOnly:async()=>assert.fail('unexpected put'),list:async()=>assert.fail('unexpected list')}),resolveAdmission:async()=>assert.fail('unexpected admission'),readVersion:async()=>{throw Error('pinned');}});
+ await app.ready();return app;
+}
+
 test('publication diagnostics expose only allowlisted failure metadata after authenticated binding',async()=>{
  const secret='sensitive-upstream-detail-must-not-leave-the-server';
  const error=Object.assign(Error(secret),{code:'not-an-allowlisted-code',publicationStoreError:true,upstreamStatus:403});
@@ -40,5 +49,15 @@ test('publication diagnostics stay absent before authentication and policy bindi
  assert.equal(response.headers['x-relationship-failure-stage'],undefined);
  assert.equal(response.headers['x-relationship-failure-code'],undefined);
  assert.equal(response.headers['x-relationship-failure-upstream-status'],undefined);
+ await app.close();
+});
+
+test('publication diagnostics identify pinned admission or proposal reads without exposing details',async()=>{
+ const app=await appForPinnedInspectionError();
+ const response=await app.inject({method:'POST',url:`/relationship-publications/v1/${cohort}/${producer}`,headers:{authorization:'Bearer synthetic','content-type':'application/json'},payload:{run,artifact_ref}});
+ assert.equal(response.statusCode,503);
+ assert.equal(response.headers['x-relationship-failure-stage'],'inspect_pins');
+ assert.equal(response.headers['x-relationship-failure-code'],'pinned');
+ assert.equal(response.body.includes('pinned'),false);
  await app.close();
 });
