@@ -91,7 +91,7 @@ async function queryPublishedHistory(d:RelationshipPublicationDeps,policy:Json,c
   if(source.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(source.payload))!==sourceRef.size_bytes||!h.sourceBound(source,b,proposal))fail();sources.push(source);
  }
  const current=await h.current(d,b,sources,ctx,signal);
- const authorization={allowed:true,provenance:{decision_source:'authenticated_gateway',policy_version:policy.policy_version,allowed_roles:['cfo']},decision_ref:`relationship-publication:${c.producer_id}:${policy.policy_version}`,expires_at:new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()};
+ const authorization={allowed:true,provenance:{decision_source:'authenticated_gateway',policy_version:policy.policy_version,allowed_roles:[c.authenticated_caller]},decision_ref:`relationship-publication:${c.producer_id}:${policy.policy_version}`,expires_at:new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()};
  return {entry:{history:historyArtifact.payload,inputs:sources.map(source=>source.payload.input),authorization,sourceCurrent:current},refresh:()=>h.current(d,b,sources,ctx,signal)};
 }
 function publicationDeps(injected?:Partial<RelationshipPublicationDeps>):RelationshipPublicationDeps{
