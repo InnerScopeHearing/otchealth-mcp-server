@@ -38,7 +38,9 @@ function parse(text:string,now:number):Json|null{
   if(Buffer.byteLength(text)>65536)return null;const p=JSON.parse(text);
   if(!h.exact(p,['schema','policy_version','expires_at','bindings'])||p.schema!=='relationship-publication-policy-v1'||!LABEL.test(p.policy_version)||!h.utc(p.expires_at)||Date.parse(p.expires_at)<=now+1000||!Array.isArray(p.bindings)||!p.bindings.length||p.bindings.length>32)return null;
   const seen=new Set();for(const b of p.bindings){
-   if(!h.exact(b,['authenticated_caller','caller_hash','producer_id','cohort_id','purpose','run_version','encryption','source_policy'])||b.authenticated_caller!=='cfo'||!SHA.test(b.caller_hash)||!PRODUCER.test(b.producer_id)||!LABEL.test(b.cohort_id)||!h.path(b.cohort_id)||!LABEL.test(b.purpose)||!LABEL.test(b.run_version))return null;
+   const corporateLegal=b?.authenticated_caller==='clo';
+   const keys=['authenticated_caller','caller_hash','producer_id','cohort_id','purpose','run_version','encryption','source_policy',...(corporateLegal?['scope','room','source_index']:[])];
+   if(!h.exact(b,keys)||!['cfo','clo'].includes(b.authenticated_caller)||corporateLegal&&(b.scope!=='legal_company'||b.room!=='legal_company'||b.source_index!=='legal-company')||!SHA.test(b.caller_hash)||!PRODUCER.test(b.producer_id)||!LABEL.test(b.cohort_id)||!h.path(b.cohort_id)||!LABEL.test(b.purpose)||!LABEL.test(b.run_version))return null;
    const e=b.encryption;if(!(e?.algorithm==='AES256'&&h.exact(e,['algorithm'])||e?.algorithm==='aws:kms'&&h.exact(e,['algorithm','kms_key_id'])&&typeof e.kms_key_id==='string'&&e.kms_key_id.length>0&&e.kms_key_id.length<=1024&&!/[\r\n]/.test(e.kms_key_id)))return null;
    const s=b.source_policy;if(!h.validSourcePolicy(s))return null;
    const key=b.caller_hash+'/'+b.cohort_id+'/'+b.producer_id;if(seen.has(key))return null;seen.add(key);
@@ -47,7 +49,7 @@ function parse(text:string,now:number):Json|null{
 }
 function binding(policy:Json,c:Json,g:Json,now:number){
  if(!h.exact(g,['schema','cohort_id','producer_id','caller_hash','run','admission','proposal','artifact_ref','approved_artifacts','issued_under_policy_version'])||g.schema!=='relationship-publication-grant-v1'||g.cohort_id!==c.cohort_id||g.producer_id!==c.producer_id||g.caller_hash!==c.caller_hash||g.run?.purpose!==c.purpose||g.run?.run_version!==c.run_version||!h.artifactRef(g.artifact_ref)||!LABEL.test(g.issued_under_policy_version))fail();
- const b={authenticated_caller:'cfo',caller_hash:c.caller_hash,producer_id:c.producer_id,run:g.run,encryption:c.encryption,cohort_id:c.cohort_id,admission:g.admission,proposal:g.proposal,approved_artifacts:g.approved_artifacts,source_policy:c.source_policy};
+ const b={authenticated_caller:c.authenticated_caller,caller_hash:c.caller_hash,producer_id:c.producer_id,run:g.run,encryption:c.encryption,cohort_id:c.cohort_id,admission:g.admission,proposal:g.proposal,approved_artifacts:g.approved_artifacts,source_policy:c.source_policy};
  if(!h.parse(h.canonical({schema:'relationship-history-policy-v1',policy_version:policy.policy_version,expires_at:policy.expires_at,bindings:[b]}),now))fail();return b;
 }
 function stored(r:Stored):Json{
@@ -57,13 +59,14 @@ function stored(r:Stored):Json{
 /** Derive artifact access from the current CFO session and immutable, server-issued catalog records. */
 export async function resolveRelationshipArtifactAutomaticBinding(input:{run_id:string;producer_id:string;ctx:AuthContext;signal:AbortSignal},injected?:{policyJson?:()=>string;now?:()=>number;resolveCatalogCohortBinding?:(ctx:AuthContext,runId:string,signal:AbortSignal)=>Promise<any>;resolveRelationshipPublicationAdmission?:(input:{cohortId:string;run:{run_id:string};ctx:AuthContext;signal:AbortSignal})=>Promise<{admission:Json;proposal:Json}>}){
  const now=injected?.now??Date.now,policy=parse((injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON))(),now());
- if(!policy||input.ctx.caller_agent!=='cfo'||!input.ctx.connector_surface||!SHA.test(input.ctx.caller_hash)||!RUN.test(input.run_id)||!PRODUCER.test(input.producer_id))return null;
+ const scope=resolveCompanyGraphScope(input.ctx.caller_agent,input.ctx.caller_agent==='clo'?'legal_company':undefined);
+ if(!policy||!scope.ok||!input.ctx.connector_surface||!SHA.test(input.ctx.caller_hash)||!RUN.test(input.run_id)||!PRODUCER.test(input.producer_id))return null;
  const catalog=await import('./graph-catalog-controller.js'),current=await (injected?.resolveCatalogCohortBinding??catalog.resolveCatalogCohortBinding)(input.ctx,input.run_id,input.signal);
  if(!current)return null;
  const c=policy.bindings.find((row:Json)=>row.cohort_id===current.cohort_id&&row.caller_hash===input.ctx.caller_hash&&row.producer_id===input.producer_id&&row.purpose===current.binding.run.purpose&&row.run_version===current.binding.run.run_version);
  if(!c||!equal(c.source_policy,current.source_policy))return null;
  const pins=await (injected?.resolveRelationshipPublicationAdmission??catalog.resolveRelationshipPublicationAdmission)({cohortId:c.cohort_id,run:{run_id:input.run_id},ctx:input.ctx,signal:input.signal});
- return {binding:{authenticated_caller:'cfo' as const,caller_hash:input.ctx.caller_hash,producer_id:c.producer_id,run:current.binding.run,encryption:c.encryption},cohort_id:c.cohort_id,policy_version:policy.policy_version,expires_at:policy.expires_at,admission:pins.admission,proposal:pins.proposal,source_policy:c.source_policy};
+ return {binding:{authenticated_caller:c.authenticated_caller,caller_hash:input.ctx.caller_hash,producer_id:c.producer_id,run:current.binding.run,encryption:c.encryption},cohort_id:c.cohort_id,policy_version:policy.policy_version,expires_at:policy.expires_at,admission:pins.admission,proposal:pins.proposal,source_policy:c.source_policy};
 }
 async function bounded<T>(f:()=>Promise<T>,signal:AbortSignal):Promise<T>{
  if(signal.aborted)fail(503);return new Promise((resolve,reject)=>{const abort=()=>{signal.removeEventListener('abort',abort);reject(Object.assign(Error('publication_cancelled'),{status:503}));};signal.addEventListener('abort',abort,{once:true});Promise.resolve().then(()=>{if(signal.aborted)fail(503);return f();}).then(v=>{signal.removeEventListener('abort',abort);resolve(v);},e=>{signal.removeEventListener('abort',abort);reject(e);});if(signal.aborted)abort();});
@@ -128,9 +131,9 @@ function relevantVerifiedHistories(records:IndexedRecord[],corrections:Array<{co
 export function createRelationshipPublicationDiscoveryService(injected?:Partial<RelationshipPublicationDeps>):RelationshipPublicationDiscoveryService{
  const d=budgeted(publicationDeps(injected));return{query:async(input,ctx,signal,recheck=async()=>{})=>{
   if(!input||Object.getPrototypeOf(input)!==Object.prototype||!h.exact(input,['cohort_id','producer_id','query',...(input.scope===undefined?[]:['scope']),...(input.after===undefined?[]:['after']),...(input.scan_limit===undefined?[]:['scan_limit']),...(input.history_limit===undefined?[]:['history_limit'])])||!LABEL.test(input.cohort_id)||!h.path(input.cohort_id)||!PRODUCER.test(input.producer_id)||input.after!==undefined&&!RUN.test(input.after)||!validQuery(input.query)||Buffer.byteLength(h.canonical(input))>16384)fail(400);
-  const limit=input.scan_limit??64,historyLimit=input.history_limit??256;if(!Number.isInteger(limit)||limit<1||limit>64||!Number.isInteger(historyLimit)||historyLimit<1||historyLimit>256||ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
-  const scope=resolveCompanyGraphScope(ctx.caller_agent,input.scope);if(!scope.ok||scope.scope.scope!=='finance')fail();
-  const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===input.cohort_id&&x.producer_id===input.producer_id&&x.caller_hash===ctx.caller_hash);if(!c)fail();
+  const limit=input.scan_limit??64,historyLimit=input.history_limit??256;if(!Number.isInteger(limit)||limit<1||limit>64||!Number.isInteger(historyLimit)||historyLimit<1||historyLimit>256||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
+  const scope=resolveCompanyGraphScope(ctx.caller_agent,input.scope);if(!scope.ok)fail();
+  const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===input.cohort_id&&x.producer_id===input.producer_id&&x.caller_hash===ctx.caller_hash&&x.authenticated_caller===scope.scope.authenticatedCaller);if(!c)fail();
   const refs:Json[]=[],loaded:Array<Awaited<ReturnType<typeof queryPublishedHistory>>>=[],records:IndexedRecord[]=[],corrections:Array<{correction:Json;history:number}>=[];let cursor=input.after,last=cursor??'',next:string|undefined;
   do{const page=await d.storeFor(c.cohort_id,c.producer_id).list({after:cursor,limit:Math.min(limit,historyLimit-loaded.length),signal});if(page.records.length>limit)fail(503);for(const row of page.records){const g=stored({found:true,...row});binding(policy,c,g,d.now());if(g.run.run_id!==row.runId||row.runId<=last)fail(503);last=row.runId;const item=await queryPublishedHistory(d,policy,c,g,ctx,signal);if(!item.entry.inputs.every((source:Json)=>companyGraphScopeOwnsBinding(scope.scope,{authenticated_caller:c.authenticated_caller,room:source.binding?.room,source_index:source.binding?.source_index,run:g.run})))fail();refs.push({run_id:g.run.run_id,artifact_ref:g.artifact_ref});loaded.push(item);const indexed=indexEntry(item.entry,loaded.length-1);records.push(...indexed.records);corrections.push(...indexed.corrections);}next=page.next;if(next!==undefined&&(next!==last||!page.records.length))fail(503);cursor=next;}while(next!==undefined&&loaded.length<historyLimit);
   await recheck();for(const result of loaded)if((await result.refresh())!==result.entry.sourceCurrent)fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();const complete=next===undefined&&input.after===undefined;

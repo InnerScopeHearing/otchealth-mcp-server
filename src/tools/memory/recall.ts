@@ -5,6 +5,7 @@ import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.
 import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
 import { cachedAgenticRecall } from '../../memory/hot-cache.js';
 import type { ToolContext, ToolResultPayload } from '../registry.js';
+import { filterPersonalSharedMemory, sharedMemoryAgentAllowed } from './shared-memory-access.js';
 
 const RECALL_INPUT_SHAPE = {
   query: z.string().min(1).describe('Keywords to match against entry text, tags, type, and agent (case-insensitive; all terms must match).'),
@@ -29,6 +30,9 @@ export async function recallHandler(
 ): Promise<ToolResultPayload> {
   const limit = input.limit ?? 25;
   const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
+  if (!sharedMemoryAgentAllowed(ctx.callerAgent, agentFilter)) {
+    return { data: { matches: [], count: 0, mode: 'ring-forbidden' }, summary: 'Refused: personal-legal shared-memory rows are not available to this caller.' };
+  }
 
   // Prefer AGENTIC HYBRID recall (Azure AI Search memory-exec): decomposes the query into
   // focused sub-queries, fans out hybrid (BM25 + semantic-ranker) searches concurrently, and
@@ -50,7 +54,7 @@ export async function recallHandler(
     if ((ar.mode === 'agentic-hybrid' || ar.mode === 'cache-hit') && ar.results.length > 0) {
       const cacheNote = ar.cacheHit ? ' [cache hit]' : '';
       return {
-        data: { matches: ar.results, count: ar.results.length, mode: ar.mode },
+      data: { matches: filterPersonalSharedMemory(ar.results, ctx.callerAgent), count: filterPersonalSharedMemory(ar.results, ctx.callerAgent).length, mode: ar.mode },
         summary: `${ar.results.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
       };
     }
@@ -64,9 +68,10 @@ export async function recallHandler(
     try {
       const hits = await semanticSearch(input.query, agentFilter, limit);
       if (hits) {
+        const visible = filterPersonalSharedMemory(hits, ctx.callerAgent);
         return {
-          data: { matches: hits, count: hits.length, mode: 'semantic' },
-          summary: `${hits.length} semantic match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+          data: { matches: visible, count: visible.length, mode: 'semantic' },
+          summary: `${visible.length} semantic match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
         };
       }
     } catch {
@@ -79,7 +84,7 @@ export async function recallHandler(
   }
   const terms = input.query.toLowerCase().split(/\s+/).filter(Boolean);
   const all = await readSharedAll();
-  const matches = all
+  const matches = filterPersonalSharedMemory(all, ctx.callerAgent)
     .filter((r) => !agentFilter || r.agent === agentFilter)
     .filter((r) => {
       const hay = `${r.type} ${r.text} ${(r.tags || []).join(' ')} ${r.agent} ${r.source || ''}`.toLowerCase();

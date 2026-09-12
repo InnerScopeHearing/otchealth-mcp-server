@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, readSharedAll, type MemoryEntry } from '../../memory/store.js';
+import { filterPersonalSharedMemory } from './shared-memory-access.js';
 
 export function registerMemoryTeam(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -27,7 +28,7 @@ export function registerMemoryTeam(server: McpServer, callerHash: CallerHashProv
         agents: z.array(z.string()),
         shared_entry_count: z.number(),
       },
-      handler: async (input) => {
+      handler: async (input, ctx) => {
         if (!isConfigured()) {
           return {
             data: { current_status: [], recent: [], agents: [], shared_entry_count: 0 },
@@ -35,7 +36,7 @@ export function registerMemoryTeam(server: McpServer, callerHash: CallerHashProv
           };
         }
         const limit = input.limit ?? 40;
-        const all = await readSharedAll();
+        const all = filterPersonalSharedMemory(await readSharedAll(), ctx.callerAgent);
         const latestStatus = new Map<string, MemoryEntry>();
         for (const r of all) {
           if (r.type === 'status' && !latestStatus.has(r.agent)) latestStatus.set(r.agent, r);
