@@ -5,6 +5,7 @@ import { createExplicitExportImmutableStore } from './identity-registry-explicit
 import {
   bindImmutableXeroOrganisationProjection,
   canonicalXeroOrganisationProjection,
+  publishXeroOrganisationExportHandoff,
   persistProvisionedXeroOrganisationSource,
   projectXeroOrganisation,
 } from './xero-organisation-source-adapter.js';
@@ -131,4 +132,23 @@ test('uses the source-owned Xero connector and readback-verified immutable write
   await assert.rejects(persistProvisionedXeroOrganisationSource({
     ...deployment(), source_storage: { ...deployment().source_storage, prefix: 'graph-trial/not-approved' },
   }, sourceOwnerDeps('ok')), { code: 'xero_organisation_deployment_invalid' });
+});
+
+test('publishes an immutable metadata-only cross-task exporter handoff', async () => {
+  const projection = projectXeroOrganisation({ tenantId: 'tenant-native-001', response: response() });
+  const pin = canonicalXeroOrganisationProjection(projection);
+  const bound = bindImmutableXeroOrganisationProjection({ projection, sourceDocumentVersion: 'source-version-1', sourceSha256: pin.sha256 });
+  let written: Readonly<{ key: string; body: Buffer }> | undefined;
+  const result = await publishXeroOrganisationExportHandoff({
+    sourceStorage: deployment().source_storage,
+    record: bound.record,
+    exportInput: { registry_id: 'synthetic-registry', prefix: 'graph-trial/20260912/identity-registry/cfo-pilot/snapshots' },
+    writer: { putImmutable: async value => { written = value; return { version_id: 'handoff-version-1' }; } },
+  });
+  assert.ok(written);
+  assert.equal(written!.key, `${prefix}/identity-registries/xero-organisation/handoffs/${pin.sha256}.json`);
+  assert.equal(result.handoff.source.version_id, 'source-version-1');
+  assert.equal(result.handoff.source.sha256, pin.sha256);
+  assert.equal(result.version_id, 'handoff-version-1');
+  assert.ok(!written!.body.toString('utf8').includes('TaxNumber'));
 });
