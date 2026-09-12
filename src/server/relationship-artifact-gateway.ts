@@ -3,8 +3,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { requireConnectorAuth, type AuthContext } from '../auth/bearer.js';
 import { loadEnv } from '../config/env.js';
 import { createRelationshipArtifactS3 } from './relationship-artifact-s3.js';
+import { resolveCompanyGraphScope } from './company-graph-scope.js';
 
-const WORKERS = 'graph-trial/20260908/workers/cfo';
 const MAX_PAYLOAD = 16 * 1024 * 1024;
 const MAX_ENVELOPE = MAX_PAYLOAD + 1024;
 const SHA = /^[a-f0-9]{64}$/;
@@ -15,7 +15,7 @@ export const RELATIONSHIP_GATEWAY_STORE_ID='relationship-gateway-v1';
 
 type RunRef = { ref_version:string; run_id:string; purpose:string; scope:string; run_version:string; manifest_sha256:string };
 type Encryption = { algorithm:'AES256'|'aws:kms'; kms_key_id?:string };
-type Binding = { authenticated_caller:'cfo'; caller_hash:string; producer_id:string; run:RunRef; encryption:Encryption };
+type Binding = { authenticated_caller:'cfo'|'clo'; caller_hash:string; producer_id:string; run:RunRef; encryption:Encryption };
 type Policy = { schema:'relationship-artifact-policy-v1'; policy_version:string; expires_at:string; bindings:Binding[] };
 type Pin = { key:string; version_id:string; sha256:string };
 type AutomaticBinding = { binding:Binding; cohort_id:string; policy_version:string; expires_at:string; admission:Pin; proposal:Pin; source_policy:unknown };
@@ -48,6 +48,7 @@ function validRun(value:unknown):value is RunRef {
   const run=value as unknown as RunRef;
   return run.ref_version==='neptune-trial-active-run-ref-v1'&&/^run_[a-f0-9]{64}$/.test(run.run_id)&&LABEL.test(run.purpose)&&LABEL.test(run.scope)&&LABEL.test(run.run_version)&&SHA.test(run.manifest_sha256)&&run.run_id==='run_'+hash(canonical(runContent(run)));
 }
+function scopeFor(binding:Pick<Binding,'authenticated_caller'|'run'>){const resolved=resolveCompanyGraphScope(binding.authenticated_caller,binding.run.scope);return resolved.ok?resolved.scope:null;}
 function same(a:unknown,b:unknown){return canonical(a)===canonical(b);}
 function validJson(value:unknown, depth=0):boolean {
   if(depth>128) return false;
@@ -67,7 +68,7 @@ function validPin(value:unknown, key:RegExp):value is Pin { return !!value&&exac
 function validAutomatic(value:unknown, ctx:AuthContext, runId:string, producerId:string, now:number):value is AutomaticBinding {
  if(!value||!exact(value,['binding','cohort_id','policy_version','expires_at','admission','proposal','source_policy']))return false;
  const row=value as Record<string,unknown>,b=row.binding as Binding,cohort=typeof row.cohort_id==='string'?row.cohort_id:'';
- if(!LABEL.test(cohort)||!bounded(row.policy_version)||!utc(row.expires_at)||Date.parse(row.expires_at)<now+1000||!b||b.authenticated_caller!=='cfo'||b.caller_hash!==ctx.caller_hash||b.producer_id!==producerId||!validRun(b.run)||b.run.run_id!==runId||!validEncryption(b.encryption)||!validSourcePolicy(row.source_policy))return false;
+ if(!LABEL.test(cohort)||!bounded(row.policy_version)||!utc(row.expires_at)||Date.parse(row.expires_at)<now+1000||!b||!scopeFor(b)||b.authenticated_caller!==ctx.caller_agent||b.caller_hash!==ctx.caller_hash||b.producer_id!==producerId||!validRun(b.run)||b.run.run_id!==runId||!validEncryption(b.encryption)||!validSourcePolicy(row.source_policy))return false;
  const root=`graph-trial/20260908/catalog-cohorts/${cohort}/server/`;
  return validPin(row.admission,new RegExp('^'+root.replace(/[.*+?^${}()|[\\]\\]/g,'\\$&')+'admissions/'+runId+'\\.json$'))&&validPin(row.proposal,new RegExp('^'+root.replace(/[.*+?^${}()|[\\]\\]/g,'\\$&')+'proposals/[a-f0-9]{64}\\.json$'));
 }
@@ -80,23 +81,23 @@ function parsePolicy(text:string, now:number):Policy|null {
   for(const value of row.bindings){
     if(!exact(value,['authenticated_caller','caller_hash','producer_id','run','encryption']))return null;
     const b=value as Record<string,unknown>;
-    if(b.authenticated_caller!=='cfo'||typeof b.caller_hash!=='string'||!SHA.test(b.caller_hash)||typeof b.producer_id!=='string'||!PRODUCER.test(b.producer_id)||!validRun(b.run)||!validEncryption(b.encryption))return null;
-    bindings.push({authenticated_caller:'cfo',caller_hash:b.caller_hash,producer_id:b.producer_id,run:b.run as RunRef,encryption:b.encryption as Encryption});
+    if(!['cfo','clo'].includes(String(b.authenticated_caller))||typeof b.caller_hash!=='string'||!SHA.test(b.caller_hash)||typeof b.producer_id!=='string'||!PRODUCER.test(b.producer_id)||!validRun(b.run)||!validEncryption(b.encryption)||!scopeFor({authenticated_caller:b.authenticated_caller as Binding['authenticated_caller'],run:b.run as RunRef}))return null;
+    bindings.push({authenticated_caller:b.authenticated_caller as Binding['authenticated_caller'],caller_hash:b.caller_hash,producer_id:b.producer_id,run:b.run as RunRef,encryption:b.encryption as Encryption});
   }
   const ids=bindings.map(b=>b.caller_hash+'\0'+b.producer_id+'\0'+b.run.run_id);
   if(new Set(ids).size!==ids.length)return null;
   return {schema:'relationship-artifact-policy-v1',policy_version:row.policy_version as string,expires_at:row.expires_at as string,bindings};
 }
-function artifactKey(run:string, producer:string, shard:string, digest:string){return `${WORKERS}/${run}/relationship-producers/${producer}/resolution-artifacts/sha256/${shard}/${digest}.json`;}
+function artifactKey(binding:Binding, producer:string, shard:string, digest:string){const scope=scopeFor(binding);if(!scope)throw Error('scope');return `${scope.workerStore.prefix}${binding.run.run_id}/relationship-producers/${producer}/resolution-artifacts/sha256/${shard}/${digest}.json`;}
 function header(headers:S3Response['headers'], name:string):string|undefined {
   if(headers instanceof Headers)return headers.get(name)??undefined;
   const found=Object.entries(headers).find(([key])=>key.toLowerCase()===name.toLowerCase()); return found?.[1];
 }
 function status(reply:FastifyReply, code:number){return reply.code(code).send();}
 function s3Status(code:number){return code===404||code===409||code===412||(code>=500&&code<=599)?code:503;}
-function stateKey(run:RunRef){return `${WORKERS}/${run.run_id}/active-runs/${hash(canonical({purpose:run.purpose,scope:'finance'}))}.json`;}
+function stateKey(binding:Binding){const scope=scopeFor(binding);if(!scope)throw Error('scope');return `${scope.workerStore.prefix}${binding.run.run_id}/active-runs/${hash(canonical({purpose:binding.run.purpose,scope:scope.scope}))}.json`;}
 async function active(d:RelationshipArtifactGatewayDeps,binding:Binding,signal:AbortSignal):Promise<boolean>{
-  const saved=await d.s3({method:'GET',key:stateKey(binding.run),signal,maxBytes:64*1024});
+  const saved=await d.s3({method:'GET',key:stateKey(binding),signal,maxBytes:64*1024});
   if(saved.status!==200||saved.body.length>64*1024)return false;
   let value:unknown;try{value=JSON.parse(saved.body.toString('utf8'));}catch{return false;}
   if(!exact(value,['schema','state_sha256','state'])||value.schema!=='neptune-trial-active-run-state-v1'||!SHA.test(String(value.state_sha256??''))||hash(canonical(value.state))!==value.state_sha256||!exact(value.state,['status','run','superseded_run','tombstone']))return false;
@@ -105,7 +106,8 @@ async function active(d:RelationshipArtifactGatewayDeps,binding:Binding,signal:A
 function admitted(value:unknown, ctx:AuthContext, binding:Binding, now:number):boolean {
   if(!value||typeof value!=='object')return false;
   const row=value as Record<string,unknown>, policy=row.policy as Record<string,unknown>|undefined, b=row.binding as Record<string,unknown>|undefined;
-  return !!policy&&policy.schema==='graph-worker-bindings-v1'&&typeof policy.expires_at==='string'&&Date.parse(policy.expires_at)>now+1000&&!!b&&b.authenticated_caller==='cfo'&&b.room==='finance'&&b.source_index==='finance-cfo-source-docs'&&same(b.run,binding.run)&&ctx.caller_agent==='cfo';
+  const scope=scopeFor(binding);
+  return !!policy&&policy.schema==='graph-worker-bindings-v1'&&typeof policy.expires_at==='string'&&Date.parse(policy.expires_at)>now+1000&&!!b&&!!scope&&b.authenticated_caller===scope.authenticatedCaller&&b.room===scope.room&&b.source_index===scope.sourceIndex&&same(b.run,binding.run)&&ctx.caller_agent===scope.authenticatedCaller;
 }
 async function guard(d:RelationshipArtifactGatewayDeps,ctx:AuthContext,binding:Binding,policyText:string,expected:Policy,signal:AbortSignal):Promise<boolean>{
   const text=d.policyJson(), current=parsePolicy(text,d.now());
@@ -115,18 +117,18 @@ async function guard(d:RelationshipArtifactGatewayDeps,ctx:AuthContext,binding:B
   const finalText=d.policyJson(), final=parsePolicy(finalText,d.now());
   return finalText===policyText&&!!final&&same(final,expected);
 }
-function payloadValid(value:unknown, run:RunRef):boolean {
+function payloadValid(value:unknown, binding:Binding):boolean {
   if(!value||Object.getPrototypeOf(value)!==Object.prototype)return false;
   const row=value as Record<string,unknown>;
-  if(row.schema==='resolution-source-input-v1')return exact(value,['schema','run','input'])&&same(row.run,run);
-  return row.schema==='resolution-history-v1'&&exact(value,['schema','run','caller_seat','sources','events','queries'])&&same(row.run,run)&&row.caller_seat==='cfo'&&Array.isArray(row.sources)&&Array.isArray(row.events)&&Array.isArray(row.queries);
+  if(row.schema==='resolution-source-input-v1')return exact(value,['schema','run','input'])&&same(row.run,binding.run);
+  return row.schema==='resolution-history-v1'&&exact(value,['schema','run','caller_seat','sources','events','queries'])&&same(row.run,binding.run)&&row.caller_seat===binding.authenticated_caller&&Array.isArray(row.sources)&&Array.isArray(row.events)&&Array.isArray(row.queries);
 }
-function envelope(value:unknown, run:RunRef, digest:string):value is {schema:'relationship-resolution-artifact-v1';payload_sha256:string;payload:unknown}{
-  return exact(value,['schema','payload_sha256','payload'])&&value.schema==='relationship-resolution-artifact-v1'&&value.payload_sha256===digest&&validJson(value.payload)&&payloadValid(value.payload,run)&&Buffer.byteLength(canonical(value.payload),'utf8')<=MAX_PAYLOAD&&hash(canonical(value.payload))===digest;
+function envelope(value:unknown, binding:Binding, digest:string):value is {schema:'relationship-resolution-artifact-v1';payload_sha256:string;payload:unknown}{
+  return exact(value,['schema','payload_sha256','payload'])&&value.schema==='relationship-resolution-artifact-v1'&&value.payload_sha256===digest&&validJson(value.payload)&&payloadValid(value.payload,binding)&&Buffer.byteLength(canonical(value.payload),'utf8')<=MAX_PAYLOAD&&hash(canonical(value.payload))===digest;
 }
 function validArtifactRef(value:unknown){if(!exact(value,['schema','artifact_id','bucket','key','payload_sha256','version_id','size_bytes']))return false;const r=value as Record<string,unknown>,d=r.payload_sha256;return r.schema==='relationship-resolution-artifact-ref-v1'&&typeof d==='string'&&SHA.test(d)&&r.artifact_id==='resart_'+d&&r.bucket==='otchealth-finance-legal-dr-55c84f6b'&&r.key===`resolution-artifacts/sha256/${d.slice(0,2)}/${d}.json`&&typeof r.version_id==='string'&&r.version_id!=='null'&&VERSION.test(r.version_id)&&typeof r.size_bytes==='number'&&Number.isSafeInteger(r.size_bytes)&&r.size_bytes>=0&&r.size_bytes<=MAX_PAYLOAD;}
-function authRequest(value:unknown,run:RunRef){return exact(value,['action','artifact_ref','run','caller_seat','store_id'])&&['write','read'].includes(String((value as any).action))&&same((value as any).run,run)&&(value as any).caller_seat==='cfo'&&(value as any).store_id===RELATIONSHIP_GATEWAY_STORE_ID&&(((value as any).action==='write'&&(value as any).artifact_ref===null)||((value as any).action==='read'&&validArtifactRef((value as any).artifact_ref)));}
-function storageAuthRequest(value:unknown){if(!value||typeof value!=='object')return false;const v=value as any,base=['action','scope','artifact_id','sha256'];const keys=v.action==='get'?[...base,'version_id']:base;if(!exact(v,keys)||typeof v.action!=='string'||!['get','put'].includes(v.action)||!exact(v.scope,['run','caller_seat','producer_id'])||!validRun(v.scope.run)||v.scope.caller_seat!=='cfo'||typeof v.scope.producer_id!=='string'||!PRODUCER.test(v.scope.producer_id)||typeof v.sha256!=='string'||!SHA.test(v.sha256)||v.artifact_id!=='resart_'+v.sha256)return false;return v.action==='put'||(typeof v.version_id==='string'&&v.version_id!=='null'&&VERSION.test(v.version_id));}
+function authRequest(value:unknown,run:RunRef){return exact(value,['action','artifact_ref','run','caller_seat','store_id'])&&['write','read'].includes(String((value as any).action))&&same((value as any).run,run)&&['cfo','clo'].includes((value as any).caller_seat)&&(value as any).store_id===RELATIONSHIP_GATEWAY_STORE_ID&&(((value as any).action==='write'&&(value as any).artifact_ref===null)||((value as any).action==='read'&&validArtifactRef((value as any).artifact_ref)));}
+function storageAuthRequest(value:unknown){if(!value||typeof value!=='object')return false;const v=value as any,base=['action','scope','artifact_id','sha256'];const keys=v.action==='get'?[...base,'version_id']:base;if(!exact(v,keys)||typeof v.action!=='string'||!['get','put'].includes(v.action)||!exact(v.scope,['run','caller_seat','producer_id'])||!validRun(v.scope.run)||!['cfo','clo'].includes(v.scope.caller_seat)||typeof v.scope.producer_id!=='string'||!PRODUCER.test(v.scope.producer_id)||typeof v.sha256!=='string'||!SHA.test(v.sha256)||v.artifact_id!=='resart_'+v.sha256)return false;return v.action==='put'||(typeof v.version_id==='string'&&v.version_id!=='null'&&VERSION.test(v.version_id));}
 function parseBody(body:unknown):unknown|null {
   if(Buffer.isBuffer(body)){if(body.length>MAX_ENVELOPE||!Buffer.from(body.toString('utf8'),'utf8').equals(body))return null;try{return JSON.parse(body.toString('utf8'));}catch{return null;}}
   if(typeof body==='string'){const raw=Buffer.from(body,'utf8');if(raw.length>MAX_ENVELOPE)return null;try{return JSON.parse(body);}catch{return null;}}
@@ -156,10 +158,10 @@ async function authority(d:RelationshipArtifactGatewayDeps,ctx:AuthContext,p:Rec
 async function guarded(d:RelationshipArtifactGatewayDeps,ctx:AuthContext,a:Authority,signal:AbortSignal){return a.mode==='static'?guard(d,ctx,a.binding,a.policyText,a.policy,signal):automaticGuard(d,ctx,a.automatic,signal);}
 async function context(request:FastifyRequest,reply:FastifyReply,d:RelationshipArtifactGatewayDeps):Promise<AuthContext|null>{
   if(request.url.includes('?')&&request.method==='PUT'||typeof request.headers.authorization!=='string'){status(reply,401);return null;}
-  const ctx=await d.authenticate(request,reply);if(!ctx||ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash)){if(!reply.sent)status(reply,403);return null;}return ctx;
+  const ctx=await d.authenticate(request,reply);if(!ctx||!['cfo','clo'].includes(ctx.caller_agent)||!ctx.connector_surface||!SHA.test(ctx.caller_hash)){if(!reply.sent)status(reply,403);return null;}return ctx;
 }
 function params(request:FastifyRequest){const p=request.params as Record<string,string>;return p;}
-function select(policy:Policy,ctx:AuthContext,p:Record<string,string>):Binding|null{return policy.bindings.find(b=>b.caller_hash===ctx.caller_hash&&b.producer_id===p.producerId&&b.run.run_id===p.runId)??null;}
+function select(policy:Policy,ctx:AuthContext,p:Record<string,string>):Binding|null{return policy.bindings.find(b=>b.caller_hash===ctx.caller_hash&&b.authenticated_caller===ctx.caller_agent&&b.producer_id===p.producerId&&b.run.run_id===p.runId)??null;}
 async function finalAuth(request:FastifyRequest,reply:FastifyReply,d:RelationshipArtifactGatewayDeps,original:AuthContext):Promise<boolean>{const now=await d.authenticate(request,reply);return !!now&&now.caller_agent===original.caller_agent&&now.connector_surface===original.connector_surface&&now.caller_hash===original.caller_hash;}
 
 export function registerRelationshipArtifactGatewayRoutes(app:FastifyInstance,injected?:Partial<RelationshipArtifactGatewayDeps>):void {
@@ -170,9 +172,10 @@ export function registerRelationshipArtifactGatewayRoutes(app:FastifyInstance,in
    const ctx=await context(request,reply,d);if(!ctx||reply.sent)return;const a=await authority(d,ctx,p,requestRun,controller.signal);if(!a)return status(reply,403);const binding=a.binding;
    if(!await guarded(d,ctx,a,controller.signal))return status(reply,403);
    const body=request.body as any;
-   if(body.action==='read'||body.action==='get'){const ref=body.action==='read'?body.artifact_ref:{payload_sha256:body.sha256,version_id:body.version_id,size_bytes:null},key=artifactKey(p.runId,p.producerId,ref.payload_sha256.slice(0,2),ref.payload_sha256),saved=await d.s3({method:'GET',key,versionId:ref.version_id,signal:controller.signal,maxBytes:MAX_ENVELOPE});if(saved.status!==200||saved.body.length>MAX_ENVELOPE||!Buffer.from(saved.body.toString('utf8'),'utf8').equals(saved.body))return status(reply,403);let value:unknown;try{value=JSON.parse(saved.body.toString('utf8'));}catch{return status(reply,403);}if(header(saved.headers,'x-amz-version-id')!==ref.version_id||header(saved.headers,'x-amz-meta-resolution-producer')!==p.producerId||header(saved.headers,'x-amz-meta-resolution-run')!==p.runId||header(saved.headers,'x-amz-server-side-encryption')!==binding.encryption.algorithm||(binding.encryption.algorithm==='aws:kms'&&header(saved.headers,'x-amz-server-side-encryption-aws-kms-key-id')!==binding.encryption.kms_key_id)||!envelope(value,binding.run,ref.payload_sha256)||(ref.size_bytes!==null&&Buffer.byteLength(canonical((value as any).payload),'utf8')!==ref.size_bytes))return status(reply,403);}
+   if((body.action==='read'&&body.caller_seat!==binding.authenticated_caller)||(body.action==='get'&&body.scope.caller_seat!==binding.authenticated_caller))return status(reply,403);
+   if(body.action==='read'||body.action==='get'){const ref=body.action==='read'?body.artifact_ref:{payload_sha256:body.sha256,version_id:body.version_id,size_bytes:null},key=artifactKey(binding,p.producerId,ref.payload_sha256.slice(0,2),ref.payload_sha256),saved=await d.s3({method:'GET',key,versionId:ref.version_id,signal:controller.signal,maxBytes:MAX_ENVELOPE});if(saved.status!==200||saved.body.length>MAX_ENVELOPE||!Buffer.from(saved.body.toString('utf8'),'utf8').equals(saved.body))return status(reply,403);let value:unknown;try{value=JSON.parse(saved.body.toString('utf8'));}catch{return status(reply,403);}if(header(saved.headers,'x-amz-version-id')!==ref.version_id||header(saved.headers,'x-amz-meta-resolution-producer')!==p.producerId||header(saved.headers,'x-amz-meta-resolution-run')!==p.runId||header(saved.headers,'x-amz-server-side-encryption')!==binding.encryption.algorithm||(binding.encryption.algorithm==='aws:kms'&&header(saved.headers,'x-amz-server-side-encryption-aws-kms-key-id')!==binding.encryption.kms_key_id)||!envelope(value,binding,ref.payload_sha256)||(ref.size_bytes!==null&&Buffer.byteLength(canonical((value as any).payload),'utf8')!==ref.size_bytes))return status(reply,403);}
    if(!await guarded(d,ctx,a,controller.signal)||!await finalAuth(request,reply,d,ctx))return status(reply,403);
-   return reply.send({allowed:true,authorization_request_sha256:hash(canonical(body)),provenance:{decision_source:'authenticated_resolution_store',authority_source:a.mode==='static'?'relationship_artifact_policy':'automatic_catalog_publication_admission',authorization_basis:a.mode==='static'?'static_policy_binding':'catalog_publication_admission',policy_version:a.mode==='static'?a.policy.policy_version:a.automatic.policy_version,authenticated_store_id:RELATIONSHIP_GATEWAY_STORE_ID,authenticated_producer_id:p.producerId,allowed_roles:['cfo'],...(a.mode==='automatic'?{cohort_id:a.automatic.cohort_id,admission_sha256:a.automatic.admission.sha256,proposal_sha256:a.automatic.proposal.sha256}: {})}});
+   return reply.send({allowed:true,authorization_request_sha256:hash(canonical(body)),provenance:{decision_source:'authenticated_resolution_store',authority_source:a.mode==='static'?'relationship_artifact_policy':'automatic_catalog_publication_admission',authorization_basis:a.mode==='static'?'static_policy_binding':'catalog_publication_admission',policy_version:a.mode==='static'?a.policy.policy_version:a.automatic.policy_version,authenticated_store_id:RELATIONSHIP_GATEWAY_STORE_ID,authenticated_producer_id:p.producerId,allowed_roles:[binding.authenticated_caller],...(a.mode==='automatic'?{cohort_id:a.automatic.cohort_id,admission_sha256:a.automatic.admission.sha256,proposal_sha256:a.automatic.proposal.sha256}: {})}});
   }catch{return !reply.sent?status(reply,503):undefined;}finally{clearTimeout(timer);controller.abort();request.raw.off('aborted',disconnect);}
  }});
  app.route({method:['GET','PUT'],url,bodyLimit:MAX_ENVELOPE,handler:async(request,reply)=>{
@@ -182,10 +185,10 @@ export function registerRelationshipArtifactGatewayRoutes(app:FastifyInstance,in
    const ctx=await context(request,reply,d);if(!ctx||reply.sent)return;
    const a=await authority(d,ctx,p,null,controller.signal);if(!a)return status(reply,403);const binding=a.binding;
    if(!await guarded(d,ctx,a,controller.signal))return status(reply,403);
-   const key=artifactKey(p.runId,p.producerId,p.shard,p.digest);
+   const key=artifactKey(binding,p.producerId,p.shard,p.digest);
    if(request.method==='PUT'){
     if(!/^application\/json(?:\s*;|$)/i.test(String(request.headers['content-type']??''))||request.headers['if-none-match']!=='*'||request.headers['if-match']!==undefined)return status(reply,400);
-    const body=parseBody(request.body);if(!body||!envelope(body,binding.run,p.digest))return status(reply,400);
+    const body=parseBody(request.body);if(!body||!envelope(body,binding,p.digest))return status(reply,400);
     const raw=Buffer.from(canonical(body));if(raw.length>MAX_ENVELOPE)return status(reply,413);
     const headers:Record<string,string>={'content-type':'application/json','if-none-match':'*','x-amz-server-side-encryption':binding.encryption.algorithm,'x-amz-meta-resolution-producer':p.producerId,'x-amz-meta-resolution-run':p.runId};if(binding.encryption.algorithm==='aws:kms')headers['x-amz-server-side-encryption-aws-kms-key-id']=binding.encryption.kms_key_id!;
     const saved=await d.s3({method:'PUT',key,headers,body:raw,signal:controller.signal,maxBytes:64*1024});if(saved.status<200||saved.status>=300)return status(reply,s3Status(saved.status));
@@ -198,7 +201,7 @@ export function registerRelationshipArtifactGatewayRoutes(app:FastifyInstance,in
    const parsed=new URL(request.url,'http://local');const entries=[...parsed.searchParams.entries()];if(entries.some(([k])=>k!=='versionId')||entries.length>1||(entries.length===1&&(entries[0][1]==='null'||!VERSION.test(entries[0][1]))))return status(reply,400);
    const versionId=entries[0]?.[1],saved=await d.s3({method:'GET',key,versionId,signal:controller.signal,maxBytes:MAX_ENVELOPE});if(saved.status!==200)return status(reply,s3Status(saved.status));
    if(saved.body.length>MAX_ENVELOPE||!Buffer.from(saved.body.toString('utf8'),'utf8').equals(saved.body))return status(reply,503);let value:unknown;try{value=JSON.parse(saved.body.toString('utf8'));}catch{return status(reply,503);}
-   const gotVersion=header(saved.headers,'x-amz-version-id');if((versionId&&gotVersion!==versionId)||!gotVersion||gotVersion==='null'||!VERSION.test(gotVersion)||!envelope(value,binding.run,p.digest)||header(saved.headers,'x-amz-meta-resolution-producer')!==p.producerId||header(saved.headers,'x-amz-meta-resolution-run')!==p.runId||header(saved.headers,'x-amz-server-side-encryption')!==binding.encryption.algorithm)return status(reply,503);
+   const gotVersion=header(saved.headers,'x-amz-version-id');if((versionId&&gotVersion!==versionId)||!gotVersion||gotVersion==='null'||!VERSION.test(gotVersion)||!envelope(value,binding,p.digest)||header(saved.headers,'x-amz-meta-resolution-producer')!==p.producerId||header(saved.headers,'x-amz-meta-resolution-run')!==p.runId||header(saved.headers,'x-amz-server-side-encryption')!==binding.encryption.algorithm)return status(reply,503);
    if(binding.encryption.algorithm==='aws:kms'&&header(saved.headers,'x-amz-server-side-encryption-aws-kms-key-id')!==binding.encryption.kms_key_id)return status(reply,503);
    if(!await guarded(d,ctx,a,controller.signal)||!await finalAuth(request,reply,d,ctx))return status(reply,403);
    reply.header('x-amz-version-id',gotVersion).header('x-amz-server-side-encryption',binding.encryption.algorithm);

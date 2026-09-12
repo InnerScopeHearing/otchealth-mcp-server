@@ -74,20 +74,20 @@ async function bounded<T>(f:()=>Promise<T>,signal:AbortSignal):Promise<T>{
 }
 async function inspect(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal,wanted?:string,setStage:(stage:string)=>void=()=>{}){
  const b=binding(policy,c,g,d.now());setStage('inspect_pins');const[a,p]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(a,p,b))fail();
- const ref=g.artifact_ref;setStage('inspect_history');const r=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);
+ const ref=g.artifact_ref;setStage('inspect_history');const r=await d.readVersion({key:h.artifactKey(b,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);
  if(history.payload.schema!=='resolution-history-v1'||Buffer.byteLength(h.canonical(history.payload))!==ref.size_bytes)fail();
  const approved=[ref,...history.payload.sources].map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id}));
  if(!equal(g.approved_artifacts,approved))fail();const sources:Json[]=[],responses=new Map<string,typeof r>();if(!wanted||wanted===ref.payload_sha256+'/'+ref.version_id)responses.set(ref.payload_sha256+'/'+ref.version_id,r);
- setStage('inspect_sources');for(const x of history.payload.sources){const response=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,x.payload_sha256),versionId:x.version_id,signal,maxBytes:16*1024*1024+1024}),s=h.parseArtifact(response,b,x.payload_sha256,x.version_id);if(s.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(s.payload))!==x.size_bytes||!h.sourceBound(s,b,p))fail();sources.push(s);if(wanted===x.payload_sha256+'/'+x.version_id)responses.set(x.payload_sha256+'/'+x.version_id,response);}
+ setStage('inspect_sources');for(const x of history.payload.sources){const response=await d.readVersion({key:h.artifactKey(b,c.producer_id,x.payload_sha256),versionId:x.version_id,signal,maxBytes:16*1024*1024+1024}),s=h.parseArtifact(response,b,x.payload_sha256,x.version_id);if(s.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(s.payload))!==x.size_bytes||!h.sourceBound(s,b,p))fail();sources.push(s);if(wanted===x.payload_sha256+'/'+x.version_id)responses.set(x.payload_sha256+'/'+x.version_id,response);}
  const currentStages={catalog:()=>setStage('inspect_catalog'),sourceCurrent:()=>setStage('inspect_source_current')};await h.current(d,b,sources,ctx,signal,currentStages);const current=await h.current(d,b,sources,ctx,signal,currentStages);return{current,responses,refresh:()=>h.current(d,b,sources,ctx,signal,currentStages)};
 }
 async function queryPublishedHistory(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal){
  const b=binding(policy,c,g,d.now()),[admission,proposal]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(admission,proposal,b))fail();
- const ref=g.artifact_ref,historyArtifact=h.parseArtifact(await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),b,ref.payload_sha256,ref.version_id);
+ const ref=g.artifact_ref,historyArtifact=h.parseArtifact(await d.readVersion({key:h.artifactKey(b,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),b,ref.payload_sha256,ref.version_id);
  if(historyArtifact.payload.schema!=='resolution-history-v1'||Buffer.byteLength(h.canonical(historyArtifact.payload))!==ref.size_bytes)fail();
  const sources:Json[]=[];for(const sourceRef of historyArtifact.payload.sources){
   if(!g.approved_artifacts.some((x:Json)=>x.digest===sourceRef.payload_sha256&&x.version_id===sourceRef.version_id))fail();
-  const source=h.parseArtifact(await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,sourceRef.payload_sha256),versionId:sourceRef.version_id,signal,maxBytes:16*1024*1024+1024}),b,sourceRef.payload_sha256,sourceRef.version_id);
+  const source=h.parseArtifact(await d.readVersion({key:h.artifactKey(b,c.producer_id,sourceRef.payload_sha256),versionId:sourceRef.version_id,signal,maxBytes:16*1024*1024+1024}),b,sourceRef.payload_sha256,sourceRef.version_id);
   if(source.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(source.payload))!==sourceRef.size_bytes||!h.sourceBound(source,b,proposal))fail();sources.push(source);
  }
  const current=await h.current(d,b,sources,ctx,signal);
@@ -168,7 +168,7 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   else{
    setStage('admission');const pins=await d.resolveAdmission({cohortId:c.cohort_id,run:input.run,ctx,signal}),ref=input.artifact_ref;
    grant={schema:'relationship-publication-grant-v1',cohort_id:c.cohort_id,producer_id:c.producer_id,caller_hash:ctx.caller_hash,run:input.run,...pins,artifact_ref:ref,approved_artifacts:[{digest:ref.payload_sha256,version_id:ref.version_id}],issued_under_policy_version:policy.policy_version};
-   const b=binding(policy,c,grant,d.now());setStage('artifact_read');const r=await d.readVersion({key:h.artifactKey(input.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);if(history.payload.schema!=='resolution-history-v1')fail();grant.approved_artifacts.push(...history.payload.sources.map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id})));
+   const b=binding(policy,c,grant,d.now());setStage('artifact_read');const r=await d.readVersion({key:h.artifactKey(b,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);if(history.payload.schema!=='resolution-history-v1')fail();grant.approved_artifacts.push(...history.payload.sources.map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id})));
   }
   setStage('inspect_pins');if(!(await inspect(d,policy,c,grant,ctx,signal,undefined,setStage)).current)fail();setStage('prewrite');await recheck();
   setStage('store_put');const saved=stored(await store.putCreateOnly({runId:input.run.run_id,body:Buffer.from(h.canonical(grant))},signal));if(!equal(saved,grant))fail(409);setStage('postwriteinspect');await recheck();if(!(await inspect(d,policy,c,grant,ctx,signal,undefined,setStage)).current)fail();await recheck();

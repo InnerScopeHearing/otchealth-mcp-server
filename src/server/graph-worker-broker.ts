@@ -96,7 +96,7 @@ type RawRequest = {
 };
 type IdentityAuthority = {
   schema: 'authenticated-structured-identity-authority-v1';
-  adapter_id: string; source_system: string; scope: 'cfo'; version: string;
+  adapter_id: string; source_system: string; scope: 'cfo'|'clo'; version: string;
 };
 export type IdentityRegistryPartitionConfig = {
   manifest_version: string;

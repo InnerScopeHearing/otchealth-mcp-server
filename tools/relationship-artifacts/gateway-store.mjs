@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export const RELATIONSHIP_ARTIFACT_BUCKET = "otchealth-finance-legal-dr-55c84f6b";
 export const RELATIONSHIP_ARTIFACT_REGION = "us-east-1";
-const WORKERS_PREFIX = "graph-trial/20260908/workers/cfo";
+const workerPrefix = callerSeat => `graph-trial/20260908/workers/${callerSeat}`;
 const PRODUCER = /^[a-z][a-z0-9-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const VERSION = /^[^\s]{1,1024}$/;
@@ -18,7 +18,7 @@ function validRun(value) {
   const content = { ref_version: value.ref_version, purpose: value.purpose, scope: value.scope,
     run_version: value.run_version, manifest_sha256: value.manifest_sha256 };
   return value.ref_version === "neptune-trial-active-run-ref-v1" && /^run_[a-f0-9]{64}$/.test(value.run_id || "") &&
-    /^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.purpose || "") && value.scope === "finance" &&
+    /^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.purpose || "") && ["finance", "legal_company"].includes(value.scope) &&
     /^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.run_version || "") && HASH.test(value.manifest_sha256 || "") &&
     value.run_id === `run_${hash(canonical(content))}`;
 }
@@ -43,18 +43,18 @@ function normalizeHistoryTrust(value, producer) {
       value.producer_ids.some(id => !PRODUCER.test(id || "")) || !value.producer_ids.includes(producer)) fail("gateway_relationship_store_configuration");
   return Object.freeze({ store_id: value.store_id, producer_ids: Object.freeze([...new Set(value.producer_ids)]) });
 }
-function physicalPrefix(run, producer) { return `${WORKERS_PREFIX}/${run.run_id}/relationship-producers/${producer}`; }
-function scopedPayload(value, run) {
+function physicalPrefix(run, producer, callerSeat) { return `${workerPrefix(callerSeat)}/${run.run_id}/relationship-producers/${producer}`; }
+function scopedPayload(value, run, callerSeat) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype) return false;
   if (value.schema === "resolution-source-input-v1") return exact(value, ["schema", "run", "input"]) && same(value.run, run);
   return value.schema === "resolution-history-v1" && exact(value, ["schema", "run", "caller_seat", "sources", "events", "queries"]) &&
-    same(value.run, run) && value.caller_seat === "cfo" && Array.isArray(value.sources) && Array.isArray(value.events) && Array.isArray(value.queries);
+    same(value.run, run) && value.caller_seat === callerSeat && Array.isArray(value.sources) && Array.isArray(value.events) && Array.isArray(value.queries);
 }
 function validateS3Request(urlText, { method, headers, body }, fixed) {
   let url;
   try { url = new URL(urlText); } catch { fail("gateway_relationship_store_route_invalid"); }
   const expectedHost = `${RELATIONSHIP_ARTIFACT_BUCKET}.s3.${RELATIONSHIP_ARTIFACT_REGION}.amazonaws.com`;
-  const prefix = physicalPrefix(fixed.run, fixed.producer);
+  const prefix = physicalPrefix(fixed.run, fixed.producer, fixed.callerSeat);
   const match = new RegExp(`^/${prefix}/resolution-artifacts/sha256/([a-f0-9]{2})/([a-f0-9]{64})\\.json$`).exec(url.pathname);
   if (url.protocol !== "https:" || url.hostname !== expectedHost || url.port || url.username || url.password || url.hash || !match || match[1] !== match[2].slice(0, 2))
     fail("gateway_relationship_store_route_invalid");
@@ -80,21 +80,22 @@ function validateS3Request(urlText, { method, headers, body }, fixed) {
  * must be supplied by trusted workflow configuration when a ref is later opened.
  */
 export function createGatewayRelationshipStore({ createS3ResolutionStore, gatewayOrigin, run, producer, authorizeArtifact,
-  getAuthorization, fetchImpl, sse, historyTrust } = {}) {
+  getAuthorization, fetchImpl, sse, historyTrust, callerSeat = run?.scope === 'legal_company' ? 'clo' : 'cfo' } = {}) {
   if (typeof createS3ResolutionStore !== "function" || !validRun(run) || !PRODUCER.test(producer || "") ||
       typeof authorizeArtifact !== "function" || typeof getAuthorization !== "function" || typeof fetchImpl !== "function")
     fail("gateway_relationship_store_configuration");
   const origin = fixedOrigin(gatewayOrigin);
-  const fixed = Object.freeze({ run: Object.freeze(structuredClone(run)), producer, sse: normalizeSse(sse),
+  if (!['cfo','clo'].includes(callerSeat) || (callerSeat === 'cfo') !== (run.scope === 'finance')) fail("gateway_relationship_store_configuration");
+  const fixed = Object.freeze({ run: Object.freeze(structuredClone(run)), producer, callerSeat, sse: normalizeSse(sse),
     historyTrust: normalizeHistoryTrust(historyTrust, producer) });
-  const scope = Object.freeze({ run: fixed.run, caller_seat: "cfo", producer_id: producer });
-  const prefix = physicalPrefix(fixed.run, producer);
+  const scope = Object.freeze({ run: fixed.run, caller_seat: fixed.callerSeat, producer_id: producer });
+  const prefix = physicalPrefix(fixed.run, producer, fixed.callerSeat);
 
   async function signRequest({ method, url, service, region, headers = {}, body = "" } = {}) {
     if (service !== "s3" || region !== RELATIONSHIP_ARTIFACT_REGION) fail("gateway_relationship_store_route_invalid");
     const route = validateS3Request(url, { method, headers, body }, fixed);
     let authorization;
-    try { authorization = await getAuthorization(Object.freeze({ run: fixed.run, caller_seat: "cfo", producer_id: producer })); }
+    try { authorization = await getAuthorization(Object.freeze({ run: fixed.run, caller_seat: fixed.callerSeat, producer_id: producer })); }
     catch { fail("gateway_relationship_store_auth_failed"); }
     if (typeof authorization !== "string" || !/^Bearer [^\s]{16,8192}$/.test(authorization)) fail("gateway_relationship_store_auth_failed");
     const gatewayUrl = `${origin}/relationship-artifacts/v1/${fixed.run.run_id}/${producer}/sha256/${route.digest.slice(0, 2)}/${route.digest}.json` +
@@ -126,12 +127,12 @@ export function createGatewayRelationshipStore({ createS3ResolutionStore, gatewa
   if (!raw || typeof raw.putArtifact !== "function" || typeof raw.getArtifact !== "function") fail("gateway_relationship_store_factory_invalid");
   return Object.freeze({
     async putArtifact(payload, { signal, scope: override } = {}) {
-      if ((override !== undefined && (!exact(override, ["run_id", "caller_seat"]) || override.run_id !== fixed.run.run_id || override.caller_seat !== "cfo")) ||
-          !scopedPayload(payload, fixed.run)) fail("gateway_relationship_store_scope_invalid");
+       if ((override !== undefined && (!exact(override, ["run_id", "caller_seat"]) || override.run_id !== fixed.run.run_id || override.caller_seat !== fixed.callerSeat)) ||
+           !scopedPayload(payload, fixed.run, fixed.callerSeat)) fail("gateway_relationship_store_scope_invalid");
       return raw.putArtifact(payload, { signal });
     },
     async getArtifact(ref, { signal, scope: override } = {}) {
-      if (override !== undefined && (!exact(override, ["run_id", "caller_seat"]) || override.run_id !== fixed.run.run_id || override.caller_seat !== "cfo"))
+       if (override !== undefined && (!exact(override, ["run_id", "caller_seat"]) || override.run_id !== fixed.run.run_id || override.caller_seat !== fixed.callerSeat))
         fail("gateway_relationship_store_scope_invalid");
       return raw.getArtifact(ref, { signal });
     },

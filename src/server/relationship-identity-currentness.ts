@@ -105,7 +105,7 @@ export function createRelationshipIdentityCurrentnessResolver(
   return Object.freeze({
     async revalidate(request, previousProof, caller, { signal }) {
       try {
-        if (signal.aborted || caller.caller_agent !== 'cfo') return null;
+        if (signal.aborted || !['cfo','clo'].includes(caller.caller_agent)) return null;
         const proof = previousProof as Json, requestSha256 = digest(canonical(request));
         if (proof?.verified !== true || proof.request_sha256 !== requestSha256) return null;
         const pointer = parseIdentityCurrentnessPointer(proof.identity_currentness, requestSha256) as Json | null;
