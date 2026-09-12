@@ -1695,6 +1695,54 @@ export function registerGraphWorkerBrokerRoutes(
     }
   });
 
+  /** Issues only target-run prepared binding metadata. It performs no model dispatch and returns no source text. */
+  app.post('/graph-worker/v1/source/:runId/cfo-text-bindings', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    if (!exact(request.body, ['run','document_ordinal']) || !validRun(request.body.run) || request.body.document_ordinal !== 0) {
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    }
+    const params = request.params as { runId: string };
+    const c = await context(request, reply, params.runId);
+    if (!c) return;
+    if (!sameRun(request.body.run, c.binding.run) || c.binding.authenticated_caller !== 'cfo' || c.binding.room !== 'finance') {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    try {
+      const prepared = await cfoTextController(c).prepare({ document_ordinal: 0 }, { signal: c.signal });
+      if (!exact(prepared, ['schema','run_id','document_ordinal','outcome','snapshot_id','source_document_version','sidecar_content_sha256','chunk_count','manifest_sha256','observed_bytes','paid_fallback']) ||
+          prepared.schema !== 'cfo-text-preparation-v1' || prepared.run_id !== c.binding.run.run_id || prepared.document_ordinal !== 0 ||
+          prepared.outcome !== 'ready' || typeof prepared.snapshot_id !== 'string' || !PREPARED_SNAPSHOT_ID.test(prepared.snapshot_id) || !SHA.test(String(prepared.manifest_sha256)) ||
+          !SHA.test(String(prepared.sidecar_content_sha256)) || !Number.isInteger(prepared.chunk_count) || prepared.chunk_count < 1 || prepared.chunk_count > 100) {
+        return fail(reply, 503, 'graph_worker_text_unavailable');
+      }
+      const snapshotId = prepared.snapshot_id;
+      const { manifest } = await loadManifest(deps, c.binding, c.signal);
+      const item = manifest.documents[0];
+      if (!item || item.ordinal !== 0 || item.document_version_id !== prepared.source_document_version || !SHA.test(item.source_version)) {
+        return fail(reply, 503, 'graph_worker_text_unavailable');
+      }
+      const bindings: PreparedBinding[] = [];
+      for (let ordinal = 0; ordinal < prepared.chunk_count; ordinal++) {
+        const chunk = await cfoTextController(c).readChunk({ snapshot_id: snapshotId, ordinal }, { signal: c.signal });
+        if (!exact(chunk, ['schema','snapshot_id','source_document_version','manifest_sha256','sidecar_content_sha256','ordinal','start_utf16','end_utf16','start_byte','end_byte','text_sha256','text']) ||
+            chunk.schema !== 'cfo-text-prepared-chunk-v1' || chunk.snapshot_id !== snapshotId || chunk.source_document_version !== item.document_version_id ||
+            chunk.manifest_sha256 !== prepared.manifest_sha256 || chunk.sidecar_content_sha256 !== prepared.sidecar_content_sha256 || chunk.ordinal !== ordinal || !SHA.test(String(chunk.text_sha256))) {
+          return fail(reply, 503, 'graph_worker_text_unavailable');
+        }
+        const binding = { schema: PREPARED_BINDING_SCHEMA, run_id: c.binding.run.run_id, room: 'finance', source_index: c.binding.source_index,
+          catalog_manifest_sha256: c.binding.run.manifest_sha256, document_ordinal: 0, source_document_version: item.document_version_id,
+          catalog_source_sha256: item.source_version, snapshot_id: snapshotId, prepared_manifest_sha256: prepared.manifest_sha256,
+          sidecar_content_sha256: prepared.sidecar_content_sha256, chunk_ordinal: ordinal, chunk_sha256: chunk.text_sha256 } as PreparedBinding;
+        if (!preparedBinding(binding, c.binding, manifest)) return fail(reply, 503, 'graph_worker_text_unavailable');
+        bindings.push(binding);
+      }
+      await recheck(c);
+      reply.header('cache-control', 'no-store');
+      return reply.send({ schema: 'cfo-prepared-binding-page-v1', run_id: c.binding.run.run_id, bindings });
+    } catch { return fail(reply, 503, 'graph_worker_text_unavailable'); }
+  });
+
   app.get(
     '/graph-worker/v1/source/:runId/cfo-text-snapshots/:snapshotId/chunks/:ordinal',
     { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } },
