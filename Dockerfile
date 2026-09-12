@@ -19,6 +19,7 @@ COPY tools/identity-registry-explicit-export.mjs ./tools/identity-registry-expli
 COPY tools/identity-registry-explicit-export-ports.mjs ./tools/identity-registry-explicit-export-ports.mjs
 COPY tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
 COPY tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
+COPY tools/identity-registry-source-handoff-task.mjs ./tools/identity-registry-source-handoff-task.mjs
 
 RUN npm run build && npm prune --omit=dev
 
