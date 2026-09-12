@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createCfoProjectBearerTokenProvider } from './relationship-artifacts/cfo-project-credential.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_READINESS_BYTES = 16 * 1024;
@@ -44,16 +45,20 @@ async function boundedReadinessJson(response) {
       const part = await reader.read();
       if (part.done) break;
       size += part.value.byteLength;
-      if (size > MAX_READINESS_BYTES) return null;
+      if (size > MAX_READINESS_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
       chunks.push(part.value);
     }
-  } finally { reader.releaseLock(); }
+  } catch { return null; }
+  finally { reader.releaseLock(); }
   try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks.map(value => Buffer.from(value)), size))); }
   catch { return null; }
 }
 
 /** Test seam only. The command-line path uses global fetch and the fixed origin. */
-export async function runIdentityRegistryProductionPreflight({ configPath, checkLive = false, sourceBindingSha256, token = process.env.GRAPH_IDENTITY_REGISTRY_CFO_BEARER_TOKEN, fetchImpl = globalThis.fetch } = {}) {
+export async function runIdentityRegistryProductionPreflight({ configPath, checkLive = false, sourceBindingSha256, cfoProjectConfig, credentialProvider, token = process.env.GRAPH_IDENTITY_REGISTRY_CFO_BEARER_TOKEN, fetchImpl = globalThis.fetch } = {}) {
   if (typeof configPath !== 'string' || !configPath || (checkLive && !sourceBindingSha256) || (!checkLive && sourceBindingSha256)) return result('blocked', 'invalid_arguments');
   if (checkLive && !SHA256.test(sourceBindingSha256)) return result('blocked', 'invalid_source_binding_sha256');
   let raw;
@@ -67,12 +72,18 @@ export async function runIdentityRegistryProductionPreflight({ configPath, check
   if (!config) return result('blocked', 'config_absent');
   const receipt = { config_valid: true, registry_config_sha256: createHash('sha256').update(raw).digest('hex'), live_probe: false };
   if (!checkLive) return result('config_valid', undefined, receipt);
-  if (!token) return result('blocked', 'cfo_bearer_token_unavailable');
+  let bearer = token;
+  if (credentialProvider || cfoProjectConfig) {
+    const provider = credentialProvider ?? createCfoProjectBearerTokenProvider({ configPath: cfoProjectConfig });
+    try { bearer = await provider({ purpose: 'identity_registry_readiness' }, { signal: AbortSignal.timeout(10_000) }); }
+    catch { return result('blocked', 'cfo_project_credential_unavailable'); }
+  }
+  if (!bearer) return result('blocked', 'cfo_bearer_token_unavailable');
   const url = `${APPROVED_GATEWAY_ORIGIN}/graph-worker/v1/identity-registry/${encodeURIComponent(config.registry_id)}/readiness`;
   let response;
   try {
     response = await fetchImpl(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(20_000),
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json' },
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify({ run_id: config.binding.run.run_id, source_binding_sha256: sourceBindingSha256 }), });
   } catch { return result('blocked', 'readiness_request_unavailable'); }
   const readiness = metadataReadiness(await boundedReadinessJson(response));
@@ -87,12 +98,12 @@ function parseCli(argv) {
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
     if (argument === '--check-live') { if (values.checkLive) return null; values.checkLive = true; continue; }
-    if (argument !== '--config' && argument !== '--source-binding-sha256') return null;
+    if (argument !== '--config' && argument !== '--source-binding-sha256' && argument !== '--cfo-project-config') return null;
     const value = argv[++index];
     if (!value || value.startsWith('--') || Object.hasOwn(values, argument)) return null;
     values[argument] = value;
   }
-  return { configPath: values['--config'], checkLive: values.checkLive === true, sourceBindingSha256: values['--source-binding-sha256'] };
+  return { configPath: values['--config'], checkLive: values.checkLive === true, sourceBindingSha256: values['--source-binding-sha256'], cfoProjectConfig: values['--cfo-project-config'] };
 }
 
 async function main() {

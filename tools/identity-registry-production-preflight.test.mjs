@@ -67,10 +67,12 @@ test('live probe uses only the approved origin and accepts the fixed success rec
     await writeFile(path, JSON.stringify(validConfig()));
     let requested = '';
     const output = await runIdentityRegistryProductionPreflight({
-      configPath: path, checkLive: true, sourceBindingSha256: 'a'.repeat(64), token: 'synthetic-only',
+      configPath: path, checkLive: true, sourceBindingSha256: 'a'.repeat(64), token: 'environment-fallback',
+      credentialProvider: async () => 'provider-only',
       fetchImpl: async (url, init) => {
         requested = url;
         assert.equal(init.redirect, 'error');
+        assert.equal(new Headers(init.headers).get('authorization'), 'Bearer provider-only');
         return new Response(JSON.stringify({ configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: true, reason: 'coverage_checked' }), { status: 200 });
       },
     });
@@ -81,14 +83,22 @@ test('live probe uses only the approved origin and accepts the fixed success rec
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('live probe rejects oversized bodies and unknown reasons without reflecting them', async () => {
+test('live probe rejects oversized bodies, stream errors, and unknown reasons without reflecting them', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'identity-registry-preflight-'));
   try {
     const path = join(directory, 'config.json');
     await writeFile(path, JSON.stringify(validConfig()));
     const input = { configPath: path, checkLive: true, sourceBindingSha256: 'a'.repeat(64), token: 'synthetic-only' };
-    const tooLarge = await runIdentityRegistryProductionPreflight({ ...input, fetchImpl: async () => new Response('x'.repeat(16 * 1024 + 1), { status: 200 }) });
+    let cancelled = false;
+    const oversized = new ReadableStream({
+      pull(controller) { controller.enqueue(new Uint8Array(16 * 1024 + 1)); },
+      cancel() { cancelled = true; },
+    });
+    const tooLarge = await runIdentityRegistryProductionPreflight({ ...input, fetchImpl: async () => new Response(oversized, { status: 200 }) });
     assert.deepEqual(tooLarge.payload, { schema: 'identity-registry-production-preflight-v1', status: 'blocked', code: 'readiness_response_invalid' });
+    assert.equal(cancelled, true);
+    const thrown = await runIdentityRegistryProductionPreflight({ ...input, fetchImpl: async () => new Response(new ReadableStream({ pull() { throw new Error('synthetic_stream_failure'); } }), { status: 200 }) });
+    assert.deepEqual(thrown.payload, { schema: 'identity-registry-production-preflight-v1', status: 'blocked', code: 'readiness_response_invalid' });
     const unknown = 'foreign-upstream-message-do-not-reflect';
     const malformed = await runIdentityRegistryProductionPreflight({ ...input, fetchImpl: async () => new Response(JSON.stringify({ configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: false, reason: unknown }), { status: 200 }) });
     assert.deepEqual(malformed.payload, { schema: 'identity-registry-production-preflight-v1', status: 'blocked', code: 'readiness_response_invalid' });
