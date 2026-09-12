@@ -237,6 +237,12 @@ test('EXTERNAL_READONLY_TOOLSET env override overrides the external set', () => 
   assert.deepEqual([...set], ['brain_search']);
 });
 
+test('cfo connector keeps its bounded relationship query through ship-set curation', () => {
+  const set = connectorToolset(testEnv(), 'cfo');
+  assert.ok(set.has('graph_relationship_query'));
+  assert.equal(connectorToolset(testEnv(), 'external-read').has('graph_relationship_query'), false);
+});
+
 // ── 2026-08-29: role-elevated connector seat curation (COO + CRO), found by LIVE tools/list probe ──
 // After the URL-only owner-code elevation shipped, a live probe showed an elevated coo connector
 // advertising only the 11-tool external read set -- its instruction block's own verbs (memory_team,
