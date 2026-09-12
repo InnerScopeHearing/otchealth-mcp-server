@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
+import { createExplicitExportImmutableStore } from './identity-registry-explicit-export-ports.js';
 import {
   bindImmutableXeroOrganisationProjection,
   canonicalXeroOrganisationProjection,
@@ -67,25 +69,60 @@ test('public projection boundaries reject forged JSON shapes before canonicaliza
   }
 });
 
-test('writes only the safe canonical projection after independent provisioning verification', async () => {
-  let written: Readonly<{ key: string; body: Buffer }> | undefined;
-  const result = await persistProvisionedXeroOrganisationSource({
-    provisioning: {
-      schema: 'cfo-xero-organisation-source-provisioning-receipt-v1',
-      status: 'verified', source_connector: 'verified', immutable_writer: 'verified',
-    },
-    connector: { getOrganisation: async () => ({ tenantId: 'tenant-native-001', response: response() }) },
-    writer: { putImmutable: async request => { written = request; return { version_id: 's3-version-synthetic-001' }; } },
-    immutableKey: 'graph-trial/identity-registry/xero-organisation/tenant-native-001.json',
+const prefix = 'graph-trial/20260912/identity-registry/cfo-pilot/source';
+const policyHash = 'a'.repeat(64);
+const deployment = () => ({
+  org: 'otchealth' as const,
+  source_storage: {
+    bucket: 'otchealth-finance-legal-dr-55c84f6b', prefix, region: 'us-east-1',
+    approvedPolicyCanonicalSha256: policyHash,
+    approvedStorageScopeSha256: createHash('sha256').update(JSON.stringify({
+      bucket: 'otchealth-finance-legal-dr-55c84f6b', prefix, policy_sha256: policyHash,
+    })).digest('hex'),
+    operationTimeoutMs: 1000,
+    sse: { algorithm: 'AES256' as const },
+  },
+});
+
+function immutableStore(mode: 'ok' | 'corrupt-bytes' | 'corrupt-version') {
+  let body: Buffer | undefined;
+  const headers = (version: string) => new Headers({
+    'x-amz-server-side-encryption': 'AES256', 'x-amz-version-id': version,
   });
-  assert.ok(written);
-  assert.equal(written!.key, 'graph-trial/identity-registry/xero-organisation/tenant-native-001.json');
-  assert.equal(written!.body.toString('utf8'), canonicalXeroOrganisationProjection(result.projection).payload);
-  assert.equal(result.record.source_document_version, 's3-version-synthetic-001');
+  return (config: Parameters<typeof createExplicitExportImmutableStore>[0]) => createExplicitExportImmutableStore({
+    ...config,
+    createRuntime: () => ({
+      preflight: async () => ({ bucket: config.bucket, prefix: config.prefix, canonical_policy_sha256: config.approvedPolicyCanonicalSha256 }),
+      request: async request => {
+        if (request.method === 'PUT') { body = Buffer.from(request.body!, 'utf8'); return { status: 201, headers: headers('version-1'), body: Buffer.alloc(0) }; }
+        if (!body) return { status: 404, headers: new Headers(), body: Buffer.alloc(0) };
+        return {
+          status: 200,
+          headers: headers(mode === 'corrupt-version' ? 'version-2' : 'version-1'),
+          body: mode === 'corrupt-bytes' ? Buffer.from('{"forged":true}') : body,
+        };
+      },
+    }) as never,
+  });
+}
+
+const sourceOwnerDeps = (mode: 'ok' | 'corrupt-bytes' | 'corrupt-version') => ({
+  getOrganisation: async () => ({
+    status: 200, body: response(), tenantId: 'tenant-native-001', dayLimitRemaining: null, minuteLimitRemaining: null,
+  }),
+  createImmutableStore: immutableStore(mode),
+});
+
+test('uses the source-owned Xero connector and readback-verified immutable writer', async () => {
+  const result = await persistProvisionedXeroOrganisationSource({
+    ...deployment(),
+  }, sourceOwnerDeps('ok'));
+  assert.equal(result.record.source_document_version, 'version-1');
+  assert.equal(result.record.source_sha256, canonicalXeroOrganisationProjection(result.projection).sha256);
+  for (const mode of ['corrupt-bytes', 'corrupt-version'] as const) {
+    await assert.rejects(persistProvisionedXeroOrganisationSource({ ...deployment() }, sourceOwnerDeps(mode)), { code: 'identity_export_store_invalid' });
+  }
   await assert.rejects(persistProvisionedXeroOrganisationSource({
-    provisioning: { schema: 'cfo-xero-organisation-source-provisioning-receipt-v1', status: 'pending', source_connector: 'verified', immutable_writer: 'verified' } as never,
-    connector: { getOrganisation: async () => { throw Error('must not run'); } },
-    writer: { putImmutable: async () => { throw Error('must not run'); } },
-    immutableKey: 'graph-trial/identity-registry/xero-organisation/tenant-native-001.json',
-  }), { code: 'xero_organisation_provisioning_unverified' });
+    ...deployment(), source_storage: { ...deployment().source_storage, prefix: 'graph-trial/not-approved' },
+  }, sourceOwnerDeps('ok')), { code: 'xero_organisation_deployment_invalid' });
 });

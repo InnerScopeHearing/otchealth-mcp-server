@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { xeroGet, type XeroOrg } from '../tools/xero/client.js';
+import { createExplicitExportImmutableStore, type ExplicitExportImmutableStoreConfig } from './identity-registry-explicit-export-ports.js';
 
 const HASH = /^[a-f0-9]{64}$/;
-const IMMUTABLE_KEY = /^graph-trial\/identity-registry\/xero-organisation\/[A-Za-z0-9._/-]{1,900}$/;
+const SOURCE_PREFIX = 'graph-trial/20260912/identity-registry/cfo-pilot/source';
 const PROJECTION_KEYS = [
   'created_date_utc', 'entity_type', 'mention', 'organisation_id', 'schema', 'status', 'tenant_id',
 ] as const;
@@ -47,25 +49,24 @@ export type XeroOrganisationMetadataReceipt = Readonly<{
   raw_response_persisted: false;
 }>;
 
-/**
- * The connector and writer are provisioned by CTO. This receipt contains no
- * credential material and makes the integration fail closed until that work
- * has been independently verified.
- */
-export type XeroOrganisationProvisioningReceipt = Readonly<{
-  schema: 'cfo-xero-organisation-source-provisioning-receipt-v1';
-  status: 'verified';
-  source_connector: 'verified';
-  immutable_writer: 'verified';
+/** Deployment-bound storage inputs, sourced from CTO's immutable-store config. */
+export type XeroOrganisationSourceStorage = Readonly<Pick<ExplicitExportImmutableStoreConfig,
+  'approvedPolicyCanonicalSha256' | 'approvedStorageScopeSha256' | 'bucket' | 'operationTimeoutMs' | 'prefix' | 'region' | 'sse'>>;
+
+export type XeroOrganisationSourceDeployment = Readonly<{
+  org: Exclude<XeroOrg, 'personal'>;
+  source_storage: XeroOrganisationSourceStorage;
 }>;
 
-export type XeroOrganisationSourceConnector = Readonly<{
-  getOrganisation(): Promise<Readonly<{ tenantId: string; response: unknown }>>;
+type SourceOwnerDeps = Readonly<{
+  getOrganisation: typeof xeroGet;
+  createImmutableStore: typeof createExplicitExportImmutableStore;
 }>;
 
-export type XeroOrganisationImmutableWriter = Readonly<{
-  putImmutable(input: Readonly<{ key: string; body: Buffer }>): Promise<Readonly<{ version_id: string }>>;
-}>;
+const productionDeps: SourceOwnerDeps = Object.freeze({
+  getOrganisation: xeroGet,
+  createImmutableStore: createExplicitExportImmutableStore,
+});
 
 type Organisation = Readonly<Record<string, unknown>>;
 
@@ -103,21 +104,13 @@ function checkedProjection(value: unknown): XeroOrganisationSafeProjection {
   return value as XeroOrganisationSafeProjection;
 }
 
-function checkedProvisioning(value: unknown): XeroOrganisationProvisioningReceipt {
-  if (!exact(value, ['immutable_writer', 'schema', 'source_connector', 'status']) ||
-      value.schema !== 'cfo-xero-organisation-source-provisioning-receipt-v1' ||
-      value.status !== 'verified' || value.source_connector !== 'verified' ||
-      value.immutable_writer !== 'verified') {
-    fail('xero_organisation_provisioning_unverified');
+function checkedDeployment(value: unknown): XeroOrganisationSourceDeployment {
+  if (!exact(value, ['org', 'source_storage']) || !['otchealth', 'innd', 'hearingassist'].includes(value.org as string) ||
+      !exact(value.source_storage, ['approvedPolicyCanonicalSha256', 'approvedStorageScopeSha256', 'bucket', 'operationTimeoutMs', 'prefix', 'region', 'sse']) ||
+      value.source_storage.prefix !== SOURCE_PREFIX) {
+    fail('xero_organisation_deployment_invalid');
   }
-  return value as XeroOrganisationProvisioningReceipt;
-}
-
-function checkedImmutableKey(value: unknown): string {
-  if (typeof value !== 'string' || !IMMUTABLE_KEY.test(value) || value.split('/').some(part => !part || part === '.' || part === '..')) {
-    fail('xero_organisation_immutable_key_invalid');
-  }
-  return value;
+  return value as XeroOrganisationSourceDeployment;
 }
 
 function singleOrganisation(value: unknown): Organisation {
@@ -211,37 +204,24 @@ export function bindImmutableXeroOrganisationProjection(input: Readonly<{
 }
 
 /**
- * The source-owner integration point. It reads the tenant's Organisation
- * metadata through a provisioned connector, writes only the safe canonical
- * projection through a conditional immutable writer, and binds the returned
- * opaque version. It is inert until a verified provisioning receipt is passed.
+ * The source-owner integration point. It reads `/Organisation` through Xero's
+ * token-rotating gateway client and creates a read-back-verified immutable
+ * object with the CTO deployment storage contract. The only injectable seams
+ * are test-only transport constructors; production always uses `productionDeps`.
  */
-export async function persistProvisionedXeroOrganisationSource(input: Readonly<{
-  provisioning: unknown;
-  connector: XeroOrganisationSourceConnector;
-  writer: XeroOrganisationImmutableWriter;
-  immutableKey: string;
-}>): Promise<Readonly<{
+export async function persistProvisionedXeroOrganisationSource(input: unknown, deps: SourceOwnerDeps = productionDeps): Promise<Readonly<{
   projection: XeroOrganisationSafeProjection;
   record: XeroOrganisationSourceRecord;
   receipt: XeroOrganisationMetadataReceipt;
 }>> {
-  checkedProvisioning(input.provisioning);
-  const key = checkedImmutableKey(input.immutableKey);
-  if (!input.connector || typeof input.connector.getOrganisation !== 'function' ||
-      !input.writer || typeof input.writer.putImmutable !== 'function') {
-    fail('xero_organisation_integration_invalid');
-  }
-  const source = await input.connector.getOrganisation();
-  if (!source || typeof source !== 'object' || Array.isArray(source) || !exact(source, ['response', 'tenantId'])) {
-    fail('xero_organisation_connector_response_invalid');
-  }
-  const projection = projectXeroOrganisation(source);
+  const deployment = checkedDeployment(input);
+  const writer = deps.createImmutableStore(deployment.source_storage);
+  const source = await deps.getOrganisation(deployment.org, '/Organisation');
+  if (!text(source.tenantId)) fail('xero_organisation_connector_response_invalid');
+  const projection = projectXeroOrganisation({ tenantId: source.tenantId, response: source.body });
   const pinned = canonicalXeroOrganisationProjection(projection);
-  const written = await input.writer.putImmutable({ key, body: Buffer.from(pinned.payload, 'utf8') });
-  if (!written || typeof written !== 'object' || Array.isArray(written) || !exact(written, ['version_id']) || !text(written.version_id)) {
-    fail('xero_organisation_immutable_write_invalid');
-  }
+  const key = `${deployment.source_storage.prefix}/identity-registries/xero-organisation/${pinned.sha256}.json`;
+  const written = await writer.putImmutable({ key, body: Buffer.from(pinned.payload, 'utf8') });
   const bound = bindImmutableXeroOrganisationProjection({
     projection,
     sourceDocumentVersion: written.version_id,
