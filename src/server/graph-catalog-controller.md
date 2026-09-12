@@ -14,6 +14,8 @@ All paths start `/graph-catalog/v1/:cohortId`. Query strings, arbitrary state pa
 | --- | --- |
 | GET `/config` | Trusted enablement, controller identity, policy hash and lifetime admission maximum. |
 | POST `/page` | Exact `{cursor,limit}`. Returns pinned catalog identity and a deterministic bounded metadata page compatible with the existing source bridge. |
+| POST `/target-page` | Exact `{source_document_version,catalog_source_sha256}`. Returns only that currently authorized immutable source page, with no cursor mutation. |
+| POST `/target-proposal` | The same exact source identity. Revalidates the selected row and immutably creates the server-owned targeted-promotion proposal. Its key and run are distinct from an ordinary proposal for the same source, while its manifest remains source-identical. It does not read or write the ordinary cursor. |
 | POST `/publish` | Exact one-document `{manifest,rows}`. Revalidates the current source row, conditionally publishes and reads back immutable row/manifest artifacts and server-owned proposal records. |
 | GET `/manifests/:sha` | A cohort-published immutable manifest only. |
 | POST `/source-current` | Exact `{item}` returns `{current:boolean}` after a pinned metadata read. |
@@ -23,7 +25,7 @@ All paths start `/graph-catalog/v1/:cohortId`. Query strings, arbitrary state pa
 | POST `/recovery` | Exact `{key,run_id}` checks separate recovery authority for an existing admission. |
 | GET `/recovery-state/:runId/:artifact/:operationId.json` | Read-only operation/result data for a recorded, prepared source chunk of the exact admitted run. No list, arbitrary source reads, writes or dispatch. |
 
-Admission uses one CAS `server/control.json` record. Its `used` count and `current` reservation move together before any authority becomes usable. Reserved runs are not accepted by the worker broker. Immutable admission and active-run registry records must be confirmed before the final active pointer is committed. Retry of the same active admission does not spend another count. A different admission cannot replace the current run until every prepared chunk has matching durable operation/result evidence. Lifetime count exhaustion never creates another active run.
+Admission uses one CAS `server/control.json` record. Its `used` count and `current` reservation move together before any authority becomes usable. Reserved runs are not accepted by the worker broker. Immutable admission and active-run registry records must be confirmed before the final active pointer is committed. Retry of the same active admission does not spend another count. Ordinary and targeted-promotion proposals both consume this same cumulative count. A different admission cannot replace the current run until every prepared chunk has matching durable operation/result evidence. Lifetime count exhaustion never creates another active run.
 
 The existing worker broker delegates dynamic cohort lookup and every recheck to `resolveCatalogCohortBinding`, then retains its ordinary active-run check and source/operation constraints. Static bindings retain their prior path. The CFO 256 KiB source canary and ordinal-zero manifest restriction are unchanged.
 
