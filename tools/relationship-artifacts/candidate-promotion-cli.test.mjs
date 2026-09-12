@@ -1,0 +1,8 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { preparePromotionTarget, runCandidatePromotionCli } from './candidate-promotion-cli.mjs';
+const target={source_document_version:'docv_'+'a'.repeat(64),catalog_source_sha256:'b'.repeat(64)};
+const config={schema:'candidate-promotion-runtime-v1',cto_root:'C:\\synthetic\\cto',host_config:'C:\\synthetic\\host.json',cfo_project_config:'C:\\synthetic\\cfo.json',target,extractor_model:'gpt-5.6-luna'};
+const proposal={key:'c'.repeat(64),run:{run_id:'run_'+'d'.repeat(64)},manifest:{manifest_sha256:'e'.repeat(64)}};
+test('target promotion preparation passes only immutable selection and emits no source body',async()=>{let request;const result=await preparePromotionTarget({config,prepareTarget:async value=>{request=value;return proposal;}});assert.deepEqual(request,target);assert.deepEqual(result,{schema:'candidate-promotion-cli-receipt-v1',event:'target_prepared',key:proposal.key,run_id:proposal.run.run_id,manifest_sha256:proposal.manifest.manifest_sha256});assert.equal(JSON.stringify(result).includes('source_document_version'),false);});
+test('CLI reports bounded configuration errors and does not invoke target preparation',async()=>{let calls=0,stderr=[];const code=await runCandidatePromotionCli({argv:['--config','synthetic.json'],load:async()=>({...config,target:{...target,catalog_source_sha256:'bad'}}),prepareTarget:async()=>{calls++;},stdout:{write:()=>{}},stderr:{write:x=>stderr.push(x)}});assert.equal(code,2);assert.equal(calls,0);assert.deepEqual(JSON.parse(stderr[0]),{schema:'candidate-promotion-cli-receipt-v1',event:'not_ready',reason:'candidate_promotion_cli_config'});});
