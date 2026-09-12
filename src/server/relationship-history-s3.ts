@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   canonicalQueryString,
   canonicalUri,
@@ -17,6 +18,7 @@ const RUN = /^run_[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
 const PRODUCER = /^[a-z][a-z0-9-]{0,63}$/;
 const COHORT = /^[a-z0-9][a-z0-9_.:-]{0,95}$/;
+const EMPTY_SHA256 = createHash('sha256').update(Buffer.alloc(0)).digest('hex');
 
 export type RelationshipHistoryRead = {
   key: string;
@@ -107,7 +109,8 @@ export function createRelationshipHistoryS3(deps: RelationshipHistoryS3Deps = {}
       const host = `${BUCKET}.s3.${REGION}.amazonaws.com`;
       const path = `/${input.key}`;
       const query = { versionId: input.versionId };
-      const signed = signer({ method: 'GET', host, path, query, region: REGION, service: 's3', credentials });
+      const signed = signer({ method: 'GET', host, path, query, region: REGION, service: 's3', credentials,
+        extraHeaders: { 'x-amz-content-sha256': EMPTY_SHA256 } });
       const encodedQuery = canonicalQueryString(query);
       const response = await abortable(fetcher(`https://${host}${canonicalUri(path)}?${encodedQuery}`, {
         method: 'GET', headers: signed.headers, signal: bound.signal, redirect: 'error',
