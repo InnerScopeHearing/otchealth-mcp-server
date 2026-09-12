@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resolveCompanyGraphScope, type CompanyGraphScope, type CompanyGraphScopeId } from './company-graph-scope.js';
 
 /**
  * Pure, bounded projection of the pinned finance catalogue used by the graph
@@ -6,8 +7,7 @@ import { createHash } from 'node:crypto';
  * so route code can obtain a page without widening its authority.
  */
 export const GRAPH_CATALOG_SOURCE_VERSION = 'catalog-mention-snapshot-v1';
-const ROOM = 'finance';
-const SOURCE_INDEX = 'finance-cfo-source-docs';
+const FINANCE_SCOPE = (() => { const resolved = resolveCompanyGraphScope('cfo', 'finance'); if (!resolved.ok) throw new Error('finance_scope_unavailable'); return resolved.scope; })();
 const SHA = /^[a-f0-9]{64}$/;
 const FIELDS = [
   'path', 'sha256', 'sidecar', 'enriched', 'enriched_sha256', 'err', 'doc_date',
@@ -18,7 +18,7 @@ const VALIDATION_TIME = '2000-01-01T00:00:00.000Z';
 
 export type FinanceCatalogRow = Readonly<Record<string, unknown>>;
 export type GraphCatalogCursor = Readonly<{
-  room: 'finance';
+  room: CompanyGraphScopeId;
   catalog_source_sha256: string;
   catalog_etag_sha256: string;
   after_document_id: string;
@@ -26,6 +26,8 @@ export type GraphCatalogCursor = Readonly<{
 
 export type GraphCatalogPlannerInput = Readonly<{
   rows: readonly FinanceCatalogRow[];
+  /** Optional only for internal company routes. The tuple is revalidated below. */
+  scope?: CompanyGraphScope;
   catalogEtag: string;
   catalogSourceSha256: string;
   createdAt: string;
@@ -34,7 +36,7 @@ export type GraphCatalogPlannerInput = Readonly<{
 }>;
 
 type Document = Readonly<{
-  room: 'finance';
+  room: CompanyGraphScopeId;
   document_version_id: string;
   source_version: string;
   source_path_hash: string;
@@ -51,8 +53,8 @@ type Manifest = Readonly<{
 
 export type GraphCatalogPlan = Readonly<{
   catalog: Readonly<{
-    room: 'finance';
-    sourceIndex: 'finance-cfo-source-docs';
+    room: CompanyGraphScopeId;
+    sourceIndex: 'finance-cfo-source-docs' | 'legal-company';
     catalogSourceSha256: string;
     catalogEtag: string;
     createdAt: string;
@@ -119,13 +121,19 @@ function eligible(row: FinanceCatalogRow): boolean {
     row.sidecar === true && row.enriched === true && row.enriched_sha256 === row.sha256 &&
     !row.err;
 }
-function documentVersion(row: FinanceCatalogRow): Pick<Document, 'document_version_id'|'source_version'|'source_path_hash'> {
+function validatedScope(value: CompanyGraphScope | undefined): CompanyGraphScope {
+  const scope = value ?? FINANCE_SCOPE;
+  const resolved = resolveCompanyGraphScope(scope.authenticatedCaller, scope.scope);
+  if (!resolved.ok || resolved.scope !== scope) fail('catalog_scope_invalid');
+  return scope;
+}
+function documentVersion(row: FinanceCatalogRow, scope: CompanyGraphScope): Pick<Document, 'document_version_id'|'source_version'|'source_path_hash'> {
   const path = row.path as string;
   const sourceVersion = row.sha256 as string;
   const sourcePathHash = hash(path);
   return {
     document_version_id: `docv_${hash(`graph-assertion-v2\0${canonical({
-      authority: { source_room: ROOM, source_index: SOURCE_INDEX, policy_ref: 'gateway:isLaneAllowed' },
+      authority: { source_room: scope.room, source_index: scope.sourceIndex, policy_ref: 'gateway:isLaneAllowed' },
       source_path_hash: sourcePathHash,
       source_version: sourceVersion,
     })}`)}`,
@@ -142,6 +150,7 @@ function frozenManifest(documents: readonly Document[], createdAt: string): Mani
 /** Mirrors source-bridge planCatalogPage with a route-shaped, finance-only result. */
 export function planGraphCatalogPage(input: GraphCatalogPlannerInput): GraphCatalogPlan {
   const { rows, catalogEtag, catalogSourceSha256, createdAt, limit = 1 } = input;
+  const scope = validatedScope(input.scope);
   if (!Array.isArray(rows) || rows.length > 100000 || typeof catalogEtag !== 'string' || !catalogEtag ||
       !SHA.test(catalogSourceSha256) || typeof createdAt !== 'string' ||
       !Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail('catalog_page_shape');
@@ -151,9 +160,9 @@ export function planGraphCatalogPage(input: GraphCatalogPlannerInput): GraphCata
   let cursorReset = false;
   if (input.cursor) {
     if (Object.keys(input.cursor).sort().join(',') !== ['room','catalog_source_sha256','catalog_etag_sha256','after_document_id'].sort().join(',') ||
-        input.cursor.room !== ROOM || input.cursor.catalog_source_sha256 !== catalogSourceSha256 ||
+        input.cursor.room !== scope.room || input.cursor.catalog_source_sha256 !== catalogSourceSha256 ||
         !SHA.test(input.cursor.catalog_etag_sha256) || !/^docv_[a-f0-9]{64}$/.test(input.cursor.after_document_id)) fail('catalog_cursor_stale');
-    if (input.cursor.room === ROOM && input.cursor.catalog_source_sha256 === catalogSourceSha256 &&
+    if (input.cursor.room === scope.room && input.cursor.catalog_source_sha256 === catalogSourceSha256 &&
         input.cursor.catalog_etag_sha256 === etagHash && typeof input.cursor.after_document_id === 'string') {
       prior = input.cursor.after_document_id;
     } else {
@@ -161,32 +170,32 @@ export function planGraphCatalogPage(input: GraphCatalogPlannerInput): GraphCata
     }
   }
 
-  const docs = new Map<string, { document: Pick<Document, 'document_version_id'|'source_version'|'source_path_hash'>; row: FinanceCatalogRow }>();
+  const docs = new Map<string, { document: Pick<Document, 'room'|'document_version_id'|'source_version'|'source_path_hash'>; row: FinanceCatalogRow }>();
   let excluded = 0;
   for (const row of rows) {
     if (!eligible(row)) { excluded++; continue; }
     const snapshot = selected(row);
-    const document = documentVersion(snapshot);
+    const document = documentVersion(snapshot, scope);
     const existing = docs.get(document.document_version_id);
     if (existing && canonical(existing.row) !== canonical(snapshot)) fail('catalog_duplicate_conflict');
-    docs.set(document.document_version_id, { document, row: snapshot });
+    docs.set(document.document_version_id, { document: { room: scope.room, ...document }, row: snapshot });
   }
   const ordered = [...docs.values()].sort((a, b) => a.document.document_version_id.localeCompare(b.document.document_version_id));
   const chosen = ordered.filter((item) => item.document.document_version_id > prior).slice(0, limit);
-  const catalog = Object.freeze({ room: ROOM, sourceIndex: SOURCE_INDEX, catalogSourceSha256, catalogEtag, createdAt });
+  const catalog = Object.freeze({ room: scope.room, sourceIndex: scope.sourceIndex, catalogSourceSha256, catalogEtag, createdAt });
   if (!chosen.length) return Object.freeze({ catalog, cursor_reset: cursorReset, page: Object.freeze({
     done: true, manifest: null, rows: [],
     counts: Object.freeze({ catalog_rows: rows.length, eligible: ordered.length, excluded, published: 0 }), next_cursor: null,
   }) });
 
   const documents: Document[] = chosen.map(({ document, row }) => ({
-    room: ROOM, ...document, enrichment_row_sha256: projectionInputSha256(row),
+    ...document, enrichment_row_sha256: projectionInputSha256(row),
     extractor_version: GRAPH_CATALOG_SOURCE_VERSION, retract_event_ids: [],
   }));
   const manifest = frozenManifest(documents, createdAt);
   const last = documents.at(-1)?.document_version_id;
   if (!last) fail('catalog_page_shape');
-  const nextCursor: GraphCatalogCursor = { room: ROOM, catalog_source_sha256: catalogSourceSha256,
+  const nextCursor: GraphCatalogCursor = { room: scope.room, catalog_source_sha256: catalogSourceSha256,
     catalog_etag_sha256: etagHash, after_document_id: last };
   return Object.freeze({ catalog, cursor_reset: cursorReset, page: Object.freeze({
     done: ordered.at(-1)?.document.document_version_id === last,

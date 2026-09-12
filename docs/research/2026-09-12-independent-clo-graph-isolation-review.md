@@ -39,3 +39,30 @@ The dependent replay branch must generalize durable query replay, historical-rea
 prepared-text binding, source currentness, and automatic artifact binding to the closed
 `finance`/`legal_company` scope table. It must preserve all CFO fixture behavior and prove a
 synthetic corporate CLO history can replay and query while finance and personal substitutions fail.
+
+## Dependent replay extension
+
+The dependent branch now resolves currentness through a company-scoped, version-pinned text reader.
+The reader receives a closed server-owned scope, checks the authenticated caller and exact room/index
+pair, and uses that scope's dedicated source prefix. A corporate CLO reader can reach only
+`otchealthlegalstore/company/`; `clo-personal`, `legal-personal`, and a finance index are refused.
+
+The catalog planner now accepts a validated internal company scope. Finance remains its default, so
+existing CFO callers retain their manifest and cursor behavior. A legal-company manifest stamps the
+legal-company room and legal-company source index into its document-version authority, allowing
+historical replay to reconstruct the same scope instead of silently reconstructing finance.
+
+Focused synthetic validation passed: 47 tests passed and 2 environment-gated integration tests
+skipped, plus TypeScript `--noEmit`. It includes a full synthetic CLO historical GET that verifies
+immutable pins, a legal-company catalog manifest, source currentness, and personal-index rejection.
+No source documents, credentials, personal legal material, or live AWS resources were accessed.
+
+## Runtime rollout gaps
+
+This change completes the closed planner and replay primitives, but does not activate a live CLO
+publication route. `graph-catalog-controller.ts` and `graph-worker-broker.ts` still instantiate
+CFO-only catalog/worker adapters and must be given a deployment-owned CLO catalog cohort and worker
+configuration before live publication. The required policy pins, source catalog version, identity
+registry, encryption configuration, and acceptance receipts remain deployment prerequisites. The
+personal legal deployment remains a separate privileged runtime and cannot reuse any company source,
+worker, identity, credential, or encryption authority.
