@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 const HASH = /^[a-f0-9]{64}$/;
+const IMMUTABLE_KEY = /^graph-trial\/identity-registry\/xero-organisation\/[A-Za-z0-9._/-]{1,900}$/;
 const PROJECTION_KEYS = [
   'created_date_utc', 'entity_type', 'mention', 'organisation_id', 'schema', 'status', 'tenant_id',
 ] as const;
@@ -46,6 +47,26 @@ export type XeroOrganisationMetadataReceipt = Readonly<{
   raw_response_persisted: false;
 }>;
 
+/**
+ * The connector and writer are provisioned by CTO. This receipt contains no
+ * credential material and makes the integration fail closed until that work
+ * has been independently verified.
+ */
+export type XeroOrganisationProvisioningReceipt = Readonly<{
+  schema: 'cfo-xero-organisation-source-provisioning-receipt-v1';
+  status: 'verified';
+  source_connector: 'verified';
+  immutable_writer: 'verified';
+}>;
+
+export type XeroOrganisationSourceConnector = Readonly<{
+  getOrganisation(): Promise<Readonly<{ tenantId: string; response: unknown }>>;
+}>;
+
+export type XeroOrganisationImmutableWriter = Readonly<{
+  putImmutable(input: Readonly<{ key: string; body: Buffer }>): Promise<Readonly<{ version_id: string }>>;
+}>;
+
 type Organisation = Readonly<Record<string, unknown>>;
 
 function fail(code: string): never {
@@ -80,6 +101,23 @@ function checkedProjection(value: unknown): XeroOrganisationSafeProjection {
     fail('xero_organisation_projection_invalid');
   }
   return value as XeroOrganisationSafeProjection;
+}
+
+function checkedProvisioning(value: unknown): XeroOrganisationProvisioningReceipt {
+  if (!exact(value, ['immutable_writer', 'schema', 'source_connector', 'status']) ||
+      value.schema !== 'cfo-xero-organisation-source-provisioning-receipt-v1' ||
+      value.status !== 'verified' || value.source_connector !== 'verified' ||
+      value.immutable_writer !== 'verified') {
+    fail('xero_organisation_provisioning_unverified');
+  }
+  return value as XeroOrganisationProvisioningReceipt;
+}
+
+function checkedImmutableKey(value: unknown): string {
+  if (typeof value !== 'string' || !IMMUTABLE_KEY.test(value) || value.split('/').some(part => !part || part === '.' || part === '..')) {
+    fail('xero_organisation_immutable_key_invalid');
+  }
+  return value;
 }
 
 function singleOrganisation(value: unknown): Organisation {
@@ -170,4 +208,44 @@ export function bindImmutableXeroOrganisationProjection(input: Readonly<{
     raw_response_persisted: false,
   });
   return Object.freeze({ record, receipt });
+}
+
+/**
+ * The source-owner integration point. It reads the tenant's Organisation
+ * metadata through a provisioned connector, writes only the safe canonical
+ * projection through a conditional immutable writer, and binds the returned
+ * opaque version. It is inert until a verified provisioning receipt is passed.
+ */
+export async function persistProvisionedXeroOrganisationSource(input: Readonly<{
+  provisioning: unknown;
+  connector: XeroOrganisationSourceConnector;
+  writer: XeroOrganisationImmutableWriter;
+  immutableKey: string;
+}>): Promise<Readonly<{
+  projection: XeroOrganisationSafeProjection;
+  record: XeroOrganisationSourceRecord;
+  receipt: XeroOrganisationMetadataReceipt;
+}>> {
+  checkedProvisioning(input.provisioning);
+  const key = checkedImmutableKey(input.immutableKey);
+  if (!input.connector || typeof input.connector.getOrganisation !== 'function' ||
+      !input.writer || typeof input.writer.putImmutable !== 'function') {
+    fail('xero_organisation_integration_invalid');
+  }
+  const source = await input.connector.getOrganisation();
+  if (!source || typeof source !== 'object' || Array.isArray(source) || !exact(source, ['response', 'tenantId'])) {
+    fail('xero_organisation_connector_response_invalid');
+  }
+  const projection = projectXeroOrganisation(source);
+  const pinned = canonicalXeroOrganisationProjection(projection);
+  const written = await input.writer.putImmutable({ key, body: Buffer.from(pinned.payload, 'utf8') });
+  if (!written || typeof written !== 'object' || Array.isArray(written) || !exact(written, ['version_id']) || !text(written.version_id)) {
+    fail('xero_organisation_immutable_write_invalid');
+  }
+  const bound = bindImmutableXeroOrganisationProjection({
+    projection,
+    sourceDocumentVersion: written.version_id,
+    sourceSha256: pinned.sha256,
+  });
+  return Object.freeze({ projection, ...bound });
 }

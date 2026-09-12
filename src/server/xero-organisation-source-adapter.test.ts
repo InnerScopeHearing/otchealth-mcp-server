@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   bindImmutableXeroOrganisationProjection,
   canonicalXeroOrganisationProjection,
+  persistProvisionedXeroOrganisationSource,
   projectXeroOrganisation,
 } from './xero-organisation-source-adapter.js';
 
@@ -64,4 +65,27 @@ test('public projection boundaries reject forged JSON shapes before canonicaliza
       projection, sourceDocumentVersion: 's3-version-synthetic-001', sourceSha256: '0'.repeat(64),
     }), { code: 'xero_organisation_projection_invalid' });
   }
+});
+
+test('writes only the safe canonical projection after independent provisioning verification', async () => {
+  let written: Readonly<{ key: string; body: Buffer }> | undefined;
+  const result = await persistProvisionedXeroOrganisationSource({
+    provisioning: {
+      schema: 'cfo-xero-organisation-source-provisioning-receipt-v1',
+      status: 'verified', source_connector: 'verified', immutable_writer: 'verified',
+    },
+    connector: { getOrganisation: async () => ({ tenantId: 'tenant-native-001', response: response() }) },
+    writer: { putImmutable: async request => { written = request; return { version_id: 's3-version-synthetic-001' }; } },
+    immutableKey: 'graph-trial/identity-registry/xero-organisation/tenant-native-001.json',
+  });
+  assert.ok(written);
+  assert.equal(written!.key, 'graph-trial/identity-registry/xero-organisation/tenant-native-001.json');
+  assert.equal(written!.body.toString('utf8'), canonicalXeroOrganisationProjection(result.projection).payload);
+  assert.equal(result.record.source_document_version, 's3-version-synthetic-001');
+  await assert.rejects(persistProvisionedXeroOrganisationSource({
+    provisioning: { schema: 'cfo-xero-organisation-source-provisioning-receipt-v1', status: 'pending', source_connector: 'verified', immutable_writer: 'verified' } as never,
+    connector: { getOrganisation: async () => { throw Error('must not run'); } },
+    writer: { putImmutable: async () => { throw Error('must not run'); } },
+    immutableKey: 'graph-trial/identity-registry/xero-organisation/tenant-native-001.json',
+  }), { code: 'xero_organisation_provisioning_unverified' });
 });
