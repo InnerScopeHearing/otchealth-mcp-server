@@ -19,8 +19,8 @@ export interface RelationshipPublicationDeps extends Omit<RelationshipHistorical
  identityCurrentness?:RelationshipIdentityCurrentnessResolver;
 }
 const SHA=/^[a-f0-9]{64}$/,RUN=/^run_[a-f0-9]{64}$/,LABEL=/^[a-z0-9][a-z0-9_.:-]{0,95}$/,PRODUCER=/^[a-z][a-z0-9-]{0,63}$/;
-const FAILURE_STAGES=new Set(['store_get','admission','artifact_read','inspect','prewrite','store_put','postwriteinspect','unknown']);
-const FAILURE_CODES=new Set(['get','put','size','credentials','deadline','record','conflict','verify','xml','artifact','pinned','source_denied','publication_cancelled','unknown']);
+const FAILURE_STAGES=new Set(['store_get','admission','artifact_read','inspect_pins','inspect_history','inspect_sources','inspect_catalog','inspect_source_current','prewrite','store_put','postwriteinspect','unknown']);
+const FAILURE_CODES=new Set(['get','put','size','credentials','deadline','record','conflict','verify','xml','artifact','pinned','source_denied','publication_cancelled','catalog_cancelled','catalog_reader_busy','catalog_head_failed','catalog_changed','catalog_get_failed','catalog_length_changed','catalog_line_too_large','catalog_too_many_rows','catalog_jsonl_invalid','catalog_content_changed','catalog_key_invalid','catalog_credentials','catalog_reader_request_invalid','catalog_timestamp_changed','catalog_version_changed','cfo_text_deadline','cfo_text_source_invalid','cfo_text_chunk_invalid','cfo_text_forbidden','cfo_text_configuration','cfo_text_credentials_unavailable','cfo_text_source_unavailable','unknown']);
 const equal=(a:any,b:any)=>h.canonical(a)===h.canonical(b);
 function identityCurrentnessMap(proofs:Array<{proof?:Json}>,decisions:Array<unknown>){
  const current=new Map<string,boolean>();
@@ -68,14 +68,14 @@ export async function resolveRelationshipArtifactAutomaticBinding(input:{run_id:
 async function bounded<T>(f:()=>Promise<T>,signal:AbortSignal):Promise<T>{
  if(signal.aborted)fail(503);return new Promise((resolve,reject)=>{const abort=()=>{signal.removeEventListener('abort',abort);reject(Object.assign(Error('publication_cancelled'),{status:503}));};signal.addEventListener('abort',abort,{once:true});Promise.resolve().then(()=>{if(signal.aborted)fail(503);return f();}).then(v=>{signal.removeEventListener('abort',abort);resolve(v);},e=>{signal.removeEventListener('abort',abort);reject(e);});if(signal.aborted)abort();});
 }
-async function inspect(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal,wanted?:string){
- const b=binding(policy,c,g,d.now()),[a,p]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(a,p,b))fail();
- const ref=g.artifact_ref,r=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);
+async function inspect(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal,wanted?:string,setStage:(stage:string)=>void=()=>{}){
+ const b=binding(policy,c,g,d.now());setStage('inspect_pins');const[a,p]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(a,p,b))fail();
+ const ref=g.artifact_ref;setStage('inspect_history');const r=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);
  if(history.payload.schema!=='resolution-history-v1'||Buffer.byteLength(h.canonical(history.payload))!==ref.size_bytes)fail();
  const approved=[ref,...history.payload.sources].map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id}));
  if(!equal(g.approved_artifacts,approved))fail();const sources:Json[]=[],responses=new Map<string,typeof r>();if(!wanted||wanted===ref.payload_sha256+'/'+ref.version_id)responses.set(ref.payload_sha256+'/'+ref.version_id,r);
- for(const x of history.payload.sources){const response=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,x.payload_sha256),versionId:x.version_id,signal,maxBytes:16*1024*1024+1024}),s=h.parseArtifact(response,b,x.payload_sha256,x.version_id);if(s.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(s.payload))!==x.size_bytes||!h.sourceBound(s,b,p))fail();sources.push(s);if(wanted===x.payload_sha256+'/'+x.version_id)responses.set(x.payload_sha256+'/'+x.version_id,response);}
- await h.current(d,b,sources,ctx,signal);const current=await h.current(d,b,sources,ctx,signal);return{current,responses,refresh:()=>h.current(d,b,sources,ctx,signal)};
+ setStage('inspect_sources');for(const x of history.payload.sources){const response=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,x.payload_sha256),versionId:x.version_id,signal,maxBytes:16*1024*1024+1024}),s=h.parseArtifact(response,b,x.payload_sha256,x.version_id);if(s.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(s.payload))!==x.size_bytes||!h.sourceBound(s,b,p))fail();sources.push(s);if(wanted===x.payload_sha256+'/'+x.version_id)responses.set(x.payload_sha256+'/'+x.version_id,response);}
+ const currentStages={catalog:()=>setStage('inspect_catalog'),sourceCurrent:()=>setStage('inspect_source_current')};await h.current(d,b,sources,ctx,signal,currentStages);const current=await h.current(d,b,sources,ctx,signal,currentStages);return{current,responses,refresh:()=>h.current(d,b,sources,ctx,signal,currentStages)};
 }
 async function queryPublishedHistory(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal){
  const b=binding(policy,c,g,d.now()),[admission,proposal]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(admission,proposal,b))fail();
@@ -166,8 +166,8 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
    grant={schema:'relationship-publication-grant-v1',cohort_id:c.cohort_id,producer_id:c.producer_id,caller_hash:ctx.caller_hash,run:input.run,...pins,artifact_ref:ref,approved_artifacts:[{digest:ref.payload_sha256,version_id:ref.version_id}],issued_under_policy_version:policy.policy_version};
    const b=binding(policy,c,grant,d.now());setStage('artifact_read');const r=await d.readVersion({key:h.artifactKey(input.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);if(history.payload.schema!=='resolution-history-v1')fail();grant.approved_artifacts.push(...history.payload.sources.map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id})));
   }
-  setStage('inspect');if(!(await inspect(d,policy,c,grant,ctx,signal)).current)fail();setStage('prewrite');await recheck();
-  setStage('store_put');const saved=stored(await store.putCreateOnly({runId:input.run.run_id,body:Buffer.from(h.canonical(grant))},signal));if(!equal(saved,grant))fail(409);setStage('postwriteinspect');await recheck();if(!(await inspect(d,policy,c,grant,ctx,signal)).current)fail();await recheck();
+  setStage('inspect_pins');if(!(await inspect(d,policy,c,grant,ctx,signal,undefined,setStage)).current)fail();setStage('prewrite');await recheck();
+  setStage('store_put');const saved=stored(await store.putCreateOnly({runId:input.run.run_id,body:Buffer.from(h.canonical(grant))},signal));if(!equal(saved,grant))fail(409);setStage('postwriteinspect');await recheck();if(!(await inspect(d,policy,c,grant,ctx,signal,undefined,setStage)).current)fail();await recheck();
   return reply.code(200).send({schema:'relationship-publication-receipt-v1',item:{run:grant.run,producer_id:c.producer_id,artifact_ref:grant.artifact_ref}});
  });
  route('GET',prefix,async(req,reply,c,policy,ctx,signal,recheck)=>{
