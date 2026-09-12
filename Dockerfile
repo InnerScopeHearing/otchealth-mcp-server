@@ -10,6 +10,15 @@ RUN npm ci --include=dev
 
 COPY tsconfig.json ./
 COPY src ./src
+# The one-off registry exporter runs as a bounded ECS task from this same reviewed
+# image. Keep its source runner and wrapper alongside the compiled server modules it
+# imports at runtime; no handoff, key, or source record is included in the image.
+COPY tools/identity-registry-exporter-task.mjs ./tools/identity-registry-exporter-task.mjs
+COPY tools/xero-organisation-explicit-export-run.mjs ./tools/xero-organisation-explicit-export-run.mjs
+COPY tools/identity-registry-explicit-export.mjs ./tools/identity-registry-explicit-export.mjs
+COPY tools/identity-registry-explicit-export-ports.mjs ./tools/identity-registry-explicit-export-ports.mjs
+COPY tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
+COPY tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
 
 RUN npm run build && npm prune --omit=dev
 
@@ -56,6 +65,12 @@ RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell 
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/package.json ./package.json
+COPY --from=build --chown=app:app /app/tools/identity-registry-exporter-task.mjs ./tools/identity-registry-exporter-task.mjs
+COPY --from=build --chown=app:app /app/tools/xero-organisation-explicit-export-run.mjs ./tools/xero-organisation-explicit-export-run.mjs
+COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export.mjs ./tools/identity-registry-explicit-export.mjs
+COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export-ports.mjs ./tools/identity-registry-explicit-export-ports.mjs
+COPY --from=build --chown=app:app /app/tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
+COPY --from=build --chown=app:app /app/tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
 # Ship the standalone eval harness (.mjs, not compiled) so the nightly eval Container Apps Job
 # can run `node eval/eval-runner.mjs` against the gateway for the regression baseline.
 COPY --from=build --chown=app:app /app/src/eval ./eval
