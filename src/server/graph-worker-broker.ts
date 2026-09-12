@@ -11,6 +11,12 @@ import {
 } from '../graph/cfo-text-snapshot.js';
 import { createCfoTextPreparationController } from '../graph/cfo-text-preparation.js';
 import {
+  createCompanyTextSnapshotReader,
+  type CompanyTextSnapshotResult,
+  type CompanyTextSource,
+} from '../graph/company-text-snapshot.js';
+import { companyGraphScopeOwnsBinding, resolveCompanyGraphScope } from './company-graph-scope.js';
+import {
   isSubscriptionReviewOperationSpec,
   SUBSCRIPTION_REVIEW_PROVIDER,
   validSubscriptionReviewOutput,
@@ -152,6 +158,10 @@ export interface GraphWorkerBrokerDeps {
   readCfoText: (
     source: CfoTextSource, callerContext: AuthContext, signal: AbortSignal,
   ) => Promise<CfoTextSnapshotResult>;
+  /** Company-scoped reader for the closed legal-company lane. */
+  readCompanyText: (
+    source: CompanyTextSource, callerContext: AuthContext, signal: AbortSignal,
+  ) => Promise<CompanyTextSnapshotResult>;
   /** A dark cohort can supply a binding only from its durable server-issued receipt. */
   resolveCohortBinding: (ctx: AuthContext, runId: string, signal: AbortSignal) => Promise<{ policy: Policy; binding: Binding } | null>;
   /**
@@ -323,6 +333,16 @@ function depsOf(injected?: Partial<GraphWorkerBrokerDeps>): GraphWorkerBrokerDep
         callerContext,
         maxSourceBytes: CFO_TEXT_CANARY_MAX_BYTES,
       }).readVersionPinnedPage(source, { signal })),
+    readCompanyText: injected?.readCompanyText ?? ((source, callerContext, signal) => {
+      const scope = resolveCompanyGraphScope(callerContext.caller_agent, source.room);
+      if (!scope.ok || !companyGraphScopeOwnsBinding(scope.scope, {
+        authenticated_caller: callerContext.caller_agent, room: source.room,
+        source_index: source.source_index, run: { scope: source.room },
+      })) throw new Error('company_text_forbidden');
+      return createCompanyTextSnapshotReader({
+        scope: scope.scope, callerContext, maxSourceBytes: CFO_TEXT_CANARY_MAX_BYTES,
+      }).readVersionPinnedPage(source, { signal });
+    }),
     resolveCohortBinding,
     identityRegistry: injected?.identityRegistry,
   };
@@ -1521,6 +1541,57 @@ export function registerGraphWorkerBrokerRoutes(
     await recheck({ ...control, signal });
     return source;
   }
+  async function resolveBoundCompanyTextSource(
+    control: BrokerControl, ordinal: number, signal: AbortSignal,
+  ): Promise<CompanyTextSource> {
+    const scope = resolveCompanyGraphScope(
+      control.ctx.caller_agent, control.binding.run.scope,
+    );
+    if (signal !== control.signal || !scope.ok ||
+        !companyGraphScopeOwnsBinding(scope.scope, control.binding) || ordinal !== 0) {
+      throw new Error('company_text_forbidden');
+    }
+    await assertActive(deps, control.binding, signal);
+    const { manifest } = await loadManifest(deps, control.binding, signal);
+    const item = manifest.documents[ordinal];
+    if (!item || item.ordinal !== ordinal || item.room !== scope.scope.room) {
+      throw new Error('company_text_source_missing');
+    }
+    const loaded = await loadRow(deps, control.binding, item, signal);
+    const source = Object.freeze({
+      room: scope.scope.room,
+      source_index: scope.scope.sourceIndex,
+      path: loaded.value.row.path as string,
+      source_path_hash: item.source_path_hash,
+      document_version_id: item.document_version_id,
+      source_version: item.source_version,
+    } as CompanyTextSource);
+    await recheck({ ...control, signal });
+    return source;
+  }
+  async function companyTextCurrentness(
+    control: BrokerControl, ordinal: number,
+  ): Promise<Record<string, unknown>> {
+    const source = await resolveBoundCompanyTextSource(control, ordinal, control.signal);
+    const result = await deps.readCompanyText(source, control.ctx, control.signal);
+    await recheck(control);
+    if (result.outcome === 'ready') {
+      return Object.freeze({
+        schema: 'company-text-currentness-v1', run_id: control.binding.run.run_id,
+        document_ordinal: ordinal, outcome: result.outcome,
+        source_document_version: result.descriptor.source_document_version,
+        catalog_source_sha256: result.descriptor.catalog_source_sha256,
+        sidecar_content_sha256: result.descriptor.sidecar_content_sha256,
+      });
+    }
+    return Object.freeze({
+      schema: 'company-text-currentness-v1', run_id: control.binding.run.run_id,
+      document_ordinal: ordinal, outcome: result.outcome,
+      source_document_version: result.source_document_version,
+      catalog_source_sha256: result.catalog_source_sha256,
+      sidecar_content_sha256: null,
+    });
+  }
   function cfoTextStore(control: BrokerControl) {
     const prefix = statePrefix(control.binding) + '/text-snapshots/';
     return async (input: RawRequest): Promise<RawResponse> => {
@@ -1658,6 +1729,31 @@ export function registerGraphWorkerBrokerRoutes(
     return output.source_sha256 === operation.sourceProof.textSha256 &&
       output.source_sha256 === operation.source.sourceBinding.chunk_sha256;
   }
+
+  /** CLO-only, closed-scope version-pinned currentness check. It never returns text or paths. */
+  app.post('/graph-worker/v1/source/:runId/company-text-currentness', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    if (!exact(request.body, ['run','document_ordinal']) ||
+        !validRun(request.body.run) || request.body.document_ordinal !== 0) {
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    }
+    const params = request.params as { runId: string };
+    const c = await context(request, reply, params.runId);
+    if (!c) return;
+    const scope = resolveCompanyGraphScope(c.ctx.caller_agent, c.binding.run.scope);
+    if (!sameRun(request.body.run, c.binding.run) || !scope.ok ||
+        scope.scope.scope !== 'legal_company' ||
+        !companyGraphScopeOwnsBinding(scope.scope, c.binding)) {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    try {
+      reply.header('cache-control', 'no-store');
+      return reply.send(await companyTextCurrentness(c, request.body.document_ordinal));
+    } catch {
+      return fail(reply, 503, 'graph_worker_text_unavailable');
+    }
+  });
 
   app.post('/graph-worker/v1/source/:runId/cfo-text-snapshots', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },

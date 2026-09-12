@@ -36,9 +36,13 @@ const projectionSha = (row: Record<string, unknown>) => {
   }
   return H(helper.canonical(pinned));
 };
-function fixture() {
+function fixture(scope: 'finance' | 'legal_company' = 'finance') {
+  const legal = scope === 'legal_company';
+  const room = legal ? 'legal_company' : 'finance';
+  const sourceIndex = legal ? 'legal-company' : 'finance-cfo-source-docs';
+  const caller = legal ? 'clo' : 'cfo';
   const row = {
-    path: 'finance/report.txt', sha256: H('source bytes'), sidecar: true,
+    path: legal ? 'company/synthetic-contract.txt' : 'finance/report.txt', sha256: H('source bytes'), sidecar: true,
     enriched: true, enriched_sha256: H('source bytes'), err: null,
     doc_date: '2026-09-01', entity: 'Synthetic Co', entities: ['Synthetic Co'],
     named_entities_orgs: ['Synthetic Co'], named_entities_people: [],
@@ -47,14 +51,14 @@ function fixture() {
   const sourceVersion = row.sha256;
   const sourcePathHash = H(row.path);
   const authority = {
-    source_room: 'finance', source_index: 'finance-cfo-source-docs',
+    source_room: room, source_index: sourceIndex,
     policy_ref: 'gateway:isLaneAllowed',
   };
   const documentVersionId = 'docv_' + H('graph-assertion-v2\0' + helper.canonical({
     authority, source_path_hash: sourcePathHash, source_version: sourceVersion,
   }));
   const item = {
-    ordinal: 0, room: 'finance', document_version_id: documentVersionId,
+    ordinal: 0, room, document_version_id: documentVersionId,
     source_version: sourceVersion, source_path_hash: sourcePathHash,
     enrichment_row_sha256: projectionSha(row),
     extractor_version: 'catalog-mention-snapshot-v1', retract_event_ids: [],
@@ -68,13 +72,12 @@ function fixture() {
   };
   const runContent = {
     ref_version: 'neptune-trial-active-run-ref-v1',
-    purpose: 'company_graph_backfill', scope: 'finance',
+    purpose: 'company_graph_backfill', scope,
     run_version: 'pilot-v1', manifest_sha256: manifest.manifest_sha256,
   };
   const run = { ...runContent, run_id: 'run_' + H(helper.canonical(runContent)) };
   const binding = {
-    authenticated_caller: 'cfo' as const, run,
-    room: 'finance' as const, source_index: 'finance-cfo-source-docs',
+    authenticated_caller: caller, run, room, source_index: sourceIndex,
   };
   const policy = {
     schema: 'graph-worker-bindings-v1', policy_version: 'gateway-policy-v1',
@@ -89,10 +92,10 @@ function fixture() {
   };
   const sourceId = helper.sourceId(binding, item);
   const sourceEnvelope = {
-    schema: 'catalog-mention-snapshot-v1', room: 'finance',
+    schema: 'catalog-mention-snapshot-v1', room,
     document_version_id: documentVersionId, row,
   };
-  const inputSha = helper.metadataInputSha(row, item, 'finance');
+  const inputSha = helper.metadataInputSha(row, item, room);
   return {
     row, item, manifest, run, binding, policy, active, sourceId,
     sourceEnvelope, inputSha,
@@ -102,14 +105,15 @@ function headers(etag = '"e1"') {
   return new Headers({ etag, 'content-type': 'application/json' });
 }
 async function harness(options: {
-  caller?: string; policy?: unknown; active?: unknown; row?: unknown; transportError?: boolean;
+  caller?: string; scope?: 'finance' | 'legal_company'; policy?: unknown; active?: unknown; row?: unknown; transportError?: boolean;
   readCfoText?: GraphWorkerBrokerDeps['readCfoText'];
+  readCompanyText?: GraphWorkerBrokerDeps['readCompanyText'];
   resolveCohortBinding?: GraphWorkerBrokerDeps['resolveCohortBinding'];
   identityRegistry?: GraphWorkerBrokerDeps['identityRegistry'];
   now?: () => number;
   rateLimit?: boolean;
 } = {}) {
-  const f = fixture();
+  const f = fixture(options.scope);
   let revision = 1;
   const objects = new Map<string, { body: Buffer; etag: string }>();
   const put = (key: string, value: unknown, etag = '"e1"') =>
@@ -118,7 +122,7 @@ async function harness(options: {
     helper.bindingHash(f.run) + '.json', options.active ?? f.active);
   put(helper.SOURCE_PREFIX + '/manifests/' + f.manifest.manifest_sha256 + '.json',
     f.manifest);
-  put(helper.SOURCE_PREFIX + '/rows/finance/' + f.item.enrichment_row_sha256 + '.json',
+  put(helper.SOURCE_PREFIX + '/rows/' + f.item.room + '/' + f.item.enrichment_row_sha256 + '.json',
     options.row ?? f.sourceEnvelope);
   const s3: GraphWorkerBrokerDeps['s3'] = async (request) => {
     if (options.transportError) throw new Error('sensitive upstream text');
@@ -155,7 +159,9 @@ async function harness(options: {
     authenticate: async (request) => ({
       caller_hash: H('caller'), raw_token: 'test-only',
       caller_agent: options.caller ??
-        (request.headers.authorization === 'Bearer cto' ? 'cto' : 'cfo'),
+        (request.headers.authorization === 'Bearer cto' ? 'cto' :
+          request.headers.authorization === 'Bearer clo' ? 'clo' :
+            request.headers.authorization === 'Bearer cfo' ? 'cfo' : f.binding.authenticated_caller),
       connector_surface: true, m365_static_auth: false,
     }),
     bindingsJson: () => JSON.stringify(options.policy ?? f.policy),
@@ -164,6 +170,14 @@ async function harness(options: {
     resolveCohortBinding: options.resolveCohortBinding,
     identityRegistry: options.identityRegistry,
     readCfoText: options.readCfoText ?? (async (source) => Object.freeze({
+      outcome: 'missing_text' as const,
+      source_document_version: source.document_version_id,
+      catalog_source_sha256: source.source_version,
+      source_path_hash: source.source_path_hash,
+      observed_bytes: null,
+      chunks: Object.freeze([]),
+    })),
+    readCompanyText: options.readCompanyText ?? (async (source) => Object.freeze({
       outcome: 'missing_text' as const,
       source_document_version: source.document_version_id,
       catalog_source_sha256: source.source_version,
@@ -359,6 +373,69 @@ test('expired policy, retired active pointer, and transport errors fail closed w
   assert.equal(cResult.statusCode, 503);
   assert.equal(cResult.body.includes('sensitive upstream text'), false);
   await c.app.close();
+});
+
+test('CLO company-text currentness uses only the legal-company tuple and never returns text', async () => {
+  const expected = fixture('legal_company');
+  const text = 'Synthetic corporate legal source excerpt.';
+  let calls = 0;
+  const h = await harness({
+    scope: 'legal_company',
+    readCompanyText: async (source, callerContext, signal) => {
+      calls++;
+      assert.equal(signal.aborted, false);
+      assert.equal(callerContext.caller_agent, 'clo');
+      assert.deepEqual(source, {
+        room: 'legal_company', source_index: 'legal-company',
+        path: 'company/synthetic-contract.txt',
+        source_path_hash: expected.item.source_path_hash,
+        document_version_id: expected.item.document_version_id,
+        source_version: expected.item.source_version,
+      });
+      return Object.freeze({
+        outcome: 'ready' as const,
+        descriptor: Object.freeze({
+          schema: 'company-version-pinned-text-snapshot-v1' as const,
+          room: 'legal_company' as const, source_index: 'legal-company' as const,
+          source_document_version: source.document_version_id,
+          catalog_source_sha256: source.source_version,
+          source_lineage_status: 'catalog_association_only' as const,
+          source_path_hash: source.source_path_hash,
+          sidecar_path_hash: H('_TEXT/' + source.path + '.txt'),
+          sidecar_etag: '"synthetic-etag"', sidecar_version_id: 'synthetic-version',
+          sidecar_content_sha256: H(text), total_bytes: Buffer.byteLength(text),
+          total_chars_utf16: text.length, chunk_count: 1, chunk_overlap_chars: 200,
+        }),
+        chunks: Object.freeze([Object.freeze({
+          ordinal: 0, start_utf16: 0, end_utf16: text.length,
+          start_byte: 0, end_byte: Buffer.byteLength(text), text_sha256: H(text), text,
+        })]),
+      });
+    },
+  });
+  const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/company-text-currentness';
+  const response = await h.app.inject({
+    method: 'POST', url, headers: { authorization: 'Bearer clo', 'content-type': 'application/json' },
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  assert.deepEqual(response.json(), {
+    schema: 'company-text-currentness-v1', run_id: h.f.run.run_id, document_ordinal: 0,
+    outcome: 'ready', source_document_version: expected.item.document_version_id,
+    catalog_source_sha256: expected.item.source_version, sidecar_content_sha256: H(text),
+  });
+  assert.equal(response.body.includes(text), false);
+  assert.equal(response.body.includes('company/synthetic-contract.txt'), false);
+  assert.equal(calls, 1);
+
+  const denied = await h.app.inject({ method: 'POST', url,
+    headers: { authorization: 'Bearer cfo', 'content-type': 'application/json' },
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(calls, 1);
+  await h.app.close();
 });
 
 test('CFO text preparation persists bound refs and serves only an exact prepared chunk', async () => {
