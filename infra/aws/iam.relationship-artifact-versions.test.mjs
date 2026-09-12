@@ -4,15 +4,28 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const policy = await readFile(new URL('./iam.tf', import.meta.url), 'utf8');
-const run = 'run_88fc625a2b155c04d116762c4e4308501cb308a8ea81ad7c41451689fa7e0f3d';
-const marker = 'Sid      = "ReadCfoRelationshipArtifactVersionsForRun88fc625a"';
+const marker = 'Sid      = "ReadCfoRelationshipArtifactVersions"';
+const admissionMarker = 'Sid      = "ReadCfoCatalogPublishAdmissionsVersions"';
 
-test('the second CFO run can read immutable artifact versions without a finance-bucket version grant', () => {
+test('CFO relationship runs can read immutable artifact versions without a finance-bucket version grant', () => {
   assert.ok(policy.includes(marker));
-  const block = policy.slice(policy.indexOf(marker), policy.indexOf('# 2026-08-28: adjacent gap', policy.indexOf(marker)));
+  const block = policy.slice(policy.indexOf(marker), policy.indexOf(admissionMarker, policy.indexOf(marker)));
 
   assert.match(block, /Action\s+=\s+\["s3:GetObjectVersion"\]/);
-  assert.match(block, new RegExp(`workers/cfo/${run}/relationship-producers/cfo-relationship-worker/resolution-artifacts/\\*`));
+  assert.match(block, /workers\/cfo\/run_\*\/relationship-producers\/cfo-relationship-worker\/resolution-artifacts\/sha256\/\?\?\/\*\.json/);
   assert.doesNotMatch(block, /s3:GetObject"|s3:PutObject|s3:DeleteObject|s3:ListBucket/);
   assert.doesNotMatch(block, /finance_legal_dr\.arn}\/\*"/);
+  assert.doesNotMatch(block, /workers\/cfo\/\*\/relationship-producers/);
+  assert.doesNotMatch(block, /workers\/clo|active-runs|catalog-cohorts|source-pilot/);
+});
+
+test('the active CFO cohort can read only immutable admission receipt versions', () => {
+  assert.ok(policy.includes(admissionMarker));
+  const block = policy.slice(policy.indexOf(admissionMarker), policy.indexOf('# 2026-08-28: adjacent gap', policy.indexOf(admissionMarker)));
+
+  assert.match(block, /Action\s+=\s+\["s3:GetObjectVersion"\]/);
+  assert.match(block, /catalog-cohorts\/cfo-catalog-publish-20260909-live\/server\/admissions\/run_\*\.json/);
+  assert.doesNotMatch(block, /s3:GetObject"|s3:PutObject|s3:DeleteObject|s3:ListBucket/);
+  assert.doesNotMatch(block, /finance_legal_dr\.arn}\/\*"/);
+  assert.doesNotMatch(block, /server\/control|server\/proposals|workers\/|otchealthcfodata/);
 });
