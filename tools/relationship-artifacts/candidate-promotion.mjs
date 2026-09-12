@@ -22,7 +22,8 @@ export function createCandidatePromotionPlanner({readParent,refreshSource,assert
   if(!exact(saved,['schema','artifact_ref','run','candidates'])||saved.schema!=='candidate-promotion-parent-v1'||canonical(artifact(saved.artifact_ref))!==canonical(parent.artifact_ref)||canonical(run(saved.run))!==canonical(parent.run)||!Array.isArray(saved.candidates)||saved.candidates.length<1||saved.candidates.length>1000)fail('candidate_promotion_parent_invalid');
   const bindings=[],index=new Map(),candidates=[];
   for(const raw of saved.candidates){const item=candidate(raw),key=canonical(item.source_ref);let sourceIndex=index.get(key);if(sourceIndex===undefined){const refreshed=promotedBinding(await refreshSource({parent,source_ref:item.source_ref,run:target},{signal}),target,item.source_ref);if(await assertCovered(refreshed,{signal})!==true)fail('candidate_promotion_source_uncovered');sourceIndex=bindings.length;index.set(key,sourceIndex);bindings.push(refreshed);}candidates.push({source_index:sourceIndex,candidate:item.candidate});}
-  const lineage=Object.freeze({schema:'candidate-promotion-lineage-v1',parent_artifact_ref:parent.artifact_ref,parent_run:parent.run,target_run:target,source_refs_sha256:sha([...index.keys()].sort())});
+  const source_refs=Object.freeze([...index.keys()].sort().map(key=>Object.freeze(JSON.parse(key))));
+  const lineage=Object.freeze({schema:'candidate-promotion-lineage-v2',parent_artifact_ref:parent.artifact_ref,parent_run:parent.run,target_run:target,source_refs,source_refs_sha256:sha(source_refs)});
   return Object.freeze({schema:'candidate-promotion-plan-v1',lineage,review_input:Object.freeze({bindings:Object.freeze(bindings),candidates:Object.freeze(candidates),queries:Object.freeze([])})});
  }});
 }
@@ -65,4 +66,16 @@ export function createHistoricalCandidateParentReader({reader}={}){
 export function createCandidatePromotionReview({planner,createSignedReview,recordLineage}={}){
  if(typeof planner?.plan!=='function'||typeof createSignedReview!=='function'||typeof recordLineage!=='function')fail('candidate_promotion_configuration');
  return Object.freeze({async reviewCandidates(request,{signal}={}){const plan=await planner.plan(request,{signal});if(await recordLineage(plan.lineage,{signal})!==true)fail('candidate_promotion_intent_unavailable');const review=await createSignedReview({run:plan.lineage.target_run,signal});if(typeof review?.reviewCandidates!=='function')fail('candidate_promotion_review_configuration');const receipt=await review.reviewCandidates(plan.review_input,{signal});if(receipt?.schema!=='resolution-review-receipt-v1'||!receipt.artifact_ref)fail('candidate_promotion_review_invalid');return receipt;}});
+}
+
+/** Adapts the create-only durable lineage store to the signed-review boundary.
+ * Replays of the same target run and exact lineage succeed idempotently. */
+export function createPromotionLineageRecorder({store,cohort_id,producer_id}={}){
+ if(typeof store?.create!=='function'||!/^[a-z][a-z0-9-]{0,63}$/.test(cohort_id)||!/^[a-z][a-z0-9-]{0,63}$/.test(producer_id))fail('candidate_promotion_configuration');
+ return async(lineage,{signal}={})=>{
+  if(signal?.aborted)fail('candidate_promotion_cancelled');
+  const target=run(lineage?.target_run);
+  await store.create({cohort_id,producer_id,run:target},lineage);
+  return true;
+ };
 }

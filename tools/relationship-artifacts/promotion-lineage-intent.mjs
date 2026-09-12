@@ -1,0 +1,28 @@
+import {createHash,randomUUID} from 'node:crypto';
+import {mkdir,open,lstat,readFile,link,unlink} from 'node:fs/promises';
+import {dirname,join,resolve,toNamespacedPath} from 'node:path';
+
+const HASH=/^[a-f0-9]{64}$/,RUN=/^run_[a-f0-9]{64}$/,LABEL=/^[a-z][a-z0-9-]{0,63}$/,MAX=524288;
+const canonical=v=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
+const sha=v=>createHash('sha256').update(canonical(v)).digest('hex');
+const exact=(v,k)=>!!v&&Object.getPrototypeOf(v)===Object.prototype&&Object.keys(v).sort().join('\0')===[...k].sort().join('\0');
+const fail=code=>{throw Object.assign(Error(code),{code});};
+const text=v=>typeof v==='string'&&v.length>0&&v.length<=1024&&!/[\0\r\n]/.test(v);
+function run(v){if(!exact(v,['ref_version','run_id','purpose','scope','run_version','manifest_sha256'])||v.ref_version!=='neptune-trial-active-run-ref-v1'||v.scope!=='finance'||!text(v.purpose)||!text(v.run_version)||!HASH.test(v.manifest_sha256)||!RUN.test(v.run_id))fail('promotion_lineage_invalid');const{run_id,...core}=v;if(run_id!=='run_'+sha(core))fail('promotion_lineage_invalid');return structuredClone(v);}
+function identity(v){if(!exact(v,['cohort_id','producer_id','run'])||!LABEL.test(v.cohort_id)||!LABEL.test(v.producer_id))fail('promotion_lineage_identity');return{cohort_id:v.cohort_id,producer_id:v.producer_id,run:run(v.run)};}
+function artifact(v){if(!exact(v,['schema','artifact_id','bucket','key','payload_sha256','version_id','size_bytes'])||v.schema!=='relationship-resolution-artifact-ref-v1'||!text(v.artifact_id)||!text(v.bucket)||!text(v.key)||!HASH.test(v.payload_sha256)||v.artifact_id!==`resart_${v.payload_sha256}`||!text(v.version_id)||!Number.isSafeInteger(v.size_bytes)||v.size_bytes<0||v.size_bytes>16777216)fail('promotion_lineage_invalid');return structuredClone(v);}
+function source(v){if(!exact(v,['source_document_version','chunk_sha256'])||!text(v.source_document_version)||!HASH.test(v.chunk_sha256))fail('promotion_lineage_invalid');return structuredClone(v);}
+function lineage(v,target){if(!exact(v,['schema','parent_artifact_ref','parent_run','target_run','source_refs','source_refs_sha256'])||v.schema!=='candidate-promotion-lineage-v2')fail('promotion_lineage_invalid');const parent=run(v.parent_run),bound=run(v.target_run),refs=v.source_refs;if(canonical(bound)!==canonical(target)||parent.run_id===bound.run_id||!Array.isArray(refs)||refs.length<1||refs.length>1000||refs.some(x=>canonical(source(x))!==canonical(x)))fail('promotion_lineage_invalid');const ordered=refs.map(source);if([...new Set(ordered.map(canonical))].length!==ordered.length||canonical(ordered)!==canonical([...ordered].sort((a,b)=>canonical(a).localeCompare(canonical(b))))||v.source_refs_sha256!==sha(ordered))fail('promotion_lineage_invalid');return{schema:v.schema,parent_artifact_ref:artifact(v.parent_artifact_ref),parent_run:parent,target_run:bound,source_refs:Object.freeze(ordered),source_refs_sha256:v.source_refs_sha256};}
+
+/** A create-only, new-run durable record for promotion lineage. It deliberately does not
+ * change the exact signed-review receipt schema, and it contains only run/ref metadata. */
+export function createPromotionLineageIntentStore(directory,{now=Date.now}={}){
+ if(typeof directory!=='string'||!directory||typeof now!=='function')fail('promotion_lineage_configuration');const root=toNamespacedPath(resolve(directory));
+ async function safeDirectory(path,create=false){if(create)await mkdir(path,{recursive:true});const stat=await lstat(path);if(!stat.isDirectory()||stat.isSymbolicLink())fail('promotion_lineage_corrupt');}
+ const file=id=>join(root,sha(id.run.run_id),sha(canonical(id))+'.json');
+ async function read(id){const path=file(id);let stat;try{stat=await lstat(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}if(!stat.isFile()||stat.isSymbolicLink()||stat.size>MAX)fail('promotion_lineage_corrupt');const bytes=await readFile(path);if(bytes.length>MAX||!Buffer.from(bytes.toString('utf8')).equals(bytes))fail('promotion_lineage_corrupt');let value;try{value=JSON.parse(bytes);}catch{fail('promotion_lineage_corrupt');}if(!exact(value,['schema','identity','lineage','created_at','sha256'])||value.schema!=='candidate-promotion-intent-v1'||canonical(identity(value.identity))!==canonical(id)||!Number.isFinite(Date.parse(value.created_at))||new Date(value.created_at).toISOString()!==value.created_at)fail('promotion_lineage_corrupt');const{sha256,...core}=value;if(sha(core)!==sha256||canonical(lineage(value.lineage,id.run))!==canonical(value.lineage))fail('promotion_lineage_corrupt');return value;}
+ return Object.freeze({
+  async get(raw){return read(identity(raw));},
+  async create(raw,lineageRaw){const id=identity(raw),entry=lineage(lineageRaw,id.run),dir=dirname(file(id));await safeDirectory(root,true);await safeDirectory(dir,true);const path=file(id),temp=join(dir,'.pending-'+randomUUID()),core={schema:'candidate-promotion-intent-v1',identity:id,lineage:entry,created_at:new Date(now()).toISOString()},bytes=Buffer.from(canonical({...core,sha256:sha(core)}));if(bytes.length>MAX)fail('promotion_lineage_invalid');let handle;try{handle=await open(temp,'wx',0o600);await handle.writeFile(bytes);await handle.sync();await handle.close();handle=null;try{await link(temp,path);}catch(error){if(error.code!=='EEXIST')throw error;const existing=await read(id);if(!existing||canonical(existing.lineage)!==canonical(entry))fail('promotion_lineage_conflict');return{created:false,lineage:existing.lineage};}return{created:true,lineage:entry};}finally{await handle?.close();await unlink(temp).catch(()=>{});}},
+ });
+}
