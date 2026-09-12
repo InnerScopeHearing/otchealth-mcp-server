@@ -245,7 +245,6 @@ export async function publishXeroOrganisationExportHandoff(input: Readonly<{
 }>): Promise<Readonly<{ handoff: XeroOrganisationExportHandoff; key: string; sha256: string; version_id: string }>> {
   if (!input.writer || typeof input.writer.putImmutable !== 'function' || input.sourceStorage.prefix !== SOURCE_PREFIX ||
       !text(input.record.source_document_version) || !HASH.test(input.record.source_sha256)) fail('xero_organisation_handoff_invalid');
-  const key = `${SOURCE_PREFIX}/identity-registries/xero-organisation/handoffs/${input.record.source_sha256}.json`;
   const storage = Object.freeze({
     bucket: input.sourceStorage.bucket, prefix: input.sourceStorage.prefix, region: input.sourceStorage.region,
     approved_policy_canonical_sha256: input.sourceStorage.approvedPolicyCanonicalSha256,
@@ -257,6 +256,10 @@ export async function publishXeroOrganisationExportHandoff(input: Readonly<{
     export_input: input.exportInput,
   });
   const payload = Buffer.from(canonical(handoff), 'utf8'), sha256 = hash(payload.toString('utf8'));
+  // The handoff includes the time-bounded export grant.  Address it by the
+  // complete canonical payload so a renewed grant for the same source pin does
+  // not collide with the prior immutable object, while an exact retry reuses it.
+  const key = `${SOURCE_PREFIX}/identity-registries/xero-organisation/handoffs/${sha256}.json`;
   const written = await input.writer.putImmutable({ key, body: payload });
   if (!written || typeof written !== 'object' || !text(written.version_id)) fail('xero_organisation_handoff_write_invalid');
   return Object.freeze({ handoff, key, sha256, version_id: written.version_id });

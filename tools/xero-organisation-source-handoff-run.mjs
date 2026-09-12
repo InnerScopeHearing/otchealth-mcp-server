@@ -4,9 +4,10 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { canonicalJson } from './identity-registry-explicit-export.mjs';
 
 const SNAPSHOT_PREFIX="graph-trial/20260912/identity-registry/cfo-pilot/snapshots",MAX=64*1024,PRIVATE_KEY=/-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/,SHA=/^[a-f0-9]{64}$/,VERSION=/^[A-Za-z0-9._~+/-]{1,1024}$/,HANDOFF_PREFIX="graph-trial/20260912/identity-registry/cfo-pilot/source/identity-registries/xero-organisation/handoffs/";
-const digest=value=>createHash("sha256").update(JSON.stringify(value,(_,item)=>item&&typeof item==="object"&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a.localeCompare(b))):item)).digest("hex");
+const digest=value=>createHash("sha256").update(canonicalJson(value)).digest("hex");
 const fail=code=>{throw Object.assign(new Error(code),{code});};
 const exact=(value,keys)=>!!value&&Object.getPrototypeOf(value)===Object.prototype&&Object.keys(value).sort().join('\0')===[...keys].sort().join('\0');
 const metadataOnly=value=>!value||typeof value!=="object"?true:Array.isArray(value)?value.every(metadataOnly):!Object.keys(value).some(key=>["records","bindings","entries","snapshot","signature"].includes(key))&&Object.values(value).every(metadataOnly);
