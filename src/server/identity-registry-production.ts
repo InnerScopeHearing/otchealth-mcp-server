@@ -2,11 +2,17 @@ import type { IdentityRegistryResolver } from './graph-worker-broker.js';
 import { parseIdentityRegistryProductionConfig } from './identity-registry-production-config.js';
 import { createIdentityRegistrySourceReader } from './identity-registry-source-reader.js';
 import { createIdentityRegistrySourceAuthority } from './identity-registry-source-authority.js';
-import { createRuntimeIdentityRegistryS3SnapshotStore } from './identity-registry-s3-runtime.js';
+import { createRuntimeIdentityRegistryS3SnapshotStore, type RuntimeIdentityRegistryS3Store } from './identity-registry-s3-runtime.js';
+
+export type ProductionIdentityRegistryResolverDeps = {
+  /** Test seam for the immutable store. Production always uses the SigV4 runtime store. */
+  createStore?: (config: Parameters<typeof createRuntimeIdentityRegistryS3SnapshotStore>[0]) => RuntimeIdentityRegistryS3Store;
+};
 
 /** Normal server startup uses this composition. Missing configuration stays unavailable. */
 export function createProductionIdentityRegistryResolver(
   raw: string | undefined = process.env.GRAPH_IDENTITY_REGISTRY_CONFIG_JSON,
+  deps: ProductionIdentityRegistryResolverDeps = {},
 ): IdentityRegistryResolver | undefined {
   const config = parseIdentityRegistryProductionConfig(raw);
   if (!config) return undefined;
@@ -18,7 +24,7 @@ export function createProductionIdentityRegistryResolver(
     manifest: config.source.manifest, pointer: config.source.pointer, readJson,
     now: () => Date.now(), timeoutMs: 10_000,
   });
-  const storage = createRuntimeIdentityRegistryS3SnapshotStore({
+  const storage = (deps.createStore ?? createRuntimeIdentityRegistryS3SnapshotStore)({
     bucket: 'otchealth-finance-legal-dr-55c84f6b', region: 'us-east-1',
     prefix: config.storage.prefix,
     approvedPolicyCanonicalSha256: config.storage.approved_policy_canonical_sha256,
@@ -33,7 +39,7 @@ export function createProductionIdentityRegistryResolver(
       const snapshots = storage.snapshots;
       return {
         registry_id, authority: config.authority, binding: config.binding,
-        public_key: config.public_key, source: authority.source, snapshots,
+        public_key: config.public_key, source: authority.source, snapshots, storage_policy_ready: true,
         partitions: {
           ...authority.partitions, manifest_version: config.partition_manifest_version,
           read_manifest: (request, options) => snapshots.read({ registry_id: request.registry_id, version: request.manifest_version }, options),
