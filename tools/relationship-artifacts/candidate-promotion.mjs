@@ -82,8 +82,8 @@ export function createPromotionLineageRecorder({store,cohort_id,producer_id}={})
 
 /** Drives the promotion-only transition. Preparation may materialize the exact target text
  * snapshot, but this runner has no worker/model dependency and never invokes extraction. */
-export function createCandidatePromotionRunner({prepareTarget,admit,prepareText,pipeline}={}){
- if(typeof prepareTarget!=='function'||typeof admit!=='function'||typeof prepareText!=='function'||typeof pipeline?.process!=='function')fail('candidate_promotion_configuration');
+export function createCandidatePromotionRunner({prepareTarget,admit,prepareText,pipeline,completePromotion}={}){
+ if(typeof prepareTarget!=='function'||typeof admit!=='function'||typeof prepareText!=='function'||typeof pipeline?.process!=='function'||typeof completePromotion!=='function')fail('candidate_promotion_configuration');
  return Object.freeze({async run({target,...request},{signal}={}){
   if(!target||!exact(target,['source_document_version','catalog_source_sha256'])||!text(target.source_document_version)||!HASH.test(target.catalog_source_sha256))fail('candidate_promotion_target_invalid');
   const proposal=await prepareTarget({source_document_version:target.source_document_version,catalog_source_sha256:target.catalog_source_sha256},{signal});
@@ -91,6 +91,7 @@ export function createCandidatePromotionRunner({prepareTarget,admit,prepareText,
   const admission=await admit(proposal,{signal});if(admission?.allowed!==true||admission.run_id!==targetRun.run_id||admission.key!==proposal.key||admission.manifest_sha256!==targetRun.manifest_sha256)fail('candidate_promotion_admission_required');
   const preparation=await prepareText(targetRun,{signal});if(preparation?.run_id!==targetRun.run_id||preparation.outcome!=='ready'||!/^txtsnap_[a-f0-9]{64}$/.test(preparation.snapshot_id||''))fail('candidate_promotion_preparation_required');
   const result=await pipeline.process(proposal,{signal,request:{...request,run:targetRun}});if(result?.status!=='complete'||result.run_id!==targetRun.run_id)fail('candidate_promotion_publication_incomplete');
-  return Object.freeze({run:targetRun,publication:structuredClone(result)});
+  const completion=await completePromotion({proposal,targetRun,publication:structuredClone(result),parent_artifact_ref:request.parent_artifact_ref,parent_run:request.parent_run},{signal});if(completion?.confirmed!==true||completion.key!==proposal.key||completion.run_id!==targetRun.run_id||!HASH.test(completion.completion_sha256||''))fail('candidate_promotion_completion_unconfirmed');
+  return Object.freeze({run:targetRun,publication:structuredClone(result),completion:structuredClone(completion)});
  }});
 }

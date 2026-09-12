@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { createFullBackfillRuntime } from './full-backfill-cli.mjs';
 import { createHistoricalRelationshipReader } from './historical-reader.mjs';
 import { createPromotionGatewayClient } from './promotion-gateway-client.mjs';
-import { createCandidatePromotionPlanner, createCandidatePromotionReview, createPreparedPromotionSourceRefresher, createPartitionCoverageAdapter, createPromotionLineageRecorder, createCandidatePromotionRunner } from './candidate-promotion.mjs';
+import { createCandidatePromotionPlanner, createCandidatePromotionReview, createHistoricalCandidateParentReader, createPreparedPromotionSourceRefresher, createPartitionCoverageAdapter, createPromotionLineageRecorder, createCandidatePromotionRunner } from './candidate-promotion.mjs';
 import { createPromotionLineageIntentStore } from './promotion-lineage-intent.mjs';
 import { createPublicationOutbox } from './publication-outbox.mjs';
 import { createPagedRecallHost } from './paged-recall-host.mjs';
@@ -24,23 +24,25 @@ function args(argv){if(argv.length!==2||argv[0]!=='--config'||!argv[1])fail('can
 export async function createCandidatePromotionRuntime({config: raw, env=process.env, stdout=process.stdout, createRuntime=createFullBackfillRuntime, createCatalogClient}={}){
  const local=config(raw), backfill=await json(local.backfill_config), runtime=await createRuntime(backfill,env,stdout);
  if(!runtime?.host||typeof runtime.bearerTokenProvider!=='function'||typeof runtime.reviewOptionsForRun!=='function'||typeof runtime.createSubscriptionCandidateReview!=='function'||!runtime.publisherOptions||!runtime.factories)fail('candidate_promotion_runtime_unavailable');
- if(!backfill.registry||backfill.review_mode==='candidate-only'||typeof backfill.cto_root!=='string'||typeof backfill.producer!=='string'||typeof backfill.outbox_directory!=='string')fail('candidate_promotion_runtime_config');
+ if(!backfill.registry||backfill.review_mode==='candidate-only'||typeof backfill.cto_root!=='string'||backfill.producer!=='cfo-relationship-worker'||typeof backfill.outbox_directory!=='string')fail('candidate_promotion_runtime_config');
  const catalogFactory=createCatalogClient??(await import(pathToFileURL(join(backfill.cto_root,'tools/neptune-trial/catalog-controller/gateway-client.mjs')).href)).createCatalogGatewayClient;
  const catalog=catalogFactory({cohort_id:runtime.host.cohort_id,seat:'cfo',bearerTokenProvider:runtime.bearerTokenProvider});
- if(typeof catalog?.createController!=='function'||typeof catalog?.admit!=='function'||typeof catalog?.workerBrokerForRun!=='function')fail('candidate_promotion_runtime_unavailable');
+ if(typeof catalog?.createController!=='function'||typeof catalog?.admit!=='function'||typeof catalog?.completePromotion!=='function'||typeof catalog?.workerBrokerForRun!=='function')fail('candidate_promotion_runtime_unavailable');
  const lineageStore=createPromotionLineageIntentStore(join(backfill.outbox_directory,'promotion-lineage'));
  async function buildPipeline(targetRun){
   const options=await runtime.reviewOptionsForRun(targetRun),gateway=createPromotionGatewayClient({run:targetRun,registryId:backfill.registry.id,bearerTokenProvider:runtime.bearerTokenProvider});
-  const planner=createCandidatePromotionPlanner({readParent:createHistoricalRelationshipReader({gatewayOrigin:'https://mcp.otchealth.app',run:local.parent_run,producer:backfill.producer,historyTrust:runtime.publisherOptions.historyTrust,getAuthorization:runtime.publisherOptions.getAuthorization,fetchImpl:runtime.publisherOptions.fetchImpl,sse:runtime.publisherOptions.sse}),refreshSource:createPreparedPromotionSourceRefresher({findPreparedBinding:gateway.findPreparedBinding,sourceAdapter:options.resolution.sourceAdapter}),assertCovered:createPartitionCoverageAdapter({registryId:backfill.registry.id,readiness:gateway.readiness})});
+  const parentReader=createHistoricalRelationshipReader({gatewayOrigin:'https://mcp.otchealth.app',run:local.parent_run,producer:backfill.producer,historyTrust:runtime.publisherOptions.historyTrust,getAuthorization:runtime.publisherOptions.getAuthorization,fetchImpl:runtime.publisherOptions.fetchImpl,sse:runtime.publisherOptions.sse});
+  const planner=createCandidatePromotionPlanner({readParent:createHistoricalCandidateParentReader({reader:parentReader}),refreshSource:createPreparedPromotionSourceRefresher({findPreparedBinding:gateway.findPreparedBinding,sourceAdapter:options.resolution.sourceAdapter}),assertCovered:createPartitionCoverageAdapter({registryId:backfill.registry.id,readiness:gateway.readiness})});
   const review=createCandidatePromotionReview({planner,recordLineage:createPromotionLineageRecorder({store:lineageStore,cohort_id:runtime.host.cohort_id,producer_id:backfill.producer}),createSignedReview:async({run,signal})=>runtime.createSubscriptionCandidateReview(await runtime.reviewOptionsForRun(run,{signal}))});
   const publisher=createPagedRecallHost({...runtime.publisherOptions,...runtime.factories});
-  return createRelationshipPublicationPipeline({cohort_id:runtime.host.cohort_id,producer_id:backfill.producer,outbox:createPublicationOutbox(backfill.outbox_directory),publisher,
+  const outbox=createPublicationOutbox(backfill.outbox_directory),pipeline=createRelationshipPublicationPipeline({cohort_id:runtime.host.cohort_id,producer_id:backfill.producer,outbox,publisher,
    loadExtracted:async()=>({bindings:[],candidates:[],queries:[]}),createReview:async()=>({reviewCandidates:async()=>review.reviewCandidates({parent_artifact_ref:local.parent_artifact_ref,parent_run:local.parent_run,run:targetRun})})});
+  return{pipeline,outbox};
  }
  return Object.freeze({async run({signal}={}){
   await runtime.checkCredential();await runtime.checkRegistry();
   const controller=await catalog.createController({binary:runtime.host.binary,environment:env,extractorModel:backfill.extractor_model,signal});
-  let pipeline;const runner=createCandidatePromotionRunner({prepareTarget:(value,options)=>controller.prepareTarget(value,options),admit:(proposal,options)=>catalog.admit(proposal,options),prepareText:async(targetRun,options)=>catalog.workerBrokerForRun(targetRun).prepareText({document_ordinal:0},options),pipeline:{process:async(proposal,options)=>{pipeline??=await buildPipeline(proposal.run);return pipeline.process(proposal,options);}}});
+  let built;const runner=createCandidatePromotionRunner({prepareTarget:(value,options)=>controller.prepareTarget(value,options),admit:(proposal,options)=>catalog.admit(proposal,options),prepareText:async(targetRun,options)=>catalog.workerBrokerForRun(targetRun).prepareText({document_ordinal:0},options),pipeline:{process:async(proposal,options)=>{built??=await buildPipeline(proposal.run);return built.pipeline.process(proposal,options);}},completePromotion:async({proposal,targetRun},{signal}={})=>{const item=await built?.outbox.get({cohort_id:runtime.host.cohort_id,producer_id:backfill.producer,run:targetRun}),lineage=await lineageStore.get({cohort_id:runtime.host.cohort_id,producer_id:backfill.producer,run:targetRun});if(item?.state!=='published'||!item.receipt?.artifact_ref||!lineage?.lineage)fail('candidate_promotion_completion_unavailable');return catalog.completePromotion({proposal,artifact_ref:item.receipt.artifact_ref,producer_id:backfill.producer,parent_run:lineage.lineage.parent_run,parent_artifact_ref:lineage.lineage.parent_artifact_ref,source_refs:lineage.lineage.source_refs,source_refs_sha256:lineage.lineage.source_refs_sha256},{signal});}});
   return runner.run({target:local.target,parent_artifact_ref:local.parent_artifact_ref,parent_run:local.parent_run},{signal});
  }});
 }
