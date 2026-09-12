@@ -12,8 +12,8 @@
  * There is deliberately NO "browse any role" escape hatch here: the brief says "not hardcoded to one
  * role" (the folder is a parameter) AND "do NOT let one role browse another role's folders by
  * default". Both hold: the folder is caller-supplied, but it must resolve to the caller's own role.
- * The clo-personal lane is treated as the CLO role for drive purposes (its OneDrive exchange folders
- * are the CLO folders); this keeps the personal-legal lane from being stranded without a drive.
+ * Personal legal exchange uses the distinct "CLO Personal ..." namespace. It is never an alias
+ * for the company CLO folders, because folder-name routing is also an authorization boundary.
  */
 
 /** Map a caller lane to the role token(s) it owns in OneDrive folder names. */
@@ -21,19 +21,22 @@ const LANE_TO_ROLES: Record<string, string[]> = {
   cto: ['cto'],
   cfo: ['cfo'],
   clo: ['clo'],
-  'clo-personal': ['clo'], // the personal-legal lane shares the CLO OneDrive exchange folders
+  'clo-personal': ['clo-personal'],
   coo: ['coo'],
   cro: ['cro'],
   cpo: ['cpo'],
   cco: ['cco'],
-  exec: ['cto', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco'], // unified chief owns every role's folders
+  exec: ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco'], // unified chief owns every role's folders
   developer: ['developer', 'dev'],
 };
 
 /** The leading role token of a folder path, e.g. "CLO Outgoing/sub" -> "clo". null if none. */
 export function roleOfFolder(folderPath: string): string | null {
   const first = folderPath.replace(/^\/+/, '').split('/')[0] ?? '';
-  const token = first.trim().split(/\s+/)[0] ?? '';
+  const words = first.trim().split(/\s+/);
+  const token = words[0]?.toLowerCase() === 'clo' && words[1]?.toLowerCase() === 'personal'
+    ? 'clo-personal'
+    : words[0] ?? '';
   return token ? token.toLowerCase() : null;
 }
 

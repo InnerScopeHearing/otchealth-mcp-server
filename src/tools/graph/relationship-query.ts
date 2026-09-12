@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { createRelationshipPublicationDiscoveryService, type RelationshipPublicationDiscoveryService } from '../../server/relationship-publication.js';
 import { isConnectorSurface } from '../../server/request-context.js';
 import { registerTool, type CallerHashProvider } from '../registry.js';
+import { resolveCompanyGraphScope } from '../../server/company-graph-scope.js';
 
 const candidateQuery = z.object({
   kind: z.literal('candidate_links'),
@@ -31,8 +32,8 @@ export function registerCfoRelationshipQuery(
     name: 'graph_relationship_query',
     category: 'read',
     annotations: {
-      title: 'Query current CFO relationship publication history',
-      description: 'CFO-only query over server-discovered immutable relationship publications. Candidate name matches stay explicitly unverified. Verified X-to-Y-to-Z dependency paths require a complete bounded scan plus fresh source and identity proof checks. The server pages storage reads in groups of at most 64 and scans at most 256 histories; next_after and an incomplete answer are returned when more history remains.',
+      title: 'Query current company relationship publication history',
+      description: 'Scope-bound query over server-discovered immutable relationship publications. CFO may query finance and corporate CLO may query company legal. Candidate name matches stay explicitly unverified. Verified X-to-Y-to-Z dependency paths require a complete bounded scan plus fresh source and identity proof checks. The server pages storage reads in groups of at most 64 and scans at most 256 histories; next_after and an incomplete answer are returned when more history remains.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -41,7 +42,7 @@ export function registerCfoRelationshipQuery(
     inputShape: {
       cohort_id: z.string().min(1).max(96),
       producer_id: z.string().min(1).max(64),
-      scope: z.literal('finance').optional(),
+      scope: z.enum(['finance', 'legal_company']).optional(),
       after: z.string().regex(/^run_[a-f0-9]{64}$/).optional(),
       scan_limit: z.number().int().min(1).max(64).optional(),
       history_limit: z.number().int().min(1).max(256).optional(),
@@ -52,8 +53,9 @@ export function registerCfoRelationshipQuery(
       error: z.string().optional(),
     },
     handler: async (input, ctx) => {
-      if (ctx.callerAgent !== 'cfo' || !isConnectorSurface()) {
-        return { data: { result: null, error: 'forbidden_cfo_only' }, summary: 'Refused: this relationship query is restricted to the authenticated CFO connector.' };
+      const scope = resolveCompanyGraphScope(ctx.callerAgent, input.scope);
+      if (!scope.ok || !isConnectorSurface()) {
+        return { data: { result: null, error: 'forbidden_graph_scope' }, summary: 'Refused: this relationship query requires the authenticated connector for its requested company graph scope.' };
       }
       service ??= createRelationshipPublicationDiscoveryService();
       const controller = new AbortController();
