@@ -38,12 +38,14 @@ export function createPreparedPromotionSourceRefresher({findPreparedBinding,sour
   return promotedBinding(binding,target,source_ref);
  };
 }
-/** The partition registry's lookup performs manifest, currentness, and exact catalog-coverage checks before returning. */
-export function createPartitionCoverageAdapter({registry}={}){
- if(typeof registry?.lookup!=='function')fail('candidate_promotion_configuration');
+/** Uses the authenticated registry readiness contract, which checks exact binding coverage without a synthetic mention. */
+export function createPartitionCoverageAdapter({registryId,readiness}={}){
+ if(!text(registryId)||typeof readiness!=='function')fail('candidate_promotion_configuration');
  return async(binding,{signal}={})=>{
-  try { await registry.lookup({source_binding:binding,mention:'promotion-coverage-probe'},{signal}); return true; }
-  catch(error){if(['partition_binding_not_covered','partition_binding_unrouted','partition_manifest_not_current','partition_shard_not_current'].includes(error?.code))return false;throw error;}
+  if(!text(binding?.source_document_version)||!HASH.test(binding?.chunk_sha256)||!RUN.test(binding?.run_id))fail('candidate_promotion_source_changed');
+  const source_binding_sha256=sha({source_document_version:binding.source_document_version,source_sha256:binding.chunk_sha256});
+  const result=await readiness({registry_id:registryId,run_id:binding.run_id,source_binding_sha256},{signal});
+  return result?.coverage_ready===true&&result?.reason==='coverage_checked';
  };
 }
 
