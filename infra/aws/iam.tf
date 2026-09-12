@@ -52,6 +52,38 @@ resource "aws_iam_role_policy" "task_runtime_access" {
           "${aws_s3_bucket.finance_legal_dr.arn}/*",
         ]
       },
+      {
+        # Documentation of the live read-modify-write change required by the
+        # CFO relationship backfill. Do not run terraform apply for this
+        # imported estate. The artifact store discovers an existing object with
+        # GetObject, then validates that exact immutable object version with
+        # GetObjectVersion before accepting a conditional-write collision.
+        #
+        # The resource admits only versioned CFO relationship-worker artifacts
+        # below a run-prefixed key. It excludes active-run pointers, catalog and
+        # admission records, sources, other producers and all CLO paths. `??`
+        # is the two-character content-hash shard. Gateway policy still requires
+        # the authenticated CFO caller, a current cohort binding and a durable
+        # server-issued admission before it can construct a key in this area.
+        # This statement grants neither ListBucket nor any write or delete action.
+        Sid      = "ReadCfoRelationshipArtifactVersions"
+        Effect   = "Allow"
+        Action   = ["s3:GetObjectVersion"]
+        Resource = "${aws_s3_bucket.finance_legal_dr.arn}/graph-trial/20260908/workers/cfo/run_*/relationship-producers/cfo-relationship-worker/resolution-artifacts/sha256/??/*.json"
+      },
+      {
+        # The publication path pins the server-issued CFO admission receipt and
+        # re-reads its exact immutable version during inspect_pins. This scope
+        # is the active CFO cohort's admission records only. It excludes cohort
+        # control/proposal records, all source objects, worker pointers, other
+        # cohorts and every write/list/delete action. Do not terraform apply
+        # this imported estate. The live change is a reviewed read-modify-write
+        # update of the current gateway role's discovered inline policy.
+        Sid      = "ReadCfoCatalogPublishAdmissionsVersions"
+        Effect   = "Allow"
+        Action   = ["s3:GetObjectVersion"]
+        Resource = "${aws_s3_bucket.finance_legal_dr.arn}/graph-trial/20260908/catalog-cohorts/cfo-catalog-publish-20260909-live/server/admissions/run_*.json"
+      },
       # 2026-08-28: adjacent gap closed alongside the PersonalLegalRingReadWrite edit below (same
       # underlying cause -- Azure's permanent deletion made every S3-mirror write path load-bearing
       # instead of best-effort). `company` is already in S3_WRITABLE_CONTAINERS

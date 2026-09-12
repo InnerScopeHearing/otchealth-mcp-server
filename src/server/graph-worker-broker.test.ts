@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import Fastify from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import type { GraphWorkerBrokerDeps } from './graph-worker-broker.js';
@@ -104,6 +105,7 @@ async function harness(options: {
   caller?: string; policy?: unknown; active?: unknown; row?: unknown; transportError?: boolean;
   readCfoText?: GraphWorkerBrokerDeps['readCfoText'];
   resolveCohortBinding?: GraphWorkerBrokerDeps['resolveCohortBinding'];
+  identityRegistry?: GraphWorkerBrokerDeps['identityRegistry'];
   now?: () => number;
   rateLimit?: boolean;
 } = {}) {
@@ -160,6 +162,7 @@ async function harness(options: {
     now: options.now ?? (() => NOW),
     s3,
     resolveCohortBinding: options.resolveCohortBinding,
+    identityRegistry: options.identityRegistry,
     readCfoText: options.readCfoText ?? (async (source) => Object.freeze({
       outcome: 'missing_text' as const,
       source_document_version: source.document_version_id,
@@ -173,6 +176,82 @@ async function harness(options: {
   return { app, f, objects };
 }
 const authHeaders = { authorization: 'Bearer cfo', 'content-type': 'application/json' };
+
+test('identity registry readiness is CFO-only, metadata-only, and does not claim coverage without a checked binding', async () => {
+  const missing = await harness();
+  const missingResponse = await missing.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: missing.f.run.run_id } });
+  assert.equal(missingResponse.statusCode, 200);
+  assert.deepEqual(missingResponse.json(), { configured: false, valid_config: false, storage_policy_ready: false, coverage_ready: false, reason: 'not_configured' });
+  await missing.app.close();
+
+  const unavailable = await harness({ identityRegistry: { resolve: async () => { throw new Error('synthetic storage failure'); } } });
+  const unavailableResponse = await unavailable.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: unavailable.f.run.run_id } });
+  assert.equal(unavailableResponse.statusCode, 200);
+  assert.deepEqual(unavailableResponse.json(), { configured: null, valid_config: null, storage_policy_ready: null, coverage_ready: false, reason: 'resolver_unavailable' });
+  assert.equal(unavailableResponse.body.includes('synthetic storage failure'), false);
+  await unavailable.app.close();
+
+  const absent = await harness({ identityRegistry: { resolve: async () => null } });
+  const absentResponse = await absent.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: absent.f.run.run_id } });
+  assert.deepEqual(absentResponse.json(), { configured: false, valid_config: null, storage_policy_ready: null, coverage_ready: false, reason: 'registry_not_configured' });
+  await absent.app.close();
+
+  const invalid = await harness({ identityRegistry: { resolve: async () => ({ registry_id: 'ready-registry' } as any) } });
+  const invalidResponse = await invalid.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: invalid.f.run.run_id } });
+  assert.deepEqual(invalidResponse.json(), { configured: true, valid_config: false, storage_policy_ready: null, coverage_ready: false, reason: 'invalid_config' });
+  await invalid.app.close();
+
+  const keyPair = generateKeyPairSync('ed25519');
+  const key = keyPair.publicKey.export({ format: 'pem', type: 'spki' }).toString();
+  const authority = { schema: 'authenticated-structured-identity-authority-v1', adapter_id: 'synthetic', source_system: 'synthetic', scope: 'cfo' as const, version: 'v1' };
+  const coverageHash = H('catalog-coverage');
+  const shards = '0123456789abcdef'.split('').map(prefix => ({
+    shard_id: 'shard-' + prefix, partition_prefix: prefix, registry_version: 'sirv_' + prefix,
+    source_version: 'source-' + prefix, snapshot_sha256: H('snapshot-' + prefix),
+    binding_set_sha256: H('bindings-' + prefix), binding_count: 0,
+  }));
+  const coverage = { schema: 'source-identity-catalog-coverage-v1', catalog_version: 'catalog-v1', complete: true,
+    coverage_sha256: coverageHash, expected_shard_count: shards.length, source_binding_count: 0,
+    source_binding_set_sha256: H('binding-set') };
+  const unsigned = { schema: 'source-identity-registry-partition-manifest-v1', registry_id: 'ready-registry',
+    source_authority: authority, source_generation: 'generation-1', catalog_coverage: coverage,
+    shards, public_key_sha256: createHash('sha256').update(keyPair.publicKey.export({ type: 'spki', format: 'der' })).digest('hex') };
+  const manifestVersion = 'sirm_' + H(helper.canonical(unsigned));
+  const snapshot = { ...unsigned, version: manifestVersion };
+  const envelope = { snapshot, signature: sign(null, Buffer.from(helper.canonical(snapshot)), keyPair.privateKey).toString('base64') };
+  const registry = (covered: boolean): GraphWorkerBrokerDeps['identityRegistry'] => ({ resolve: async ({ registry_id }) => registry_id === 'ready-registry' ? ({
+    registry_id, authority, binding: fixture().binding, public_key: key, storage_policy_ready: true,
+    source: { page: async () => ({ }), current: async () => true },
+    snapshots: { publish: async () => true, read: async () => ({ status: 'missing' as const }) },
+    partitions: { manifest_version: manifestVersion, read_manifest: async () => ({ status: 'active' as const, envelope }),
+      manifest_current: async () => true, binding_covered: async () => covered },
+  } as any) : null });
+  const ready = await harness({ identityRegistry: registry(true) });
+  const response = await ready.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: ready.f.run.run_id } });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: false, reason: 'coverage_not_checked' });
+  const covered = await ready.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: ready.f.run.run_id, source_binding_sha256: H('binding') } });
+  assert.deepEqual(covered.json(), { configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: true, reason: 'coverage_checked' });
+  const notCovered = await harness({ identityRegistry: registry(false) });
+  const missingCoverage = await notCovered.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: notCovered.f.run.run_id, source_binding_sha256: H('binding') } });
+  assert.deepEqual(missingCoverage.json(), { configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: false, reason: 'coverage_missing' });
+  await notCovered.app.close();
+  const wrongRun = await ready.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: authHeaders, payload: { run_id: 'run_' + 'a'.repeat(64) } });
+  assert.equal(wrongRun.statusCode, 200);
+  assert.equal(wrongRun.json().reason, 'run_mismatch');
+  const denied = await ready.app.inject({ method: 'POST', url: '/graph-worker/v1/identity-registry/ready-registry/readiness',
+    headers: { ...authHeaders, authorization: 'Bearer cto' }, payload: { run_id: ready.f.run.run_id } });
+  assert.equal(denied.statusCode, 403);
+  await ready.app.close();
+});
 
 function authorizeRequest(f: ReturnType<typeof fixture>) {
   return {
@@ -363,6 +442,102 @@ test('CFO text preparation persists bound refs and serves only an exact prepared
   });
   assert.equal(cto.statusCode, 403);
   assert.equal(calls.length, 1);
+  await h.app.close();
+});
+
+test('CFO prepared binding page validates the target run and never returns prepared text', async () => {
+  const expected = fixture();
+  const text = 'Synthetic target-run source excerpt.';
+  const h = await harness({
+    readCfoText: async (source) => Object.freeze({
+      outcome: 'ready' as const,
+      descriptor: Object.freeze({
+        schema: 'cfo-version-pinned-text-snapshot-v1' as const,
+        room: 'finance' as const,
+        source_index: 'finance-cfo-source-docs' as const,
+        source_document_version: source.document_version_id,
+        catalog_source_sha256: source.source_version,
+        source_lineage_status: 'catalog_association_only' as const,
+        source_path_hash: source.source_path_hash,
+        sidecar_path_hash: H('_TEXT/' + source.path + '.txt'),
+        sidecar_etag: '"synthetic-etag"', sidecar_version_id: 'synthetic-version',
+        sidecar_content_sha256: H(text), total_bytes: Buffer.byteLength(text),
+        total_chars_utf16: text.length, chunk_count: 1, chunk_overlap_chars: 200,
+      }),
+      chunks: Object.freeze([Object.freeze({
+        ordinal: 0, start_utf16: 0, end_utf16: text.length,
+        start_byte: 0, end_byte: Buffer.byteLength(text), text_sha256: H(text), text,
+      })]),
+    }),
+  });
+  const url = '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-bindings';
+  const response = await h.app.inject({
+    method: 'POST', url, headers: authHeaders,
+    payload: { run: h.f.run, document_ordinal: 0 },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  const page = response.json();
+  assert.deepEqual(Object.keys(page).sort(), ['bindings', 'run_id', 'schema']);
+  assert.equal(page.schema, 'cfo-prepared-binding-page-v1');
+  assert.equal(page.run_id, h.f.run.run_id);
+  assert.equal(page.bindings.length, 1);
+  assert.deepEqual(page.bindings[0], {
+    schema: 'cfo-prepared-chunk-binding-v1', run_id: h.f.run.run_id, room: 'finance',
+    source_index: 'finance-cfo-source-docs', catalog_manifest_sha256: h.f.run.manifest_sha256,
+    document_ordinal: 0, source_document_version: expected.item.document_version_id,
+    catalog_source_sha256: expected.item.source_version,
+    snapshot_id: page.bindings[0].snapshot_id,
+    prepared_manifest_sha256: page.bindings[0].prepared_manifest_sha256,
+    sidecar_content_sha256: H(text), chunk_ordinal: 0, chunk_sha256: H(text),
+  });
+  assert.equal(JSON.stringify(page).includes(text), false);
+
+  const wrongRun = { ...h.f.run, run_id: 'run_' + H('wrong') };
+  const forbidden = await h.app.inject({ method: 'POST', url, headers: authHeaders,
+    payload: { run: wrongRun, document_ordinal: 0 } });
+  assert.equal(forbidden.statusCode, 400);
+  const cto = await h.app.inject({ method: 'POST', url, headers: { ...authHeaders, authorization: 'Bearer cto' },
+    payload: { run: h.f.run, document_ordinal: 0 } });
+  assert.equal(cto.statusCode, 403);
+  await h.app.close();
+});
+
+test('CFO prepared binding page reconstructs a bounded 100-chunk target snapshot without rereading the source', async () => {
+  const chunks = Array.from({ length: 100 }, (_, ordinal) => {
+    const text = `synthetic-${ordinal.toString().padStart(3, '0')}`;
+    const start = ordinal * text.length;
+    return Object.freeze({ ordinal, start_utf16: start, end_utf16: start + text.length,
+      start_byte: start, end_byte: start + Buffer.byteLength(text), text_sha256: H(text), text });
+  });
+  const sourceText = chunks.map(chunk => chunk.text).join('');
+  let reads = 0;
+  const h = await harness({
+    readCfoText: async (source, _caller, signal) => {
+      reads++;
+      assert.equal(signal.aborted, false);
+      return Object.freeze({ outcome: 'ready' as const, descriptor: Object.freeze({
+        schema: 'cfo-version-pinned-text-snapshot-v1' as const, room: 'finance' as const,
+        source_index: 'finance-cfo-source-docs' as const,
+        source_document_version: source.document_version_id, catalog_source_sha256: source.source_version,
+        source_lineage_status: 'catalog_association_only' as const, source_path_hash: source.source_path_hash,
+        sidecar_path_hash: H('_TEXT/' + source.path + '.txt'), sidecar_etag: '"synthetic-etag"',
+        sidecar_version_id: 'synthetic-version', sidecar_content_sha256: H(sourceText),
+        total_bytes: Buffer.byteLength(sourceText), total_chars_utf16: sourceText.length,
+        chunk_count: chunks.length, chunk_overlap_chars: 200,
+      }), chunks });
+    },
+  });
+  const response = await h.app.inject({ method: 'POST',
+    url: '/graph-worker/v1/source/' + h.f.run.run_id + '/cfo-text-bindings', headers: authHeaders,
+    payload: { run: h.f.run, document_ordinal: 0 } });
+  assert.equal(response.statusCode, 200);
+  const page = response.json();
+  assert.equal(page.bindings.length, 100);
+  assert.equal(page.bindings[0].chunk_sha256, chunks[0].text_sha256);
+  assert.equal(page.bindings[99].chunk_sha256, chunks[99].text_sha256);
+  assert.equal(reads, 1);
+  assert.equal(JSON.stringify(page).includes(chunks[50].text), false);
   await h.app.close();
 });
 
