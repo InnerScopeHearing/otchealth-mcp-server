@@ -78,8 +78,8 @@ const COMPANY_PROFILE: TextProfile = Object.freeze({
 
 export interface CfoTextPreparationControllerOptions {
   runId: string;
-  sourceReader: SourceReader;
-  resolveSource: SourceResolver;
+  sourceReader: Readonly<{ readVersionPinnedPage: (source: CfoTextSource, options: { signal: AbortSignal }) => Promise<CfoTextSnapshotResult> }>;
+  resolveSource: (documentOrdinal: number, options: { signal: AbortSignal }) => Promise<CfoTextSource>;
   recheck: Recheck;
   store: Store;
   maxPreparedBytes?: number;
@@ -155,6 +155,10 @@ function validateChunk(chunk: TextChunk, expectedOrdinal: number, profile: TextP
       typeof chunk.text !== 'string' || chunk.text.length < 1 || chunk.text.length > 16_000 ||
       Buffer.byteLength(chunk.text, 'utf8') > 16 * 1024) fail(`${profile.errorPrefix}_preparation_invalid`);
 }
+type TextPreparationControllerOptions = Omit<CfoTextPreparationControllerOptions, 'sourceReader' | 'resolveSource'> & {
+  sourceReader: SourceReader;
+  resolveSource: SourceResolver;
+};
 function validDescriptor(value: unknown, source: TextSource, chunkCount: number, profile: TextProfile): value is Record<string, unknown> {
   const keys = ['schema','room','source_index','source_document_version','catalog_source_sha256',
     'source_lineage_status','source_path_hash','sidecar_path_hash','sidecar_etag','sidecar_version_id',
@@ -222,7 +226,7 @@ function bundleKey(prefix: string, snapshotId: string, ordinal: number, hash: st
  * resolveSource and recheck closures captured from its trusted auth/policy context.
  * Request bodies supply only a document ordinal or a prepared snapshot id/ordinal.
  */
-function createTextPreparationController(options: CfoTextPreparationControllerOptions, profile: TextProfile) {
+function createTextPreparationController(options: TextPreparationControllerOptions, profile: TextProfile) {
   if (!options || !RUN_ID.test(options.runId || '') || typeof options.resolveSource !== 'function' ||
       typeof options.recheck !== 'function' || typeof options.store !== 'function' ||
       typeof options.sourceReader?.readVersionPinnedPage !== 'function') fail(`${profile.errorPrefix}_preparation_configuration`);
@@ -453,7 +457,7 @@ function createTextPreparationController(options: CfoTextPreparationControllerOp
 }
 
 export function createCfoTextPreparationController(options: CfoTextPreparationControllerOptions) {
-  return createTextPreparationController(options, CFO_PROFILE);
+  return createTextPreparationController(options as unknown as TextPreparationControllerOptions, CFO_PROFILE);
 }
 
 export interface CompanyTextPreparationControllerOptions extends Omit<CfoTextPreparationControllerOptions, 'sourceReader' | 'resolveSource'> {
@@ -462,5 +466,5 @@ export interface CompanyTextPreparationControllerOptions extends Omit<CfoTextPre
 }
 
 export function createCompanyTextPreparationController(options: CompanyTextPreparationControllerOptions) {
-  return createTextPreparationController(options as unknown as CfoTextPreparationControllerOptions, COMPANY_PROFILE);
+  return createTextPreparationController(options as unknown as TextPreparationControllerOptions, COMPANY_PROFILE);
 }

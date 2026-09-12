@@ -46,6 +46,9 @@ const PREPARED_AUTH_SCHEMA = 'company-prepared-text-gateway-authorization-v1';
 const PREPARED_BINDING_SCHEMA = 'cfo-prepared-chunk-binding-v1';
 const PREPARED_SOURCE_SCHEMA = 'cfo-prepared-chunk-source-v1';
 const PREPARED_SOURCE_ID = /^cfotext_[a-f0-9]{64}$/;
+const COMPANY_PREPARED_BINDING_SCHEMA = 'company-prepared-chunk-binding-v1';
+const COMPANY_PREPARED_SOURCE_SCHEMA = 'company-prepared-chunk-source-v1';
+const COMPANY_PREPARED_SOURCE_ID = /^companytext_[a-f0-9]{64}$/;
 const PREPARED_SOURCE_VERSION = /^txtchunk_[a-f0-9]{64}$/;
 const PREPARED_SNAPSHOT_ID = /^txtsnap_[a-f0-9]{64}$/;
 const IDENTITY_REGISTRY_SCHEMA = 'source-identity-registry-v1';
@@ -74,10 +77,10 @@ type Policy = {
   expires_at: string; bindings: Binding[];
 };
 type PreparedBinding = {
-  schema: 'cfo-prepared-chunk-binding-v1';
+  schema: 'cfo-prepared-chunk-binding-v1' | 'company-prepared-chunk-binding-v1';
   run_id: string;
-  room: 'finance';
-  source_index: 'finance-cfo-source-docs';
+  room: 'finance' | 'legal_company';
+  source_index: 'finance-cfo-source-docs' | 'legal-company';
   catalog_manifest_sha256: string;
   document_ordinal: number;
   source_document_version: string;
@@ -88,6 +91,22 @@ type PreparedBinding = {
   chunk_ordinal: number;
   chunk_sha256: string;
 };
+type PreparedProfile = Readonly<{
+  bindingSchema: PreparedBinding['schema']; sourceSchema: string;
+  sourceId: RegExp; sourceIdPrefix: 'cfotext' | 'companytext';
+  chunkSchema: 'cfo-text-prepared-chunk-v1' | 'company-text-prepared-chunk-v1';
+  room: PreparedBinding['room']; sourceIndex: PreparedBinding['source_index'];
+}>;
+const CFO_PREPARED_PROFILE: PreparedProfile = Object.freeze({
+  bindingSchema: PREPARED_BINDING_SCHEMA, sourceSchema: PREPARED_SOURCE_SCHEMA,
+  sourceId: PREPARED_SOURCE_ID, sourceIdPrefix: 'cfotext',
+  chunkSchema: 'cfo-text-prepared-chunk-v1', room: 'finance', sourceIndex: 'finance-cfo-source-docs',
+});
+const COMPANY_PREPARED_PROFILE: PreparedProfile = Object.freeze({
+  bindingSchema: COMPANY_PREPARED_BINDING_SCHEMA, sourceSchema: COMPANY_PREPARED_SOURCE_SCHEMA,
+  sourceId: COMPANY_PREPARED_SOURCE_ID, sourceIdPrefix: 'companytext',
+  chunkSchema: 'company-text-prepared-chunk-v1', room: 'legal_company', sourceIndex: 'legal-company',
+});
 type OperationSource =
   | { kind: 'metadata'; item: ManifestItem }
   | { kind: 'prepared'; item: ManifestItem; sourceBinding: PreparedBinding };
@@ -536,15 +555,21 @@ const PREPARED_BINDING_KEYS = [
   'snapshot_id','prepared_manifest_sha256','sidecar_content_sha256',
   'chunk_ordinal','chunk_sha256',
 ];
+function preparedProfile(binding: Binding): PreparedProfile | null {
+  const scope = resolveCompanyGraphScope(binding.authenticated_caller, binding.run.scope);
+  if (!scope.ok || !companyGraphScopeOwnsBinding(scope.scope, binding)) return null;
+  return scope.scope.scope === 'legal_company' ? COMPANY_PREPARED_PROFILE : CFO_PREPARED_PROFILE;
+}
 function preparedBinding(
   value: unknown, binding: Binding, manifest: Manifest,
 ): { binding: PreparedBinding; item: ManifestItem } | null {
   if (!exact(value, PREPARED_BINDING_KEYS)) return null;
   const prepared = value as unknown as PreparedBinding;
-  if (prepared.schema !== PREPARED_BINDING_SCHEMA ||
+  const profile = preparedProfile(binding);
+  if (!profile || prepared.schema !== profile.bindingSchema ||
       prepared.run_id !== binding.run.run_id ||
-      prepared.room !== 'finance' || binding.room !== 'finance' ||
-      prepared.source_index !== 'finance-cfo-source-docs' ||
+      prepared.room !== profile.room || binding.room !== profile.room ||
+      prepared.source_index !== profile.sourceIndex ||
       binding.source_index !== prepared.source_index ||
       prepared.catalog_manifest_sha256 !== binding.run.manifest_sha256 ||
       prepared.document_ordinal !== 0 ||
@@ -565,9 +590,9 @@ function preparedBinding(
 function preparedSourceVersion(sourceBinding: PreparedBinding): string {
   return 'txtchunk_' + digest(canonical(sourceBinding));
 }
-function preparedSourceId(purpose: string, sourceBinding: PreparedBinding): string {
-  return 'cfotext_' + digest(canonical({
-    schema: PREPARED_SOURCE_SCHEMA, purpose, source_binding: sourceBinding,
+function preparedSourceId(purpose: string, sourceBinding: PreparedBinding, profile: PreparedProfile): string {
+  return profile.sourceIdPrefix + '_' + digest(canonical({
+    schema: profile.sourceSchema, purpose, source_binding: sourceBinding,
   }));
 }
 function preparedAuthorizationRequest(
@@ -629,12 +654,11 @@ function parseAuthorization(
   }
   if (request.schema !== PREPARED_AUTH_SCHEMA ||
       request.phase !== 'model_source_access' ||
-      ctx.caller_agent !== 'cfo' || binding.authenticated_caller !== 'cfo' ||
-      binding.room !== 'finance' ||
       !exact(request.source, ['source_id','subscription_source_version','purpose',
         'canonical_input_sha256','source_binding'])) return null;
   const source = request.source as Record<string, unknown>;
-  if (!PREPARED_SOURCE_ID.test(String(source.source_id)) ||
+  const profile = preparedProfile(binding);
+  if (!profile || !profile.sourceId.test(String(source.source_id)) ||
       !PREPARED_SOURCE_VERSION.test(String(source.subscription_source_version)) ||
       source.purpose !== binding.run.purpose ||
       !SHA.test(String(source.canonical_input_sha256))) return null;
@@ -898,8 +922,10 @@ function operationSource(
   }
   const prepared = preparedBinding(spec.source_binding, binding, manifest);
   if (!prepared) return null;
+  const profile = preparedProfile(binding);
+  if (!profile) return null;
   const sourceVersion = preparedSourceVersion(prepared.binding);
-  const sourceIdValue = preparedSourceId(binding.run.purpose, prepared.binding);
+  const sourceIdValue = preparedSourceId(binding.run.purpose, prepared.binding, profile);
   if (spec.source_id !== sourceIdValue || spec.source_version !== sourceVersion) return null;
   const request = preparedAuthorizationRequest(
     binding, prepared.binding, sourceIdValue, sourceVersion, String(spec.input_sha256),
@@ -1488,9 +1514,11 @@ export function registerGraphWorkerBrokerRoutes(
           parsed.sourceBinding, c.binding, manifest,
         );
         if (!prepared) return fail(reply, 403, 'graph_worker_forbidden');
+        const profile = preparedProfile(c.binding);
+        if (!profile) return fail(reply, 403, 'graph_worker_forbidden');
         const sourceVersion = preparedSourceVersion(prepared.binding);
         const sourceIdValue = preparedSourceId(
-          c.binding.run.purpose, prepared.binding,
+          c.binding.run.purpose, prepared.binding, profile,
         );
         const expected = preparedAuthorizationRequest(
           c.binding, prepared.binding, sourceIdValue, sourceVersion,
@@ -1662,14 +1690,18 @@ export function registerGraphWorkerBrokerRoutes(
   async function resolvePreparedChunk(
     control: BrokerControl, sourceBinding: PreparedBinding,
   ): Promise<{ inputSha256: string; textSha256: string; text: string } | null> {
-    const result = await cfoTextController(control).readChunk({
+    const profile = preparedProfile(control.binding);
+    if (!profile || sourceBinding.schema !== profile.bindingSchema) return null;
+    const controller = profile === COMPANY_PREPARED_PROFILE
+      ? companyTextController(control) : cfoTextController(control);
+    const result = await controller.readChunk({
       snapshot_id: sourceBinding.snapshot_id,
       ordinal: sourceBinding.chunk_ordinal,
     }, { signal: control.signal });
     if (!exact(result, ['schema','snapshot_id','source_document_version',
       'manifest_sha256','sidecar_content_sha256','ordinal','start_utf16',
       'end_utf16','start_byte','end_byte','text_sha256','text']) ||
-      result.schema !== 'cfo-text-prepared-chunk-v1' ||
+      result.schema !== profile.chunkSchema ||
       result.snapshot_id !== sourceBinding.snapshot_id ||
       result.source_document_version !== sourceBinding.source_document_version ||
       result.manifest_sha256 !== sourceBinding.prepared_manifest_sha256 ||
@@ -1681,7 +1713,7 @@ export function registerGraphWorkerBrokerRoutes(
       digest(result.text) !== sourceBinding.chunk_sha256) return null;
     const sourceVersion = preparedSourceVersion(sourceBinding);
     const document = {
-      text: result.text, document_version_id: sourceVersion, room: 'finance',
+      text: result.text, document_version_id: sourceVersion, room: profile.room,
     };
     return {
       inputSha256: digest(canonical(document)),

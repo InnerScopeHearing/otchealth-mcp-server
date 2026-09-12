@@ -500,6 +500,39 @@ test('CLO prepared text loads the legal catalog prefix and serves the bound comp
   assert.equal(chunk.json().schema, 'company-text-prepared-chunk-v1');
   assert.equal(chunk.json().text, text);
   assert.equal(chunk.json().manifest_sha256, receipt.json().manifest_sha256);
+  const sourceBinding = {
+    schema: 'company-prepared-chunk-binding-v1', run_id: h.f.run.run_id,
+    room: 'legal_company', source_index: 'legal-company',
+    catalog_manifest_sha256: h.f.run.manifest_sha256, document_ordinal: 0,
+    source_document_version: expected.item.document_version_id,
+    catalog_source_sha256: expected.item.source_version,
+    snapshot_id: receipt.json().snapshot_id,
+    prepared_manifest_sha256: receipt.json().manifest_sha256,
+    sidecar_content_sha256: H(text), chunk_ordinal: 0, chunk_sha256: H(text),
+  };
+  const sourceVersion = 'txtchunk_' + H(helper.canonical(sourceBinding));
+  const sourceId = 'companytext_' + H(helper.canonical({
+    schema: 'company-prepared-chunk-source-v1', purpose: h.f.run.purpose,
+    source_binding: sourceBinding,
+  }));
+  const inputSha = H(helper.canonical({
+    text, document_version_id: sourceVersion, room: 'legal_company',
+  }));
+  const authorization = await h.app.inject({
+    method: 'POST', url: '/graph-worker/v1/authorize',
+    headers: { authorization: 'Bearer clo', 'content-type': 'application/json' },
+    payload: {
+      schema: 'company-prepared-text-gateway-authorization-v1',
+      phase: 'model_source_access', authenticated_caller: 'clo', run: h.f.run,
+      source: {
+        source_id: sourceId, subscription_source_version: sourceVersion,
+        purpose: h.f.run.purpose, canonical_input_sha256: inputSha, source_binding: sourceBinding,
+      },
+    },
+  });
+  assert.equal(authorization.statusCode, 200);
+  assert.equal(authorization.json().allowed, true);
+  assert.deepEqual(authorization.json().provenance.allowed_roles, ['clo']);
   const denied = await h.app.inject({
     method: 'POST', url,
     headers: { authorization: 'Bearer cfo', 'content-type': 'application/json' },
