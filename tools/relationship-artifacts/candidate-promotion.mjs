@@ -34,7 +34,7 @@ export function createCandidatePromotionPlanner({readParent,refreshSource,assert
 export function createPreparedPromotionSourceRefresher({findPreparedBinding,sourceAdapter}={}){
  if(typeof findPreparedBinding!=='function'||typeof sourceAdapter?.load!=='function')fail('candidate_promotion_configuration');
  return async({source_ref,run:target},{signal}={})=>{
-  const requested=await findPreparedBinding({source_ref:structuredClone(source_ref),run:structuredClone(target)},{signal});
+  const requested=await findPreparedBinding({source_ref:structuredClone(source_ref),target:structuredClone(target)},{signal});
   const loaded=await sourceAdapter.load(requested,{signal}),binding=loaded?.input?.binding;
   return promotedBinding(binding,target,source_ref);
  };
