@@ -32,7 +32,7 @@
  * Token values never appear in tool output, summaries, or logs.
  */
 import { createHash } from 'node:crypto';
-import { loadEnv } from '../../config/env.js';
+import { loadXeroRuntimeConfig } from './runtime-config.js';
 import { EXEC_RING } from '../kb/search-privileged.js';
 import {
   isConfigured as cosmosConfigured,
@@ -150,14 +150,14 @@ function envTenantPin(env: Record<string, unknown>, org: XeroOrg): string {
 }
 
 export function xeroConfigured(): boolean {
-  const env = loadEnv() as unknown as Record<string, unknown>;
+  const env = loadXeroRuntimeConfig();
   const anyRt = XERO_ORGS.some((o) => envBootstrapToken(env, o));
   return Boolean(env.XERO_CLIENT_ID && env.XERO_CLIENT_SECRET && anyRt && cosmosConfigured());
 }
 
 /** Which orgs have a bootstrap secret configured (status surface for xero_orgs). */
 export function configuredOrgs(): XeroOrg[] {
-  const env = loadEnv() as unknown as Record<string, unknown>;
+  const env = loadXeroRuntimeConfig();
   return XERO_ORGS.filter((o) => envBootstrapToken(env, o));
 }
 
@@ -285,7 +285,7 @@ async function adoptWinner(deps: TokenDeps, id: string, bHash: string): Promise<
  */
 export async function getOrgAccess(org: XeroOrg, opts: { forceRefresh?: boolean; deps?: TokenDeps } = {}): Promise<OrgAccess> {
   const deps = opts.deps ?? defaultDeps;
-  const env = loadEnv() as unknown as Record<string, unknown>;
+  const env = loadXeroRuntimeConfig();
   const clientId = String(env.XERO_CLIENT_ID || '');
   const clientSecret = String(env.XERO_CLIENT_SECRET || '');
   if (!clientId || !clientSecret) throw new Error('Xero not configured (XERO_CLIENT_ID/SECRET missing)');
