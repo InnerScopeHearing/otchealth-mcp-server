@@ -16,14 +16,15 @@ const utc = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2
  */
 export function queryDurableHistories({ entries, query, now = Date.now, identityCurrentness = null }) {
   if (!Array.isArray(entries) || !entries.length || entries.length > 64) fail("durable_query_invalid");
-  const sourcesByRef = new Map(); let totalSources = 0, totalEvents = 0;
+  const sourcesByRef = new Map(); let totalSources = 0, totalEvents = 0, callerLane = null;
   for (const entry of entries) {
     const { history, inputs, authorization, sourceCurrent } = entry ?? {};
     if (!exact(history, ["schema", "run", "caller_seat", "sources", "events", "queries"]) || history.schema !== "resolution-history-v1" ||
-        history.caller_seat !== "cfo" || !Array.isArray(inputs) || !inputs.length ||
+        !["cfo", "clo"].includes(history.caller_seat) || (callerLane !== null && history.caller_seat !== callerLane) || !Array.isArray(inputs) || !inputs.length ||
         !Array.isArray(history.events) || !authorization || authorization.allowed !== true || authorization.provenance?.decision_source !== "authenticated_gateway" ||
-        !Array.isArray(authorization.provenance.allowed_roles) || !authorization.provenance.allowed_roles.includes("cfo") ||
+        !Array.isArray(authorization.provenance.allowed_roles) || !authorization.provenance.allowed_roles.includes(history.caller_seat) ||
         !utc(authorization.expires_at) || Date.parse(authorization.expires_at) <= now() || typeof sourceCurrent !== "boolean") fail("durable_query_invalid");
+    callerLane = history.caller_seat;
     totalSources += inputs.length; totalEvents += history.events.length;
     if (totalSources > LIMITS.sources || totalEvents > LIMITS.sources + 2 * LIMITS.assertions) fail("durable_query_limit");
     let inputIndex = 0;
@@ -35,7 +36,7 @@ export function queryDurableHistories({ entries, query, now = Date.now, identity
     if (inputIndex !== inputs.length) fail("durable_query_history_invalid");
   }
   let frame = null, offset = 0, replaying = true; const identityProofs = [];
-  const services = { callerLane: "cfo", isCurrentIdentity: endpoint => identityCurrentness === null || identityCurrentness.get(endpoint?.proof?.request_sha256) === true };
+  const services = { callerLane, isCurrentIdentity: endpoint => identityCurrentness === null || identityCurrentness.get(endpoint?.proof?.request_sha256) === true };
   for (const name of CALLBACKS) services[name] = (...args) => {
     if (replaying) {
       const recorded = frame?.calls?.[offset++];

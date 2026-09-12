@@ -13,7 +13,7 @@ const text = (value: unknown, max = 240): value is string => typeof value === 's
 const same = (left: unknown, right: unknown) => canonical(left) === canonical(right);
 type Reader = (request: { key: string; version_id?: string; sha256?: string }, options: { signal: AbortSignal }) => Promise<{ value: unknown; version_id: string }>;
 type Run = { ref_version: string; run_id: string; purpose: string; scope: string; run_version: string; manifest_sha256: string };
-type Authority = { schema: 'authenticated-structured-identity-authority-v1'; adapter_id: string; source_system: string; scope: 'cfo'; version: string };
+type Authority = { schema: 'authenticated-structured-identity-authority-v1'; adapter_id: string; source_system: string; scope: 'cfo'|'clo'; version: string };
 type Pin = { key: string; version_id: string; sha256: string };
 export type IdentityRegistrySourceAuthorityConfig = {
   registryId: string; authority: Authority; run: Run; catalog: { catalog_version: string; catalog_sha256: string };
@@ -26,7 +26,7 @@ function validRun(run: unknown): run is Run {
   const content = { ref_version: run.ref_version, purpose: run.purpose, scope: run.scope, run_version: run.run_version, manifest_sha256: run.manifest_sha256 };
   return run.ref_version === 'neptune-trial-active-run-ref-v1' && /^run_[a-f0-9]{64}$/.test(String(run.run_id)) && LABEL.test(String(run.purpose)) && run.scope === 'finance' && LABEL.test(String(run.run_version)) && HASH.test(String(run.manifest_sha256)) && run.run_id === 'run_' + hash(canonical(content));
 }
-function validAuthority(value: unknown): value is Authority { return exact(value, ['adapter_id','schema','scope','source_system','version']) && value.schema === 'authenticated-structured-identity-authority-v1' && value.scope === 'cfo' && text(value.adapter_id) && text(value.source_system) && text(value.version); }
+function validAuthority(value: unknown): value is Authority { return exact(value, ['adapter_id','schema','scope','source_system','version']) && value.schema === 'authenticated-structured-identity-authority-v1' && ['cfo','clo'].includes(String(value.scope)) && text(value.adapter_id) && text(value.source_system) && text(value.version); }
 function validPin(value: unknown): value is Pin { return exact(value, ['key','sha256','version_id']) && text(value.key, 1024) && HASH.test(String(value.sha256)) && VERSION.test(String(value.version_id)) && value.version_id !== 'null'; }
 function validPageDescriptor(value: unknown): boolean { return exact(value, ['cursor','key','sha256','source_version','version_id']) && (value.cursor === null || text(value.cursor)) && text(value.key, 1024) && HASH.test(String(value.sha256)) && VERSION.test(String(value.version_id)) && value.version_id !== 'null' && text(value.source_version); }
 function validShardDescriptor(value: unknown): boolean { return exact(value, ['key','registry_version','sha256','shard_id','source_version','version_id']) && text(value.key, 1024) && HASH.test(String(value.sha256)) && VERSION.test(String(value.version_id)) && value.version_id !== 'null' && text(value.shard_id) && text(value.registry_version) && text(value.source_version); }

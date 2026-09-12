@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
 
-type IdentityAuthority = { schema: 'authenticated-structured-identity-authority-v1'; adapter_id: string; source_system: string; scope: 'cfo'; version: string };
+type IdentityAuthority = { schema: 'authenticated-structured-identity-authority-v1'; adapter_id: string; source_system: string; scope: 'cfo'|'clo'; version: string };
 export type IdentityVerificationConfig = { registry_id: string; authority: IdentityAuthority; public_key: string | Buffer };
 type IdentityRegistryConfig = IdentityVerificationConfig;
 const IDENTITY_REGISTRY_SCHEMA = 'source-identity-registry-v1';

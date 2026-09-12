@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {planGraphCatalogPage} from './graph-catalog-planner.js';
+import {resolveCompanyGraphScope} from './company-graph-scope.js';
 import {createCfoTextSnapshotReader} from '../graph/cfo-text-snapshot.js';
 import Fastify from 'fastify';
 import '../../tools/relationship-artifacts/historical-reader.test.mjs';
@@ -34,17 +35,40 @@ test('historical policy accepts explicit all-CFO scope only with empty prefixes'
  assert.equal(parse(canonical(policy({...base,source_prefixes:['finance/'],source_scope:'all_cfo_source_documents'})),now),null);
  assert.equal(parse(canonical(policy({...base,source_prefixes:[],source_scope:'all_company_documents'})),now),null);
 });
-function evidence({rowPath='finance/synthetic.pdf',sourcePolicy}:any={}){
- const b:any=policy(sourcePolicy).bindings[0],row={path:rowPath,sha256:sha('binary'),enriched_sha256:sha('binary'),sidecar:true,enriched:true,err:null};
- const manifest=planGraphCatalogPage({rows:[row],catalogEtag:'synthetic',catalogSourceSha256:b.source_policy.catalog_source_sha256,createdAt:'2026-09-08T12:00:00.000Z'}).page.manifest!;
- const runBody={ref_version:b.run.ref_version,purpose:b.run.purpose,scope:'finance',run_version:b.run.run_version,manifest_sha256:manifest.manifest_sha256};b.run={...runBody,run_id:'run_'+hash(canonical(runBody))};
- const controller=hash(canonical({schema:'catalog-controller-v1',room:'finance',catalogSourceSha256:b.source_policy.catalog_source_sha256,purpose:b.run.purpose,runVersion:b.run.run_version})),item=manifest.documents[0];
+test('historical policy accepts a synthetic corporate CLO legal-company run, never a personal lane',()=>{
+ const value=policy(),binding=value.bindings[0];
+ const body={...binding.run,scope:'legal_company'};delete (body as any).run_id;
+ binding.run={...body,run_id:'run_'+hash(canonical(body))};binding.authenticated_caller='clo';
+ binding.admission.key=`graph-trial/20260908/catalog-cohorts/${binding.cohort_id}/server/admissions/${binding.run.run_id}.json`;
+ assert.ok(parse(canonical(value),now));
+ binding.authenticated_caller='clo-personal';
+ assert.equal(parse(canonical(value),now),null);
+});
+function evidence({rowPath='finance/synthetic.pdf',sourcePolicy,scope='finance'}:any={}){
+ const b:any=policy(sourcePolicy).bindings[0];if(scope==='legal_company'){b.authenticated_caller='clo';b.source_policy=sourcePolicy??{catalog_key:'graph-trial/synthetic/legal-catalog.jsonl',catalog_source_sha256:sha('catalog'),source_prefixes:['legal/']};}
+ const row={path:rowPath,sha256:sha('binary'),enriched_sha256:sha('binary'),sidecar:true,enriched:true,err:null};
+ const resolved=resolveCompanyGraphScope(b.authenticated_caller,scope);if(!resolved.ok)throw new Error(resolved.code);
+ const manifest=planGraphCatalogPage({rows:[row],scope:resolved.scope,catalogEtag:'synthetic',catalogSourceSha256:b.source_policy.catalog_source_sha256,createdAt:'2026-09-08T12:00:00.000Z'}).page.manifest!;
+ const runBody={ref_version:b.run.ref_version,purpose:b.run.purpose,scope,run_version:b.run.run_version,manifest_sha256:manifest.manifest_sha256};b.run={...runBody,run_id:'run_'+hash(canonical(runBody))};
+ const controller=hash(canonical({schema:'catalog-controller-v1',room:scope,catalogSourceSha256:b.source_policy.catalog_source_sha256,purpose:b.run.purpose,runVersion:b.run.run_version})),item=manifest.documents[0];
  const key=hash(canonical({controller_id:controller,document_version_id:item.document_version_id,source_version:item.source_version,enrichment_row_sha256:item.enrichment_row_sha256,extractor_version:item.extractor_version}));
  b.proposal.key=`graph-trial/20260908/catalog-cohorts/${b.cohort_id}/server/proposals/${key}.json`;
  const proposal={controller_id:controller,key,catalog_snapshot_sha256:sha('snapshot'),catalog_source_sha256:b.source_policy.catalog_source_sha256,catalog_etag_sha256:sha('etag'),manifest,run:b.run,max_documents:1,document_ordinal:0,paid_fallback:false,requires_review:true};
  const bare={allowed:true,key,run_id:b.run.run_id,manifest_sha256:manifest.manifest_sha256,max_documents:1,policy_sha256:sha('policy')},admission={...bare,decision_sha256:hash(canonical(bare))};
- const source={payload:{input:{binding:{schema:'cfo-prepared-chunk-binding-v1',run_id:b.run.run_id,room:'finance',source_index:'finance-cfo-source-docs',catalog_manifest_sha256:b.run.manifest_sha256,document_ordinal:0,source_document_version:item.document_version_id,catalog_source_sha256:item.source_version,snapshot_id:'txtsnap_'+sha('snapshot'),prepared_manifest_sha256:sha('prepared'),sidecar_content_sha256:sha('text'),chunk_ordinal:0,chunk_sha256:sha('text')},catalog_row:row,prepared_text:'text',chunk_start_utf16:0,chunk_end_utf16:4,purpose:b.run.purpose}}};return{b,proposal,admission,source};
+ const source={payload:{input:{binding:{schema:scope==='finance'?'cfo-prepared-chunk-binding-v1':'company-prepared-chunk-binding-v1',run_id:b.run.run_id,room:scope,source_index:scope==='finance'?'finance-cfo-source-docs':'legal-company',catalog_manifest_sha256:b.run.manifest_sha256,document_ordinal:0,source_document_version:item.document_version_id,catalog_source_sha256:item.source_version,snapshot_id:'txtsnap_'+sha('snapshot'),prepared_manifest_sha256:sha('prepared'),sidecar_content_sha256:sha('text'),chunk_ordinal:0,chunk_sha256:sha('text')},catalog_row:row,prepared_text:'text',chunk_start_utf16:0,chunk_end_utf16:4,purpose:b.run.purpose}}};return{b,proposal,admission,source};
 }
+test('synthetic CLO history replay is bound to legal-company source and never a personal tuple', async()=>{
+ const {b,proposal,admission,source}=evidence({scope:'legal_company',rowPath:'legal/synthetic.pdf'});
+ assert.equal(admissionChain(admission,proposal,b),true);
+ assert.equal(sourceBound(source,b,proposal),true);
+ const personal=structuredClone(source);personal.payload.input.binding.source_index='legal-personal';assert.equal(sourceBound(personal,b,proposal),false);
+ const objects=new Map<string,any>();b.admission.key=`graph-trial/20260908/catalog-cohorts/${b.cohort_id}/server/admissions/${b.run.run_id}.json`;
+ for(const [ref,value] of [[b.admission,admission],[b.proposal,proposal]] as any[]){const body=Buffer.from(canonical(value));ref.sha256=hash(body);objects.set(ref.key,{status:200,body,headers:new Headers({'x-amz-version-id':ref.version_id})});}
+ const payload={schema:'resolution-source-input-v1',run:b.run,input:source.payload.input},digest=hash(canonical(payload)),version='legal-synthetic-v1';b.approved_artifacts=[{digest,version_id:version}];
+ objects.set(h.artifactKey(b,b.producer_id,digest),{status:200,body:Buffer.from(canonical({schema:'relationship-resolution-artifact-v1',payload_sha256:digest,payload})),headers:new Headers({'x-amz-version-id':version,'x-amz-meta-resolution-run':b.run.run_id,'x-amz-meta-resolution-producer':b.producer_id,'x-amz-server-side-encryption':'AES256'})});
+ const app=Fastify();registerRelationshipHistoricalReadRoutes(app,{now:()=>now,policyJson:()=>canonical({...policy(),bindings:[b]}),authenticate:async()=>({caller_agent:'clo',caller_hash:b.caller_hash,connector_surface:true,raw_token:'synthetic',m365_static_auth:false}),readVersion:async r=>objects.get(r.key),readCatalog:async()=>[source.payload.input.catalog_row],checkSource:async(row,binding,ctx)=>ctx.caller_agent==='clo'&&binding.room==='legal_company'&&binding.source_index==='legal-company'});
+ try{const url=`/relationship-history/v1/${b.run.run_id}/${b.producer_id}/sha256/${digest.slice(0,2)}/${digest}.json?versionId=${version}`;const response=await app.inject({url});assert.equal(response.statusCode,200,response.body);assert.equal(response.headers['x-relationship-source-current'],'true');}finally{await app.close();}
+});
 test('valid pinned admission chain refuses cross-run and proposal substitutions',()=>{
  const {b,proposal,admission}=evidence();assert.equal(admissionChain(admission,proposal,b),true);
  for(const mutate of[(a:any)=>a.run_id='run_'+sha('other'),(a:any)=>a.key=sha('other'),(a:any)=>a.manifest_sha256=sha('other')]){const a=structuredClone(admission);mutate(a);assert.equal(admissionChain(a,proposal,b),false);}
@@ -67,7 +91,7 @@ test('root-level CFO source is allowed only by explicit all-source scope',()=>{
 });
 test('default source currentness uses the frozen descriptor required by the real CFO snapshot reader',async()=>{
  const text='Synthetic current CFO source.';const row={path:'finance/synthetic.txt'};
- const binding={source_document_version:'docv_'+sha('source'),catalog_source_sha256:sha('catalog'),sidecar_content_sha256:sha(text)};
+ const binding={authenticated_caller:'cfo',room:'finance',source_index:'finance-cfo-source-docs',run:{scope:'finance'},source_document_version:'docv_'+sha('source'),catalog_source_sha256:sha('catalog'),sidecar_content_sha256:sha(text)};
  const reader=createCfoTextSnapshotReader({callerContext:{caller_agent:'cfo',connector_surface:true},maxSourceBytes:1024*1024,credentialProvider:async()=>({accessKeyId:'synthetic',secretAccessKey:'synthetic'}),signer:input=>({headers:input.extraHeaders??{}}),fetchImpl:async(_url,init)=>init.method==='HEAD'?new Response('',{status:200,headers:{etag:'"synthetic"','x-amz-version-id':'synthetic-v1','content-length':String(Buffer.byteLength(text))}}):new Response(text,{status:200,headers:{etag:'"synthetic"','x-amz-version-id':'synthetic-v1','content-length':String(Buffer.byteLength(text))}})});
  const current=await defaultSource(row,binding,{caller_agent:'cfo',caller_hash:sha('caller'),connector_surface:true,raw_token:'synthetic',m365_static_auth:false},new AbortController().signal,reader);
  assert.equal(current,true);
@@ -77,7 +101,7 @@ test('historical GET verifies pinned records and fresh source policy without exe
  b.admission.key=`graph-trial/20260908/catalog-cohorts/${b.cohort_id}/server/admissions/${b.run.run_id}.json`;
  for(const [ref,value] of[[b.admission,admission],[b.proposal,proposal]]){const body=Buffer.from(canonical(value));ref.sha256=hash(body);objects.set(ref.key,{status:200,body,headers:new Headers({'x-amz-version-id':ref.version_id})});}
  const payload={schema:'resolution-source-input-v1',run:b.run,input:source.payload.input},digest=hash(canonical(payload)),version='synthetic+/=version';
- b.approved_artifacts=[{digest,version_id:version}];const key=h.artifactKey(b.run.run_id,b.producer_id,digest);
+ b.approved_artifacts=[{digest,version_id:version}];const key=h.artifactKey(b,b.producer_id,digest);
  objects.set(key,{status:200,body:Buffer.from(canonical({schema:'relationship-resolution-artifact-v1',payload_sha256:digest,payload})),headers:new Headers({'x-amz-version-id':version,'x-amz-meta-resolution-run':b.run.run_id,'x-amz-meta-resolution-producer':b.producer_id,'x-amz-server-side-encryption':'AES256'})});
  let value:any={...policy(),bindings:[b]},rows:any[]=[source.payload.input.catalog_row],checks=0,revoke=false;
  const app=Fastify();registerRelationshipHistoricalReadRoutes(app,{now:()=>now,policyJson:()=>canonical(value),authenticate:async()=>({caller_agent:'cfo',caller_hash:b.caller_hash,connector_surface:true,raw_token:'synthetic',m365_static_auth:false}),readVersion:async r=>{assert.ok(r.versionId);assert.ok(!r.key.includes('/active-runs/'));return objects.get(r.key);},readCatalog:async()=>rows,checkSource:async()=>{checks++;if(revoke&&checks%2===0)value=null;return true;}});

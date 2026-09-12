@@ -38,7 +38,9 @@ function parse(text:string,now:number):Json|null{
   if(Buffer.byteLength(text)>65536)return null;const p=JSON.parse(text);
   if(!h.exact(p,['schema','policy_version','expires_at','bindings'])||p.schema!=='relationship-publication-policy-v1'||!LABEL.test(p.policy_version)||!h.utc(p.expires_at)||Date.parse(p.expires_at)<=now+1000||!Array.isArray(p.bindings)||!p.bindings.length||p.bindings.length>32)return null;
   const seen=new Set();for(const b of p.bindings){
-   if(!h.exact(b,['authenticated_caller','caller_hash','producer_id','cohort_id','purpose','run_version','encryption','source_policy'])||b.authenticated_caller!=='cfo'||!SHA.test(b.caller_hash)||!PRODUCER.test(b.producer_id)||!LABEL.test(b.cohort_id)||!h.path(b.cohort_id)||!LABEL.test(b.purpose)||!LABEL.test(b.run_version))return null;
+   const corporateLegal=b?.authenticated_caller==='clo';
+   const keys=['authenticated_caller','caller_hash','producer_id','cohort_id','purpose','run_version','encryption','source_policy',...(corporateLegal?['scope','room','source_index']:[])];
+   if(!h.exact(b,keys)||!['cfo','clo'].includes(b.authenticated_caller)||corporateLegal&&(b.scope!=='legal_company'||b.room!=='legal_company'||b.source_index!=='legal-company')||!SHA.test(b.caller_hash)||!PRODUCER.test(b.producer_id)||!LABEL.test(b.cohort_id)||!h.path(b.cohort_id)||!LABEL.test(b.purpose)||!LABEL.test(b.run_version))return null;
    const e=b.encryption;if(!(e?.algorithm==='AES256'&&h.exact(e,['algorithm'])||e?.algorithm==='aws:kms'&&h.exact(e,['algorithm','kms_key_id'])&&typeof e.kms_key_id==='string'&&e.kms_key_id.length>0&&e.kms_key_id.length<=1024&&!/[\r\n]/.test(e.kms_key_id)))return null;
    const s=b.source_policy;if(!h.validSourcePolicy(s))return null;
    const key=b.caller_hash+'/'+b.cohort_id+'/'+b.producer_id;if(seen.has(key))return null;seen.add(key);
@@ -47,7 +49,7 @@ function parse(text:string,now:number):Json|null{
 }
 function binding(policy:Json,c:Json,g:Json,now:number){
  if(!h.exact(g,['schema','cohort_id','producer_id','caller_hash','run','admission','proposal','artifact_ref','approved_artifacts','issued_under_policy_version'])||g.schema!=='relationship-publication-grant-v1'||g.cohort_id!==c.cohort_id||g.producer_id!==c.producer_id||g.caller_hash!==c.caller_hash||g.run?.purpose!==c.purpose||g.run?.run_version!==c.run_version||!h.artifactRef(g.artifact_ref)||!LABEL.test(g.issued_under_policy_version))fail();
- const b={authenticated_caller:'cfo',caller_hash:c.caller_hash,producer_id:c.producer_id,run:g.run,encryption:c.encryption,cohort_id:c.cohort_id,admission:g.admission,proposal:g.proposal,approved_artifacts:g.approved_artifacts,source_policy:c.source_policy};
+ const b={authenticated_caller:c.authenticated_caller,caller_hash:c.caller_hash,producer_id:c.producer_id,run:g.run,encryption:c.encryption,cohort_id:c.cohort_id,admission:g.admission,proposal:g.proposal,approved_artifacts:g.approved_artifacts,source_policy:c.source_policy};
  if(!h.parse(h.canonical({schema:'relationship-history-policy-v1',policy_version:policy.policy_version,expires_at:policy.expires_at,bindings:[b]}),now))fail();return b;
 }
 function stored(r:Stored):Json{
@@ -57,37 +59,39 @@ function stored(r:Stored):Json{
 /** Derive artifact access from the current CFO session and immutable, server-issued catalog records. */
 export async function resolveRelationshipArtifactAutomaticBinding(input:{run_id:string;producer_id:string;ctx:AuthContext;signal:AbortSignal},injected?:{policyJson?:()=>string;now?:()=>number;resolveCatalogCohortBinding?:(ctx:AuthContext,runId:string,signal:AbortSignal)=>Promise<any>;resolveRelationshipPublicationAdmission?:(input:{cohortId:string;run:{run_id:string};ctx:AuthContext;signal:AbortSignal})=>Promise<{admission:Json;proposal:Json}>}){
  const now=injected?.now??Date.now,policy=parse((injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON))(),now());
- if(!policy||input.ctx.caller_agent!=='cfo'||!input.ctx.connector_surface||!SHA.test(input.ctx.caller_hash)||!RUN.test(input.run_id)||!PRODUCER.test(input.producer_id))return null;
+ if(!policy||!input.ctx.connector_surface||!SHA.test(input.ctx.caller_hash)||!RUN.test(input.run_id)||!PRODUCER.test(input.producer_id))return null;
  const catalog=await import('./graph-catalog-controller.js'),current=await (injected?.resolveCatalogCohortBinding??catalog.resolveCatalogCohortBinding)(input.ctx,input.run_id,input.signal);
  if(!current)return null;
- const c=policy.bindings.find((row:Json)=>row.cohort_id===current.cohort_id&&row.caller_hash===input.ctx.caller_hash&&row.producer_id===input.producer_id&&row.purpose===current.binding.run.purpose&&row.run_version===current.binding.run.run_version);
- if(!c||!equal(c.source_policy,current.source_policy))return null;
+ const scope=resolveCompanyGraphScope(input.ctx.caller_agent,current.binding?.run?.scope);
+ if(!scope.ok)return null;
+ const c=policy.bindings.find((row:Json)=>row.cohort_id===current.cohort_id&&row.caller_hash===input.ctx.caller_hash&&row.producer_id===input.producer_id&&row.authenticated_caller===scope.scope.authenticatedCaller&&row.purpose===current.binding.run.purpose&&row.run_version===current.binding.run.run_version);
+ if(!c||!companyGraphScopeOwnsBinding(scope.scope,current.binding)||!equal(c.source_policy,current.source_policy))return null;
  const pins=await (injected?.resolveRelationshipPublicationAdmission??catalog.resolveRelationshipPublicationAdmission)({cohortId:c.cohort_id,run:{run_id:input.run_id},ctx:input.ctx,signal:input.signal});
- return {binding:{authenticated_caller:'cfo' as const,caller_hash:input.ctx.caller_hash,producer_id:c.producer_id,run:current.binding.run,encryption:c.encryption},cohort_id:c.cohort_id,policy_version:policy.policy_version,expires_at:policy.expires_at,admission:pins.admission,proposal:pins.proposal,source_policy:c.source_policy};
+ return {binding:{authenticated_caller:c.authenticated_caller,caller_hash:input.ctx.caller_hash,producer_id:c.producer_id,run:current.binding.run,encryption:c.encryption},cohort_id:c.cohort_id,policy_version:policy.policy_version,expires_at:policy.expires_at,admission:pins.admission,proposal:pins.proposal,source_policy:c.source_policy};
 }
 async function bounded<T>(f:()=>Promise<T>,signal:AbortSignal):Promise<T>{
  if(signal.aborted)fail(503);return new Promise((resolve,reject)=>{const abort=()=>{signal.removeEventListener('abort',abort);reject(Object.assign(Error('publication_cancelled'),{status:503}));};signal.addEventListener('abort',abort,{once:true});Promise.resolve().then(()=>{if(signal.aborted)fail(503);return f();}).then(v=>{signal.removeEventListener('abort',abort);resolve(v);},e=>{signal.removeEventListener('abort',abort);reject(e);});if(signal.aborted)abort();});
 }
 async function inspect(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal,wanted?:string,setStage:(stage:string)=>void=()=>{}){
  const b=binding(policy,c,g,d.now());setStage('inspect_pins');const[a,p]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(a,p,b))fail();
- const ref=g.artifact_ref;setStage('inspect_history');const r=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);
+ const ref=g.artifact_ref;setStage('inspect_history');const r=await d.readVersion({key:h.artifactKey(b,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);
  if(history.payload.schema!=='resolution-history-v1'||Buffer.byteLength(h.canonical(history.payload))!==ref.size_bytes)fail();
  const approved=[ref,...history.payload.sources].map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id}));
  if(!equal(g.approved_artifacts,approved))fail();const sources:Json[]=[],responses=new Map<string,typeof r>();if(!wanted||wanted===ref.payload_sha256+'/'+ref.version_id)responses.set(ref.payload_sha256+'/'+ref.version_id,r);
- setStage('inspect_sources');for(const x of history.payload.sources){const response=await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,x.payload_sha256),versionId:x.version_id,signal,maxBytes:16*1024*1024+1024}),s=h.parseArtifact(response,b,x.payload_sha256,x.version_id);if(s.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(s.payload))!==x.size_bytes||!h.sourceBound(s,b,p))fail();sources.push(s);if(wanted===x.payload_sha256+'/'+x.version_id)responses.set(x.payload_sha256+'/'+x.version_id,response);}
+ setStage('inspect_sources');for(const x of history.payload.sources){const response=await d.readVersion({key:h.artifactKey(b,c.producer_id,x.payload_sha256),versionId:x.version_id,signal,maxBytes:16*1024*1024+1024}),s=h.parseArtifact(response,b,x.payload_sha256,x.version_id);if(s.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(s.payload))!==x.size_bytes||!h.sourceBound(s,b,p))fail();sources.push(s);if(wanted===x.payload_sha256+'/'+x.version_id)responses.set(x.payload_sha256+'/'+x.version_id,response);}
  const currentStages={catalog:()=>setStage('inspect_catalog'),sourceCurrent:()=>setStage('inspect_source_current')};await h.current(d,b,sources,ctx,signal,currentStages);const current=await h.current(d,b,sources,ctx,signal,currentStages);return{current,responses,refresh:()=>h.current(d,b,sources,ctx,signal,currentStages)};
 }
 async function queryPublishedHistory(d:RelationshipPublicationDeps,policy:Json,c:Json,g:Json,ctx:AuthContext,signal:AbortSignal){
  const b=binding(policy,c,g,d.now()),[admission,proposal]=await Promise.all([h.pinned(d,b.admission,signal),h.pinned(d,b.proposal,signal)]);if(!h.admissionChain(admission,proposal,b))fail();
- const ref=g.artifact_ref,historyArtifact=h.parseArtifact(await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),b,ref.payload_sha256,ref.version_id);
+ const ref=g.artifact_ref,historyArtifact=h.parseArtifact(await d.readVersion({key:h.artifactKey(b,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),b,ref.payload_sha256,ref.version_id);
  if(historyArtifact.payload.schema!=='resolution-history-v1'||Buffer.byteLength(h.canonical(historyArtifact.payload))!==ref.size_bytes)fail();
  const sources:Json[]=[];for(const sourceRef of historyArtifact.payload.sources){
   if(!g.approved_artifacts.some((x:Json)=>x.digest===sourceRef.payload_sha256&&x.version_id===sourceRef.version_id))fail();
-  const source=h.parseArtifact(await d.readVersion({key:h.artifactKey(b.run.run_id,c.producer_id,sourceRef.payload_sha256),versionId:sourceRef.version_id,signal,maxBytes:16*1024*1024+1024}),b,sourceRef.payload_sha256,sourceRef.version_id);
+  const source=h.parseArtifact(await d.readVersion({key:h.artifactKey(b,c.producer_id,sourceRef.payload_sha256),versionId:sourceRef.version_id,signal,maxBytes:16*1024*1024+1024}),b,sourceRef.payload_sha256,sourceRef.version_id);
   if(source.payload.schema!=='resolution-source-input-v1'||Buffer.byteLength(h.canonical(source.payload))!==sourceRef.size_bytes||!h.sourceBound(source,b,proposal))fail();sources.push(source);
  }
  const current=await h.current(d,b,sources,ctx,signal);
- const authorization={allowed:true,provenance:{decision_source:'authenticated_gateway',policy_version:policy.policy_version,allowed_roles:['cfo']},decision_ref:`relationship-publication:${c.producer_id}:${policy.policy_version}`,expires_at:new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()};
+ const authorization={allowed:true,provenance:{decision_source:'authenticated_gateway',policy_version:policy.policy_version,allowed_roles:[c.authenticated_caller]},decision_ref:`relationship-publication:${c.producer_id}:${policy.policy_version}`,expires_at:new Date(Math.min(Date.parse(policy.expires_at),d.now()+120000)).toISOString()};
  return {entry:{history:historyArtifact.payload,inputs:sources.map(source=>source.payload.input),authorization,sourceCurrent:current},refresh:()=>h.current(d,b,sources,ctx,signal)};
 }
 function publicationDeps(injected?:Partial<RelationshipPublicationDeps>):RelationshipPublicationDeps{
@@ -128,9 +132,9 @@ function relevantVerifiedHistories(records:IndexedRecord[],corrections:Array<{co
 export function createRelationshipPublicationDiscoveryService(injected?:Partial<RelationshipPublicationDeps>):RelationshipPublicationDiscoveryService{
  const d=budgeted(publicationDeps(injected));return{query:async(input,ctx,signal,recheck=async()=>{})=>{
   if(!input||Object.getPrototypeOf(input)!==Object.prototype||!h.exact(input,['cohort_id','producer_id','query',...(input.scope===undefined?[]:['scope']),...(input.after===undefined?[]:['after']),...(input.scan_limit===undefined?[]:['scan_limit']),...(input.history_limit===undefined?[]:['history_limit'])])||!LABEL.test(input.cohort_id)||!h.path(input.cohort_id)||!PRODUCER.test(input.producer_id)||input.after!==undefined&&!RUN.test(input.after)||!validQuery(input.query)||Buffer.byteLength(h.canonical(input))>16384)fail(400);
-  const limit=input.scan_limit??64,historyLimit=input.history_limit??256;if(!Number.isInteger(limit)||limit<1||limit>64||!Number.isInteger(historyLimit)||historyLimit<1||historyLimit>256||ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
-  const scope=resolveCompanyGraphScope(ctx.caller_agent,input.scope);if(!scope.ok||scope.scope.scope!=='finance')fail();
-  const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===input.cohort_id&&x.producer_id===input.producer_id&&x.caller_hash===ctx.caller_hash);if(!c)fail();
+  const limit=input.scan_limit??64,historyLimit=input.history_limit??256;if(!Number.isInteger(limit)||limit<1||limit>64||!Number.isInteger(historyLimit)||historyLimit<1||historyLimit>256||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
+  const scope=resolveCompanyGraphScope(ctx.caller_agent,input.scope);if(!scope.ok)fail();
+  const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===input.cohort_id&&x.producer_id===input.producer_id&&x.caller_hash===ctx.caller_hash&&x.authenticated_caller===scope.scope.authenticatedCaller);if(!c)fail();
   const refs:Json[]=[],loaded:Array<Awaited<ReturnType<typeof queryPublishedHistory>>>=[],records:IndexedRecord[]=[],corrections:Array<{correction:Json;history:number}>=[];let cursor=input.after,last=cursor??'',next:string|undefined;
   do{const page=await d.storeFor(c.cohort_id,c.producer_id).list({after:cursor,limit:Math.min(limit,historyLimit-loaded.length),signal});if(page.records.length>limit)fail(503);for(const row of page.records){const g=stored({found:true,...row});binding(policy,c,g,d.now());if(g.run.run_id!==row.runId||row.runId<=last)fail(503);last=row.runId;const item=await queryPublishedHistory(d,policy,c,g,ctx,signal);if(!item.entry.inputs.every((source:Json)=>companyGraphScopeOwnsBinding(scope.scope,{authenticated_caller:c.authenticated_caller,room:source.binding?.room,source_index:source.binding?.source_index,run:g.run})))fail();refs.push({run_id:g.run.run_id,artifact_ref:g.artifact_ref});loaded.push(item);const indexed=indexEntry(item.entry,loaded.length-1);records.push(...indexed.records);corrections.push(...indexed.corrections);}next=page.next;if(next!==undefined&&(next!==last||!page.records.length))fail(503);cursor=next;}while(next!==undefined&&loaded.length<historyLimit);
   await recheck();for(const result of loaded)if((await result.refresh())!==result.entry.sourceCurrent)fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();const complete=next===undefined&&input.after===undefined;
@@ -151,11 +155,11 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   let authenticatedBinding=false,stage='unknown';const setStage=(value:string)=>{stage=FAILURE_STAGES.has(value)?value:'unknown';};
   try{
    const params=req.params as Json;if(!LABEL.test(params.cohortId)||!h.path(params.cohortId)||!PRODUCER.test(params.producerId))fail(400);
-   const ctx=await bounded(()=>d.authenticate(req,reply),ctl.signal);if(!ctx||ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
+   const ctx=await bounded(()=>d.authenticate(req,reply),ctl.signal);if(!ctx||!['cfo','clo'].includes(ctx.caller_agent)||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
    const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===params.cohortId&&x.producer_id===params.producerId&&x.caller_hash===ctx.caller_hash);if(!c)fail();authenticatedBinding=true;
-   const recheck=async()=>{const auth=await d.authenticate(req,reply);if(!auth||auth.caller_agent!=='cfo'||!auth.connector_surface||auth.caller_hash!==ctx.caller_hash||!equal(parse(d.policyJson(),d.now()),policy)||ctl.signal.aborted)fail();};
+   const recheck=async()=>{const auth=await d.authenticate(req,reply);if(!auth||auth.caller_agent!==ctx.caller_agent||!['cfo','clo'].includes(auth.caller_agent)||!auth.connector_surface||auth.caller_hash!==ctx.caller_hash||!equal(parse(d.policyJson(),d.now()),policy)||ctl.signal.aborted)fail();};
    return await bounded(()=>operation(req,reply,c,policy,ctx,ctl.signal,recheck,setStage),ctl.signal);
-  }catch(e){if(!reply.sent){if(authenticatedBinding&&method==='POST'){reply.header('x-relationship-failure-stage',stage).header('x-relationship-failure-code',failureCode(e));const upstreamStatus=failureUpstreamStatus(e);if(upstreamStatus!==null)reply.header('x-relationship-failure-upstream-status',String(upstreamStatus));}return reply.code((e as any).status??((e as Error).message==='source_denied'?403:503)).send();}}finally{clearTimeout(timer);ctl.abort();req.raw.off('aborted',abort);reply.raw.off('close',close);}
+   }catch(e){if(!reply.sent){if(authenticatedBinding&&method==='POST'){reply.header('x-relationship-failure-stage',stage).header('x-relationship-failure-code',failureCode(e));const upstreamStatus=failureUpstreamStatus(e);if(upstreamStatus!==null)reply.header('x-relationship-failure-upstream-status',String(upstreamStatus));}return reply.code((e as any).status??((e as Error).message==='source_denied'?403:503)).send();}}finally{clearTimeout(timer);ctl.abort();req.raw.off('aborted',abort);reply.raw.off('close',close);}
  }});
  route('POST',prefix,async(req,reply,c,policy,ctx,signal,recheck,setStage)=>{
   if(new URL(req.url,'http://local').search)fail(400);const input=req.body as Json;if(!h.exact(input,['run','artifact_ref'])||!h.validRun(input.run)||!h.artifactRef(input.artifact_ref)||input.run.purpose!==c.purpose||input.run.run_version!==c.run_version)fail(400);
@@ -164,7 +168,7 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   else{
    setStage('admission');const pins=await d.resolveAdmission({cohortId:c.cohort_id,run:input.run,ctx,signal}),ref=input.artifact_ref;
    grant={schema:'relationship-publication-grant-v1',cohort_id:c.cohort_id,producer_id:c.producer_id,caller_hash:ctx.caller_hash,run:input.run,...pins,artifact_ref:ref,approved_artifacts:[{digest:ref.payload_sha256,version_id:ref.version_id}],issued_under_policy_version:policy.policy_version};
-   const b=binding(policy,c,grant,d.now());setStage('artifact_read');const r=await d.readVersion({key:h.artifactKey(input.run.run_id,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);if(history.payload.schema!=='resolution-history-v1')fail();grant.approved_artifacts.push(...history.payload.sources.map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id})));
+   const b=binding(policy,c,grant,d.now());setStage('artifact_read');const r=await d.readVersion({key:h.artifactKey(b,c.producer_id,ref.payload_sha256),versionId:ref.version_id,signal,maxBytes:16*1024*1024+1024}),history=h.parseArtifact(r,b,ref.payload_sha256,ref.version_id);if(history.payload.schema!=='resolution-history-v1')fail();grant.approved_artifacts.push(...history.payload.sources.map((x:Json)=>({digest:x.payload_sha256,version_id:x.version_id})));
   }
   setStage('inspect_pins');if(!(await inspect(d,policy,c,grant,ctx,signal,undefined,setStage)).current)fail();setStage('prewrite');await recheck();
   setStage('store_put');const saved=stored(await store.putCreateOnly({runId:input.run.run_id,body:Buffer.from(h.canonical(grant))},signal));if(!equal(saved,grant))fail(409);setStage('postwriteinspect');await recheck();if(!(await inspect(d,policy,c,grant,ctx,signal,undefined,setStage)).current)fail();await recheck();

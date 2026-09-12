@@ -10,6 +10,13 @@ import {
   type CfoTextSource,
 } from '../graph/cfo-text-snapshot.js';
 import { createCfoTextPreparationController } from '../graph/cfo-text-preparation.js';
+import { createCompanyTextPreparationController } from '../graph/cfo-text-preparation.js';
+import {
+  createCompanyTextSnapshotReader,
+  type CompanyTextSnapshotResult,
+  type CompanyTextSource,
+} from '../graph/company-text-snapshot.js';
+import { companyGraphScopeOwnsBinding, resolveCompanyGraphScope } from './company-graph-scope.js';
 import {
   isSubscriptionReviewOperationSpec,
   SUBSCRIPTION_REVIEW_PROVIDER,
@@ -19,6 +26,7 @@ import {
 const BUCKET = 'otchealth-finance-legal-dr-55c84f6b';
 const REGION = 'us-east-1';
 const SOURCE_PREFIX = 'graph-trial/20260908/source-pilot/snapshots';
+const COMPANY_SOURCE_PREFIX = 'graph-trial/20260912/legal-company/catalog-snapshots';
 const STATE_BASE = 'graph-trial/20260908/workers';
 const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -38,6 +46,9 @@ const PREPARED_AUTH_SCHEMA = 'company-prepared-text-gateway-authorization-v1';
 const PREPARED_BINDING_SCHEMA = 'cfo-prepared-chunk-binding-v1';
 const PREPARED_SOURCE_SCHEMA = 'cfo-prepared-chunk-source-v1';
 const PREPARED_SOURCE_ID = /^cfotext_[a-f0-9]{64}$/;
+const COMPANY_PREPARED_BINDING_SCHEMA = 'company-prepared-chunk-binding-v1';
+const COMPANY_PREPARED_SOURCE_SCHEMA = 'company-prepared-chunk-source-v1';
+const COMPANY_PREPARED_SOURCE_ID = /^companytext_[a-f0-9]{64}$/;
 const PREPARED_SOURCE_VERSION = /^txtchunk_[a-f0-9]{64}$/;
 const PREPARED_SNAPSHOT_ID = /^txtsnap_[a-f0-9]{64}$/;
 const IDENTITY_REGISTRY_SCHEMA = 'source-identity-registry-v1';
@@ -66,10 +77,10 @@ type Policy = {
   expires_at: string; bindings: Binding[];
 };
 type PreparedBinding = {
-  schema: 'cfo-prepared-chunk-binding-v1';
+  schema: 'cfo-prepared-chunk-binding-v1' | 'company-prepared-chunk-binding-v1';
   run_id: string;
-  room: 'finance';
-  source_index: 'finance-cfo-source-docs';
+  room: 'finance' | 'legal_company';
+  source_index: 'finance-cfo-source-docs' | 'legal-company';
   catalog_manifest_sha256: string;
   document_ordinal: number;
   source_document_version: string;
@@ -80,6 +91,22 @@ type PreparedBinding = {
   chunk_ordinal: number;
   chunk_sha256: string;
 };
+type PreparedProfile = Readonly<{
+  bindingSchema: PreparedBinding['schema']; sourceSchema: string;
+  sourceId: RegExp; sourceIdPrefix: 'cfotext' | 'companytext';
+  chunkSchema: 'cfo-text-prepared-chunk-v1' | 'company-text-prepared-chunk-v1';
+  room: PreparedBinding['room']; sourceIndex: PreparedBinding['source_index'];
+}>;
+const CFO_PREPARED_PROFILE: PreparedProfile = Object.freeze({
+  bindingSchema: PREPARED_BINDING_SCHEMA, sourceSchema: PREPARED_SOURCE_SCHEMA,
+  sourceId: PREPARED_SOURCE_ID, sourceIdPrefix: 'cfotext',
+  chunkSchema: 'cfo-text-prepared-chunk-v1', room: 'finance', sourceIndex: 'finance-cfo-source-docs',
+});
+const COMPANY_PREPARED_PROFILE: PreparedProfile = Object.freeze({
+  bindingSchema: COMPANY_PREPARED_BINDING_SCHEMA, sourceSchema: COMPANY_PREPARED_SOURCE_SCHEMA,
+  sourceId: COMPANY_PREPARED_SOURCE_ID, sourceIdPrefix: 'companytext',
+  chunkSchema: 'company-text-prepared-chunk-v1', room: 'legal_company', sourceIndex: 'legal-company',
+});
 type OperationSource =
   | { kind: 'metadata'; item: ManifestItem }
   | { kind: 'prepared'; item: ManifestItem; sourceBinding: PreparedBinding };
@@ -90,7 +117,7 @@ type RawRequest = {
 };
 type IdentityAuthority = {
   schema: 'authenticated-structured-identity-authority-v1';
-  adapter_id: string; source_system: string; scope: 'cfo'; version: string;
+  adapter_id: string; source_system: string; scope: 'cfo'|'clo'; version: string;
 };
 export type IdentityRegistryPartitionConfig = {
   manifest_version: string;
@@ -152,6 +179,10 @@ export interface GraphWorkerBrokerDeps {
   readCfoText: (
     source: CfoTextSource, callerContext: AuthContext, signal: AbortSignal,
   ) => Promise<CfoTextSnapshotResult>;
+  /** Company-scoped reader for the closed legal-company lane. */
+  readCompanyText: (
+    source: CompanyTextSource, callerContext: AuthContext, signal: AbortSignal,
+  ) => Promise<CompanyTextSnapshotResult>;
   /** A dark cohort can supply a binding only from its durable server-issued receipt. */
   resolveCohortBinding: (ctx: AuthContext, runId: string, signal: AbortSignal) => Promise<{ policy: Policy; binding: Binding } | null>;
   /**
@@ -323,6 +354,16 @@ function depsOf(injected?: Partial<GraphWorkerBrokerDeps>): GraphWorkerBrokerDep
         callerContext,
         maxSourceBytes: CFO_TEXT_CANARY_MAX_BYTES,
       }).readVersionPinnedPage(source, { signal })),
+    readCompanyText: injected?.readCompanyText ?? ((source, callerContext, signal) => {
+      const scope = resolveCompanyGraphScope(callerContext.caller_agent, source.room);
+      if (!scope.ok || !companyGraphScopeOwnsBinding(scope.scope, {
+        authenticated_caller: callerContext.caller_agent, room: source.room,
+        source_index: source.source_index, run: { scope: source.room },
+      })) throw new Error('company_text_forbidden');
+      return createCompanyTextSnapshotReader({
+        scope: scope.scope, callerContext, maxSourceBytes: CFO_TEXT_CANARY_MAX_BYTES,
+      }).readVersionPinnedPage(source, { signal });
+    }),
     resolveCohortBinding,
     identityRegistry: injected?.identityRegistry,
   };
@@ -399,11 +440,18 @@ function validManifest(value: unknown, binding: Binding): value is Manifest {
       .every((entry) => SHA.test(entry)) &&
     item.extractor_version === SOURCE_SCHEMA && Array.isArray(item.retract_event_ids));
 }
+function sourcePrefix(binding: Binding): string {
+  const scope = resolveCompanyGraphScope(binding.authenticated_caller, binding.run.scope);
+  if (!scope.ok || !companyGraphScopeOwnsBinding(scope.scope, binding)) {
+    throw new Error('source_scope');
+  }
+  return scope.scope.scope === 'legal_company' ? COMPANY_SOURCE_PREFIX : SOURCE_PREFIX;
+}
 async function loadManifest(
   deps: GraphWorkerBrokerDeps, binding: Binding, signal: AbortSignal,
 ) {
   const loaded = await jsonGet(
-    deps, SOURCE_PREFIX + '/manifests/' + binding.run.manifest_sha256 + '.json', signal,
+    deps, sourcePrefix(binding) + '/manifests/' + binding.run.manifest_sha256 + '.json', signal,
   );
   if (!validManifest(loaded.value, binding)) throw new Error('manifest');
   return { manifest: loaded.value, response: loaded.response };
@@ -461,7 +509,7 @@ async function loadRow(
   deps: GraphWorkerBrokerDeps, binding: Binding, item: ManifestItem, signal: AbortSignal,
 ) {
   const loaded = await jsonGet(
-    deps, SOURCE_PREFIX + '/rows/' + binding.room + '/' + item.enrichment_row_sha256 + '.json',
+    deps, sourcePrefix(binding) + '/rows/' + binding.room + '/' + item.enrichment_row_sha256 + '.json',
     signal,
   );
   if (!validRow(loaded.value, binding, item)) throw new Error('row');
@@ -507,15 +555,21 @@ const PREPARED_BINDING_KEYS = [
   'snapshot_id','prepared_manifest_sha256','sidecar_content_sha256',
   'chunk_ordinal','chunk_sha256',
 ];
+function preparedProfile(binding: Binding): PreparedProfile | null {
+  const scope = resolveCompanyGraphScope(binding.authenticated_caller, binding.run.scope);
+  if (!scope.ok || !companyGraphScopeOwnsBinding(scope.scope, binding)) return null;
+  return scope.scope.scope === 'legal_company' ? COMPANY_PREPARED_PROFILE : CFO_PREPARED_PROFILE;
+}
 function preparedBinding(
   value: unknown, binding: Binding, manifest: Manifest,
 ): { binding: PreparedBinding; item: ManifestItem } | null {
   if (!exact(value, PREPARED_BINDING_KEYS)) return null;
   const prepared = value as unknown as PreparedBinding;
-  if (prepared.schema !== PREPARED_BINDING_SCHEMA ||
+  const profile = preparedProfile(binding);
+  if (!profile || prepared.schema !== profile.bindingSchema ||
       prepared.run_id !== binding.run.run_id ||
-      prepared.room !== 'finance' || binding.room !== 'finance' ||
-      prepared.source_index !== 'finance-cfo-source-docs' ||
+      prepared.room !== profile.room || binding.room !== profile.room ||
+      prepared.source_index !== profile.sourceIndex ||
       binding.source_index !== prepared.source_index ||
       prepared.catalog_manifest_sha256 !== binding.run.manifest_sha256 ||
       prepared.document_ordinal !== 0 ||
@@ -536,9 +590,9 @@ function preparedBinding(
 function preparedSourceVersion(sourceBinding: PreparedBinding): string {
   return 'txtchunk_' + digest(canonical(sourceBinding));
 }
-function preparedSourceId(purpose: string, sourceBinding: PreparedBinding): string {
-  return 'cfotext_' + digest(canonical({
-    schema: PREPARED_SOURCE_SCHEMA, purpose, source_binding: sourceBinding,
+function preparedSourceId(purpose: string, sourceBinding: PreparedBinding, profile: PreparedProfile): string {
+  return profile.sourceIdPrefix + '_' + digest(canonical({
+    schema: profile.sourceSchema, purpose, source_binding: sourceBinding,
   }));
 }
 function preparedAuthorizationRequest(
@@ -600,12 +654,11 @@ function parseAuthorization(
   }
   if (request.schema !== PREPARED_AUTH_SCHEMA ||
       request.phase !== 'model_source_access' ||
-      ctx.caller_agent !== 'cfo' || binding.authenticated_caller !== 'cfo' ||
-      binding.room !== 'finance' ||
       !exact(request.source, ['source_id','subscription_source_version','purpose',
         'canonical_input_sha256','source_binding'])) return null;
   const source = request.source as Record<string, unknown>;
-  if (!PREPARED_SOURCE_ID.test(String(source.source_id)) ||
+  const profile = preparedProfile(binding);
+  if (!profile || !profile.sourceId.test(String(source.source_id)) ||
       !PREPARED_SOURCE_VERSION.test(String(source.subscription_source_version)) ||
       source.purpose !== binding.run.purpose ||
       !SHA.test(String(source.canonical_input_sha256))) return null;
@@ -869,8 +922,10 @@ function operationSource(
   }
   const prepared = preparedBinding(spec.source_binding, binding, manifest);
   if (!prepared) return null;
+  const profile = preparedProfile(binding);
+  if (!profile) return null;
   const sourceVersion = preparedSourceVersion(prepared.binding);
-  const sourceIdValue = preparedSourceId(binding.run.purpose, prepared.binding);
+  const sourceIdValue = preparedSourceId(binding.run.purpose, prepared.binding, profile);
   if (spec.source_id !== sourceIdValue || spec.source_version !== sourceVersion) return null;
   const request = preparedAuthorizationRequest(
     binding, prepared.binding, sourceIdValue, sourceVersion, String(spec.input_sha256),
@@ -1459,9 +1514,11 @@ export function registerGraphWorkerBrokerRoutes(
           parsed.sourceBinding, c.binding, manifest,
         );
         if (!prepared) return fail(reply, 403, 'graph_worker_forbidden');
+        const profile = preparedProfile(c.binding);
+        if (!profile) return fail(reply, 403, 'graph_worker_forbidden');
         const sourceVersion = preparedSourceVersion(prepared.binding);
         const sourceIdValue = preparedSourceId(
-          c.binding.run.purpose, prepared.binding,
+          c.binding.run.purpose, prepared.binding, profile,
         );
         const expected = preparedAuthorizationRequest(
           c.binding, prepared.binding, sourceIdValue, sourceVersion,
@@ -1521,7 +1578,58 @@ export function registerGraphWorkerBrokerRoutes(
     await recheck({ ...control, signal });
     return source;
   }
-  function cfoTextStore(control: BrokerControl) {
+  async function resolveBoundCompanyTextSource(
+    control: BrokerControl, ordinal: number, signal: AbortSignal,
+  ): Promise<CompanyTextSource> {
+    const scope = resolveCompanyGraphScope(
+      control.ctx.caller_agent, control.binding.run.scope,
+    );
+    if (signal !== control.signal || !scope.ok ||
+        !companyGraphScopeOwnsBinding(scope.scope, control.binding) || ordinal !== 0) {
+      throw new Error('company_text_forbidden');
+    }
+    await assertActive(deps, control.binding, signal);
+    const { manifest } = await loadManifest(deps, control.binding, signal);
+    const item = manifest.documents[ordinal];
+    if (!item || item.ordinal !== ordinal || item.room !== scope.scope.room) {
+      throw new Error('company_text_source_missing');
+    }
+    const loaded = await loadRow(deps, control.binding, item, signal);
+    const source = Object.freeze({
+      room: scope.scope.room,
+      source_index: scope.scope.sourceIndex,
+      path: loaded.value.row.path as string,
+      source_path_hash: item.source_path_hash,
+      document_version_id: item.document_version_id,
+      source_version: item.source_version,
+    } as CompanyTextSource);
+    await recheck({ ...control, signal });
+    return source;
+  }
+  async function companyTextCurrentness(
+    control: BrokerControl, ordinal: number,
+  ): Promise<Record<string, unknown>> {
+    const source = await resolveBoundCompanyTextSource(control, ordinal, control.signal);
+    const result = await deps.readCompanyText(source, control.ctx, control.signal);
+    await recheck(control);
+    if (result.outcome === 'ready') {
+      return Object.freeze({
+        schema: 'company-text-currentness-v1', run_id: control.binding.run.run_id,
+        document_ordinal: ordinal, outcome: result.outcome,
+        source_document_version: result.descriptor.source_document_version,
+        catalog_source_sha256: result.descriptor.catalog_source_sha256,
+        sidecar_content_sha256: result.descriptor.sidecar_content_sha256,
+      });
+    }
+    return Object.freeze({
+      schema: 'company-text-currentness-v1', run_id: control.binding.run.run_id,
+      document_ordinal: ordinal, outcome: result.outcome,
+      source_document_version: result.source_document_version,
+      catalog_source_sha256: result.catalog_source_sha256,
+      sidecar_content_sha256: null,
+    });
+  }
+  function preparedTextStore(control: BrokerControl) {
     const prefix = statePrefix(control.binding) + '/text-snapshots/';
     return async (input: RawRequest): Promise<RawResponse> => {
       if (input.signal !== control.signal || !input.key.startsWith(prefix)) {
@@ -1559,7 +1667,22 @@ export function registerGraphWorkerBrokerRoutes(
       resolveSource: (ordinal, options) =>
         resolveBoundCfoTextSource(control, ordinal, options.signal),
       recheck: (options) => recheck({ ...control, signal: options.signal }),
-      store: cfoTextStore(control),
+      store: preparedTextStore(control),
+      maxPreparedBytes: CFO_TEXT_CANARY_MAX_BYTES,
+    });
+  }
+  function companyTextController(control: BrokerControl) {
+    return createCompanyTextPreparationController({
+      runId: control.binding.run.run_id,
+      sourceReader: Object.freeze({
+        readVersionPinnedPage: (
+          source: CompanyTextSource, options: { signal: AbortSignal },
+        ) => deps.readCompanyText(source, control.ctx, options.signal),
+      }),
+      resolveSource: (ordinal, options) =>
+        resolveBoundCompanyTextSource(control, ordinal, options.signal),
+      recheck: (options) => recheck({ ...control, signal: options.signal }),
+      store: preparedTextStore(control),
       maxPreparedBytes: CFO_TEXT_CANARY_MAX_BYTES,
     });
   }
@@ -1567,14 +1690,18 @@ export function registerGraphWorkerBrokerRoutes(
   async function resolvePreparedChunk(
     control: BrokerControl, sourceBinding: PreparedBinding,
   ): Promise<{ inputSha256: string; textSha256: string; text: string } | null> {
-    const result = await cfoTextController(control).readChunk({
+    const profile = preparedProfile(control.binding);
+    if (!profile || sourceBinding.schema !== profile.bindingSchema) return null;
+    const controller = profile === COMPANY_PREPARED_PROFILE
+      ? companyTextController(control) : cfoTextController(control);
+    const result = await controller.readChunk({
       snapshot_id: sourceBinding.snapshot_id,
       ordinal: sourceBinding.chunk_ordinal,
     }, { signal: control.signal });
     if (!exact(result, ['schema','snapshot_id','source_document_version',
       'manifest_sha256','sidecar_content_sha256','ordinal','start_utf16',
       'end_utf16','start_byte','end_byte','text_sha256','text']) ||
-      result.schema !== 'cfo-text-prepared-chunk-v1' ||
+      result.schema !== profile.chunkSchema ||
       result.snapshot_id !== sourceBinding.snapshot_id ||
       result.source_document_version !== sourceBinding.source_document_version ||
       result.manifest_sha256 !== sourceBinding.prepared_manifest_sha256 ||
@@ -1586,7 +1713,7 @@ export function registerGraphWorkerBrokerRoutes(
       digest(result.text) !== sourceBinding.chunk_sha256) return null;
     const sourceVersion = preparedSourceVersion(sourceBinding);
     const document = {
-      text: result.text, document_version_id: sourceVersion, room: 'finance',
+      text: result.text, document_version_id: sourceVersion, room: profile.room,
     };
     return {
       inputSha256: digest(canonical(document)),
@@ -1658,6 +1785,86 @@ export function registerGraphWorkerBrokerRoutes(
     return output.source_sha256 === operation.sourceProof.textSha256 &&
       output.source_sha256 === operation.source.sourceBinding.chunk_sha256;
   }
+
+  /** CLO-only, closed-scope version-pinned currentness check. It never returns text or paths. */
+  app.post('/graph-worker/v1/source/:runId/company-text-currentness', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    if (!exact(request.body, ['run','document_ordinal']) ||
+        !validRun(request.body.run) || request.body.document_ordinal !== 0) {
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    }
+    const params = request.params as { runId: string };
+    const c = await context(request, reply, params.runId);
+    if (!c) return;
+    const scope = resolveCompanyGraphScope(c.ctx.caller_agent, c.binding.run.scope);
+    if (!sameRun(request.body.run, c.binding.run) || !scope.ok ||
+        scope.scope.scope !== 'legal_company' ||
+        !companyGraphScopeOwnsBinding(scope.scope, c.binding)) {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    try {
+      reply.header('cache-control', 'no-store');
+      return reply.send(await companyTextCurrentness(c, request.body.document_ordinal));
+    } catch {
+      return fail(reply, 503, 'graph_worker_text_unavailable');
+    }
+  });
+
+  /** CLO-only prepared text route. Source identity and storage prefix come from the closed binding. */
+  app.post('/graph-worker/v1/source/:runId/company-text-snapshots', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    if (!exact(request.body, ['run','document_ordinal']) ||
+        !validRun(request.body.run) || request.body.document_ordinal !== 0) {
+      return fail(reply, 400, 'graph_worker_request_invalid');
+    }
+    const params = request.params as { runId: string };
+    const c = await context(request, reply, params.runId);
+    if (!c) return;
+    const scope = resolveCompanyGraphScope(c.ctx.caller_agent, c.binding.run.scope);
+    if (!sameRun(request.body.run, c.binding.run) || !scope.ok ||
+        scope.scope.scope !== 'legal_company' ||
+        !companyGraphScopeOwnsBinding(scope.scope, c.binding)) {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    try {
+      const result = await companyTextController(c).prepare(
+        { document_ordinal: request.body.document_ordinal }, { signal: c.signal },
+      );
+      reply.header('cache-control', 'no-store');
+      return reply.send(result);
+    } catch {
+      return fail(reply, 503, 'graph_worker_text_unavailable');
+    }
+  });
+
+  app.get(
+    '/graph-worker/v1/source/:runId/company-text-snapshots/:snapshotId/chunks/:ordinal',
+    { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      const params = request.params as { runId: string; snapshotId: string; ordinal: string };
+      if (!/^(?:0|[1-9]\d?)$/.test(params.ordinal)) {
+        return fail(reply, 400, 'graph_worker_request_invalid');
+      }
+      const c = await context(request, reply, params.runId);
+      if (!c) return;
+      const scope = resolveCompanyGraphScope(c.ctx.caller_agent, c.binding.run.scope);
+      if (!scope.ok || scope.scope.scope !== 'legal_company' ||
+          !companyGraphScopeOwnsBinding(scope.scope, c.binding)) {
+        return fail(reply, 403, 'graph_worker_forbidden');
+      }
+      try {
+        const result = await companyTextController(c).readChunk({
+          snapshot_id: params.snapshotId, ordinal: Number(params.ordinal),
+        }, { signal: c.signal });
+        reply.header('cache-control', 'no-store');
+        return reply.send(result);
+      } catch {
+        return fail(reply, 503, 'graph_worker_text_unavailable');
+      }
+    },
+  );
 
   app.post('/graph-worker/v1/source/:runId/cfo-text-snapshots', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
@@ -1966,7 +2173,7 @@ export function registerGraphWorkerBrokerRoutes(
 }
 
 export const graphWorkerBrokerTest = {
-  BUCKET, SOURCE_PREFIX, STATE_BASE, canonical, digest, parsePolicy,
+  BUCKET, SOURCE_PREFIX, COMPANY_SOURCE_PREFIX, STATE_BASE, sourcePrefix, canonical, digest, parsePolicy,
   bindingHash, statePrefix, validManifest, validRow, sourceId, metadataInputSha,
   abortable, boundedCancel,
 };

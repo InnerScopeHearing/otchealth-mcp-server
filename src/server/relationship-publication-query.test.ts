@@ -32,3 +32,28 @@ test('published relationship query replays qualified X-to-Y-to-Z evidence and de
   flags.changed=false;flags.sourceChecks=0;flags.revokeAfterChecks=3;assert.equal((await post(body)).statusCode,403);
  }finally{await f.routes.close();}
 });
+
+test('publication policy preserves corporate CLO authority and excludes the personal legal lane', async()=>{
+ const {relationshipPublicationTest}=await import('./relationship-publication.js');
+ const base={schema:'relationship-publication-policy-v1',policy_version:'synthetic-clo-v1',expires_at:'2027-01-01T00:00:00.000Z',bindings:[{authenticated_caller:'clo',caller_hash:'a'.repeat(64),producer_id:'synthetic-reviewer-1',cohort_id:'synthetic-history',purpose:'synthetic-resolution',run_version:'synthetic-clo-v1',encryption:{algorithm:'AES256'},source_policy:{catalog_key:'graph-trial/synthetic/legal-catalog.jsonl',catalog_source_sha256:'b'.repeat(64),source_prefixes:['legal/']},scope:'legal_company',room:'legal_company',source_index:'legal-company'}]};
+ assert.ok(relationshipPublicationTest.parse(JSON.stringify(base),Date.parse('2026-09-08T12:00:00.000Z')));
+ for(const mutate of [(binding:any)=>binding.authenticated_caller='clo-personal',(binding:any)=>binding.scope='personal_legal',(binding:any)=>binding.source_index='legal-personal']){const value=structuredClone(base);mutate(value.bindings[0]);assert.equal(relationshipPublicationTest.parse(JSON.stringify(value),Date.parse('2026-09-08T12:00:00.000Z')),null);}
+});
+
+test('synthetic corporate CLO publication discovers and durably replays only the legal-company history',{skip:!enabled},async()=>{
+ const {createAutoPublicationFixture}=await import(new URL('../../tools/relationship-artifacts/auto-publication-fixture.mjs',import.meta.url).href);
+ const flags:any={},f=await createAutoPublicationFixture({callerSeat:'clo',flags});
+ const discover=(payload:any)=>f.routes.app.inject({method:'POST',url:'/relationship-publications/v1/synthetic-history/synthetic-reviewer-1/discover-query',headers:{authorization:'Bearer synthetic-history-token-value-1234','content-type':'application/json'},payload:JSON.stringify(payload)});
+ try{
+  for(let index=0;index<3;index++){f.admit(index);await f.reviewAndPublish(index);}
+  const accepted=await discover({scope:'legal_company',query:f.query});
+  assert.equal(accepted.statusCode,200,accepted.body);
+  assert.equal(accepted.json().answer.status,'qualified');
+  assert.equal(accepted.json().answer.premise_ids.length,3);
+  assert.equal(accepted.json().discovery.scanned_histories,3);
+  assert.equal(accepted.json().discovery.scan_complete,true);
+  assert.equal((await discover({scope:'personal_legal',query:f.query})).statusCode,403);
+  flags.callerAgent='cfo';assert.equal((await discover({scope:'legal_company',query:f.query})).statusCode,403);
+  flags.callerAgent='clo-personal';assert.equal((await discover({scope:'legal_company',query:f.query})).statusCode,403);
+ }finally{await f.routes.close();}
+});

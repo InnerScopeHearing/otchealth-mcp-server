@@ -1,7 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured, normalizeAgent, readInbound, readReconcileMarker, writeReconcileMarker } from '../../memory/store.js';
+import { isConfigured, readInbound, readReconcileMarker, writeReconcileMarker } from '../../memory/store.js';
+import { resolveAgentReadScope } from './agent-scope.js';
 
 export function registerMemoryReconcile(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -24,7 +25,9 @@ export function registerMemoryReconcile(server: McpServer, callerHash: CallerHas
       outputShape: { reconciled: z.boolean(), acked: z.number(), marker: z.string() },
       handler: async (input, ctx) => {
         if (!isConfigured()) return { data: { reconciled: false, acked: 0, marker: '', note: 'Shared brain not configured.' }, summary: 'Memory store not configured.' };
-        const agent = normalizeAgent(input.agent || ctx.callerAgent);
+        const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
+        if (!scope || !scope.allowed) return { data: { reconciled: false, acked: 0, marker: '' }, summary: 'Refused: authenticated callers can reconcile only their own inbound ledger.' };
+        const agent = scope.agent;
         const prev = await readReconcileMarker(agent);
         const pending = await readInbound(agent, prev);
         if (ctx.dryRun) return { data: { reconciled: false, acked: pending.length, marker: prev, note: 'dry_run: pass dry_run=false to persist.' }, summary: `DRY RUN: would ack ${pending.length} inbound note(s) on ${agent}'s ledger.` };

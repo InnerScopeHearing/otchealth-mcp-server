@@ -1,7 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured, normalizeAgent, readInbound, readReconcileMarker } from '../../memory/store.js';
+import { isConfigured, readInbound, readReconcileMarker } from '../../memory/store.js';
+import { resolveAgentReadScope } from './agent-scope.js';
 
 export function registerMemoryInbound(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -24,7 +25,9 @@ export function registerMemoryInbound(server: McpServer, callerHash: CallerHashP
       outputShape: { count: z.number(), sinceMarker: z.string(), inbound: z.array(z.unknown()) },
       handler: async (input, ctx) => {
         if (!isConfigured()) return { data: { count: 0, sinceMarker: '', inbound: [], note: 'Shared brain not configured.' }, summary: 'Memory store not configured.' };
-        const agent = normalizeAgent(input.agent || ctx.callerAgent);
+        const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
+        if (!scope || !scope.allowed) return { data: { count: 0, sinceMarker: '', inbound: [] }, summary: 'Refused: authenticated callers can inspect only their own inbound ledger.' };
+        const agent = scope.agent;
         const marker = await readReconcileMarker(agent);
         const inbound = await readInbound(agent, marker);
         return {
