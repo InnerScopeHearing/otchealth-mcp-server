@@ -21,21 +21,21 @@ function args(argv){if(argv.length!==2||argv[0]!=='--config'||!argv[1])fail('can
 
 /** Actual production composition. It performs no model dispatch: target text preparation is
  * the existing version-pinned broker operation, while review consumes retained candidates. */
-export async function createCandidatePromotionRuntime({config: raw, env=process.env, stdout=process.stdout, createRuntime=createFullBackfillRuntime, createCatalogClient}={}){
+export async function createCandidatePromotionRuntime({config: raw, env=process.env, stdout=process.stdout, createRuntime=createFullBackfillRuntime, createCatalogClient, createHistoricalReader=createHistoricalRelationshipReader, createPromotionGateway=createPromotionGatewayClient, createLineageStore=createPromotionLineageIntentStore, createOutbox=createPublicationOutbox, createPublisher=createPagedRecallHost, createPipeline=createRelationshipPublicationPipeline}={}){
  const local=config(raw), backfill=await json(local.backfill_config), runtime=await createRuntime(backfill,env,stdout);
  if(!runtime?.host||typeof runtime.bearerTokenProvider!=='function'||typeof runtime.reviewOptionsForRun!=='function'||typeof runtime.createSubscriptionCandidateReview!=='function'||!runtime.publisherOptions||!runtime.factories)fail('candidate_promotion_runtime_unavailable');
  if(!backfill.registry||backfill.review_mode==='candidate-only'||typeof backfill.cto_root!=='string'||backfill.producer!=='cfo-relationship-worker'||typeof backfill.outbox_directory!=='string')fail('candidate_promotion_runtime_config');
  const catalogFactory=createCatalogClient??(await import(pathToFileURL(join(backfill.cto_root,'tools/neptune-trial/catalog-controller/gateway-client.mjs')).href)).createCatalogGatewayClient;
  const catalog=catalogFactory({cohort_id:runtime.host.cohort_id,seat:'cfo',bearerTokenProvider:runtime.bearerTokenProvider});
  if(typeof catalog?.createController!=='function'||typeof catalog?.admit!=='function'||typeof catalog?.completePromotion!=='function'||typeof catalog?.workerBrokerForRun!=='function')fail('candidate_promotion_runtime_unavailable');
- const lineageStore=createPromotionLineageIntentStore(join(backfill.outbox_directory,'promotion-lineage'));
+ const lineageStore=createLineageStore(join(backfill.outbox_directory,'promotion-lineage'));
  async function buildPipeline(targetRun){
-  const options=await runtime.reviewOptionsForRun(targetRun),gateway=createPromotionGatewayClient({run:targetRun,registryId:backfill.registry.id,bearerTokenProvider:runtime.bearerTokenProvider});
-  const parentReader=createHistoricalRelationshipReader({gatewayOrigin:'https://mcp.otchealth.app',run:local.parent_run,producer:backfill.producer,historyTrust:runtime.publisherOptions.historyTrust,getAuthorization:runtime.publisherOptions.getAuthorization,fetchImpl:runtime.publisherOptions.fetchImpl,sse:runtime.publisherOptions.sse});
+  const options=await runtime.reviewOptionsForRun(targetRun),gateway=createPromotionGateway({run:targetRun,registryId:backfill.registry.id,bearerTokenProvider:runtime.bearerTokenProvider});
+  const parentReader=createHistoricalReader({gatewayOrigin:'https://mcp.otchealth.app',run:local.parent_run,producer:backfill.producer,historyTrust:runtime.publisherOptions.historyTrust,getAuthorization:runtime.publisherOptions.getAuthorization,fetchImpl:runtime.publisherOptions.fetchImpl,sse:runtime.publisherOptions.sse});
   const planner=createCandidatePromotionPlanner({readParent:createHistoricalCandidateParentReader({reader:parentReader}),refreshSource:createPreparedPromotionSourceRefresher({findPreparedBinding:gateway.findPreparedBinding,sourceAdapter:options.resolution.sourceAdapter}),assertCovered:createPartitionCoverageAdapter({registryId:backfill.registry.id,readiness:gateway.readiness})});
   const review=createCandidatePromotionReview({planner,recordLineage:createPromotionLineageRecorder({store:lineageStore,cohort_id:runtime.host.cohort_id,producer_id:backfill.producer}),createSignedReview:async({run,signal})=>runtime.createSubscriptionCandidateReview(await runtime.reviewOptionsForRun(run,{signal}))});
-  const publisher=createPagedRecallHost({...runtime.publisherOptions,...runtime.factories});
-  const outbox=createPublicationOutbox(backfill.outbox_directory),pipeline=createRelationshipPublicationPipeline({cohort_id:runtime.host.cohort_id,producer_id:backfill.producer,outbox,publisher,
+  const publisher=createPublisher({...runtime.publisherOptions,...runtime.factories});
+  const outbox=createOutbox(backfill.outbox_directory),pipeline=createPipeline({cohort_id:runtime.host.cohort_id,producer_id:backfill.producer,outbox,publisher,
    loadExtracted:async()=>({bindings:[],candidates:[],queries:[]}),createReview:async()=>({reviewCandidates:async()=>review.reviewCandidates({parent_artifact_ref:local.parent_artifact_ref,parent_run:local.parent_run,run:targetRun})})});
   return{pipeline,outbox};
  }
