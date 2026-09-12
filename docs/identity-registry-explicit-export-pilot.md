@@ -1,9 +1,30 @@
 # CFO source-owned explicit-ID export pilot
 
-`publishExplicitIdentityRegistryExport` is the source-owner publication primitive. It is intentionally a module rather than a credential-loading CLI. The CFO process supplies two approved ports:
+`publishExplicitIdentityRegistryExport` is the source-owner publication primitive. `tools/identity-registry-explicit-export-run.mjs` is its approved source-ring runner. It takes an explicit-ID input path, a public ports-config path, and a new output path. It never prints or copies the input records.
 
-- `signer`, with a public Ed25519 PEM and `sign(bytes)`. The signer reads the private key inside the authorized secrets-store boundary and returns only a 64-byte signature. The exporter never accepts a private key, a key file, a key environment variable, or a signing-key value.
-- `store.putImmutable({ key, body })`, which writes an encrypted, versioned object with conditional creation and returns its assigned version ID. The exporter does not select a cloud provider or create a bucket.
+The runner constructs these two concrete approved ports:
+
+- `createCfoIdentityRegistryKmsSigner`, which uses the existing ECS SigV4 credential resolver to call KMS `GetPublicKey` and `Sign` with an Ed25519 KMS key reference. KMS retains the private key. The runner accepts no private key, key file, key environment variable, or signing-key value.
+- `createExplicitExportImmutableStore`, which uses the existing identity-registry S3 runtime, including Versioning and reviewed immutable-prefix policy preflight. It writes encrypted, versioned objects with `If-None-Match: *`, then reads the exact assigned version. An interrupted or repeated write is accepted only when the existing bytes are identical.
+
+The ports config is public metadata only:
+
+```json
+{
+  "schema": "cfo-identity-registry-explicit-export-ports-v1",
+  "kms": { "region": "us-east-1", "key_id": "alias/cfo-identity-registry-pilot" },
+  "source_storage": {
+    "bucket": "otchealth-finance-legal-dr-55c84f6b",
+    "region": "us-east-1",
+    "prefix": "graph-trial/cfo-identity-pilot",
+    "approved_policy_canonical_sha256": "<64 lowercase hex>",
+    "approved_storage_scope_sha256": "<64 lowercase hex>",
+    "sse": { "algorithm": "AES256" }
+  }
+}
+```
+
+The example identifiers above are placeholders, not a deployed configuration. Source owner supplies actual approved metadata in its own ring. No bucket, KMS key, policy, source record, or gateway deployment is provisioned by this change.
 
 The input is `source-identity-registry-explicit-export-input-v1` in practice, enforced by exact field validation. It carries one CFO registry identifier, source authority descriptor, exact active run, catalog pins, partition-manifest version, source generation and version, output prefix, expiry, prepared source bindings, explicit identity records, and current partition shard versions.
 
@@ -16,7 +37,15 @@ The workflow writes, in order, immutable source pages, coverage pages, per-shard
 Run the synthetic proof from the gateway checkout:
 
 ```powershell
-node .\node_modules\typescript\bin\tsc -p tsconfig.json; node --test tools\identity-registry-explicit-export.test.mjs
+node .\node_modules\typescript\bin\tsc -p tsconfig.json; node --test tools\identity-registry-explicit-export.test.mjs; node --import ./tools/relationship-artifacts/typescript-test-loader.mjs --test src/server/identity-registry-explicit-export-ports.test.ts
 ```
 
 This proof uses generated synthetic records and an in-memory immutable store. It does not read CFO source data, write cloud storage, use a production signing key, or configure the gateway.
+
+After source owner has supplied approved metadata in its ring, the bounded runner command is:
+
+```powershell
+node .\tools\identity-registry-explicit-export-run.mjs --input C:\approved-source-ring\identity-export-input.json --ports C:\approved-source-ring\identity-export-ports.json --output C:\approved-source-ring\identity-export-result.json
+```
+
+The output has the public production-config source fields and immutable object pins. The release owner adds the separate storage section to `identity-registry-production-v1`, runs preflight, and deploys only after the documented live acceptance checks.
