@@ -425,6 +425,8 @@ const MIN_SPACING_MS = 1100;
 export interface XeroGetResult {
   status: number;
   body: unknown;
+  /** Connector-resolved tenant, retained inside the gateway for source-owned callers. */
+  tenantId?: string;
   dayLimitRemaining: string | null;
   minuteLimitRemaining: string | null;
 }
@@ -525,11 +527,13 @@ export async function xeroGet(
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, v);
   const url = `${base}${path}${qs.size ? `?${qs}` : ''}`;
 
+  let tenantId: string | undefined;
   const attempt = async (force: boolean): Promise<Response> => {
-    const { accessToken, tenantId } = await getOrgAccess(org, { forceRefresh: force, deps });
+    const access = await getOrgAccess(org, { forceRefresh: force, deps });
+    tenantId = access.tenantId;
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${accessToken}`,
-      'Xero-tenant-id': tenantId,
+      Authorization: `Bearer ${access.accessToken}`,
+      'Xero-tenant-id': access.tenantId,
       Accept: 'application/json',
     };
     if (opts.modifiedAfter) headers['If-Modified-Since'] = opts.modifiedAfter;
@@ -553,6 +557,7 @@ export async function xeroGet(
   return {
     status: r.status,
     body,
+    tenantId,
     dayLimitRemaining: r.headers.get('X-DayLimit-Remaining'),
     minuteLimitRemaining: r.headers.get('X-MinLimit-Remaining'),
   };
