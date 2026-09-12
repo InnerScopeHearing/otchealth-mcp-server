@@ -155,9 +155,9 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   let authenticatedBinding=false,stage='unknown';const setStage=(value:string)=>{stage=FAILURE_STAGES.has(value)?value:'unknown';};
   try{
    const params=req.params as Json;if(!LABEL.test(params.cohortId)||!h.path(params.cohortId)||!PRODUCER.test(params.producerId))fail(400);
-   const ctx=await bounded(()=>d.authenticate(req,reply),ctl.signal);if(!ctx||ctx.caller_agent!=='cfo'||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
+   const ctx=await bounded(()=>d.authenticate(req,reply),ctl.signal);if(!ctx||!['cfo','clo'].includes(ctx.caller_agent)||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
    const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===params.cohortId&&x.producer_id===params.producerId&&x.caller_hash===ctx.caller_hash);if(!c)fail();authenticatedBinding=true;
-   const recheck=async()=>{const auth=await d.authenticate(req,reply);if(!auth||auth.caller_agent!=='cfo'||!auth.connector_surface||auth.caller_hash!==ctx.caller_hash||!equal(parse(d.policyJson(),d.now()),policy)||ctl.signal.aborted)fail();};
+   const recheck=async()=>{const auth=await d.authenticate(req,reply);if(!auth||auth.caller_agent!==ctx.caller_agent||!['cfo','clo'].includes(auth.caller_agent)||!auth.connector_surface||auth.caller_hash!==ctx.caller_hash||!equal(parse(d.policyJson(),d.now()),policy)||ctl.signal.aborted)fail();};
    return await bounded(()=>operation(req,reply,c,policy,ctx,ctl.signal,recheck,setStage),ctl.signal);
   }catch(e){if(!reply.sent){if(authenticatedBinding&&method==='POST'){reply.header('x-relationship-failure-stage',stage).header('x-relationship-failure-code',failureCode(e));const upstreamStatus=failureUpstreamStatus(e);if(upstreamStatus!==null)reply.header('x-relationship-failure-upstream-status',String(upstreamStatus));}return reply.code((e as any).status??((e as Error).message==='source_denied'?403:503)).send();}}finally{clearTimeout(timer);ctl.abort();req.raw.off('aborted',abort);reply.raw.off('close',close);}
  }});

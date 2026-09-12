@@ -32,3 +32,10 @@ test('published relationship query replays qualified X-to-Y-to-Z evidence and de
   flags.changed=false;flags.sourceChecks=0;flags.revokeAfterChecks=3;assert.equal((await post(body)).statusCode,403);
  }finally{await f.routes.close();}
 });
+
+test('publication policy preserves corporate CLO authority and excludes the personal legal lane', async()=>{
+ const {relationshipPublicationTest}=await import('./relationship-publication.js');
+ const base={schema:'relationship-publication-policy-v1',policy_version:'synthetic-clo-v1',expires_at:'2027-01-01T00:00:00.000Z',bindings:[{authenticated_caller:'clo',caller_hash:'a'.repeat(64),producer_id:'synthetic-reviewer-1',cohort_id:'synthetic-history',purpose:'synthetic-resolution',run_version:'synthetic-clo-v1',encryption:{algorithm:'AES256'},source_policy:{catalog_key:'graph-trial/synthetic/legal-catalog.jsonl',catalog_source_sha256:'b'.repeat(64),source_prefixes:['legal/']},scope:'legal_company',room:'legal_company',source_index:'legal-company'}]};
+ assert.ok(relationshipPublicationTest.parse(JSON.stringify(base),Date.parse('2026-09-08T12:00:00.000Z')));
+ for(const mutate of [(binding:any)=>binding.authenticated_caller='clo-personal',(binding:any)=>binding.scope='personal_legal',(binding:any)=>binding.source_index='legal-personal']){const value=structuredClone(base);mutate(value.bindings[0]);assert.equal(relationshipPublicationTest.parse(JSON.stringify(value),Date.parse('2026-09-08T12:00:00.000Z')),null);}
+});
