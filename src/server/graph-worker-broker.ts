@@ -137,6 +137,8 @@ export type IdentityRegistryConfig = {
    * every callback and the immutable manifest pin are configured.
    */
   partitions?: IdentityRegistryPartitionConfig;
+  /** Production resolver sets this only after its immutable-storage preflight succeeds. */
+  storage_policy_ready?: true;
 };
 export type IdentityRegistryResolver = {
   resolve: (request: { registry_id: string; caller: AuthContext }, options: { signal: AbortSignal }) =>
@@ -956,32 +958,33 @@ export function registerGraphWorkerBrokerRoutes(
     await assertActive(deps, control.binding, control.signal);
   }
 
-  async function identityContext(request: FastifyRequest, reply: FastifyReply, registryId: string) {
-    const ctx = await authenticate(request, reply, deps);
+  function validIdentityRegistryConfig(config: IdentityRegistryConfig | null, registryId: string): config is IdentityRegistryConfig {
+    if (!config || config.registry_id !== registryId || !validIdentityAuthority(config.authority) ||
+        config.authority.scope !== 'cfo' || !validRun(config.binding.run) ||
+        config.binding.authenticated_caller !== 'cfo' || config.binding.room !== 'finance' ||
+        config.binding.source_index !== ROOM.finance.index || typeof config.source?.page !== 'function' ||
+        typeof config.source?.current !== 'function' || typeof config.snapshots?.publish !== 'function' ||
+        typeof config.snapshots?.read !== 'function') return false;
+    try { return createPublicKey(config.public_key).asymmetricKeyType === 'ed25519'; } catch { return false; }
+  }
+  async function identityContext(request: FastifyRequest, reply: FastifyReply, registryId: string,
+    resolved?: { ctx: AuthContext; config: IdentityRegistryConfig; signal: AbortSignal },
+  ) {
+    const ctx = resolved?.ctx ?? await authenticate(request, reply, deps);
     if (!ctx) return null;
     if (ctx.caller_agent !== 'cfo' || !deps.identityRegistry || !LABEL.test(registryId)) {
       await fail(reply, deps.identityRegistry ? 403 : 503,
         deps.identityRegistry ? 'graph_worker_forbidden' : 'identity_registry_unavailable');
       return null;
     }
-    const signal = AbortSignal.timeout(15_000);
-    let config: IdentityRegistryConfig | null;
-    try { config = await abortable(Promise.resolve().then(() =>
-      deps.identityRegistry!.resolve({ registry_id: registryId, caller: ctx }, { signal })), signal); }
-    catch { await fail(reply, 503, 'identity_registry_unavailable'); return null; }
-    if (!config || config.registry_id !== registryId || !validIdentityAuthority(config.authority) ||
-        config.authority.scope !== 'cfo' || !validRun(config.binding.run) ||
-        config.binding.authenticated_caller !== 'cfo' || config.binding.room !== 'finance' ||
-        config.binding.source_index !== ROOM.finance.index || typeof config.source?.page !== 'function' ||
-        typeof config.source?.current !== 'function' || typeof config.snapshots?.publish !== 'function' ||
-        typeof config.snapshots?.read !== 'function') {
-      await fail(reply, 503, 'identity_registry_unavailable'); return null;
+    const signal = resolved?.signal ?? AbortSignal.timeout(15_000);
+    let config: IdentityRegistryConfig | null = resolved?.config ?? null;
+    if (!resolved) {
+      try { config = await abortable(Promise.resolve().then(() =>
+        deps.identityRegistry!.resolve({ registry_id: registryId, caller: ctx }, { signal })), signal); }
+      catch { await fail(reply, 503, 'identity_registry_unavailable'); return null; }
     }
-    let publicKey;
-    try { publicKey = createPublicKey(config.public_key); } catch {
-      await fail(reply, 503, 'identity_registry_unavailable'); return null;
-    }
-    if (publicKey.asymmetricKeyType !== 'ed25519') {
+    if (!validIdentityRegistryConfig(config, registryId)) {
       await fail(reply, 503, 'identity_registry_unavailable'); return null;
     }
     let policy = parsePolicy(deps.bindingsJson(), deps.now());
@@ -1029,6 +1032,67 @@ export function registerGraphWorkerBrokerRoutes(
       value.policy_version === control.policy.policy_version &&
       value.decision_ref === decisionRef(control.policy.policy_version, request);
   }
+
+  /** Metadata-only readiness. It never returns registry records, source text, pins, keys, or policy values. */
+  app.post('/graph-worker/v1/identity-registry/:registryId/readiness', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const registryId = String((request.params as { registryId?: string }).registryId);
+    const body = request.body as Record<string, unknown> | undefined;
+    const caller = await authenticate(request, reply, deps);
+    if (!caller) return;
+    if (caller.caller_agent !== 'cfo' || !LABEL.test(registryId) || !exact(body, ['run_id', ...(Object.hasOwn(body ?? {}, 'source_binding_sha256') ? ['source_binding_sha256'] : [])]) ||
+        !/^run_[a-f0-9]{64}$/.test(String(body?.run_id)) || (Object.hasOwn(body ?? {}, 'source_binding_sha256') && !SHA.test(String(body?.source_binding_sha256)))) {
+      return fail(reply, 403, 'graph_worker_forbidden');
+    }
+    if (!deps.identityRegistry) {
+      return reply.send({ configured: false, valid_config: false, storage_policy_ready: false, coverage_ready: false, reason: 'not_configured' });
+    }
+    const signal = AbortSignal.timeout(15_000);
+    let config: IdentityRegistryConfig | null;
+    try { config = await abortable(Promise.resolve().then(() =>
+      deps.identityRegistry!.resolve({ registry_id: registryId, caller }, { signal })), signal); }
+    catch {
+      return reply.send({ configured: null, valid_config: null, storage_policy_ready: null, coverage_ready: false, reason: 'resolver_unavailable' });
+    }
+    if (!config) {
+      return reply.send({ configured: false, valid_config: null, storage_policy_ready: null, coverage_ready: false, reason: 'registry_not_configured' });
+    }
+    if (!validIdentityRegistryConfig(config, registryId)) {
+      return reply.send({ configured: true, valid_config: false, storage_policy_ready: null, coverage_ready: false, reason: 'invalid_config' });
+    }
+    if (config.storage_policy_ready !== true) {
+      return reply.send({ configured: true, valid_config: true, storage_policy_ready: null, coverage_ready: false, reason: 'storage_policy_not_verified' });
+    }
+    const c = await identityContext(request, reply, registryId, { ctx: caller, config, signal });
+    if (!c) return;
+    if (c.config.binding.run.run_id !== body!.run_id) {
+      return reply.send({ configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: false, reason: 'run_mismatch' });
+    }
+    const partitions = c.config.partitions;
+    if (!partitions || typeof partitions.read_manifest !== 'function' || typeof partitions.manifest_current !== 'function' ||
+        typeof partitions.binding_covered !== 'function' || !PARTITION_VERSION.test(partitions.manifest_version)) {
+      return reply.send({ configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: false, reason: 'coverage_unavailable' });
+    }
+    if (!Object.hasOwn(body!, 'source_binding_sha256')) {
+      return reply.send({ configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: false, reason: 'coverage_not_checked' });
+    }
+    const partition = { ...c, partitions } as NonNullable<Awaited<ReturnType<typeof partitionContext>>>;
+    try {
+      const manifest = await pinnedManifest(partition, partitions.manifest_version);
+      const catalog = manifest.snapshot.catalog_coverage as Record<string, unknown>;
+      if (!catalog || !bounded(catalog.catalog_version) || !SHA.test(String(catalog.coverage_sha256))) throw new Error('coverage');
+      const coverage = await partitionCall(partition, options => partitions.binding_covered!({
+        ...manifest.current, catalog_version: catalog.catalog_version as string, coverage_sha256: catalog.coverage_sha256 as string,
+        source_binding_hash: body!.source_binding_sha256 as string,
+      }, options));
+      await partitionRecheck(partition);
+      return reply.send({ configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: coverage === true,
+        reason: coverage === true ? 'coverage_checked' : 'coverage_missing' });
+    } catch {
+      return reply.send({ configured: true, valid_config: true, storage_policy_ready: true, coverage_ready: false, reason: 'coverage_unavailable' });
+    }
+  });
 
   app.post('/graph-worker/v1/identity-registry/:registryId/authorize', {
     config: { rateLimit: { max: 120, timeWindow: '1 minute' } },

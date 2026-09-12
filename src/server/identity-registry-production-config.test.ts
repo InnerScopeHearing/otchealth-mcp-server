@@ -1,16 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { parseIdentityRegistryProductionConfig } from './identity-registry-production-config.js';
+import { createProductionIdentityRegistryResolver } from './identity-registry-production.js';
+
+const canonical = (value: unknown): string => value === null || typeof value !== 'object' ? JSON.stringify(value) : Array.isArray(value)
+  ? '[' + value.map(canonical).join(',') + ']' : '{' + Object.keys(value as object).sort().map(key => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key])).join(',') + '}';
+const hash = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 
 function fixture() {
+  const run = { ref_version: 'neptune-trial-active-run-ref-v1', purpose: 'graph', scope: 'finance', run_version: 'v1', manifest_sha256: '2'.repeat(64) };
   return {
     schema: 'identity-registry-production-v1', registry_id: 'cfo-registry',
     authority: { schema: 'authenticated-structured-identity-authority-v1', adapter_id: 'synthetic-source-owner',
       source_system: 'synthetic-ledger', scope: 'cfo', version: 'v1' },
     binding: { authenticated_caller: 'cfo', room: 'finance', source_index: 'finance-cfo-source-docs',
-      run: { ref_version: 'neptune-trial-active-run-ref-v1', run_id: 'run_' + '1'.repeat(64),
-        purpose: 'graph', scope: 'finance', run_version: 'v1', manifest_sha256: '2'.repeat(64) } },
+      run: { ...run, run_id: 'run_' + hash(run) } },
     public_key: generateKeyPairSync('ed25519').publicKey.export({ format: 'pem', type: 'spki' }).toString(),
     partition_manifest_version: 'sirm_' + '3'.repeat(64),
     source: { prefix: 'graph-trial/source-authority',
@@ -44,4 +49,27 @@ test('production config rejects cross-ring, unsafe storage scopes, private keys 
       message: 'identity_registry_production_configuration_invalid',
     });
   }
+});
+
+test('production resolver proves storage preflight before returning a valid parsed configuration', async () => {
+  assert.equal(createProductionIdentityRegistryResolver(undefined), undefined);
+  assert.throws(() => createProductionIdentityRegistryResolver('{'), /identity_registry_production_configuration_invalid/);
+  let preflights = 0;
+  const resolver = createProductionIdentityRegistryResolver(JSON.stringify(fixture()), {
+    createStore: () => ({
+      preflight: async () => { preflights++; return { bucket: 'synthetic', prefix: 'synthetic', canonical_policy_sha256: '0'.repeat(64) }; },
+      snapshots: {
+        publish: async () => true,
+        read: async () => ({ status: 'missing' as const }),
+        revoke: async () => true,
+      },
+    }),
+  });
+  assert.ok(resolver);
+  const resolved = await resolver!.resolve({ registry_id: 'cfo-registry', caller: {
+    caller_hash: 'synthetic', raw_token: 'synthetic', caller_agent: 'cfo', connector_surface: true, m365_static_auth: false,
+  } }, { signal: new AbortController().signal });
+  assert.equal(preflights, 1);
+  assert.equal(resolved?.storage_policy_ready, true);
+  assert.equal(resolved?.registry_id, 'cfo-registry');
 });
