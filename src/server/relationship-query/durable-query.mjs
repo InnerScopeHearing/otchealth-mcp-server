@@ -20,9 +20,9 @@ export function queryDurableHistories({ entries, query, now = Date.now, identity
   for (const entry of entries) {
     const { history, inputs, authorization, sourceCurrent } = entry ?? {};
     if (!exact(history, ["schema", "run", "caller_seat", "sources", "events", "queries"]) || history.schema !== "resolution-history-v1" ||
-        history.caller_seat !== "cfo" || !Array.isArray(inputs) || !inputs.length ||
+        !["cfo", "clo"].includes(history.caller_seat) || !Array.isArray(inputs) || !inputs.length ||
         !Array.isArray(history.events) || !authorization || authorization.allowed !== true || authorization.provenance?.decision_source !== "authenticated_gateway" ||
-        !Array.isArray(authorization.provenance.allowed_roles) || !authorization.provenance.allowed_roles.includes("cfo") ||
+        !Array.isArray(authorization.provenance.allowed_roles) || !authorization.provenance.allowed_roles.includes(history.caller_seat) ||
         !utc(authorization.expires_at) || Date.parse(authorization.expires_at) <= now() || typeof sourceCurrent !== "boolean") fail("durable_query_invalid");
     totalSources += inputs.length; totalEvents += history.events.length;
     if (totalSources > LIMITS.sources || totalEvents > LIMITS.sources + 2 * LIMITS.assertions) fail("durable_query_limit");
@@ -35,7 +35,9 @@ export function queryDurableHistories({ entries, query, now = Date.now, identity
     if (inputIndex !== inputs.length) fail("durable_query_history_invalid");
   }
   let frame = null, offset = 0, replaying = true; const identityProofs = [];
-  const services = { callerLane: "cfo", isCurrentIdentity: endpoint => identityCurrentness === null || identityCurrentness.get(endpoint?.proof?.request_sha256) === true };
+  const callerLane = entries[0].history.caller_seat;
+  if (entries.some(entry => entry.history.caller_seat !== callerLane)) fail("durable_query_invalid");
+  const services = { callerLane, isCurrentIdentity: endpoint => identityCurrentness === null || identityCurrentness.get(endpoint?.proof?.request_sha256) === true };
   for (const name of CALLBACKS) services[name] = (...args) => {
     if (replaying) {
       const recorded = frame?.calls?.[offset++];

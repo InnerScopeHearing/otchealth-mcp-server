@@ -34,6 +34,14 @@ test('historical policy accepts explicit all-CFO scope only with empty prefixes'
  assert.equal(parse(canonical(policy({...base,source_prefixes:['finance/'],source_scope:'all_cfo_source_documents'})),now),null);
  assert.equal(parse(canonical(policy({...base,source_prefixes:[],source_scope:'all_company_documents'})),now),null);
 });
+test('historical policy accepts a synthetic corporate CLO legal-company run, never a personal lane',()=>{
+ const value=policy(),binding=value.bindings[0];
+ const body={...binding.run,scope:'legal_company'};delete (body as any).run_id;
+ binding.run={...body,run_id:'run_'+hash(canonical(body))};binding.authenticated_caller='clo';
+ assert.ok(parse(canonical(value),now));
+ binding.authenticated_caller='clo-personal';
+ assert.equal(parse(canonical(value),now),null);
+});
 function evidence({rowPath='finance/synthetic.pdf',sourcePolicy}:any={}){
  const b:any=policy(sourcePolicy).bindings[0],row={path:rowPath,sha256:sha('binary'),enriched_sha256:sha('binary'),sidecar:true,enriched:true,err:null};
  const manifest=planGraphCatalogPage({rows:[row],catalogEtag:'synthetic',catalogSourceSha256:b.source_policy.catalog_source_sha256,createdAt:'2026-09-08T12:00:00.000Z'}).page.manifest!;

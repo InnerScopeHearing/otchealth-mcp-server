@@ -52,10 +52,11 @@ export async function recallHandler(
       top: 5,
     });
     if ((ar.mode === 'agentic-hybrid' || ar.mode === 'cache-hit') && ar.results.length > 0) {
+      const visible = filterPersonalSharedMemory(ar.results, ctx.callerAgent);
       const cacheNote = ar.cacheHit ? ' [cache hit]' : '';
       return {
-      data: { matches: filterPersonalSharedMemory(ar.results, ctx.callerAgent), count: filterPersonalSharedMemory(ar.results, ctx.callerAgent).length, mode: ar.mode },
-        summary: `${ar.results.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
+      data: { matches: visible, count: visible.length, mode: ar.mode },
+      summary: `${visible.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
       };
     }
   } catch {
