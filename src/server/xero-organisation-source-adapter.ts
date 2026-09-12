@@ -58,6 +58,12 @@ export type XeroOrganisationSourceDeployment = Readonly<{
   source_storage: XeroOrganisationSourceStorage;
 }>;
 
+export type XeroOrganisationExportHandoff = Readonly<{
+  schema: 'cfo-xero-organisation-explicit-export-handoff-v1';
+  source: Readonly<{ key: string; version_id: string; sha256: string; storage: Record<string, unknown> }>;
+  export_input: unknown;
+}>;
+
 type SourceOwnerDeps = Readonly<{
   getOrganisation: typeof xeroGet;
   createImmutableStore: typeof createExplicitExportImmutableStore;
@@ -228,4 +234,30 @@ export async function persistProvisionedXeroOrganisationSource(input: unknown, d
     sourceSha256: pinned.sha256,
   });
   return Object.freeze({ projection, ...bound });
+}
+
+/** Builds and conditionally persists the immutable cross-task exporter handoff. */
+export async function publishXeroOrganisationExportHandoff(input: Readonly<{
+  sourceStorage: XeroOrganisationSourceStorage;
+  record: XeroOrganisationSourceRecord;
+  exportInput: unknown;
+  writer: Readonly<{ putImmutable(request: Readonly<{ key: string; body: Buffer }>): Promise<Readonly<{ version_id: string }>> }>;
+}>): Promise<Readonly<{ handoff: XeroOrganisationExportHandoff; key: string; sha256: string; version_id: string }>> {
+  if (!input.writer || typeof input.writer.putImmutable !== 'function' || input.sourceStorage.prefix !== SOURCE_PREFIX ||
+      !text(input.record.source_document_version) || !HASH.test(input.record.source_sha256)) fail('xero_organisation_handoff_invalid');
+  const key = `${SOURCE_PREFIX}/identity-registries/xero-organisation/handoffs/${input.record.source_sha256}.json`;
+  const storage = Object.freeze({
+    bucket: input.sourceStorage.bucket, prefix: input.sourceStorage.prefix, region: input.sourceStorage.region,
+    approved_policy_canonical_sha256: input.sourceStorage.approvedPolicyCanonicalSha256,
+    approved_storage_scope_sha256: input.sourceStorage.approvedStorageScopeSha256, sse: input.sourceStorage.sse,
+  });
+  const handoff: XeroOrganisationExportHandoff = Object.freeze({
+    schema: 'cfo-xero-organisation-explicit-export-handoff-v1',
+    source: Object.freeze({ key: `${SOURCE_PREFIX}/identity-registries/xero-organisation/${input.record.source_sha256}.json`, version_id: input.record.source_document_version, sha256: input.record.source_sha256, storage }),
+    export_input: input.exportInput,
+  });
+  const payload = Buffer.from(canonical(handoff), 'utf8'), sha256 = hash(payload.toString('utf8'));
+  const written = await input.writer.putImmutable({ key, body: payload });
+  if (!written || typeof written !== 'object' || !text(written.version_id)) fail('xero_organisation_handoff_write_invalid');
+  return Object.freeze({ handoff, key, sha256, version_id: written.version_id });
 }

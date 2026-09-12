@@ -5,7 +5,6 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson, publishExplicitIdentityRegistryExport } from './identity-registry-explicit-export.mjs';
-import { createCfoIdentityRegistryKmsSigner, createExplicitExportImmutableStore } from './identity-registry-explicit-export-ports.mjs';
 
 const SHA = /^[a-f0-9]{64}$/;
 const VERSION = /^[A-Za-z0-9._~+/-]{1,1024}$/;
@@ -48,8 +47,8 @@ function configuredPorts(value) {
 function sseHeadersMatch(headers, sse) { return headers.get('x-amz-server-side-encryption') === sse.algorithm && (sse.algorithm !== 'aws:kms' || headers.get('x-amz-server-side-encryption-aws-kms-key-id') === sse.kmsKeyId); }
 
 /** Core is injectable for tests; production receives only compiled runtime ports. */
-export async function runXeroOrganisationExplicitExport({ argv, read = readFile, write = writeFile, runtimeFactory, bind, signerFactory = createCfoIdentityRegistryKmsSigner, storeFactory = createExplicitExportImmutableStore, publish = publishExplicitIdentityRegistryExport } = {}) {
-  const paths = parseCli(argv); if (!paths || typeof runtimeFactory !== 'function' || typeof bind !== 'function') fail('xero_export_arguments_invalid');
+export async function runXeroOrganisationExplicitExport({ argv, read = readFile, write = writeFile, runtimeFactory, bind, signerFactory, storeFactory, publish = publishExplicitIdentityRegistryExport } = {}) {
+  const paths = parseCli(argv); if (!paths || typeof runtimeFactory !== 'function' || typeof bind !== 'function' || typeof signerFactory !== 'function' || typeof storeFactory !== 'function') fail('xero_export_arguments_invalid');
   const [rawHandoff, rawPorts] = await Promise.all([json(paths.handoff, 'xero_export_handoff_unavailable', read), json(paths.ports, 'xero_export_ports_unavailable', read)]);
   const hand = handoff(rawHandoff), ports = configuredPorts(rawPorts), runtime = runtimeFactory(hand.source.storage), signal = AbortSignal.timeout(30_000);
   await runtime.preflight(signal);
@@ -69,7 +68,8 @@ async function main() {
   try {
     const { createIdentityRegistryS3Runtime } = await import('../dist/server/identity-registry-s3-runtime.js');
     const { bindImmutableXeroOrganisationProjection } = await import('../dist/server/xero-organisation-source-adapter.js');
-    await runXeroOrganisationExplicitExport({ argv: process.argv.slice(2), runtimeFactory: createIdentityRegistryS3Runtime, bind: bindImmutableXeroOrganisationProjection });
+    const { createCfoIdentityRegistryKmsSigner, createExplicitExportImmutableStore } = await import('../dist/server/identity-registry-explicit-export-ports.js');
+    await runXeroOrganisationExplicitExport({ argv: process.argv.slice(2), runtimeFactory: createIdentityRegistryS3Runtime, bind: bindImmutableXeroOrganisationProjection, signerFactory: createCfoIdentityRegistryKmsSigner, storeFactory: createExplicitExportImmutableStore });
     process.stdout.write(JSON.stringify({ schema: 'cfo-xero-organisation-explicit-export-run-v1', status: 'published', output_written: true }) + '\n');
   } catch (error) { process.stderr.write(`${error?.code ?? 'xero_export_unavailable'}\n`); process.exitCode = 1; }
 }
