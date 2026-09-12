@@ -59,12 +59,13 @@ function stored(r:Stored):Json{
 /** Derive artifact access from the current CFO session and immutable, server-issued catalog records. */
 export async function resolveRelationshipArtifactAutomaticBinding(input:{run_id:string;producer_id:string;ctx:AuthContext;signal:AbortSignal},injected?:{policyJson?:()=>string;now?:()=>number;resolveCatalogCohortBinding?:(ctx:AuthContext,runId:string,signal:AbortSignal)=>Promise<any>;resolveRelationshipPublicationAdmission?:(input:{cohortId:string;run:{run_id:string};ctx:AuthContext;signal:AbortSignal})=>Promise<{admission:Json;proposal:Json}>}){
  const now=injected?.now??Date.now,policy=parse((injected?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_PUBLICATION_POLICY_JSON))(),now());
- const scope=resolveCompanyGraphScope(input.ctx.caller_agent,input.ctx.caller_agent==='clo'?'legal_company':undefined);
- if(!policy||!scope.ok||!input.ctx.connector_surface||!SHA.test(input.ctx.caller_hash)||!RUN.test(input.run_id)||!PRODUCER.test(input.producer_id))return null;
+ if(!policy||!input.ctx.connector_surface||!SHA.test(input.ctx.caller_hash)||!RUN.test(input.run_id)||!PRODUCER.test(input.producer_id))return null;
  const catalog=await import('./graph-catalog-controller.js'),current=await (injected?.resolveCatalogCohortBinding??catalog.resolveCatalogCohortBinding)(input.ctx,input.run_id,input.signal);
  if(!current)return null;
- const c=policy.bindings.find((row:Json)=>row.cohort_id===current.cohort_id&&row.caller_hash===input.ctx.caller_hash&&row.producer_id===input.producer_id&&row.purpose===current.binding.run.purpose&&row.run_version===current.binding.run.run_version);
- if(!c||!equal(c.source_policy,current.source_policy))return null;
+ const scope=resolveCompanyGraphScope(input.ctx.caller_agent,current.binding?.run?.scope);
+ if(!scope.ok)return null;
+ const c=policy.bindings.find((row:Json)=>row.cohort_id===current.cohort_id&&row.caller_hash===input.ctx.caller_hash&&row.producer_id===input.producer_id&&row.authenticated_caller===scope.scope.authenticatedCaller&&row.purpose===current.binding.run.purpose&&row.run_version===current.binding.run.run_version);
+ if(!c||!companyGraphScopeOwnsBinding(scope.scope,current.binding)||!equal(c.source_policy,current.source_policy))return null;
  const pins=await (injected?.resolveRelationshipPublicationAdmission??catalog.resolveRelationshipPublicationAdmission)({cohortId:c.cohort_id,run:{run_id:input.run_id},ctx:input.ctx,signal:input.signal});
  return {binding:{authenticated_caller:c.authenticated_caller,caller_hash:input.ctx.caller_hash,producer_id:c.producer_id,run:current.binding.run,encryption:c.encryption},cohort_id:c.cohort_id,policy_version:policy.policy_version,expires_at:policy.expires_at,admission:pins.admission,proposal:pins.proposal,source_policy:c.source_policy};
 }
