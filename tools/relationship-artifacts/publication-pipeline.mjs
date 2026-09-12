@@ -4,6 +4,8 @@ const sha=v=>createHash('sha256').update(v).digest('hex');
 const fail=code=>{throw Object.assign(Error(code),{code});};
 const active=s=>{if(s?.aborted)fail('relationship_pipeline_cancelled');};
 const same=(a,b)=>canonical(a)===canonical(b);
+const REVIEW_ERROR_CODES=new Set(['candidate_review_batch_invalid','candidate_review_configuration','candidate_review_source_mismatch','relationship_review_configuration','relationship_review_receipt_invalid']);
+const reviewErrorCode=error=>typeof error?.code==='string'&&REVIEW_ERROR_CODES.has(error.code)?error.code:null;
 /** Load only already-completed immutable extractor results, never invoke extraction. */
 export function createCatalogExtractionLoader({store,operationStoreForRun}){
  if(typeof store?.read!=='function'||typeof operationStoreForRun!=='function')fail('relationship_pipeline_configuration');
@@ -33,7 +35,7 @@ export function createRelationshipPublicationPipeline({cohort_id,producer_id,out
  async function review(id,proposal,signal,input){
   input??=await loadExtracted(proposal,{signal});active(signal);let reviewed;
   try{const adapter=await createReview({run:id.run,signal});if(typeof adapter?.reviewCandidates!=='function')fail('relationship_review_configuration');reviewed=await adapter.reviewCandidates(input,{signal});active(signal);if(reviewed?.schema!=='resolution-review-receipt-v1'||!reviewed.artifact_ref)fail('relationship_review_receipt_invalid');await outbox.createReviewed(id,{artifact_ref:reviewed.artifact_ref});}
-  catch(error){const paused=error?.code==='subscription_review_incomplete'&&error.review_status==='paused';return status(id,signal?.aborted?'cancelled':paused?'paused':'held',signal?.aborted?'relationship_cancelled':paused?'relationship_review_paused':'relationship_review_unknown');}
+  catch(error){const paused=error?.code==='subscription_review_incomplete'&&error.review_status==='paused',error_code=reviewErrorCode(error);return {...status(id,signal?.aborted?'cancelled':paused?'paused':'held',signal?.aborted?'relationship_cancelled':paused?'relationship_review_paused':'relationship_review_unknown'),...(error_code?{review_error_code:error_code}:{})};}
   return publish(id,await outbox.get(id),signal);
  }
  async function process(proposal,{signal,recoveryOnly=false,resumeCandidateOnly=false}={}){
