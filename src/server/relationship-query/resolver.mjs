@@ -83,7 +83,6 @@ function locate(candidate, source) {
   const start = candidate.evidence_start_utf16, end = candidate.evidence_end_utf16;
   if (!boundary(source.text, start) || !boundary(source.text, end) || end <= start || source.text.slice(start, end) !== candidate.quote)
     fail("candidate_span_invalid");
-  if (source.text.indexOf(candidate.quote) !== source.text.lastIndexOf(candidate.quote)) fail("candidate_quote_ambiguous");
   const startByte = Buffer.byteLength(source.text.slice(0, start)), endByte = Buffer.byteLength(source.text.slice(0, end));
   return copy({ passage: candidate.quote, passage_sha256: sha256(candidate.quote), source_ref: source.source_ref,
     source_binding: source.binding, lineage: source.lineage,
