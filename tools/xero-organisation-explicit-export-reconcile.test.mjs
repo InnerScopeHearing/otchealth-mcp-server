@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 import test from 'node:test';
 import { publishExplicitIdentityRegistryExport } from './identity-registry-explicit-export.mjs';
 import { buildExportInput } from './xero-organisation-source-handoff-run.mjs';
@@ -16,16 +19,19 @@ test('reconciles only the historical source-version run label and produces a gat
   assert.equal(reconciled.private_handoff.export_input.catalog.catalog_version, source.version_id);
   assert.notEqual(reconciled.private_handoff.export_input.run.run_version, source.version_id);
   assert.equal(reconciled.receipt.source_pin_preserved, true);
+  assert.deepEqual(reconciled.receipt.replaced_fields, ['expires_at', 'prefix', 'run.run_id', 'run.run_version']);
   assert.match(reconciled.receipt.required_successor_storage_prefix, /\/reconciled\/[a-f0-9]{64}$/);
   const keys = generateKeyPairSync('ed25519'), objects = new Map(), input = { ...reconciled.private_handoff.export_input,
     records: [{ source_record_id: 'record-1', source_document_version: record.source_document_version, source_sha256: record.source_sha256, mention: 'Synthetic Organisation', disposition: 'resolved', endpoint: { display_name: 'Synthetic Organisation', entity_type: 'organisation', identifier: { namespace: 'synthetic', scope: 'test', value: 'organisation-1' } } }],
     bindings: [{ source_document_version: record.source_document_version, chunk_sha256: record.source_sha256 }] };
-  const result = await publishExplicitIdentityRegistryExport({ input, signer: { publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), maxMessageBytes: 64 * 1024, sign: async bytes => sign(null, bytes, keys.privateKey) }, store: { maxVersionIdBytes: 32, putImmutable: async ({ key, body }) => { assert.equal(objects.has(key), false); objects.set(key, body); return { version_id: `version-${objects.size}` }; } } });
+  const result = await publishExplicitIdentityRegistryExport({ input, signer: { publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), maxMessageBytes: 64 * 1024, sign: async bytes => sign(null, bytes, keys.privateKey) }, store: { maxVersionIdBytes: 9, putImmutable: async ({ key, body }) => { assert.equal(objects.has(key), false); objects.set(key, { value: JSON.parse(body.toString('utf8')), version_id: 'version-1', sha256: createHash('sha256').update(body).digest('hex') }); return { version_id: 'version-1' }; } } });
   const authority = createIdentityRegistrySourceAuthority({ registryId: result.public_config.registry_id, authority: result.public_config.authority,
     run: result.public_config.binding.run, catalog: result.public_config.source.catalog, partitionManifestVersion: result.public_config.partition_manifest_version,
     publicKey: result.public_config.public_key, manifest: result.public_config.source.manifest, pointer: result.public_config.source.pointer,
-    readJson: async () => { throw new Error('not_called'); } });
+    readJson: async request => { const object = objects.get(request.key); assert.ok(object); if (request.version_id !== undefined) assert.equal(request.version_id, object.version_id); if (request.sha256 !== undefined) assert.equal(request.sha256, object.sha256); return { value: object.value, version_id: object.version_id }; },
+    now: () => Date.parse('2026-09-13T00:00:00.000Z') });
   assert.equal(typeof authority.source.current, 'function');
+  assert.equal(await authority.source.current({ source_version: input.source_version }), true);
 });
 
 test('refuses to reinterpret a handoff that is not the exact historical source-generated form', () => {
@@ -34,8 +40,9 @@ test('refuses to reinterpret a handoff that is not the exact historical source-g
 
 test('writes a private successor handoff and reports only the required storage prefix', async () => {
   let written;
-  const receipt = await prepareHistoricalXeroOrganisationReconciliation({ argv: ['--handoff', 'C:\\legacy.json', '--expires-at', '2030-01-02T00:00:00.000Z', '--output', 'C:\\reconciled.json'], read: async () => JSON.stringify(legacy), write: async (_path, body, options) => { written = { body, options }; } });
-  assert.equal(parseCli(['--handoff', 'legacy.json', '--expires-at', '2030-01-02T00:00:00.000Z', '--output', 'C:\\reconciled.json']), null);
+  const handoffPath = resolve(tmpdir(), 'legacy.json'), outputPath = resolve(tmpdir(), 'reconciled.json');
+  const receipt = await prepareHistoricalXeroOrganisationReconciliation({ argv: ['--handoff', handoffPath, '--expires-at', '2030-01-02T00:00:00.000Z', '--output', outputPath], read: async () => JSON.stringify(legacy), write: async (_path, body, options) => { written = { body, options }; } });
+  assert.equal(parseCli(['--handoff', 'legacy.json', '--expires-at', '2030-01-02T00:00:00.000Z', '--output', outputPath]), null);
   assert.equal(receipt.writes_performed, false);
   assert.equal(receipt.source_pin_preserved, true);
   assert.equal(written.options.mode, 0o600);

@@ -37,7 +37,7 @@ export function reconcileHistoricalXeroOrganisationHandoff(value, { expiresAt } 
   const runBody = { ref_version: repaired.run.ref_version, purpose: repaired.run.purpose, scope: repaired.run.scope, run_version: repaired.run.run_version, manifest_sha256: repaired.run.manifest_sha256 };
   if (repaired.run.run_version !== REGISTRY_EXPORT_RUN_VERSION || repaired.run.run_id !== `run_${digest(runBody)}`) fail('identity_registry_legacy_handoff_repair_invalid');
   const private_handoff = Object.freeze({ schema: value.schema, source: Object.freeze(structuredClone(value.source)), export_input: Object.freeze(repaired) });
-  return Object.freeze({ schema: 'cfo-xero-organisation-explicit-export-reconciliation-v1', private_handoff, receipt: Object.freeze({ source_pin_sha256: digest(value.source), source_pin_preserved: true, required_successor_storage_prefix: successorPrefix, replaced_fields: Object.freeze(['prefix', 'run.run_version']), run_version: REGISTRY_EXPORT_RUN_VERSION, writes_performed: false }) });
+  return Object.freeze({ schema: 'cfo-xero-organisation-explicit-export-reconciliation-v1', private_handoff, receipt: Object.freeze({ source_pin_sha256: digest(value.source), source_pin_preserved: true, required_successor_storage_prefix: successorPrefix, replaced_fields: Object.freeze(['expires_at', 'prefix', 'run.run_id', 'run.run_version']), run_version: REGISTRY_EXPORT_RUN_VERSION, writes_performed: false }) });
 }
 
 export function parseCli(argv) {
