@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 import { run } from './identity-registry-pointer-refresh-task.mjs';
 
@@ -13,4 +13,12 @@ test('task wrapper emits only the refresh pins from a successful private runner 
 });
 test('task wrapper allowlists a source-currentness failure', () => {
   assert.throws(() => run({ env: { CFO_IDENTITY_REGISTRY_POINTER_REFRESH_JSON: '{}', CFO_IDENTITY_REGISTRY_PORTS_JSON: '{}' }, spawn: () => ({ status: 1, stderr: 'identity_pointer_refresh_source_not_current\n' }) }), { code: 'identity_pointer_refresh_source_not_current' });
+});
+
+test('gateway image copies both pointer-refresh entry modules through build and runtime stages', () => {
+  const lines = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8').split(/\r?\n/);
+  for (const file of ['identity-registry-pointer-refresh-task.mjs', 'identity-registry-pointer-refresh-run.mjs']) {
+    assert.ok(lines.includes(`COPY tools/${file} ./tools/${file}`));
+    assert.ok(lines.includes(`COPY --from=build --chown=app:app /app/tools/${file} ./tools/${file}`));
+  }
 });

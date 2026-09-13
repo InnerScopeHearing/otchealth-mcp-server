@@ -20,6 +20,8 @@ COPY tools/identity-registry-explicit-export-ports.mjs ./tools/identity-registry
 COPY tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
 COPY tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
 COPY tools/identity-registry-source-handoff-task.mjs ./tools/identity-registry-source-handoff-task.mjs
+COPY tools/identity-registry-pointer-refresh-task.mjs ./tools/identity-registry-pointer-refresh-task.mjs
+COPY tools/identity-registry-pointer-refresh-run.mjs ./tools/identity-registry-pointer-refresh-run.mjs
 
 RUN npm run build && npm prune --omit=dev
 
@@ -73,6 +75,8 @@ COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export-p
 COPY --from=build --chown=app:app /app/tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
 COPY --from=build --chown=app:app /app/tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
 COPY --from=build --chown=app:app /app/tools/identity-registry-source-handoff-task.mjs ./tools/identity-registry-source-handoff-task.mjs
+COPY --from=build --chown=app:app /app/tools/identity-registry-pointer-refresh-task.mjs ./tools/identity-registry-pointer-refresh-task.mjs
+COPY --from=build --chown=app:app /app/tools/identity-registry-pointer-refresh-run.mjs ./tools/identity-registry-pointer-refresh-run.mjs
 # Ship the standalone eval harness (.mjs, not compiled) so the nightly eval Container Apps Job
 # can run `node eval/eval-runner.mjs` against the gateway for the regression baseline.
 COPY --from=build --chown=app:app /app/src/eval ./eval
