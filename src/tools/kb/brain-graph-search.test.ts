@@ -44,19 +44,22 @@ test('personal legal query can return both labeled corpora; company seats withho
   assert.equal(clo.data.count, 2); assert.equal(JSON.parse(String(h.calls[1]?.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, undefined);
 });
 
-test('company retrieval admits only the existing and priority company prefixes', async () => {
+test('company retrieval admits existing, priority and capacity prefixes with matching source labels', async () => {
   const h = harness(() => Response.json({ retrievalResults: [
     row('company', root + 'company/test.txt'),
     row('company', root + 'company-priority/test.txt'),
-    row('company', root + 'company-private/test.txt'),
+    row('company', root + 'company-capacity/batch/test.txt'),
+    row('company', root + 'company-capacity-other/test.txt'),
     row('personal', root + 'company-priority/test.txt'),
+    row('personal', root + 'company-capacity/test.txt'),
     row('company', root + 'personal/test.txt'),
   ] }));
-  const result: any = await handleBrainGraphSearch({ query: 'synthetic', top: 5 }, ctx('cfo'), h.deps);
-  assert.equal(result.data.count, 2);
-  assert.equal(result.data.withheld_count, 3);
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic', top: 8 }, ctx('cfo'), h.deps);
+  assert.equal(result.data.count, 3);
+  assert.equal(result.data.withheld_count, 4);
   assert.deepEqual(result.data.matches.map((match: any) => match.source_uri), [
     root + 'company/test.txt', root + 'company-priority/test.txt',
+    root + 'company-capacity/batch/test.txt',
   ]);
 });
 
