@@ -14,7 +14,8 @@ function harness(response: () => Response = () => Response.json({ retrievalResul
 
 test('role decisions happen before credentials or AWS; shared personal scope is explicit', async () => {
   assert.equal(graphScopeFor('cfo'), 'company');
-  assert.equal(graphScopeFor('clo'), 'all');
+  assert.equal(graphScopeFor('clo'), 'company');
+  assert.equal(graphScopeFor('clo', 'personal'), null);
   assert.equal(graphScopeFor('clo-personal'), 'all');
   assert.equal(graphScopeFor('cfo', 'personal'), null);
   for (const caller of ['cto', 'developer', 'cro', 'coo', 'external', '']) {
@@ -35,11 +36,11 @@ test('CFO request signs exact configured endpoint and enforced company label', a
   assert.equal(result.data.matches[0].citation, 'graph:1'); assert.equal(JSON.stringify(result).includes('must not be copied'), false);
 });
 
-test('shared CLO query can return both labeled corpora; CFO withholds mismatched labels or locations', async () => {
+test('personal legal query can return both labeled corpora; company seats withhold personal results', async () => {
   const h = harness(() => Response.json({ retrievalResults: [row(), row('personal'), { ...row(), location: { type: 'S3', s3Location: { uri: 's3://another-bucket/test.txt' } } }] }));
   const cfo: any = await handleBrainGraphSearch({ query: 'synthetic', top: 4 }, ctx('cfo'), h.deps);
   assert.equal(cfo.data.count, 1); assert.equal(cfo.data.withheld_count, 2);
-  const clo: any = await handleBrainGraphSearch({ query: 'synthetic', top: 4 }, ctx('clo'), h.deps);
+  const clo: any = await handleBrainGraphSearch({ query: 'synthetic', top: 4 }, ctx('clo-personal'), h.deps);
   assert.equal(clo.data.count, 2); assert.equal(JSON.parse(String(h.calls[1]?.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, undefined);
 });
 

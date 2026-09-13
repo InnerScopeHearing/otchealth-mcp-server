@@ -24,14 +24,14 @@ const DEFAULTS: Deps = {
 };
 const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
-  scope: z.enum(['company', 'personal', 'all']).optional().describe('Source label filter. CFO defaults to company. CLO and the personal legal seat may query the shared corpus.'),
+  scope: z.enum(['company', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. The personal legal seat may query the shared corpus.'),
   top: z.number().int().min(1).max(8).optional(),
 };
 const inputSchema = z.object(inputShape).strict();
 
 export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
   if (!isLaneAllowed('finance-cfo-source-docs', caller) || !isLaneAllowed('legal-company', caller)) return null;
-  const personalAllowed = caller === 'clo' || caller === 'clo-personal' || caller === 'exec';
+  const personalAllowed = isLaneAllowed('legal-personal', caller);
   const scope = requested ?? (personalAllowed ? 'all' : 'company');
   return scope !== 'company' && !personalAllowed ? null : scope;
 }
