@@ -39,6 +39,8 @@ import { resolveAwsCredentials, signRequest } from './sigv4.js';
 import { isChunkedRoom, pickText, type KbHit, type FetchedDocument, type HybridSearchOptions } from '../azure/search.js';
 import { demoteExhaustHits } from '../memory/room-hygiene.js';
 import { rerankByAuthority, rerankEnabled } from '../memory/authority-rerank.js';
+import { identifierEvidenceSnippet, literalIndex, opaqueIdentifierQuery } from './identifier-match.js';
+export { identifierEvidenceSnippet, opaqueIdentifierQuery } from './identifier-match.js';
 
 const RRF_K = 60;
 /** Fields the BM25 side searches, matching the room registry's documented text fields. Chunked doc
@@ -144,6 +146,26 @@ interface RawHit {
   source: Record<string, unknown>;
 }
 
+type SearchHit = {
+  score: number;
+  text: string;
+  fullText: string;
+  id: string;
+  agent?: string;
+  type?: string;
+  path?: string;
+  ts?: string;
+  source?: string;
+  by?: string;
+  _parent: string;
+};
+
+function promoteLiteralIdentifier<T extends { fullText: string }>(hits: T[], token: string | null): T[] {
+  if (!token) return hits;
+  const match = hits.find((hit) => literalIndex(hit.fullText, token) >= 0);
+  return match ? [match, ...hits.filter((hit) => hit !== match)] : hits;
+}
+
 function extractHits(json: unknown): RawHit[] {
   const hits = (json as { hits?: { hits?: Array<Record<string, unknown>> } })?.hits?.hits ?? [];
   return hits.map((h) => ({
@@ -175,6 +197,7 @@ export async function hybridSearch(
   if (!e.OPENSEARCH_ENDPOINT) return null;
 
   const includeOps = opts?.includeOps ?? true;
+  const identifier = opaqueIdentifierQuery(query);
   const chunked = isChunkedRoom(index);
   const vecField = vectorFieldFor(index);
 
@@ -288,13 +311,14 @@ export async function hybridSearch(
   const bySource = new Map<string, Record<string, unknown>>();
   for (const h of [...bmHits, ...vecHits]) if (h.id && !bySource.has(h.id)) bySource.set(h.id, h.source);
 
-  let raw = [...rrf.entries()]
+  let raw: SearchHit[] = [...rrf.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([id, rrfScore]) => {
       const doc = bySource.get(id) ?? {};
       return {
         score: rrfScore,
         text: pickText(doc).slice(0, 1200),
+        fullText: pickText(doc),
         id: (doc['id'] as string | undefined) ?? (doc['chunk_id'] as string | undefined) ?? id,
         agent: typeof doc['agent'] === 'string' ? (doc['agent'] as string) : undefined,
         type: typeof doc['type'] === 'string' ? (doc['type'] as string) : undefined,
@@ -306,6 +330,7 @@ export async function hybridSearch(
       };
     });
 
+  raw = promoteLiteralIdentifier(raw, identifier);
   let hits = raw;
   if (chunked) {
     // Parent-collapse only (Azure's PASS 1): keep the single highest-scored chunk per parent doc,
@@ -314,18 +339,26 @@ export async function hybridSearch(
     const best = new Map<string, (typeof raw)[number]>();
     for (const h of raw) {
       const cur = best.get(h._parent);
-      if (!cur || h.score > cur.score) best.set(h._parent, h);
+      const exact = identifier !== null && literalIndex(h.fullText, identifier) >= 0;
+      const currentExact = cur && identifier !== null && literalIndex(cur.fullText, identifier) >= 0;
+      if (!cur || (exact && !currentExact) || (!exact && !currentExact && h.score > cur.score)) best.set(h._parent, h);
     }
-    hits = [...best.values()]
-      .sort((a, b) => b.score - a.score)
+    hits = promoteLiteralIdentifier([...best.values()].sort((a, b) => b.score - a.score), identifier)
       .slice(0, top)
       .map((h) => ({ ...h, id: h._parent || h.id }));
   } else if (rerankOn) {
     hits = rerankByAuthority(raw, { mode: e.MEMORY_RERANK_MODE });
   }
 
-  let matches: KbHit[] = hits.map(({ _parent, ts, source, by, ...h }) => ({ ...h }));
+  hits = promoteLiteralIdentifier(hits, identifier);
+
+  let matches: KbHit[] = hits.map(({ _parent, ts, source, by, fullText, ...h }) => {
+    const evidence = identifier ? identifierEvidenceSnippet(fullText, identifier) : null;
+    return { ...h, text: evidence ?? h.text, ...(evidence ? { exactIdentifierMatch: true } : {}) } as KbHit;
+  });
+  const exactMatch = matches.find((hit) => (hit as KbHit & { exactIdentifierMatch?: boolean }).exactIdentifierMatch === true);
   matches = demoteExhaustHits(matches, includeOps, top);
+  if (exactMatch) matches = [exactMatch, ...matches.filter((hit) => hit !== exactMatch)].slice(0, top);
   return { matches, mode: usedVector ? 'hybrid' : 'keyword' };
 }
 
