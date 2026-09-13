@@ -38,6 +38,17 @@ test('changed payload with same key is a conflict, not a new record', async () =
   const f = fixtures(record);
   await assert.rejects(call({ ...input, text: 'Different synthetic fact.' }, f.deps), /idempotency conflict/);
 });
+test('a first-write race loser does not repeat projection or publish its supersession guess', async () => {
+  const f = fixtures(null);
+  const deps: Deps = { ...f.deps, embed: async () => [1],
+    detectSupersession: async () => ({ action: 'auto-link', reason: 'synthetic', supersedeId: 'race-loser-guess' }),
+    writeMemory: async (_value, onReplay) => { onReplay?.(); return record; } };
+  const result = await call(input, deps);
+  const data = result.data as { replayed: boolean; supersede?: unknown; record: MemoryRecord };
+  assert.equal(data.replayed, true);
+  assert.equal(data.supersede, undefined);
+  assert.equal(data.record.supersedes, undefined);
+});
 test('authorization and dry run precede idempotency lookup', async () => {
   for (const mode of ['forgery', 'personal', 'dry'] as const) {
     const f = fixtures(record);

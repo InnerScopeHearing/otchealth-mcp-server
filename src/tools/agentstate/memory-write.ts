@@ -170,7 +170,14 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
   const supersedes = input.supersedes ?? (sup.action === 'auto-link' ? sup.supersedeId : undefined);
   // agent: callerAgent (never input.agent) -- the same defense-in-depth reasoning as the
   // detectSupersession call above; this is the actual persisted attribution.
-  const record = await deps.writeMemory({ ...input, agent: callerAgent, supersedes, intent });
+  let replayed = false;
+  const record = await deps.writeMemory({ ...input, agent: callerAgent, supersedes, intent }, () => { replayed = true; });
+  if (replayed) {
+    return {
+      data: { written: true, replayed: true, record, indexed: record.indexing?.state === 'indexed', persistence_state: 'committed' },
+      summary: `Recovered committed memory ${record.id} after concurrent or uncertain creation; projection remains owned by its original writer or reconciler.`,
+    };
+  }
   // WRITE-THROUGH: the Cosmos memory-of-record was previously indexed by NOTHING -- semantic.mjs
   // indexes only the shared blob feed, so every memory_write was durable but UNFINDABLE by
   // brain_search/kb_search. This makes the system-of-record actually recallable. Fail-open:

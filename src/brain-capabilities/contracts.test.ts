@@ -54,6 +54,7 @@ test('accepts opaque external source identifiers but rejects malformed internal 
   assert.equal(evidenceReferenceSchema.safeParse({ ...evidence, contentSha256: 'not-a-hash' }).success, false);
   assert.equal(evidenceReferenceSchema.safeParse({ ...evidence, span: { offsetUnit: 'bytes', start: 3, end: 3 } }).success, false);
   assert.equal(timeIntervalSchema.safeParse({ basis: 'exact', start: '2026-09-14T00:00:00Z', end: at }).success, false);
+  assert.equal(timeIntervalSchema.safeParse({ basis: 'exact', start: '2026-09-13T12:00:00+99:00', end: null }).success, false);
   assert.equal(timeIntervalSchema.safeParse({ basis: 'unknown', start: null, end: null }).success, true);
   assert.equal(timeIntervalSchema.safeParse({ basis: 'exact', start: null, end: at }).success, true);
 });
@@ -61,6 +62,11 @@ test('accepts opaque external source identifiers but rejects malformed internal 
 test('rejects duplicated evidence and invalid recorded-time intervals', () => {
   assert.equal(assertionRecordSchema.safeParse({ ...baseAssertion, status: 'unknown', evidence: [evidence, evidence] }).success, false);
   assert.equal(assertionRecordSchema.safeParse({ ...baseAssertion, status: 'unknown', recordedUntil: at }).success, false);
+  const verification = { method: 'human-review', verifiedAt: at, verifier: 'reviewer-1', evidenceIds: ['evidence-1'] };
+  assert.equal(assertionRecordSchema.safeParse({ ...baseAssertion, status: 'verified', verification, recordedUntil: at }).success, false);
+  assert.equal(assertionRecordSchema.safeParse({ ...baseAssertion, status: 'verified', verification, recordedUntil: '2026-09-12T12:00:00.000Z' }).success, false);
+  assert.equal(assertionRecordSchema.safeParse({ ...baseAssertion, status: 'verified', verification, evidence: [evidence, evidence] }).success, false);
+  assert.equal(assertionRecordSchema.safeParse({ ...baseAssertion, status: 'verified', verification: { ...verification, evidenceIds: ['evidence-1', 'evidence-1'] } }).success, false);
 });
 
 test('source coverage rejects impossible counts and unqualified complete states', () => {

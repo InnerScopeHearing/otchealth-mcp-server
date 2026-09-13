@@ -27,7 +27,7 @@ export interface MemoryRecord {
   supersedes?: string | null;
   created_at: string;
   /** Request hash only. Never store the caller's operation key. */
-  idempotency?: { payloadSha256: string };
+  idempotency?: { payloadSha256: string; requestedSupersedes?: string | null };
   /**
    * The source record is accepted before its search projection.  Keep that obligation on the
    * source record so a transient projection failure survives a worker restart.  This is metadata
@@ -44,7 +44,7 @@ export async function writeMemory(input: {
   source?: string;
   supersedes?: string;
   intent?: MemoryWriteIntent;
-}): Promise<MemoryRecord> {
+}, onReplay?: () => void): Promise<MemoryRecord> {
   const agent = normalizeAgent(input.agent);
   const rec: MemoryRecord = {
     id: input.intent?.id ?? newId('m'),
@@ -56,12 +56,12 @@ export async function writeMemory(input: {
     source: input.source ?? null,
     ...(input.supersedes ? { supersedes: input.supersedes } : {}),
     created_at: new Date().toISOString(),
-    ...(input.intent ? { idempotency: { payloadSha256: input.intent.payloadSha256 } } : {}),
+    ...(input.intent ? { idempotency: { payloadSha256: input.intent.payloadSha256, requestedSupersedes: input.intent.requestedSupersedes ?? null } } : {}),
     indexing: { state: 'pending', attempts: 0, updated_at: new Date().toISOString() },
   };
   return persistMemoryOnce(rec, async (value) => {
     await createDoc(MEMORY, agent, value as unknown as Record<string, unknown>);
-  }, getMemory);
+  }, getMemory, onReplay);
 }
 
 /**

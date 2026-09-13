@@ -49,6 +49,35 @@ test('memoryWriteIntent isolates the same operation key across agents', () => {
   assert.notEqual(developer.payloadSha256, cto.payloadSha256);
 });
 
+test('readback verifies content, not merely matching stored hash metadata', async () => {
+  const requested = record();
+  const changed = { ...requested, text: 'Unexpected changed content.' };
+  await assert.rejects(persistMemoryOnce(requested, async () => {}, async () => changed), /idempotency conflict/);
+});
+
+test('readback retains the original explicit supersession separately from automatic supersession', async () => {
+  const requested = record();
+  requested.supersedes = 'automatically-detected-old-record';
+  requested.idempotency!.requestedSupersedes = null;
+  assert.deepEqual(await persistMemoryOnce(requested, async () => {}, async () => requested), requested);
+});
+
+test('two concurrent captures have one source winner and one replay observer', async () => {
+  let stored: MemoryRecord | null = null;
+  let replays = 0;
+  let creates = 0;
+  const create = async (value: MemoryRecord) => {
+    if (stored) throw new Error('409');
+    stored = value;
+    creates++;
+  };
+  const read = async () => stored;
+  const results = await Promise.all([1, 2].map(() => persistMemoryOnce(record(), create, read, () => { replays++; })));
+  assert.equal(creates, 1);
+  assert.equal(replays, 1);
+  assert.deepEqual(results[0], results[1]);
+});
+
 test('persistMemoryOnce refuses a cross-agent record even if a faulty read returns the requested id', async () => {
   const requested = record('developer');
   // Synthetic hostile/faulty backend response: the id and request hash alone must not bridge

@@ -9,7 +9,8 @@ const identifier = z.string().regex(
 const opaqueSourceIdentifier = z.string().min(1).max(1_024)
   .refine((value) => !/[\u0000-\u001F\u007F]/.test(value), 'must not contain control characters');
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/i, 'must be a SHA-256 hex digest');
-const timestamp = z.string().datetime({ offset: true });
+const timestamp = z.string().datetime({ offset: true })
+  .refine((value) => Number.isFinite(Date.parse(value)), 'must be a finite timestamp');
 
 export const BRAIN_CONTRACT_VERSION = 'brain.contract.v1' as const;
 export const assertionStatusSchema = z.enum(['verified', 'inferred', 'unknown']);
@@ -86,11 +87,25 @@ const assertionBaseSchema = z.object({
   evidence: z.array(evidenceReferenceSchema).max(100),
 });
 
+function validateSharedAssertionInvariants(
+  value: { recordedAt: string; recordedUntil: string | null; evidence: Array<{ evidenceId: string }> },
+  context: z.RefinementCtx,
+): void {
+  if (value.recordedUntil !== null && Date.parse(value.recordedAt) >= Date.parse(value.recordedUntil)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['recordedUntil'], message: 'must be after recordedAt' });
+  }
+  const evidenceIds = value.evidence.map((evidence) => evidence.evidenceId);
+  if (new Set(evidenceIds).size !== evidenceIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['evidence'], message: 'evidence IDs must be unique' });
+  }
+}
+
 /** A verified assertion names both its method and its authoritative evidence. */
 export const verifiedAssertionSchema = assertionBaseSchema.extend({
   status: z.literal('verified'),
   verification: verificationSchema,
 }).strict().superRefine((value, context) => {
+  validateSharedAssertionInvariants(value, context);
   const knownEvidence = new Set(value.evidence.map((evidence) => evidence.evidenceId));
   if (value.evidence.length === 0) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['evidence'], message: 'verified assertions require evidence' });
@@ -100,19 +115,16 @@ export const verifiedAssertionSchema = assertionBaseSchema.extend({
       context.addIssue({ code: z.ZodIssueCode.custom, path: ['verification', 'evidenceIds'], message: `unknown evidence ID: ${evidenceId}` });
     }
   }
+  if (new Set(value.verification.evidenceIds).size !== value.verification.evidenceIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['verification', 'evidenceIds'], message: 'verification evidence IDs must be unique' });
+  }
 });
 
 /** Inferred and unknown assertions deliberately cannot carry a verified claim. */
 export const nonVerifiedAssertionSchema = assertionBaseSchema.extend({
   status: z.enum(['inferred', 'unknown']),
 }).strict().superRefine((value, context) => {
-  if (value.recordedUntil !== null && Date.parse(value.recordedAt) >= Date.parse(value.recordedUntil)) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['recordedUntil'], message: 'must be after recordedAt' });
-  }
-  const evidenceIds = value.evidence.map((evidence) => evidence.evidenceId);
-  if (new Set(evidenceIds).size !== evidenceIds.length) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['evidence'], message: 'evidence IDs must be unique' });
-  }
+  validateSharedAssertionInvariants(value, context);
 });
 
 export const assertionRecordSchema = z.union([verifiedAssertionSchema, nonVerifiedAssertionSchema]);
