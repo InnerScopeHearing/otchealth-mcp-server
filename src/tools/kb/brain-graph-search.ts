@@ -12,7 +12,7 @@ import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../s
 const REGION = 'us-east-1';
 const SOURCE_ROOT = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
 const SOURCE_PREFIXES: Record<'company' | 'personal', readonly string[]> = {
-  company: [`${SOURCE_ROOT}company/`, `${SOURCE_ROOT}company-priority/`],
+  company: [`${SOURCE_ROOT}company/`, `${SOURCE_ROOT}company-priority/`, `${SOURCE_ROOT}company-capacity/`],
   personal: [`${SOURCE_ROOT}personal/`],
 };
 const MAX_BYTES = 512 * 1024;
