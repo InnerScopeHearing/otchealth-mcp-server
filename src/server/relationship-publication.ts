@@ -10,6 +10,7 @@ import {companyGraphScopeOwnsBinding,resolveCompanyGraphScope} from './company-g
 import {collectHistoryCandidates,validCandidatePagination} from './candidate-query-pagination.js';
 import {adaptRelationshipAssertions} from '../brain-capabilities/relationship-assertion-adapter.js';
 import type {AssertionRecord} from '../brain-capabilities/contracts.js';
+import {createEvidenceBackedDecisionBrief,type EvidenceViewQuery,type TrustedAuthorization} from '../brain-capabilities/evidence-view.js';
 
 type Json=Record<string,any>;
 type Stored={found:boolean;body?:Buffer;versionId?:string};
@@ -113,6 +114,33 @@ async function replayTrustedEntries(d:RelationshipPublicationDeps,policy:Json,ct
  const revalidate=async()=>d.identityCurrentness?await Promise.all(uniqueProofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal}))):uniqueProofs.map(()=>null),before=identityCurrentnessMap(uniqueProofs,await revalidate());if(requireCurrentSources&&[...before.values()].some(current=>current!==true))fail();const answer=queryDurableHistories({entries,query,now:d.now,identityCurrentness:before});
  await recheck();for(const result of loaded){const refreshed=await result.refresh();if(refreshed!==result.entry.sourceCurrent||(requireCurrentSources&&refreshed!==true))fail();}const after=identityCurrentnessMap(uniqueProofs,await revalidate());for(const [key,wasCurrent] of before)if(wasCurrent&&after.get(key)!==true)fail();if(requireCurrentSources&&[...after.values()].some(current=>current!==true))fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();return answer;
 }
+/**
+ * The assertion brief deliberately accepts a narrower query than the internal view: `current`
+ * gets its observed time from the gateway clock, never a client timestamp.  The other modes
+ * require canonical UTC instants so the HTTP boundary cannot admit a value the contracts reject.
+ */
+function assertionBriefTemporal(value:unknown,observedAt:string):EvidenceViewQuery|null{
+ if(!value||Object.getPrototypeOf(value)!==Object.prototype||!h.utc(observedAt))return null;
+ const input=value as Json;
+ if(h.exact(input,['mode'])&&input.mode==='current')return{mode:'current',validAt:observedAt,observedAt};
+ if(h.exact(input,['mode','valid_at'])&&input.mode==='valid-at'&&h.utc(input.valid_at))return{mode:'valid-at',validAt:input.valid_at,observedAt};
+ if(h.exact(input,['mode','valid_at','known_as_of'])&&input.mode==='known-as-of'&&h.utc(input.valid_at)&&h.utc(input.known_as_of)&&Date.parse(input.known_as_of)<=Date.parse(observedAt))return{mode:'known-as-of',validAt:input.valid_at,observedAt,knownAsOf:input.known_as_of};
+ return null;
+}
+
+/**
+ * This closure is deliberately bound to the already-authenticated publication policy.  It is not
+ * a client-provided hint: assertionRecords has replayed source and identity authority, and the
+ * route rechecks that authority again before emitting a response.
+ */
+function assertionBriefAuthorization(actorId:string,tenantId:string,policyVersion:string):TrustedAuthorization{
+ return({context,assertion,evidence})=>{
+  if(context.actorId!==actorId||context.tenantId!==tenantId||assertion.actorId!==actorId||assertion.tenantId!==tenantId)return false;
+  if(!assertion.authorization.length||!assertion.authorization.every(label=>label.name==='relationship-publication'&&label.policyVersion===policyVersion))return false;
+  if(!evidence)return true;
+  return evidence.sourceSystem==='relationship-publication'&&evidence.actorId===actorId&&evidence.tenantId===tenantId&&evidence.sourceGeneration===assertion.sourceGeneration;
+ };
+}
 async function queryEntries(d:RelationshipPublicationDeps,policy:Json,ctx:AuthContext,signal:AbortSignal,loaded:Array<Awaited<ReturnType<typeof queryPublishedHistory>>>,query:Json,recheck:()=>Promise<void>){
  return replayTrustedEntries(d,policy,ctx,signal,loaded,query,recheck);
 }
@@ -200,13 +228,33 @@ export function registerRelationshipPublicationRoutes(app:FastifyInstance,inject
   const page=await d.storeFor(c.cohort_id,c.producer_id,c.authenticated_caller).list({after,limit,signal});if(page.records.length>limit)fail(503);let last=after??'';
   const items=[],refreshes:Array<()=>Promise<boolean>>=[];for(const r of page.records){const g=stored({found:true,...r});binding(policy,c,g,d.now());if(g.run.run_id!==r.runId||r.runId<=last)fail(503);last=r.runId;refreshes.push((await inspect(d,policy,c,g,ctx,signal)).refresh);items.push({run:g.run,producer_id:c.producer_id,artifact_ref:g.artifact_ref});}if(page.next!==undefined&&(page.next!==last||!items.length))fail(503);await recheck();for(const refresh of refreshes)await refresh();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();return reply.send({schema:'relationship-publication-page-v1',items,next_after:page.next??null});
  });
- route('POST',prefix+'/query',async(req,reply,c,policy,ctx,signal,recheck)=>{
+  route('POST',prefix+'/query',async(req,reply,c,policy,ctx,signal,recheck)=>{
   if(new URL(req.url,'http://local').search)fail(400);const input=req.body as Json;
    if(!h.exact(input,['histories','query'])||!Array.isArray(input.histories)||!input.histories.length||input.histories.length>64||!validQuery(input.query)||Buffer.byteLength(h.canonical(input))>16384)fail(400);
   const seen=new Set<string>(),items:Json[]=[];for(const item of input.histories){if(!h.exact(item,['run_id','artifact_ref'])||!RUN.test(item.run_id)||!h.artifactRef(item.artifact_ref)||seen.has(item.run_id+'\0'+h.canonical(item.artifact_ref)))fail(400);seen.add(item.run_id+'\0'+h.canonical(item.artifact_ref));items.push(item);}
   const loaded=[];for(const item of items){const g=stored(await d.storeFor(c.cohort_id,c.producer_id,c.authenticated_caller).get(item.run_id,signal));binding(policy,c,g,d.now());if(g.run.run_id!==item.run_id||!equal(g.artifact_ref,item.artifact_ref))fail();loaded.push(await queryPublishedHistory(d,policy,c,g,ctx,signal));}
    const answer=await queryEntries(d,policy,ctx,signal,loaded,input.query,recheck);
-   return reply.send({schema:'relationship-publication-query-v1',history_refs:items.map(item=>item.artifact_ref),answer});
+    return reply.send({schema:'relationship-publication-query-v1',history_refs:items.map(item=>item.artifact_ref),answer});
+   });
+  /**
+   * A client-neutral, read-only projection of selected published histories.  This is intentionally
+   * not discovery: it cannot claim corpus completeness beyond the immutable history references the
+   * caller supplied.  `assertionRecords` supplies the source/identity/policy trust chain before the
+   * pure evidence view applies business and recorded time.
+   */
+  route('POST',prefix+'/assertion-brief',async(req,reply,c,policy,ctx,signal,recheck)=>{
+   if(new URL(req.url,'http://local').search)fail(400);const input=req.body as Json;
+   if(!h.exact(input,['histories','temporal'])||!Array.isArray(input.histories)||!input.histories.length||input.histories.length>64||Buffer.byteLength(h.canonical(input))>16384)fail(400);
+   const observedAt=new Date(d.now()).toISOString(),temporal=assertionBriefTemporal(input.temporal,observedAt);if(!temporal)fail(400);
+   const scope=resolveCompanyGraphScope(ctx.caller_agent);if(!scope.ok)fail();
+   const batches=await discovery.assertionRecords({cohort_id:c.cohort_id,producer_id:c.producer_id,histories:input.histories},ctx,signal,recheck);
+   const records=batches.flatMap(batch=>batch.assertions);
+   const brief=createEvidenceBackedDecisionBrief(records,{actorId:c.authenticated_caller,tenantId:scope.scope.scope},temporal,assertionBriefAuthorization(c.authenticated_caller,scope.scope.scope,policy.policy_version));
+   // Close the window between the final per-evidence authorization decision and serialization.
+   // Source/identity freshness is rechecked by assertionRecords; this repeats request auth and
+   // policy identity immediately before the response leaves the gateway.
+   await recheck();
+   return reply.send({schema:'relationship-publication-assertion-brief-v1',selection:{selected_history_count:input.histories.length,unselected_history_coverage:'unknown'},temporal:{mode:temporal.mode,valid_at:temporal.validAt,observed_at:temporal.observedAt,...(temporal.knownAsOf?{known_as_of:temporal.knownAsOf}:{})},assertions:brief});
   });
   route('POST',prefix+'/discover-query',async(req,reply,c,_policy,ctx,signal,recheck)=>{
    if(new URL(req.url,'http://local').search)fail(400);const body=req.body as Json;if(!body||Object.getPrototypeOf(body)!==Object.prototype||Object.keys(body).some(key=>!['scope','after','scan_limit','history_limit','query'].includes(key))||!Object.hasOwn(body,'query'))fail(400);
