@@ -12,6 +12,25 @@ test('publication XML decodes each original entity once and rejects unknown enti
 
 const run='run_'+'a'.repeat(64), body=Buffer.from('{"schema":"synthetic"}');
 const key=`graph-trial/20260908/relationship-publications/cfo/synthetic/synthetic-producer/runs/${run}.json`;
+
+test('corporate publication writes, reads and lists only the CLO completion namespace',async()=>{
+ const paths:string[]=[];let saved:Buffer|undefined;
+ const prefix='graph-trial/20260912/relationship-publications/clo/clo-company-catalog-20260912/clo-relationship-worker/runs/';
+ const store=createRelationshipPublicationStore({callerAgent:'clo',cohort:'clo-company-catalog-20260912',producer:'clo-relationship-worker',resolveCredentials:async()=>({accessKeyId:'synthetic',secretAccessKey:'synthetic'}),fetch:async(url,init)=>{
+  const target=new URL(String(url));paths.push(target.pathname);
+  if(target.searchParams.has('list-type')){
+   assert.equal(target.searchParams.get('prefix'),prefix);
+   return new Response(`<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>${prefix}${run}.json</Key></Contents></ListBucketResult>`);
+  }
+  assert.equal(target.pathname,'/'+prefix+run+'.json');
+  if(init?.method==='PUT'){saved=Buffer.from(init.body as Uint8Array);return new Response('',{status:201});}
+  return new Response(saved as never,{headers:{'x-amz-version-id':'v1','x-amz-server-side-encryption':'AES256'}});
+ }});
+ await store.putCreateOnly({runId:run,body},new AbortController().signal);
+ const page=await store.list({limit:2,signal:new AbortController().signal});
+ assert.equal(page.records.length,1);assert.ok(paths.every(path=>!path.includes('/cfo/')));
+ assert.throws(()=>createRelationshipPublicationStore({cohort:'synthetic',producer:'synthetic',callerAgent:'clo-personal' as any}),/namespace/);
+});
 test('publication store creates with immutable S3 headers then verifies the durable record',async()=>{
  const calls:Array<{method:string;headers:Record<string,string>}>=[];let saved:Buffer|undefined;
  const store=createRelationshipPublicationStore({cohort:'synthetic',producer:'synthetic-producer',resolveCredentials:async()=>({accessKeyId:'AKID',secretAccessKey:'synthetic'}),signRequest:o=>({headers:{...(o.extraHeaders??{})}}),fetch:async(_url,init)=>{calls.push({method:init?.method??'',headers:init?.headers as Record<string,string>});if(init?.method==='PUT'){saved=Buffer.from(init.body as Uint8Array);return new Response('',{status:201});}return saved?new Response(saved as never,{headers:{'x-amz-version-id':'v1','x-amz-server-side-encryption':'AES256'}}):new Response('',{status:404});}});
