@@ -68,6 +68,45 @@ test('disabled or invalid deployment configuration cannot spend on retrieval', a
   assert.equal(h.calls.length, 0);
 });
 
+test('known source IDs narrow company retrieval and locally reject upstream filter violations', async () => {
+  const target = 'a'.repeat(64);
+  const other = { ...row(), metadata: { ...row().metadata, source_id: 'c'.repeat(64) } };
+  const missingId = { ...row(), metadata: { source_group: 'company' } };
+  const h = harness(() => Response.json({ retrievalResults: [other, missingId, row('personal'), row()], nextToken: 'opaque' }));
+  const r: any = await handleBrainGraphSearch({ query: 'synthetic', source_ids: [target], top: 8 }, ctx('cfo'), h.deps);
+  assert.deepEqual(JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, {
+    andAll: [{ equals: { key: 'source_group', value: 'company' } }, { in: { key: 'source_id', value: [target] } }],
+  });
+  assert.equal(r.data.count, 1); assert.equal(r.data.withheld_count, 3);
+  assert.equal(r.data.matches[0].source_id, target);
+  assert.equal(r.data.source_filter_applied, true); assert.equal(r.data.requested_source_count, 1);
+  assert.equal(r.data.more_results_available, true);
+});
+
+test('source-ID narrowing preserves personal scope rules and cannot admit a forbidden caller', async () => {
+  const ids = ['a'.repeat(64), 'c'.repeat(64)];
+  const h = harness();
+  await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx('clo-personal'), h.deps);
+  assert.deepEqual(JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, { in: { key: 'source_id', value: ids } });
+  await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'personal' }, ctx('clo-personal'), h.deps);
+  assert.deepEqual(JSON.parse(String(h.calls[1]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, {
+    andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { in: { key: 'source_id', value: ids } }],
+  });
+  for (const caller of ['cto', 'developer', 'cro', 'coo', 'external']) {
+    assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
+  }
+  assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'all' }, ctx('cfo'), h.deps) as any).data.error, 'forbidden_ring');
+  assert.equal(h.calls.length, 2);
+});
+
+test('empty, repeated, malformed, and oversized source-ID lists never call AWS', async () => {
+  const h = harness(); h.deps.credentials = async () => { throw new Error('must not resolve'); };
+  for (const source_ids of [[], ['a'.repeat(64), 'a'.repeat(64)], ['A'.repeat(64)], ['../source'], Array.from({ length: 6 }, (_, i) => String(i).repeat(64))]) {
+    assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids }, ctx('cfo'), h.deps) as any).data.mode, 'invalid_request');
+  }
+  assert.equal(h.calls.length, 0);
+});
+
 test('unknown fields, oversized requests and unauthorized scope are rejected', async () => {
   const h = harness();
   for (const input of [{ query: 'synthetic', kbId: 'OVERRIDE01' }, { query: 'x'.repeat(2001) }, { query: 'test', top: 9 }]) {

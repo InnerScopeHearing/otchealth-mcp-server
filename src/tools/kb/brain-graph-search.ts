@@ -18,7 +18,7 @@ const SOURCE_PREFIXES: Record<'company' | 'personal', readonly string[]> = {
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
 type Scope = 'company' | 'personal' | 'all';
-type Input = { query: string; scope?: Scope; top?: number };
+type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[] };
 type Config = { enabled: boolean; kbId: string };
 type Deps = { config(): Config; credentials(): Promise<AwsCredentials | null>; fetch: typeof fetch };
 const DEFAULTS: Deps = {
@@ -30,6 +30,9 @@ const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
   scope: z.enum(['company', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. The personal legal seat may query the shared corpus.'),
   top: z.number().int().min(1).max(8).optional(),
+  source_ids: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(5)
+    .refine((ids) => new Set(ids).size === ids.length, 'Source IDs must be unique')
+    .optional().describe('Narrow retrieval to up to five known canonical document IDs within your authorized scope. Use to inspect a missing source; this does not establish relationship coverage.'),
 };
 const inputSchema = z.object(inputShape).strict();
 
@@ -78,13 +81,19 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   const credentials = await deps.credentials();
   if (!credentials) return outcome('unavailable', 'credentials_unavailable');
   const top = parsed.data.top ?? 5;
+  const requestedSources = parsed.data.source_ids ? new Set(parsed.data.source_ids) : undefined;
+  const sourceFilter = requestedSources ? { in: { key: 'source_id', value: [...requestedSources] } } : undefined;
+  const groupFilter = scope === 'all' ? undefined : { equals: { key: 'source_group', value: scope } };
+  // Source narrowing is intersected with the authenticated scope, never substituted
+  // for it. Repeat the source-ID check on returned rows if upstream ignores a filter.
+  const filter = groupFilter && sourceFilter ? { andAll: [groupFilter, sourceFilter] } : groupFilter ?? sourceFilter;
   const host = `bedrock-agent-runtime.${REGION}.amazonaws.com`;
   const path = `/knowledgebases/${config.kbId}/retrieve`;
   const body = JSON.stringify({
     retrievalQuery: { text: parsed.data.query },
     retrievalConfiguration: { vectorSearchConfiguration: {
       numberOfResults: top,
-      ...(scope === 'all' ? {} : { filter: { equals: { key: 'source_group', value: scope } } }),
+      ...(filter ? { filter } : {}),
     } },
   });
   const signed = signRequest({ method: 'POST', host, path, body, region: REGION, service: 'bedrock', credentials });
@@ -108,6 +117,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       if ((group !== 'company' && group !== 'personal') || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri(group, uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
       const sourceId = row?.metadata?.source_id;
       const textHash = row?.metadata?.text_sha256;
+      if (requestedSources && (typeof sourceId !== 'string' || !requestedSources.has(sourceId))) { withheld++; continue; }
       matches.push({
         citation: `graph:${matches.length + 1}`, source_group: group, source_uri: uri,
         ...(typeof sourceId === 'string' && /^[a-f0-9]{64}$/.test(sourceId) ? { source_id: sourceId } : {}),
@@ -117,7 +127,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       });
     }
     return {
-      data: { mode: 'aws-managed-graphrag', scope, matches, count: matches.length, withheld_count: withheld, answer_generated: false, ...(raw.nextToken ? { more_results_available: true } : {}) },
+      data: { mode: 'aws-managed-graphrag', scope, matches, count: matches.length, withheld_count: withheld, answer_generated: false, ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
       summary: `${matches.length} source-cited GraphRAG passages. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,
     };
   } catch { return outcome('unavailable', 'bedrock_retrieval_failed'); }
@@ -132,8 +142,8 @@ export function registerBrainGraphSearch(server: McpServer, callerHash: CallerHa
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
     },
     inputShape,
-    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional() },
-    redactInputForLog: (input) => ({ query_redacted: true, scope: input.scope, top: input.top }),
+    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional(), source_filter_applied: z.boolean().optional(), requested_source_count: z.number().optional() },
+    redactInputForLog: (input) => ({ query_redacted: true, scope: input.scope, top: input.top, ...(Array.isArray(input.source_ids) ? { source_id_count: input.source_ids.length } : {}) }),
     handler: (input, ctx) => handleBrainGraphSearch(input, ctx),
   }, callerHash);
 }
