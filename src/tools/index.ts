@@ -123,6 +123,7 @@ import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js'
 // Wave A+ — fleet knowledge RAG (hybrid AI Search; commons open, finance/legal ring-gated)
 import { registerKbSearch } from './kb/search.js';
 import { registerBrainSearch } from './kb/brain-search.js';
+import { registerBrainGraphSearch } from './kb/brain-graph-search.js';
 import { registerWebSearch } from './web/web-search.js';
 // Task G-3 (2026-09-03): Tavily-only parity tools alongside web_search -- see each file's header.
 import { registerWebResearch } from './web/web-research.js';
@@ -1088,6 +1089,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Wave A+: fleet knowledge RAG + commodity LLM (credit-funded) =====
   registerKbSearch(server, callerHash);
   registerBrainSearch(server, callerHash);
+  registerBrainGraphSearch(server, callerHash);
   registerRetrievalFeedback(server, callerHash); // write_simple: opt-in feedback on a brain_search/kb_search hit (Wave 7 item 7.1)
   registerWebSearch(server, callerHash);
   // Task G-3 (2026-09-03): web_search parity -- deeper multi-step research + fetch-a-known-URL,

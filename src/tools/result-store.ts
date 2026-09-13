@@ -85,7 +85,7 @@ function jsonEscapedUtf8Bytes(symbol: string): number {
 
 /** gateway_fetch_result is the terminal retrieval transport and must never produce another id. */
 export function mayOffloadToolResult(canonicalName: string): boolean {
-  return canonicalName !== 'gateway_fetch_result';
+  return canonicalName !== 'gateway_fetch_result' && canonicalName !== 'brain_graph_search';
 }
 
 function pageBoundaries(s: string): Array<{ start: number; end: number }> {
