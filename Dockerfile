@@ -16,6 +16,7 @@ COPY src ./src
 COPY tools/identity-registry-exporter-task.mjs ./tools/identity-registry-exporter-task.mjs
 COPY tools/xero-organisation-explicit-export-run.mjs ./tools/xero-organisation-explicit-export-run.mjs
 COPY tools/identity-registry-explicit-export.mjs ./tools/identity-registry-explicit-export.mjs
+COPY tools/xero-organisation-explicit-export-reconcile.mjs ./tools/xero-organisation-explicit-export-reconcile.mjs
 COPY tools/identity-registry-explicit-export-ports.mjs ./tools/identity-registry-explicit-export-ports.mjs
 COPY tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
 COPY tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
@@ -71,6 +72,7 @@ COPY --from=build --chown=app:app /app/package.json ./package.json
 COPY --from=build --chown=app:app /app/tools/identity-registry-exporter-task.mjs ./tools/identity-registry-exporter-task.mjs
 COPY --from=build --chown=app:app /app/tools/xero-organisation-explicit-export-run.mjs ./tools/xero-organisation-explicit-export-run.mjs
 COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export.mjs ./tools/identity-registry-explicit-export.mjs
+COPY --from=build --chown=app:app /app/tools/xero-organisation-explicit-export-reconcile.mjs ./tools/xero-organisation-explicit-export-reconcile.mjs
 COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export-ports.mjs ./tools/identity-registry-explicit-export-ports.mjs
 COPY --from=build --chown=app:app /app/tools/xero-organisation-source-export-run.mjs ./tools/xero-organisation-source-export-run.mjs
 COPY --from=build --chown=app:app /app/tools/xero-organisation-source-handoff-run.mjs ./tools/xero-organisation-source-handoff-run.mjs
