@@ -30,7 +30,7 @@ function recordingHistory(runRef, sourceRef, input) {
   return { schema: "resolution-history-v1", run: runRef, caller_seat: "cfo", sources: [sourceRef], events: [registered, accepted], queries: [] };
 }
 function reader(runRef, producer, objects, state) {
-  return { run_id: runRef.run_id, producer_id: producer, boundHistoryTrust: { store_id: "trusted", producer_ids: [producer] }, async readArtifact(artifact) {
+  return { run_id: runRef.run_id, producer_id: producer, caller_seat: "cfo", boundHistoryTrust: { store_id: "trusted", producer_ids: [producer] }, async readArtifact(artifact) {
     const payload = objects.get(JSON.stringify(artifact)); if (!payload) throw Object.assign(new Error("missing"), { code: "missing" });
     return { payload: structuredClone(payload), authority: { authenticated_gateway: true, policy_version: "policy-v1", expires_at: "2026-09-08T00:04:00.000Z", producer_id: producer, caller_seat: "cfo", current: state.current } };
   } };

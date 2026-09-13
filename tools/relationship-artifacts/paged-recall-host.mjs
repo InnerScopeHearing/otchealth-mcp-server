@@ -74,7 +74,7 @@ export function createPagedRecallHost({ gatewayOrigin, cohortId, producer, calle
     if (!Buffer.from(bytes.bytes.toString("utf8"), "utf8").equals(bytes.bytes)) fail("paged_recall_response_invalid"); try { return JSON.parse(bytes.bytes.toString("utf8")); } catch { fail("paged_recall_response_invalid"); }
   }
   function publicationReader(item) {
-    return createHistoricalRelationshipReader({ gatewayOrigin: fixedOrigin, run: item.run, producer, historyTrust, getAuthorization, now, sse,
+    return createHistoricalRelationshipReader({ gatewayOrigin: fixedOrigin, run: item.run, producer, callerSeat, historyTrust, getAuthorization, now, sse,
       fetchImpl: async (oldUrl, init) => {
         const source = new URL(oldUrl); const expected = new RegExp(`^/relationship-history/v1/${item.run.run_id}/${producer}/sha256/([a-f0-9]{2})/([a-f0-9]{64})\\.json$`).exec(source.pathname);
         if (source.origin !== fixedOrigin || !expected || expected[1] !== expected[2].slice(0, 2) || source.searchParams.get("versionId") === null || [...source.searchParams.keys()].length !== 1) fail("paged_recall_reader_route_invalid");
