@@ -2,7 +2,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, isShipLane, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
-import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
+import { writeMemory, recordMemoryIndexOutcome, getMemory } from '../../agentstate/memory.js';
+import { memoryWriteIntent, validateMemoryReplay } from '../../agentstate/memory-idempotency.js';
 import { MEMORY_KINDS, normalizeAgent } from '../../agentstate/agents.js';
 import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { embed } from '../../azure/foundry.js';
@@ -87,7 +88,10 @@ export interface MemoryWriteInput {
   tags?: string[];
   source?: string;
   supersedes?: string;
+  idempotency_key?: string;
 }
+
+const memoryWriteDependencies = { isConfigured, getMemory, embed, detectSupersession, writeMemory, indexMemoryNow, recordMemoryIndexOutcome };
 
 /**
  * `memory_write` handler. Exported standalone (rather than inline in the registerTool call) so the
@@ -101,7 +105,7 @@ export interface MemoryWriteInput {
  * so a test must wrap the call in requestContext.run() to simulate an authenticated caller, exactly
  * as the real server does via server/mcp.ts).
  */
-export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContext): Promise<ToolResultPayload> {
+export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContext, deps = memoryWriteDependencies): Promise<ToolResultPayload> {
   const callerAgent = currentCallerAgent();
   // Returns the ACTUAL refusal reason in the summary rather than a hardcoded "connector lane
   // ... executive ring" sentence -- fixed 2026-07-30 review: that hardcoded text was wrong for
@@ -138,11 +142,22 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
       summary: `Refused: ${mnpiGate.reason}`,
     };
   }
-  if (!isConfigured()) return { data: { written: false, note: 'agent-state Cosmos not configured.' }, summary: 'Memory store not configured.' };
+  if (!deps.isConfigured()) return { data: { written: false, note: 'agent-state not configured.' }, summary: 'Memory store not configured.' };
   if (ctx.dryRun) return { data: { written: false, preview: { ...input, agent: callerAgent }, note: 'dry_run: pass dry_run=false to persist.' }, summary: `DRY RUN: would write a ${input.kind} for ${callerAgent}.` };
+  const intent = memoryWriteIntent({ ...input, agent: normalizeAgent(callerAgent) });
+  if (intent) {
+    const existing = await deps.getMemory(intent.id, normalizeAgent(callerAgent));
+    if (existing) {
+      const record = validateMemoryReplay(existing, normalizeAgent(callerAgent), intent);
+      return {
+        data: { written: true, replayed: true, record, indexed: record.indexing?.state === 'indexed', persistence_state: 'committed' },
+        summary: `Recovered committed memory ${record.id}; no new write or embedding was performed.`,
+      };
+    }
+  }
   // Embed ONCE and reuse for both auto-supersession detection and the index write below.
   let vector: number[] | null = null;
-  try { vector = await embed(input.text); } catch { vector = null; }
+  try { vector = await deps.embed(input.text); } catch { vector = null; }
   // AUTO-SUPERSESSION (W1-2): does this new entry contradict a near-prior same-agent one? Fail-open
   // (never blocks/breaks the write); sets supersedes only under MEMORY_AUTOSUPERSEDE_MODE=auto; and
   // NEVER overrides an explicit caller-provided supersedes (the agent already knows what it retires).
@@ -151,16 +166,16 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
   // here too means a future weakening of that gate alone still cannot misattribute a write).
   const sup = input.supersedes
     ? { action: 'none' as const, reason: 'caller set supersedes', supersedeId: undefined as string | undefined }
-    : await detectSupersession({ agent: normalizeAgent(callerAgent), kind: input.kind, text: input.text, vector });
+    : await deps.detectSupersession({ agent: normalizeAgent(callerAgent), kind: input.kind, text: input.text, vector });
   const supersedes = input.supersedes ?? (sup.action === 'auto-link' ? sup.supersedeId : undefined);
   // agent: callerAgent (never input.agent) -- the same defense-in-depth reasoning as the
   // detectSupersession call above; this is the actual persisted attribution.
-  const record = await writeMemory({ ...input, agent: callerAgent, supersedes });
+  const record = await deps.writeMemory({ ...input, agent: callerAgent, supersedes, intent });
   // WRITE-THROUGH: the Cosmos memory-of-record was previously indexed by NOTHING -- semantic.mjs
   // indexes only the shared blob feed, so every memory_write was durable but UNFINDABLE by
   // brain_search/kb_search. This makes the system-of-record actually recallable. Fail-open:
   // the record is already committed to Cosmos, so an index outage must never fail the write.
-  const idx = await indexMemoryNow({
+  const idx = await deps.indexMemoryNow({
     agent: record.agent,
     id: record.id,
     type: record.kind,
@@ -171,7 +186,7 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
   });
   // Best effort only. The initial source write already recorded a pending obligation, so an
   // outcome-write outage cannot make an accepted memory silently disappear from reconciliation.
-  await recordMemoryIndexOutcome(record, idx.indexed).catch(() => undefined);
+  await deps.recordMemoryIndexOutcome(record, idx.indexed).catch(() => undefined);
   const supNote =
     sup.action === 'auto-link'
       ? ` Auto-superseded ${sup.supersedeId} (contradiction detected).`
@@ -181,6 +196,7 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
   return {
     data: {
       written: true,
+      persistence_state: 'committed',
       record,
       indexed: idx.indexed,
       ...(idx.reason ? { index_error: idx.reason } : {}),
@@ -212,6 +228,7 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
         text: z.string().min(1).describe('The atomic, non-sensitive memory text.'),
         tags: z.array(z.string()).optional(),
         source: z.string().optional().describe('Optional attribution, e.g. "Matt 2026-07-01".'),
+        idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{16,128}$/).optional().describe('Stable operation key for retry-safe capture. Reuse only with the identical original payload. Replay returns the committed record without a new embedding. Omit for legacy append behavior.'),
         supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES (e.g. "20260713-015"). Set it ONLY when this entry makes the older one FALSE, not merely related -- readers (wake, memory_pack) DROP the superseded entry so a retracted belief cannot resurface as a live truth. Use it whenever you correct a previously-stated fact.'),
       },
       outputShape: { written: z.boolean(), record: z.unknown() },

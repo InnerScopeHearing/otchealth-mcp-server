@@ -11,6 +11,7 @@
 
 import { createDoc, readDoc, queryDocs, replaceDoc, newId } from './store.js';
 import { normalizeAgent, type MemoryKind } from './agents.js';
+import { persistMemoryOnce, type MemoryWriteIntent } from './memory-idempotency.js';
 
 const MEMORY = 'memory';
 
@@ -25,6 +26,8 @@ export interface MemoryRecord {
   /** id of a record this one REPLACES (correction chain). See MemoryEntry.supersedes. */
   supersedes?: string | null;
   created_at: string;
+  /** Request hash only. Never store the caller's operation key. */
+  idempotency?: { payloadSha256: string };
   /**
    * The source record is accepted before its search projection.  Keep that obligation on the
    * source record so a transient projection failure survives a worker restart.  This is metadata
@@ -40,10 +43,11 @@ export async function writeMemory(input: {
   tags?: string[];
   source?: string;
   supersedes?: string;
+  intent?: MemoryWriteIntent;
 }): Promise<MemoryRecord> {
   const agent = normalizeAgent(input.agent);
   const rec: MemoryRecord = {
-    id: newId('m'),
+    id: input.intent?.id ?? newId('m'),
     type: 'memory',
     agent,
     kind: input.kind,
@@ -52,10 +56,12 @@ export async function writeMemory(input: {
     source: input.source ?? null,
     ...(input.supersedes ? { supersedes: input.supersedes } : {}),
     created_at: new Date().toISOString(),
+    ...(input.intent ? { idempotency: { payloadSha256: input.intent.payloadSha256 } } : {}),
     indexing: { state: 'pending', attempts: 0, updated_at: new Date().toISOString() },
   };
-  await createDoc(MEMORY, agent, rec as unknown as Record<string, unknown>);
-  return rec;
+  return persistMemoryOnce(rec, async (value) => {
+    await createDoc(MEMORY, agent, value as unknown as Record<string, unknown>);
+  }, getMemory);
 }
 
 /**

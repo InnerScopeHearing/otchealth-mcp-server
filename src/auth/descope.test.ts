@@ -1,7 +1,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from 'node:crypto';
-import { verifyDescopeClaims, laneFromScope, verifyDescopeToken, type DescopeClaims } from './descope.js';
+import { hasExpectedAudience, verifyDescopeClaims, laneFromScope, verifyDescopeToken, type DescopeClaims } from './descope.js';
 
 // loadEnv() (called transitively by laneFromScope -> scopeLaneMap) caches its result for the
 // life of the process, so DESCOPE_SCOPE_LANE_MAP is deliberately left UNSET here -- these tests
@@ -48,6 +48,13 @@ function signRs256(claims: DescopeClaims, kid = KID, key: KeyObject = privateKey
   return `${data}.${b64url(sig)}`;
 }
 
+function signRawJson(header: unknown, payload: unknown, key: KeyObject = privateKey): string {
+  const encodedHeader = b64url(JSON.stringify(header));
+  const encodedPayload = b64url(JSON.stringify(payload));
+  const data = `${encodedHeader}.${encodedPayload}`;
+  return `${data}.${b64url(cryptoSign('RSA-SHA256', Buffer.from(data), key))}`;
+}
+
 function baseClaims(overrides: Partial<DescopeClaims> = {}): DescopeClaims {
   const now = Math.floor(Date.now() / 1000);
   return {
@@ -87,6 +94,37 @@ test('verifyDescopeClaims rejects an expired token', () => {
   assert.equal(verifyDescopeClaims(token, keySet(), ISSUER), null);
 });
 
+test('verifyDescopeClaims rejects non-numeric or non-finite expiry claims', () => {
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims({ exp: 'tomorrow' as unknown as number })), keySet(), ISSUER), null);
+  // JSON serialization turns Infinity into null, which must still fail closed rather than being
+  // interpreted as an absent or usable expiry.
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims({ exp: Infinity })), keySet(), ISSUER), null);
+});
+
+test('verifyDescopeClaims rejects a not-before claim in the future or with an invalid type', () => {
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims({ nbf: now + 60 })), keySet(), ISSUER), null);
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims({ nbf: 'later' as unknown as number })), keySet(), ISSUER), null);
+  assert.ok(verifyDescopeClaims(signRs256(baseClaims({ nbf: now - 60 })), keySet(), ISSUER));
+});
+
+test('hasExpectedAudience supports standard JWT string and array audience shapes', () => {
+  assert.equal(hasExpectedAudience('https://gateway.example.test', 'https://gateway.example.test'), true);
+  assert.equal(hasExpectedAudience(['unrelated', 'https://gateway.example.test'], 'https://gateway.example.test'), true);
+  assert.equal(hasExpectedAudience('resource-b', ['resource-a', 'resource-b']), true);
+});
+
+test('verifyDescopeClaims enforces an explicitly supplied expected audience without guessing one', () => {
+  const expected = 'https://gateway.example.test';
+  assert.ok(verifyDescopeClaims(signRs256(baseClaims({ aud: expected })), keySet(), ISSUER, expected));
+  assert.ok(verifyDescopeClaims(signRs256(baseClaims({ aud: ['other', expected] })), keySet(), ISSUER, expected));
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims({ aud: 'https://other.example.test' })), keySet(), ISSUER, expected), null);
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims()), keySet(), ISSUER, expected), null);
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims({ aud: ['https://other.example.test', 42] as unknown as string[] })), keySet(), ISSUER, expected), null);
+  assert.equal(verifyDescopeClaims(signRs256(baseClaims({ aud: [expected, 42] as unknown as string[] })), keySet(), ISSUER, expected), null);
+  assert.equal(hasExpectedAudience('https://gateway.example.test', ''), false);
+});
+
 test('verifyDescopeClaims rejects a mismatched issuer', () => {
   const token = signRs256(baseClaims({ iss: 'https://api.descope.com/v1/apps/SomeOtherProject' }));
   assert.equal(verifyDescopeClaims(token, keySet(), ISSUER), null);
@@ -102,6 +140,20 @@ test('verifyDescopeClaims rejects a non-RS256 header', () => {
   const payload = b64url(JSON.stringify(baseClaims()));
   const token = `${header}.${payload}.deadbeef`;
   assert.equal(verifyDescopeClaims(token, keySet(), ISSUER), null);
+});
+
+test('verifyDescopeClaims rejects non-object JSON header and payload shapes without throwing', () => {
+  assert.equal(verifyDescopeClaims(signRawJson(null, baseClaims()), keySet(), ISSUER), null);
+  assert.equal(verifyDescopeClaims(signRawJson([], baseClaims()), keySet(), ISSUER), null);
+  assert.equal(verifyDescopeClaims(signRawJson({ alg: 'RS256', kid: KID }, null), keySet(), ISSUER), null);
+  assert.equal(verifyDescopeClaims(signRawJson({ alg: 'RS256', kid: KID }, ['not', 'claims']), keySet(), ISSUER), null);
+  assert.equal(verifyDescopeClaims(signRawJson({ alg: 'RS256', kid: KID }, 'claims'), keySet(), ISSUER), null);
+});
+
+test('verifyDescopeClaims rejects invalid header algorithm and key identifier types', () => {
+  assert.equal(verifyDescopeClaims(signRawJson({ alg: 256, kid: KID }, baseClaims()), keySet(), ISSUER), null);
+  assert.equal(verifyDescopeClaims(signRawJson({ alg: 'RS256', kid: 42 }, baseClaims()), keySet(), ISSUER), null);
+  assert.equal(verifyDescopeClaims(signRawJson({ alg: 'RS256', kid: ['test-kid-1'] }, baseClaims()), keySet(), ISSUER), null);
 });
 
 test('verifyDescopeClaims rejects a malformed token (wrong number of segments)', () => {
