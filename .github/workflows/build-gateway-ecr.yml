@@ -85,6 +85,9 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@aded0d722166a37980e030aa969dda0bfe6b6947 # v2.1.7
 
+      - name: Verify pointer-refresh source packaging contract
+        run: node --test tools/identity-registry-pointer-refresh-task.test.mjs
+
       - name: Build and push (linux/amd64 + linux/arm64) with Buildx
         run: |
           set -euo pipefail
@@ -135,7 +138,7 @@ jobs:
           node --test src/eval/verify-image.test.mjs
           node src/eval/verify-image.mjs "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$ARM" "$INDEX" eval-image-hashes.json
 
-      - name: Verify source handoff runtime bytes on both platforms without execution
+      - name: Verify source handoff and pointer-refresh runtime bytes on both platforms without execution
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           REGISTRY: ${{ steps.ecr.outputs.registry }}
@@ -151,10 +154,14 @@ jobs:
             mkdir -p "$work/$platform"
             docker cp "$cid:/app/tools/identity-registry-source-handoff-task.mjs" "$work/$platform/source-task.mjs"
             docker cp "$cid:/app/tools/xero-organisation-source-handoff-run.mjs" "$work/$platform/source-run.mjs"
+            docker cp "$cid:/app/tools/identity-registry-pointer-refresh-task.mjs" "$work/$platform/pointer-refresh-task.mjs"
+            docker cp "$cid:/app/tools/identity-registry-pointer-refresh-run.mjs" "$work/$platform/pointer-refresh-run.mjs"
             test "$(sha256sum "$work/$platform/source-task.mjs" | awk '{print $1}')" = "$(sha256sum tools/identity-registry-source-handoff-task.mjs | awk '{print $1}')"
             test "$(sha256sum "$work/$platform/source-run.mjs" | awk '{print $1}')" = "$(sha256sum tools/xero-organisation-source-handoff-run.mjs | awk '{print $1}')"
+            test "$(sha256sum "$work/$platform/pointer-refresh-task.mjs" | awk '{print $1}')" = "$(sha256sum tools/identity-registry-pointer-refresh-task.mjs | awk '{print $1}')"
+            test "$(sha256sum "$work/$platform/pointer-refresh-run.mjs" | awk '{print $1}')" = "$(sha256sum tools/identity-registry-pointer-refresh-run.mjs | awk '{print $1}')"
             docker rm "$cid" >/dev/null
-            echo "Verified source handoff runtime bytes for $platform"
+            echo "Verified source handoff and pointer-refresh runtime bytes for $platform"
           done
 
       - name: Retain evaluator hash receipt
