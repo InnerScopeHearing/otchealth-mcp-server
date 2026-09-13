@@ -68,6 +68,7 @@ import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
 import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
 import { lookupEntity, type EntityHit } from '../../memory/entity-lookup.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
+import { opaqueIdentifierQuery } from '../../search/identifier-match.js';
 
 // Re-exported so the pre-existing `import { rrfFuse, ... } from './brain-search.js'` in
 // brain-search.test.ts keeps working unchanged -- the implementation moved to memory/rrf.ts (see
@@ -85,7 +86,24 @@ export function fuseWithDirectCandidate(
 ): FusedHit[] {
   const pool = rrfFuse(perRoom, top * 3);
   if (!directCandidate) return pool;
-  return [directCandidate, ...pool.filter((hit) => String(hit.id ?? '') !== String(directCandidate.id ?? ''))];
+  return [directCandidate, ...pool.filter((hit) =>
+    hit.source !== directCandidate.source || String(hit.id ?? '') !== String(directCandidate.id ?? ''))];
+}
+
+/** Keep opaque identifiers out of natural-language ranking. Mirrors the OpenSearch detector. */
+export function isOpaqueIdentifierQuery(query: string): boolean {
+  return opaqueIdentifierQuery(query) !== null;
+}
+
+/** A backend can mark a full-source literal witness before it truncates its public snippet. */
+export function exactIdentifierCandidate(
+  query: string,
+  room: string,
+  hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; exactIdentifierMatch?: unknown }>,
+): FusedHit | undefined {
+  if (!isOpaqueIdentifierQuery(query)) return undefined;
+  const hit = hits.find((value) => value.exactIdentifierMatch === true);
+  return hit ? { score: 1, source: room, text: hit.text, id: hit.id, path: hit.path, agent: hit.agent } : undefined;
 }
 
 
@@ -282,6 +300,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   const searched: string[] = [];
   const failed: string[] = [];
   let directCandidate: FusedHit | undefined;
+  let identifierCandidate: FusedHit | undefined;
   for (let i = 0; i < settled.length; i++) {
     const s = settled[i];
     if (s.status === 'fulfilled' && s.value.res) {
@@ -300,6 +319,9 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
           };
         }
       }
+      if (!identifierCandidate) {
+        identifierCandidate = exactIdentifierCandidate(input.query, s.value.room, s.value.res.matches);
+      }
     } else {
       // One dead room must never blank the brain. Degrade, disclose, continue — WITH the reason,
       // so an agent (or the canary) can tell quota/semantic from auth from index-missing without
@@ -311,11 +333,14 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
 
   // Fuse a WIDER pool first, drop retracted beliefs, and only THEN trim to `top` -- otherwise
   // removing a retracted hit would leave a hole instead of promoting a real result into its place.
-  const pool = fuseWithDirectCandidate(perRoom, top, directCandidate);
+  const preferredCandidate = directCandidate ?? identifierCandidate;
+  const pool = fuseWithDirectCandidate(perRoom, top, preferredCandidate);
   const retracted = await retractedIdsByAgent();
   const { kept, dropped } = filterRetractedByAgent(pool, retracted);
   const directSurvived = Boolean(directCandidate && kept.some((hit) =>
     hit.source === directCandidate?.source && String(hit.id ?? '') === String(directCandidate?.id ?? '')));
+  const identifierSurvived = Boolean(!directCandidate && identifierCandidate && kept.some((hit) =>
+    hit.source === identifierCandidate?.source && String(hit.id ?? '') === String(identifierCandidate?.id ?? '')));
 
   // W1-3 DETERMINISTIC CURRENT-VALUE PROMOTION (fail-open, kill-switch ENTITY_LOOKUP_MODE). If the
   // query resolves to a known typed-entity key ("what is the ASC key id", "n8n base url"), surface
@@ -345,7 +370,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   const data: Record<string, unknown> = {
     matches: taggedMatches,
     count: taggedMatches.length,
-    mode: directSurvived ? 'direct-id' : 'federated-rrf',
+    mode: directSurvived ? 'direct-id' : identifierSurvived ? 'identifier-match' : 'federated-rrf',
     rooms_searched: searched,
     include_ops: includeOps,
   };

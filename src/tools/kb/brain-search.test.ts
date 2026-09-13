@@ -27,7 +27,7 @@ process.env.WEB_SEARCH_PROVIDER ||= 'azure';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
-const { roomsFor, rrfFuse, fuseWithDirectCandidate, canUseEntityLookup, buildEntityPromotion, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
+const { roomsFor, rrfFuse, fuseWithDirectCandidate, exactIdentifierCandidate, isOpaqueIdentifierQuery, canUseEntityLookup, buildEntityPromotion, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
 const { filterRetractedByAgent } = await import('../../memory/retractions.js');
 const { z } = await import('zod');
 
@@ -81,6 +81,26 @@ test('direct exact hit survives top=1 fusion across many rooms, then remains ret
   const filtered = filterRetractedByAgent(pool, new Map([['cto', new Set(['20260907-007'])]]));
   assert.equal(filtered.kept.some((hit) => hit.id === direct.id), false,
     'retention runs before retraction filtering and cannot revive the exact row');
+});
+
+test('opaque literal witness survives federation rank loss but remains retractable', () => {
+  const token = 'MXVEDTUKA2';
+  const candidate = exactIdentifierCandidate(token, 'memory-exec', [
+    { id: 'cto__semantic', text: 'semantic distractor' },
+    { id: 'cto__literal', text: `literal ${token} evidence`, agent: 'cto', exactIdentifierMatch: true },
+  ]);
+  assert.ok(candidate);
+  const ordinary = Array.from({ length: 8 }, (_, i) => ({ room: `room-${i}`, hits: [{ id: `other__${i}`, text: `rank-one-${i}` }] }));
+  const pool = fuseWithDirectCandidate([...ordinary, { room: 'memory-exec', hits: [] }], 3, candidate);
+  assert.equal(pool[0]?.id, 'cto__literal');
+  const filtered = filterRetractedByAgent(pool, new Map([['cto', new Set(['literal'])]]));
+  assert.equal(filtered.kept.some((hit) => hit.id === 'cto__literal'), false);
+});
+
+test('natural-language queries and unmarked identifier hits keep existing federation behavior', () => {
+  assert.equal(isOpaqueIdentifierQuery('what is the current plan'), false);
+  assert.equal(exactIdentifierCandidate('what is the current plan', 'memory-exec', [{ id: 'x', text: 'plan', exactIdentifierMatch: true }]), undefined);
+  assert.equal(exactIdentifierCandidate('MXVEDTUKA2', 'memory-exec', [{ id: 'x', text: 'not a literal' }]), undefined);
 });
 
 test('an unauthenticated caller still gets the open rooms, never the ring', () => {

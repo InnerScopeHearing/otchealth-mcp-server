@@ -36,7 +36,7 @@ process.env.AWS_SECRET_ACCESS_KEY ||= 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY'
 const openSearchClient = await import('./opensearch.js');
 const azureClient = await import('../azure/search.js');
 const { hybridSearch, getDocumentByKey, searchConfigured, vectorFieldFor, reciprocalRankFusion, translateODataFilter,
-  exactFlatMemoryId } =
+  exactFlatMemoryId, opaqueIdentifierQuery, identifierEvidenceSnippet } =
   openSearchClient;
 
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
@@ -67,6 +67,55 @@ test('exactFlatMemoryId accepts canonical IDs only in flat memory rooms', () => 
   assert.equal(exactFlatMemoryId('commons-company-journal', 'cto__20260907-007'), null);
   assert.equal(exactFlatMemoryId('cs-knowledge', 'cto__20260907-007'), null);
   assert.equal(exactFlatMemoryId('finance-otchealth-cfo-source-docs', 'cfo__20260907-007'), null);
+});
+
+test('opaque identifier detection is narrow and evidence uses literal token boundaries', () => {
+  assert.equal(opaqueIdentifierQuery('MXVEDTUKA2'), 'MXVEDTUKA2');
+  assert.equal(opaqueIdentifierQuery('cto__m_mtqtdgxm_cac8442d'), 'cto__m_mtqtdgxm_cac8442d');
+  assert.equal(opaqueIdentifierQuery('what is the current plan'), null);
+  assert.equal(identifierEvidenceSnippet('prefix MXVEDTUKA2 suffix', 'MXVEDTUKA2'), 'prefix MXVEDTUKA2 suffix');
+  assert.equal(identifierEvidenceSnippet('prefix MXVEDTUKA20 suffix', 'MXVEDTUKA2'), null);
+});
+
+test('hybridSearch promotes a full-source opaque literal and centers evidence beyond the leading snippet', async () => {
+  const token = 'MXVEDTUKA2', text = `${'a'.repeat(1400)} ${token} ${'b'.repeat(1400)}`;
+  const res = await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (u.startsWith(`https://${OS_HOST}/memory-exec/_search`)) {
+        return new Response(JSON.stringify({ hits: { hits: [
+          { _id: 'literal', _score: 1, _source: { id: 'cto__literal', text, type: 'fact' } },
+          { _id: 'semantic', _score: 2, _source: { id: 'cto__semantic', text: 'semantic distractor', type: 'fact' } },
+        ] } }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as typeof fetch,
+    () => hybridSearch('memory-exec', token, 1, { includeOps: true }),
+  );
+  assert.equal(res?.matches[0]?.id, 'cto__literal');
+  assert.match(res?.matches[0]?.text ?? '', new RegExp(token));
+  assert.equal((res?.matches[0] as any)?.exactIdentifierMatch, true);
+});
+
+test('chunk parent collapse keeps an exact identifier child before its top trim', async () => {
+  const token = 'MXVEDTUKA2';
+  const res = await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (u.startsWith(`https://${OS_HOST}/commons-company-journal/_search`)) {
+        return new Response(JSON.stringify({ hits: { hits: [
+          { _id: 'semantic#0', _score: 2, _source: { chunk_id: 'semantic#0', parent_id: 'semantic', chunk: 'semantic distractor' } },
+          { _id: 'literal#0', _score: 1, _source: { chunk_id: 'literal#0', parent_id: 'literal', chunk: `literal ${token} witness` } },
+        ] } }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as typeof fetch,
+    () => hybridSearch('commons-company-journal', token, 1, { includeOps: false }),
+  );
+  assert.equal(res?.matches[0]?.id, 'literal');
+  assert.match(res?.matches[0]?.text ?? '', new RegExp(token));
 });
 
 test('hybridSearch direct lookup returns the canonical key and owning prefix without embedding', async () => {

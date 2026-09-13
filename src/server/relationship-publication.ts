@@ -8,6 +8,8 @@ import {queryDurableHistories} from './relationship-query/durable-query.mjs';
 import {createProductionRelationshipIdentityCurrentnessResolver,type RelationshipIdentityCurrentnessResolver} from './relationship-identity-currentness.js';
 import {companyGraphScopeOwnsBinding,resolveCompanyGraphScope} from './company-graph-scope.js';
 import {collectHistoryCandidates,validCandidatePagination} from './candidate-query-pagination.js';
+import {adaptRelationshipAssertions} from '../brain-capabilities/relationship-assertion-adapter.js';
+import type {AssertionRecord} from '../brain-capabilities/contracts.js';
 
 type Json=Record<string,any>;
 type Stored={found:boolean;body?:Buffer;versionId?:string};
@@ -105,13 +107,23 @@ function validQuery(query:Json):boolean{
  if(!query||Object.getPrototypeOf(query)!==Object.prototype)return false;const keys=Object.keys(query);
  return query.kind==='candidate_links'?validCandidatePagination(query)&&keys.every(k=>['kind','subject_name','object_name','predicate','offset','limit','include_stale'].includes(k)):keys.every(k=>['subject_id','object_id','premise_ids','as_of_recorded','valid_at'].includes(k))&&Object.hasOwn(query,'subject_id')&&Object.hasOwn(query,'object_id');
 }
-async function queryEntries(d:RelationshipPublicationDeps,policy:Json,ctx:AuthContext,signal:AbortSignal,loaded:Array<Awaited<ReturnType<typeof queryPublishedHistory>>>,query:Json,recheck:()=>Promise<void>){
+/** Replay before projecting any event output.  The raw history remains private to this module. */
+async function replayTrustedEntries(d:RelationshipPublicationDeps,policy:Json,ctx:AuthContext,signal:AbortSignal,loaded:Array<Awaited<ReturnType<typeof queryPublishedHistory>>>,query:Json,recheck:()=>Promise<void>,requireCurrentSources=false){
  const entries=loaded.map(result=>result.entry),preliminary=queryDurableHistories({entries,query,now:d.now}),proofs=(preliminary as any).identityProofs as Array<{request:unknown;proof:Json}>,uniqueProofs=[...new Map(proofs.map(item=>[h.canonical(item),item])).values()];
- const revalidate=async()=>d.identityCurrentness?await Promise.all(uniqueProofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal}))):uniqueProofs.map(()=>null),before=identityCurrentnessMap(uniqueProofs,await revalidate()),answer=queryDurableHistories({entries,query,now:d.now,identityCurrentness:before});
- await recheck();for(const result of loaded)if((await result.refresh())!==result.entry.sourceCurrent)fail();const after=identityCurrentnessMap(uniqueProofs,await revalidate());for(const [key,wasCurrent] of before)if(wasCurrent&&after.get(key)!==true)fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();return answer;
+ const revalidate=async()=>d.identityCurrentness?await Promise.all(uniqueProofs.map(item=>d.identityCurrentness!.revalidate(item.request,item.proof,ctx,{signal}))):uniqueProofs.map(()=>null),before=identityCurrentnessMap(uniqueProofs,await revalidate());if(requireCurrentSources&&[...before.values()].some(current=>current!==true))fail();const answer=queryDurableHistories({entries,query,now:d.now,identityCurrentness:before});
+ await recheck();for(const result of loaded){const refreshed=await result.refresh();if(refreshed!==result.entry.sourceCurrent||(requireCurrentSources&&refreshed!==true))fail();}const after=identityCurrentnessMap(uniqueProofs,await revalidate());for(const [key,wasCurrent] of before)if(wasCurrent&&after.get(key)!==true)fail();if(requireCurrentSources&&[...after.values()].some(current=>current!==true))fail();if(!equal(parse(d.policyJson(),d.now()),policy)||signal.aborted)fail();return answer;
+}
+async function queryEntries(d:RelationshipPublicationDeps,policy:Json,ctx:AuthContext,signal:AbortSignal,loaded:Array<Awaited<ReturnType<typeof queryPublishedHistory>>>,query:Json,recheck:()=>Promise<void>){
+ return replayTrustedEntries(d,policy,ctx,signal,loaded,query,recheck);
 }
 export type RelationshipPublicationDiscoveryInput={cohort_id:string;producer_id:string;scope?:string;after?:string;scan_limit?:number;history_limit?:number;query:Json};
-export type RelationshipPublicationDiscoveryService={query:(input:RelationshipPublicationDiscoveryInput,ctx:AuthContext,signal:AbortSignal,recheck?:()=>Promise<void>)=>Promise<Json>};
+export type RelationshipPublicationAssertionInput={cohort_id:string;producer_id:string;scope?:string;histories:Array<{run_id:string;artifact_ref:Json}>};
+export type RelationshipPublicationAssertionBatch=Array<{runId:string;tenantId:string;assertions:AssertionRecord[]}>;
+export type RelationshipPublicationDiscoveryService={
+ query:(input:RelationshipPublicationDiscoveryInput,ctx:AuthContext,signal:AbortSignal,recheck?:()=>Promise<void>)=>Promise<Json>;
+ /** Internal, sanitized event projection for the Brain adapter. It never returns prepared source text. */
+ assertionRecords:(input:RelationshipPublicationAssertionInput,ctx:AuthContext,signal:AbortSignal,recheck?:()=>Promise<void>)=>Promise<RelationshipPublicationAssertionBatch>;
+};
 type IndexedRecord={record:Json;history:number};
 function indexEntry(entry:Json,history:number):{records:IndexedRecord[];corrections:Array<{correction:Json;history:number}>}{
  queryDurableHistories({entries:[entry],query:{kind:'candidate_links',include_stale:true,limit:1},now:()=>0});
@@ -130,7 +142,16 @@ function relevantVerifiedHistories(records:IndexedRecord[],corrections:Array<{co
 }
 /** Server-owned publication discovery. Index pages are bounded and every selected history is replayed before use. */
 export function createRelationshipPublicationDiscoveryService(injected?:Partial<RelationshipPublicationDeps>):RelationshipPublicationDiscoveryService{
- const d=budgeted(publicationDeps(injected));return{query:async(input,ctx,signal,recheck=async()=>{})=>{
+ const d=budgeted(publicationDeps(injected));return{assertionRecords:async(input,ctx,signal,recheck=async()=>{})=>{
+  if(!input||Object.getPrototypeOf(input)!==Object.prototype||!h.exact(input,['cohort_id','producer_id','histories',...(input.scope===undefined?[]:['scope'])])||!LABEL.test(input.cohort_id)||!h.path(input.cohort_id)||!PRODUCER.test(input.producer_id)||!Array.isArray(input.histories)||!input.histories.length||input.histories.length>64||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
+  const scope=resolveCompanyGraphScope(ctx.caller_agent,input.scope);if(!scope.ok)fail();const policy=parse(d.policyJson(),d.now());if(!policy)fail(404);const c=policy.bindings.find((x:Json)=>x.cohort_id===input.cohort_id&&x.producer_id===input.producer_id&&x.caller_hash===ctx.caller_hash&&x.authenticated_caller===scope.scope.authenticatedCaller);if(!c)fail();
+  const selected:Array<{runId:string;loaded:Awaited<ReturnType<typeof queryPublishedHistory>>}>=[],seenRuns=new Set<string>();for(const item of input.histories){if(!h.exact(item,['run_id','artifact_ref'])||!RUN.test(item.run_id)||!h.artifactRef(item.artifact_ref)||seenRuns.has(item.run_id))fail(400);seenRuns.add(item.run_id);const g=stored(await d.storeFor(c.cohort_id,c.producer_id,c.authenticated_caller).get(item.run_id,signal));binding(policy,c,g,d.now());if(g.run.run_id!==item.run_id||!equal(g.artifact_ref,item.artifact_ref))fail();const loaded=await queryPublishedHistory(d,policy,c,g,ctx,signal);if(!loaded.entry.inputs.every((source:Json)=>companyGraphScopeOwnsBinding(scope.scope,{authenticated_caller:c.authenticated_caller,room:source.binding?.room,source_index:source.binding?.source_index,run:g.run})))fail();selected.push({runId:item.run_id,loaded});}
+  // Replay validates the durable event chain and revalidates identity proofs.  Only then
+  // may this private method inspect accepted event outputs for its sanitized projection.
+  await replayTrustedEntries(d,policy,ctx,signal,selected.map(item=>item.loaded),{kind:'candidate_links',include_stale:true,limit:1},recheck,true);
+  const corrections=selected.flatMap(({loaded})=>loaded.entry.history.events.filter((event:Json)=>event.operation==='supersede').map((event:Json)=>event.output));
+  return selected.map(({runId,loaded})=>{const records=loaded.entry.history.events.filter((event:Json)=>event.operation==='accept').map((event:Json)=>event.output);return{runId,tenantId:scope.scope.scope,assertions:adaptRelationshipAssertions({runId,actorId:c.authenticated_caller,tenantId:scope.scope.scope,policyVersion:policy.policy_version,records,corrections})};});
+ },query:async(input,ctx,signal,recheck=async()=>{})=>{
   if(!input||Object.getPrototypeOf(input)!==Object.prototype||!h.exact(input,['cohort_id','producer_id','query',...(input.scope===undefined?[]:['scope']),...(input.after===undefined?[]:['after']),...(input.scan_limit===undefined?[]:['scan_limit']),...(input.history_limit===undefined?[]:['history_limit'])])||!LABEL.test(input.cohort_id)||!h.path(input.cohort_id)||!PRODUCER.test(input.producer_id)||input.after!==undefined&&!RUN.test(input.after)||!validQuery(input.query)||Buffer.byteLength(h.canonical(input))>16384)fail(400);
   const limit=input.scan_limit??64,historyLimit=input.history_limit??256;if(!Number.isInteger(limit)||limit<1||limit>64||!Number.isInteger(historyLimit)||historyLimit<1||historyLimit>256||!ctx.connector_surface||!SHA.test(ctx.caller_hash))fail();
   const scope=resolveCompanyGraphScope(ctx.caller_agent,input.scope);if(!scope.ok)fail();
