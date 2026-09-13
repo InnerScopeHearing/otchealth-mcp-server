@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 export const MATERIALIZED_CATALOG_PREFIX='graph-trial/20260909/materialized-cfo/';
 export const CFO_SOURCE_CATALOG_KEY='otchealthcfodata/cfo-source-docs/_CATALOG/catalog.jsonl';
 const SHA=/^[a-f0-9]{64}$/;
-const VERSION=/^[A-Za-z0-9._-]{1,1024}$/;
+const VERSION=/^[A-Za-z0-9._~+/-]{1,1024}$/;
 const ID=/^[a-z0-9][a-z0-9_.:-]{0,95}$/;
 const MAX_RECEIPT_BYTES=64*1024;
 type RawResponse=Readonly<{status:number;headers:Headers;body:Buffer}>;
@@ -30,8 +30,32 @@ function validCounts(value:unknown):boolean{if(!exact(value,['source_rows','elig
  if(!['source_rows','eligible_rows','duplicate_rows'].every(key=>Number.isSafeInteger(counts[key])&&counts[key]>=0&&counts[key]<=100000)||!plain(counts.excluded)||Object.keys(counts.excluded).length>32||!Object.entries(counts.excluded).every(([key,count])=>ID.test(key)&&Number.isSafeInteger(count)&&count>=0&&count<=100000))return false;
  return counts.source_rows===counts.eligible_rows+counts.duplicate_rows+Object.values(counts.excluded).reduce<number>((total,count)=>total+(count as number),0);}
 function bindingWithoutOutcome(receipt:Record<string,any>){const {status,published,catalog_key,catalog_version_id,binding_sha256,...binding}=receipt;return binding;}
+function validQuarantine(value:unknown,counts:Record<string,any>):boolean{
+ if(!Array.isArray(value)||value.length!==2||counts.excluded.unknown_extraction_quarantine!==value.length)return false;
+ const identities=new Set<string>(),sources=new Set<string>();
+ for(const row of value){
+  if(!exact(row,['proposal_key','run_id','operation_id','source_document_version','catalog_source_sha256','source_path_sha256'])||
+    !['proposal_key','catalog_source_sha256','source_path_sha256'].every(key=>typeof row[key]==='string'&&SHA.test(row[key]))||
+    typeof row.run_id!=='string'||!/^run_[a-f0-9]{64}$/.test(row.run_id)||typeof row.operation_id!=='string'||!/^subop_[a-f0-9]{64}$/.test(row.operation_id)||
+    typeof row.source_document_version!=='string'||!/^docv_[a-f0-9]{64}$/.test(row.source_document_version))return false;
+  const source=row.source_path_sha256+':'+row.catalog_source_sha256;
+  if(sources.has(source)||[row.proposal_key,row.run_id,row.operation_id].some(id=>identities.has(id)))return false;
+  sources.add(source);for(const id of [row.proposal_key,row.run_id,row.operation_id])identities.add(id);
+ }
+ return true;
+}
+function validCompletedPointer(value:unknown,counts:Record<string,any>,cohortId:string):boolean{
+ if(!exact(value,['schema','key','version_id','sha256','count']))return false;
+ const pointer=value as Record<string,any>;
+ return pointer.schema==='cfo-completed-publication-exclusion-manifest-pointer-v1'&&
+  typeof pointer.sha256==='string'&&SHA.test(pointer.sha256)&&typeof pointer.version_id==='string'&&VERSION.test(pointer.version_id)&&pointer.version_id!=='null'&&
+  Number.isSafeInteger(pointer.count)&&pointer.count>=1&&pointer.count<=100&&counts.excluded.already_published_source===pointer.count&&
+  cohortId==='cfo-catalog-successor-unknown-20260912'&&pointer.key===`${MATERIALIZED_CATALOG_PREFIX}${cohortId}/completed-publication-exclusions/${pointer.sha256}.json`;
+}
 function receiptValid(receipt:unknown,context:MaterializationContext):receipt is Record<string,any>{
- const keys=['schema','cohort_id','policy_sha256','source_prefixes_sha256','source_version_id','source_etag_sha256','source_catalog_content_sha256','source_bytes','catalog_content_sha256','catalog_source_sha256','catalog_bytes','counts','lineage','source_current_checked','status','published','catalog_key','catalog_version_id','binding_sha256',...(context.source_scope?['source_scope']:[])];
+ const hasQuarantine=plain(receipt)&&Object.hasOwn(receipt,'quarantine_exclusions');
+ const hasCompleted=plain(receipt)&&Object.hasOwn(receipt,'completed_publication_exclusion_manifest');
+ const keys=['schema','cohort_id','policy_sha256','source_prefixes_sha256','source_version_id','source_etag_sha256','source_catalog_content_sha256','source_bytes','catalog_content_sha256','catalog_source_sha256','catalog_bytes','counts','lineage','source_current_checked','status','published','catalog_key','catalog_version_id','binding_sha256',...(context.source_scope?['source_scope']:[]),...(hasQuarantine?['quarantine_exclusions']:[]),...(hasCompleted?['completed_publication_exclusion_manifest']:[])];
  if(!exact(receipt,keys))return false;const r=receipt as Record<string,any>;
  if(r.schema!=='cfo-catalog-materialization-v1'||r.cohort_id!==context.cohort_id||r.policy_sha256!==context.policy_sha256||r.source_scope!==context.source_scope||
    r.source_prefixes_sha256!==hash(canonical([...context.source_prefixes].sort()))||r.source_version_id!==context.materialization.source_catalog_version_id||
@@ -39,6 +63,8 @@ function receiptValid(receipt:unknown,context:MaterializationContext):receipt is
    r.catalog_content_sha256!==context.materialization.catalog_content_sha256||r.catalog_source_sha256!==FIXED_LOGICAL_SOURCE_SHA256||context.catalog_source_sha256!==FIXED_LOGICAL_SOURCE_SHA256||!Number.isSafeInteger(r.catalog_bytes)||r.catalog_bytes<1||r.catalog_bytes>192*1024*1024||
    !validCounts(r.counts)||r.counts.eligible_rows<1||r.lineage!=='catalog_association_only'||r.source_current_checked!==true||r.status!=='published'||r.published!==true||
    r.catalog_key!==context.catalog_key||r.catalog_version_id!==context.materialization.catalog_version_id||!SHA.test(r.binding_sha256))return false;
+ if(hasQuarantine ? context.source_scope!=='all_cfo_source_documents'||!validQuarantine(r.quarantine_exclusions,r.counts) : (r.counts.excluded.unknown_extraction_quarantine??0)!==0)return false;
+ if(hasCompleted ? context.source_scope!=='all_cfo_source_documents'||!validCompletedPointer(r.completed_publication_exclusion_manifest,r.counts,context.cohort_id) : (r.counts.excluded.already_published_source??0)!==0)return false;
  const binding=bindingWithoutOutcome(r);
  if(r.binding_sha256!==hash(canonical(binding)))return false;
  const expectedKey=`${MATERIALIZED_CATALOG_PREFIX}${r.cohort_id}/${r.binding_sha256}/${r.catalog_content_sha256}.jsonl`;
