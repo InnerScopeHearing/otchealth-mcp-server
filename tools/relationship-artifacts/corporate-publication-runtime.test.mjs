@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import { createAutoPublicationFixture } from './auto-publication-fixture.mjs';
+import { createReviewHistoryAuthority } from './review-history-authority.mjs';
+
+test('corporate history authority rejects personal and unknown scopes before transport', () => {
+  for (const scope of ['legal_personal', 'unknown', 'finance']) {
+    assert.throws(() => createReviewHistoryAuthority({run:{run_id:'run_'+'a'.repeat(64),scope},callerSeat:'clo',producer:'synthetic',getAuthorization:async()=>{throw Error('transport must not run');}}), /relationship_authority_configuration/);
+  }
+});
 
 const ctoRoot = process.env.RELATIONSHIP_CTO_ROOT;
 for (const [name, value] of Object.entries({

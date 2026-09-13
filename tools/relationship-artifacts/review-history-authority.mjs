@@ -4,7 +4,7 @@ const hash=v=>createHash('sha256').update(canonical(v)).digest('hex');
 const fail=code=>{throw Object.assign(Error(code),{code});};
 export const HISTORY_STORE_ID='relationship-gateway-v1';
 export function createReviewHistoryAuthority({run,producer,callerSeat='cfo',getAuthorization,fetchImpl=globalThis.fetch}){
- if(!['cfo','clo'].includes(callerSeat)||(callerSeat==='cfo')!==(run?.scope==='finance')||!/^run_[a-f0-9]{64}$/.test(run?.run_id??'')||!/^[a-z][a-z0-9-]{0,63}$/.test(producer??'')||typeof getAuthorization!=='function'||typeof fetchImpl!=='function')fail('relationship_authority_configuration');
+ if(!['cfo','clo'].includes(callerSeat)||run?.scope!==(callerSeat==='clo'?'legal_company':'finance')||!/^run_[a-f0-9]{64}$/.test(run?.run_id??'')||!/^[a-z][a-z0-9-]{0,63}$/.test(producer??'')||typeof getAuthorization!=='function'||typeof fetchImpl!=='function')fail('relationship_authority_configuration');
  async function requestDecision(request,{signal}={}){
   
   const bounded=signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000);
