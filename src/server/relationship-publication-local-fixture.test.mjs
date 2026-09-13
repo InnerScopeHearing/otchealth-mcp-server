@@ -11,7 +11,7 @@ for (const [key, value] of Object.entries({
 })) process.env[key] ??= value;
 
 test('local durable artifact fixture reaches assertionRecords with a nonempty verified typed claim', async () => {
-  const { createLocalBrainAssertionServiceFixture } = await import('../../tools/relationship-artifacts/brain-assertion-local-fixture.mjs');
+  const { createLocalBrainAssertionServiceFixture } = await import(new URL('../../tools/relationship-artifacts/brain-assertion-local-fixture.mjs', import.meta.url).href);
   const fixture = createLocalBrainAssertionServiceFixture();
   const records = await fixture.service.assertionRecords(fixture.input, fixture.context, new AbortController().signal);
   assert.equal(records.length, 1);
@@ -27,7 +27,7 @@ test('local durable artifact fixture reaches assertionRecords with a nonempty ve
 });
 
 async function rejects(options, mutate = value => value) {
-  const { createLocalBrainAssertionServiceFixture } = await import('../../tools/relationship-artifacts/brain-assertion-local-fixture.mjs');
+  const { createLocalBrainAssertionServiceFixture } = await import(new URL('../../tools/relationship-artifacts/brain-assertion-local-fixture.mjs', import.meta.url).href);
   const fixture = createLocalBrainAssertionServiceFixture(options);
   const { input = fixture.input, context = fixture.context } = mutate(fixture);
   await assert.rejects(() => fixture.service.assertionRecords(input, context, new AbortController().signal));
