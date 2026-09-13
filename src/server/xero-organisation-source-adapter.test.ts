@@ -6,6 +6,7 @@ import { createExplicitExportImmutableStore } from './identity-registry-explicit
 import {
   bindImmutableXeroOrganisationProjection,
   canonicalXeroOrganisationProjection,
+  currentXeroOrganisationSource,
   publishXeroOrganisationExportHandoff,
   persistProvisionedXeroOrganisationSource,
   projectXeroOrganisation,
@@ -229,4 +230,16 @@ test('retries an exact source handoff and exports each renewed handoff through t
   assert.deepEqual(result, { output_written: true });
   assert.equal(JSON.parse(output!).receipt.coverage_binding_count, 1);
   assert.equal(exportObjects.size, 5);
+});
+
+
+test('reads only a current source digest without persisting an immutable object', async () => {
+  let calls = 0;
+  const marker = await currentXeroOrganisationSource({}, { getOrganisation: async () => {
+    calls++; return { status: 200, body: response(), tenantId: 'tenant-native-001', dayLimitRemaining: null, minuteLimitRemaining: null };
+  } });
+  assert.equal(calls, 1);
+  assert.match(marker.source_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(marker.source_generation, `xero-organisation-${marker.source_sha256.slice(0, 16)}`);
+  assert.equal(JSON.stringify(marker).includes('TaxNumber'), false);
 });
