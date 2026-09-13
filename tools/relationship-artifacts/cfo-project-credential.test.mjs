@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createCfoProjectBearerTokenProvider } from './cfo-project-credential.mjs';
+import { createCfoProjectBearerTokenProvider, createCloProjectBearerTokenProvider } from './cfo-project-credential.mjs';
 
 const path = (await import('node:path')).resolve('synthetic','CFO','.codex','config.toml');
+const cloPath = (await import('node:path')).resolve('synthetic','CLO','.codex','config.toml');
 const token = 'synthetic-cfo-token-value-123456';
 const reader = value => ({
   statImpl: async () => ({ isFile: () => true, size: Buffer.byteLength(value) }),
@@ -62,4 +63,12 @@ test('rejects inline authorization from a different server section', async () =>
 test('does not mix another server inline header with the CFO otchealth bearer', async () => {
  const config=`[mcp_servers.other]\nhttp_headers = { Authorization = "Bearer synthetic-other-not-used-1234" }\n[mcp_servers.otchealth]\nhttp_headers = { Authorization = "Bearer ${token}" }\n`;
  assert.equal(await createCfoProjectBearerTokenProvider({configPath:path,...reader(config)})(),token);
+});
+
+test('reads only the corporate CLO project configuration and rejects personal or CFO paths', async () => {
+ const config = `[mcp_servers.otchealth.http_headers]\nAuthorization = "Bearer synthetic-clo-token-value-123456"\n`;
+ assert.equal(await createCloProjectBearerTokenProvider({configPath:cloPath,...reader(config)})(), 'synthetic-clo-token-value-123456');
+ assert.throws(() => createCloProjectBearerTokenProvider({configPath:path,...reader(config)}), /clo_project_credential_configuration/);
+ const personal = (await import('node:path')).resolve('synthetic','CLO Personal','.codex','config.toml');
+ assert.throws(() => createCloProjectBearerTokenProvider({configPath:personal,...reader(config)}), /clo_project_credential_configuration/);
 });

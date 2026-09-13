@@ -22,10 +22,10 @@ function deadlineScope(signal, timeoutMs) {
 }
 async function deadline(signal, timeoutMs, operation) { const scope = deadlineScope(signal, timeoutMs); try { return await scope.wait(operation(scope.signal)); } finally { scope.close(); } }
 async function boundedCancelResponse(response) { const body = response?.body; if (!body) return; const reader = body.getReader?.(); if (reader) return boundedCancel(reader); if (typeof body.cancel === "function") return boundedCancel({ cancel: () => body.cancel() }); }
-function validRun(value) {
+function validRun(value, callerSeat) {
   if (!exact(value, ["ref_version", "run_id", "purpose", "scope", "run_version", "manifest_sha256"])) return false;
   const content = { ref_version: value.ref_version, purpose: value.purpose, scope: value.scope, run_version: value.run_version, manifest_sha256: value.manifest_sha256 };
-  return value.ref_version === "neptune-trial-active-run-ref-v1" && /^run_[a-f0-9]{64}$/.test(value.run_id || "") && value.scope === "finance" &&
+  return value.ref_version === "neptune-trial-active-run-ref-v1" && /^run_[a-f0-9]{64}$/.test(value.run_id || "") && value.scope === (callerSeat === "clo" ? "legal_company" : "finance") &&
     /^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.purpose || "") && /^[a-z0-9][a-z0-9_.:-]{0,95}$/.test(value.run_version || "") &&
     HASH.test(value.manifest_sha256 || "") && value.run_id === `run_${hash(canonical(content))}`;
 }
@@ -58,19 +58,19 @@ function trustOf(value, producer) {
   if (!exact(value, ["store_id", "producer_ids"]) || typeof value.store_id !== "string" || !value.store_id || !Array.isArray(value.producer_ids) || !value.producer_ids.length || value.producer_ids.some(id => !PRODUCER.test(id || "")) || !value.producer_ids.includes(producer)) fail("relationship_history_configuration");
   return Object.freeze({ store_id: value.store_id, producer_ids: Object.freeze([...new Set(value.producer_ids)]) });
 }
-function payloadOf(value, run) {
+function payloadOf(value, run, callerSeat) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype) return false;
   if (value.schema === "resolution-source-input-v1") return exact(value, ["schema", "run", "input"]) && same(value.run, run);
-  return value.schema === "resolution-history-v1" && exact(value, ["schema", "run", "caller_seat", "sources", "events", "queries"]) && same(value.run, run) && value.caller_seat === "cfo" && Array.isArray(value.sources) && Array.isArray(value.events) && Array.isArray(value.queries);
+  return value.schema === "resolution-history-v1" && exact(value, ["schema", "run", "caller_seat", "sources", "events", "queries"]) && same(value.run, run) && value.caller_seat === callerSeat && Array.isArray(value.sources) && Array.isArray(value.events) && Array.isArray(value.queries);
 }
 
-export function createHistoricalRelationshipReader({ gatewayOrigin, run, producer, historyTrust, getAuthorization, fetchImpl, now = Date.now, sse, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  if (!validRun(run) || !PRODUCER.test(producer || "") || typeof getAuthorization !== "function" || typeof fetchImpl !== "function" || typeof now !== "function" ||
+export function createHistoricalRelationshipReader({ gatewayOrigin, run, producer, callerSeat = "cfo", historyTrust, getAuthorization, fetchImpl, now = Date.now, sse, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  if (!(["cfo","clo"].includes(callerSeat) && validRun(run, callerSeat)) || !PRODUCER.test(producer || "") || typeof getAuthorization !== "function" || typeof fetchImpl !== "function" || typeof now !== "function" ||
       !sse || !exact(sse, sse.algorithm === "AES256" ? ["algorithm"] : ["algorithm", "kmsKeyId"]) || !["AES256", "aws:kms"].includes(sse.algorithm) || (sse.algorithm === "aws:kms" && (typeof sse.kmsKeyId !== "string" || !sse.kmsKeyId)) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > DEFAULT_TIMEOUT_MS) fail("relationship_history_configuration");
   const origin = originOf(gatewayOrigin), fixedRun = Object.freeze(structuredClone(run)), trust = trustOf(historyTrust, producer), encryption = Object.freeze(structuredClone(sse));
   async function readArtifact(rawRef, { signal } = {}) {
     active(signal); const ref = refOf(rawRef); let authorization;
-    try { authorization = await deadline(signal, timeoutMs, requestSignal => getAuthorization(Object.freeze({ run: fixedRun, caller_seat: "cfo", producer_id: producer }), { signal: requestSignal })); } catch (error) { if (error?.code === "relationship_history_deadline") throw error; fail("relationship_history_auth_failed"); }
+    try { authorization = await deadline(signal, timeoutMs, requestSignal => getAuthorization(Object.freeze({ run: fixedRun, caller_seat: callerSeat, producer_id: producer }), { signal: requestSignal })); } catch (error) { if (error?.code === "relationship_history_deadline") throw error; fail("relationship_history_auth_failed"); }
     if (typeof authorization !== "string" || !/^Bearer [^\s]{16,8192}$/.test(authorization)) fail("relationship_history_auth_failed");
     const url = `${origin}/relationship-history/v1/${fixedRun.run_id}/${producer}/sha256/${ref.payload_sha256.slice(0, 2)}/${ref.payload_sha256}.json?versionId=${encodeURIComponent(ref.version_id)}`;
     const request = deadlineScope(signal, timeoutMs); let response, bytes, policyVersion, expiresAt, current;
@@ -87,9 +87,9 @@ export function createHistoricalRelationshipReader({ gatewayOrigin, run, produce
     let envelope; try { envelope = JSON.parse(bytes.toString("utf8")); } catch { fail("relationship_history_corrupt"); }
     if (!exact(envelope, ["schema", "payload_sha256", "payload"]) || envelope.schema !== "relationship-resolution-artifact-v1" || envelope.payload_sha256 !== ref.payload_sha256) fail("relationship_history_corrupt");
     json(envelope.payload); const payloadText = canonical(envelope.payload);
-    if (!payloadOf(envelope.payload, fixedRun) || hash(payloadText) !== ref.payload_sha256 || Buffer.byteLength(payloadText) !== ref.size_bytes) fail("relationship_history_corrupt");
+    if (!payloadOf(envelope.payload, fixedRun, callerSeat) || hash(payloadText) !== ref.payload_sha256 || Buffer.byteLength(payloadText) !== ref.size_bytes) fail("relationship_history_corrupt");
     if (Date.parse(expiresAt) <= now() || Date.parse(expiresAt) - now() > 300000) fail("relationship_history_gateway_invalid");
-    return Object.freeze({ payload: structuredClone(envelope.payload), authority: Object.freeze({ authenticated_gateway: true, policy_version: policyVersion, expires_at: expiresAt, producer_id: producer, caller_seat: "cfo", current: current === "true" }) });
+    return Object.freeze({ payload: structuredClone(envelope.payload), authority: Object.freeze({ authenticated_gateway: true, policy_version: policyVersion, expires_at: expiresAt, producer_id: producer, caller_seat: callerSeat, current: current === "true" }) });
   }
-  return Object.freeze({ readArtifact, run_id: fixedRun.run_id, producer_id: producer, boundHistoryTrust: trust });
+  return Object.freeze({ readArtifact, run_id: fixedRun.run_id, producer_id: producer, caller_seat: callerSeat, boundHistoryTrust: trust });
 }

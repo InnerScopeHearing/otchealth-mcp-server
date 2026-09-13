@@ -13,7 +13,7 @@ function frozen(value) { const copy = clone(value); const visit = item => { if (
 function validAuthority(authority, reader, at) {
   if (!Number.isFinite(at)) fail("cross_run_clock_invalid");
   if (!exact(authority, ["authenticated_gateway", "policy_version", "expires_at", "producer_id", "caller_seat", "current"]) ||
-      authority.authenticated_gateway !== true || authority.producer_id !== reader.producer_id || authority.caller_seat !== "cfo" ||
+      authority.authenticated_gateway !== true || authority.producer_id !== reader.producer_id || authority.caller_seat !== reader.caller_seat ||
       typeof authority.policy_version !== "string" || !authority.policy_version || !utc(authority.expires_at) ||
       Date.parse(authority.expires_at) <= at || Date.parse(authority.expires_at) - at > 300000 || typeof authority.current !== "boolean") fail("cross_run_authority_invalid");
   return frozen(authority);
@@ -22,12 +22,12 @@ function readerKey(runId, producer) { return `${runId}\0${producer}`; }
 function artifactKey(ref) { return canonical(ref); }
 function validReader(reader) {
   return !!reader && typeof reader.readArtifact === "function" && typeof reader.run_id === "string" && /^run_[a-f0-9]{64}$/.test(reader.run_id) &&
-    typeof reader.producer_id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(reader.producer_id) && reader.boundHistoryTrust && typeof reader.boundHistoryTrust.store_id === "string" &&
+    typeof reader.producer_id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(reader.producer_id) && ['cfo','clo'].includes(reader.caller_seat) && reader.boundHistoryTrust && typeof reader.boundHistoryTrust.store_id === "string" &&
     Array.isArray(reader.boundHistoryTrust.producer_ids) && reader.boundHistoryTrust.producer_ids.includes(reader.producer_id);
 }
-function validHistory(value, run) {
+function validHistory(value, run, callerSeat) {
   if (!exact(value, ["schema", "run", "caller_seat", "sources", "events", "queries"]) || value.schema !== HISTORY_SCHEMA ||
-      !equal(value.run, run) || value.caller_seat !== "cfo" || !Array.isArray(value.sources) || !Array.isArray(value.events) || !Array.isArray(value.queries) ||
+      !equal(value.run, run) || value.caller_seat !== callerSeat || !Array.isArray(value.sources) || !Array.isArray(value.events) || !Array.isArray(value.queries) ||
       value.sources.length > 64 || value.events.length > 640 || value.queries.length > 100 || new Set(value.sources.map(artifactKey)).size !== value.sources.length) fail("cross_run_history_invalid");
 }
 
@@ -37,7 +37,7 @@ function validHistory(value, run) {
  */
 export function createCrossRunRecall({ createResolver, bindPreparedSource, verificationRequestHash, refreshIdentityReceipts, revalidateIdentity = null, readers, now = Date.now } = {}) {
   if (typeof createResolver !== "function" || typeof bindPreparedSource !== "function" || typeof verificationRequestHash !== "function" ||
-      !Array.isArray(readers) || !readers.length || readers.length > 64 || readers.some(reader => !validReader(reader)) || typeof now !== "function") fail("cross_run_configuration");
+      !Array.isArray(readers) || !readers.length || readers.length > 64 || readers.some(reader => !validReader(reader)) || readers.some(reader => reader.caller_seat !== readers[0].caller_seat) || typeof now !== "function") fail("cross_run_configuration");
   const fixedReaders = new Map();
   for (const reader of readers) {
     const key = readerKey(reader.run_id, reader.producer_id);
@@ -62,7 +62,7 @@ export function createCrossRunRecall({ createResolver, bindPreparedSource, verif
       const id = `${readerKey(reader.run_id, raw.producer_id)}\0${artifactKey(raw.artifact_ref)}`;
       if (seen.has(id)) fail("cross_run_history_duplicate"); seen.add(id);
       const result = await read(reader, raw.artifact_ref, signal, { history: true });
-      validHistory(result.payload, raw.run);
+      validHistory(result.payload, raw.run, reader.caller_seat);
       loaded.push({ reader, entry: frozen(raw), history: result.payload });
     }
     return loaded.sort((left, right) => left.reader.run_id.localeCompare(right.reader.run_id) || left.reader.producer_id.localeCompare(right.reader.producer_id) || artifactKey(left.entry.artifact_ref).localeCompare(artifactKey(right.entry.artifact_ref)));
@@ -84,7 +84,7 @@ export function createCrossRunRecall({ createResolver, bindPreparedSource, verif
     const byHistory = new Map(loaded.map(item => [item, sources.filter(source => source.history === item.history)]));
     let frame = null, callOffset = 0, replaying = true;
     const live = new Map(sources.map(source => [source.bound.source_ref, source]));
-    const services = { callerLane: "cfo", isCurrentIdentity: endpoint => identityChecks.get(endpoint.proof?.request_sha256) === true };
+    const services = { callerLane: loaded[0].reader.caller_seat, isCurrentIdentity: endpoint => identityChecks.get(endpoint.proof?.request_sha256) === true };
     for (const name of CALLBACKS) services[name] = (...args) => {
       if (replaying) {
         const call = frame?.calls?.[callOffset++];
@@ -98,7 +98,7 @@ export function createCrossRunRecall({ createResolver, bindPreparedSource, verif
       if (name === "authorizeSource") {
         const source = live.get(args[0]?.source_ref);
         if (!source || !equal(args[0]?.source_binding, source.bound.binding)) fail("cross_run_source_invalid");
-        return { allowed: true, provenance: { decision_source: "authenticated_gateway", policy_version: source.authority.policy_version, allowed_roles: ["cfo"] },
+        return { allowed: true, provenance: { decision_source: "authenticated_gateway", policy_version: source.authority.policy_version, allowed_roles: [source.authority.caller_seat] },
           decision_ref: `gateway-policy:${source.authority.producer_id}:${source.authority.policy_version}`, expires_at: source.authority.expires_at };
       }
       if (name === "isCurrentSource") { const source = live.get(args[0]?.source_ref); if (!source) fail("cross_run_source_invalid"); return source.authority.current; }
