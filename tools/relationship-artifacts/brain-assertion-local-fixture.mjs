@@ -14,7 +14,9 @@ import { preparedTextIdentity } from '../../src/server/relationship-query/prepar
 import { planGraphCatalogPage } from '../../src/server/graph-catalog-planner.ts';
 import { graphCatalogControllerTest } from '../../src/server/graph-catalog-controller.ts';
 import { createRelationshipPublicationDiscoveryService } from '../../src/server/relationship-publication.ts';
+import { registerRelationshipPublicationRoutes } from '../../src/server/relationship-publication.ts';
 import { resolveCompanyGraphScope } from '../../src/server/company-graph-scope.ts';
+import Fastify from 'fastify';
 
 const AT = '2026-09-13T12:00:00.000Z';
 const LATER = '2026-09-13T12:01:00.000Z';
@@ -117,7 +119,7 @@ const response = (body, version_id, run, producer) => ({
  * assertion that must be present in the service result.  Cross-history correction is
  * intentionally unavailable: the paired durable contract rejects it before persist.
  */
-export function createLocalBrainAssertionServiceFixture({ sourceCurrent = true, identityCurrent = true, policyChange = false, artifactVersionMismatch = false, tamperedReceipt = false, tamperedHistoryEvent = false } = {}) {
+export function createLocalBrainAssertionServiceFixture({ sourceCurrent = true, identityCurrent = true, policyChange = false, artifactVersionMismatch = false, tamperedReceipt = false, tamperedHistoryEvent = false, exactValidTime = false } = {}) {
   const caller_hash = sha256('local-fixture-caller');
   const cohort_id = 'local-fixture';
   const producer_id = 'synthetic-reviewer-1';
@@ -151,8 +153,10 @@ export function createLocalBrainAssertionServiceFixture({ sourceCurrent = true, 
   const source_ref = resolver.registerSource(sourceInput);
   const registration = { operation: 'registerSource', input: null, source_index: 0, calls: trace.take(), output: source_ref };
   const candidate = { subject: 'P-001', predicate: 'depends_on', object: 'I-001', quote: text, state: 'candidate', semantic_verified: false, document_version_id: preparedTextIdentity({ source_binding: binding, purpose: run.purpose }).source_version, source_sha256: binding.chunk_sha256, evidence_start_utf16: 0, evidence_end_utf16: text.length };
-  const accepted = resolver.accept({ candidate, subject: endpoint('payment', 'P-001'), object: endpoint('invoice', 'I-001'), source_ref, polarity: 'positive', uncertainty: { level: 'low', qualifications: [] } });
-  const acceptance = { operation: 'accept', input: { candidate, subject: endpoint('payment', 'P-001'), object: endpoint('invoice', 'I-001'), source_ref, polarity: 'positive', uncertainty: { level: 'low', qualifications: [] } }, calls: trace.take(), output: accepted };
+  const valid_time = exactValidTime ? { valid_from: '2026-09-13T11:00:00.000Z', valid_to: '2026-09-13T13:00:00.000Z', valid_from_basis: 'exact_witness', valid_to_basis: 'exact_witness' } : undefined;
+  const acceptInput = { candidate, subject: endpoint('payment', 'P-001'), object: endpoint('invoice', 'I-001'), source_ref, polarity: 'positive', uncertainty: { level: 'low', qualifications: [] }, ...(valid_time ? { valid_time } : {}) };
+  const accepted = resolver.accept(acceptInput);
+  const acceptance = { operation: 'accept', input: acceptInput, calls: trace.take(), output: accepted };
   const sourcePayload = { schema: 'resolution-source-input-v1', run, input: sourceInput };
   const sourceArtifactRef = artifactRef(sourcePayload, 'v-source-1');
   const historyPayload = { schema: 'resolution-history-v1', run, caller_seat: 'cfo', sources: [sourceArtifactRef], events: [registration, acceptance], queries: [] };
@@ -182,15 +186,39 @@ export function createLocalBrainAssertionServiceFixture({ sourceCurrent = true, 
     envelope.payload.events[1].output.candidate.predicate = 'tampered_predicate';
     objects.set(key, { ...value, body: Buffer.from(canonical(envelope)) });
   }
-  let policyReads = 0, identityReads = 0, sourceReads = 0;
-  const service = createRelationshipPublicationDiscoveryService({
-    now: () => Date.parse(AT), policyJson: () => canonical(policyChange && policyReads++ > 0 ? { ...policy, policy_version: 'local-fixture-v2' } : policy),
+  const state = { sourceCurrent, identityCurrent, policyChange, policyReads: 0, identityReads: 0, sourceReads: 0,
+    authenticated: true, callerHash: caller_hash, authChecks: 0, revokeAuthAfterChecks: null, changeCallerHashAfterChecks: null };
+  const context = { caller_agent: 'cfo', caller_hash, connector_surface: true, raw_token: 'local-fixture-token', m365_static_auth: false };
+  const deps = {
+    // This is a synthetic boundary, but it deliberately authenticates the actual Fastify request
+    // rather than handing routes ambient trust.  Tests can revoke or change the caller only after
+    // the initial request authentication to exercise the route's final recheck.
+    authenticate: async (request) => {
+      state.authChecks++;
+      const authorization = request?.headers?.authorization;
+      if (!state.authenticated || authorization !== `Bearer ${context.raw_token}` ||
+        (state.revokeAuthAfterChecks !== null && state.authChecks > state.revokeAuthAfterChecks)) return undefined;
+      const currentHash = state.changeCallerHashAfterChecks !== null && state.authChecks > state.changeCallerHashAfterChecks
+        ? sha256('local-fixture-late-caller') : state.callerHash;
+      return { ...context, caller_hash: currentHash };
+    },
+    now: () => Date.parse(AT), policyJson: () => canonical(state.policyChange && state.policyReads++ > 0 ? { ...policy, policy_version: 'local-fixture-v2' } : policy),
     storeFor: () => ({ get: async () => ({ found: true, body: Buffer.from(canonical(storedGrant)), versionId: 'v-grant-1' }), putCreateOnly: async () => { throw Error('fixture_unexpected_write'); }, list: async () => ({ records: [] }) }),
     readVersion: async ({ key, versionId }) => { const value = objects.get(key); if (!value || value.headers.get('x-amz-version-id') !== versionId) throw Error('fixture_version_mismatch'); return value; },
-    readCatalog: async () => [row], checkSource: async () => sourceCurrent === 'late' ? sourceReads++ === 0 : sourceCurrent,
-    identityCurrentness: { revalidate: async (_request, previousProof) => identityCurrent === 'late' ? identityReads++ === 0 ? structuredClone(previousProof) : null : identityCurrent ? structuredClone(previousProof) : null },
-  });
-  const context = { caller_agent: 'cfo', caller_hash, connector_surface: true };
+    readCatalog: async () => [row], checkSource: async () => state.sourceCurrent === 'late' ? state.sourceReads++ === 0 : state.sourceCurrent,
+    identityCurrentness: { revalidate: async (_request, previousProof) => state.identityCurrent === 'late' ? state.identityReads++ === 0 ? structuredClone(previousProof) : null : state.identityCurrent ? structuredClone(previousProof) : null },
+  };
+  const service = createRelationshipPublicationDiscoveryService(deps);
   const input = { cohort_id, producer_id, histories: [{ run_id: run.run_id, artifact_ref: historyArtifactRef }] };
-  return { service, input, context, expected: accepted, artifacts: { historyArtifactRef, sourceArtifactRef }, limitation: 'cross_history_supersession_rejected_by_paired_durable_contract' };
+  return { service, deps, input, context, expected: accepted, artifacts: { historyArtifactRef, sourceArtifactRef }, state, limitation: 'cross_history_supersession_rejected_by_paired_durable_contract' };
+}
+
+/** Self-contained authenticated Fastify surface over the same durable replay fixture. */
+export async function createLocalBrainAssertionRouteFixture(options = {}) {
+  const fixture = createLocalBrainAssertionServiceFixture(options);
+  const app = Fastify();
+  registerRelationshipPublicationRoutes(app, fixture.deps);
+  await app.ready();
+  return { app, input: fixture.input, context: fixture.context, expected: fixture.expected, state: fixture.state,
+    close: async () => app.close() };
 }
