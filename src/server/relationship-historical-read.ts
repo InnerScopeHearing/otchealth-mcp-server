@@ -11,10 +11,13 @@ import {resolveCompanyGraphScope} from './company-graph-scope.js';
 type Json=Record<string,any>;
 type Source={catalog_key:string;catalog_source_sha256:string;source_prefixes:string[];source_scope?:'all_cfo_source_documents';deployment_profile?:'legal_company';source_catalog_version_id?:string};
 export type HistoricalReadResult={status:number;headers:Headers|Record<string,string|undefined>;body:Buffer};
+type SourceReader={readVersionPinnedPage:(source:any,options:{signal:AbortSignal})=>Promise<any>};
 export interface RelationshipHistoricalReadDeps{
  authenticate:(r:FastifyRequest,p:FastifyReply)=>Promise<AuthContext|undefined>;policyJson:()=>string;now:()=>number;
  readVersion:(r:{key:string;versionId:string;signal:AbortSignal;maxBytes:number})=>Promise<HistoricalReadResult>;
  readCatalog:(s:Source,signal:AbortSignal)=>Promise<readonly unknown[]>;
+ /** Test-only injection of the production source reader. Callers never supply source scope. */
+ sourceReader?:SourceReader;
  checkSource:(row:Json,binding:Json,ctx:AuthContext,signal:AbortSignal)=>Promise<boolean>;
 }
 const BUCKET='otchealth-finance-legal-dr-55c84f6b',MAX_PAYLOAD=16*1024*1024,MAX=MAX_PAYLOAD+1024;
@@ -83,15 +86,30 @@ function sourceBound(source:Json,b:Json,proposal:Json){
  const plan=planGraphCatalogPage({rows:[row],scope,catalogEtag:'historical-projection',catalogSourceSha256:b.source_policy.catalog_source_sha256,createdAt:proposal.manifest.created_at,limit:1});if(!plan.page.manifest||!same(plan.page.manifest,proposal.manifest)||x.source_document_version!==proposal.manifest.documents[0].document_version_id||x.catalog_source_sha256!==proposal.manifest.documents[0].source_version)return false;
  const text=i.prepared_text,start=i.chunk_start_utf16,end=i.chunk_end_utf16;if(typeof text!=='string'||!text.length||Buffer.byteLength(text)>1024*1024||Buffer.from(text).toString('utf8')!==text||hash(text)!==x.sidecar_content_sha256||!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end>text.length||end<=start||x.chunk_ordinal===0&&start!==0)return false;const chunk=text.slice(start,end);return chunk.length<=16000&&Buffer.byteLength(chunk)<=16384&&Buffer.from(chunk).toString('utf8')===chunk&&hash(chunk)===x.chunk_sha256;
 }
+/**
+ * The source artifact carries a prepared-chunk binding, while the publication policy
+ * carries the run binding. Resolve the closed company scope from the authenticated
+ * caller and the prepared binding's exact schema, room, and source index. Never
+ * accept a caller-selected scope and never fall back to personal legal.
+ */
+function scopeForPreparedBinding(binding:unknown,ctx:AuthContext){
+ if(!binding||Object.getPrototypeOf(binding)!==Object.prototype)return null;
+ const value=binding as Json;
+ const requested=value.schema==='cfo-prepared-chunk-binding-v1'?'finance':value.schema==='company-prepared-chunk-binding-v1'?'legal_company':null;
+ if(!requested)return null;
+ const resolved=resolveCompanyGraphScope(ctx.caller_agent,requested);
+ if(!resolved.ok||value.room!==resolved.scope.room||value.source_index!==resolved.scope.sourceIndex)return null;
+ return resolved.scope;
+}
 /** Re-read through the exact company scope. Personal legal has no company reader or fallback. */
-async function defaultSource(row:Json,binding:Json,ctx:AuthContext,signal:AbortSignal,reader?:{readVersionPinnedPage:(source:any,options:{signal:AbortSignal})=>Promise<any>}){
- const scope=scopeFor(binding);if(!scope||ctx.caller_agent!==scope.authenticatedCaller)return false;
+async function defaultSource(row:Json,binding:Json,ctx:AuthContext,signal:AbortSignal,reader?:SourceReader){
+ const scope=scopeForPreparedBinding(binding,ctx);if(!scope)return false;
  const source=Object.freeze({room:scope.room,source_index:scope.sourceIndex,path:row.path,source_path_hash:hash(row.path),document_version_id:binding.source_document_version,source_version:binding.catalog_source_sha256});
  const selected=reader??(scope.scope==='finance'
   ?createCfoTextSnapshotReader({callerContext:ctx,maxSourceBytes:1024*1024})
   :createCompanyTextSnapshotReader({scope,callerContext:ctx,maxSourceBytes:1024*1024}));
  const result=await selected.readVersionPinnedPage(source,{signal});return result.outcome==='ready'&&result.descriptor.sidecar_content_sha256===binding.sidecar_content_sha256;}
-function deps(i?:Partial<RelationshipHistoricalReadDeps>):RelationshipHistoricalReadDeps{const transport=createRelationshipHistoryS3();return{authenticate:i?.authenticate??requireConnectorAuth,policyJson:i?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_HISTORY_POLICY_JSON),now:i?.now??Date.now,readVersion:i?.readVersion??(r=>transport.readVersion(r)),readCatalog:i?.readCatalog??(async(s,signal)=>(await readPinnedGraphCatalog({key:s.catalog_key,sourceSha256:s.catalog_source_sha256,signal})).rows),checkSource:i?.checkSource??defaultSource};}
+function deps(i?:Partial<RelationshipHistoricalReadDeps>):RelationshipHistoricalReadDeps{const transport=createRelationshipHistoryS3();return{authenticate:i?.authenticate??requireConnectorAuth,policyJson:i?.policyJson??(()=>loadEnv().GRAPH_RELATIONSHIP_HISTORY_POLICY_JSON),now:i?.now??Date.now,readVersion:i?.readVersion??(r=>transport.readVersion(r)),readCatalog:i?.readCatalog??(async(s,signal)=>(await readPinnedGraphCatalog({key:s.catalog_key,sourceSha256:s.catalog_source_sha256,signal})).rows),sourceReader:i?.sourceReader,checkSource:i?.checkSource??((row,binding,ctx,signal)=>defaultSource(row,binding,ctx,signal,i?.sourceReader))};}
 async function current(d:RelationshipHistoricalReadDeps,b:Json,sources:Json[],ctx:AuthContext,signal:AbortSignal,stages?:{catalog:()=>void;sourceCurrent:()=>void}){stages?.catalog();const rows=await d.readCatalog(b.source_policy,signal);let all=true;for(const source of sources){const i=source.payload.input,row=i.catalog_row,matches=rows.filter((r:any)=>r?.path===row.path);if(matches.length!==1||!sourcePathAllowed(b.source_policy,row.path))throw Error('source_denied');if(!same(matches[0],row)){all=false;continue;}stages?.sourceCurrent();const isCurrent=await d.checkSource(row,i.binding,ctx,signal);all=isCurrent&&all;}return all;}
 const fail=(p:FastifyReply,n:number)=>p.code(n).send();
 export function registerRelationshipHistoricalReadRoutes(app:FastifyInstance,injected?:Partial<RelationshipHistoricalReadDeps>):void{
