@@ -11,6 +11,10 @@ import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../s
 
 const REGION = 'us-east-1';
 const SOURCE_ROOT = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
+const SOURCE_PREFIXES: Record<'company' | 'personal', readonly string[]> = {
+  company: [`${SOURCE_ROOT}company/`, `${SOURCE_ROOT}company-priority/`],
+  personal: [`${SOURCE_ROOT}personal/`],
+};
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
 type Scope = 'company' | 'personal' | 'all';
@@ -38,6 +42,10 @@ export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
 
 function outcome(mode: string, error?: string): ToolResultPayload {
   return { data: { mode, matches: [], count: 0, ...(error ? { error } : {}) }, summary: `Managed GraphRAG retrieval: ${mode}.` };
+}
+
+function isAllowedSourceUri(group: 'company' | 'personal', uri: string): boolean {
+  return SOURCE_PREFIXES[group].some((prefix) => uri.startsWith(prefix)) && /\.txt$/.test(uri);
 }
 
 async function readBounded(response: Response): Promise<unknown> {
@@ -97,7 +105,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       const text = row?.content?.text;
       // Require both the owner-written label and the fixed ingestion location. No URL
       // from a model result is fetched, and arbitrary metadata is never copied onward.
-      if (!['company', 'personal'].includes(group) || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !uri.startsWith(SOURCE_ROOT + group + '/') || !/\.txt$/.test(uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
+      if ((group !== 'company' && group !== 'personal') || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri(group, uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
       const sourceId = row?.metadata?.source_id;
       const textHash = row?.metadata?.text_sha256;
       matches.push({

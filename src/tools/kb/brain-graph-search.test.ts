@@ -5,7 +5,7 @@ import { mayOffloadToolResult } from '../result-store.js';
 
 const ctx = (callerAgent: string) => ({ callerAgent, callerHash: 'synthetic', correlationId: 'synthetic', dryRun: false, acknowledgeWarning: false });
 const root = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
-const row = (group = 'company') => ({ content: { text: 'Synthetic Organization X signed contract Y.' }, location: { type: 'S3', s3Location: { uri: root + group + '/test.txt' } }, metadata: { source_group: group, source_id: 'a'.repeat(64), text_sha256: 'b'.repeat(64), private_extra: 'must not be copied' }, score: 0.8 });
+const row = (group = 'company', uri = root + group + '/test.txt') => ({ content: { text: 'Synthetic Organization X signed contract Y.' }, location: { type: 'S3', s3Location: { uri } }, metadata: { source_group: group, source_id: 'a'.repeat(64), text_sha256: 'b'.repeat(64), private_extra: 'must not be copied' }, score: 0.8 });
 function harness(response: () => Response = () => Response.json({ retrievalResults: [row()] })) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const deps = { config: () => ({ enabled: true, kbId: 'ABCDEFGHIJ' }), credentials: async () => ({ accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }), fetch: (async (url: any, init?: RequestInit) => { calls.push({ url: String(url), init }); return response(); }) as typeof fetch };
@@ -42,6 +42,22 @@ test('personal legal query can return both labeled corpora; company seats withho
   assert.equal(cfo.data.count, 1); assert.equal(cfo.data.withheld_count, 2);
   const clo: any = await handleBrainGraphSearch({ query: 'synthetic', top: 4 }, ctx('clo-personal'), h.deps);
   assert.equal(clo.data.count, 2); assert.equal(JSON.parse(String(h.calls[1]?.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, undefined);
+});
+
+test('company retrieval admits only the existing and priority company prefixes', async () => {
+  const h = harness(() => Response.json({ retrievalResults: [
+    row('company', root + 'company/test.txt'),
+    row('company', root + 'company-priority/test.txt'),
+    row('company', root + 'company-private/test.txt'),
+    row('personal', root + 'company-priority/test.txt'),
+    row('company', root + 'personal/test.txt'),
+  ] }));
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic', top: 5 }, ctx('cfo'), h.deps);
+  assert.equal(result.data.count, 2);
+  assert.equal(result.data.withheld_count, 3);
+  assert.deepEqual(result.data.matches.map((match: any) => match.source_uri), [
+    root + 'company/test.txt', root + 'company-priority/test.txt',
+  ]);
 });
 
 test('disabled or invalid deployment configuration cannot spend on retrieval', async () => {
