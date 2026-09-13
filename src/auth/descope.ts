@@ -61,6 +61,8 @@ export interface DescopeClaims {
   iss: string;
   sub: string;
   exp: number;
+  nbf?: number;
+  aud?: string | string[];
   lane?: string;
   ring?: string;
   pilot?: boolean;
@@ -84,6 +86,10 @@ let jwksCache: { keys: Map<string, KeyObject>; fetchedAt: number; projectId: str
 
 function b64urlDecode(input: string): Buffer {
   return Buffer.from(input, 'base64url');
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function jwksUrl(projectId: string): string {
@@ -156,10 +162,34 @@ async function getKey(projectId: string, kid: string): Promise<{ key: KeyObject 
  * Pure signature + claim verification against an already-resolved key set. No network. This is
  * the unit-tested core (descope.test.ts uses a locally generated RSA keypair here).
  */
+/**
+ * Returns true only when an `aud` claim contains one of the explicitly trusted audiences.
+ * JWT permits `aud` to be either a single string or an array of strings, so both forms are
+ * handled without coercion. Empty expected values are never accepted.
+ *
+ * This helper deliberately has no inferred default. The Descope pilot's actual resource audience
+ * has not yet been verified, so callers must opt in with a reviewed configured value rather than
+ * hardcoding a guess or silently treating a project ID as a resource identifier.
+ */
+export function hasExpectedAudience(
+  audience: unknown,
+  expectedAudience: string | readonly string[],
+): boolean {
+  const expected = new Set(
+    (typeof expectedAudience === 'string' ? [expectedAudience] : expectedAudience).filter(
+      (value): value is string => typeof value === 'string' && value.length > 0,
+    ),
+  );
+  if (expected.size === 0) return false;
+  if (typeof audience === 'string') return expected.has(audience);
+  return Array.isArray(audience) && audience.every((value) => typeof value === 'string') && audience.some((value) => expected.has(value));
+}
+
 export function verifyDescopeClaims(
   token: string,
   keys: Map<string, KeyObject>,
   expectedIssuer: string,
+  expectedAudience?: string | readonly string[],
 ): DescopeClaims | null {
   const parts = token.split('.');
   if (parts.length !== 3) return null;
@@ -167,15 +197,28 @@ export function verifyDescopeClaims(
   let header: { alg?: string; kid?: string };
   let claims: DescopeClaims;
   try {
-    header = JSON.parse(b64urlDecode(headerB64).toString('utf8')) as { alg?: string; kid?: string };
-    claims = JSON.parse(b64urlDecode(payloadB64).toString('utf8')) as DescopeClaims;
+    const parsedHeader: unknown = JSON.parse(b64urlDecode(headerB64).toString('utf8'));
+    const parsedClaims: unknown = JSON.parse(b64urlDecode(payloadB64).toString('utf8'));
+    if (!isJsonObject(parsedHeader) || !isJsonObject(parsedClaims)) return null;
+    if (parsedHeader.alg !== undefined && typeof parsedHeader.alg !== 'string') return null;
+    if (parsedHeader.kid !== undefined && typeof parsedHeader.kid !== 'string') return null;
+    header = parsedHeader;
+    claims = parsedClaims as DescopeClaims;
   } catch {
     return null;
   }
   if (header.alg !== 'RS256' || !header.kid) return null;
   if (claims.iss !== expectedIssuer) return null;
   const now = Math.floor(Date.now() / 1000);
-  if (!claims.exp || now >= claims.exp) return null;
+  // NumericDate claims must be finite JSON numbers. Coercion would allow malformed temporal
+  // claims (for example strings) to bypass a comparison intended to fail closed.
+  if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp) || now >= claims.exp) return null;
+  if (claims.nbf !== undefined && (typeof claims.nbf !== 'number' || !Number.isFinite(claims.nbf) || now < claims.nbf)) {
+    return null;
+  }
+  // Audience enforcement is intentionally opt-in until the live pilot's resource audience is
+  // confirmed. A future reviewed config binding must pass the expected value here.
+  if (expectedAudience !== undefined && !hasExpectedAudience(claims.aud, expectedAudience)) return null;
 
   const key = keys.get(header.kid);
   if (!key) return null;
@@ -270,7 +313,11 @@ async function verifyDescopeTokenUninstrumented(token: string, projectId: string
   if (parts.length !== 3) return { claims: null, outcome: 'credential_rejected' };
   let header: { kid?: string };
   try {
-    header = JSON.parse(b64urlDecode(parts[0]).toString('utf8')) as { kid?: string };
+    const parsedHeader: unknown = JSON.parse(b64urlDecode(parts[0]).toString('utf8'));
+    if (!isJsonObject(parsedHeader) || (parsedHeader.kid !== undefined && typeof parsedHeader.kid !== 'string')) {
+      return { claims: null, outcome: 'credential_rejected' };
+    }
+    header = parsedHeader;
   } catch {
     return { claims: null, outcome: 'credential_rejected' };
   }

@@ -113,9 +113,27 @@ export interface AuthCodeRecord {
 
 const authCodes = new Map<string, AuthCodeRecord>();
 
+export interface DurableAuthCodeStore {
+  isConfigured: () => boolean;
+  read: (container: string, partitionKey: string, id: string) => Promise<{ doc: Record<string, unknown>; etag: string | null } | null>;
+  delete: (container: string, partitionKey: string, id: string, ifMatch: string) => Promise<{ ok: boolean; status: number }>;
+  now: () => number;
+}
+
+const durableAuthCodeStore: DurableAuthCodeStore = {
+  isConfigured: cosmosConfigured,
+  read: readDoc,
+  delete: deleteDoc,
+  now: Date.now,
+};
+
+function isUsableAuthCode(record: AuthCodeRecord, now: number): boolean {
+  return typeof record.expiresAt === 'number' && Number.isFinite(record.expiresAt) && record.expiresAt > now;
+}
+
 setInterval(() => {
   const now = Date.now();
-  for (const [code, rec] of authCodes) if (rec.expiresAt < now) authCodes.delete(code);
+  for (const [code, rec] of authCodes) if (!isUsableAuthCode(rec, now)) authCodes.delete(code);
 }, 60_000).unref?.();
 
 export async function createAuthCode(
@@ -133,27 +151,35 @@ export async function createAuthCode(
   return code;
 }
 
-/** One-time consume: returns the record and deletes it. Null if missing/expired/malformed. */
-export async function consumeAuthCode(code: string): Promise<AuthCodeRecord | null> {
+/**
+ * One-time consume: returns a durable record only after a conditional delete of the exact version
+ * read succeeds. Null on missing, expired, malformed, or any uncertain durable-store outcome.
+ */
+export async function consumeAuthCode(code: string, store: DurableAuthCodeStore = durableAuthCodeStore): Promise<AuthCodeRecord | null> {
   // Auth codes are created as randomBytes(32).toString('hex'). Validate that wire contract before
   // using request input as either a durable-store selector or a Cosmos URL path component.
   if (!/^[0-9a-f]{64}$/.test(code)) return null;
-  if (cosmosConfigured()) {
-    let found: { doc: Record<string, unknown> } | null;
+  if (store.isConfigured()) {
+    let found: { doc: Record<string, unknown>; etag: string | null } | null;
     try {
       // A malformed code trips the Cosmos id-charset guard (throws) -> treat as invalid_grant.
-      found = await readDoc(CODES_CONTAINER, code, code);
+      found = await store.read(CODES_CONTAINER, code, code);
     } catch {
       return null;
     }
     if (!found) return null;
-    try {
-      await deleteDoc(CODES_CONTAINER, code, code); // enforce single-use; ignore if already gone
-    } catch {
-      /* best-effort */
-    }
     const d = found.doc as unknown as AuthCodeRecord;
-    if (!d.expiresAt || d.expiresAt < Date.now()) return null;
+    // Expired codes are logically unusable even if physical TTL cleanup has not happened yet.
+    if (!isUsableAuthCode(d, store.now())) return null;
+    // Missing etag means the durable read cannot support an exact-version conditional delete.
+    // Fail closed rather than risk returning a code another request can also consume.
+    if (!found.etag) return null;
+    try {
+      const removed = await store.delete(CODES_CONTAINER, code, code, found.etag);
+      if (!removed.ok) return null; // 404/412 and all non-ok outcomes mean this request did not consume it.
+    } catch {
+      return null; // timeout/error is uncertain: never mint tokens from an unconfirmed consume.
+    }
     return {
       clientId: d.clientId,
       redirectUri: d.redirectUri,
@@ -171,7 +197,7 @@ export async function consumeAuthCode(code: string): Promise<AuthCodeRecord | nu
   const rec = authCodes.get(code);
   if (!rec) return null;
   authCodes.delete(code);
-  if (rec.expiresAt < Date.now()) return null;
+  if (!isUsableAuthCode(rec, Date.now())) return null;
   return rec;
 }
 
