@@ -162,6 +162,18 @@ export function canonicalXeroOrganisationProjection(projection: unknown): Readon
   return Object.freeze({ payload, sha256: hash(payload) });
 }
 
+/** Reads the native corporate source without persisting it. The returned marker
+ * contains only a projection digest and cannot expose Xero response fields. */
+export async function currentXeroOrganisationSource(input: Readonly<{ org?: Exclude<XeroOrg, 'personal'> }> = {}, deps: Pick<SourceOwnerDeps, 'getOrganisation'> = productionDeps): Promise<Readonly<{ source_sha256: string; source_generation: string }>> {
+  const org = input.org ?? 'otchealth';
+  if (!['otchealth', 'innd', 'hearingassist'].includes(org) || !deps || typeof deps.getOrganisation !== 'function') fail('xero_organisation_deployment_invalid');
+  const source = await deps.getOrganisation(org, '/Organisation');
+  if (source.status !== 200 || !text(source.tenantId)) fail('xero_organisation_connector_response_invalid');
+  const projection = projectXeroOrganisation({ tenantId: source.tenantId, response: source.body });
+  const source_sha256 = canonicalXeroOrganisationProjection(projection).sha256;
+  return Object.freeze({ source_sha256, source_generation: `xero-organisation-${source_sha256.slice(0, 16)}` });
+}
+
 /**
  * Binds the already-written immutable object to the explicit identity record.
  * The storage writer supplies the opaque object version after a conditional,

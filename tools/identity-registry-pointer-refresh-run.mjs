@@ -1,0 +1,60 @@
+#!/usr/bin/env node
+/** Source-owner CFO pointer refresh. It preserves one verified immutable
+ * manifest and writes one newly signed, create-only pointer. */
+import { createHash, createPublicKey, verify } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SHA = /^[a-f0-9]{64}$/;
+const VERSION = /^[A-Za-z0-9._~+/-]{1,1024}$/;
+const KEY = /^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,1023}$/;
+const MAX = 64 * 1024;
+const fail = code => { throw Object.assign(new Error(code), { code }); };
+const canonical = value => value === null || typeof value !== 'object' ? JSON.stringify(value) : Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+const sha = value => createHash('sha256').update(value).digest('hex');
+const plain = value => Boolean(value) && Object.getPrototypeOf(value) === Object.prototype;
+const exact = (value, keys) => plain(value) && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+const text = value => typeof value === 'string' && value.length > 0 && value.length <= 1024 && !/[\s\0]/.test(value);
+const validKey = value => typeof value === 'string' && KEY.test(value) && value.split('/').every(part => part && part !== '.' && part !== '..');
+const pin = value => exact(value, ['key', 'sha256', 'version_id']) && validKey(value.key) && SHA.test(value.sha256) && typeof value.version_id === 'string' && VERSION.test(value.version_id) && value.version_id !== 'null' ? Object.freeze({ ...value }) : fail('identity_pointer_refresh_pin_invalid');
+
+export const CONFIG = Object.freeze({ schema: 'cfo-identity-registry-pointer-refresh-v1', resultSchema: 'cfo-identity-registry-pointer-refresh-result-v1', maxLifetimeMs: 24 * 60 * 60 * 1000 });
+function args(argv) { if (!Array.isArray(argv) || argv.length !== 6) return null; const found = new Map(); for (let i = 0; i < argv.length; i += 2) { const flag = argv[i], value = argv[i + 1]; if (!['--refresh', '--ports', '--output'].includes(flag) || typeof value !== 'string' || !isAbsolute(value) || found.has(flag)) return null; found.set(flag, resolve(value)); } return { refresh: found.get('--refresh'), ports: found.get('--ports'), output: found.get('--output') }; }
+async function json(path, code, read = readFile) { let raw; try { raw = await read(path, 'utf8'); } catch { fail(code); } if (Buffer.byteLength(raw, 'utf8') < 1 || Buffer.byteLength(raw, 'utf8') > MAX || /-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/.test(raw)) fail(code); try { return JSON.parse(raw); } catch { fail(code); } }
+function storage(value, code) { if (!exact(value, ['approved_policy_canonical_sha256', 'approved_storage_scope_sha256', 'bucket', 'prefix', 'region', 'sse']) || !SHA.test(value.approved_policy_canonical_sha256) || !SHA.test(value.approved_storage_scope_sha256) || !validKey(value.prefix) || !value.prefix.startsWith('graph-trial/') || !text(value.bucket) || !text(value.region) || !plain(value.sse)) fail(code); return Object.freeze({ bucket: value.bucket, prefix: value.prefix, region: value.region, approvedPolicyCanonicalSha256: value.approved_policy_canonical_sha256, approvedStorageScopeSha256: value.approved_storage_scope_sha256, sse: structuredClone(value.sse) }); }
+function ports(value) { if (!exact(value, ['kms', 'schema', 'source_storage']) || value.schema !== 'cfo-identity-registry-explicit-export-ports-v1' || !exact(value.kms, ['key_id', 'region']) || !text(value.kms.key_id) || !text(value.kms.region)) fail('identity_pointer_refresh_ports_invalid'); return Object.freeze({ kms: Object.freeze({ ...value.kms }), storage: storage(value.source_storage, 'identity_pointer_refresh_ports_invalid') }); }
+function refresh(value, prefix, now) { if (!exact(value, ['expires_at', 'manifest', 'prior_pointer', 'schema']) || value.schema !== CONFIG.schema || typeof value.expires_at !== 'string' || !Number.isFinite(Date.parse(value.expires_at))) fail('identity_pointer_refresh_input_invalid'); const expiry = Date.parse(value.expires_at); if (expiry <= now() + 1000 || expiry > now() + CONFIG.maxLifetimeMs) fail('identity_pointer_refresh_expiry_invalid'); const manifest = pin(value.manifest), prior = pin(value.prior_pointer); if (manifest.key !== `${prefix}/exports/manifest.json` || prior.key !== `${prefix}/exports/current.json`) fail('identity_pointer_refresh_input_invalid'); return Object.freeze({ expires_at: value.expires_at, manifest, prior_pointer: prior }); }
+function envelope(value, schema, key) { if (!exact(value, ['signature', 'snapshot']) || !plain(value.snapshot) || typeof value.signature !== 'string') fail('identity_pointer_refresh_envelope_invalid'); const signature = Buffer.from(value.signature, 'base64'); if (signature.length !== 64 || !verify(null, Buffer.from(canonical(value.snapshot)), key, signature) || value.snapshot.schema !== schema) fail('identity_pointer_refresh_signature_invalid'); return value.snapshot; }
+function manifestSnapshot(value, key) { const snapshot = envelope(value, 'source-identity-registry-explicit-export-manifest-v1', key); const required = ['catalog','coverage_binding_count','coverage_binding_sha256','coverage_pages','pages','partition_manifest_version','public_key_sha256','registry_id','run','schema','shards','source_authority','source_generation','version']; if (!exact(snapshot, required) || !plain(snapshot.catalog) || !SHA.test(snapshot.catalog.catalog_sha256) || !text(snapshot.registry_id) || !text(snapshot.version) || !text(snapshot.source_generation)) fail('identity_pointer_refresh_manifest_invalid'); return snapshot; }
+function priorPointer(value, manifest, key) { const snapshot = envelope(value, 'source-identity-registry-explicit-export-current-v1', key); if (!exact(snapshot, ['expires_at','manifest_version','registry_id','revoked','schema','source_generation']) || snapshot.registry_id !== manifest.registry_id || snapshot.manifest_version !== manifest.version || snapshot.source_generation !== manifest.source_generation || snapshot.revoked !== false || typeof snapshot.expires_at !== 'string' || !Number.isFinite(Date.parse(snapshot.expires_at))) fail('identity_pointer_refresh_prior_pointer_invalid'); return snapshot; }
+function sseMatches(headers, sse) { return headers.get('x-amz-server-side-encryption') === sse.algorithm && (sse.algorithm !== 'aws:kms' || headers.get('x-amz-server-side-encryption-aws-kms-key-id') === sse.kmsKeyId); }
+async function readPinned(runtime, item, storageConfig, signal) { const response = await runtime.request({ method: 'GET', key: item.key, versionId: item.version_id, signal }); if (response.status !== 200 || response.headers.get('x-amz-version-id') !== item.version_id || !sseMatches(response.headers, storageConfig.sse) || sha(response.body) !== item.sha256) fail('identity_pointer_refresh_pin_invalid'); try { return JSON.parse(response.body.toString('utf8')); } catch { fail('identity_pointer_refresh_pin_invalid'); } }
+function pointerKey(prefix, manifest, expiresAt) { return `${prefix}/exports/pointers/${sha(canonical({ registry_id: manifest.registry_id, manifest_version: manifest.version, source_generation: manifest.source_generation, expires_at: expiresAt }))}.json`; }
+async function sourceCurrent(value, manifest) { if (!plain(value) || !SHA.test(value.source_sha256) || value.source_generation !== `xero-organisation-${value.source_sha256.slice(0, 16)}` || value.source_sha256 !== manifest.catalog.catalog_sha256 || value.source_generation !== manifest.source_generation) fail('identity_pointer_refresh_source_not_current'); return true; }
+
+/** Injectable core. The task reads and validates every prior pin before it signs. */
+export async function runPointerRefresh({ argv, read = readFile, write = writeFile, now = Date.now, runtimeFactory, signerFactory, currentSource, storeFactory }) {
+  const paths = args(argv); if (!paths || typeof runtimeFactory !== 'function' || typeof signerFactory !== 'function' || typeof currentSource !== 'function' || typeof storeFactory !== 'function') fail('identity_pointer_refresh_arguments_invalid');
+  const [rawRefresh, rawPorts] = await Promise.all([json(paths.refresh, 'identity_pointer_refresh_input_unavailable', read), json(paths.ports, 'identity_pointer_refresh_ports_unavailable', read)]);
+  const configured = ports(rawPorts), input = refresh(rawRefresh, configured.storage.prefix, now), runtime = runtimeFactory(configured.storage), signal = AbortSignal.timeout(30_000);
+  await runtime.preflight(signal);
+  const signer = await signerFactory({ region: configured.kms.region, keyId: configured.kms.key_id });
+  if (!signer || typeof signer.publicKey !== 'string' || typeof signer.sign !== 'function' || !Number.isSafeInteger(signer.maxMessageBytes)) fail('identity_pointer_refresh_signer_invalid');
+  let publicKey; try { publicKey = createPublicKey(signer.publicKey); } catch { fail('identity_pointer_refresh_signer_invalid'); } if (publicKey.asymmetricKeyType !== 'ed25519') fail('identity_pointer_refresh_signer_invalid');
+  const manifest = manifestSnapshot(await readPinned(runtime, input.manifest, configured.storage, signal), publicKey);
+  priorPointer(await readPinned(runtime, input.prior_pointer, configured.storage, signal), manifest, publicKey);
+  if (sha(publicKey.export({ type: 'spki', format: 'der' })) !== manifest.public_key_sha256) fail('identity_pointer_refresh_signer_invalid');
+  await sourceCurrent(await currentSource({ signal }), manifest);
+  const snapshot = Object.freeze({ schema: 'source-identity-registry-explicit-export-current-v1', registry_id: manifest.registry_id, manifest_version: manifest.version, source_generation: manifest.source_generation, expires_at: input.expires_at, revoked: false });
+  const bytes = Buffer.from(canonical(snapshot), 'utf8'); if (bytes.length > signer.maxMessageBytes) fail('identity_pointer_refresh_signature_invalid');
+  const signature = await signer.sign(bytes); if (!Buffer.isBuffer(signature) || signature.length !== 64 || !verify(null, bytes, publicKey, signature)) fail('identity_pointer_refresh_signature_invalid');
+  await sourceCurrent(await currentSource({ signal }), manifest);
+  const key = pointerKey(configured.storage.prefix, manifest, input.expires_at), body = Buffer.from(canonical({ snapshot, signature: signature.toString('base64') }), 'utf8');
+  const written = await storeFactory(configured.storage).putImmutable({ key, body });
+  if (!written || typeof written.version_id !== 'string' || !VERSION.test(written.version_id) || written.version_id === 'null') fail('identity_pointer_refresh_store_invalid');
+  const result = Object.freeze({ schema: CONFIG.resultSchema, status: 'refreshed', manifest: input.manifest, pointer: Object.freeze({ key, version_id: written.version_id, sha256: sha(body) }), expires_at: input.expires_at, source_current: true, writes_performed: true });
+  await write(paths.output, canonical(result) + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 }); return result;
+}
+async function main() { try { const { createIdentityRegistryS3Runtime } = await import('../dist/server/identity-registry-s3-runtime.js'); const { createCfoIdentityRegistryKmsSigner, createExplicitExportImmutableStore } = await import('../dist/server/identity-registry-explicit-export-ports.js'); const { currentXeroOrganisationSource } = await import('../dist/server/xero-organisation-source-adapter.js'); const result = await runPointerRefresh({ argv: process.argv.slice(2), runtimeFactory: createIdentityRegistryS3Runtime, signerFactory: createCfoIdentityRegistryKmsSigner, currentSource: currentXeroOrganisationSource, storeFactory: createExplicitExportImmutableStore }); process.stdout.write(JSON.stringify({ schema: CONFIG.resultSchema, status: result.status, source_current: true, writes_performed: true }) + '\n'); } catch (error) { process.stderr.write(`${error?.code ?? 'identity_pointer_refresh_failed'}\n`); process.exitCode = 1; } }
+if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) await main();
