@@ -37,6 +37,36 @@ test('corporate CLO publishes and retrieves a synthetic legal-company history th
   }
 });
 
+
+test('production publication currentness derives CFO and corporate scope from source-bound prepared bindings', { skip: !ctoRoot }, async () => {
+  const prior = process.env.RELATIONSHIP_STORE_MODULE;
+  process.env.RELATIONSHIP_STORE_MODULE = join(resolve(ctoRoot), 'tools/neptune-trial/relationship-adapters/s3-resolution-store.mjs');
+  try {
+    for (const callerSeat of ['cfo', 'clo']) {
+      let fixture;
+      const observed = [];
+      const sourceReader = { readVersionPinnedPage: async source => {
+        observed.push({ room: source.room, source_index: source.source_index, path: source.path });
+        const matching = fixture.fixtures.find(item => item.state.definitions[0].row.path === source.path);
+        if (!matching) return { outcome: 'missing_text' };
+        return { outcome: 'ready', descriptor: { sidecar_content_sha256: matching.state.definitions[0].binding.sidecar_content_sha256 } };
+      }};
+      fixture = await createAutoPublicationFixture({ callerSeat, sourceReader });
+      try {
+        fixture.admit(0);
+        const publication = await fixture.reviewAndPublish(0);
+        assert.equal(publication.run.scope, callerSeat === 'cfo' ? 'finance' : 'legal_company');
+        assert.ok(observed.length >= 4);
+        assert.ok(observed.every(value => value.room === (callerSeat === 'cfo' ? 'finance' : 'legal_company')));
+        assert.ok(observed.every(value => value.source_index === (callerSeat === 'cfo' ? 'finance-cfo-source-docs' : 'legal-company')));
+      } finally { await fixture.routes.close(); }
+    }
+  } finally {
+    if (prior === undefined) delete process.env.RELATIONSHIP_STORE_MODULE;
+    else process.env.RELATIONSHIP_STORE_MODULE = prior;
+  }
+});
+
 test('corporate CLO publication refuses a personal caller before a grant is issued', { skip: !ctoRoot }, async () => {
   const prior = process.env.RELATIONSHIP_STORE_MODULE;
   process.env.RELATIONSHIP_STORE_MODULE = join(resolve(ctoRoot), 'tools/neptune-trial/relationship-adapters/s3-resolution-store.mjs');

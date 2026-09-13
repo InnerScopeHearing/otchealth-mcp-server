@@ -89,12 +89,27 @@ test('root-level CFO source is allowed only by explicit all-source scope',()=>{
  const foreign=structuredClone(all.source);foreign.payload.input.binding.room='legal_company';
  assert.equal(sourceBound(foreign,all.b,all.proposal),false);
 });
-test('default source currentness uses the frozen descriptor required by the real CFO snapshot reader',async()=>{
+test('default source currentness derives the closed CFO scope from a prepared binding',async()=>{
  const text='Synthetic current CFO source.';const row={path:'finance/synthetic.txt'};
- const binding={authenticated_caller:'cfo',room:'finance',source_index:'finance-cfo-source-docs',run:{scope:'finance'},source_document_version:'docv_'+sha('source'),catalog_source_sha256:sha('catalog'),sidecar_content_sha256:sha(text)};
+ const binding={schema:'cfo-prepared-chunk-binding-v1',room:'finance',source_index:'finance-cfo-source-docs',source_document_version:'docv_'+sha('source'),catalog_source_sha256:sha('catalog'),sidecar_content_sha256:sha(text)};
  const reader=createCfoTextSnapshotReader({callerContext:{caller_agent:'cfo',connector_surface:true},maxSourceBytes:1024*1024,credentialProvider:async()=>({accessKeyId:'synthetic',secretAccessKey:'synthetic'}),signer:input=>({headers:input.extraHeaders??{}}),fetchImpl:async(_url,init)=>init.method==='HEAD'?new Response('',{status:200,headers:{etag:'"synthetic"','x-amz-version-id':'synthetic-v1','content-length':String(Buffer.byteLength(text))}}):new Response(text,{status:200,headers:{etag:'"synthetic"','x-amz-version-id':'synthetic-v1','content-length':String(Buffer.byteLength(text))}})});
  const current=await defaultSource(row,binding,{caller_agent:'cfo',caller_hash:sha('caller'),connector_surface:true,raw_token:'synthetic',m365_static_auth:false},new AbortController().signal,reader);
  assert.equal(current,true);
+});
+test('default source currentness accepts only the caller-matched CFO or corporate prepared scope',async()=>{
+ const row={path:'synthetic/source.pdf'},sidecar=sha('synthetic sidecar'),calls:any[]=[];
+ const reader={readVersionPinnedPage:async(source:any)=>{calls.push(source);return{outcome:'ready',descriptor:{sidecar_content_sha256:sidecar}};}};
+ const cfo={schema:'cfo-prepared-chunk-binding-v1',room:'finance',source_index:'finance-cfo-source-docs',source_document_version:'docv_'+sha('cfo'),catalog_source_sha256:sha('catalog'),sidecar_content_sha256:sidecar};
+ const clo={schema:'company-prepared-chunk-binding-v1',room:'legal_company',source_index:'legal-company',source_document_version:'docv_'+sha('clo'),catalog_source_sha256:sha('catalog'),sidecar_content_sha256:sidecar};
+ const cfoCtx={caller_agent:'cfo',caller_hash:sha('cfo caller'),connector_surface:true,raw_token:'synthetic',m365_static_auth:false};
+ const cloCtx={caller_agent:'clo',caller_hash:sha('clo caller'),connector_surface:true,raw_token:'synthetic',m365_static_auth:false};
+ assert.equal(await defaultSource(row,cfo,cfoCtx,new AbortController().signal,reader),true);
+ assert.equal(await defaultSource(row,clo,cloCtx,new AbortController().signal,reader),true);
+ assert.deepEqual(calls.map(value=>[value.room,value.source_index]),[['finance','finance-cfo-source-docs'],['legal_company','legal-company']]);
+ assert.equal(await defaultSource(row,cfo,cloCtx,new AbortController().signal,reader),false);
+ assert.equal(await defaultSource(row,{...clo,source_index:'legal-personal'},cloCtx,new AbortController().signal,reader),false);
+ assert.equal(await defaultSource(row,{...clo,schema:'personal-prepared-chunk-binding-v1'},cloCtx,new AbortController().signal,reader),false);
+ assert.equal(calls.length,2);
 });
 test('historical GET verifies pinned records and fresh source policy without execution authority',async()=>{
  const {b,proposal,admission,source}=evidence(),objects=new Map<string,any>();
