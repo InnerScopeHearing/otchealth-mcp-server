@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { COMPANY_GRAPH_RING, PERSONAL_GRAPH_RING, graphScopeFor, handleBrainGraphSearch } from './brain-graph-search.js';
+import { graphScopeFor, handleBrainGraphSearch } from './brain-graph-search.js';
 import { mayOffloadToolResult } from '../result-store.js';
 
 const ctx = (callerAgent: string) => ({ callerAgent, callerHash: 'synthetic', correlationId: 'synthetic', dryRun: false, acknowledgeWarning: false });
@@ -12,28 +12,28 @@ function harness(response: () => Response = () => Response.json({ retrievalResul
   return { deps, calls };
 }
 
-test('company graph ring is exactly the six company seats, while personal graph access remains protected', async () => {
-  assert.deepEqual(COMPANY_GRAPH_RING, ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
-  assert.deepEqual(PERSONAL_GRAPH_RING, ['clo-personal']);
-  for (const caller of COMPANY_GRAPH_RING) {
+test('coarse company graph access requires the executive ring, while personal graph access remains protected', async () => {
+  for (const caller of ['cfo', 'clo', 'cpo', 'cco']) {
     assert.equal(graphScopeFor(caller), 'company');
     assert.equal(graphScopeFor(caller, 'company'), 'company');
     assert.equal(graphScopeFor(caller, 'personal'), null);
     assert.equal(graphScopeFor(caller, 'all'), null);
   }
-  assert.equal(graphScopeFor('clo-personal'), 'all');
-  assert.equal(graphScopeFor('clo-personal', 'company'), 'company');
-  assert.equal(graphScopeFor('clo-personal', 'personal'), 'personal');
-  assert.equal(graphScopeFor('clo-personal', 'all'), 'all');
-  for (const caller of ['cpo', 'cco', 'exec', 'external', '']) {
+  for (const caller of ['clo-personal', 'exec']) {
+    assert.equal(graphScopeFor(caller), 'all');
+    assert.equal(graphScopeFor(caller, 'company'), 'company');
+    assert.equal(graphScopeFor(caller, 'personal'), 'personal');
+    assert.equal(graphScopeFor(caller, 'all'), 'all');
+  }
+  for (const caller of ['cto', 'coo', 'cro', 'developer', 'external', '']) {
     const h = harness(); h.deps.credentials = async () => { throw new Error('must not resolve'); };
     const result: any = await handleBrainGraphSearch({ query: 'X relates to Y' }, ctx(caller), h.deps);
     assert.equal(result.data.error, 'forbidden_ring'); assert.equal(h.calls.length, 0);
   }
 });
 
-test('every company graph seat reaches only the company-labelled corpus', async () => {
-  for (const caller of COMPANY_GRAPH_RING) {
+test('every executive company graph seat reaches only the company-labelled corpus', async () => {
+  for (const caller of ['cfo', 'clo', 'cpo', 'cco']) {
     const h = harness();
     const allowed: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company' }, ctx(caller), h.deps);
     assert.equal(allowed.data.scope, 'company', caller);
@@ -48,6 +48,17 @@ test('every company graph seat reaches only the company-labelled corpus', async 
       assert.equal(denied.data.error, 'forbidden_ring', `${caller}/${scope}`);
       assert.equal(h.calls.length, 1, `${caller}/${scope} must not reach AWS`);
     }
+  }
+  for (const caller of ['clo-personal', 'exec']) {
+    const h = harness();
+    const allowed: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company' }, ctx(caller), h.deps);
+    assert.equal(allowed.data.scope, 'company', caller);
+    assert.equal(h.calls.length, 1, `${caller} should make exactly one company retrieval`);
+    assert.deepEqual(
+      JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
+      { equals: { key: 'source_group', value: 'company' } },
+      caller,
+    );
   }
 });
 
@@ -121,7 +132,7 @@ test('source-ID narrowing preserves personal scope rules and cannot admit a forb
   assert.deepEqual(JSON.parse(String(h.calls[1]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, {
     andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { in: { key: 'source_id', value: ids } }],
   });
-  for (const caller of ['cpo', 'cco', 'exec', 'external']) {
+  for (const caller of ['cto', 'coo', 'cro', 'developer', 'external']) {
     assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
   }
   assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'all' }, ctx('cfo'), h.deps) as any).data.error, 'forbidden_ring');
