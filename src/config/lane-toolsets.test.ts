@@ -33,6 +33,9 @@ test('every lane in LANE_TOOLSETS has a non-empty allowlist', () => {
 
 test('isToolInLaneAllowlist: exact-name match', () => {
   assert.equal(isToolInLaneAllowlist('cto', 'brain_search'), true);
+  for (const lane of ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']) {
+    assert.equal(isToolInLaneAllowlist(lane, 'brain_graph_search'), true, lane);
+  }
   assert.equal(isToolInLaneAllowlist('cto', 'wake'), true);
 });
 

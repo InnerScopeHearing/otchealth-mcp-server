@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { graphScopeFor, handleBrainGraphSearch } from './brain-graph-search.js';
+import { COMPANY_GRAPH_RING, PERSONAL_GRAPH_RING, graphScopeFor, handleBrainGraphSearch } from './brain-graph-search.js';
 import { mayOffloadToolResult } from '../result-store.js';
 
 const ctx = (callerAgent: string) => ({ callerAgent, callerHash: 'synthetic', correlationId: 'synthetic', dryRun: false, acknowledgeWarning: false });
@@ -12,16 +12,42 @@ function harness(response: () => Response = () => Response.json({ retrievalResul
   return { deps, calls };
 }
 
-test('role decisions happen before credentials or AWS; shared personal scope is explicit', async () => {
-  assert.equal(graphScopeFor('cfo'), 'company');
-  assert.equal(graphScopeFor('clo'), 'company');
-  assert.equal(graphScopeFor('clo', 'personal'), null);
+test('company graph ring is exactly the six company seats, while personal graph access remains protected', async () => {
+  assert.deepEqual(COMPANY_GRAPH_RING, ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
+  assert.deepEqual(PERSONAL_GRAPH_RING, ['clo-personal']);
+  for (const caller of COMPANY_GRAPH_RING) {
+    assert.equal(graphScopeFor(caller), 'company');
+    assert.equal(graphScopeFor(caller, 'company'), 'company');
+    assert.equal(graphScopeFor(caller, 'personal'), null);
+    assert.equal(graphScopeFor(caller, 'all'), null);
+  }
   assert.equal(graphScopeFor('clo-personal'), 'all');
-  assert.equal(graphScopeFor('cfo', 'personal'), null);
-  for (const caller of ['cto', 'developer', 'cro', 'coo', 'external', '']) {
+  assert.equal(graphScopeFor('clo-personal', 'company'), 'company');
+  assert.equal(graphScopeFor('clo-personal', 'personal'), 'personal');
+  assert.equal(graphScopeFor('clo-personal', 'all'), 'all');
+  for (const caller of ['cpo', 'cco', 'exec', 'external', '']) {
     const h = harness(); h.deps.credentials = async () => { throw new Error('must not resolve'); };
     const result: any = await handleBrainGraphSearch({ query: 'X relates to Y' }, ctx(caller), h.deps);
     assert.equal(result.data.error, 'forbidden_ring'); assert.equal(h.calls.length, 0);
+  }
+});
+
+test('every company graph seat reaches only the company-labelled corpus', async () => {
+  for (const caller of COMPANY_GRAPH_RING) {
+    const h = harness();
+    const allowed: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company' }, ctx(caller), h.deps);
+    assert.equal(allowed.data.scope, 'company', caller);
+    assert.equal(h.calls.length, 1, `${caller} should make exactly one company retrieval`);
+    assert.deepEqual(
+      JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
+      { equals: { key: 'source_group', value: 'company' } },
+      caller,
+    );
+    for (const scope of ['personal', 'all'] as const) {
+      const denied: any = await handleBrainGraphSearch({ query: 'synthetic', scope }, ctx(caller), h.deps);
+      assert.equal(denied.data.error, 'forbidden_ring', `${caller}/${scope}`);
+      assert.equal(h.calls.length, 1, `${caller}/${scope} must not reach AWS`);
+    }
   }
 });
 
@@ -95,7 +121,7 @@ test('source-ID narrowing preserves personal scope rules and cannot admit a forb
   assert.deepEqual(JSON.parse(String(h.calls[1]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, {
     andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { in: { key: 'source_id', value: ids } }],
   });
-  for (const caller of ['cto', 'developer', 'cro', 'coo', 'external']) {
+  for (const caller of ['cpo', 'cco', 'exec', 'external']) {
     assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
   }
   assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'all' }, ctx('cfo'), h.deps) as any).data.error, 'forbidden_ring');

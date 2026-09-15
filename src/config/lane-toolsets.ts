@@ -69,7 +69,7 @@ const CATALOG = ['catalog_*', 'gateway_fetch_result'] as const;
 // fetch-a-known-URL siblings, seeded into the SAME open-RAG group so every internal lane's
 // allowlist gains them the moment web_search is present -- consistent with how this group already
 // treats every other member as "the same exposure, one decision".
-const RAG_OPEN = ['brain_search', 'web_search', 'web_research', 'web_extract', 'kb_search', 'search', 'fetch', 'incident_match'] as const;
+const RAG_OPEN = ['brain_search', 'brain_graph_search', 'web_search', 'web_research', 'web_extract', 'kb_search', 'search', 'fetch', 'incident_match'] as const;
 const RAG_PRIVILEGED = ['kb_search_privileged', 'kb_get_document'] as const;
 const LLM = ['llm_azure'] as const;
 const SAFETY_CHECKS = ['shield_check', 'groundedness_check', 'claims_check'] as const;

@@ -47,6 +47,7 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, 'hyperagent_discover_capabilities'].sort());
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
+  assert.ok(set.has('brain_graph_search'), 'CTO connector must expose company-scoped GraphRAG');
   // Regression guard (Task G-3, 2026-09-03): web_research/web_extract were added in the SAME
   // change that registers them, so they can't repeat the exact omission class every other guard on
   // this page documents (built + registered but invisible on every connector).
@@ -125,6 +126,7 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
 test('(b) developer lane gets the full ship-lane set', () => {
   const set = connectorToolset(testEnv(), 'developer');
   assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET].sort());
+  assert.ok(set.has('brain_graph_search'));
 });
 
 test('(c) every EXEC_RING lane gets the full ship-lane set', () => {
@@ -132,6 +134,7 @@ test('(c) every EXEC_RING lane gets the full ship-lane set', () => {
   for (const lane of EXEC_RING) {
     const set = connectorToolset(env, lane);
     assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET].sort(), `${lane} should get the ship set`);
+    assert.ok(set.has('brain_graph_search'), `${lane} should expose GraphRAG`);
   }
 });
 
@@ -252,7 +255,7 @@ test('cfo connector keeps its bounded relationship query through ship-set curati
 test('coo lane: seat-memory + ledger coordination, and nothing privileged', () => {
   const set = connectorToolset(testEnv(), 'coo');
   assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET].sort());
-  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_update', 'agent_dispatch', 'inbox_read', 'brain_search', 'search', 'fetch']) {
+  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_update', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'search', 'fetch']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
   for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'graph_send_email']) {
@@ -263,7 +266,7 @@ test('coo lane: seat-memory + ledger coordination, and nothing privileged', () =
 test('cro lane: commerce curation present, engineering/legal/finance/privileged absent, destructive commerce absent', () => {
   const set = connectorToolset(testEnv(), 'cro');
   assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET].sort());
-  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'heygen_videos_list']) {
+  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'brain_graph_search', 'heygen_videos_list']) {
     assert.ok(set.has(needed), `cro connector must advertise ${needed} (its charter names this family)`);
   }
   for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'github_merge_pull_request', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
