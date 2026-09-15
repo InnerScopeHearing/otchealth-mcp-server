@@ -465,7 +465,7 @@ test('Codex CLO Personal static token resolves only to the protected clo-persona
 });
 
 test('Codex static-token ownership fails closed on empty, short, or cross-seat collisions', async () => {
-  const { resolveCodexStaticAgent } = await import('./bearer.js');
+  const { resolveCodexStaticAgent, resolveUniqueStaticCredential } = await import('./bearer.js');
   const personal = 'personal-' + 'p'.repeat(40);
   const cto = 'cto-' + 'c'.repeat(40);
   assert.equal(resolveCodexStaticAgent(personal, { cto, 'clo-personal': personal }), 'clo-personal');
@@ -474,6 +474,14 @@ test('Codex static-token ownership fails closed on empty, short, or cross-seat c
   assert.equal(resolveCodexStaticAgent('short', { cto: 'short', 'clo-personal': '' }), null);
   assert.equal(resolveCodexStaticAgent(personal, { cto: personal, 'clo-personal': personal }), null);
   assert.equal(resolveCodexStaticAgent(personal, { clo: personal, 'clo-personal': personal }), null);
+  assert.equal(resolveUniqueStaticCredential(personal, [
+    { agent: 'cto', kind: 'm365', value: personal },
+    { agent: 'clo-personal', kind: 'codex', value: personal },
+  ]), null);
+  assert.equal(resolveUniqueStaticCredential(personal, [
+    { agent: 'copilot-agent', kind: 'eval', value: personal },
+    { agent: 'clo-personal', kind: 'codex', value: personal },
+  ]), null);
 });
 
 test('CODEX: dedicated WeFunder token binds only its curated principal and fails closed without revocation readiness', async () => {
