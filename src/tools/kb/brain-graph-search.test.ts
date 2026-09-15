@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { graphScopeFor, handleBrainGraphSearch } from './brain-graph-search.js';
+import { graphScopeFor, handleBrainGraphSearch, hasMeaningfulOverlap, isCleanRetrievedText } from './brain-graph-search.js';
 import { mayOffloadToolResult } from '../result-store.js';
 
 const ctx = (callerAgent: string) => ({ callerAgent, callerHash: 'synthetic', correlationId: 'synthetic', dryRun: false, acknowledgeWarning: false });
 const root = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
-const row = (group = 'company', uri = root + group + '/test.txt') => ({ content: { text: 'Synthetic Organization X signed contract Y.' }, location: { type: 'S3', s3Location: { uri } }, metadata: { source_group: group, source_id: 'a'.repeat(64), text_sha256: 'b'.repeat(64), private_extra: 'must not be copied' }, score: 0.8 });
+const matter = 'personal-civil-cv0057318';
+const row = (group = 'company', uri = root + group + '/test.txt') => ({ content: { text: 'Synthetic Organization X signed contract Y.' }, location: { type: 'S3', s3Location: { uri } }, metadata: { source_group: group, ...(group === 'personal' ? { matter_id: matter } : {}), source_id: 'a'.repeat(64), text_sha256: 'b'.repeat(64), source_sha256: 'c'.repeat(64), source_version: 'sha256:' + 'c'.repeat(64), private_extra: 'must not be copied' }, score: 0.8 });
 function harness(response: () => Response = () => Response.json({ retrievalResults: [row()] })) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const deps = { config: () => ({ enabled: true, kbId: 'ABCDEFGHIJ' }), credentials: async () => ({ accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }), fetch: (async (url: any, init?: RequestInit) => { calls.push({ url: String(url), init }); return response(); }) as typeof fetch };
@@ -20,10 +21,10 @@ test('coarse company graph access requires the executive ring, while personal gr
     assert.equal(graphScopeFor(caller, 'all'), null);
   }
   for (const caller of ['clo-personal', 'exec']) {
-    assert.equal(graphScopeFor(caller), 'all');
+    assert.equal(graphScopeFor(caller), 'personal');
     assert.equal(graphScopeFor(caller, 'company'), 'company');
     assert.equal(graphScopeFor(caller, 'personal'), 'personal');
-    assert.equal(graphScopeFor(caller, 'all'), 'all');
+    assert.equal(graphScopeFor(caller, 'all'), null);
   }
   for (const caller of ['cto', 'coo', 'cro', 'developer', 'external', '']) {
     const h = harness(); h.deps.credentials = async () => { throw new Error('must not resolve'); };
@@ -63,7 +64,7 @@ test('every executive company graph seat reaches only the company-labelled corpu
 });
 
 test('CFO request signs exact configured endpoint and enforced company label', async () => {
-  const h = harness(); const result: any = await handleBrainGraphSearch({ query: 'X relates to Y', top: 2 }, ctx('cfo'), h.deps);
+  const h = harness(); const result: any = await handleBrainGraphSearch({ query: 'organization contract', top: 2 }, ctx('cfo'), h.deps);
   assert.equal(h.calls.length, 1); const call = h.calls[0]!;
   assert.equal(call.url, 'https://bedrock-agent-runtime.us-east-1.amazonaws.com/knowledgebases/ABCDEFGHIJ/retrieve');
   assert.equal(call.init?.redirect, 'error');
@@ -73,12 +74,17 @@ test('CFO request signs exact configured endpoint and enforced company label', a
   assert.equal(result.data.matches[0].citation, 'graph:1'); assert.equal(JSON.stringify(result).includes('must not be copied'), false);
 });
 
-test('personal legal query can return both labeled corpora; company seats withhold personal results', async () => {
+test('personal legal query requires and enforces one exact matter', async () => {
   const h = harness(() => Response.json({ retrievalResults: [row(), row('personal'), { ...row(), location: { type: 'S3', s3Location: { uri: 's3://another-bucket/test.txt' } } }] }));
   const cfo: any = await handleBrainGraphSearch({ query: 'synthetic', top: 4 }, ctx('cfo'), h.deps);
   assert.equal(cfo.data.count, 1); assert.equal(cfo.data.withheld_count, 2);
-  const clo: any = await handleBrainGraphSearch({ query: 'synthetic', top: 4 }, ctx('clo-personal'), h.deps);
-  assert.equal(clo.data.count, 2); assert.equal(JSON.parse(String(h.calls[1]?.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, undefined);
+  const missing: any = await handleBrainGraphSearch({ query: 'synthetic', top: 4 }, ctx('clo-personal'), h.deps);
+  assert.equal(missing.data.error, 'matter_id_required'); assert.equal(h.calls.length, 1);
+  const clo: any = await handleBrainGraphSearch({ query: 'synthetic', matter_id: matter, top: 4 }, ctx('clo-personal'), h.deps);
+  assert.equal(clo.data.count, 1); assert.equal(clo.data.matter_filter_applied, true);
+  assert.deepEqual(JSON.parse(String(h.calls[1]?.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, {
+    andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { equals: { key: 'matter_id', value: matter } }],
+  });
 });
 
 test('company retrieval admits existing, priority and capacity prefixes with matching source labels', async () => {
@@ -92,12 +98,10 @@ test('company retrieval admits existing, priority and capacity prefixes with mat
     row('company', root + 'personal/test.txt'),
   ] }));
   const result: any = await handleBrainGraphSearch({ query: 'synthetic', top: 8 }, ctx('cfo'), h.deps);
-  assert.equal(result.data.count, 3);
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.duplicate_withheld_count, 2);
   assert.equal(result.data.withheld_count, 4);
-  assert.deepEqual(result.data.matches.map((match: any) => match.source_uri), [
-    root + 'company/test.txt', root + 'company-priority/test.txt',
-    root + 'company-capacity/batch/test.txt',
-  ]);
+  assert.deepEqual(result.data.matches.map((match: any) => match.source_uri), [root + 'company/test.txt']);
 });
 
 test('disabled or invalid deployment configuration cannot spend on retrieval', async () => {
@@ -126,17 +130,42 @@ test('known source IDs narrow company retrieval and locally reject upstream filt
 test('source-ID narrowing preserves personal scope rules and cannot admit a forbidden caller', async () => {
   const ids = ['a'.repeat(64), 'c'.repeat(64)];
   const h = harness();
-  await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx('clo-personal'), h.deps);
-  assert.deepEqual(JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, { in: { key: 'source_id', value: ids } });
-  await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'personal' }, ctx('clo-personal'), h.deps);
-  assert.deepEqual(JSON.parse(String(h.calls[1]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, {
-    andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { in: { key: 'source_id', value: ids } }],
+  await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, matter_id: matter }, ctx('clo-personal'), h.deps);
+  assert.deepEqual(JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter, {
+    andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { equals: { key: 'matter_id', value: matter } }, { in: { key: 'source_id', value: ids } }],
   });
   for (const caller of ['cto', 'coo', 'cro', 'developer', 'external']) {
     assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
   }
   assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'all' }, ctx('cfo'), h.deps) as any).data.error, 'forbidden_ring');
-  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls.length, 1);
+});
+
+test('personal retrieval rejects cross-matter rows, corrupted text, irrelevant text, and duplicate hashes', async () => {
+  const valid = row('personal');
+  const duplicate = { ...valid, metadata: { ...valid.metadata, source_id: 'd'.repeat(64) }, score: 0.7 };
+  const otherMatter = { ...valid, metadata: { ...valid.metadata, matter_id: 'personal-divorce-dr0067153', source_id: 'e'.repeat(64), text_sha256: 'e'.repeat(64) } };
+  const corrupt = { ...valid, content: { text: '\u0000\ufffd\u0001broken' }, metadata: { ...valid.metadata, source_id: 'f'.repeat(64), text_sha256: 'f'.repeat(64) } };
+  const irrelevant = { ...valid, content: { text: 'Completely unrelated words.' }, metadata: { ...valid.metadata, source_id: '1'.repeat(64), text_sha256: '1'.repeat(64) } };
+  const h = harness(() => Response.json({ retrievalResults: [valid, duplicate, otherMatter, corrupt, irrelevant] }));
+  const result: any = await handleBrainGraphSearch({ query: 'organization contract', scope: 'personal', matter_id: matter, top: 8 }, ctx('clo-personal'), h.deps);
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.withheld_count, 1);
+  assert.equal(result.data.quality_withheld_count, 1);
+  assert.equal(result.data.relevance_withheld_count, 1);
+  assert.equal(result.data.duplicate_withheld_count, 1);
+  assert.equal(result.data.matches[0].matter_id, matter);
+  assert.equal(result.data.matches[0].source_version, 'sha256:' + 'c'.repeat(64));
+});
+
+test('negative synthetic identifiers produce a true no-match result', async () => {
+  const h = harness(() => Response.json({ retrievalResults: [{ ...row('personal'), content: { text: 'A clean but unrelated legal passage.' }, score: 2.1 }] }));
+  const result: any = await handleBrainGraphSearch({ query: 'ZXQ-NEVER-EXISTS-94731 QVJ-NO-MATCH-62804', scope: 'personal', matter_id: matter }, ctx('clo-personal'), h.deps);
+  assert.equal(result.data.count, 0);
+  assert.equal(result.data.relevance_withheld_count, 1);
+  assert.equal(hasMeaningfulOverlap('known contract', 'The contract is known.'), true);
+  assert.equal(isCleanRetrievedText('clean\ntext'), true);
+  assert.equal(isCleanRetrievedText('\u0000broken'), false);
 });
 
 test('empty, repeated, malformed, and oversized source-ID lists never call AWS', async () => {
@@ -168,7 +197,7 @@ test('large provider responses are rejected and returned passages remain bounded
   const h = harness(() => Response.json({ retrievalResults: [{ ...row(), content: { text: 'x'.repeat(600000) } }] }));
   assert.equal((await handleBrainGraphSearch({ query: 'test' }, ctx('clo'), h.deps) as any).data.mode, 'unavailable');
   h.deps.fetch = async () => Response.json({ retrievalResults: [{ ...row(), content: { text: 'x'.repeat(6000) } }] });
-  const r: any = await handleBrainGraphSearch({ query: 'test' }, ctx('clo'), h.deps);
+  const r: any = await handleBrainGraphSearch({ query: 'xxx' }, ctx('clo'), h.deps);
   assert.equal(r.data.matches[0].text.length, 3000); assert.equal(r.data.matches[0].truncated, true);
   assert.equal(mayOffloadToolResult('brain_graph_search'), false);
 });

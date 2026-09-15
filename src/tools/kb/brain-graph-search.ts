@@ -17,8 +17,10 @@ const SOURCE_PREFIXES: Record<'company' | 'personal', readonly string[]> = {
 };
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
+const MIN_RETRIEVAL_SCORE = 0.2;
+const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
 type Scope = 'company' | 'personal' | 'all';
-type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[] };
+type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string };
 type Config = { enabled: boolean; kbId: string };
 type Deps = { config(): Config; credentials(): Promise<AwsCredentials | null>; fetch: typeof fetch };
 const DEFAULTS: Deps = {
@@ -28,23 +30,27 @@ const DEFAULTS: Deps = {
 };
 const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
-  scope: z.enum(['company', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. The personal legal seat may query the shared corpus.'),
+  scope: z.enum(['company', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
   top: z.number().int().min(1).max(8).optional(),
   source_ids: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(5)
     .refine((ids) => new Set(ids).size === ids.length, 'Source IDs must be unique')
     .optional().describe('Narrow retrieval to up to five known canonical document IDs within your authorized scope. Use to inspect a missing source; this does not establish relationship coverage.'),
+  matter_id: z.string().regex(/^personal-(?:civil|divorce)-[a-z0-9-]{3,64}$/).optional()
+    .describe('Required for every personal legal retrieval. Results are intersected with this exact protected matter ID.'),
 };
 const inputSchema = z.object(inputShape).strict();
 
 export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
+  const personalAllowed = isLaneAllowed('legal-personal', caller);
+  const scope = requested ?? (personalAllowed ? 'personal' : 'company');
+  if (scope === 'all') return null;
+  if (scope === 'personal') return personalAllowed ? scope : null;
   // The managed `company` label currently combines finance and company-legal material.
   // Until ingestion publishes a narrower, authenticated lane label, require the caller to
   // hold both underlying company rings. This keeps broad engineering and operations tokens
   // from turning one coarse metadata value into cross-ring access.
   if (!isLaneAllowed('finance-cfo-source-docs', caller) || !isLaneAllowed('legal-company', caller)) return null;
-  const personalAllowed = isLaneAllowed('legal-personal', caller);
-  const scope = requested ?? (personalAllowed ? 'all' : 'company');
-  return scope !== 'company' && !personalAllowed ? null : scope;
+  return scope;
 }
 
 function outcome(mode: string, error?: string): ToolResultPayload {
@@ -53,6 +59,30 @@ function outcome(mode: string, error?: string): ToolResultPayload {
 
 function isAllowedSourceUri(group: 'company' | 'personal', uri: string): boolean {
   return SOURCE_PREFIXES[group].some((prefix) => uri.startsWith(prefix)) && /\.txt$/.test(uri);
+}
+
+const STOP_WORDS = new Set(['about', 'after', 'again', 'also', 'and', 'are', 'between', 'did', 'does', 'for', 'from', 'has', 'have', 'how', 'into', 'its', 'not', 'only', 'that', 'the', 'their', 'then', 'this', 'through', 'was', 'were', 'what', 'when', 'where', 'which', 'who', 'with']);
+
+function meaningfulTerms(value: string): string[] {
+  return [...new Set(value.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [])]
+    .filter((term) => !STOP_WORDS.has(term));
+}
+
+export function hasMeaningfulOverlap(query: string, text: string): boolean {
+  const terms = meaningfulTerms(query);
+  if (!terms.length) return false;
+  const normalized = text.toLowerCase();
+  return terms.some((term) => normalized.includes(term));
+}
+
+export function isCleanRetrievedText(text: string): boolean {
+  if (!text.trim() || text.includes('\u0000')) return false;
+  let suspicious = 0;
+  for (const character of text) {
+    const code = character.charCodeAt(0);
+    if (character === '\ufffd' || (code < 32 && character !== '\n' && character !== '\r' && character !== '\t')) suspicious++;
+  }
+  return suspicious / Math.max(1, text.length) <= MAX_SUSPICIOUS_TEXT_RATIO;
 }
 
 async function readBounded(response: Response): Promise<unknown> {
@@ -79,6 +109,8 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   if (!parsed.success) return outcome('invalid_request', 'invalid_input');
   const scope = graphScopeFor(ctx.callerAgent, parsed.data.scope);
   if (!scope) return outcome('forbidden', 'forbidden_ring');
+  if (scope === 'personal' && !parsed.data.matter_id) return outcome('invalid_request', 'matter_id_required');
+  if (scope === 'company' && parsed.data.matter_id) return outcome('invalid_request', 'matter_id_not_allowed');
   const config = deps.config();
   if (!config.enabled) return outcome('not_enabled');
   if (!/^[A-Za-z0-9]{10}$/.test(config.kbId)) return outcome('unconfigured', 'invalid_knowledge_base_configuration');
@@ -87,10 +119,12 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   const top = parsed.data.top ?? 5;
   const requestedSources = parsed.data.source_ids ? new Set(parsed.data.source_ids) : undefined;
   const sourceFilter = requestedSources ? { in: { key: 'source_id', value: [...requestedSources] } } : undefined;
-  const groupFilter = scope === 'all' ? undefined : { equals: { key: 'source_group', value: scope } };
+  const groupFilter = { equals: { key: 'source_group', value: scope } };
+  const matterFilter = parsed.data.matter_id ? { equals: { key: 'matter_id', value: parsed.data.matter_id } } : undefined;
   // Source narrowing is intersected with the authenticated scope, never substituted
   // for it. Repeat the source-ID check on returned rows if upstream ignores a filter.
-  const filter = groupFilter && sourceFilter ? { andAll: [groupFilter, sourceFilter] } : groupFilter ?? sourceFilter;
+  const filters = [groupFilter, matterFilter, sourceFilter].filter((value) => value !== undefined);
+  const filter = filters.length === 1 ? filters[0] : { andAll: filters };
   const host = `bedrock-agent-runtime.${REGION}.amazonaws.com`;
   const path = `/knowledgebases/${config.kbId}/retrieve`;
   const body = JSON.stringify({
@@ -110,8 +144,10 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
     const raw: any = await readBounded(response);
     if (raw?.guardrailAction === 'INTERVENED') return outcome('withheld', 'retrieval_intervened');
     if (!Array.isArray(raw?.retrievalResults) || raw.retrievalResults.length > 100) return outcome('unavailable', 'invalid_bedrock_response');
-    const matches: Array<Record<string, unknown>> = [];
+    const candidates: Array<Record<string, unknown>> = [];
     let withheld = 0;
+    let qualityWithheld = 0;
+    let relevanceWithheld = 0;
     for (const row of raw.retrievalResults.slice(0, top)) {
       const uri = row?.location?.type === 'S3' ? row?.location?.s3Location?.uri : undefined;
       const group = row?.metadata?.source_group;
@@ -121,17 +157,33 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       if ((group !== 'company' && group !== 'personal') || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri(group, uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
       const sourceId = row?.metadata?.source_id;
       const textHash = row?.metadata?.text_sha256;
+      const matterId = row?.metadata?.matter_id;
       if (requestedSources && (typeof sourceId !== 'string' || !requestedSources.has(sourceId))) { withheld++; continue; }
-      matches.push({
-        citation: `graph:${matches.length + 1}`, source_group: group, source_uri: uri,
+      if (scope === 'personal' && matterId !== parsed.data.matter_id) { withheld++; continue; }
+      if (!isCleanRetrievedText(text)) { qualityWithheld++; continue; }
+      const score = typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : undefined;
+      if (!requestedSources && (score === undefined || score < MIN_RETRIEVAL_SCORE || !hasMeaningfulOverlap(parsed.data.query, text))) { relevanceWithheld++; continue; }
+      candidates.push({
+        source_group: group, source_uri: uri,
         ...(typeof sourceId === 'string' && /^[a-f0-9]{64}$/.test(sourceId) ? { source_id: sourceId } : {}),
         ...(typeof textHash === 'string' && /^[a-f0-9]{64}$/.test(textHash) ? { text_sha256: textHash } : {}),
+        ...(typeof matterId === 'string' ? { matter_id: matterId } : {}),
+        ...(typeof row?.metadata?.source_version === 'string' ? { source_version: row.metadata.source_version } : {}),
+        ...(typeof row?.metadata?.source_sha256 === 'string' && /^[a-f0-9]{64}$/.test(row.metadata.source_sha256) ? { source_sha256: row.metadata.source_sha256 } : {}),
         text: text.slice(0, MAX_HIT_CHARS), truncated: text.length > MAX_HIT_CHARS,
-        ...(typeof row.score === 'number' && Number.isFinite(row.score) ? { retrieval_score: row.score } : {}),
+        ...(score !== undefined ? { retrieval_score: score } : {}),
       });
     }
+    const seenText = new Set<string>();
+    let duplicateWithheld = 0;
+    const matches = candidates.filter((match) => {
+      const key = typeof match.text_sha256 === 'string' ? match.text_sha256 : undefined;
+      if (!key || !seenText.has(key)) { if (key) seenText.add(key); return true; }
+      duplicateWithheld++;
+      return false;
+    }).map((match, index) => ({ citation: `graph:${index + 1}`, ...match }));
     return {
-      data: { mode: 'aws-managed-graphrag', scope, matches, count: matches.length, withheld_count: withheld, answer_generated: false, ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
+      data: { mode: 'aws-managed-graphrag', scope, matches, count: matches.length, withheld_count: withheld, quality_withheld_count: qualityWithheld, relevance_withheld_count: relevanceWithheld, duplicate_withheld_count: duplicateWithheld, answer_generated: false, ...(parsed.data.matter_id ? { matter_id: parsed.data.matter_id, matter_filter_applied: true } : {}), ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
       summary: `${matches.length} source-cited GraphRAG passages. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,
     };
   } catch { return outcome('unavailable', 'bedrock_retrieval_failed'); }
@@ -142,12 +194,12 @@ export function registerBrainGraphSearch(server: McpServer, callerHash: CallerHa
     name: 'brain_graph_search', category: 'read',
     annotations: {
       title: 'Search document connections using AWS GraphRAG',
-      description: 'Retrieve source-cited relationship context from the shared AWS Bedrock/Neptune graph. Read-only, no generated answer. Respects authenticated role and source labels. Company and personal legal documents share graph storage by owner instruction; source filters are not physically separate graphs. Returns not_enabled or unavailable honestly when the service is not ready. Query this when asking how X relates to Y or Z, then cite sources and distinguish evidence from inference.',
+      description: 'Retrieve source-cited relationship context from AWS Bedrock GraphRAG. Read-only, no generated answer. Personal legal retrieval requires one exact matter_id and refuses all-scope searches. Results are locally checked for ring, matter, clean text, meaningful query overlap, and duplicate text hashes. Returns not_enabled or unavailable honestly when the service is not ready. Cite sources and distinguish evidence from inference.',
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
     },
     inputShape,
-    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional(), source_filter_applied: z.boolean().optional(), requested_source_count: z.number().optional() },
-    redactInputForLog: (input) => ({ query_redacted: true, scope: input.scope, top: input.top, ...(Array.isArray(input.source_ids) ? { source_id_count: input.source_ids.length } : {}) }),
+    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), matter_id: z.string().optional(), matter_filter_applied: z.boolean().optional(), withheld_count: z.number().optional(), quality_withheld_count: z.number().optional(), relevance_withheld_count: z.number().optional(), duplicate_withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional(), source_filter_applied: z.boolean().optional(), requested_source_count: z.number().optional() },
+    redactInputForLog: (input) => ({ query_redacted: true, scope: input.scope, matter_id: input.matter_id, top: input.top, ...(Array.isArray(input.source_ids) ? { source_id_count: input.source_ids.length } : {}) }),
     handler: (input, ctx) => handleBrainGraphSearch(input, ctx),
   }, callerHash);
 }

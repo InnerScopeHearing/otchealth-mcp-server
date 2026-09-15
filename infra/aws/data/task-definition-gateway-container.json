@@ -1,6 +1,14 @@
 {
   "environment": [
     {
+      "name": "NEPTUNE_PERSONAL_GRAPH_ENABLED",
+      "value": "true"
+    },
+    {
+      "name": "NEPTUNE_PERSONAL_GRAPH_ID",
+      "value": "g-ztex6q1l41"
+    },
+    {
       "name": "FOUNDRY_ROUTER_DEPLOYMENT",
       "value": "model-router"
     },
