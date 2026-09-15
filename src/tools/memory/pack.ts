@@ -19,8 +19,9 @@ import { resolveAgentReadScope } from './agent-scope.js';
 // Same real bug report as wake's BRIEF WAKE (see src/tools/memory/wake.ts's header comment for the
 // full context): a long-lived agent session's memory_pack was measured at ~99KB and JIT-offloading
 // (result-store.ts THRESHOLD_CHARS=40000). Unlike wake, memory_pack had NO text capping and NO
-// superseded-collapsing at all in its full-mode response -- status/corrections/decisions/recent
-// were all returned verbatim, uncapped, which is the larger share of that 99KB.
+// superseded-collapsing in its full-mode response -- status/corrections/decisions/recent
+// were all returned verbatim, uncapped, which was the larger share of that 99KB. Full mode now
+// also honors the current-truth contract before it is returned.
 //
 // FIX (brief: true, default false -- ADDITIVE; brief:false is byte-for-byte today's existing,
 // uncapped behavior, nothing below changes it):
@@ -56,6 +57,24 @@ export interface PackFullData {
   decisions: Record<string, unknown>[];
   recent: Record<string, unknown>[];
   count: number;
+}
+
+/** Apply the documented current-truth contract to both full and brief pack responses. */
+export function filterSupersededPackData(full: PackFullData, correctionRecords: Record<string, unknown>[] = full.corrections): PackFullData {
+  const supersededIds = computeRetractedIds(correctionRecords.filter((record) => record['type'] === 'correction' || record['kind'] === 'correction'));
+  if (!supersededIds.size) return full;
+  const current = (record: Record<string, unknown>) => {
+    const id = record['id'];
+    return !(typeof id === 'string' && supersededIds.has(id));
+  };
+  const status = full.status && current(full.status) ? full.status : null;
+  return {
+    ...full,
+    status,
+    corrections: full.corrections.filter(current),
+    decisions: full.decisions.filter(current),
+    recent: full.recent.filter(current),
+  };
 }
 
 /** boundRecord never returns null for a non-null input; this just narrows the type back for
@@ -199,7 +218,7 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
           .boolean()
           .optional()
           .describe(
-            'If true, return only current-truth entries (retracted/superseded entries filtered out across every section) with ids for drill-down via memory_pack(brief:false), hard-capped for size. Defaults to false (unchanged full behavior).',
+            'If true, return the hard-capped brief current-truth working set with ids for drill-down via memory_pack(brief:false). Both full and brief responses exclude superseded entries; brief additionally applies size caps.',
           ),
       },
       outputShape: {
@@ -236,14 +255,14 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
         const recent = mine.slice(0, recentLimit);
 
         const brief = input.brief ?? false;
-        const fullData: PackFullData = {
+        const fullData = filterSupersededPackData({
           agent,
           status: status as unknown as Record<string, unknown> | null,
           corrections: corrections as unknown as Record<string, unknown>[],
           decisions: decisions as unknown as Record<string, unknown>[],
           recent: recent as unknown as Record<string, unknown>[],
           count: mine.length,
-        };
+        }, mine.filter((record) => record.type === 'correction') as unknown as Record<string, unknown>[]);
         // The canonical, AGENT-SCOPED retraction set (memory/retractions.ts's retractedIdsForAgent,
         // NOT the bare fleet-wide retractedIds() -- review finding, 2026-07-30: shared-feed ids are
         // per-agent day+counter values, so two different agents' entries can share a bare id; the

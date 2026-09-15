@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBriefPack, PACK_BRIEF_LIST_CAP, PACK_BRIEF_RECENT_FACT_CAP, PACK_BRIEF_TEXT_CAP, type PackFullData } from './pack.js';
+import { buildBriefPack, filterSupersededPackData, PACK_BRIEF_LIST_CAP, PACK_BRIEF_RECENT_FACT_CAP, PACK_BRIEF_TEXT_CAP, type PackFullData } from './pack.js';
 
 // Pins the P2-3 fix: memory_pack was measured at ~99KB and JIT-offloading, with NO text capping
-// and NO superseded-collapsing at all in full mode (unlike wake, which at least capped text).
+// and no superseded-collapsing in full mode before the current-truth boundary was added.
 // These tests pin buildBriefPack's behavior under brief:true.
 //
 // Fixture shapes are the REAL MemoryEntry shape every field of a pack response actually carries
@@ -39,6 +39,16 @@ function fullData(overrides: Partial<PackFullData> = {}): PackFullData {
   };
 }
 
+test('filterSupersededPackData applies correction supersession to full pack sections without removing the correction', () => {
+  const stale = entry('stale-record', 'fact');
+  const correction = entry('current-correction', 'correction', { supersedes: 'stale-record' });
+  const current = entry('current-record', 'fact');
+  const filtered = filterSupersededPackData(fullData({ status: stale, corrections: [correction, stale], decisions: [stale, current], recent: [stale, correction, current] }), [correction]);
+  assert.equal(JSON.stringify(filtered).includes('"id":"stale-record"'), false);
+  assert.equal(JSON.stringify(filtered).includes('"id":"current-correction"'), true);
+  assert.equal(JSON.stringify(filtered).includes('"id":"current-record"'), true);
+});
+
 test('buildBriefPack collapses a superseded chain in corrections to just the surviving head', () => {
   const data = fullData();
   data.corrections = [
@@ -53,7 +63,7 @@ test('buildBriefPack collapses a superseded chain in corrections to just the sur
   );
 });
 
-test('buildBriefPack collapses superseded decisions (NOT collapsed in full mode today)', () => {
+test('buildBriefPack collapses superseded decisions', () => {
   const data = fullData();
   data.decisions = [
     entry('d2', 'decision', { text: 'the real decision', supersedes: 'd1' }),

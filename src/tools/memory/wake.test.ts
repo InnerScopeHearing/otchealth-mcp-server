@@ -7,6 +7,7 @@ import {
   DEFINITION_OF_DONE,
   STANDING_DIRECTIVES,
   filterWakeDataForAgent,
+  filterSupersededWakeData,
   wakeRecordVisibleToAgent,
 } from './wake.js';
 import type { MemoryEntry } from '../../memory/store.js';
@@ -74,6 +75,27 @@ test('company full wake final defense removes protected provenance from every re
   const { buildBriefWake, buildM365LiteWake } = await import('./wake.js');
   assert.equal(JSON.stringify(buildBriefWake(filtered)).includes('"id":"personal"'), false);
   assert.equal(JSON.stringify(buildM365LiteWake(filtered)).includes('"id":"personal"'), false);
+});
+
+test('full wake applies one visible correction supersession set across every record-bearing section', async () => {
+  const stale = { id: 'stale-record', type: 'fact', text: 'synthetic' };
+  const correction = { id: 'current-correction', type: 'correction', supersedes: 'stale-record', text: 'synthetic' };
+  const current = { id: 'current-record', type: 'fact', text: 'synthetic' };
+  const full: any = {
+    agent: 'clo',
+    pack: { configured: true, status: stale, corrections: [correction, stale], decisions: [stale, current], recent: [stale, correction, current], count: 3 },
+    memory_records: [stale, current], tasks: { configured: true, active: [stale, current], counts: {} },
+    inbox: { configured: true, count: 2, preview: [stale, current] }, inbound: { configured: true, count: 2, sinceMarker: '', notes: [stale, correction, current] },
+    errors: [], doctrine: { definition_of_done: 'synthetic', pitfalls: [{ id: 'stale-record', text: 'synthetic', source: 'shared_feed' }, { id: 'current-record', text: 'synthetic', source: 'shared_feed' }], standing_directives: [] },
+  };
+  const filtered = filterSupersededWakeData(full);
+  const encoded = JSON.stringify(filtered);
+  assert.equal(encoded.includes('"id":"stale-record"'), false);
+  assert.equal(encoded.includes('"id":"current-correction"'), true, 'the replacement remains visible');
+  assert.equal(encoded.includes('"id":"current-record"'), true, 'unrelated records remain visible');
+  const { buildBriefWake, buildM365LiteWake } = await import('./wake.js');
+  assert.equal(JSON.stringify(buildBriefWake(filtered)).includes('"id":"stale-record"'), false);
+  assert.equal(JSON.stringify(buildM365LiteWake(filtered)).includes('"id":"stale-record"'), false);
 });
 
 // --- supersedes is now a REAL field (fix 2026-07-13) -------------------------------------------

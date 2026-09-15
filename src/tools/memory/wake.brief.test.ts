@@ -151,7 +151,7 @@ test('buildBriefWake collapses a superseded chain in pack.corrections to just th
   );
 });
 
-test('buildBriefWake collapses superseded pack.decisions (NOT collapsed in full mode today)', () => {
+test('buildBriefWake collapses superseded pack.decisions', () => {
   const data = fullData();
   data.pack.decisions = [
     { id: 'd2', type: 'decision', text: 'the real decision', supersedes: 'd1' },
@@ -164,7 +164,7 @@ test('buildBriefWake collapses superseded pack.decisions (NOT collapsed in full 
   );
 });
 
-test('buildBriefWake collapses superseded memory_records (Cosmos, NOT collapsed in full mode today)', () => {
+test('buildBriefWake collapses superseded memory_records (Cosmos)', () => {
   const data = fullData();
   data.memory_records = [
     { id: 'm2', type: 'memory', text: 'the corrected memory', supersedes: 'm1' },
