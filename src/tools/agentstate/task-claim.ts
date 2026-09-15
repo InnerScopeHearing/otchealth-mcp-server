@@ -57,16 +57,16 @@ export async function handleTaskClaim(
   // report a dead-lettered task as "Claimed".
   if (res.dead_lettered) {
     return {
-      data: { claimed: false, task: projectTaskForCaller(res.task, actor), dead_lettered: true, reason: res.reason, claimed_actor },
+      data: { claimed: false, task: projectTaskForCaller(res.task!, actor), dead_lettered: true, reason: res.reason, claimed_actor },
       summary: `NOT claimed -- ${input.task_id} exceeded its retry budget and has been dead-lettered: ${res.reason}`,
-      audit: { after: projectTaskForCaller(res.task, actor) },
+      audit: { after: projectTaskForCaller(res.task!, actor) },
     };
   }
   if (res.task) {
     return {
-      data: { claimed: true, task: projectTaskForCaller(res.task, actor), claimed_actor },
+      data: { claimed: true, task: projectTaskForCaller(res.task!, actor), claimed_actor },
       summary: `Claimed ${input.task_id} for ${actor} (lease until ${res.task.lease_until}).`,
-      audit: { after: projectTaskForCaller(res.task, actor) },
+      audit: { after: projectTaskForCaller(res.task!, actor) },
     };
   }
   return { data: { claimed: false, conflict: res.conflict ?? false, reason: res.reason }, summary: `Not claimed: ${res.reason}` };
