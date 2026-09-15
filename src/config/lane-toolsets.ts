@@ -248,7 +248,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // fleet comms tooling.
   'clo-personal': [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'legal_blob_*', 'docintel_*',
+    'legal_blob_*', 'docintel_*', 'personal_graph_query',
   ],
   // Operations: dispatch, comms, Notion-facing briefings. Removed from EXEC_RING 2026-07-21
   // (least-privilege) -- no finance/legal privileged rooms; the ring gate already enforces this

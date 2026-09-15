@@ -113,6 +113,24 @@ resource "aws_iam_role_policy" "task_runtime_access" {
         Resource = "*"
       },
       {
+        # The gateway sends Retrieve only to the one approved managed GraphRAG
+        # knowledge base. Application code still intersects every personal
+        # request with the caller ring and its mandatory matter_id.
+        Sid      = "RetrieveManagedGraphRag"
+        Effect   = "Allow"
+        Action   = ["bedrock:Retrieve"]
+        Resource = "arn:aws:bedrock:${var.aws_region}:${var.aws_account_id}:knowledge-base/XNMHPUKGDT"
+      },
+      {
+        # The application still applies the stricter caller ring plus a mandatory
+        # matter filter before it signs a query. This grants the ECS task only a
+        # read query against the one protected graph, never graph mutation.
+        Sid      = "ReadProtectedPersonalGraph"
+        Effect   = "Allow"
+        Action   = ["neptune-graph:ReadDataViaQuery"]
+        Resource = "arn:aws:neptune-graph:${var.aws_region}:${var.aws_account_id}:graph/g-ztex6q1l41"
+      },
+      {
         Effect   = "Allow"
         Action   = ["es:ESHttpGet", "es:ESHttpPost", "es:ESHttpPut", "es:ESHttpDelete", "es:ESHttpHead"]
         Resource = "${aws_opensearch_domain.brain.arn}/*"

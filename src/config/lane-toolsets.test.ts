@@ -73,6 +73,13 @@ test('isToolInLaneAllowlist: a tool outside the lane list is rejected', () => {
   assert.equal(isToolInLaneAllowlist('cro', 'legal_blob_get'), false, 'cro was removed from EXEC_RING, no privileged legal');
 });
 
+test('personal graph traversal is exposed only to the clo-personal lane', () => {
+  assert.equal(isToolInLaneAllowlist('clo-personal', 'personal_graph_query'), true);
+  for (const lane of ['cto', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec']) {
+    assert.equal(isToolInLaneAllowlist(lane, 'personal_graph_query'), false, lane);
+  }
+});
+
 test('isToolInLaneAllowlist: FAIL-OPEN for an unknown lane (always true, regardless of tool)', () => {
   assert.equal(isToolInLaneAllowlist('some-unscoped-lane', 'depot_job_execute'), true);
   assert.equal(isToolInLaneAllowlist('', 'anything_at_all'), true);
