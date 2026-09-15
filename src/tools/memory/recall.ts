@@ -4,6 +4,7 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
 import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
 import { cachedAgenticRecall } from '../../memory/hot-cache.js';
+import { agenticRecall } from '../../memory/agentic.js';
 import type { ToolContext, ToolResultPayload } from '../registry.js';
 import { filterPersonalSharedMemory, sharedMemoryAgentAllowed } from './shared-memory-access.js';
 import { filterRetractedByAgent, retractedIdsByAgent } from '../../memory/retractions.js';
@@ -12,6 +13,7 @@ const RECALL_INPUT_SHAPE = {
   query: z.string().min(1).describe('Keywords to match against entry text, tags, type, and agent (case-insensitive; all terms must match).'),
   agent: z.string().optional().describe('Optional: restrict to one agent lane (e.g. "cto").'),
   limit: z.number().int().min(1).max(100).optional().describe('Max results (default 25).'),
+  include_superseded: z.boolean().optional().describe('Audit-history mode. Include entries explicitly superseded by a newer record. Defaults to false so ordinary recall returns current truth only.'),
 };
 
 const RECALL_OUTPUT_SHAPE = {
@@ -30,12 +32,16 @@ const RECALL_OUTPUT_SHAPE = {
 export function filterCurrentRecallHits<T extends { id?: unknown; agent?: unknown }>(
   hits: T[],
   retractedByAgent: Map<string, Set<string>>,
+  includeSuperseded = false,
 ): T[] {
-  return filterRetractedByAgent(hits, retractedByAgent).kept;
+  return includeSuperseded ? hits : filterRetractedByAgent(hits, retractedByAgent).kept;
 }
 
-async function currentRecallHits<T extends { id?: unknown; agent?: unknown }>(hits: T[]): Promise<T[]> {
-  return filterCurrentRecallHits(hits, await retractedIdsByAgent());
+async function currentRecallHits<T extends { id?: unknown; agent?: unknown }>(
+  hits: T[],
+  includeSuperseded: boolean,
+): Promise<T[]> {
+  return filterCurrentRecallHits(hits, await retractedIdsByAgent(), includeSuperseded);
 }
 
 /**
@@ -44,10 +50,14 @@ async function currentRecallHits<T extends { id?: unknown; agent?: unknown }>(hi
  * alias tool run the IDENTICAL logic. No behavior change from before the extraction.
  */
 export async function recallHandler(
-  input: { query: string; agent?: string; limit?: number },
+  input: { query: string; agent?: string; limit?: number; include_superseded?: boolean },
   ctx: ToolContext,
 ): Promise<ToolResultPayload> {
   const limit = input.limit ?? 25;
+  const includeSuperseded = input.include_superseded === true;
+  // Filter retractions BEFORE applying the caller's limit. Fetch enough candidates that
+  // several retired entries cannot crowd the current answer out of the result window.
+  const candidateLimit = Math.min(100, Math.max(limit, limit * 4, 20));
   const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
   if (!sharedMemoryAgentAllowed(ctx.callerAgent, agentFilter)) {
     return { data: { matches: [], count: 0, mode: 'ring-forbidden' }, summary: 'Refused: personal-legal shared-memory rows are not available to this caller.' };
@@ -65,18 +75,28 @@ export async function recallHandler(
   // filter above, forwarded through unchanged. The privilege-walled clo-personal lane is
   // never cached (defense in depth; it should never reach the gateway as a caller identity).
   try {
-    const ar = await cachedAgenticRecall(input.query, {
+    let ar = await cachedAgenticRecall(input.query, {
       scope: ctx.callerAgent,
       agent: agentFilter ?? undefined,
-      top: 5,
+      top: candidateLimit,
     });
     if ((ar.mode === 'agentic-hybrid' || ar.mode === 'cache-hit') && ar.results.length > 0) {
-      const cacheNote = ar.cacheHit ? ' [cache hit]' : '';
-      const visible = await currentRecallHits(filterPersonalSharedMemory(ar.results, ctx.callerAgent));
-      return {
-        data: { matches: visible, count: visible.length, mode: ar.mode },
-        summary: `${visible.length} current agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
-      };
+      let cacheNote = ar.cacheHit ? ' [cache hit]' : '';
+      let visible = await currentRecallHits(filterPersonalSharedMemory(ar.results, ctx.callerAgent), includeSuperseded);
+      // A cache entry can predate a retraction. On an all-retired cache hit, bypass it once
+      // so a current record below the cached window still has a chance to surface.
+      if (visible.length === 0 && ar.cacheHit && !includeSuperseded) {
+        ar = { ...(await agenticRecall(input.query, { agent: agentFilter ?? undefined, top: candidateLimit })), cacheHit: false };
+        cacheNote = '';
+        visible = await currentRecallHits(filterPersonalSharedMemory(ar.results, ctx.callerAgent), includeSuperseded);
+      }
+      if (visible.length > 0) {
+        const matches = visible.slice(0, limit);
+        return {
+          data: { matches, count: matches.length, mode: ar.mode },
+          summary: `${matches.length} ${includeSuperseded ? 'audit-history' : 'current'} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
+        };
+      }
     }
   } catch {
     /* fall through to flat semantic / keyword */
@@ -86,13 +106,16 @@ export async function recallHandler(
   // Falls back to keyword over the blob feed when search isn't configured or errors.
   if (semanticConfigured()) {
     try {
-      const hits = await semanticSearch(input.query, agentFilter, limit);
+      const hits = await semanticSearch(input.query, agentFilter, candidateLimit);
       if (hits) {
-        const visible = await currentRecallHits(filterPersonalSharedMemory(hits, ctx.callerAgent));
-        return {
-          data: { matches: visible, count: visible.length, mode: 'semantic' },
-          summary: `${visible.length} semantic match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
-        };
+        const visible = await currentRecallHits(filterPersonalSharedMemory(hits, ctx.callerAgent), includeSuperseded);
+        if (visible.length > 0) {
+          const matches = visible.slice(0, limit);
+          return {
+            data: { matches, count: matches.length, mode: 'semantic' },
+            summary: `${matches.length} ${includeSuperseded ? 'audit-history' : 'current'} semantic match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+          };
+        }
       }
     } catch {
       /* fall through to keyword */
@@ -110,10 +133,11 @@ export async function recallHandler(
       const hay = `${r.type} ${r.text} ${(r.tags || []).join(' ')} ${r.agent} ${r.source || ''}`.toLowerCase();
       return terms.every((t) => hay.includes(t));
     });
-  const current = await currentRecallHits(matches);
+  const current = await currentRecallHits(matches, includeSuperseded);
+  const returned = current.slice(0, limit);
   return {
-    data: { matches: current.slice(0, limit), count: current.slice(0, limit).length, mode: 'keyword' },
-    summary: `${current.slice(0, limit).length} current keyword match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+    data: { matches: returned, count: returned.length, mode: 'keyword' },
+    summary: `${returned.length} ${includeSuperseded ? 'audit-history' : 'current'} keyword match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
   };
 }
 
@@ -126,7 +150,7 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
       annotations: {
         title: 'Recall from the shared brain',
         description:
-          'Search the cross-agent shared memory for current entries matching a query. Entries explicitly superseded by a newer record are excluded. For byte-exact audit history, use memory_search. Use BEFORE asserting any cross-team fact: the ledger is the source of truth.',
+          'Search the cross-agent shared memory for current entries matching a query. Entries explicitly superseded by a newer record are excluded unless include_superseded is set for audit history. Use BEFORE asserting any cross-team fact: the ledger is the source of truth.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

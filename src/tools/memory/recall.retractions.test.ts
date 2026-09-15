@@ -20,3 +20,20 @@ test('current recall preserves all hits when no retraction exists', () => {
   const hits = [{ id: 'cto__current', agent: 'cto', text: 'current belief' }];
   assert.deepEqual(filterCurrentRecallHits(hits, new Map()), hits);
 });
+
+test('current recall filters before the result limit so a current hit survives retired higher ranks', () => {
+  const hits = [
+    { id: 'cto__stale-1', agent: 'cto' },
+    { id: 'cto__stale-2', agent: 'cto' },
+    { id: 'cto__stale-3', agent: 'cto' },
+    { id: 'cto__current', agent: 'cto' },
+  ];
+  const current = filterCurrentRecallHits(hits, new Map([['cto', new Set(['stale-1', 'stale-2', 'stale-3'])]]));
+  assert.deepEqual(current.slice(0, 1).map((hit) => hit.id), ['cto__current']);
+});
+
+test('audit-history mode explicitly retains superseded entries', () => {
+  const hits = [{ id: 'cto__stale', agent: 'cto' }, { id: 'cto__current', agent: 'cto' }];
+  const history = filterCurrentRecallHits(hits, new Map([['cto', new Set(['stale'])]]), true);
+  assert.deepEqual(history, hits);
+});
