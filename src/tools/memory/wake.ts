@@ -590,6 +590,22 @@ export function wakeRecordVisibleToAgent(record: Record<string, unknown>, agent:
   );
 }
 
+/** Final defense for full, brief, and M365 output shaping. Upstream readers filter at their source,
+ * but every returned collection is checked again by structured provenance, never by scanning text. */
+export function filterWakeDataForAgent(full: WakeFullData): WakeFullData {
+  if (canReadPersonalTasks(full.agent)) return full;
+  const visible = (records: Record<string, unknown>[]) => records.filter((record) => wakeRecordVisibleToAgent(record, full.agent));
+  const status = full.pack.status && wakeRecordVisibleToAgent(full.pack.status, full.agent) ? full.pack.status : null;
+  return {
+    ...full,
+    pack: { ...full.pack, status, corrections: visible(full.pack.corrections), decisions: visible(full.pack.decisions), recent: visible(full.pack.recent) },
+    memory_records: visible(full.memory_records),
+    tasks: { ...full.tasks, active: visible(full.tasks.active) },
+    inbox: { ...full.inbox, preview: (full.inbox.preview as Record<string, unknown>[]).filter((record) => wakeRecordVisibleToAgent(record, full.agent)) },
+    inbound: { ...full.inbound, notes: (full.inbound.notes as Record<string, unknown>[]).filter((record) => wakeRecordVisibleToAgent(record, full.agent)) },
+  };
+}
+
 export function registerWake(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -768,7 +784,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         );
         const doctrine = buildDoctrine(buildDoctrinePitfalls(doctrinePitfallsSharedV, cosmosPitfalls));
 
-        const fullData: WakeFullData = {
+        const fullData = filterWakeDataForAgent({
           agent,
           pack: packV as WakePack,
           memory_records: (memV as { records: Record<string, unknown>[] }).records,
@@ -777,7 +793,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           inbound: inboundV as WakeInbound,
           errors,
           doctrine,
-        };
+        });
 
         // M365 LITE WAKE: see the header comment on buildM365LiteWake above. Every other caller
         // (Claude Code, Hyperagent, any non-M365 lane) gets fullData unchanged, UNLESS it opted

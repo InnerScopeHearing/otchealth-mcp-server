@@ -26,7 +26,7 @@ process.env.AZURE_COMMONS_STORAGE_KEY ||= Buffer.from('k'.repeat(32)).toString('
 // exercises the Azure path. The S3 path has its own file (store-s3.test.ts) because loadEnv() caches
 // and each test file gets its own process.
 
-const { normalizeAgent, readSharedAll, appendShared, isConfigured } = await import('./store.js');
+const { normalizeAgent, parseSharedRows, readSharedAll, appendShared, isConfigured } = await import('./store.js');
 
 async function withFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
@@ -163,5 +163,16 @@ describe('memory store normalizeAgent', () => {
     assert.throws(() => normalizeAgent('bad name!'), /invalid agent/);
     assert.throws(() => normalizeAgent('a/b'), /invalid agent/);
     assert.throws(() => normalizeAgent('x'.repeat(60)), /invalid agent/);
+  });
+});
+
+describe('memory store shared-feed source identity', () => {
+  it('uses the storage-key lane over a spoofable serialized agent field', () => {
+    const rows = parseSharedRows(
+      JSON.stringify({ id: 'synthetic', ts: '2026-09-15T00:00:00Z', type: 'fact', text: 'synthetic', tags: [], agent: 'clo' }),
+      'clo-personal',
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.agent, 'clo-personal');
   });
 });
