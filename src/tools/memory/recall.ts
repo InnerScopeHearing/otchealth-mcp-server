@@ -6,6 +6,7 @@ import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
 import { cachedAgenticRecall } from '../../memory/hot-cache.js';
 import type { ToolContext, ToolResultPayload } from '../registry.js';
 import { filterPersonalSharedMemory, sharedMemoryAgentAllowed } from './shared-memory-access.js';
+import { filterRetractedByAgent, retractedIdsByAgent } from '../../memory/retractions.js';
 
 const RECALL_INPUT_SHAPE = {
   query: z.string().min(1).describe('Keywords to match against entry text, tags, type, and agent (case-insensitive; all terms must match).'),
@@ -18,6 +19,24 @@ const RECALL_OUTPUT_SHAPE = {
   count: z.number(),
   mode: z.string(),
 };
+
+/**
+ * `memory_recall` is a current-truth surface, unlike `memory_search`, which remains
+ * the byte-exact audit-history tool. Apply the same agent-scoped retraction contract
+ * already used by semantic brain search before returning any recall result. The
+ * composite `{agent}__{entryId}` identity prevents one lane's retraction from hiding
+ * another lane's same-day shared-feed ID.
+ */
+export function filterCurrentRecallHits<T extends { id?: unknown; agent?: unknown }>(
+  hits: T[],
+  retractedByAgent: Map<string, Set<string>>,
+): T[] {
+  return filterRetractedByAgent(hits, retractedByAgent).kept;
+}
+
+async function currentRecallHits<T extends { id?: unknown; agent?: unknown }>(hits: T[]): Promise<T[]> {
+  return filterCurrentRecallHits(hits, await retractedIdsByAgent());
+}
 
 /**
  * Shared recall handler, extracted (2026-07-25, M365 declarative-agent alias fix — see
@@ -53,9 +72,10 @@ export async function recallHandler(
     });
     if ((ar.mode === 'agentic-hybrid' || ar.mode === 'cache-hit') && ar.results.length > 0) {
       const cacheNote = ar.cacheHit ? ' [cache hit]' : '';
+      const visible = await currentRecallHits(filterPersonalSharedMemory(ar.results, ctx.callerAgent));
       return {
-      data: { matches: filterPersonalSharedMemory(ar.results, ctx.callerAgent), count: filterPersonalSharedMemory(ar.results, ctx.callerAgent).length, mode: ar.mode },
-        summary: `${ar.results.length} agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
+        data: { matches: visible, count: visible.length, mode: ar.mode },
+        summary: `${visible.length} current agentic-hybrid match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''} (sub-queries: ${ar.subQueries.length})${cacheNote}.`,
       };
     }
   } catch {
@@ -68,7 +88,7 @@ export async function recallHandler(
     try {
       const hits = await semanticSearch(input.query, agentFilter, limit);
       if (hits) {
-        const visible = filterPersonalSharedMemory(hits, ctx.callerAgent);
+        const visible = await currentRecallHits(filterPersonalSharedMemory(hits, ctx.callerAgent));
         return {
           data: { matches: visible, count: visible.length, mode: 'semantic' },
           summary: `${visible.length} semantic match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
@@ -89,11 +109,11 @@ export async function recallHandler(
     .filter((r) => {
       const hay = `${r.type} ${r.text} ${(r.tags || []).join(' ')} ${r.agent} ${r.source || ''}`.toLowerCase();
       return terms.every((t) => hay.includes(t));
-    })
-    .slice(0, limit);
+    });
+  const current = await currentRecallHits(matches);
   return {
-    data: { matches, count: matches.length, mode: 'keyword' },
-    summary: `${matches.length} keyword match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+    data: { matches: current.slice(0, limit), count: current.slice(0, limit).length, mode: 'keyword' },
+    summary: `${current.slice(0, limit).length} current keyword match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
   };
 }
 
@@ -106,7 +126,7 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
       annotations: {
         title: 'Recall from the shared brain',
         description:
-          'Search the cross-agent shared memory (kb-memory commons feed) for entries matching a query. Returns matching facts, decisions, corrections, pitfalls, and status across every agent, newest first. Use BEFORE asserting any cross-team fact: the ledger is the source of truth.',
+          'Search the cross-agent shared memory for current entries matching a query. Entries explicitly superseded by a newer record are excluded. For byte-exact audit history, use memory_search. Use BEFORE asserting any cross-team fact: the ledger is the source of truth.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
