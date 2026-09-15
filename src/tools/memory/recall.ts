@@ -23,9 +23,9 @@ const RECALL_OUTPUT_SHAPE = {
 };
 
 /**
- * `memory_recall` is a current-truth surface, unlike `memory_search`, which remains
- * the byte-exact audit-history tool. Apply the same agent-scoped retraction contract
- * already used by semantic brain search before returning any recall result. The
+ * `memory_recall` defaults to current truth; its explicit `include_superseded` mode
+ * retains the append-only shared-feed history for audit. Apply the same agent-scoped
+ * retraction contract already used by semantic brain search before returning any recall result. The
  * composite `{agent}__{entryId}` identity prevents one lane's retraction from hiding
  * another lane's same-day shared-feed ID.
  */
