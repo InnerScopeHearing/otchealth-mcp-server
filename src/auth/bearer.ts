@@ -160,6 +160,17 @@ function codexStaticAgentTokens(): Record<string, string> {
   };
 }
 
+/** Resolve a Codex token only when exactly one configured seat owns it. */
+export function resolveCodexStaticAgent(
+  token: string,
+  configured: Record<string, string> = codexStaticAgentTokens(),
+): string | null {
+  const matches = Object.entries(configured).filter(
+    ([, value]) => value && value.length >= 32 && safeEqual(token, value),
+  );
+  return matches.length === 1 ? matches[0][0] : null;
+}
+
 /**
  * Validates a bearer against PERPLEXITY_CONNECTOR_TOKEN. On success returns
  * the AuthContext (with SHA256 caller hash). On failure returns null and the
@@ -233,11 +244,9 @@ export async function validateBearer(
           staticAgent = m365Hit[0];
           isM365Static = true;
         } else {
-          const codexHit = Object.entries(codexStaticAgentTokens()).find(
-            ([, v]) => v && v.length >= 32 && safeEqual(token, v),
-          );
-          if (codexHit) {
-            staticAgent = codexHit[0];
+          const codexAgent = resolveCodexStaticAgent(token);
+          if (codexAgent) {
+            staticAgent = codexAgent;
             isCodexStatic = true;
           } else {
             return null;

@@ -438,7 +438,8 @@ test('CODEX: a forged token and a too-short token are both rejected', async () =
 });
 
 test('Codex CLO Personal static token resolves only to the protected clo-personal lane', async () => {
-  const { validateBearer } = await import('./bearer.js');
+  const { default: Fastify } = await import('fastify');
+  const { requireConnectorAuth, validateBearer } = await import('./bearer.js');
   const ctx = await validateBearer(`Bearer ${CODEX_CLO_PERSONAL_TOKEN}`);
   assert.ok(ctx);
   assert.equal(ctx.caller_agent, 'clo-personal');
@@ -446,6 +447,33 @@ test('Codex CLO Personal static token resolves only to the protected clo-persona
   assert.equal(ctx.m365_static_auth, false);
   assert.notEqual(ctx.caller_agent, 'cto');
   assert.notEqual(ctx.caller_agent, 'clo');
+
+  const app = Fastify();
+  app.post('/mcp', async (request, reply) => {
+    const auth = await requireConnectorAuth(request, reply);
+    if (!auth) return;
+    return reply.send({ caller_agent: auth.caller_agent, connector_surface: auth.connector_surface });
+  });
+  const response = await app.inject({
+    method: 'POST',
+    url: '/mcp',
+    headers: { authorization: `Bearer ${CODEX_CLO_PERSONAL_TOKEN}` },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { caller_agent: 'clo-personal', connector_surface: true });
+  await app.close();
+});
+
+test('Codex static-token ownership fails closed on empty, short, or cross-seat collisions', async () => {
+  const { resolveCodexStaticAgent } = await import('./bearer.js');
+  const personal = 'personal-' + 'p'.repeat(40);
+  const cto = 'cto-' + 'c'.repeat(40);
+  assert.equal(resolveCodexStaticAgent(personal, { cto, 'clo-personal': personal }), 'clo-personal');
+  assert.equal(resolveCodexStaticAgent(cto, { cto, 'clo-personal': '' }), 'cto');
+  assert.equal(resolveCodexStaticAgent(personal, { cto, 'clo-personal': '' }), null);
+  assert.equal(resolveCodexStaticAgent('short', { cto: 'short', 'clo-personal': '' }), null);
+  assert.equal(resolveCodexStaticAgent(personal, { cto: personal, 'clo-personal': personal }), null);
+  assert.equal(resolveCodexStaticAgent(personal, { clo: personal, 'clo-personal': personal }), null);
 });
 
 test('CODEX: dedicated WeFunder token binds only its curated principal and fails closed without revocation readiness', async () => {
