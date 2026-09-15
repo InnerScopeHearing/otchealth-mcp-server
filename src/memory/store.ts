@@ -299,7 +299,13 @@ export function normalizeAgent(agent: string): string {
   return a;
 }
 
-function parseRows(text: string | null, agent: string): MemoryEntry[] {
+/**
+ * Parse one feed object using the lane encoded by its storage key as the authority. Historical
+ * rows may carry an `agent` property, but that is payload metadata and must never be allowed to
+ * relabel a record from the protected personal feed as a company-lane record.
+ */
+export function parseSharedRows(text: string | null, agent: string): MemoryEntry[] {
+  const sourceAgent = normalizeAgent(agent);
   if (!text) return [];
   const rows: MemoryEntry[] = [];
   for (const line of text.split('\n')) {
@@ -307,7 +313,7 @@ function parseRows(text: string | null, agent: string): MemoryEntry[] {
     if (!t) continue;
     try {
       const r = JSON.parse(t) as MemoryEntry;
-      r.agent = r.agent || agent;
+      r.agent = sourceAgent;
       rows.push(r);
     } catch {
       /* skip malformed line */
@@ -439,7 +445,7 @@ export async function appendShared(
   try {
     for (let attempt = 0; attempt < 6; attempt++) {
       const { text: current, etag } = await withinSharedAppendDeadline((signal) => getTextMeta(key, signal), deadlineAt, timing);
-      const existing = parseRows(current, a);
+      const existing = parseSharedRows(current, a);
       const replay = writeIntent ? existing.find((row) => row.write_intent === writeIntent) : undefined;
       if (replay) {
         if (replay.write_intent_content !== entry.write_intent_content) throw new Error('idempotency key conflict: the authenticated caller already used this key for a different shared-memory intent');
@@ -473,7 +479,7 @@ export async function appendShared(
       }
     }
 
-    const storedRows = parseRows((await withinSharedAppendDeadline((signal) => getTextMeta(key, signal), deadlineAt, timing)).text, a);
+    const storedRows = parseSharedRows((await withinSharedAppendDeadline((signal) => getTextMeta(key, signal), deadlineAt, timing)).text, a);
     const stored = writeIntent
       ? storedRows.find((row) => row.write_intent === writeIntent)
       : storedRows.find((row) => row.id === entry.id);
@@ -519,7 +525,7 @@ export async function writeReconcileMarker(agent: string, iso: string): Promise<
 /** Notes OTHER agents wrote on `agent`'s feed since `marker` (or all, if no marker). Oldest first. */
 export async function readInbound(agent: string, marker: string): Promise<MemoryEntry[]> {
   const a = normalizeAgent(agent);
-  const rows = parseRows(await getText(sharedKey(a)), a);
+  const rows = parseSharedRows(await getText(sharedKey(a)), a);
   return rows
     .filter((r) => r.by && r.by !== a && (!marker || (r.ts || '') > marker))
     .sort((x, y) => (x.ts || '').localeCompare(y.ts || ''));
@@ -531,7 +537,7 @@ export async function readSharedAll(): Promise<MemoryEntry[]> {
   const all: MemoryEntry[] = [];
   for (const b of blobs) {
     const agent = b.slice(SHARED_PREFIX.length).replace(/\.jsonl$/, '');
-    all.push(...parseRows(await getText(b), agent));
+    all.push(...parseSharedRows(await getText(b), agent));
   }
   all.sort((x, y) => (y.ts || '').localeCompare(x.ts || ''));
   return all;

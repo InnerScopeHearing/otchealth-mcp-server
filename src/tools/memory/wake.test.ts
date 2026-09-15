@@ -6,6 +6,7 @@ import {
   buildDoctrinePitfalls,
   DEFINITION_OF_DONE,
   STANDING_DIRECTIVES,
+  filterWakeDataForAgent,
   wakeRecordVisibleToAgent,
 } from './wake.js';
 import type { MemoryEntry } from '../../memory/store.js';
@@ -56,6 +57,23 @@ test('company wake removes every protected personal-lane provenance shape while 
   }
   assert.equal(wakeRecordVisibleToAgent({ agent: 'clo', by: 'cto' }, 'clo'), true);
   assert.equal(wakeRecordVisibleToAgent({ by: 'clo-personal' }, 'clo-personal'), true);
+});
+
+test('company full wake final defense removes protected provenance from every record-bearing section and brief output', async () => {
+  const personal = { id: 'personal', by: 'clo-personal', text: 'synthetic' };
+  const company = { id: 'company', by: 'clo', text: 'synthetic' };
+  const full: any = {
+    agent: 'clo',
+    pack: { configured: true, status: personal, corrections: [personal, company], decisions: [personal, company], recent: [personal, company], count: 2 },
+    memory_records: [personal, company], tasks: { configured: true, active: [personal, company], counts: {} },
+    inbox: { configured: true, count: 2, preview: [personal, company] }, inbound: { configured: true, count: 2, sinceMarker: '', notes: [personal, company] },
+    errors: [], doctrine: { definition_of_done: 'synthetic', pitfalls: [], standing_directives: [] },
+  };
+  const filtered = filterWakeDataForAgent(full);
+  assert.equal(JSON.stringify(filtered).includes('"id":"personal"'), false);
+  const { buildBriefWake, buildM365LiteWake } = await import('./wake.js');
+  assert.equal(JSON.stringify(buildBriefWake(filtered)).includes('"id":"personal"'), false);
+  assert.equal(JSON.stringify(buildM365LiteWake(filtered)).includes('"id":"personal"'), false);
 });
 
 // --- supersedes is now a REAL field (fix 2026-07-13) -------------------------------------------
