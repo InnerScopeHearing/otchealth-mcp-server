@@ -4,7 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured } from '../../agentstate/store.js';
 import { listTasks, type Task, type TaskListFilter } from '../../agentstate/ledger.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
-import { canReadPersonalTasks, taskVisibleToCaller } from './task-read-access.js';
+import { canReadPersonalTasks, projectTaskForCaller, taskVisibleToCaller } from './task-read-access.js';
 
 export interface TaskListInput {
   owner_agent?: string;
@@ -38,7 +38,7 @@ export async function handleTaskList(
   // exclusion before its max limit, so this post-filter cannot starve an ordinary caller's page.
   const visible = tasks.filter((task) => taskVisibleToCaller(task, ctx.callerAgent));
   return {
-    data: { count: visible.length, tasks: visible },
+    data: { count: visible.length, tasks: visible.map((task) => projectTaskForCaller(task, ctx.callerAgent)) },
     summary: String(visible.length) + ' task(s)' +
       (input.owner_agent ? ' for ' + input.owner_agent : '') +
       (input.status ? ' [' + input.status + ']' : '') + '.',
@@ -54,7 +54,7 @@ export function registerTaskList(server: McpServer, callerHash: CallerHashProvid
       annotations: {
         title: 'List work-ledger tasks',
         description:
-          'List tasks from the fleet work-ledger, optionally filtered by owner_agent and/or status. This is the "what is everyone working on / what is open" view, live and cross-engine. Personal-legal tasks remain limited to the existing personal-legal ring.',
+          'List tasks from the fleet work-ledger, optionally filtered by owner_agent and/or status. This is the "what is everyone working on / what is open" view, live and cross-engine. Personal-legal tasks remain limited to the existing personal-legal ring. Cross-seat company views return coordination metadata only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

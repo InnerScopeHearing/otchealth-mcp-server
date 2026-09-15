@@ -4,7 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured } from '../../agentstate/store.js';
 import { claimTask } from '../../agentstate/ledger.js';
 import { resolveAttribution } from './attribution.js';
-import { taskVisibleToCaller } from './task-read-access.js';
+import { projectTaskForCaller, taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -57,16 +57,16 @@ export async function handleTaskClaim(
   // report a dead-lettered task as "Claimed".
   if (res.dead_lettered) {
     return {
-      data: { claimed: false, task: res.task, dead_lettered: true, reason: res.reason, claimed_actor },
+      data: { claimed: false, task: projectTaskForCaller(res.task, actor), dead_lettered: true, reason: res.reason, claimed_actor },
       summary: `NOT claimed -- ${input.task_id} exceeded its retry budget and has been dead-lettered: ${res.reason}`,
-      audit: { after: res.task },
+      audit: { after: projectTaskForCaller(res.task, actor) },
     };
   }
   if (res.task) {
     return {
-      data: { claimed: true, task: res.task, claimed_actor },
+      data: { claimed: true, task: projectTaskForCaller(res.task, actor), claimed_actor },
       summary: `Claimed ${input.task_id} for ${actor} (lease until ${res.task.lease_until}).`,
-      audit: { after: res.task },
+      audit: { after: projectTaskForCaller(res.task, actor) },
     };
   }
   return { data: { claimed: false, conflict: res.conflict ?? false, reason: res.reason }, summary: `Not claimed: ${res.reason}` };

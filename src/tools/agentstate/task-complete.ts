@@ -4,7 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured } from '../../agentstate/store.js';
 import { completeTask } from '../../agentstate/ledger.js';
 import { resolveAttribution } from './attribution.js';
-import { taskVisibleToCaller } from './task-read-access.js';
+import { projectTaskForCaller, taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -54,9 +54,9 @@ export async function handleTaskComplete(
   );
   if (res.task) {
     return {
-      data: { completed: true, task: res.task, resolution: res.resolution, claimed_actor },
+      data: { completed: true, task: projectTaskForCaller(res.task, actor), resolution: res.resolution, claimed_actor },
       summary: `Completed ${input.task_id}. Artifact verified: ${input.artifact_uri}.`,
-      audit: { after: res.task },
+      audit: { after: projectTaskForCaller(res.task, actor) },
     };
   }
   return {

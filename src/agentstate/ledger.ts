@@ -62,6 +62,8 @@ export interface Task {
   tags: string[];
   artifact_uri: string | null;
   created_by: string;
+  /** Immutable content-reader grants set at creation. Owner reassignment never changes them. */
+  detail_readers?: string[];
   created_at: string;
   updated_at: string;
   claim_ts: string | null;
@@ -202,6 +204,7 @@ export async function createTask(input: {
     tags: input.tags ?? [],
     artifact_uri: null,
     created_by: input.created_by,
+    detail_readers: [...new Set([normalizeAgent(input.created_by), owner])],
     created_at: now,
     updated_at: now,
     claim_ts: null,

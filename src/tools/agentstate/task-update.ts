@@ -5,7 +5,7 @@ import { isConfigured } from '../../agentstate/store.js';
 import { updateTask } from '../../agentstate/ledger.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
 import { resolveAttribution } from './attribution.js';
-import { taskVisibleToCaller } from './task-read-access.js';
+import { projectTaskForCaller, taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -73,7 +73,7 @@ export async function handleTaskUpdate(
     claimed_actor,
     (task) => deps.taskVisibleToCaller(task, actor),
   );
-  if (res.task) return { data: { updated: true, task: res.task, claimed_actor }, summary: `Updated ${input.task_id}.`, audit: { after: res.task } };
+  if (res.task) return { data: { updated: true, task: projectTaskForCaller(res.task, actor), claimed_actor }, summary: `Updated ${input.task_id}.`, audit: { after: projectTaskForCaller(res.task, actor) } };
   return { data: { updated: false, fenced: res.fenced, reason: res.reason }, summary: `Not updated: ${res.reason}` };
 }
 

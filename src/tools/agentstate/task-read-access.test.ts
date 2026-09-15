@@ -15,6 +15,8 @@ const {
   canReadPersonalTasks,
   isPersonalTask,
   taskVisibleToCaller,
+  canReadTaskDetails,
+  projectTaskForCaller,
 } = await import('./task-read-access.js');
 
 function task(overrides: Record<string, unknown> = {}) {
@@ -30,6 +32,7 @@ function task(overrides: Record<string, unknown> = {}) {
     tags: [],
     artifact_uri: null,
     created_by: 'cfo',
+    detail_readers: ['cfo', 'developer'],
     created_at: '2026-09-08T00:00:00.000Z',
     updated_at: '2026-09-08T00:00:00.000Z',
     claim_ts: null,
@@ -52,7 +55,7 @@ test('existing personal-legal ring is the exact grant for personal tasks', () =>
   }
 });
 
-test('personal ownership or creation protects a task while ordinary company tasks remain shared', () => {
+test('personal ownership or creation protects task existence while company detail readers are immutable', () => {
   const ordinary = task({ owner_agent: 'coo', created_by: 'cfo' });
   const personalOwner = task({ owner_agent: 'clo-personal', created_by: 'cfo' });
   const personalCreator = task({ owner_agent: 'developer', created_by: 'clo-personal' });
@@ -60,6 +63,9 @@ test('personal ownership or creation protects a task while ordinary company task
   assert.equal(isPersonalTask(personalOwner), true);
   assert.equal(isPersonalTask(personalCreator), true);
   assert.equal(taskVisibleToCaller(ordinary, 'cro'), true);
+  assert.equal(canReadTaskDetails(ordinary, 'cfo'), true);
+  assert.equal(canReadTaskDetails(ordinary, 'developer'), true);
+  assert.equal(canReadTaskDetails(ordinary, 'cro'), false);
   assert.equal(taskVisibleToCaller(personalOwner, 'cfo'), false);
   assert.equal(taskVisibleToCaller(personalCreator, 'clo'), false);
   assert.equal(taskVisibleToCaller(personalOwner, 'exec'), true);
@@ -108,6 +114,7 @@ test('task_list sends the exclusion to storage and post-filters a malformed adap
   );
   assert.deepEqual(seen, { status: 'open', limit: 1, exclude_personal_legal: true });
   assert.deepEqual((result.data as any).tasks.map((t: { id: string }) => t.id), ['t_ordinary']);
+  assert.equal((result.data as any).tasks[0].description, 'Synthetic description');
   assert.equal((result.data as any).count, 1);
 });
 
@@ -130,6 +137,9 @@ test('task_list lets personal-ring callers retain personal and ordinary tasks', 
   );
   assert.deepEqual(seen, { exclude_personal_legal: false });
   assert.equal((result.data as any).count, 2);
+  const ordinary = (result.data as any).tasks.find((row: { id: string }) => row.id === 't_ordinary');
+  assert.equal(ordinary.description, undefined);
+  assert.equal(ordinary.title, undefined);
 });
 
 test('task_get denies a personal task before event fetch with the exact missing envelope', async () => {
@@ -158,7 +168,7 @@ test('task_get denies a personal task before event fetch with the exact missing 
   assert.equal(eventCalls, 0);
 });
 
-test('task_get preserves cross-company reads and personal-ring access', async () => {
+test('task_get limits cross-company reads to coordination metadata and no event fetch', async () => {
   let eventCalls = 0;
   const events = [{ kind: 'synthetic' }];
   const read = async (row: any, callerAgent: string) => handleTaskGet(
@@ -177,6 +187,19 @@ test('task_get preserves cross-company reads and personal-ring access', async ()
   const ordinary = await read(task({ id: 't_cross', owner_agent: 'coo', created_by: 'cfo' }), 'cro');
   const personal = await read(task({ id: 't_private', owner_agent: 'clo-personal' }), 'clo-personal');
   assert.equal((ordinary.data as any).found, true);
+  assert.equal((ordinary.data as any).task.description, undefined);
+  assert.deepEqual((ordinary.data as any).events, []);
   assert.equal((personal.data as any).found, true);
-  assert.equal(eventCalls, 2);
+  assert.equal(eventCalls, 1);
+});
+
+
+test('legacy company tasks expose status only outside their immutable creator grant', () => {
+  const legacy = task({ detail_readers: undefined, created_by: 'cfo', owner_agent: 'developer' });
+  assert.equal(canReadTaskDetails(legacy, 'cfo'), true);
+  assert.equal(canReadTaskDetails(legacy, 'developer'), false);
+  const projected = projectTaskForCaller(legacy, 'developer') as any;
+  assert.equal(projected.description, undefined);
+  assert.equal(projected.notes, undefined);
+  assert.equal(projected.created_by, undefined);
 });
