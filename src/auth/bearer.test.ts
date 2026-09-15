@@ -17,6 +17,7 @@ const M365_CTO_TOKEN = 'm'.repeat(40);
 // Deliberately a DIFFERENT string from M365_CTO_TOKEN: the Codex tests prove the two families are
 // independent (neither accepts the other's value) and that CODEX_* is its own variable.
 const CODEX_CTO_TOKEN = 'codex-cto-static-' + 'k'.repeat(40);
+const CODEX_CLO_PERSONAL_TOKEN = 'codex-clo-personal-static-' + 'p'.repeat(40);
 const CODEX_WEFUNDER_TOKEN = 'synthetic-wefunder-' + 'w'.repeat(40);
 const EVAL_TOKEN = 'e'.repeat(40);
 
@@ -41,6 +42,7 @@ before(() => {
     // PERPLEXITY_CONNECTOR_TOKEN (the exact bug this token was added to stop recurring).
     EVAL_AGENT_TOKEN: EVAL_TOKEN,
     CODEX_CTO_MCP_TOKEN: CODEX_CTO_TOKEN,
+    CODEX_CLO_PERSONAL_MCP_TOKEN: CODEX_CLO_PERSONAL_TOKEN,
     CODEX_WEFUNDER_MCP_TOKEN: CODEX_WEFUNDER_TOKEN,
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
@@ -433,6 +435,17 @@ test('CODEX: a forged token and a too-short token are both rejected', async () =
     assert.equal(res.statusCode, 401, `must reject ${bad.length}-char forged/short token`);
   }
   await app.close();
+});
+
+test('Codex CLO Personal static token resolves only to the protected clo-personal lane', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  const ctx = await validateBearer(`Bearer ${CODEX_CLO_PERSONAL_TOKEN}`);
+  assert.ok(ctx);
+  assert.equal(ctx.caller_agent, 'clo-personal');
+  assert.equal(ctx.connector_surface, true);
+  assert.equal(ctx.m365_static_auth, false);
+  assert.notEqual(ctx.caller_agent, 'cto');
+  assert.notEqual(ctx.caller_agent, 'clo');
 });
 
 test('CODEX: dedicated WeFunder token binds only its curated principal and fails closed without revocation readiness', async () => {

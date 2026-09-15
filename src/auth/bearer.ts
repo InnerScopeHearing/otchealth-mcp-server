@@ -152,6 +152,7 @@ function codexStaticAgentTokens(): Record<string, string> {
     cto: env.CODEX_CTO_MCP_TOKEN,
     cfo: env.CODEX_CFO_MCP_TOKEN,
     clo: env.CODEX_CLO_MCP_TOKEN,
+    'clo-personal': env.CODEX_CLO_PERSONAL_MCP_TOKEN,
     coo: env.CODEX_COO_MCP_TOKEN,
     cro: env.CODEX_CRO_MCP_TOKEN,
     developer: env.CODEX_DEVELOPER_MCP_TOKEN,
