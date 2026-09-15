@@ -6,7 +6,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
-import { isLaneAllowed } from './search-privileged.js';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
 
 const REGION = 'us-east-1';
@@ -36,11 +35,20 @@ const inputShape = {
 };
 const inputSchema = z.object(inputShape).strict();
 
+/**
+ * The shared graph is physically shared, but its company-labelled corpus is an operational
+ * capability for the six company seats only. This must stay separate from the finance and
+ * company-legal dataroom rings: requiring membership in both of those rings accidentally denied
+ * CTO, COO, CRO, and Developer even when their request was explicitly company-scoped.
+ */
+export const COMPANY_GRAPH_RING = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer'] as const;
+/** Personal labels remain available only through the separate protected personal-legal seat. */
+export const PERSONAL_GRAPH_RING = ['clo-personal'] as const;
+
 export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
-  if (!isLaneAllowed('finance-cfo-source-docs', caller) || !isLaneAllowed('legal-company', caller)) return null;
-  const personalAllowed = isLaneAllowed('legal-personal', caller);
-  const scope = requested ?? (personalAllowed ? 'all' : 'company');
-  return scope !== 'company' && !personalAllowed ? null : scope;
+  if ((PERSONAL_GRAPH_RING as readonly string[]).includes(caller)) return requested ?? 'all';
+  if (!(COMPANY_GRAPH_RING as readonly string[]).includes(caller)) return null;
+  return requested === undefined || requested === 'company' ? 'company' : null;
 }
 
 function outcome(mode: string, error?: string): ToolResultPayload {

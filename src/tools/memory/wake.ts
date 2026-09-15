@@ -573,6 +573,23 @@ export async function readWakeTasks(
   return { configured: true, active, counts };
 }
 
+const PERSONAL_WAKE_LANE = 'clo-personal';
+const PERSONAL_PROVENANCE_FIELDS = ['agent', 'by', 'from', 'sender_agent', 'owner_agent', 'created_by'] as const;
+
+/**
+ * The company wake surface must never carry a record attributed to the protected personal-legal
+ * lane. Apply this to every wake section because shared-feed entries, inbox messages, and legacy
+ * state records use different provenance field names. Missing or unrelated provenance is retained;
+ * only the exact normalized protected lane is removed. The protected lane itself keeps its own
+ * records unchanged.
+ */
+export function wakeRecordVisibleToAgent(record: Record<string, unknown>, agent: string): boolean {
+  if (canReadPersonalTasks(agent)) return true;
+  return !PERSONAL_PROVENANCE_FIELDS.some((field) =>
+    typeof record[field] === 'string' && record[field].trim().toLowerCase() === PERSONAL_WAKE_LANE,
+  );
+}
+
 export function registerWake(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -653,7 +670,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
 
         const packP = (async () => {
           if (!sharedConfigured()) return { configured: false, status: null, corrections: [], decisions: [], recent: [], count: 0 };
-          const mine = (await sharedFeedP).filter((r) => r.agent === agent); // newest-first
+          const mine = (await sharedFeedP).filter((r) => r.agent === agent && wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent)); // newest-first
           const status = mine.find((r) => r.type === 'status') ?? null;
           const corrections = collapseSuperseded(mine.filter((r) => r.type === 'correction')).slice(0, 8);
           const decisions = mine.filter((r) => r.type === 'decision').slice(0, 8);
@@ -680,7 +697,9 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         const memP = (async () => {
           if (!cosmosConfigured()) return { configured: false, records: [] as Record<string, unknown>[] };
           const records = await searchMemory({ agent, limit: memoryFetchLimit });
-          return { configured: true, records: records.map((r) => capText(r as unknown as Record<string, unknown>)) };
+          return { configured: true, records: records
+            .filter((r) => wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent))
+            .map((r) => capText(r as unknown as Record<string, unknown>)) };
         })();
 
         const tasksP = (async () => {
@@ -691,21 +710,23 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         const inboxP = (async () => {
           if (!inboxConfigured()) return { configured: false, count: 0, preview: [] as unknown[] };
           const msgs = await readMessages(agent, { max: 8, ack: false }); // PEEK — wake never drains
-          return { configured: true, count: msgs.length, preview: msgs.slice(0, 5).map((m) => capText(m as unknown as Record<string, unknown>, 400)) };
+          const visible = msgs.filter((m) => wakeRecordVisibleToAgent(m as unknown as Record<string, unknown>, agent));
+          return { configured: true, count: visible.length, preview: visible.slice(0, 5).map((m) => capText(m as unknown as Record<string, unknown>, 400)) };
         })();
 
         const inboundP = (async () => {
           if (!sharedConfigured()) return { configured: false, count: 0, sinceMarker: '', notes: [] as unknown[] };
           const marker = await readReconcileMarker(agent);
           const notes = await readInbound(agent, marker);
-          return { configured: true, count: notes.length, sinceMarker: marker, notes: notes.map((n) => capText(n as unknown as Record<string, unknown>)) };
+          const visible = notes.filter((n) => wakeRecordVisibleToAgent(n as unknown as Record<string, unknown>, agent));
+          return { configured: true, count: visible.length, sinceMarker: marker, notes: visible.map((n) => capText(n as unknown as Record<string, unknown>)) };
         })();
 
         // Doctrine pitfalls (shared-feed half): the shared feed's own type='pitfall' rows,
         // superseded-collapsed with the same helper wake already uses for corrections. Reuses
         // sharedFeedP above — no extra network fetch.
         const doctrinePitfallsSharedP = (async () => {
-          const mine = (await sharedFeedP).filter((r) => r.agent === agent);
+          const mine = (await sharedFeedP).filter((r) => r.agent === agent && wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent));
           return collapseSuperseded(mine.filter((r) => r.type === 'pitfall'));
         })();
 
@@ -780,7 +801,8 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         let rawMine: Record<string, unknown>[] | undefined;
         if (brief && sharedConfigured()) {
           try {
-            rawMine = (await sharedFeedP).filter((r) => r.agent === agent) as unknown as Record<string, unknown>[];
+            rawMine = (await sharedFeedP)
+              .filter((r) => r.agent === agent && wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent)) as unknown as Record<string, unknown>[];
           } catch (e) {
             errors.push(`brief_raw_feed: ${e instanceof Error ? e.message : String(e)}`);
           }

@@ -325,6 +325,8 @@ const CONNECTOR_SEAT_MEMORY_BASELINE: readonly string[] = [
  */
 export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  // Read-only GraphRAG handler separately constrains this lane to source_group=company.
+  'brain_graph_search',
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
   // Existing broker handlers enforce source assignment, owner identity, ring, and write budget.
   'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
@@ -389,6 +391,8 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  */
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  // Read-only GraphRAG handler separately constrains this lane to source_group=company.
+  'brain_graph_search',
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
   // Match the existing broker surface without widening any source assignment or ring grant.
   'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',

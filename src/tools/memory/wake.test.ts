@@ -6,6 +6,7 @@ import {
   buildDoctrinePitfalls,
   DEFINITION_OF_DONE,
   STANDING_DIRECTIVES,
+  wakeRecordVisibleToAgent,
 } from './wake.js';
 import type { MemoryEntry } from '../../memory/store.js';
 
@@ -47,6 +48,14 @@ test('capText leaves short text and non-string text untouched', () => {
   assert.deepEqual(capText(short, 900), short);
   const noText = { id: 'n', v: 1 };
   assert.deepEqual(capText(noText as unknown as Record<string, unknown>, 900), noText);
+});
+
+test('company wake removes every protected personal-lane provenance shape while preserving company records', () => {
+  for (const field of ['agent', 'by', 'from', 'sender_agent', 'owner_agent', 'created_by']) {
+    assert.equal(wakeRecordVisibleToAgent({ [field]: ' CLO-PERSONAL ' }, 'clo'), false, field);
+  }
+  assert.equal(wakeRecordVisibleToAgent({ agent: 'clo', by: 'cto' }, 'clo'), true);
+  assert.equal(wakeRecordVisibleToAgent({ by: 'clo-personal' }, 'clo-personal'), true);
 });
 
 // --- supersedes is now a REAL field (fix 2026-07-13) -------------------------------------------
