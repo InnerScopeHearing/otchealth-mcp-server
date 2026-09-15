@@ -99,6 +99,9 @@ const EnvSchema = z.object({
   CODEX_CTO_MCP_TOKEN: z.string().optional().default(''),
   CODEX_CFO_MCP_TOKEN: z.string().optional().default(''),
   CODEX_CLO_MCP_TOKEN: z.string().optional().default(''),
+  // Protected personal-legal Codex seat. This is deliberately distinct from the company CLO
+  // credential and is provisioned only through the protected AWS delivery path.
+  CODEX_CLO_PERSONAL_MCP_TOKEN: z.string().optional().default(''),
   CODEX_COO_MCP_TOKEN: z.string().optional().default(''),
   CODEX_CRO_MCP_TOKEN: z.string().optional().default(''),
   CODEX_DEVELOPER_MCP_TOKEN: z.string().optional().default(''),

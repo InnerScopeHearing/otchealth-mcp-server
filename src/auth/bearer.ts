@@ -152,11 +152,48 @@ function codexStaticAgentTokens(): Record<string, string> {
     cto: env.CODEX_CTO_MCP_TOKEN,
     cfo: env.CODEX_CFO_MCP_TOKEN,
     clo: env.CODEX_CLO_MCP_TOKEN,
+    'clo-personal': env.CODEX_CLO_PERSONAL_MCP_TOKEN,
     coo: env.CODEX_COO_MCP_TOKEN,
     cro: env.CODEX_CRO_MCP_TOKEN,
     developer: env.CODEX_DEVELOPER_MCP_TOKEN,
     'wefunder-campaign-director': env.CODEX_WEFUNDER_MCP_TOKEN,
   };
+}
+
+/** Resolve a Codex token only when exactly one configured seat owns it. */
+export function resolveCodexStaticAgent(
+  token: string,
+  configured: Record<string, string> = codexStaticAgentTokens(),
+): string | null {
+  const matches = Object.entries(configured).filter(
+    ([, value]) => value && value.length >= 32 && safeEqual(token, value),
+  );
+  return matches.length === 1 ? matches[0][0] : null;
+}
+
+type StaticCredentialKind = 'connector' | 'copilot' | 'eval' | 'copilot-dev' | 'm365' | 'codex';
+type StaticCredentialCandidate = { agent: string; kind: StaticCredentialKind; value: string };
+
+/** Fail closed when one opaque value is assigned to more than one static credential slot. */
+export function resolveUniqueStaticCredential(
+  token: string,
+  candidates: StaticCredentialCandidate[],
+): StaticCredentialCandidate | null {
+  const matches = candidates.filter(
+    ({ value }) => value && value.length >= 32 && safeEqual(token, value),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function staticCredentialCandidates(): StaticCredentialCandidate[] {
+  return [
+    { agent: env.OAUTH_DEFAULT_AGENT || '', kind: 'connector', value: env.PERPLEXITY_CONNECTOR_TOKEN },
+    { agent: 'copilot-agent', kind: 'copilot', value: env.COPILOT_AGENT_TOKEN },
+    { agent: 'copilot-agent', kind: 'eval', value: env.EVAL_AGENT_TOKEN },
+    { agent: 'developer', kind: 'copilot-dev', value: env.COPILOT_DEV_AGENT_TOKEN },
+    ...Object.entries(m365StaticAgentTokens()).map(([agent, value]) => ({ agent, kind: 'm365' as const, value })),
+    ...Object.entries(codexStaticAgentTokens()).map(([agent, value]) => ({ agent, kind: 'codex' as const, value })),
+  ];
 }
 
 /**
@@ -205,44 +242,11 @@ export async function validateBearer(
       descopeAgent = await agentFromDescopeToken(token);
     }
     if (!descopeAgent) {
-      if (safeEqual(token, env.PERPLEXITY_CONNECTOR_TOKEN)) {
-        staticAgent = env.OAUTH_DEFAULT_AGENT || '';
-      } else if (env.COPILOT_AGENT_TOKEN && env.COPILOT_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_AGENT_TOKEN)) {
-        // Deliberately low-privilege: 'copilot-agent' is NOT cfo/clo/clo-personal (no privileged RAG)
-        // and NOT cto (no GitHub writes / builds). It gets reads, commons RAG, llm_azure, guardrails.
-        staticAgent = 'copilot-agent';
-      } else if (env.EVAL_AGENT_TOKEN && env.EVAL_AGENT_TOKEN.length >= 32 && safeEqual(token, env.EVAL_AGENT_TOKEN)) {
-        // The scheduled eval harness (src/eval/eval-runner.mjs). Same low-priv lane as
-        // copilot-agent -- see EVAL_AGENT_TOKEN's own comment in config/env.ts for why this token
-        // exists as a dedicated credential rather than reusing PERPLEXITY_CONNECTOR_TOKEN.
-        staticAgent = 'copilot-agent';
-      } else if (env.COPILOT_DEV_AGENT_TOKEN && env.COPILOT_DEV_AGENT_TOKEN.length >= 32 && safeEqual(token, env.COPILOT_DEV_AGENT_TOKEN)) {
-        // 'otchealth-dev' (.github-private/agents/otchealth-dev.agent.md) -- a user-invocable
-        // GitHub Copilot custom agent with a real app-build job, a different trust profile than
-        // the autonomous issue-assignment coding agent above. Maps to caller_agent='developer',
-        // the SAME lane the Hyperagent "OTCHealth Gateway (Developer)" skill and
-        // M365_DEVELOPER_MCP_TOKEN already reach -- this widens WHICH FRONT DOOR can reach that
-        // lane, not what the lane itself can do.
-        staticAgent = 'developer';
-      } else {
-        const m365Hit = Object.entries(m365StaticAgentTokens()).find(
-          ([, v]) => v && v.length >= 32 && safeEqual(token, v),
-        );
-        if (m365Hit) {
-          staticAgent = m365Hit[0];
-          isM365Static = true;
-        } else {
-          const codexHit = Object.entries(codexStaticAgentTokens()).find(
-            ([, v]) => v && v.length >= 32 && safeEqual(token, v),
-          );
-          if (codexHit) {
-            staticAgent = codexHit[0];
-            isCodexStatic = true;
-          } else {
-            return null;
-          }
-        }
-      }
+      const match = resolveUniqueStaticCredential(token, staticCredentialCandidates());
+      if (!match) return null;
+      staticAgent = match.agent;
+      isM365Static = match.kind === 'm365';
+      isCodexStatic = match.kind === 'codex';
     }
   }
   if (staticAgent !== null && !staticTokenReady()) {
