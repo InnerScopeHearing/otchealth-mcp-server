@@ -12,12 +12,11 @@ const MAX_BYTES = 512 * 1024;
 const SHA = /^[a-f0-9]{64}$/;
 const MATTER = /^personal-(?:civil|divorce)-[a-z0-9-]{3,64}$/;
 const PAIR_QUERY = `
-MATCH (left:PersonalLegalEntity {matter_sha256: $matter_sha256, entity_id: $left_entity_id})
+MATCH (left:PersonalLegalEntity {matter_sha256: $matter_sha256, entity_sha256: $left_entity_id})
       -[edge:SOURCE_EVIDENCED {matter_sha256: $matter_sha256}]->
-      (right:PersonalLegalEntity {matter_sha256: $matter_sha256, entity_id: $right_entity_id})
-RETURN edge.edge_id AS edge_id, edge.predicate AS predicate,
-       edge.document_id AS document_id, edge.source_id AS source_id,
-       edge.source_sha256 AS source_sha256, edge.text_sha256 AS text_sha256,
+      (right:PersonalLegalEntity {matter_sha256: $matter_sha256, entity_sha256: $right_entity_id})
+RETURN edge.edge_id AS edge_id, edge.predicate_sha256 AS predicate_sha256,
+       edge.document_sha256 AS document_sha256, edge.source_sha256 AS source_sha256,
        edge.anchor_sha256 AS anchor_sha256, edge.locator_sha256 AS locator_sha256,
        edge.status AS status, edge.reviewer_sha256 AS reviewer_sha256
 ORDER BY edge.edge_id
@@ -64,10 +63,10 @@ async function readBounded(response: Response): Promise<unknown> {
 function validEdge(row: unknown): row is Record<string, string> {
   if (!row || typeof row !== 'object') return false;
   const value = row as Record<string, unknown>;
-  const strings = ['edge_id', 'predicate', 'document_id', 'source_id', 'source_sha256', 'text_sha256', 'anchor_sha256', 'locator_sha256', 'status', 'reviewer_sha256'];
+  const strings = ['edge_id', 'predicate_sha256', 'document_sha256', 'source_sha256', 'anchor_sha256', 'locator_sha256', 'status', 'reviewer_sha256'];
   return strings.every((key) => typeof value[key] === 'string' && value[key] !== '')
-    && SHA.test(String(value.source_id)) && SHA.test(String(value.source_sha256))
-    && SHA.test(String(value.text_sha256)) && SHA.test(String(value.anchor_sha256))
+    && SHA.test(String(value.predicate_sha256)) && SHA.test(String(value.document_sha256))
+    && SHA.test(String(value.source_sha256)) && SHA.test(String(value.anchor_sha256))
     && SHA.test(String(value.locator_sha256)) && SHA.test(String(value.reviewer_sha256));
 }
 
@@ -114,7 +113,7 @@ export function registerPersonalGraphQuery(server: McpServer, callerHash: Caller
     name: 'personal_graph_query', category: 'read',
     annotations: {
       title: 'Query protected personal legal graph edges',
-      description: 'CLO Personal only. Proves or disproves one exact X-to-Y-to-Z traversal inside one mandatory matter. Inputs are matter-scoped opaque entity hashes, never names or source text. Returns explicit edges with source, version, anchor, locator, review, and edge provenance. Does not infer a direct X-to-Z legal relationship.',
+      description: 'CLO Personal only. Proves or disproves one exact X-to-Y-to-Z traversal inside one mandatory matter. Inputs and returned provenance are opaque hashes, never names, source text, predicate text, or document identifiers. Does not infer a direct X-to-Z legal relationship.',
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
     },
     inputShape,
