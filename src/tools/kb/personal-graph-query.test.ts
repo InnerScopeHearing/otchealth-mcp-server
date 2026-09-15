@@ -29,6 +29,7 @@ test('returns three separately proven exact pairs with provenance', async () => 
     assert.equal(body.parameters.matter_sha256, createHash('sha256').update(matter, 'utf8').digest('hex'));
     assert.equal(body.query.includes(body.parameters.left_entity_id), false);
     assert.match(body.query, /entity_sha256: \$left_entity_id/);
+    assert.match(body.query, /status: 'reviewed'/);
   }
 });
 
@@ -45,4 +46,13 @@ test('invalid matter and malformed provider provenance fail closed', async () =>
   const h = harness([[{ ...edge, source_sha256: 'bad' }], [], []]);
   assert.equal((await handlePersonalGraphQuery({ matter_id: '../other', x_entity_id: x, y_entity_id: y, z_entity_id: z }, ctx('clo-personal'), h.deps) as any).data.error, 'invalid_input');
   assert.equal((await handlePersonalGraphQuery({ matter_id: matter, x_entity_id: x, y_entity_id: y, z_entity_id: z }, ctx('clo-personal'), h.deps) as any).data.error, 'neptune_query_failed');
+});
+
+test('pending and rejected graph edges can never satisfy a traversal', async () => {
+  for (const status of ['pending', 'rejected']) {
+    const h = harness([[{ ...edge, status }], [edge], []]);
+    const result: any = await handlePersonalGraphQuery({ matter_id: matter, x_entity_id: x, y_entity_id: y, z_entity_id: z }, ctx('clo-personal'), h.deps);
+    assert.equal(result.data.complete_chain, false, status);
+    assert.equal(result.data.error, 'neptune_query_failed', status);
+  }
 });

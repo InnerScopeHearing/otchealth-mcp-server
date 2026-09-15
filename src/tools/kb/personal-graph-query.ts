@@ -13,7 +13,7 @@ const SHA = /^[a-f0-9]{64}$/;
 const MATTER = /^personal-(?:civil|divorce)-[a-z0-9-]{3,64}$/;
 const PAIR_QUERY = `
 MATCH (left:PersonalLegalEntity {matter_sha256: $matter_sha256, entity_sha256: $left_entity_id})
-      -[edge:SOURCE_EVIDENCED {matter_sha256: $matter_sha256}]->
+      -[edge:SOURCE_EVIDENCED {matter_sha256: $matter_sha256, status: 'reviewed'}]->
       (right:PersonalLegalEntity {matter_sha256: $matter_sha256, entity_sha256: $right_entity_id})
 RETURN edge.edge_id AS edge_id, edge.predicate_sha256 AS predicate_sha256,
        edge.document_sha256 AS document_sha256, edge.source_sha256 AS source_sha256,
@@ -67,7 +67,8 @@ function validEdge(row: unknown): row is Record<string, string> {
   return strings.every((key) => typeof value[key] === 'string' && value[key] !== '')
     && SHA.test(String(value.predicate_sha256)) && SHA.test(String(value.document_sha256))
     && SHA.test(String(value.source_sha256)) && SHA.test(String(value.anchor_sha256))
-    && SHA.test(String(value.locator_sha256)) && SHA.test(String(value.reviewer_sha256));
+    && SHA.test(String(value.locator_sha256)) && SHA.test(String(value.reviewer_sha256))
+    && value.status === 'reviewed';
 }
 
 function hashMatterId(matterId: string): string {
