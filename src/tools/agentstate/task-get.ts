@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
 import { getTask, listEvents, type Task } from '../../agentstate/ledger.js';
-import { taskVisibleToCaller } from './task-read-access.js';
+import { canReadTaskDetails, projectTaskForCaller, taskVisibleToCaller } from './task-read-access.js';
 
 export interface TaskGetInput {
   task_id: string;
@@ -40,11 +40,11 @@ export async function handleTaskGet(
   // partition is never touched.
   if (!task || !taskVisibleToCaller(task, ctx.callerAgent)) return notFound(input.task_id);
 
-  const events = input.include_events === false ? [] : await deps.listEvents(input.task_id);
+  const hasDetails = canReadTaskDetails(task, ctx.callerAgent);
+  const events = hasDetails && input.include_events !== false ? await deps.listEvents(input.task_id) : [];
   return {
-    data: { found: true, task, events },
-    summary: 'Task ' + input.task_id + ' [' + task.status + '] owned by ' +
-      task.owner_agent + ', ' + String(events.length) + ' event(s).',
+    data: { found: true, task: projectTaskForCaller(task, ctx.callerAgent), events },
+    summary: 'Task ' + input.task_id + ' [' + task.status + '] owned by ' + task.owner_agent + ', ' + String(events.length) + ' event(s).' + (hasDetails ? '' : ' Cross-seat coordination metadata only.'),
   };
 }
 
@@ -57,7 +57,7 @@ export function registerTaskGet(server: McpServer, callerHash: CallerHashProvide
       annotations: {
         title: 'Get a work-ledger task + its history',
         description:
-          'Fetch one task by id, including its full transition history (the events log). Use to reconstruct exactly what happened to a task. Personal-legal tasks remain limited to the existing personal-legal ring.',
+          'Fetch one task by id, including its full transition history (the events log). Use to reconstruct exactly what happened to a task. Personal-legal tasks remain limited to the existing personal-legal ring. Cross-seat company callers receive coordination metadata and no event history.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

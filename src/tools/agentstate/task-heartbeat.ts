@@ -4,7 +4,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isConfigured } from '../../agentstate/store.js';
 import { heartbeatTask } from '../../agentstate/ledger.js';
 import { resolveAttribution } from './attribution.js';
-import { taskVisibleToCaller } from './task-read-access.js';
+import { projectTaskForCaller, taskVisibleToCaller } from './task-read-access.js';
 
 /**
  * ATTRIBUTION (FND-20260829-878f, see attribution.ts's module doc comment for the full triage):
@@ -52,9 +52,9 @@ export async function handleTaskHeartbeat(
   );
   if (res.task) {
     return {
-      data: { extended: true, task: res.task, claimed_actor },
+      data: { extended: true, task: projectTaskForCaller(res.task, actor), claimed_actor },
       summary: `Lease on ${input.task_id} extended to ${res.task.lease_until}.`,
-      audit: { after: res.task },
+      audit: { after: projectTaskForCaller(res.task, actor) },
     };
   }
   return { data: { extended: false, fenced: res.fenced, reason: res.reason }, summary: `Not extended: ${res.reason}` };
