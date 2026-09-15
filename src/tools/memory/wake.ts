@@ -593,16 +593,58 @@ export function wakeRecordVisibleToAgent(record: Record<string, unknown>, agent:
 /** Final defense for full, brief, and M365 output shaping. Upstream readers filter at their source,
  * but every returned collection is checked again by structured provenance, never by scanning text. */
 export function filterWakeDataForAgent(full: WakeFullData): WakeFullData {
-  if (canReadPersonalTasks(full.agent)) return full;
+  if (canReadPersonalTasks(full.agent)) return filterSupersededWakeData(full);
   const visible = (records: Record<string, unknown>[]) => records.filter((record) => wakeRecordVisibleToAgent(record, full.agent));
   const status = full.pack.status && wakeRecordVisibleToAgent(full.pack.status, full.agent) ? full.pack.status : null;
-  return {
+  return filterSupersededWakeData({
     ...full,
     pack: { ...full.pack, status, corrections: visible(full.pack.corrections), decisions: visible(full.pack.decisions), recent: visible(full.pack.recent) },
     memory_records: visible(full.memory_records),
     tasks: { ...full.tasks, active: visible(full.tasks.active) },
     inbox: { ...full.inbox, preview: (full.inbox.preview as Record<string, unknown>[]).filter((record) => wakeRecordVisibleToAgent(record, full.agent)) },
     inbound: { ...full.inbound, notes: (full.inbound.notes as Record<string, unknown>[]).filter((record) => wakeRecordVisibleToAgent(record, full.agent)) },
+  });
+}
+
+/**
+ * Apply the memory_remember current-truth contract to a fully authorized wake payload. A
+ * correction's structured `supersedes` edge retires its target from every returned section; the
+ * correction itself and the historical storage record remain unchanged. This deliberately runs
+ * after provenance filtering, so only corrections already authorized for this caller can affect
+ * its view. It never inspects record text.
+ */
+export function filterSupersededWakeData(full: WakeFullData): WakeFullData {
+  const collections: Record<string, unknown>[][] = [
+    full.pack.corrections,
+    full.pack.decisions,
+    full.pack.recent,
+    full.memory_records,
+    full.tasks.active,
+    full.inbox.preview as Record<string, unknown>[],
+    full.inbound.notes as Record<string, unknown>[],
+  ];
+  const corrections = collections.flat().filter((record) => record['type'] === 'correction' || record['kind'] === 'correction');
+  const supersededIds = computeRetractedIds(corrections);
+  if (!supersededIds.size) return full;
+  const current = (record: Record<string, unknown>) => {
+    const id = record['id'];
+    return !(typeof id === 'string' && supersededIds.has(id));
+  };
+  const status = full.pack.status && current(full.pack.status) ? full.pack.status : null;
+  return {
+    ...full,
+    pack: {
+      ...full.pack,
+      status,
+      corrections: full.pack.corrections.filter(current),
+      decisions: full.pack.decisions.filter(current),
+      recent: full.pack.recent.filter(current),
+    },
+    memory_records: full.memory_records.filter(current),
+    tasks: { ...full.tasks, active: full.tasks.active.filter(current) },
+    inbox: { ...full.inbox, preview: (full.inbox.preview as Record<string, unknown>[]).filter(current) },
+    inbound: { ...full.inbound, notes: (full.inbound.notes as Record<string, unknown>[]).filter(current) },
+    doctrine: { ...full.doctrine, pitfalls: full.doctrine.pitfalls.filter((pitfall) => !supersededIds.has(pitfall.id)) },
   };
 }
 
@@ -630,7 +672,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           .boolean()
           .optional()
           .describe(
-            'If true, return only current-truth entries (retracted/superseded entries filtered out across every section), hard-capped for size, with ids for drill-down. Defaults to false (unchanged full behavior). Use on a long-lived session whose wake payload is JIT-offloading. NO EFFECT for an M365 static-auth caller -- the M365-lite response-size ceiling always takes priority over this flag for that platform (see the M365-lite behavior above).',
+            'If true, return the hard-capped brief current-truth working set with ids for drill-down. Full, brief, and M365 responses all exclude superseded entries; brief additionally applies size caps. Use on a long-lived session whose wake payload is JIT-offloading. NO EFFECT for an M365 static-auth caller -- the M365-lite response-size ceiling always takes priority over this flag for that platform (see the M365-lite behavior above).',
           ),
       },
       outputShape: {
