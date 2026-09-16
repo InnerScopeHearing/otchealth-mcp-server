@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isLaneAllowed } from './search-privileged.js';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
+import { createGraphCitationReceiptResolver } from './graph-citation-receipts.js';
 
 const REGION = 'us-east-1';
 const SOURCE_ROOT = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
@@ -25,7 +26,7 @@ const MIN_RETRIEVAL_SCORE = 0.2;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
 type Scope = SourceGroup | 'all';
 type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string; require_documentary_bridge?: boolean };
-type Config = { enabled: boolean; kbId: string };
+type Config = { enabled: boolean; kbId: string; citationMappings?: readonly unknown[] };
 type Deps = { config(): Config; credentials(): Promise<AwsCredentials | null>; fetch: typeof fetch };
 const SHA256 = /^[a-f0-9]{64}$/;
 type BridgeSource = {
@@ -38,7 +39,14 @@ type BridgeSource = {
 };
 type Candidate = Record<string, unknown> & { bridge_source?: BridgeSource };
 const DEFAULTS: Deps = {
-  config: () => ({ enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '' }),
+  config: () => {
+    let citationMappings: readonly unknown[] = [];
+    try {
+      const parsed: unknown = JSON.parse(process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_JSON ?? '[]');
+      if (Array.isArray(parsed)) citationMappings = parsed;
+    } catch { /* Invalid operator configuration must resolve no citations. */ }
+    return { enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '', citationMappings };
+  },
   credentials: resolveAwsCredentials,
   fetch: (...args) => fetch(...args),
 };
@@ -168,6 +176,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   const credentials = await deps.credentials();
   if (!credentials) return outcome('unavailable', 'credentials_unavailable', requireDocumentaryBridge);
   const top = parsed.data.top ?? 5;
+  const resolveCitation = createGraphCitationReceiptResolver(config.citationMappings ?? []);
   const requestedSources = parsed.data.source_ids ? new Set(parsed.data.source_ids) : undefined;
   const sourceFilter = requestedSources ? { in: { key: 'source_id', value: [...requestedSources] } } : undefined;
   const groupFilter = { equals: { key: 'source_group', value: scope } };
@@ -240,7 +249,12 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       return false;
     });
     const bridge = requireDocumentaryBridge ? documentaryBridge(matches) : undefined;
-    const returnedMatches = matches.map(({ bridge_source: _bridgeSource, ...match }, index) => ({ citation: `graph:${index + 1}`, ...match }));
+    const returnedMatches = matches.map(({ bridge_source: _bridgeSource, ...match }, index) => {
+      const canonicalId = typeof match.source_id === 'string' ? match.source_id : '';
+      const sourceVersion = typeof match.source_version === 'string' ? match.source_version : '';
+      const citation_resolution = resolveCitation({ caller_agent: ctx.callerAgent, canonical_id: canonicalId, source_version: sourceVersion });
+      return { citation: `graph:${index + 1}`, ...match, citation_resolution };
+    });
     return {
       data: { mode: 'aws-managed-graphrag', scope, matches: returnedMatches, count: returnedMatches.length, withheld_count: withheld, quality_withheld_count: qualityWithheld, relevance_withheld_count: relevanceWithheld, duplicate_withheld_count: duplicateWithheld, answer_generated: false, ...(bridge ? { documentary_bridge: bridge } : {}), ...(parsed.data.matter_id ? { matter_id: parsed.data.matter_id, matter_filter_applied: true } : {}), ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
       summary: `${returnedMatches.length} source-cited GraphRAG passages. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,

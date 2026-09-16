@@ -158,6 +158,19 @@ test('known source IDs narrow company retrieval and locally reject upstream filt
   assert.equal(r.data.more_results_available, true);
 });
 
+test('GraphRAG citations carry only a canonical source-resolution receipt when an authorized mapping is current', async () => {
+  const h = harness();
+  const source = 'c'.repeat(64);
+  h.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [{
+    canonical_id: 'a'.repeat(64), source_version: `sha256:${source}`, source_group: 'company', source_sha256: source,
+    source_locator_sha256: 'd'.repeat(64), provenance_receipt_sha256: 'e'.repeat(64),
+  }] });
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic' }, ctx('cfo'), h.deps);
+  assert.equal(result.data.matches[0].citation_resolution.status, 'resolved');
+  assert.deepEqual(Object.keys(result.data.matches[0].citation_resolution.receipt).sort(), ['canonical_id', 'provenance_receipt_sha256', 'receipt_id', 'schema', 'source_group', 'source_locator_sha256', 'source_sha256', 'source_version']);
+  assert.equal(JSON.stringify(result.data.matches[0].citation_resolution).includes('test.txt'), false);
+});
+
 test('source-ID narrowing preserves personal scope rules and cannot admit a forbidden caller', async () => {
   const ids = ['a'.repeat(64), 'c'.repeat(64)];
   const h = harness();
