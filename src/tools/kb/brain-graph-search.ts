@@ -11,15 +11,19 @@ import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../s
 
 const REGION = 'us-east-1';
 const SOURCE_ROOT = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
-const SOURCE_PREFIXES: Record<'company' | 'personal', readonly string[]> = {
+type SourceGroup = 'company' | 'company_shared' | 'personal';
+const SOURCE_PREFIXES: Record<SourceGroup, readonly string[]> = {
   company: [`${SOURCE_ROOT}company/`, `${SOURCE_ROOT}company-priority/`, `${SOURCE_ROOT}company-capacity/`],
+  // CTO receives only the deliberately materialized shared projection. It must
+  // never fall through to the broader company prefixes above.
+  company_shared: [`${SOURCE_ROOT}company_shared/`],
   personal: [`${SOURCE_ROOT}personal/`],
 };
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
 const MIN_RETRIEVAL_SCORE = 0.2;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
-type Scope = 'company' | 'personal' | 'all';
+type Scope = SourceGroup | 'all';
 type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string };
 type Config = { enabled: boolean; kbId: string };
 type Deps = { config(): Config; credentials(): Promise<AwsCredentials | null>; fetch: typeof fetch };
@@ -30,7 +34,7 @@ const DEFAULTS: Deps = {
 };
 const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
-  scope: z.enum(['company', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
+  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. CTO may request only the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
   top: z.number().int().min(1).max(8).optional(),
   source_ids: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(5)
     .refine((ids) => new Set(ids).size === ids.length, 'Source IDs must be unique')
@@ -41,9 +45,15 @@ const inputShape = {
 const inputSchema = z.object(inputShape).strict();
 
 export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
+  // The CTO is intentionally not in either privileged company ring. Its only
+  // GraphRAG route is the separate, ingestion-owned shared projection; omitted
+  // scope deliberately remains a refusal so clients cannot gain access by
+  // relying on a default.
+  if (caller === 'cto') return requested === 'company_shared' ? 'company_shared' : null;
   const personalAllowed = isLaneAllowed('legal-personal', caller);
   const scope = requested ?? (personalAllowed ? 'personal' : 'company');
   if (scope === 'all') return null;
+  if (scope === 'company_shared') return null;
   if (scope === 'personal') return personalAllowed ? scope : null;
   // The managed `company` label currently combines finance and company-legal material.
   // Until ingestion publishes a narrower, authenticated lane label, require the caller to
@@ -57,7 +67,7 @@ function outcome(mode: string, error?: string): ToolResultPayload {
   return { data: { mode, matches: [], count: 0, ...(error ? { error } : {}) }, summary: `Managed GraphRAG retrieval: ${mode}.` };
 }
 
-function isAllowedSourceUri(group: 'company' | 'personal', uri: string): boolean {
+function isAllowedSourceUri(group: SourceGroup, uri: string): boolean {
   return SOURCE_PREFIXES[group].some((prefix) => uri.startsWith(prefix)) && /\.txt$/.test(uri);
 }
 
@@ -110,7 +120,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   const scope = graphScopeFor(ctx.callerAgent, parsed.data.scope);
   if (!scope) return outcome('forbidden', 'forbidden_ring');
   if (scope === 'personal' && !parsed.data.matter_id) return outcome('invalid_request', 'matter_id_required');
-  if (scope === 'company' && parsed.data.matter_id) return outcome('invalid_request', 'matter_id_not_allowed');
+  if (scope !== 'personal' && parsed.data.matter_id) return outcome('invalid_request', 'matter_id_not_allowed');
   const config = deps.config();
   if (!config.enabled) return outcome('not_enabled');
   if (!/^[A-Za-z0-9]{10}$/.test(config.kbId)) return outcome('unconfigured', 'invalid_knowledge_base_configuration');
@@ -154,7 +164,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       const text = row?.content?.text;
       // Require both the owner-written label and the fixed ingestion location. No URL
       // from a model result is fetched, and arbitrary metadata is never copied onward.
-      if ((group !== 'company' && group !== 'personal') || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri(group, uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
+      if ((group !== 'company' && group !== 'company_shared' && group !== 'personal') || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri(group, uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
       const sourceId = row?.metadata?.source_id;
       const textHash = row?.metadata?.text_sha256;
       const matterId = row?.metadata?.matter_id;

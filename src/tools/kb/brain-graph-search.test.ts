@@ -26,11 +26,42 @@ test('coarse company graph access requires the executive ring, while personal gr
     assert.equal(graphScopeFor(caller, 'personal'), 'personal');
     assert.equal(graphScopeFor(caller, 'all'), null);
   }
+  assert.equal(graphScopeFor('cto'), null);
+  assert.equal(graphScopeFor('cto', 'company_shared'), 'company_shared');
+  for (const scope of ['company', 'personal', 'all'] as const) {
+    assert.equal(graphScopeFor('cto', scope), null, `cto/${scope}`);
+  }
   for (const caller of ['cto', 'coo', 'cro', 'developer', 'external', '']) {
     const h = harness(); h.deps.credentials = async () => { throw new Error('must not resolve'); };
     const result: any = await handleBrainGraphSearch({ query: 'X relates to Y' }, ctx(caller), h.deps);
     assert.equal(result.data.error, 'forbidden_ring'); assert.equal(h.calls.length, 0);
   }
+});
+
+test('CTO can retrieve only the separate company_shared projection', async () => {
+  const h = harness(() => Response.json({ retrievalResults: [
+    row('company_shared', root + 'company_shared/projection.txt'),
+    row('company', root + 'company/test.txt'),
+    row('company_shared', root + 'company/projection.txt'),
+  ] }));
+  const allowed: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), h.deps);
+  assert.equal(allowed.data.scope, 'company_shared');
+  assert.equal(allowed.data.count, 1);
+  assert.deepEqual(allowed.data.matches.map((match: any) => match.source_uri), [root + 'company_shared/projection.txt']);
+  assert.deepEqual(
+    JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
+    { equals: { key: 'source_group', value: 'company_shared' } },
+  );
+
+  const denied = harness();
+  let credentialCalls = 0;
+  denied.deps.credentials = async () => { credentialCalls++; return { accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }; };
+  for (const scope of [undefined, 'company', 'personal', 'all'] as const) {
+    const result: any = await handleBrainGraphSearch({ query: 'synthetic', ...(scope === undefined ? {} : { scope }) }, ctx('cto'), denied.deps);
+    assert.equal(result.data.error, 'forbidden_ring', `cto/${scope ?? 'omitted'}`);
+  }
+  assert.equal(denied.calls.length, 0);
+  assert.equal(credentialCalls, 0);
 });
 
 test('every executive company graph seat reaches only the company-labelled corpus', async () => {
