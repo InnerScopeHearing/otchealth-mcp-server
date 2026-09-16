@@ -325,6 +325,9 @@ const CONNECTOR_SEAT_MEMORY_BASELINE: readonly string[] = [
  */
 export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  // Keep the small read-only diagnostic reachable so the desktop connector can report
+  // its own caller and registry binding when its catalog looks stale or incomplete.
+  'catalog_probe',
   // Read-only GraphRAG handler separately constrains this lane to source_group=company.
   'brain_graph_search',
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
@@ -391,6 +394,8 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  */
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  // This diagnostic is intentionally safe on the constrained coordination surface.
+  'catalog_probe',
   // Read-only GraphRAG handler separately constrains this lane to source_group=company.
   'brain_graph_search',
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
