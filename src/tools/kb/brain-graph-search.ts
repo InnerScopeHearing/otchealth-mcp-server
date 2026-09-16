@@ -11,12 +11,15 @@ import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../s
 
 const REGION = 'us-east-1';
 const SOURCE_ROOT = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
-type SourceGroup = 'company' | 'company_shared' | 'personal';
+type SourceGroup = 'company' | 'company_shared' | 'operations' | 'revenue' | 'engineering' | 'personal';
 const SOURCE_PREFIXES: Record<SourceGroup, readonly string[]> = {
   company: [`${SOURCE_ROOT}company/`, `${SOURCE_ROOT}company-priority/`, `${SOURCE_ROOT}company-capacity/`],
   // CTO receives only the deliberately materialized shared projection. It must
   // never fall through to the broader company prefixes above.
   company_shared: [`${SOURCE_ROOT}company_shared/`],
+  operations: [`${SOURCE_ROOT}company/operations/`],
+  revenue: [`${SOURCE_ROOT}company/revenue/`],
+  engineering: [`${SOURCE_ROOT}company/engineering/`],
   personal: [`${SOURCE_ROOT}personal/`],
 };
 const MAX_BYTES = 512 * 1024;
@@ -34,7 +37,7 @@ const DEFAULTS: Deps = {
 };
 const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
-  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. CTO may request only the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
+  scope: z.enum(['company', 'company_shared', 'operations', 'revenue', 'engineering', 'personal', 'all']).optional().describe('Source label filter. CFO and company CLO default to company; COO, CRO, and Developer default to their own department label. CTO may request only company_shared. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
   top: z.number().int().min(1).max(8).optional(),
   source_ids: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(5)
     .refine((ids) => new Set(ids).size === ids.length, 'Source IDs must be unique')
@@ -50,6 +53,9 @@ export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
   // scope deliberately remains a refusal so clients cannot gain access by
   // relying on a default.
   if (caller === 'cto') return requested === 'company_shared' ? 'company_shared' : null;
+  const departmentScope: Record<string, Extract<SourceGroup, 'operations' | 'revenue' | 'engineering'>> = { coo: 'operations', cro: 'revenue', developer: 'engineering' };
+  const department = departmentScope[caller];
+  if (department) return requested === undefined || requested === department ? department : null;
   const personalAllowed = isLaneAllowed('legal-personal', caller);
   const scope = requested ?? (personalAllowed ? 'personal' : 'company');
   if (scope === 'all') return null;
@@ -164,7 +170,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       const text = row?.content?.text;
       // Require both the owner-written label and the fixed ingestion location. No URL
       // from a model result is fetched, and arbitrary metadata is never copied onward.
-      if ((group !== 'company' && group !== 'company_shared' && group !== 'personal') || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri(group, uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
+      if ((group !== 'company' && group !== 'company_shared' && group !== 'operations' && group !== 'revenue' && group !== 'engineering' && group !== 'personal') || (scope !== 'all' && group !== scope) || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri(group, uri) || typeof text !== 'string' || !text.trim()) { withheld++; continue; }
       const sourceId = row?.metadata?.source_id;
       const textHash = row?.metadata?.text_sha256;
       const matterId = row?.metadata?.matter_id;
