@@ -31,10 +31,36 @@ test('coarse company graph access requires the executive ring, while personal gr
   for (const scope of ['company', 'personal', 'all'] as const) {
     assert.equal(graphScopeFor('cto', scope), null, `cto/${scope}`);
   }
-  for (const caller of ['cto', 'coo', 'cro', 'developer', 'external', '']) {
+  for (const caller of ['cto', 'external', '']) {
     const h = harness(); h.deps.credentials = async () => { throw new Error('must not resolve'); };
     const result: any = await handleBrainGraphSearch({ query: 'X relates to Y' }, ctx(caller), h.deps);
     assert.equal(result.data.error, 'forbidden_ring'); assert.equal(h.calls.length, 0);
+  }
+});
+
+test('department seats retrieve only their own isolated source group', async () => {
+  const cases = [
+    ['coo', 'operations', root + 'company/operations/test.txt'],
+    ['cro', 'revenue', root + 'company/revenue/test.txt'],
+    ['developer', 'engineering', root + 'company/engineering/test.txt'],
+  ] as const;
+  for (const [caller, scope, uri] of cases) {
+    assert.equal(graphScopeFor(caller), scope, caller);
+    assert.equal(graphScopeFor(caller, scope), scope, caller);
+    assert.equal(graphScopeFor(caller, 'company'), null, caller);
+    assert.equal(graphScopeFor(caller, 'personal'), null, caller);
+    const h = harness(() => Response.json({ retrievalResults: [row(scope, uri)] }));
+    const allowed: any = await handleBrainGraphSearch({ query: 'synthetic' }, ctx(caller), h.deps);
+    assert.equal(allowed.data.scope, scope, caller);
+    assert.equal(allowed.data.count, 1, caller);
+    assert.deepEqual(
+      JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
+      { equals: { key: 'source_group', value: scope } },
+      caller,
+    );
+    const denied: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company' }, ctx(caller), h.deps);
+    assert.equal(denied.data.error, 'forbidden_ring', caller);
+    assert.equal(h.calls.length, 1, caller);
   }
 });
 
@@ -166,7 +192,7 @@ test('source-ID narrowing preserves personal scope rules and cannot admit a forb
     andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { equals: { key: 'matter_id', value: matter } }, { in: { key: 'source_id', value: ids } }],
   });
   for (const caller of ['cto', 'coo', 'cro', 'developer', 'external']) {
-    assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
+    assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'company' }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
   }
   assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'all' }, ctx('cfo'), h.deps) as any).data.error, 'forbidden_ring');
   assert.equal(h.calls.length, 1);
