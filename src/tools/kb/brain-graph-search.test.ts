@@ -192,7 +192,7 @@ test('source-ID narrowing preserves personal scope rules and cannot admit a forb
     andAll: [{ equals: { key: 'source_group', value: 'personal' } }, { equals: { key: 'matter_id', value: matter } }, { in: { key: 'source_id', value: ids } }],
   });
   for (const caller of ['cto', 'coo', 'cro', 'developer', 'external']) {
-    assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
+    assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'company' }, ctx(caller), h.deps) as any).data.error, 'forbidden_ring');
   }
   assert.equal((await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, scope: 'all' }, ctx('cfo'), h.deps) as any).data.error, 'forbidden_ring');
   assert.equal(h.calls.length, 1);
