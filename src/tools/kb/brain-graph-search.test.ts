@@ -232,3 +232,54 @@ test('large provider responses are rejected and returned passages remain bounded
   assert.equal(r.data.matches[0].text.length, 3000); assert.equal(r.data.matches[0].truncated, true);
   assert.equal(mayOffloadToolResult('brain_graph_search'), false);
 });
+
+test('documentary bridge is opt-in and requires two distinct immutable sources sharing reviewed hashes', async () => {
+  const attestation = 'd'.repeat(64);
+  const receipt = 'e'.repeat(64);
+  const first = row();
+  first.metadata = {
+    ...first.metadata,
+    document_name_sha256: '1'.repeat(64),
+    documentary_bridge_attestation_sha256: attestation,
+    provenance_receipt_sha256: receipt,
+  };
+  const second = row();
+  second.metadata = {
+    ...second.metadata,
+    source_id: '2'.repeat(64),
+    source_sha256: '3'.repeat(64),
+    source_version: 'sha256:' + '3'.repeat(64),
+    text_sha256: '4'.repeat(64),
+    document_name_sha256: '5'.repeat(64),
+    documentary_bridge_attestation_sha256: attestation,
+    provenance_receipt_sha256: receipt,
+  };
+  const h = harness(() => Response.json({ retrievalResults: [first, second] }));
+  const ordinary: any = await handleBrainGraphSearch({ query: 'synthetic' }, ctx('cfo'), h.deps);
+  assert.equal(ordinary.data.documentary_bridge, undefined);
+  const qualified: any = await handleBrainGraphSearch({ query: 'synthetic', require_documentary_bridge: true }, ctx('cfo'), h.deps);
+  assert.deepEqual(qualified.data.documentary_bridge, {
+    status: 'supported', qualifying_source_count: 2,
+    documentary_bridge_attestation_sha256: attestation,
+    provenance_receipt_sha256: receipt,
+  });
+  assert.equal(JSON.stringify(qualified.data.documentary_bridge).includes('test.txt'), false);
+});
+
+test('documentary bridge rejects aliases and does not call AWS for a forbidden scope', async () => {
+  const source = row();
+  source.metadata = {
+    ...source.metadata,
+    document_name_sha256: '1'.repeat(64),
+    documentary_bridge_attestation_sha256: '2'.repeat(64),
+    provenance_receipt_sha256: '3'.repeat(64),
+  };
+  const alias = { ...source, metadata: { ...source.metadata, text_sha256: '4'.repeat(64) } };
+  const h = harness(() => Response.json({ retrievalResults: [source, alias] }));
+  const unproven: any = await handleBrainGraphSearch({ query: 'synthetic', require_documentary_bridge: true }, ctx('cfo'), h.deps);
+  assert.deepEqual(unproven.data.documentary_bridge, { status: 'unproven' });
+  const denied: any = await handleBrainGraphSearch({ query: 'synthetic', require_documentary_bridge: true }, ctx('cto'), h.deps);
+  assert.equal(denied.data.error, 'forbidden_ring');
+  assert.deepEqual(denied.data.documentary_bridge, { status: 'unproven' });
+  assert.equal(h.calls.length, 1);
+});

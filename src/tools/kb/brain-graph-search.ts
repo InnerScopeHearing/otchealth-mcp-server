@@ -24,9 +24,19 @@ const MAX_HIT_CHARS = 3000;
 const MIN_RETRIEVAL_SCORE = 0.2;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
 type Scope = SourceGroup | 'all';
-type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string };
+type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string; require_documentary_bridge?: boolean };
 type Config = { enabled: boolean; kbId: string };
 type Deps = { config(): Config; credentials(): Promise<AwsCredentials | null>; fetch: typeof fetch };
+const SHA256 = /^[a-f0-9]{64}$/;
+type BridgeSource = {
+  source_id: string;
+  source_sha256: string;
+  source_version: string;
+  document_name_sha256: string;
+  documentary_bridge_attestation_sha256: string;
+  provenance_receipt_sha256: string;
+};
+type Candidate = Record<string, unknown> & { bridge_source?: BridgeSource };
 const DEFAULTS: Deps = {
   config: () => ({ enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '' }),
   credentials: resolveAwsCredentials,
@@ -41,6 +51,8 @@ const inputShape = {
     .optional().describe('Narrow retrieval to up to five known canonical document IDs within your authorized scope. Use to inspect a missing source; this does not establish relationship coverage.'),
   matter_id: z.string().regex(/^personal-(?:civil|divorce)-[a-z0-9-]{3,64}$/).optional()
     .describe('Required for every personal legal retrieval. Results are intersected with this exact protected matter ID.'),
+  require_documentary_bridge: z.boolean().optional()
+    .describe('When true, include a hash-only documentary bridge aggregate. It is supported only by two distinct immutable returned sources with matching bridge and provenance attestations.'),
 };
 const inputSchema = z.object(inputShape).strict();
 
@@ -63,8 +75,36 @@ export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
   return scope;
 }
 
-function outcome(mode: string, error?: string): ToolResultPayload {
-  return { data: { mode, matches: [], count: 0, ...(error ? { error } : {}) }, summary: `Managed GraphRAG retrieval: ${mode}.` };
+function documentaryBridge(records: Candidate[]): Record<string, unknown> {
+  const groups = new Map<string, BridgeSource[]>();
+  for (const record of records) {
+    const source = record.bridge_source;
+    if (!source) continue;
+    const key = `${source.documentary_bridge_attestation_sha256}:${source.provenance_receipt_sha256}`;
+    const group = groups.get(key);
+    if (group) group.push(source); else groups.set(key, [source]);
+  }
+  for (const sources of groups.values()) {
+    const sourceIds = new Set(sources.map((source) => source.source_id));
+    const sourceHashes = new Set(sources.map((source) => source.source_sha256));
+    const sourceVersions = new Set(sources.map((source) => source.source_version));
+    const documentNameHashes = new Set(sources.map((source) => source.document_name_sha256));
+    if (sourceIds.size < 2 || sourceHashes.size < 2 || sourceVersions.size < 2 || documentNameHashes.size < 2) continue;
+    const witness = sources.find((source) =>
+      [...sources].filter((other) => other.source_id !== source.source_id && other.source_sha256 !== source.source_sha256 && other.source_version !== source.source_version && other.document_name_sha256 !== source.document_name_sha256).length > 0,
+    );
+    if (!witness) continue;
+    return {
+      status: 'supported', qualifying_source_count: Math.min(sources.length, 8),
+      documentary_bridge_attestation_sha256: witness.documentary_bridge_attestation_sha256,
+      provenance_receipt_sha256: witness.provenance_receipt_sha256,
+    };
+  }
+  return { status: 'unproven' };
+}
+
+function outcome(mode: string, error?: string, requireDocumentaryBridge = false): ToolResultPayload {
+  return { data: { mode, matches: [], count: 0, ...(error ? { error } : {}), ...(requireDocumentaryBridge ? { documentary_bridge: { status: 'unproven' } } : {}) }, summary: `Managed GraphRAG retrieval: ${mode}.` };
 }
 
 function isAllowedSourceUri(group: SourceGroup, uri: string): boolean {
@@ -117,15 +157,16 @@ async function readBounded(response: Response): Promise<unknown> {
 export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, deps: Deps = DEFAULTS): Promise<ToolResultPayload> {
   const parsed = inputSchema.safeParse(input);
   if (!parsed.success) return outcome('invalid_request', 'invalid_input');
+  const requireDocumentaryBridge = parsed.data.require_documentary_bridge === true;
   const scope = graphScopeFor(ctx.callerAgent, parsed.data.scope);
-  if (!scope) return outcome('forbidden', 'forbidden_ring');
-  if (scope === 'personal' && !parsed.data.matter_id) return outcome('invalid_request', 'matter_id_required');
-  if (scope !== 'personal' && parsed.data.matter_id) return outcome('invalid_request', 'matter_id_not_allowed');
+  if (!scope) return outcome('forbidden', 'forbidden_ring', requireDocumentaryBridge);
+  if (scope === 'personal' && !parsed.data.matter_id) return outcome('invalid_request', 'matter_id_required', requireDocumentaryBridge);
+  if (scope !== 'personal' && parsed.data.matter_id) return outcome('invalid_request', 'matter_id_not_allowed', requireDocumentaryBridge);
   const config = deps.config();
-  if (!config.enabled) return outcome('not_enabled');
-  if (!/^[A-Za-z0-9]{10}$/.test(config.kbId)) return outcome('unconfigured', 'invalid_knowledge_base_configuration');
+  if (!config.enabled) return outcome('not_enabled', undefined, requireDocumentaryBridge);
+  if (!/^[A-Za-z0-9]{10}$/.test(config.kbId)) return outcome('unconfigured', 'invalid_knowledge_base_configuration', requireDocumentaryBridge);
   const credentials = await deps.credentials();
-  if (!credentials) return outcome('unavailable', 'credentials_unavailable');
+  if (!credentials) return outcome('unavailable', 'credentials_unavailable', requireDocumentaryBridge);
   const top = parsed.data.top ?? 5;
   const requestedSources = parsed.data.source_ids ? new Set(parsed.data.source_ids) : undefined;
   const sourceFilter = requestedSources ? { in: { key: 'source_id', value: [...requestedSources] } } : undefined;
@@ -154,7 +195,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
     const raw: any = await readBounded(response);
     if (raw?.guardrailAction === 'INTERVENED') return outcome('withheld', 'retrieval_intervened');
     if (!Array.isArray(raw?.retrievalResults) || raw.retrievalResults.length > 100) return outcome('unavailable', 'invalid_bedrock_response');
-    const candidates: Array<Record<string, unknown>> = [];
+    const candidates: Candidate[] = [];
     let withheld = 0;
     let qualityWithheld = 0;
     let relevanceWithheld = 0;
@@ -168,6 +209,11 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       const sourceId = row?.metadata?.source_id;
       const textHash = row?.metadata?.text_sha256;
       const matterId = row?.metadata?.matter_id;
+      const sourceHash = row?.metadata?.source_sha256;
+      const sourceVersion = row?.metadata?.source_version;
+      const documentNameHash = row?.metadata?.document_name_sha256;
+      const bridgeAttestationHash = row?.metadata?.documentary_bridge_attestation_sha256;
+      const provenanceReceiptHash = row?.metadata?.provenance_receipt_sha256;
       if (requestedSources && (typeof sourceId !== 'string' || !requestedSources.has(sourceId))) { withheld++; continue; }
       if (scope === 'personal' && matterId !== parsed.data.matter_id) { withheld++; continue; }
       if (!isCleanRetrievedText(text)) { qualityWithheld++; continue; }
@@ -175,11 +221,12 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       if (!requestedSources && (score === undefined || score < MIN_RETRIEVAL_SCORE || !hasMeaningfulOverlap(parsed.data.query, text))) { relevanceWithheld++; continue; }
       candidates.push({
         source_group: group, source_uri: uri,
-        ...(typeof sourceId === 'string' && /^[a-f0-9]{64}$/.test(sourceId) ? { source_id: sourceId } : {}),
-        ...(typeof textHash === 'string' && /^[a-f0-9]{64}$/.test(textHash) ? { text_sha256: textHash } : {}),
+        ...(typeof sourceId === 'string' && SHA256.test(sourceId) ? { source_id: sourceId } : {}),
+        ...(typeof textHash === 'string' && SHA256.test(textHash) ? { text_sha256: textHash } : {}),
         ...(typeof matterId === 'string' ? { matter_id: matterId } : {}),
         ...(typeof row?.metadata?.source_version === 'string' ? { source_version: row.metadata.source_version } : {}),
-        ...(typeof row?.metadata?.source_sha256 === 'string' && /^[a-f0-9]{64}$/.test(row.metadata.source_sha256) ? { source_sha256: row.metadata.source_sha256 } : {}),
+        ...(typeof sourceHash === 'string' && SHA256.test(sourceHash) ? { source_sha256: sourceHash } : {}),
+        ...(typeof sourceId === 'string' && SHA256.test(sourceId) && typeof sourceHash === 'string' && SHA256.test(sourceHash) && sourceVersion === `sha256:${sourceHash}` && typeof documentNameHash === 'string' && SHA256.test(documentNameHash) && typeof bridgeAttestationHash === 'string' && SHA256.test(bridgeAttestationHash) && typeof provenanceReceiptHash === 'string' && SHA256.test(provenanceReceiptHash) ? { bridge_source: { source_id: sourceId, source_sha256: sourceHash, source_version: sourceVersion, document_name_sha256: documentNameHash, documentary_bridge_attestation_sha256: bridgeAttestationHash, provenance_receipt_sha256: provenanceReceiptHash } } : {}),
         text: text.slice(0, MAX_HIT_CHARS), truncated: text.length > MAX_HIT_CHARS,
         ...(score !== undefined ? { retrieval_score: score } : {}),
       });
@@ -191,10 +238,12 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       if (!key || !seenText.has(key)) { if (key) seenText.add(key); return true; }
       duplicateWithheld++;
       return false;
-    }).map((match, index) => ({ citation: `graph:${index + 1}`, ...match }));
+    });
+    const bridge = requireDocumentaryBridge ? documentaryBridge(matches) : undefined;
+    const returnedMatches = matches.map(({ bridge_source: _bridgeSource, ...match }, index) => ({ citation: `graph:${index + 1}`, ...match }));
     return {
-      data: { mode: 'aws-managed-graphrag', scope, matches, count: matches.length, withheld_count: withheld, quality_withheld_count: qualityWithheld, relevance_withheld_count: relevanceWithheld, duplicate_withheld_count: duplicateWithheld, answer_generated: false, ...(parsed.data.matter_id ? { matter_id: parsed.data.matter_id, matter_filter_applied: true } : {}), ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
-      summary: `${matches.length} source-cited GraphRAG passages. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,
+      data: { mode: 'aws-managed-graphrag', scope, matches: returnedMatches, count: returnedMatches.length, withheld_count: withheld, quality_withheld_count: qualityWithheld, relevance_withheld_count: relevanceWithheld, duplicate_withheld_count: duplicateWithheld, answer_generated: false, ...(bridge ? { documentary_bridge: bridge } : {}), ...(parsed.data.matter_id ? { matter_id: parsed.data.matter_id, matter_filter_applied: true } : {}), ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
+      summary: `${returnedMatches.length} source-cited GraphRAG passages. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,
     };
   } catch { return outcome('unavailable', 'bedrock_retrieval_failed'); }
 }
@@ -208,8 +257,8 @@ export function registerBrainGraphSearch(server: McpServer, callerHash: CallerHa
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
     },
     inputShape,
-    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), matter_id: z.string().optional(), matter_filter_applied: z.boolean().optional(), withheld_count: z.number().optional(), quality_withheld_count: z.number().optional(), relevance_withheld_count: z.number().optional(), duplicate_withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional(), source_filter_applied: z.boolean().optional(), requested_source_count: z.number().optional() },
-    redactInputForLog: (input) => ({ query_redacted: true, scope: input.scope, matter_id: input.matter_id, top: input.top, ...(Array.isArray(input.source_ids) ? { source_id_count: input.source_ids.length } : {}) }),
+    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), matter_id: z.string().optional(), matter_filter_applied: z.boolean().optional(), withheld_count: z.number().optional(), quality_withheld_count: z.number().optional(), relevance_withheld_count: z.number().optional(), duplicate_withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional(), source_filter_applied: z.boolean().optional(), requested_source_count: z.number().optional(), documentary_bridge: z.object({ status: z.enum(['supported', 'unproven']), qualifying_source_count: z.number().optional(), documentary_bridge_attestation_sha256: z.string().optional(), provenance_receipt_sha256: z.string().optional() }).optional() },
+    redactInputForLog: (input) => ({ query_redacted: true, scope: input.scope, matter_id: input.matter_id, top: input.top, ...(input.require_documentary_bridge === true ? { require_documentary_bridge: true } : {}), ...(Array.isArray(input.source_ids) ? { source_id_count: input.source_ids.length } : {}) }),
     handler: (input, ctx) => handleBrainGraphSearch(input, ctx),
   }, callerHash);
 }
