@@ -248,6 +248,12 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       duplicateWithheld++;
       return false;
     });
+    const boundedReturnedSources = new Set<string>();
+    if (requestedSources) {
+      for (const match of matches) {
+        if (typeof match.source_id === 'string' && requestedSources.has(match.source_id)) boundedReturnedSources.add(match.source_id);
+      }
+    }
     const bridge = requireDocumentaryBridge ? documentaryBridge(matches) : undefined;
     const returnedMatches = matches.map(({ bridge_source: _bridgeSource, ...match }, index) => {
       const canonicalId = typeof match.source_id === 'string' ? match.source_id : '';
@@ -256,7 +262,9 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       return { citation: `graph:${index + 1}`, ...match, citation_resolution };
     });
     return {
-      data: { mode: 'aws-managed-graphrag', scope, matches: returnedMatches, count: returnedMatches.length, withheld_count: withheld, quality_withheld_count: qualityWithheld, relevance_withheld_count: relevanceWithheld, duplicate_withheld_count: duplicateWithheld, answer_generated: false, ...(bridge ? { documentary_bridge: bridge } : {}), ...(parsed.data.matter_id ? { matter_id: parsed.data.matter_id, matter_filter_applied: true } : {}), ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
+      // This describes only the bounded provider page. It does not establish index
+      // absence, graph traversal, or a relationship among the requested sources.
+      data: { mode: 'aws-managed-graphrag', scope, matches: returnedMatches, count: returnedMatches.length, withheld_count: withheld, quality_withheld_count: qualityWithheld, relevance_withheld_count: relevanceWithheld, duplicate_withheld_count: duplicateWithheld, answer_generated: false, ...(bridge ? { documentary_bridge: bridge } : {}), ...(parsed.data.matter_id ? { matter_id: parsed.data.matter_id, matter_filter_applied: true } : {}), ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size, bounded_returned_source_count: boundedReturnedSources.size, bounded_source_coverage_complete: boundedReturnedSources.size === requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
       summary: `${returnedMatches.length} source-cited GraphRAG passages. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,
     };
   } catch { return outcome('unavailable', 'bedrock_retrieval_failed'); }
@@ -271,7 +279,7 @@ export function registerBrainGraphSearch(server: McpServer, callerHash: CallerHa
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
     },
     inputShape,
-    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), matter_id: z.string().optional(), matter_filter_applied: z.boolean().optional(), withheld_count: z.number().optional(), quality_withheld_count: z.number().optional(), relevance_withheld_count: z.number().optional(), duplicate_withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional(), source_filter_applied: z.boolean().optional(), requested_source_count: z.number().optional(), documentary_bridge: z.object({ status: z.enum(['supported', 'unproven']), qualifying_source_count: z.number().optional(), documentary_bridge_attestation_sha256: z.string().optional(), provenance_receipt_sha256: z.string().optional() }).optional() },
+    outputShape: { mode: z.string(), matches: z.array(z.unknown()), count: z.number(), error: z.string().optional(), scope: z.string().optional(), matter_id: z.string().optional(), matter_filter_applied: z.boolean().optional(), withheld_count: z.number().optional(), quality_withheld_count: z.number().optional(), relevance_withheld_count: z.number().optional(), duplicate_withheld_count: z.number().optional(), answer_generated: z.boolean().optional(), more_results_available: z.boolean().optional(), source_filter_applied: z.boolean().optional(), requested_source_count: z.number().optional(), bounded_returned_source_count: z.number().optional(), bounded_source_coverage_complete: z.boolean().optional(), documentary_bridge: z.object({ status: z.enum(['supported', 'unproven']), qualifying_source_count: z.number().optional(), documentary_bridge_attestation_sha256: z.string().optional(), provenance_receipt_sha256: z.string().optional() }).optional() },
     redactInputForLog: (input) => ({ query_redacted: true, scope: input.scope, matter_id: input.matter_id, top: input.top, ...(input.require_documentary_bridge === true ? { require_documentary_bridge: true } : {}), ...(Array.isArray(input.source_ids) ? { source_id_count: input.source_ids.length } : {}) }),
     handler: (input, ctx) => handleBrainGraphSearch(input, ctx),
   }, callerHash);
