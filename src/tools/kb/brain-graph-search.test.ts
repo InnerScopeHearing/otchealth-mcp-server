@@ -155,7 +155,22 @@ test('known source IDs narrow company retrieval and locally reject upstream filt
   assert.equal(r.data.count, 1); assert.equal(r.data.withheld_count, 3);
   assert.equal(r.data.matches[0].source_id, target);
   assert.equal(r.data.source_filter_applied, true); assert.equal(r.data.requested_source_count, 1);
+  assert.equal(r.data.bounded_returned_source_count, 1);
+  assert.equal(r.data.bounded_source_coverage_complete, true);
   assert.equal(r.data.more_results_available, true);
+});
+
+test('bounded source coverage distinguishes an X to Y to Z request from repeated chunks of one source', async () => {
+  const ids = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
+  const x = row('company');
+  const xAgain = { ...row(), metadata: { ...row().metadata, source_id: ids[0] } };
+  const y = { ...row(), content: { text: 'Synthetic Organization Y assigned contract Z.' }, metadata: { ...row().metadata, source_id: ids[1], text_sha256: 'd'.repeat(64) } };
+  const h = harness(() => Response.json({ retrievalResults: [x, xAgain, y], nextToken: 'opaque' }));
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic', source_ids: ids, top: 3 }, ctx('cfo'), h.deps);
+  assert.equal(result.data.requested_source_count, 3);
+  assert.equal(result.data.bounded_returned_source_count, 2);
+  assert.equal(result.data.bounded_source_coverage_complete, false);
+  assert.equal(result.data.more_results_available, true);
 });
 
 test('GraphRAG citations carry only a canonical source-resolution receipt when an authorized mapping is current', async () => {
