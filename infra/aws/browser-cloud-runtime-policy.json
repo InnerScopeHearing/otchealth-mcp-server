@@ -1,0 +1,36 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudBrowserState",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+      "Resource": "arn:aws:dynamodb:us-east-1:900915535335:table/otchealth-browser-cloud"
+    },
+    {
+      "Sid": "CloudBrowserQueue",
+      "Effect": "Allow",
+      "Action": ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"],
+      "Resource": "arn:aws:sqs:us-east-1:900915535335:otchealth-browser-cloud"
+    },
+    {
+      "Sid": "CloudBrowserArtifacts",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": "arn:aws:s3:::otchealth-chat-agents-900915535335-us-east-1/browser-cloud/*"
+    },
+    {
+      "Sid": "CloudBrowserSessions",
+      "Effect": "Allow",
+      "Action": ["bedrock-agentcore:StartBrowserSession", "bedrock-agentcore:StopBrowserSession", "bedrock-agentcore:GetBrowserSession", "bedrock-agentcore:SaveBrowserSessionProfile"],
+      "Resource": ["arn:aws:bedrock-agentcore:us-east-1:aws:browser/aws.browser.v1", "arn:aws:bedrock-agentcore:us-east-1:900915535335:browser-profile/otchealth_cto_cloud-dVDhGycboH"]
+    },
+    {
+      "Sid": "CloudBrowserStream",
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:ConnectBrowserAutomationStream",
+      "Resource": "*",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
+    }
+  ]
+}
