@@ -364,6 +364,7 @@ test('DCR (PUBLIC) client is shown the consent interstitial instead of an auto-i
   assert.equal(res.statusCode === 302, false);
   assert.match(String(res.headers['content-type']), /text\/html/);
   assert.equal(res.headers['cache-control'], 'no-store');
+  assert.match(String(res.headers['content-security-policy']), /form-action 'self' https:\/\/claude\.ai;/);
   assert.match(res.payload, /A connector is requesting access to the OTCHealth gateway/);
   assert.match(res.payload, /name="action" value="readonly"/);
   assert.match(res.payload, /name="action" value="elevate"/);

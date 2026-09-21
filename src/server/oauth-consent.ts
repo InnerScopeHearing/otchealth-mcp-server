@@ -245,7 +245,7 @@ export type ResolveOutcome =
   /** `expiresAt` is the SAME pending record's own expiry (never re-read from storage, never
    *  extended by a wrong guess) -- carried here purely so the caller can re-render renderConsentPage's
    *  "valid until" line without a second storage read. It is NOT a new expiry for this retry. */
-  | { outcome: 'retry'; message: string; expiresAt: string }
+  | { outcome: 'retry'; message: string; expiresAt: string; redirectUri: string }
   | { outcome: 'burned' }
   | { outcome: 'store_error' };
 
@@ -332,7 +332,12 @@ export async function resolveElevateChoice(
     if (result.status === 404) return { outcome: 'burned' };
     if (!result.ok) return { outcome: 'store_error' };
     if (burned) return { outcome: 'burned' };
-    return { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt: found.doc.expiresAt };
+    return {
+      outcome: 'retry',
+      message: 'That code is invalid or has expired.',
+      expiresAt: found.doc.expiresAt,
+      redirectUri: found.doc.redirectUri,
+    };
   }
   return { outcome: 'store_error' };
 }
@@ -433,10 +438,20 @@ export function renderDeadEndPage(kind: 'expired' | 'server_error'): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTCHealth Gateway Connection</title><style>${PAGE_STYLE}</style></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main></body></html>`;
 }
 
-export function applyConsentPageHeaders(reply: FastifyReply): void {
+export function applyConsentPageHeaders(reply: FastifyReply, redirectUri?: string): void {
+  let redirectOrigin = '';
+  if (redirectUri) {
+    try {
+      const parsed = new URL(redirectUri);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') redirectOrigin = ` ${parsed.origin}`;
+    } catch {
+      // The OAuth route validates redirect_uri before rendering this page. Keep the restrictive
+      // self-only fallback if a future caller supplies an invalid value.
+    }
+  }
   reply.header(
     'content-security-policy',
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${redirectOrigin}; frame-ancestors 'none'; base-uri 'none'`,
   );
   reply.header('cache-control', 'no-store');
   reply.header('referrer-policy', 'no-referrer');

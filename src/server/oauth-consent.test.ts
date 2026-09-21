@@ -257,7 +257,12 @@ test('a wrong code returns "retry" and increments the pending record\'s attempt 
     consentDeps,
   );
   const outcome = await resolveElevateChoice(id, 'WRONG-CODE-AAAA-BBBB', consentDeps, setupDeps);
-  assert.deepEqual(outcome, { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt });
+  assert.deepEqual(outcome, {
+    outcome: 'retry',
+    message: 'That code is invalid or has expired.',
+    expiresAt,
+    redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+  });
   const doc = [...cache.store.values()].find((r) => (r.doc as PendingAuthDoc).kind === 'connector-pending-auth')!.doc as PendingAuthDoc;
   assert.equal(doc.attempts, 1);
   assert.equal(doc.burned, false);
@@ -277,7 +282,12 @@ test('BURN: after MAX_SETUP_CODE_ATTEMPTS wrong guesses the record is burned, an
     const outcome = await resolveElevateChoice(id, `WRONG-${i}-AAAA-BBBB`, consentDeps, setupDeps);
     assert.deepEqual(
       outcome,
-      { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt },
+      {
+        outcome: 'retry',
+        message: 'That code is invalid or has expired.',
+        expiresAt,
+        redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      },
       `attempt ${i} should still be a retry`,
     );
   }
@@ -360,7 +370,12 @@ test('two concurrent wrong-code submissions against the SAME pending id both cou
     resolveElevateChoice(id, 'WRONG-B-BBBB-BBBB', consentDeps, setupDeps),
   ]);
   for (const r of [r1, r2]) {
-    assert.deepEqual(r, { outcome: 'retry', message: 'That code is invalid or has expired.', expiresAt });
+    assert.deepEqual(r, {
+      outcome: 'retry',
+      message: 'That code is invalid or has expired.',
+      expiresAt,
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+    });
   }
   const doc = [...cache.store.values()].find((r) => (r.doc as PendingAuthDoc).kind === 'connector-pending-auth')!.doc as PendingAuthDoc;
   assert.equal(doc.attempts, 2, 'both concurrent wrong guesses must be counted, not collapsed into one');
@@ -506,7 +521,28 @@ test('applyConsentPageHeaders sets the expected no-store / CSP / frame headers',
   assert.equal(asMap['x-content-type-options'], 'nosniff');
   assert.equal(asMap['referrer-policy'], 'no-referrer');
   assert.match(asMap['content-security-policy'], /default-src 'none'/);
+  assert.match(asMap['content-security-policy'], /form-action 'self'/);
   assert.equal(typeCall, 'text/html; charset=utf-8');
+});
+
+test('applyConsentPageHeaders permits only the validated OAuth callback origin for form redirects', () => {
+  const calls: Array<[string, string]> = [];
+  const fakeReply = {
+    header: (name: string, value: string) => {
+      calls.push([name, value]);
+      return fakeReply;
+    },
+    type: () => fakeReply,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+
+  applyConsentPageHeaders(
+    fakeReply,
+    'https://chatgpt.com/connector/oauth/example?state=not-part-of-the-csp',
+  );
+  const csp = Object.fromEntries(calls)['content-security-policy'];
+  assert.match(csp, /form-action 'self' https:\/\/chatgpt\.com;/);
+  assert.doesNotMatch(csp, /connector\/oauth|state=/);
 });
 
 test('buildAuthorizeRedirectUrl appends code and, when present, state', () => {
