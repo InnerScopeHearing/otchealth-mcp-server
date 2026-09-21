@@ -27,6 +27,8 @@ After acceptance, release through the standard build workflow and ECS revision u
 
 Each agent requires its own owned profile and a test from its actual Chat or other supported MCP connection. Seeing tools in a catalog is not evidence of browser access. A passing root or task-role test is not evidence of Chat client acceptance. Human sign-in and any website challenges must use the provider's supported interactive session.
 
+For an ordinary company Chat lane, the CTO first calls `browser_cloud_profile_provision_public_trial` for that exact lane and its reviewed public host list. It creates the deterministic non-persistent ID `<lane>-public-trial`. The receiving lane calls `browser_cloud_profile_discover`, which returns only its own ID and host policy, then supplies that ID to `browser_cloud_session_start`. Discovery never lists other owners. Provisioning accepts only `cto`, `cfo`, `clo`, `coo`, `cro`, `developer`, and `wefunder-campaign-director`; `clo-personal` remains excluded.
+
 Acceptance requires: discover tools, start owned session, navigate, read, perform an authorized reversible edit, verify saved state, retrieve a job artifact, reconnect and retrieve the result again, and confirm another seat cannot use the session or artifact. Do not mark a seat ready until these receipts exist.
 
 ## Limits and remaining scope

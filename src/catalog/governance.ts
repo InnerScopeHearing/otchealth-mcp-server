@@ -15,6 +15,7 @@ export interface GovRule {
 }
 
 export const GOVERNANCE: GovRule[] = [
+  { pattern: 'browser_cloud_profile_provision_public_trial', requiredRole: 'cto', reason: 'Provisioning an owner-bound cloud-browser profile is CTO-only infrastructure administration.' },
   // Customer.io administrative control plane. CRO can read and dry-run every bounded wrapper; live
   // configuration writes are additionally restricted in-handler to cto/exec and require an owner
   // approval reference. This central rule duplicates the fixed in-handler lane model for visibility.

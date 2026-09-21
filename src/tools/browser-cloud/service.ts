@@ -7,6 +7,24 @@ import {
 
 function validHost(host: string): boolean { return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host); }
 
+/**
+ * These are the ordinary company Chat lanes that may receive an isolated public
+ * trial profile. The protected personal-legal lane is deliberately absent.
+ */
+export const CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS = [
+  'cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director',
+] as const;
+
+export type CloudBrowserPublicTrialOwner = (typeof CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS)[number];
+
+export function publicTrialProfileId(owner: CloudBrowserPublicTrialOwner): string {
+  return `${owner}-public-trial`;
+}
+
+function isPublicTrialOwner(owner: string): owner is CloudBrowserPublicTrialOwner {
+  return (CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(owner);
+}
+
 function assertProfile(profile: CloudBrowserProfile): void {
   if (!/^[a-z0-9][a-z0-9_-]{2,63}$/i.test(profile.profileId) || !/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(profile.owner)) throw new CloudBrowserError('invalid_profile', 'Profile identity is invalid.');
   if (profile.allowedHosts.length === 0 || profile.allowedHosts.length > 24 || profile.allowedHosts.some((host) => !validHost(host))) throw new CloudBrowserError('invalid_profile', 'Profile hosts are invalid.');
@@ -46,6 +64,31 @@ export class CloudBrowserService {
     const profile = await this.store.loadProfile(profileId);
     if (!profile || profile.owner !== caller) throw new CloudBrowserError('owner_forbidden', 'Profile is unavailable to this caller.');
     return profile;
+  }
+
+  /**
+   * Returns the one deterministic profile name a Chat lane may use. This avoids
+   * profile-ID guessing while never enumerating another lane's profiles.
+   */
+  async publicTrialProfile(caller: string): Promise<Pick<CloudBrowserProfile, 'profileId' | 'allowedHosts' | 'persistent'>> {
+    if (!isPublicTrialOwner(caller)) throw new CloudBrowserError('profile_not_enrolled', 'This caller has no cloud-browser public trial profile.');
+    const profile = await this.loadProfile(caller, publicTrialProfileId(caller));
+    return { profileId: profile.profileId, allowedHosts: profile.allowedHosts, persistent: profile.persistent };
+  }
+
+  /**
+   * CTO provisions a public, non-persistent profile for one ordinary Chat lane.
+   * The target owner is fixed from the allowlist and can never be the protected
+   * personal-legal lane. Existing profiles retain their original owner because
+   * the store's conditional write rejects ownership changes.
+   */
+  async provisionPublicTrialProfile(caller: string, owner: string, allowedHosts: readonly string[]): Promise<Pick<CloudBrowserProfile, 'profileId' | 'owner' | 'allowedHosts' | 'persistent'>> {
+    if (caller !== 'cto') throw new CloudBrowserError('provisioner_forbidden', 'Only the CTO lane may provision a public trial profile.');
+    if (!isPublicTrialOwner(owner)) throw new CloudBrowserError('profile_owner_not_allowed', 'The requested profile owner is not eligible for a public trial profile.');
+    const profile: CloudBrowserProfile = { profileId: publicTrialProfileId(owner), owner, allowedHosts, persistent: false };
+    assertProfile(profile);
+    await this.store.saveProfile({ ...profile, allowedHosts: [...new Set(profile.allowedHosts.map((host) => host.toLowerCase()))] });
+    return { profileId: profile.profileId, owner: profile.owner, allowedHosts: profile.allowedHosts.map((host) => host.toLowerCase()), persistent: false };
   }
 
   async start(caller: string, profileId: string, maxSeconds: number): Promise<{ sessionId: string; expiresAt: number }> {
