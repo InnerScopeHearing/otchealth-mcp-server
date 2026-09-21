@@ -118,9 +118,13 @@ export class CloudBrowserJobs {
     const hit = await this.required(jobId);
     const job = clone(hit.value); const now = this.now();
     if (job.agent !== agent) throw new BrowserJobError('job_owner_mismatch');
-    if (job.status === 'cancelled' || job.status === 'succeeded' || job.status === 'failed') throw new BrowserJobError('job_terminal');
-    if (job.externalEffect === 'unknown') throw new BrowserJobError('effect_reconciliation_required');
+    if (job.status === 'cancelled' || job.status === 'succeeded' || job.status === 'failed' || job.status === 'needs_reconciliation') throw new BrowserJobError('job_terminal');
     if (job.leaseUntil && Date.parse(job.leaseUntil) > now) throw new BrowserJobError('lease_held');
+    if (job.externalEffect === 'unknown') {
+      job.status = 'needs_reconciliation'; job.errorCode = 'effect_reconciliation_required'; job.leaseOwner = null; job.leaseUntil = null;
+      job.updatedAt = new Date(now).toISOString(); await this.replace(job, hit.version);
+      throw new BrowserJobError('effect_reconciliation_required');
+    }
     job.status = job.cancellationRequestedAt ? 'cancelling' : 'running'; job.leaseOwner = agent; job.leaseUntil = new Date(now + leaseMs).toISOString(); job.leaseToken++; job.attempts++; job.updatedAt = new Date(now).toISOString();
     await this.replace(job, hit.version); return job;
   }
@@ -155,6 +159,15 @@ export class CloudBrowserJobs {
     const hit = await this.required(jobId); const job = clone(hit.value); if (job.agent !== agent) throw new BrowserJobError('job_owner_mismatch');
     if (job.actionEffects[step] !== 'unknown') throw new BrowserJobError('effect_not_uncertain');
     job.actionEffects[step] = state; job.externalEffect = Object.values(job.actionEffects).includes('unknown') ? 'unknown' : state; job.status = state === 'failed' ? 'failed' : 'queued'; job.leaseOwner = null; job.leaseUntil = null; job.errorCode = state === 'failed' ? 'external_effect_failed' : null; job.updatedAt = new Date(this.now()).toISOString(); await this.replace(job, hit.version); return job;
+  }
+
+  /** Fence an expired worker into a durable terminal reconciliation state before its queue message is removed. */
+  async markNeedsReconciliation(jobId: string, agent: string, token: number, reason: string): Promise<BrowserJob> {
+    const hit = await this.required(jobId); const job = clone(hit.value);
+    if (job.agent !== agent) throw new BrowserJobError('job_owner_mismatch');
+    if (job.leaseToken !== token || job.leaseOwner !== agent) throw new BrowserJobError('stale_lease');
+    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'needs_reconciliation') return job;
+    job.status = 'needs_reconciliation'; job.leaseOwner = null; job.leaseUntil = null; job.errorCode = reason; job.updatedAt = new Date(this.now()).toISOString(); await this.replace(job, hit.version); return job;
   }
 
   async complete(jobId: string, agent: string, token: number): Promise<BrowserJob> { return this.finish(jobId, agent, token, 'succeeded', null); }

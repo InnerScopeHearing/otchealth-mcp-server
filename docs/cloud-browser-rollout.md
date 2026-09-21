@@ -34,3 +34,6 @@ Acceptance requires: discover tools, start owned session, navigate, read, perfor
 This initial provider supports bounded navigate/click/type/wait/observation operations. It is not yet full desktop control. File upload/download, image screenshots, a user-facing sign-in/live-view flow, broader background plans, and Daytona transport require separate implementation and acceptance. The existing Daytona Linux desktop trial does not prove Chat MCP integration. No 64 GiB Windows desktop or vendor capacity request is part of this rollout.
 
 Runtime limits are 180 seconds per session, 20 actions and 10 sessions per owner per UTC day. These are initial trial limits, not a promise of unlimited access or an account-wide dollar cap. Monitor actual gross AWS usage before increasing them. Disable the worker and browser feature flags to stop new dispatch, reconcile active sessions, and restore the prior ECS task definition if acceptance fails.
+
+Trial budget note: the ten daily session slots count start attempts, including provider failures. Reservation occurs before the provider call so concurrent attempts cannot bypass the cost bound. This is an attempt limit, not a guarantee of ten successful sessions. Durable job errors after possible external effects are recorded as needs_reconciliation before queue acknowledgement; pre-effect expiry retains its delivery for retry.
+
