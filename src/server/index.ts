@@ -4,6 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import { publicErrorResponse } from './public-error-response.js';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
+import { runCloudBrowserPolling } from './cloud-browser-runtime.js';
 import { registerHealth } from './health.js';
 import { registerAdmin } from './admin.js';
 import { registerMcpRoutes } from './mcp.js';
@@ -178,7 +179,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const stopCloudBrowserPolling = runCloudBrowserPolling();
   const shutdown = async (signal: string): Promise<void> => {
+    stopCloudBrowserPolling();
     logger.info({ signal }, 'shutdown signal received');
     try {
       await app.close();
