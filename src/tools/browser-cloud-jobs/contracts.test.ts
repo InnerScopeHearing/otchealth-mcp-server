@@ -30,6 +30,11 @@ test('uncertain external effects require reconciliation and are never automatica
   h.tick(1_001); await assert.rejects(h.api.claim(job.id, 'cto', 1_000), /effect_reconciliation_required/); await assert.rejects(h.api.complete(job.id, 'cto', run.leaseToken), /lease_expired/);
   const reconciled = await h.api.reconcileExternalEffect(job.id, 'cto', 'not_started'); assert.equal(reconciled.status, 'queued');
 });
+test('heartbeat reloads cancellation written after a claim', async () => {
+  const h = harness(); const { job } = await h.api.submit({ agent: 'cto', idempotencyKey: 'cancel:001', request: {} }); const run = await h.api.claim(job.id, 'cto', 1_000);
+  await h.api.requestCancellation(job.id, 'cto'); const current = await h.api.heartbeat(job.id, 'cto', run.leaseToken, 1_000);
+  assert.notEqual(current.cancellationRequestedAt, null); assert.equal(current.status, 'cancelling');
+});
 test('artifact metadata is agent/job scoped and completed jobs require a current lease', async () => {
   const h = harness(); const { job } = await h.api.submit({ agent: 'cto', idempotencyKey: 'artifact:001', request: {} }); const run = await h.api.claim(job.id, 'cto', 1_000); const body = Buffer.from('synthetic receipt'); const artifact = await h.api.attachArtifact(job.id, 'cto', run.leaseToken, body, 'text/plain', sha(body));
   assert.match(artifact.storageKey, new RegExp(`^browser-cloud/cto/${job.id}/artifacts/`)); assert.equal((await h.api.complete(job.id, 'cto', run.leaseToken)).status, 'succeeded');

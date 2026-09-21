@@ -32,12 +32,12 @@ function ddb(config: Required<AwsBrowserJobsConfig>, deps: AwsBrowserJobsDeps) {
     const signed = signer({ method: 'POST', host, path: '/', region: config.region, service: 'dynamodb', credentials: creds, body, extraHeaders: { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': `DynamoDB_20120810.${target}` } });
     const response = await fetcher(`https://${host}/`, { method: 'POST', headers: signed.headers, body, redirect: 'error', signal: AbortSignal.timeout(10_000) });
     const responseText = await response.text(); if (responseText.length > 1_000_000) throw new Error('browser_cloud_ddb_response_too_large');
-    if (!response.ok) { let kind = ''; try { kind = String((JSON.parse(responseText) as { __type?: unknown }).__type ?? ''); } catch {} throw new Error(`browser_cloud_ddb_${response.status}_${kind}`); }
+    if (!response.ok) { let kind = ''; let conditionalOnly = false; try { const parsed = JSON.parse(responseText) as { __type?: unknown; CancellationReasons?: Array<{ Code?: unknown }> }; kind = String(parsed.__type ?? ''); const reasons = parsed.CancellationReasons; conditionalOnly = kind.includes('TransactionCanceledException') && Array.isArray(reasons) && reasons.some(reason => reason.Code === 'ConditionalCheckFailed') && reasons.every(reason => reason.Code === undefined || reason.Code === 'None' || reason.Code === 'ConditionalCheckFailed'); } catch {} throw new Error(`browser_cloud_ddb_${response.status}_${kind}${conditionalOnly ? ':conditional' : ''}`); }
     return responseText ? JSON.parse(responseText) as Record<string, unknown> : {};
   };
 }
 
-/** Dynamo layout: job item PK=JOB#id/SK=JOB, idempotency item PK=IDEM#agent#sha/SK=JOB. Provision TTL on expiresAtEpoch. */
+/** Dynamo layout: job item PK=JOB#id, idempotency item PK=IDEM#agent#sha. Provision TTL on expiresAtEpoch. */
 export function createDynamoBrowserJobStore(configInput: AwsBrowserJobsConfig = {}, deps: AwsBrowserJobsDeps = {}): CloudBrowserJobStore {
   const config = checked(configInput); const request = ddb(config, deps);
   const read = async (pk: string): Promise<{ job: BrowserJob; version: string } | null> => {
@@ -48,7 +48,7 @@ export function createDynamoBrowserJobStore(configInput: AwsBrowserJobsConfig = 
     async createIfAbsent(job) {
       const version = '1'; const jobItem = { pk: text(key(job)), job: attrs(job), version: text(version), expiresAtEpoch: { N: String(Math.floor(Date.parse(job.createdAt) / 1000) + 30 * 86400) } };
       const indexItem = { pk: text(idemKey(job.agent, job.idempotencyDigest)), job: attrs(job), version: text(version), expiresAtEpoch: { N: String(Math.floor(Date.parse(job.createdAt) / 1000) + 30 * 86400) } };
-      try { await request('TransactWriteItems', { TransactItems: [{ Put: { TableName: config.table, Item: jobItem, ConditionExpression: 'attribute_not_exists(pk)' } }, { Put: { TableName: config.table, Item: indexItem, ConditionExpression: 'attribute_not_exists(pk)' } }] }); return 'created'; } catch (error) { if (String(error).includes('TransactionCanceledException') || String(error).includes('ConditionalCheckFailedException')) return 'exists'; throw error; }
+      try { await request('TransactWriteItems', { ReturnCancellationReasons: true, TransactItems: [{ Put: { TableName: config.table, Item: jobItem, ConditionExpression: 'attribute_not_exists(pk)' } }, { Put: { TableName: config.table, Item: indexItem, ConditionExpression: 'attribute_not_exists(pk)' } }] }); return 'created'; } catch (error) { if (String(error).includes(':conditional') || String(error).includes('ConditionalCheckFailedException')) return 'exists'; throw error; }
     },
     async readById(id) { const hit = await read(`JOB#${id}`); return hit && { value: hit.job, version: hit.version }; },
     async readByIdempotency(agent, digest) { const hit = await read(idemKey(agent, digest)); return hit && { value: hit.job, version: hit.version }; },

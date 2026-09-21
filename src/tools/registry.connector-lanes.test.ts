@@ -28,6 +28,9 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
+const CLOUD_BROWSER_TOOLS = ['browser_cloud_session_start', 'browser_cloud_session_action',
+  'browser_cloud_session_snapshot', 'browser_cloud_profile_save', 'browser_cloud_session_stop',
+  'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get'];
 function testEnv(): Env {
   return loadEnv();
 }
@@ -44,7 +47,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, 'hyperagent_discover_capabilities'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, 'hyperagent_discover_capabilities'].sort());
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
   assert.ok(set.has('brain_graph_search'), 'CTO connector must expose company-scoped GraphRAG');
@@ -125,7 +128,7 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
 
 test('(b) developer lane gets the full ship-lane set', () => {
   const set = connectorToolset(testEnv(), 'developer');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.ok(set.has('brain_graph_search'));
 });
 
@@ -133,14 +136,14 @@ test('(c) every EXEC_RING lane gets the full ship-lane set', () => {
   const env = testEnv();
   for (const lane of EXEC_RING) {
     const set = connectorToolset(env, lane);
-    assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET].sort(), `${lane} should get the ship set`);
+    assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...(['cfo', 'clo'].includes(lane) ? CLOUD_BROWSER_TOOLS : [])].sort(), `${lane} should get the ship set`);
     assert.ok(set.has('brain_graph_search'), `${lane} should expose GraphRAG`);
   }
 });
 
 test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus external reads', () => {
   const set = connectorToolset(testEnv(), 'cro');
-  assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET].sort());
+  assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   for (const required of [
     'heygen_account_get', 'heygen_avatar_groups_list', 'heygen_avatar_look_get',
     'heygen_avatar_video_create', 'heygen_owner_approval_status_get',
@@ -153,9 +156,9 @@ test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus extern
   ]) assert.equal(set.has(forbidden), false, `cro connector must not expose ${forbidden}`);
 });
 
-test('(e) Wefunder Campaign Director gets exact-source migration tools without private-data or browser-write grants', () => {
+test('(e) Wefunder Campaign Director gets exact-source migration tools with owner-bound cloud browsing and without private-data grants', () => {
   const set = connectorToolset(testEnv(), 'wefunder-campaign-director');
-  assert.deepEqual([...set].sort(), [...WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET].sort());
+  assert.deepEqual([...set].sort(), [...WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.ok(set.has('browser_broker_preflight'));
   assert.ok(set.has('browser_broker_inspect_public'));
   for (const required of ['catalog_probe', 'hyperagent_list_agents', 'hyperagent_list_threads',
@@ -254,7 +257,7 @@ test('cfo connector keeps its bounded relationship query through ship-set curati
 
 test('coo lane: seat-memory + ledger coordination, and nothing privileged', () => {
   const set = connectorToolset(testEnv(), 'coo');
-  assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET].sort());
+  assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_update', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
@@ -265,7 +268,7 @@ test('coo lane: seat-memory + ledger coordination, and nothing privileged', () =
 
 test('cro lane: commerce curation present, engineering/legal/finance/privileged absent, destructive commerce absent', () => {
   const set = connectorToolset(testEnv(), 'cro');
-  assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET].sort());
+  assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list']) {
     assert.ok(set.has(needed), `cro connector must advertise ${needed} (its charter names this family)`);
   }

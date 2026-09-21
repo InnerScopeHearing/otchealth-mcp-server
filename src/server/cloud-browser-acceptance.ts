@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { cloudBrowserRuntime } from './cloud-browser-runtime.js';
 import { startCloudBrowserWorker } from '../tools/browser-cloud-gateway/index.js';
 
@@ -27,7 +27,15 @@ async function main(): Promise<void> {
   await worker.pollOnce(1);
   const result = await runtime.jobs.get(created.job.id, 'cto');
   if (result.status !== 'succeeded' || result.artifacts.length < 1) throw new Error(`durable_job_failed:${result.status}:${result.errorCode}`);
-  console.log(JSON.stringify({ check: 'durable_job', jobId: result.id, status: result.status, idempotency: true, artifacts: result.artifacts.length }));
+  const artifact = result.artifacts[0]!;
+  const saved = await runtime.artifacts.getVersion({ key: artifact.storageKey, version: artifact.storageVersion, maxBytes: 1_000_000 });
+  if (createHash('sha256').update(saved.body).digest('hex') !== artifact.sha256) throw new Error('artifact_readback_hash_failed');
+  const page = JSON.parse(saved.body.toString('utf8')) as { title?: string };
+  if (!page.title?.includes('Example Domain')) throw new Error('artifact_content_failed');
+  let jobDenied = false;
+  try { await runtime.jobs.get(result.id, 'cfo'); } catch { jobDenied = true; }
+  if (!jobDenied) throw new Error('cross_owner_job_access_not_denied');
+  console.log(JSON.stringify({ check: 'durable_job', jobId: result.id, status: result.status, idempotency: true, artifacts: result.artifacts.length, readbackHashVerified: true, crossOwnerDenied: true }));
 }
 
 main().catch((error: unknown) => {
