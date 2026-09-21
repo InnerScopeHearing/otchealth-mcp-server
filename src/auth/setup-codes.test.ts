@@ -92,14 +92,17 @@ function fakeDeps(overrides: Partial<SetupCodeDeps> = {}): FakeDeps {
 // Role allowlist: clo-personal is permanently unmintable; nothing outside ELEVATION_ROLES mints.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-test('ELEVATION_ROLES is exactly the six named roles, and clo-personal is not among them', () => {
-  assert.deepEqual([...ELEVATION_ROLES].sort(), ['cfo', 'clo', 'coo', 'cro', 'cto', 'developer'].sort());
+test('ELEVATION_ROLES includes the dedicated WeFunder principal and excludes clo-personal', () => {
+  assert.deepEqual(
+    [...ELEVATION_ROLES].sort(),
+    ['cfo', 'clo', 'coo', 'cro', 'cto', 'developer', 'wefunder-campaign-director'].sort(),
+  );
   assert.equal((ELEVATION_ROLES as readonly string[]).includes('clo-personal'), false);
 });
 
-test('isElevationRole accepts exactly the six roles and rejects everything else, including clo-personal', () => {
+test('isElevationRole accepts only the explicit elevation roles and rejects everything else, including clo-personal', () => {
   for (const role of ELEVATION_ROLES) assert.equal(isElevationRole(role), true, role);
-  for (const bad of ['clo-personal', 'exec', 'cpo', 'cco', 'admin', '', 'CTO', 'cto ']) {
+  for (const bad of ['wefunder', 'clo-personal', 'exec', 'cpo', 'cco', 'admin', '', 'CTO', 'cto ']) {
     assert.equal(isElevationRole(bad), false, bad);
   }
 });

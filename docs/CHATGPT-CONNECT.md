@@ -10,7 +10,8 @@ connector's self-chosen name used to be trusted to pick a lane (see `oauth.ts`'s
 This document covers the piece on top of that default: an **interstitial consent page**, shown by
 the gateway itself mid-flow, that lets the owner (Matt) type in a short-lived setup code and connect
 a URL-only connector as a privileged role instead — `cto`, `cfo`, `clo`, `coo`, `cro`, or
-`developer`. The pattern mirrors what Sentry (`mcp.sentry.dev`), Cloudflare, and Linear all do for
+`developer`, or the dedicated `wefunder-campaign-director` principal. The WeFunder principal has
+its own fixed scope and does not inherit CRO access. The pattern mirrors what Sentry (`mcp.sentry.dev`), Cloudflare, and Linear all do for
 the same problem: the auth server, not the connecting client, decides what a connection is allowed
 to become, and it decides that from something only the owner holds.
 
@@ -51,7 +52,9 @@ asked for was valid.
 }
 ```
 
-- `role` — one of `cto`, `cfo`, `clo`, `coo`, `cro`, `developer`. **`clo-personal` is not a valid
+- `role` — one of `cto`, `cfo`, `clo`, `coo`, `cro`, `developer`, `wefunder-campaign-director`.
+  Use `wefunder-campaign-director` for an ordinary Chat connection to the dedicated WeFunder
+  source lane. **`clo-personal` is not a valid
   value and never will be** — there is no connector-elevation path to the attorney-privileged
   personal-legal ring, full stop (see `src/auth/setup-codes.ts`'s header for why).
 - `label` — optional, for your own tracking (never shown to the connecting owner, never logged with

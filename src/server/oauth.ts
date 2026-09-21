@@ -604,7 +604,8 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       //       that explicit rather than implicit: a confidential client's token is ALWAYS rc.agent,
       //       full stop, regardless of what a record might contain.
       //   (2) isElevationRole -- re-validates against the SAME allow-list auth/setup-codes.ts's
-      //       assertMintableRole() enforced at mint time (cto/cfo/clo/coo/cro/developer; NEVER
+      //       assertMintableRole() enforced at mint time (cto/cfo/clo/coo/cro/developer/
+      //       wefunder-campaign-director; NEVER
       //       clo-personal). A future bug that somehow let a bad value into an AuthCodeRecord still
       //       could not be honored here -- it silently falls back to rc.agent (external-read for a
       //       DCR client) rather than granting an unvalidated string as a privileged identity.
