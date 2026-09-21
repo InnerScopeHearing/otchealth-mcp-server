@@ -408,7 +408,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         applyConsentPageHeaders(reply);
         return reply.status(500).send(renderDeadEndPage('server_error'));
       }
-      applyConsentPageHeaders(reply);
+      applyConsentPageHeaders(reply, redirect_uri);
       return reply.status(200).send(renderConsentPage(pending.id, undefined, pending.expiresAt));
     }
 
@@ -461,7 +461,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         return reply.status(400).send(renderDeadEndPage('expired'));
       }
       if (resolved.outcome === 'retry') {
-        applyConsentPageHeaders(reply);
+        applyConsentPageHeaders(reply, resolved.redirectUri);
         return reply.status(200).send(renderConsentPage(pendingId, resolved.message, resolved.expiresAt));
       }
 
