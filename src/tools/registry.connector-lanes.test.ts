@@ -261,7 +261,7 @@ test('cfo connector keeps its bounded relationship query through ship-set curati
 test('coo lane: seat-memory + ledger coordination, and nothing privileged', () => {
   const set = connectorToolset(testEnv(), 'coo');
   assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
-  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_update', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch']) {
+  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
   for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'graph_send_email']) {
@@ -272,7 +272,7 @@ test('coo lane: seat-memory + ledger coordination, and nothing privileged', () =
 test('cro lane: commerce curation present, engineering/legal/finance/privileged absent, destructive commerce absent', () => {
   const set = connectorToolset(testEnv(), 'cro');
   assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
-  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list']) {
+  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'task_claim', 'task_heartbeat', 'task_complete', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list']) {
     assert.ok(set.has(needed), `cro connector must advertise ${needed} (its charter names this family)`);
   }
   for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'github_merge_pull_request', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
@@ -284,10 +284,14 @@ test('the seat additions never leak into the plain external/unknown lane', () =>
   const set = connectorToolset(testEnv(), 'totally-unknown-lane');
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
   for (const seatOnly of [
-    'memory_team', 'memory_remember', 'checkpoint', 'task_create', 'shopify_list_products',
+    'memory_team', 'memory_remember', 'checkpoint', 'task_create', 'task_claim', 'task_heartbeat', 'task_complete', 'shopify_list_products',
     'cio_track_event', 'hyperagent_list_agents', 'hyperagent_create_thread',
   ]) {
     assert.equal(set.has(seatOnly), false, `external lane must NOT gain ${seatOnly}`);
+  }
+  const wefunder = connectorToolset(testEnv(), 'wefunder-campaign-director');
+  for (const seatOnly of ['task_claim', 'task_heartbeat', 'task_complete']) {
+    assert.equal(wefunder.has(seatOnly), false, `WeFunder lane must NOT gain ${seatOnly}`);
   }
 });
 
