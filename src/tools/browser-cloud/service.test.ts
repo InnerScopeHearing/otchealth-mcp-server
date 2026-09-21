@@ -50,6 +50,16 @@ test('cloud browser rejects hosts, uncontrolled selectors and over-budget action
   assert.equal(transport.actions.length, 0);
 });
 
+test('CTO can provision one deterministic public profile per ordinary Chat lane, while callers discover only their own', async () => {
+  const store = new MemoryStore(); const service = new CloudBrowserService(store, new FakeTransport());
+  const profile = await service.provisionPublicTrialProfile('cto', 'cfo', ['Example.TEST']);
+  assert.deepEqual(profile, { profileId: 'cfo-public-trial', owner: 'cfo', allowedHosts: ['example.test'], persistent: false });
+  assert.deepEqual(await service.publicTrialProfile('cfo'), { profileId: 'cfo-public-trial', allowedHosts: ['example.test'], persistent: false });
+  await assert.rejects(() => service.publicTrialProfile('cto'), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  await assert.rejects(() => service.provisionPublicTrialProfile('cfo', 'coo', ['example.test']), (e: unknown) => e instanceof CloudBrowserError && e.code === 'provisioner_forbidden');
+  await assert.rejects(() => service.provisionPublicTrialProfile('cto', 'clo-personal', ['example.test']), (e: unknown) => e instanceof CloudBrowserError && e.code === 'profile_owner_not_allowed');
+});
+
 test('session action lease fences concurrent gateway copies and preserves action increments', async () => {
   const store = new MemoryStore(); let release!: () => void; const entered = new Promise<void>((resolve) => { release = resolve; });
   const transport = new FakeTransport(); transport.execute = async (_s, action) => { transport.actions.push(action); await entered; return typeof action === 'object' && action !== null && (action as { type?: unknown }).type === 'snapshot' ? { url: 'https://example.test/', title: 'Example', visibleText: '' } : null; };

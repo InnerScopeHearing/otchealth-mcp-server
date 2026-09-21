@@ -438,9 +438,12 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
   // owns the migration bridge, while not advertising it to other ship lanes.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('hyperagent_discover_capabilities');
+  // Provisioning is deliberately discoverable only to the CTO Chat lane. Its handler and
+  // write_orchestrated governance independently re-check that same identity at execution time.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('browser_cloud_profile_provision_public_trial');
   // Visibility is not enrollment: cloud handlers still require an owned, provisioned profile.
   if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane) && !(isShipLane(lane) && env.CONNECTOR_TOOLSET)) {
-    for (const name of ['browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
+    for (const name of ['browser_cloud_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
       'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get']) tools.add(name);
   }
   return tools;
