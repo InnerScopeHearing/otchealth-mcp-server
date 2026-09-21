@@ -66,10 +66,14 @@ const DOC_ID_PREFIX = 'connector-setup-code_';
  * deliberately, permanently absent: it has no connector-elevation path of any kind, ever. This is
  * enforced twice: assertMintableRole() below refuses to mint it (and refuses anything not in this
  * list), and isSetupCodeDoc()'s shape check refuses to even RECOGNIZE a stored doc whose role is
- * not one of these six -- so a future bug that somehow got a bad role into storage still could not
+ * not one of these seven -- so a future bug that somehow got a bad role into storage still could not
  * be redeemed for it.
  */
-export const ELEVATION_ROLES = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer'] as const;
+// `wefunder-campaign-director` is deliberately the existing canonical specialist lane rather than
+// a broad `wefunder`, `finance`, or `exec` alias.  Its connector curation and Hyperagent broker
+// both constrain it to the one reviewed campaign source.  Keeping the exact identity here means a
+// URL-only Chat connection receives the same bounded policy as the pre-existing static/Codex path.
+export const ELEVATION_ROLES = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'] as const;
 export type ElevationRole = (typeof ELEVATION_ROLES)[number];
 
 export function isElevationRole(value: string): value is ElevationRole {

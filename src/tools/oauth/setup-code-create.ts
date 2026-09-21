@@ -38,7 +38,7 @@ export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: 
       annotations: {
         title: 'Mint an owner connector setup code (cto/exec only)',
         description:
-          'Creates a single-use, short-lived setup code for the OAuth consent interstitial to elevate a URL-only ChatGPT/Claude connector to ONE named privileged role (cto/cfo/clo/coo/cro/developer -- never clo-personal). ' +
+          'Creates a single-use, short-lived setup code for the OAuth consent interstitial to elevate a URL-only ChatGPT/Claude connector to ONE named role (cto/cfo/clo/coo/cro/developer/wefunder-campaign-director -- never clo-personal). The WeFunder role remains constrained to its reviewed campaign source and does not receive finance, legal, browser-write, or publication authority. ' +
           'SECURITY: the tool RESULT contains a short-lived plaintext owner secret (the code itself). It is shown exactly once and is never recoverable afterward. Deliver it to the owner PRIVATELY (do not paste it into a shared channel, ticket, or log) -- whoever holds the code can redeem it for the granted role at the consent page.',
         readOnlyHint: false,
         destructiveHint: false,

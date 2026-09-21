@@ -104,7 +104,7 @@ for (const allowed of ['cto', 'exec']) {
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // ROLE ALLOWLIST: the Zod z.enum(ELEVATION_ROLES) input shape rejects clo-personal (and anything
-// else outside the six roles) BEFORE the handler -- and therefore BEFORE mintSetupCode -- ever runs.
+// else outside the seven roles) BEFORE the handler -- and therefore BEFORE mintSetupCode -- ever runs.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 test('SAFETY-CRITICAL: role="clo-personal" is rejected at input validation, even for the cto caller', async () => {
@@ -116,14 +116,14 @@ test('SAFETY-CRITICAL: role="clo-personal" is rejected at input validation, even
 });
 
 for (const bad of ['exec', 'cpo', 'cco', 'admin', 'ADMIN', 'cto ']) {
-  test(`role="${bad}" (outside the six elevation roles) is rejected at input validation`, async () => {
+  test(`role="${bad}" (outside the seven elevation roles) is rejected at input validation`, async () => {
     const result = await callAsAgent('cto', { role: bad });
     assert.equal(result.isError, true);
     assert.equal(result.structuredContent.error?.code, 'invalid_input');
   });
 }
 
-for (const role of ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']) {
+for (const role of ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director']) {
   test(`role="${role}" passes input validation for an allowed caller (reaches the mint attempt)`, async () => {
     const result = await callAsAgent('cto', { role });
     assert.notEqual(result.structuredContent.error?.code, 'invalid_input', `role "${role}" must be a valid input`);

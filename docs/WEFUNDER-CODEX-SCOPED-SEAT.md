@@ -1,8 +1,10 @@
 # Dedicated WeFunder source seat
 
-Status: local review patch only. No credential, runtime assignment, deployment or source export is created by this change.
+Status: ordinary Chat OAuth elevation support is implemented in the gateway source, but no credential,
+runtime assignment, deployment, or source export is created by that source change alone. The
+canonical role string for setup-code minting is `wefunder-campaign-director`.
 
-The `wefunder-campaign-director` principal may address only Hyperagent source agent `cmsozxle705pz07adrh3k9l2v`. It must also have that exact source in `HYPERAGENT_LANE_AGENTS` and the source must be explicitly classified `exec` in `HYPERAGENT_AGENT_CLASSES`. A missing assignment, missing classification, general classification, personal-legal classification or any other source is refused. The specialist is not added to either privileged ring. CTO remains denied the source, including ID-only reads and an accidental general classification.
+The `wefunder-campaign-director` principal may address only Hyperagent source agent `cmsozxle705pz07adrh3k9l2v`. It must also have that exact source in `HYPERAGENT_LANE_AGENTS` and the source must be explicitly classified `exec` in `HYPERAGENT_AGENT_CLASSES`. A missing assignment, missing classification, general classification, personal-legal classification or any other source is refused. The specialist is not added to either privileged ring. CTO remains denied the source, including ID-only reads and an accidental general classification. A Chat OAuth setup code redeems only to this exact canonical principal, so it uses this same constrained policy.
 
 The new `CODEX_WEFUNDER_MCP_TOKEN` environment slot maps a distinct static bearer to this principal and uses existing durable revocation checks. Its value must be securely provisioned and bound through AWS SSM, never placed in source, review artifacts, chat or logs. Existing confidential OAuth clients mapped to this same principal also receive its scoped behavior. Therefore an unset new static token alone does not make a deployed patch inactive; activation review must inspect existing identity metadata and source assignments without exposing credentials.
 
