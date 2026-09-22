@@ -21,6 +21,7 @@ const CONNECTOR_WRITE_TOOLS = [
   'github_push_files',
   'github_create_pull_request',
   'github_pr_update',
+  'github_pr_mark_ready_for_review',
 ];
 
 const CONNECTOR_READ_TOOLS = ['github_list_workflow_runs', 'github_workflow_run_get'];
@@ -42,6 +43,13 @@ test('every git write tool on the connector surface is role-gated to cto/develop
 
 test('github_pr_update specifically allows cto and developer only (write_simple has no orchestrated-default gate)', () => {
   const gov = requiredRoleFor('github_pr_update');
+  assert.ok(roleAllows(gov?.role ?? '', 'cto'));
+  assert.ok(roleAllows(gov?.role ?? '', 'developer'));
+  assert.ok(!roleAllows(gov?.role ?? '', 'cfo'));
+});
+
+test('github_pr_mark_ready_for_review specifically allows cto and developer only', () => {
+  const gov = requiredRoleFor('github_pr_mark_ready_for_review');
   assert.ok(roleAllows(gov?.role ?? '', 'cto'));
   assert.ok(roleAllows(gov?.role ?? '', 'developer'));
   assert.ok(!roleAllows(gov?.role ?? '', 'cfo'));
