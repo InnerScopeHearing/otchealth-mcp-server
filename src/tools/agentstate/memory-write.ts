@@ -223,7 +223,7 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Write a structured memory-of-record',
         description:
-          'Write a durable, byte-exact, queryable memory record (fact/decision/correction/pitfall/status) to the Cosmos memory store. This is the verbatim system-of-record for memory: never lossy, never LLM-rewritten. It is ALSO write-through indexed into the semantic brain, so it is immediately recallable via brain_search/kb_search (before 2026-07-14 it was durable but INVISIBLE to every semantic recall path). Non-PHI, non-MNPI, non-privileged (clo-personal rejected, code-enforced). SELF-WRITE ONLY: unlike memory_remember, this tool has no cross-lane feature -- the record is always attributed to YOUR OWN authenticated token identity; a mismatched `agent` value is refused outright as a forgery attempt, not silently substituted (fixed 2026-07-30). Over a Claude Chat connector surface, only the cto/developer/executive-ring lanes may write. MNPI GATE (hard, code-level, every caller including client_credentials fleet lanes): text/tags/source are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE the write; a match is refused outright, because this record is broadly recallable via brain_search. Pass dry_run=false to persist.',
+          'Store one non-sensitive, self-owned memory record and return its persistence and search-index status. The gateway independently validates caller identity, authorization, and allowed content before it writes. Reuse the same idempotency key only to retry the identical request. Set dry_run=false to persist.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
