@@ -146,24 +146,6 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         idempotentHint: false,
         openWorldHint: true,
       },
-      // Ordinary Chat receives the equivalent schema with no field-level prose. This is a
-      // connector-metadata projection only; registerTool keeps the detailed internal schema and
-      // the handler, delivery, MNPI, and capture-pressure behavior below unchanged.
-      connectorInputShape: {
-        agent: z.string(),
-        summary: z.string().optional(),
-        memories: z
-          .array(
-            z.object({
-              kind: z.enum(MEMORY_KINDS),
-              text: z.string().min(1),
-              tags: z.array(z.string()).optional(),
-              supersedes: z.string().optional(),
-            }),
-          )
-          .max(20)
-          .optional(),
-      },
       inputShape: {
         agent: z.string().describe('Agent lane to checkpoint (lowercase id, e.g. "cto", "developer").'),
         summary: z

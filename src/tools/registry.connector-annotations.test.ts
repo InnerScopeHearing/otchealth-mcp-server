@@ -177,62 +177,72 @@ test('the connector surface still omits outputSchema, the outer title, and annot
   );
 });
 
-test('memory_write and checkpoint use a neutral, validation-equivalent schema only on the connector surface', async () => {
+test('memory_write uses a neutral, validation-equivalent schema only on the connector surface', async () => {
   const developerConnector = await registerConnectorSurface('developer');
   const developerInternal = await registerInternalLane('developer');
-  const cooConnector = await registerConnectorSurface('coo');
-  const cooInternal = await registerInternalLane('coo');
+  const connector = developerConnector['memory_write'];
+  const internal = developerInternal['memory_write'];
+  assert.ok(connector?.inputSchema, 'memory_write: connector schema must be registered');
+  assert.ok(internal?.inputSchema, 'memory_write: internal schema must be registered');
+  const connectorShape = connector.inputSchema.shape;
+  const internalShape = internal.inputSchema.shape;
+  const valid = {
+    agent: 'developer', kind: 'fact', text: 'Non-sensitive test marker.',
+    idempotency_key: 'chat-developer-schema-projection-20260922', dry_run: false,
+  };
+  const invalid = { agent: 'developer', kind: 'fact', text: '', idempotency_key: 'short', dry_run: false };
 
-  const pairs: Array<{
-    name: string;
-    connector: RawRegisteredTool | undefined;
-    internal: RawRegisteredTool | undefined;
-    valid: Record<string, unknown>;
-    invalid: Record<string, unknown>;
-  }> = [
-    {
-      name: 'memory_write',
-      connector: developerConnector['memory_write'],
-      internal: developerInternal['memory_write'],
-      valid: {
-        agent: 'developer', kind: 'fact', text: 'Non-sensitive test marker.',
-        idempotency_key: 'chat-developer-schema-projection-20260922', dry_run: false,
-      },
-      invalid: { agent: 'developer', kind: 'fact', text: '', idempotency_key: 'short', dry_run: false },
-    },
-    {
-      name: 'checkpoint',
-      connector: cooConnector['checkpoint'],
-      internal: cooInternal['checkpoint'],
-      valid: {
-        agent: 'coo', memories: [{ kind: 'status', text: 'Non-sensitive test marker.' }], dry_run: false,
-      },
-      invalid: {
-        agent: 'coo',
-        memories: Array.from({ length: 21 }, () => ({ kind: 'status', text: 'Over the fixed cap.' })),
-        dry_run: false,
-      },
-    },
-  ];
-
-  for (const { name, connector, internal, valid, invalid } of pairs) {
-    assert.ok(connector?.inputSchema, name + ': connector schema must be registered');
-    assert.ok(internal?.inputSchema, name + ': internal schema must be registered');
-    const connectorShape = connector.inputSchema.shape;
-    const internalShape = internal.inputSchema.shape;
-    assert.deepEqual(Object.keys(connectorShape).sort(), Object.keys(internalShape).sort(), name + ': connector fields must not drift');
-    for (const [field, schema] of Object.entries(connectorShape)) {
-      assert.ok((schema as z.ZodTypeAny).description == null, name + '.' + field + ': connector schema must not carry field prose');
-    }
-    assert.ok(
-      Object.values(internalShape).some((schema) => Boolean((schema as z.ZodTypeAny).description)),
-      name + ': internal schema must retain its operator guidance',
-    );
-    assert.equal(z.object(connectorShape).safeParse(valid).success, true, name + ': connector schema must accept a valid payload');
-    assert.equal(z.object(internalShape).safeParse(valid).success, true, name + ': internal schema must accept the same valid payload');
-    assert.equal(z.object(connectorShape).safeParse(invalid).success, false, name + ': connector schema must reject the invalid payload');
-    assert.equal(z.object(internalShape).safeParse(invalid).success, false, name + ': internal schema must reject the same invalid payload');
+  assert.deepEqual(Object.keys(connectorShape).sort(), Object.keys(internalShape).sort(), 'memory_write: connector fields must not drift');
+  for (const [field, schema] of Object.entries(connectorShape)) {
+    assert.ok((schema as z.ZodTypeAny).description == null, 'memory_write.' + field + ': connector schema must not carry field prose');
   }
+  assert.ok(
+    Object.values(internalShape).some((schema) => Boolean((schema as z.ZodTypeAny).description)),
+    'memory_write: internal schema must retain its operator guidance',
+  );
+  assert.equal(z.object(connectorShape).safeParse(valid).success, true, 'memory_write: connector schema must accept a valid payload');
+  assert.equal(z.object(internalShape).safeParse(valid).success, true, 'memory_write: internal schema must accept the same valid payload');
+  assert.equal(z.object(connectorShape).safeParse(invalid).success, false, 'memory_write: connector schema must reject the invalid payload');
+  assert.equal(z.object(internalShape).safeParse(invalid).success, false, 'memory_write: internal schema must reject the same invalid payload');
+});
+
+test('checkpoint retains its described, validation-equivalent input contract on the connector surface', async () => {
+  const connectorTools = await registerConnectorSurface('cto');
+  const internalTools = await registerInternalLane('cto');
+  const connector = connectorTools['checkpoint'];
+  const internal = internalTools['checkpoint'];
+  assert.ok(connector?.inputSchema, 'checkpoint: connector schema must be registered');
+  assert.ok(internal?.inputSchema, 'checkpoint: internal schema must be registered');
+  const connectorShape = connector.inputSchema.shape;
+  const internalShape = internal.inputSchema.shape;
+  const valid = {
+    agent: 'cto', memories: [{ kind: 'status', text: 'Non-sensitive test marker.' }], dry_run: false,
+  };
+  const invalid = {
+    agent: 'cto',
+    memories: Array.from({ length: 21 }, () => ({ kind: 'status', text: 'Over the fixed cap.' })),
+    dry_run: false,
+  };
+
+  assert.deepEqual(Object.keys(connectorShape).sort(), Object.keys(internalShape).sort(), 'checkpoint: connector fields must not drift');
+  for (const field of ['agent', 'summary', 'memories', 'dry_run', 'acknowledge_warning']) {
+    const connectorField = connectorShape[field] as z.ZodTypeAny | undefined;
+    const internalField = internalShape[field] as z.ZodTypeAny | undefined;
+    assert.ok(connectorField?.description, 'checkpoint.' + field + ': connector field must retain guidance');
+    assert.equal(connectorField?.description, internalField?.description, 'checkpoint.' + field + ': connector guidance must match the internal contract');
+  }
+  assert.equal(z.object(connectorShape).safeParse(valid).success, true, 'checkpoint: connector schema must accept a valid payload');
+  assert.equal(z.object(internalShape).safeParse(valid).success, true, 'checkpoint: internal schema must accept the same valid payload');
+  assert.equal(z.object(connectorShape).safeParse(invalid).success, false, 'checkpoint: connector schema must reject a 21-memory payload');
+  assert.equal(z.object(internalShape).safeParse(invalid).success, false, 'checkpoint: internal schema must reject a 21-memory payload');
+  assert.equal(connector.outputSchema, undefined, 'checkpoint: output schema must remain omitted from the connector surface');
+  assert.equal(connector.title, undefined, 'checkpoint: outer title must remain omitted from the connector surface');
+  assert.equal(connector.annotations?.title, undefined, 'checkpoint: annotation title must remain omitted from the connector surface');
+  assert.deepEqual(
+    connector.annotations,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    'checkpoint: connector annotations must retain their write contract',
+  );
 });
 
 test('kill switch: CONNECTOR_ANNOTATIONS_MODE=off reverts the connector surface to the EXACT prior bare shape (no annotations key at all)', async () => {
