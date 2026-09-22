@@ -350,6 +350,7 @@ export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   // instruction block promises (draft orders, discount codes); every write still hits its own
   // in-handler governance.
   'shopify_list_products', 'shopify_get_product', 'shopify_collection_list',
+  'shopify_location_list',
   'shopify_order_list', 'shopify_get_order', 'shopify_order_count',
   'shopify_customer_search', 'shopify_customer_get', 'shopify_list_abandoned_checkouts',
   'shopify_inventory_level_list', 'shopify_price_rule_list', 'shopify_discount_code_list',
@@ -359,6 +360,7 @@ export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   'cio_customer_get_activities', 'cio_customer_get_messages', 'cio_customer_get_segments',
   'cio_segment_list', 'cio_campaign_list', 'cio_campaign_get', 'cio_campaign_get_metrics',
   'cio_broadcast_list', 'cio_broadcast_get_metrics', 'cio_message_list', 'cio_transactional_list',
+  'cio_admin_read_workspace_health',
   'cio_track_event',
   'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get',
   'intercom_contact_search', 'intercom_contact_get', 'intercom_list_articles',

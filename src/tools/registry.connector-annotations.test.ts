@@ -98,6 +98,23 @@ async function registerInternalLane(lane: string): Promise<Record<string, RawReg
   return (mcp as unknown as { _registeredTools: Record<string, RawRegisteredTool> })._registeredTools;
 }
 
+test('CRO Chat request context registers the two bounded revenue reads and does not leak them to constrained connector lanes', async () => {
+  const toolNames = ['shopify_location_list', 'cio_admin_read_workspace_health'] as const;
+  const croTools = await registerConnectorSurface('cro');
+  const negativeLanes = [
+    ['coo', await registerConnectorSurface('coo')],
+    ['unknown', await registerConnectorSurface('totally-unknown-lane')],
+    ['wefunder', await registerConnectorSurface('wefunder-campaign-director')],
+  ] as const;
+
+  for (const name of toolNames) {
+    assert.ok(croTools[name], `CRO Chat must register ${name} through the real request-context path`);
+    for (const [lane, tools] of negativeLanes) {
+      assert.equal(tools[name], undefined, `${lane} Chat must not register ${name}`);
+    }
+  }
+});
+
 test('pure: parseConnectorAnnotationsMode defaults to "on"; only the literal string "off" (any case/whitespace) reverts it', async () => {
   const { parseConnectorAnnotationsMode } = await import('./registry.js');
   assert.equal(parseConnectorAnnotationsMode(undefined), 'on');
