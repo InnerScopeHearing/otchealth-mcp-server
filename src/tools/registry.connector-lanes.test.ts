@@ -152,10 +152,12 @@ test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus extern
     'heygen_avatar_video_create', 'heygen_owner_approval_status_get',
     'heygen_existing_video_ingest_qa', 'heygen_video_wait_ingest_qa',
     'heygen_reference_look_create', 'heygen_video_agent_session_create_preflight',
+    'shopify_location_list', 'cio_admin_read_workspace_health',
   ]) assert.ok(set.has(required), `cro connector must expose ${required}`);
   for (const forbidden of [
     'heygen_pairing_start', 'heygen_pairing_status', 'heygen_prompt_avatar_create',
     'heygen_avatar_look_name_update', 'github_push_files', 'kb_search_privileged',
+    'cio_admin_write_frequency_cap_delete', 'shopify_refund_create',
   ]) assert.equal(set.has(forbidden), false, `cro connector must not expose ${forbidden}`);
 });
 
@@ -173,6 +175,7 @@ test('(e) Wefunder Campaign Director gets exact-source migration tools with owne
     'browser_agentcore_wefunder_preflight', 'github_push_files', 'kb_search_privileged',
     'memory_write', 'memory_remember', 'checkpoint', 'legal_blob_put', 'legal_blob_get',
     'kb_get_document', 'kb_list_documents', 'xero_manual_journals', 'heygen_pairing_start', 'gateway_fetch_result',
+    'shopify_location_list', 'cio_admin_read_workspace_health',
   ]) assert.equal(set.has(forbidden), false, `Wefunder connector must not expose ${forbidden}`);
 });
 
@@ -264,7 +267,7 @@ test('coo lane: seat-memory + ledger coordination, and nothing privileged', () =
   for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'graph_send_email']) {
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email']) {
     assert.equal(set.has(excluded), false, `coo connector must NOT advertise ${excluded}`);
   }
 });
@@ -275,7 +278,7 @@ test('cro lane: commerce curation present, engineering/legal/finance/privileged 
   for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'task_claim', 'task_heartbeat', 'task_complete', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list']) {
     assert.ok(set.has(needed), `cro connector must advertise ${needed} (its charter names this family)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'github_merge_pull_request', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'github_merge_pull_request', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_admin_write_frequency_cap_delete', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
     assert.equal(set.has(excluded), false, `cro connector must NOT advertise ${excluded}`);
   }
 });
@@ -285,7 +288,7 @@ test('the seat additions never leak into the plain external/unknown lane', () =>
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
   for (const seatOnly of [
     'memory_team', 'memory_remember', 'checkpoint', 'task_create', 'task_claim', 'task_heartbeat', 'task_complete', 'shopify_list_products',
-    'cio_track_event', 'hyperagent_list_agents', 'hyperagent_create_thread',
+    'shopify_location_list', 'cio_track_event', 'cio_admin_read_workspace_health', 'hyperagent_list_agents', 'hyperagent_create_thread',
   ]) {
     assert.equal(set.has(seatOnly), false, `external lane must NOT gain ${seatOnly}`);
   }
