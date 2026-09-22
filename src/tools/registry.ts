@@ -559,6 +559,12 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   category: ToolCategory;
   annotations: ToolAnnotations;
   inputShape: Shape;
+  /**
+   * Optional schema projection for the OAuth connector surface only. It must preserve the
+   * input shape's types and validation, but may omit connector-hostile field descriptions.
+   * Internal clients always receive inputShape unchanged.
+   */
+  connectorInputShape?: Shape;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
@@ -611,6 +617,16 @@ const COMMON_INPUT: ZodRawShape = {
     .describe(
       'If true, the caller accepts that the response may contain regulated or investor-sensitive content (see compliance_warning). Required to render flagged payloads.',
     ),
+};
+
+/**
+ * Neutral common fields for the narrowly opted-in connector schema projection. The validation is
+ * byte-for-byte equivalent to COMMON_INPUT, but the prompt-like parameter descriptions are absent
+ * from the ordinary Chat connector metadata. Internal callers never use this shape.
+ */
+const CONNECTOR_COMMON_INPUT: ZodRawShape = {
+  dry_run: z.boolean().optional(),
+  acknowledge_warning: z.boolean().optional(),
 };
 
 function buildTextContent(
@@ -838,7 +854,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     description: def.annotations.description,
     readOnly: def.annotations.readOnlyHint,
   });
-  const inputShape: ZodRawShape = { ...def.inputShape, ...COMMON_INPUT };
+  // Only an explicitly opted-in tool receives the neutral connector projection. This changes
+  // metadata serialization, not handler inputs, authorization, or validation. The internal
+  // Work/Codex path always retains the full descriptive schema.
+  const useConnectorInputProjection = connectorSurfaceForThisTool && Boolean(def.connectorInputShape);
+  const inputShape: ZodRawShape = {
+    ...(useConnectorInputProjection ? def.connectorInputShape! : def.inputShape),
+    ...(useConnectorInputProjection ? CONNECTOR_COMMON_INPUT : COMMON_INPUT),
+  };
   // outputSchema is wrapped: every tool reports compliance_warning + result. HeyGen's production
   // control surface opts into strict result schemas so provider-shape drift cannot bypass redaction.
   const enforceStrictOutput = canonicalName.startsWith('heygen_');
