@@ -135,6 +135,25 @@ test('(b) developer lane gets the full ship-lane set', () => {
   assert.ok(set.has('brain_graph_search'));
 });
 
+test('ship connector surfaces retain the narrow Chat-native draft-to-ready transition while the execution rule limits it to CTO/Developer', () => {
+  for (const lane of ['cto', 'developer']) {
+    assert.ok(
+      connectorToolset(testEnv(), lane).has('github_pr_mark_ready_for_review'),
+      `${lane} must retain github_pr_mark_ready_for_review for direct Chat-only PR progression`,
+    );
+  }
+  // CFO/CLO/COO are ship lanes, so curation exposes the common GitHub set; the
+  // governance regression test independently proves they cannot execute this
+  // write. Wefunder and external/unknown callers must not see it at all.
+  for (const lane of ['wefunder-campaign-director', 'external-read', 'unknown']) {
+    assert.equal(
+      connectorToolset(testEnv(), lane).has('github_pr_mark_ready_for_review'),
+      false,
+      `${lane} must not receive the CTO/Developer GitHub transition`,
+    );
+  }
+});
+
 test('(c) every EXEC_RING lane gets the full ship-lane set', () => {
   const env = testEnv();
   for (const lane of EXEC_RING) {
