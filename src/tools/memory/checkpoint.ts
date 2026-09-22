@@ -140,7 +140,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
-          'Save a small set of non-sensitive session takeaways. The gateway validates content before it writes, records every accepted entry, returns delivery and index status, and preserves confirmed entries for safe recovery. Set dry_run=false to persist.',
+          'Save a few short session notes for the current app. Set dry_run=false to run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
