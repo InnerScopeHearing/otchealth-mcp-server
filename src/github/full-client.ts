@@ -151,6 +151,35 @@ async function ghSend<T = any>(
   return { statusCode, data: data as T };
 }
 
+/**
+ * Fixed GitHub GraphQL mutation transport. The query text is owned by this
+ * module, never supplied by a caller, so the connector cannot turn this into
+ * an arbitrary GitHub API proxy.
+ */
+async function ghGraphql<T = any>(query: string, variables: Record<string, unknown>): Promise<T> {
+  const token = await getInstallationToken();
+  // A mutation must never be retried automatically: a timed-out response may
+  // still have committed upstream.
+  const res = await fetchWithBudget('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: {
+      ...GITHUB_HEADERS,
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query, variables }),
+  }, { retries: 0 });
+  const statusCode = res.status;
+  const text = await res.text();
+  let data: any;
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (statusCode >= 400)
+    throw new GitHubFullError({ code: `github_${statusCode}`, status: statusCode, message: data?.message || `HTTP ${statusCode}`, nextStep: 'Verify the App installation has write access to this repo.' });
+  if (Array.isArray(data?.errors) && data.errors.length > 0)
+    throw new GitHubFullError({ code: 'github_graphql_error', status: statusCode, message: data.errors[0]?.message || 'GitHub GraphQL mutation failed.', nextStep: 'Read the pull request again and retry only if it remains a draft with the expected head SHA.' });
+  return data?.data as T;
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // REPOS
 // ════════════════════════════════════════════════════════════════════════════════
@@ -340,6 +369,67 @@ export async function prUpdate(opts: {
   if (opts.maintainerCanModify !== undefined) body.maintainer_can_modify = opts.maintainerCanModify;
   const { data } = await ghSend<any>('PATCH', `/repos/${O(opts.owner)}/${O(opts.repo)}/pulls/${opts.pullNumber}`, body);
   return data;
+}
+
+/**
+ * Change only a draft PR's review state. This is deliberately narrower than a
+ * generic GraphQL tool: it has no caller-controlled operation or query, it
+ * verifies the head SHA before the mutation, and a repeat after success is a
+ * no-op. GitHub's mutation accepts no expected-head parameter, so the
+ * precondition closes stale Chat requests and the response is checked before a
+ * success receipt is returned.
+ */
+export async function prMarkReadyForReview(opts: {
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  expectedHeadSha: string;
+}): Promise<{ number: number; alreadyReady: boolean; headSha: string; url: string }> {
+  assertNotPhi(opts.repo);
+  const before = await prGet(opts.owner, opts.repo, opts.pullNumber);
+  const headSha = typeof before?.head?.sha === 'string' ? before.head.sha : '';
+  if (!headSha || typeof before?.node_id !== 'string' || !before.node_id) {
+    throw new GitHubFullError({
+      code: 'github_pr_malformed_response',
+      status: 0,
+      message: `GitHub did not return a usable draft PR identity for #${opts.pullNumber}.`,
+      nextStep: 'Read the pull request again before attempting the transition.',
+    });
+  }
+  if (headSha !== opts.expectedHeadSha) {
+    throw new GitHubFullError({
+      code: 'github_pr_head_sha_mismatch',
+      status: 0,
+      message: `PR #${opts.pullNumber} head SHA changed since the caller inspected it.`,
+      nextStep: 'Read the pull request again, verify its checks, and pass its current head SHA.',
+    });
+  }
+  if (!before.draft) {
+    return { number: before.number ?? opts.pullNumber, alreadyReady: true, headSha, url: before.html_url ?? '' };
+  }
+
+  const data = await ghGraphql<{
+    markPullRequestReadyForReview?: {
+      pullRequest?: { number?: number; isDraft?: boolean; headRefOid?: string; url?: string };
+    };
+  }>(
+    `mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
+      markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+        pullRequest { number isDraft headRefOid url }
+      }
+    }`,
+    { pullRequestId: before.node_id },
+  );
+  const after = data?.markPullRequestReadyForReview?.pullRequest;
+  if (!after || after.isDraft !== false || after.headRefOid !== headSha) {
+    throw new GitHubFullError({
+      code: 'github_pr_ready_transition_unconfirmed',
+      status: 0,
+      message: `GitHub did not confirm the expected ready-for-review transition for PR #${opts.pullNumber}.`,
+      nextStep: 'Read the pull request again before making any further changes.',
+    });
+  }
+  return { number: after.number ?? opts.pullNumber, alreadyReady: false, headSha: after.headRefOid ?? headSha, url: after.url ?? before.html_url ?? '' };
 }
 
 /** GET /repos/{owner}/{repo}/pulls/{pull_number}/files */
