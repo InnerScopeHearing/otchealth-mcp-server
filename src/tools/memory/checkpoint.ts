@@ -140,7 +140,7 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
       annotations: {
         title: 'Checkpoint: distill and persist session memory',
         description:
-          'Platform-agnostic session-end capture. ANY engine (Claude Code, ChatGPT, Copilot, Hyperagent) calls this at a natural stopping point, not only the Claude Code Stop hook. Writes up to 20 explicit "memories" verbatim (sequentially, one write+index per entry -- this is for a handful of session takeaways, not a bulk import), server-side distills an optional freeform "summary" into 0 to 3 atomic durable memories (fact/decision/correction/pitfall) when the selected LLM provider is configured, attempts an episode marker, and resets capture pressure only when delivery is confirmed. Partial failure preserves confirmed IDs and reports indexing and unconfirmed storage separately; do not blindly repeat stored memories. Pass dry_run=false to actually write. Non-PHI, non-MNPI, non-privileged (clo-personal rejected downstream by normalizeAgent). MNPI GATE (hard, code-level, not fail-open like the rest of this tool): summary + every explicit memory text are scanned for an EXEC_RING-gated room reference or an explicit MNPI marker BEFORE anything is written; a match refuses the ENTIRE checkpoint call, because this record is write-through indexed into memory-exec, a room every agent reaches.',
+          'Save a small set of non-sensitive session takeaways. The gateway validates content before it writes, records every accepted entry, returns delivery and index status, and preserves confirmed entries for safe recovery. Set dry_run=false to persist.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
