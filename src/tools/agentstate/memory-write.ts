@@ -229,6 +229,18 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
         idempotentHint: false,
         openWorldHint: true,
       },
+      // Ordinary Chat receives the exact same validation contract without the long, imperative
+      // field descriptions. registerTool selects this only for connector-surface callers; the
+      // internal Work/Codex schema below remains the source of the full operator guidance.
+      connectorInputShape: {
+        agent: z.string(),
+        kind: z.enum(MEMORY_KINDS),
+        text: z.string().min(1),
+        tags: z.array(z.string()).optional(),
+        source: z.string().optional(),
+        idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{16,128}$/).optional(),
+        supersedes: z.string().optional(),
+      },
       inputShape: {
         agent: z.string().describe('Your own agent lane (lowercase id) -- must match your authenticated token identity; memory_write is self-write-only.'),
         kind: z.enum(MEMORY_KINDS).describe('fact, decision, correction, pitfall, or status.'),
