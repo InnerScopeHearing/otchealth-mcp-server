@@ -854,7 +854,14 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     description: def.annotations.description,
     readOnly: def.annotations.readOnlyHint,
   });
-  const inputShape: ZodRawShape = { ...def.inputShape, ...COMMON_INPUT };
+  // Only an explicitly opted-in tool receives the neutral connector projection. This changes
+  // metadata serialization, not handler inputs, authorization, or validation. The internal
+  // Work/Codex path always retains the full descriptive schema.
+  const useConnectorInputProjection = connectorSurfaceForThisTool && Boolean(def.connectorInputShape);
+  const inputShape: ZodRawShape = {
+    ...(useConnectorInputProjection ? def.connectorInputShape! : def.inputShape),
+    ...(useConnectorInputProjection ? CONNECTOR_COMMON_INPUT : COMMON_INPUT),
+  };
   // outputSchema is wrapped: every tool reports compliance_warning + result. HeyGen's production
   // control surface opts into strict result schemas so provider-shape drift cannot bypass redaction.
   const enforceStrictOutput = canonicalName.startsWith('heygen_');
