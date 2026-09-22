@@ -55,6 +55,7 @@ afterEach(() => {
 interface RawRegisteredTool {
   title?: string;
   description?: string;
+  inputSchema?: z.AnyZodObject;
   outputSchema?: unknown;
   annotations?: {
     title?: string;
