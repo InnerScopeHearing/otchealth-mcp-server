@@ -619,6 +619,16 @@ const COMMON_INPUT: ZodRawShape = {
     ),
 };
 
+/**
+ * Neutral common fields for the narrowly opted-in connector schema projection. The validation is
+ * byte-for-byte equivalent to COMMON_INPUT, but the prompt-like parameter descriptions are absent
+ * from the ordinary Chat connector metadata. Internal callers never use this shape.
+ */
+const CONNECTOR_COMMON_INPUT: ZodRawShape = {
+  dry_run: z.boolean().optional(),
+  acknowledge_warning: z.boolean().optional(),
+};
+
 function buildTextContent(
   payload: ToolResultPayload,
   warning: ComplianceWarning | null,
