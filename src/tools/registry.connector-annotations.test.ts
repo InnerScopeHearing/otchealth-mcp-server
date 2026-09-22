@@ -245,6 +245,35 @@ test('checkpoint retains its described, validation-equivalent input contract on 
   );
 });
 
+test('memory_remember has a concise connector description while the internal policy description stays intact', async () => {
+  const connectorTools = await registerConnectorSurface('cro');
+  const internalTools = await registerInternalLane('cro');
+  const connector = connectorTools['memory_remember'];
+  const internal = internalTools['memory_remember'];
+  assert.ok(connector, 'memory_remember: connector tool must be registered for CRO');
+  assert.ok(internal, 'memory_remember: internal tool must be registered for CRO');
+  assert.equal(
+    connector.description,
+    'Append one short non-sensitive company note to the shared memory feed. Set dry_run=false to persist.',
+    'memory_remember: connector metadata must use the concise presentation',
+  );
+  assert.match(
+    internal.description ?? '',
+    /MNPI GATE \(hard, code-level/,
+    'memory_remember: internal operator description must retain the detailed safety contract',
+  );
+  assert.deepEqual(
+    connector.inputSchema?.shape && Object.keys(connector.inputSchema.shape).sort(),
+    internal.inputSchema?.shape && Object.keys(internal.inputSchema.shape).sort(),
+    'memory_remember: connector presentation must not alter its input contract',
+  );
+  assert.deepEqual(
+    connector.annotations,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    'memory_remember: connector write annotations must remain unchanged',
+  );
+});
+
 test('kill switch: CONNECTOR_ANNOTATIONS_MODE=off reverts the connector surface to the EXACT prior bare shape (no annotations key at all)', async () => {
   process.env.CONNECTOR_ANNOTATIONS_MODE = 'off';
   const tools = await registerConnectorSurface('cto');
