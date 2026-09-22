@@ -269,3 +269,25 @@ test('the internal (non-connector) lane is byte-identical regardless of CONNECTO
     }
   }
 });
+
+test('COO connector exposes only the safe n8n credential-type schema read, not credential or workflow mutations', async () => {
+  const coo = await registerConnectorSurface('coo');
+  const schema = coo['n8n_credential_schema_get'];
+  assert.ok(schema, 'COO Chat must receive the explicitly approved n8n credential-type schema read');
+  assert.deepEqual(
+    schema.annotations,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    'the schema endpoint must retain its real read-only connector annotations',
+  );
+  for (const forbidden of [
+    'n8n_credential_list', 'n8n_credential_create', 'n8n_credential_delete',
+    'n8n_create_workflow', 'n8n_update_workflow', 'n8n_run_workflow',
+    'n8n_project_create', 'n8n_variable_create',
+  ]) {
+    assert.equal(coo[forbidden], undefined, `COO connector must not receive ${forbidden}`);
+  }
+  for (const lane of ['cro', 'wefunder-campaign-director', 'external-read', 'unknown']) {
+    const tools = await registerConnectorSurface(lane);
+    assert.equal(tools['n8n_credential_schema_get'], undefined, `${lane} must not receive the COO n8n schema read`);
+  }
+});

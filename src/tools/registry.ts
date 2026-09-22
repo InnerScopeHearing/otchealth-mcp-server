@@ -403,6 +403,10 @@ export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   'catalog_probe',
   // Read-only GraphRAG handler separately constrains this lane to source_group=company.
   'brain_graph_search',
+  // A credential-type schema is static metadata, not a credential instance or value. Expose
+  // precisely this read so ordinary COO Chat can verify the n8n control-plane boundary without
+  // gaining workflow, credential, project, tag, variable, or execution access.
+  'n8n_credential_schema_get',
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
   // Match the existing broker surface without widening any source assignment or ring grant.
   'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
