@@ -301,7 +301,9 @@ for (const [lane, upperBound, mustInclude] of [
   // catalog_probe's known_tools_present check (which reads the full unscoped catalog, not this
   // lane's curated view), so it looked "present" there while being genuinely uncallable by an M365
   // developer caller. Locks the fix at the real registration layer, not just the seed-list layer.
-  ['developer', 200, ['brain_search', 'developer_wake_lite', 'catalog_probe']],
+  // This branch adds one exact, role-governed github_* transition to the developer
+  // wildcard. Keep the ceiling tight and prove the real M365 registration retains it.
+  ['developer', 201, ['brain_search', 'developer_wake_lite', 'catalog_probe', 'github_pr_mark_ready_for_review']],
 ] as const) {
   test(`TOOL_CATALOG_CURATION_MODE=curate-m365-only -- an M365 '${lane}' caller is narrowed to a concrete bound and keeps its representative tools (2026-08-02 Bug-2 fix)`, async () => {
     process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
