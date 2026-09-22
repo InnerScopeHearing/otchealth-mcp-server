@@ -1,6 +1,7 @@
 import { test, before, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
 
 /**
  * 2026-09-04: the connector-surface (dcr_/occ_ OAuth client) branch of registerTool()'s
