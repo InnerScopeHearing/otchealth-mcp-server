@@ -559,6 +559,12 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   category: ToolCategory;
   annotations: ToolAnnotations;
   inputShape: Shape;
+  /**
+   * Optional schema projection for the OAuth connector surface only. It must preserve the
+   * input shape's types and validation, but may omit connector-hostile field descriptions.
+   * Internal clients always receive inputShape unchanged.
+   */
+  connectorInputShape?: Shape;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
