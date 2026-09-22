@@ -223,7 +223,7 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Write a structured memory-of-record',
         description:
-          'Store one non-sensitive, self-owned memory record and return its persistence and search-index status. The gateway independently validates caller identity, authorization, and allowed content before it writes. Reuse the same idempotency key only to retry the identical request. Set dry_run=false to persist.',
+          'Save one short note for the current app. Set dry_run=false to run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
