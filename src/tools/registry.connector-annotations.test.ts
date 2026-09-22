@@ -146,6 +146,16 @@ test('the connector surface still omits outputSchema, the outer title, and annot
     assert.equal(t.annotations?.title, undefined, `${name}: annotations.title must stay OFF the connector surface`);
     assert.ok(t.description, `${name}: description must still be present`);
   }
+  assert.equal(
+    tools['memory_write'].description,
+    'Save one short note for the current app. Set dry_run=false to run.',
+    'memory_write must keep the concise connector-facing description',
+  );
+  assert.equal(
+    tools['checkpoint'].description,
+    'Save a few short session notes for the current app. Set dry_run=false to run.',
+    'checkpoint must keep the concise connector-facing description',
+  );
 });
 
 test('kill switch: CONNECTOR_ANNOTATIONS_MODE=off reverts the connector surface to the EXACT prior bare shape (no annotations key at all)', async () => {
