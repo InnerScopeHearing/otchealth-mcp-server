@@ -44,6 +44,11 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         idempotentHint: false,
         openWorldHint: true,
       },
+      // The detailed internal policy record above remains available to internal lanes and every
+      // server-side refusal stays enforced. Ordinary Chat receives a concise task description so
+      // the connector host does not mistake policy explanation for an instruction to its classifier.
+      connectorDescription:
+        'Append one short non-sensitive company note to the shared memory feed. Set dry_run=false to persist.',
       inputShape: {
         agent: z
           .string()

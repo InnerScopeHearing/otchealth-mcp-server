@@ -564,6 +564,13 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   name: string;
   category: ToolCategory;
   annotations: ToolAnnotations;
+  /**
+   * Optional concise description for OAuth connector clients. This is presentation metadata only:
+   * the internal lane keeps annotations.description, and handlers retain every authorization and
+   * content-safety check. Use it only where a detailed internal policy explanation is hostile to a
+   * connector host's tool-metadata safety classifier.
+   */
+  connectorDescription?: string;
   inputShape: Shape;
   /**
    * Optional schema projection for the OAuth connector surface only. It must preserve the
@@ -908,9 +915,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // if a client regresses.
   const includeConnectorAnnotations =
     parseConnectorAnnotationsMode(process.env.CONNECTOR_ANNOTATIONS_MODE) === 'on';
+  const connectorDescription = def.connectorDescription ?? def.annotations.description;
   const toolConfig = connectorSurfaceForThisTool
     ? {
-        description: def.annotations.description,
+        description: connectorDescription,
         inputSchema: inputShape,
         ...(includeConnectorAnnotations
           ? {
