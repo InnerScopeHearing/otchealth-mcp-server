@@ -315,6 +315,7 @@ import { registerGitHubPrListReviews } from './github/pr-list-reviews.js';
 import { registerGitHubPrRequestReviewers } from './github/pr-request-reviewers.js';
 import { registerGitHubPrUpdateBranch } from './github/pr-update-branch.js';
 import { registerGitHubPrUpdate } from './github/pr-update.js';
+import { registerGitHubPrReadyForReview } from './github/pr-ready-for-review.js';
 import { registerGitHubRefCreate } from './github/ref-create.js';
 import { registerGitHubRefDelete } from './github/ref-delete.js';
 import { registerGitHubRefUpdate } from './github/ref-update.js';
@@ -1370,6 +1371,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubPrRequestReviewers(server, callerHash);
   registerGitHubPrUpdateBranch(server, callerHash);
   registerGitHubPrUpdate(server, callerHash);
+  registerGitHubPrReadyForReview(server, callerHash);
   registerGitHubRefCreate(server, callerHash);
   registerGitHubRefDelete(server, callerHash);
   registerGitHubRefUpdate(server, callerHash);

@@ -133,6 +133,7 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'github_push_files', requiredRole: ['cto', 'developer'], reason: 'Code pushes: cto/developer-only (developer widened to full write 2026-07-26 per Matt/CEO directive; previously CTO-only single-initiator).' },
   { pattern: 'github_create_pull_request', requiredRole: ['cto', 'developer'], reason: 'Opening PRs: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   { pattern: 'github_pr_update', requiredRole: ['cto', 'developer'], reason: 'Updating a PR (title/body/base/state, incl. close/reopen) is a write_simple GitHub write, so the write_orchestrated default CTO gate does NOT cover it; explicit rule required. Widened 2026-07-26 per Matt/CEO directive to cto/developer.' },
+  { pattern: 'github_pr_ready_for_review', requiredRole: 'cto', reason: 'Changing a draft PR to ready for review is a CTO release-control action and remains single-initiator CTO-only.' },
   { pattern: 'github_merge_pull_request', requiredRole: ['cto', 'developer'], reason: 'Merging PRs: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   // ===== FULL READ+WRITE WAVE: write-tool role gates (CTO = the operator connector identity) =====
   // GitHub writes (single-initiator, mirrors existing push/PR/merge rules) -- widened alongside them.
