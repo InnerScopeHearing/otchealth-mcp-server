@@ -15,7 +15,7 @@ export interface ChatActionWorkerDeps {
 }
 
 const JOBS = 'events';
-const DEFAULT_DEPS: ChatActionWorkerDeps = { queryDocs, readDoc, replaceDoc, execute: {
+export const DEFAULT_CHAT_ACTION_WORKER_DEPS: ChatActionWorkerDeps = { queryDocs, readDoc, replaceDoc, execute: {
   brainSearch: async () => { throw new Error('chat_action_brain_executor_unconfigured'); },
   checkpoint: async () => { throw new Error('chat_action_checkpoint_executor_unconfigured'); },
 } };
@@ -27,7 +27,7 @@ function terminal(job: ChatActionJob, status: 'succeeded' | 'failed', result?: u
 export async function runQueuedChatActionJob(
   jobId: string,
   callerHash: string,
-  deps: ChatActionWorkerDeps = DEFAULT_DEPS,
+  deps: ChatActionWorkerDeps = DEFAULT_CHAT_ACTION_WORKER_DEPS,
 ): Promise<{ status: ChatActionJob['status']; job_id: string }> {
   const current = await deps.readDoc(JOBS, jobId, jobId) as ChatActionJob | null;
   if (!current || current.type !== 'chat_action_job' || current.caller_hash !== callerHash) throw new Error('chat_action_job_not_found');
@@ -53,7 +53,7 @@ export async function runQueuedChatActionJob(
 
 export async function runNextQueuedChatActionJob(
   callerHash: string,
-  deps: ChatActionWorkerDeps = DEFAULT_DEPS,
+  deps: ChatActionWorkerDeps = DEFAULT_CHAT_ACTION_WORKER_DEPS,
 ): Promise<{ status: ChatActionJob['status']; job_id: string } | null> {
   const rows = await deps.queryDocs(JOBS, 'SELECT * FROM c WHERE c.type = @type AND c.status = @status ORDER BY c.created_at', [
     { name: '@type', value: 'chat_action_job' }, { name: '@status', value: 'queued' },

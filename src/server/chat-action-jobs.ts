@@ -30,7 +30,7 @@ function sameSecret(value: unknown, expected: string): boolean {
   const a = createHash('sha256').update(value).digest(); const b = createHash('sha256').update(expected).digest();
   return timingSafeEqual(a, b);
 }
-function serviceAuthorized(headers: Record<string, unknown>): boolean {
+export function serviceAuthorized(headers: Record<string, unknown>): boolean {
   const token = process.env[SERVICE_TOKEN_ENV];
   const supplied = headers['x-otchealth-service-token'] ?? headers['authorization']?.toString().replace(/^Bearer\s+/i, '');
   return Boolean(token && sameSecret(supplied, token));

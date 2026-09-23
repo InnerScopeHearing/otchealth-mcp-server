@@ -19,6 +19,8 @@ import { registerRelationshipArtifactGatewayRoutes } from './relationship-artifa
 import { registerRelationshipHistoricalReadRoutes } from './relationship-historical-read.js';
 import { registerRelationshipPublicationRoutes } from './relationship-publication.js';
 import { registerChatActionJobRoutes } from './chat-action-jobs.js';
+import { registerChatActionRunRoute } from './chat-action-run-route.js';
+import { DEFAULT_CHAT_ACTION_WORKER_DEPS } from './chat-action-worker.js';
 import {
   getRevocationStoreStatus,
   loadRevocations,
@@ -108,6 +110,7 @@ async function main(): Promise<void> {
   registerRelationshipHistoricalReadRoutes(app);
   registerRelationshipPublicationRoutes(app);
   registerChatActionJobRoutes(app);
+  registerChatActionRunRoute(app, DEFAULT_CHAT_ACTION_WORKER_DEPS);
   registerWebhookRoutes(app);
 
   app.setNotFoundHandler(async (_req, reply) => {
