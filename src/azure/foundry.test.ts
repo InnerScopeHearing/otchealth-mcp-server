@@ -1,25 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Satisfy loadEnv()'s required vars, then configure Foundry so cfg() resolves.
+// Satisfy loadEnv()'s required vars, then poison the retired Foundry settings.
 process.env.CIO_SITE_ID ||= 'test';
 process.env.CIO_TRACK_KEY ||= 'test';
 process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
-// Pin the pre-2026-08-28 backend defaults (env.ts's SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
-// LLM_PROVIDER/WEB_SEARCH_PROVIDER/BLOB_BACKEND/STATE_BACKEND now default to their AWS-native
-// replacements) so this file keeps exercising exactly the Azure/Foundry/Cosmos code path it was
-// written for -- those paths stay inert-but-present and still need this coverage.
+// Pin the retired provider explicitly so this file proves stale settings stay inert.
 process.env.STATE_BACKEND ||= 'cosmos';
 process.env.BLOB_BACKEND ||= 'azure';
 process.env.SEARCH_BACKEND ||= 'azure';
 process.env.LLM_PROVIDER ||= 'foundry';
 process.env.EMBEDDINGS_PROVIDER ||= 'foundry';
 process.env.WEB_SEARCH_PROVIDER ||= 'azure';
-process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
-process.env.FOUNDRY_KEY ||= 'test-foundry-key';
+process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://retired-foundry.example.invalid';
+process.env.FOUNDRY_KEY ||= 'test-retired-foundry-key';
 
 const { embedBatch, foundryConfigured, chatTarget, chatConfigured, promptCacheKey, chat } = await import('./foundry.js');
 
@@ -55,167 +52,119 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
   }
 }
 
-test('foundry: is considered configured once endpoint + key are set', () => {
-  assert.equal(foundryConfigured(), true);
+test('retired Foundry: endpoint and key never make the provider appear configured', () => {
+  assert.equal(foundryConfigured(), false);
 });
 
 // ── chatTarget()/chatConfigured() DEFAULT scenario: LLM_PROVIDER is unset here, so this file also
 // covers "byte-identical to every prior deploy" for the chat path (see chat-provider.test.ts and
 // chat-provider-overrides.test.ts for the LLM_PROVIDER=openai scenarios, in their own processes). ──
 
-test('chatConfigured() is true by default (LLM_PROVIDER unset -> foundry) once Foundry endpoint + key are set', () => {
-  assert.equal(chatConfigured(), true);
+test('retired Foundry: chatConfigured() remains false despite poisoned settings', () => {
+  assert.equal(chatConfigured(), false);
 });
 
-test('chatTarget() defaults to the Azure deployment URL shape, addressing the model via the URL (not the body)', () => {
-  const t = chatTarget('standard');
-  assert.equal(t?.url, 'https://otchealth-foundry.example.invalid/openai/deployments/gpt-5.1/chat/completions?api-version=2024-08-01-preview');
-  assert.equal(t?.headers['api-key'], 'test-foundry-key');
-  assert.equal(t?.headers.Authorization, undefined, 'the OpenAI-direct auth header must not ride along');
-  assert.equal(t?.model, null, 'Azure addresses the model via the URL deployment segment, not the body');
-  assert.equal(t?.resolvedLabel, 'gpt-5.1');
+test('retired Foundry: chatTarget() never returns an Azure deployment URL', () => {
+  assert.equal(chatTarget('standard'), null);
 });
 
-test('chatTarget() tier "high" resolves the high deployment', () => {
-  assert.equal(chatTarget('high')?.resolvedLabel, 'gpt-5.4');
+test('retired Foundry: high-tier selection is unavailable', () => {
+  assert.equal(chatTarget('high'), null);
 });
 
-test('chatTarget() tier "router" falls back to standard when the router endpoint/key are unset (byte-identical to the pre-chatTarget() chat() behavior)', () => {
-  assert.equal(chatTarget('router')?.resolvedLabel, 'gpt-5.1');
-  assert.equal(chatTarget('router')?.url.includes('otchealth-foundry.example.invalid'), true);
+test('retired Foundry: router selection is unavailable', () => {
+  assert.equal(chatTarget('router'), null);
 });
 
-test('embedBatch: preserves input order so vector[i] corresponds to texts[i], even when the API returns data out of order', async () => {
-  const texts = ['alpha query', 'beta query', 'gamma query'];
-  let capturedBody: unknown;
+test('retired Foundry: embedBatch returns no vectors and makes no provider call', async () => {
+  let calls = 0;
   await withStubbedFetch(
-    (async (_url: string | URL, init?: RequestInit) => {
-      capturedBody = init?.body ? JSON.parse(init.body as string) : undefined;
-      // Deliberately return the embeddings SHUFFLED and out of array order, each tagged with its
-      // real `.index` from the Azure OpenAI /embeddings response shape, to prove embedBatch sorts
-      // by `.index` rather than trusting bare response-array order.
-      return new Response(
-        JSON.stringify({
-          data: [
-            { index: 2, embedding: [2, 2, 2] }, // gamma
-            { index: 0, embedding: [0, 0, 0] }, // alpha
-            { index: 1, embedding: [1, 1, 1] }, // beta
-          ],
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      );
+    (async () => {
+      calls++;
+      throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
     async () => {
-      const vectors = await embedBatch(texts);
-      assert.ok(vectors, 'embedBatch should return a non-null array when configured');
-      assert.equal(vectors!.length, 3);
-      // vector[i] must correspond to texts[i] regardless of the shuffled response order above.
-      assert.deepEqual(vectors![0], [0, 0, 0], 'texts[0] (alpha) must map to index-0 embedding');
-      assert.deepEqual(vectors![1], [1, 1, 1], 'texts[1] (beta) must map to index-1 embedding');
-      assert.deepEqual(vectors![2], [2, 2, 2], 'texts[2] (gamma) must map to index-2 embedding');
+      assert.equal(await embedBatch(['alpha query', 'beta query']), null);
     },
   );
-  assert.deepEqual(
-    (capturedBody as { input?: string[] })?.input,
-    texts,
-    'the batch call must send all texts as a single array input, not one call per text',
-  );
+  assert.equal(calls, 0);
 });
 
-test('embedBatch: sends exactly ONE request for a multi-item batch (not one call per text)', async () => {
+test('retired Foundry: multi-item embedBatch cannot issue a request', async () => {
+  let calls = 0;
+  await withStubbedFetch(
+    (async () => {
+      calls++;
+      throw new Error('retired provider must not be contacted');
+    }) as typeof fetch,
+    async () => {
+      assert.equal(await embedBatch(['q1', 'q2', 'q3', 'q4']), null);
+    },
+  );
+  assert.equal(calls, 0);
+});
+
+test('retired Foundry: an empty embedBatch returns no vectors without a network call', async () => {
   let callCount = 0;
   await withStubbedFetch(
     (async () => {
       callCount++;
-      return new Response(
-        JSON.stringify({
-          data: [
-            { index: 0, embedding: [1] },
-            { index: 1, embedding: [2] },
-            { index: 2, embedding: [3] },
-            { index: 3, embedding: [4] },
-          ],
-        }),
-        { status: 200 },
-      );
-    }) as typeof fetch,
-    async () => {
-      const vectors = await embedBatch(['q1', 'q2', 'q3', 'q4']);
-      assert.equal(vectors?.length, 4);
-      assert.equal(callCount, 1, 'batching must issue a single HTTP call for the whole batch');
-    },
-  );
-});
-
-test('embedBatch: an empty input list returns an empty array without making a network call', async () => {
-  let callCount = 0;
-  await withStubbedFetch(
-    (async () => {
-      callCount++;
-      return new Response('{}', { status: 200 });
+      throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
     async () => {
       const vectors = await embedBatch([]);
-      assert.deepEqual(vectors, []);
+      assert.equal(vectors, null);
       assert.equal(callCount, 0);
     },
   );
 });
 
-test('embedBatch: a response missing the `.index` field falls back to array position (defensive, still order-correct for a well-behaved API)', async () => {
+test('retired Foundry: malformed provider responses are unreachable', async () => {
   await withStubbedFetch(
     (async () => {
-      return new Response(
-        JSON.stringify({
-          data: [{ embedding: [10] }, { embedding: [20] }],
-        }),
-        { status: 200 },
-      );
+      throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
     async () => {
       const vectors = await embedBatch(['first', 'second']);
-      assert.deepEqual(vectors, [[10], [20]]);
+      assert.equal(vectors, null);
     },
   );
 });
 
 // ---- provider gating for the 2026-09-03 OpenAI cost levers (serviceTier is OpenAI-direct ONLY) ----
 
-test('chat(): serviceTier:"flex" is NEVER sent to Azure OpenAI, even when explicitly requested (this file is LLM_PROVIDER=foundry)', async () => {
-  let body: Record<string, unknown> = {};
-  let seenUrl = '';
+test('retired Foundry: chat with serviceTier fails before provider I/O', async () => {
+  let calls = 0;
   await withStubbedFetch(
-    (async (u: string | URL, init?: RequestInit) => {
-      seenUrl = String(u);
-      body = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    (async () => {
+      calls++;
+      throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
-    () => chat([{ role: 'user', content: 'x' }], { serviceTier: 'flex' }),
+    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { serviceTier: 'flex' }), /Foundry not configured/),
   );
-  assert.ok(seenUrl.includes('/openai/deployments/'), 'sanity: this really is the Azure URL shape');
-  assert.equal('service_tier' in body, false, 'service_tier must never reach Azure OpenAI');
+  assert.equal(calls, 0);
 });
 
-test('chat(): promptCacheKey (OpenAI-style prompt_cache_key) is still additive on the Azure path -- unlike serviceTier, it is not provider-gated', async () => {
-  let body: Record<string, unknown> = {};
+test('retired Foundry: chat with promptCacheKey fails before provider I/O', async () => {
+  let calls = 0;
   await withStubbedFetch(
-    (async (_u: string | URL, init?: RequestInit) => {
-      body = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    (async () => {
+      calls++;
+      throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
-    () => chat([{ role: 'user', content: 'x' }], { promptCacheKey: 'llm:cto:summarize:standard' }),
+    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { promptCacheKey: 'llm:cto:summarize:standard' }), /Foundry not configured/),
   );
-  assert.equal(body.prompt_cache_key, 'llm:cto:summarize:standard');
+  assert.equal(calls, 0);
 });
 
-test('chat(): router-tier reasoning_effort default is ALSO provider-neutral in principle, but never fires on Azure because FOUNDRY_CHAT_DEPLOYMENT/_HIGH_DEPLOYMENT here are gpt-5.1/gpt-5.4, not the gpt-5.6 family', async () => {
-  let body: Record<string, unknown> = {};
+test('retired Foundry: router-tier chat fails before provider I/O', async () => {
+  let calls = 0;
   await withStubbedFetch(
-    (async (_u: string | URL, init?: RequestInit) => {
-      body = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    (async () => {
+      calls++;
+      throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
-    () => chat([{ role: 'user', content: 'x' }], { tier: 'router' }),
+    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { tier: 'router' }), /Foundry not configured/),
   );
-  assert.equal('reasoning_effort' in body, false, 'the family gate correctly excludes this deploy\'s gpt-5.1 fallback');
+  assert.equal(calls, 0);
 });
