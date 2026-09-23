@@ -35,6 +35,7 @@ import { registerIntercomGetArticle } from './intercom/get-article.js';
 // Phase 2 — n8n meta-tools
 import { registerN8nListWorkflows } from './n8n/list-workflows.js';
 import { registerN8nGetExecution } from './n8n/get-execution.js';
+import { registerN8nChatActions } from './n8n/chat-actions.js';
 
 // Phase 3 — Cloudflare (fleet email routing + DNS)
 import { registerCloudflareListEmailDestinations } from './cloudflare/list-email-destinations.js';
@@ -1001,6 +1002,10 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // ===== Phase 2: n8n meta-tools =====
   registerN8nListWorkflows(server, callerHash);
   registerN8nGetExecution(server, callerHash);
+  // Ordinary Chat has a deliberately narrow asynchronous route through n8n.
+  // It can submit only an allowlisted Brain read or checkpoint and then retrieve
+  // the durable job receipt. It is never an arbitrary n8n API proxy.
+  registerN8nChatActions(server, callerHash);
 
   // ===== Phase 3: Cloudflare (fleet email routing + DNS) =====
   registerCloudflareListEmailDestinations(server, callerHash);
