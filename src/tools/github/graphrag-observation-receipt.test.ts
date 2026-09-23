@@ -5,6 +5,7 @@ import { deflateRawSync } from 'node:zlib';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { MAX_GRAPHRAG_ARCHIVE_BYTES } from '../../github/graphrag-observation-receipt.js';
 
 const REPOSITORY = 'InnerScopeHearing/otchealth-cto';
 const REPOSITORY_ID = 123456789;
@@ -193,6 +194,7 @@ type StubOverrides = {
   producerBlobSha?: string;
   artifact?: Record<string, unknown>;
   archive?: Buffer;
+  downloadChunk?: Uint8Array;
   downloadLocation?: string;
 };
 
@@ -227,6 +229,15 @@ function githubStub(captured: CapturedRequest[], overrides: StubOverrides = {}):
       return new Response(null, { status: 302, headers: { location: overrides.downloadLocation ?? DOWNLOAD_URL } });
     }
     if (url.toString() === (overrides.downloadLocation ?? DOWNLOAD_URL)) {
+      const chunk = overrides.downloadChunk;
+      if (chunk) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(chunk);
+            controller.close();
+          },
+        }), { status: 200 });
+      }
       return new Response(archive, { status: 200, headers: { 'content-length': String(archive.length) } });
     }
     throw new Error('unexpected mocked GitHub request');
@@ -429,6 +440,32 @@ test('pinned observation read rejects any archive with extra or unsafe members',
     const archive = Buffer.alloc(1024 * 1024 + 1);
     const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
     assert.equal(result.isError, true);
+  });
+
+  await t.test('single oversized response chunk is rejected before copying', async () => {
+    const requests: CapturedRequest[] = [];
+    const oversizedChunk = new Uint8Array(MAX_GRAPHRAG_ARCHIVE_BYTES + 1);
+    const stub = githubStub(requests, { downloadChunk: oversizedChunk });
+    const originalBufferFrom = Buffer.from;
+    let copiedOversizedChunk = false;
+    let result: Awaited<ReturnType<typeof callThroughRealMcpServer>>;
+
+    Buffer.from = ((value: unknown, ...args: unknown[]) => {
+      if (value === oversizedChunk) {
+        copiedOversizedChunk = true;
+        throw new Error('oversized response chunk reached Buffer.from');
+      }
+      return Reflect.apply(originalBufferFrom, Buffer, [value, ...args]);
+    }) as typeof Buffer.from;
+    try {
+      result = await withStubbedFetch(stub, () => callThroughRealMcpServer());
+    } finally {
+      Buffer.from = originalBufferFrom;
+    }
+
+    assert.equal(result.isError, true);
+    assert.ok(requests.some((request) => request.url === DOWNLOAD_URL), 'the test must reach the streamed archive response');
+    assert.equal(copiedOversizedChunk, false, 'the oversized chunk must be rejected before Buffer.from copies it');
   });
 
   await t.test('receipt extraction byte limit', async () => {

@@ -731,12 +731,12 @@ async function readBoundedResponseBytes(response: Response, maxBytes: number): P
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunk = Buffer.from(value);
-      totalBytes += chunk.length;
-      if (totalBytes > maxBytes) {
+      if (value.byteLength > maxBytes - totalBytes) {
         try { await reader.cancel(); } catch { /* keep the bounded parse failure */ }
         throw new Error('response too large');
       }
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
       chunks.push(chunk);
     }
   } finally {
