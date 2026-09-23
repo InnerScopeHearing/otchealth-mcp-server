@@ -5,19 +5,18 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { workflowJobGetLogArchive, workflowRunListJobs, GitHubFullError } from '../../github/full-client.js';
 
 export const MAX_EVIDENCE_LINES = 80;
-export const MAX_EVIDENCE_LINE_BYTES = 4_000;
 export const FAILURE_EVIDENCE_REPOSITORY = 'InnerScopeHearing/otchealth-mcp-server';
-export const WITHHELD_SOURCE_FILE = '[withheld]';
 const MAX_ARCHIVE_ENTRIES = 8;
 const MAX_UNCOMPRESSED_LOG_BYTES = 2 * 1024 * 1024;
 const FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
 
 export interface FailureEvidence {
-  lines: string[];
+  failure_category: 'test_failure' | 'build_failure' | 'dependency_failure' | 'timeout' | 'permission_failure' | 'network_failure' | 'unknown_failure';
   total_lines: number;
-  redacted_count: number;
+  signal_count: number;
+  error_count: number;
+  warning_count: number;
   truncated: boolean;
-  source_file: string;
 }
 
 /** This first capability is deliberately narrower than the general GitHub repo allowlist. */
@@ -40,34 +39,15 @@ export function verifyFailureJobMetadata(jobs: readonly any[], jobId: number): a
 }
 
 export function safeFailureEvidenceError(error: unknown, phase: 'metadata' | 'log'): GitHubFullError {
-  if (error instanceof GitHubFullError) return new GitHubFullError({ code: error.code, status: error.status, message: `GitHub job ${phase} retrieval failed.`, nextStep: `Verify the GitHub App can read ${phase} for this repository.` });
-  return new GitHubFullError({ code: `github_job_${phase}_error`, status: 502, message: `GitHub job ${phase} retrieval failed.`, nextStep: `Verify the GitHub App can read ${phase} for this repository.` });
-}
-
-/** Remove URLs, authorization/header values, and common secret-shaped values before any output. */
-export function sanitizeLogLine(value: string): { line: string; redactions: number } {
-  let line = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ');
-  let redactions = 0;
-  const replace = (re: RegExp, replacement: string) => { line = line.replace(re, (...args) => { redactions++; return replacement.replace('$1', String(args[1] ?? '')); }); };
-  replace(/https?:\/\/[^\s\])}>]+/gi, '[redacted-url]');
-  replace(/((?:authorization|proxy-authorization)\s*[:=]\s*(?:bearer|basic)\s+)[^\s,;]+/gi, '$1[redacted]');
-  replace(/((?:cookie|set-cookie|x-api-key|api-key|private-key)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
-  replace(/((?:password|passwd|secret|token|api[_-]?key|client[_-]?secret)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
-  replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+)\b/g, '[redacted-secret]');
-  replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted-jwt]');
-  replace(/[?&](?:token|sig|signature|expires|X-Amz-[A-Za-z-]+)=[^&\s]+/gi, '?[redacted-query]');
-  if (Buffer.byteLength(line, 'utf8') > MAX_EVIDENCE_LINE_BYTES) {
-    line = Buffer.from(line, 'utf8').subarray(0, MAX_EVIDENCE_LINE_BYTES).toString('utf8') + '…';
-    redactions++;
-  }
-  return { line, redactions };
+  void error;
+  return new GitHubFullError({ code: phase === 'metadata' ? 'github_job_metadata_unavailable' : 'github_job_log_unavailable', status: 502, message: 'GitHub failure evidence is temporarily unavailable.', nextStep: 'Retry later or inspect the run in GitHub.' });
 }
 
 function readU16(bytes: Uint8Array, at: number): number { return bytes[at] | (bytes[at + 1] << 8); }
 function readU32(bytes: Uint8Array, at: number): number { return (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0; }
 
 /** Extract the first bounded text member from GitHub's job-log ZIP response. */
-export function extractJobLogText(archive: Uint8Array): { text: string; source_file: string } {
+export function extractJobLogText(archive: Uint8Array): string {
   let offset = 0;
   let entries = 0;
   while (offset + 30 <= archive.byteLength && entries++ < MAX_ARCHIVE_ENTRIES) {
@@ -79,17 +59,17 @@ export function extractJobLogText(archive: Uint8Array): { text: string; source_f
     const extraLength = readU16(archive, offset + 28);
     const nameStart = offset + 30;
     const dataStart = nameStart + nameLength + extraLength;
-    const name = Buffer.from(archive.subarray(nameStart, nameStart + nameLength)).toString('utf8');
+    const memberName = Buffer.from(archive.subarray(nameStart, nameStart + nameLength)).toString('utf8');
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > archive.byteLength || uncompressedSize > MAX_UNCOMPRESSED_LOG_BYTES) throw new Error('bounded log archive cannot be safely inspected');
     const compressed = archive.subarray(dataStart, dataEnd);
-    if (/\.(?:txt|log)$/i.test(name) || entries === 1) {
+    if (entries === 1 || /\.(?:txt|log)$/i.test(memberName)) {
       let plain: Uint8Array;
       if (method === 0) plain = compressed;
       else if (method === 8) plain = inflateRawSync(compressed, { maxOutputLength: MAX_UNCOMPRESSED_LOG_BYTES });
       else throw new Error('unsupported log archive compression');
       if (plain.byteLength > MAX_UNCOMPRESSED_LOG_BYTES) throw new Error('bounded log archive cannot be safely inspected');
-      return { text: Buffer.from(plain).toString('utf8'), source_file: name.slice(0, 256) };
+      return Buffer.from(plain).toString('utf8');
     }
     offset = dataEnd;
   }
@@ -100,14 +80,17 @@ export function summarizeFailureEvidence(text: string, startLine = 1, maxLines =
   const all = text.split(/\r?\n/);
   const start = Math.max(1, Math.min(startLine, all.length + 1));
   const limit = Math.max(1, Math.min(maxLines, MAX_EVIDENCE_LINES));
-  let redacted_count = 0;
-  const lines: string[] = [];
-  for (let i = start - 1; i < all.length && lines.length < limit; i++) {
-    const safe = sanitizeLogLine(all[i]);
-    redacted_count += safe.redactions;
-    lines.push(safe.line);
-  }
-  return { lines, total_lines: all.length, redacted_count, truncated: start - 1 + lines.length < all.length, source_file: '' };
+  const selected = all.slice(start - 1, start - 1 + limit);
+  const joined = selected.join('\n');
+  const matches = (re: RegExp): number => joined.match(re)?.length ?? 0;
+  const failure_category = /(?:timeout|timed out|deadline exceeded)/i.test(joined) ? 'timeout'
+    : /(?:permission denied|forbidden|unauthorized|access denied)/i.test(joined) ? 'permission_failure'
+    : /(?:network|connection refused|connection reset|dns|econn)/i.test(joined) ? 'network_failure'
+    : /(?:npm|pnpm|yarn|pip|cargo|dependency|package .*not found)/i.test(joined) ? 'dependency_failure'
+    : /(?:test failed|tests?\s+failed|assertion|expect\()/i.test(joined) ? 'test_failure'
+    : /(?:build failed|compilation failed|compile error|ts\d{4}|error:)/i.test(joined) ? 'build_failure'
+    : 'unknown_failure';
+  return { failure_category, total_lines: all.length, signal_count: matches(/(?:error|fail|failed|failure|exception|timeout|denied|forbidden)/gi), error_count: matches(/(?:error|exception|failed|failure)/gi), warning_count: matches(/warning/gi), truncated: start - 1 + selected.length < all.length };
 }
 
 export function registerGitHubWorkflowJobLogFailureEvidence(server: McpServer, callerHash: CallerHashProvider): void {
@@ -116,7 +99,7 @@ export function registerGitHubWorkflowJobLogFailureEvidence(server: McpServer, c
     category: 'read',
     annotations: {
       title: 'GitHub: bounded workflow job failure evidence',
-      description: 'Retrieve a bounded, sanitized summary from one verified failed Actions job log. CTO-only and read-only; raw logs, archives, URLs, and credentials are never returned.',
+      description: 'Classify one verified failed Actions job log into a fixed failure category with bounded numeric counters. CTO-only and read-only; no log text, archive metadata, URLs, paths, or credentials are returned.',
       readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true,
     },
     inputShape: {
@@ -124,12 +107,12 @@ export function registerGitHubWorkflowJobLogFailureEvidence(server: McpServer, c
       repo: z.string().describe('Repository name.'),
       run_id: z.number().int().positive().describe('Workflow run numeric ID.'),
       job_id: z.number().int().positive().describe('Exact job numeric ID, verified against the run.'),
-      start_line: z.number().int().positive().max(2_000_000).optional().describe('One-based first line to include.'),
-      max_lines: z.number().int().positive().max(MAX_EVIDENCE_LINES).optional().describe('Maximum sanitized lines to return.'),
+      start_line: z.number().int().positive().max(2_000_000).optional().describe('One-based first line of the bounded internal classification window.'),
+      max_lines: z.number().int().positive().max(MAX_EVIDENCE_LINES).optional().describe('Maximum lines in the bounded internal classification window.'),
     },
     outputShape: {
-      job: z.object({ id: z.number(), name: z.string().nullable(), conclusion: z.string().nullable(), status: z.string().nullable() }),
-      evidence: z.object({ lines: z.array(z.string()), total_lines: z.number(), redacted_count: z.number(), truncated: z.boolean(), source_file: z.string() }),
+      job_id: z.number(),
+      evidence: z.object({ failure_category: z.enum(['test_failure', 'build_failure', 'dependency_failure', 'timeout', 'permission_failure', 'network_failure', 'unknown_failure']), total_lines: z.number(), signal_count: z.number(), error_count: z.number(), warning_count: z.number(), truncated: z.boolean() }),
     },
     handler: async (input, _ctx) => {
       // This exact allowlist runs before any GitHub request, including metadata verification, and
@@ -142,11 +125,11 @@ export function registerGitHubWorkflowJobLogFailureEvidence(server: McpServer, c
       let archive: Uint8Array;
       try { archive = await workflowJobGetLogArchive(input.owner, input.repo, input.job_id); }
       catch (error) { throw safeFailureEvidenceError(error, 'log'); }
-      const extracted = extractJobLogText(archive);
-      const evidence = summarizeFailureEvidence(extracted.text, input.start_line ?? 1, input.max_lines ?? MAX_EVIDENCE_LINES);
-      evidence.source_file = WITHHELD_SOURCE_FILE;
-      const safeJobName = typeof job.name === 'string' ? sanitizeLogLine(job.name.slice(0, 256)).line : null;
-      return { data: { job: { id: job.id, name: safeJobName, conclusion: job.conclusion ?? null, status: job.status ?? null }, evidence }, summary: `Bounded sanitized failure evidence for job #${job.id}.` };
+      let extracted: string;
+      try { extracted = extractJobLogText(archive); }
+      catch { throw new GitHubFullError({ code: 'github_job_log_unreadable', status: 422, message: 'GitHub failure evidence is unavailable for this log.', nextStep: 'Inspect the job log in GitHub.' }); }
+      const evidence = summarizeFailureEvidence(extracted, input.start_line ?? 1, input.max_lines ?? MAX_EVIDENCE_LINES);
+      return { data: { job_id: job.id, evidence }, summary: 'Bounded classification-only failure evidence returned.' };
     },
   }, callerHash);
 }

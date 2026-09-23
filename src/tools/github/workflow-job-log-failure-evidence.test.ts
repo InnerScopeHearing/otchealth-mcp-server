@@ -3,12 +3,10 @@ import assert from 'node:assert/strict';
 import { deflateRawSync } from 'node:zlib';
 
 let extractJobLogText: typeof import('./workflow-job-log-failure-evidence.js').extractJobLogText;
-let sanitizeLogLine: typeof import('./workflow-job-log-failure-evidence.js').sanitizeLogLine;
 let summarizeFailureEvidence: typeof import('./workflow-job-log-failure-evidence.js').summarizeFailureEvidence;
 let assertFailureEvidenceRepoAllowed: typeof import('./workflow-job-log-failure-evidence.js').assertFailureEvidenceRepoAllowed;
 let verifyFailureJobMetadata: typeof import('./workflow-job-log-failure-evidence.js').verifyFailureJobMetadata;
 let safeFailureEvidenceError: typeof import('./workflow-job-log-failure-evidence.js').safeFailureEvidenceError;
-let WITHHELD_SOURCE_FILE: typeof import('./workflow-job-log-failure-evidence.js').WITHHELD_SOURCE_FILE;
 let requiredRoleFor: typeof import('../../catalog/governance.js').requiredRoleFor;
 let roleAllows: typeof import('../../catalog/governance.js').roleAllows;
 let CTO_SHIP_LANE_TOOLSET: typeof import('../registry.js').CTO_SHIP_LANE_TOOLSET;
@@ -20,7 +18,7 @@ before(async () => {
   process.env.PERPLEXITY_CONNECTOR_TOKEN ??= 'a'.repeat(32);
   process.env.ADMIN_REVOKE_TOKEN ??= 'b'.repeat(32);
   process.env.N8N_WEBHOOK_SECRET ??= 'c'.repeat(32);
-  ({ extractJobLogText, sanitizeLogLine, summarizeFailureEvidence, assertFailureEvidenceRepoAllowed, verifyFailureJobMetadata, safeFailureEvidenceError, WITHHELD_SOURCE_FILE } = await import('./workflow-job-log-failure-evidence.js'));
+  ({ extractJobLogText, summarizeFailureEvidence, assertFailureEvidenceRepoAllowed, verifyFailureJobMetadata, safeFailureEvidenceError } = await import('./workflow-job-log-failure-evidence.js'));
   ({ requiredRoleFor, roleAllows } = await import('../../catalog/governance.js'));
   ({ CTO_SHIP_LANE_TOOLSET } = await import('../registry.js'));
 });
@@ -40,27 +38,32 @@ function makeZip(name: string, text: string, deflated = true): Uint8Array {
   return Buffer.concat([header, data]);
 }
 
-test('sanitization removes URLs, auth/header values, secret-shaped tokens and control bytes', () => {
-  const result = sanitizeLogLine('Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789 https://example.test/x?token=secret\u0001');
-  assert.doesNotMatch(result.line, /ghp_|https?:\/\//i);
-  assert.doesNotMatch(result.line, /Bearer\s+ghp_/i);
-  assert.ok(result.redactions >= 2);
-});
-
-test('ZIP extraction is bounded, supports deflate and never exposes archive bytes', () => {
+test('ZIP extraction is bounded and supports deflate without returning archive/source metadata', () => {
   const archive = makeZip('job.txt', 'first\nERROR password=secret\nlast\n');
   const extracted = extractJobLogText(archive);
-  assert.equal(extracted.source_file, 'job.txt');
-  assert.match(extracted.text, /password=secret/);
-  assert.notEqual(extracted.text, archive.toString());
+  assert.match(extracted, /password=secret/);
+  assert.notEqual(extracted, archive.toString());
 });
 
-test('summary enforces line window and reports truncation/redaction', () => {
+test('classification summary enforces line window and returns only fixed categories/counters', () => {
   const result = summarizeFailureEvidence('a\nsecret=abc\nthird\nfourth', 2, 2);
-  assert.deepEqual(result.lines, ['secret=[redacted]', 'third']);
+  assert.equal(result.failure_category, 'unknown_failure');
   assert.equal(result.total_lines, 4);
   assert.equal(result.truncated, true);
-  assert.equal(result.redacted_count, 1);
+  assert.equal(result.signal_count, 0);
+  assert.equal(result.error_count, 0);
+});
+
+test('synthetic log signals classify only into the finite category enum', () => {
+  const cases = [
+    ['tests failed: assertion', 'test_failure'],
+    ['build failed: compilation failed', 'build_failure'],
+    ['npm dependency package not found', 'dependency_failure'],
+    ['deadline exceeded', 'timeout'],
+    ['permission denied', 'permission_failure'],
+    ['network connection refused', 'network_failure'],
+  ] as const;
+  for (const [text, category] of cases) assert.equal(summarizeFailureEvidence(text).failure_category, category);
 });
 
 test('malformed and oversized archive members fail closed', () => {
@@ -92,7 +95,7 @@ test('metadata fence refuses run/job mismatch and completed success jobs', () =>
   assert.equal(verifyFailureJobMetadata([{ id: 8, status: 'completed', conclusion: 'failure', name: 'test' }], 8).id, 8);
 });
 
-test('remote metadata and log errors are bounded and cannot echo secrets or archive/source names', () => {
+test('classification and remote errors never expose sentinel source/log/secret values', () => {
   const upstream = new Error('https://signed.example/log.zip?token=ghp_secret');
   const metadataError = safeFailureEvidenceError(upstream, 'metadata');
   const logError = safeFailureEvidenceError(upstream, 'log');
@@ -100,9 +103,8 @@ test('remote metadata and log errors are bounded and cannot echo secrets or arch
     assert.doesNotMatch(error.message, /signed|ghp_|token=|zip/i);
     assert.doesNotMatch(error.nextStep, /signed|ghp_|token=|zip/i);
   }
-  assert.equal(WITHHELD_SOURCE_FILE, '[withheld]');
   const evidence = summarizeFailureEvidence('archive-secret=ghp_secret\nsource-name=private.log', 1, 2);
-  evidence.source_file = WITHHELD_SOURCE_FILE;
-  assert.equal(evidence.source_file, '[withheld]');
-  assert.doesNotMatch(JSON.stringify(evidence), /ghp_secret|archive-secret=ghp_secret/);
+  const serialized = JSON.stringify(evidence);
+  assert.doesNotMatch(serialized, /ghp_secret|private\.log|archive-secret=ghp_secret/);
+  assert.match(serialized, /unknown_failure|failure_category/);
 });
