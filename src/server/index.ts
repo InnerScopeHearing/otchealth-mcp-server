@@ -18,6 +18,11 @@ import { registerGraphCatalogControllerRoutes } from './graph-catalog-controller
 import { registerRelationshipArtifactGatewayRoutes } from './relationship-artifact-gateway.js';
 import { registerRelationshipHistoricalReadRoutes } from './relationship-historical-read.js';
 import { registerRelationshipPublicationRoutes } from './relationship-publication.js';
+import { registerChatActionJobRoutes } from './chat-action-jobs.js';
+import { registerChatActionRunRoute } from './chat-action-run-route.js';
+import { createChatActionExecutor } from './chat-action-executor.js';
+import { handleCheckpoint } from '../tools/memory/checkpoint.js';
+import { queryDocs, readDoc, replaceDoc } from '../agentstate/store.js';
 import {
   getRevocationStoreStatus,
   loadRevocations,
@@ -106,6 +111,8 @@ async function main(): Promise<void> {
   registerRelationshipArtifactGatewayRoutes(app);
   registerRelationshipHistoricalReadRoutes(app);
   registerRelationshipPublicationRoutes(app);
+  registerChatActionJobRoutes(app);
+  registerChatActionRunRoute(app, { queryDocs, readDoc, replaceDoc, execute: createChatActionExecutor(handleCheckpoint) });
   registerWebhookRoutes(app);
 
   app.setNotFoundHandler(async (_req, reply) => {

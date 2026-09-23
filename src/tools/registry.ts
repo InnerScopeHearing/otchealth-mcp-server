@@ -117,6 +117,9 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'legal_blob_move', 'legal_blob_copy', 'legal_blob_delete',
   'graph_drive_list', 'graph_drive_download', 'graph_drive_upload',
   'wake', 'checkpoint', 'memory_recall', 'memory_search', 'memory_write', 'memory_remember', 'memory_pack', 'memory_team', 'memory_inbound', 'memory_reconcile',
+  // Narrow durable bridge for ordinary Chat: exactly the allowlisted Brain
+  // search/checkpoint action contract, never direct n8n administration.
+  'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // Wave 7 item 7.1: opt-in feedback reporting on a brain_search/kb_search hit (see kb/search.ts,
   // kb/brain-search.ts, memory/retrieval-feedback.ts). Not added to EXTERNAL_READONLY_TOOLSET below,
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
@@ -325,6 +328,7 @@ const CONNECTOR_SEAT_MEMORY_BASELINE: readonly string[] = [
  */
 export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // Keep the small read-only diagnostic reachable so the desktop connector can report
   // its own caller and registry binding when its catalog looks stale or incomplete.
   'catalog_probe',
@@ -383,6 +387,7 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
   // Result-store retrieval has no caller binding; never expose it to this scoped principal.
   ...EXTERNAL_READONLY_TOOLSET.filter(name => name !== 'gateway_fetch_result'),
   'catalog_probe',
+  'chat_action_submit', 'chat_action_status', 'chat_action_result',
   'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
   'hyperagent_create_thread', 'hyperagent_send_message',
   'browser_broker_preflight',
@@ -399,6 +404,7 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  */
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // This diagnostic is intentionally safe on the constrained coordination surface.
   'catalog_probe',
   // Read-only GraphRAG handler separately constrains this lane to source_group=company.

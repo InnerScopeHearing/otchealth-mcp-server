@@ -4,7 +4,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { registerTool, type CallerHashProvider } from '../registry.js';
+import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
 import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
@@ -281,4 +281,15 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
     },
     callerHash,
   );
+}
+
+/** Direct in-process adapter for durable workers. It captures the exact handler definition used by
+ * registerCheckpoint, so the checkpoint's existing MNPI gate, delivery accounting, indexing, and
+ * capture-pressure behavior remain one implementation. */
+export async function handleCheckpoint(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResultPayload> {
+  let handler: ((value: any, context: ToolContext) => Promise<ToolResultPayload>) | undefined;
+  const captureRegister = ((_server: McpServer, definition: any) => { handler = definition.handler; }) as typeof registerTool;
+  registerCheckpoint({} as McpServer, () => ctx.callerHash, { register: captureRegister });
+  if (!handler) throw new Error('checkpoint_handler_unavailable');
+  return handler(input, ctx);
 }

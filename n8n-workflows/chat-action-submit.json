@@ -1,0 +1,220 @@
+{
+  "name": "OTCHealth Chat Action Submit",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true
+  },
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Chat Action Submit",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "chat-action-submit",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-action-submit",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "verify",
+      "name": "Verify HMAC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET missing');\nconst h = $json.headers || {};\nconst raw = $binary?.data?.data ? Buffer.from($binary.data.data, 'base64').toString('utf8') : JSON.stringify($json.body || {});\nconst expected = crypto.createHmac('sha256', secret).update(raw, 'utf8').digest('hex');\nconst supplied = h['x-signature-sha256'] || h['X-Signature-Sha256'];\nif (!supplied || supplied !== expected) return [{ json: { authorized: false } }];\nconst body = $json.body || JSON.parse(raw);\nconst companyLanes = new Set(['cto','developer','coo','cro','cfo','clo','exec']);\nif (!body.action || !['brain_search','checkpoint'].includes(body.action) || typeof body.idempotency_key !== 'string' || !body.request || !companyLanes.has(body.caller_agent) || JSON.stringify(body).toLowerCase().includes('clo-personal')) return [{ json: { authorized: false, reason: 'invalid_action_request' } }];\nreturn [{ json: { authorized: true, body, correlation_id: h['x-correlation-id'], caller_hash: h['x-caller-hash'] } }];"
+      }
+    },
+    {
+      "id": "persist",
+      "name": "Persist Opaque Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        940,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_GATEWAY_BASE_URL + '/internal/chat-actions/jobs' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ action: $('Verify HMAC').first().json.body.action, request: $('Verify HMAC').first().json.body.request, idempotency_key: $('Verify HMAC').first().json.body.idempotency_key, correlation_id: $('Verify HMAC').first().json.correlation_id, caller_hash: $('Verify HMAC').first().json.caller_hash, caller_agent: $('Verify HMAC').first().json.body.caller_agent }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "OTCHealth Gateway Service"
+        }
+      }
+    },
+    {
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1420,
+        220
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, result: { job_id: $json.result.job_id, status: $json.result.status } }) }}"
+      }
+    },
+    {
+      "id": "reject",
+      "name": "Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        940,
+        430
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 401,
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'invalid_signature_or_action' }) }}"
+      }
+    },
+    {
+      "id": "authorization-gate",
+      "name": "Authorized?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.authorized }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "run",
+      "name": "Run Queued Action",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1180,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_GATEWAY_BASE_URL + '/internal/chat-actions/jobs/run' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ job_id: $('Persist Opaque Job').first().json.result.job_id, caller_hash: $('Verify HMAC').first().json.caller_hash }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "OTCHealth Gateway Service"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Chat Action Submit": {
+      "main": [
+        [
+          {
+            "node": "Verify HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Opaque Job": {
+      "main": [
+        [
+          {
+            "node": "Run Queued Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify HMAC": {
+      "main": [
+        {
+          "node": "Authorized?",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Authorized?": {
+      "main": [
+        [
+          {
+            "node": "Persist Opaque Job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Queued Action": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "_otchealth_mcp_metadata": {
+    "required_gateway_credential": "OTCHealth Gateway Service",
+    "required_env": [
+      "N8N_WEBHOOK_SECRET",
+      "N8N_GATEWAY_BASE_URL"
+    ],
+    "import_instructions": "Import inactive, bind the existing OTCHealth Gateway Service credential on Persist Opaque Job and Run Queued Action, set N8N_GATEWAY_BASE_URL and N8N_WEBHOOK_SECRET in n8n, test a synthetic company-lane Brain job, then activate. Never paste a secret into the workflow JSON."
+  }
+}
