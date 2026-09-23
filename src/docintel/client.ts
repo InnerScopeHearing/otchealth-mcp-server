@@ -1,9 +1,8 @@
 /**
- * Azure Document Intelligence (Form Recognizer) API client.
+ * Retired Azure Document Intelligence compatibility adapter.
  *
- * Required env vars:
- *   DOCINTEL_ENDPOINT  – e.g. https://di-otchealth.cognitiveservices.azure.com
- *   DOCINTEL_KEY       – Azure subscription key (Ocp-Apim-Subscription-Key)
+ * The former provider integration is retained only for source and response-shape
+ * compatibility. Azure configuration is obsolete and is never read by this module.
  *
  * PHI / RING SAFETY WARNING:
  *   This gateway is NOT covered by a Business Associate Agreement (BAA).
@@ -11,24 +10,6 @@
  *   these tools. Permitted content: CFO finance documents (invoices, receipts)
  *   and CLO commercial contracts only. PHI goes to the BAA-covered engine.
  */
-
-import { fetchWithBudget } from '../util/fetch-budget.js';
-
-const API_VERSION = '2024-11-30';
-const POLL_INTERVAL_MS = 2_000;
-const POLL_TIMEOUT_MS = 25_000;
-
-// Read secrets directly from process.env (no loadEnv() — new connector, no
-// shared config key yet; the CTO adds it to config/env.ts).
-function endpoint(): string {
-  return (process.env['DOCINTEL_ENDPOINT'] ?? '').replace(/\/$/, '');
-}
-function apiKey(): string {
-  return process.env['DOCINTEL_KEY'] ?? '';
-}
-function isConfigured(): boolean {
-  return endpoint() !== '' && apiKey() !== '';
-}
 
 export interface AnalyzeSource {
   urlSource?: string;
@@ -41,7 +22,7 @@ export interface AnalyzeResultOk {
 }
 
 export interface AnalyzeResultFailed {
-  status: 'failed' | 'timedOut' | 'notConfigured';
+  status: 'failed' | 'timedOut' | 'notConfigured' | 'retired';
   error?: string;
 }
 
@@ -61,118 +42,26 @@ export class DocIntelApiError extends Error {
 }
 
 /**
- * Analyze a document against a Document Intelligence model.
+ * Analyze a document through the retired compatibility seam.
  *
- * Submits the job, polls Operation-Location until succeeded/failed/timeout,
- * and returns the full analyzeResult blob.
- *
- * On missing credentials, returns a flagged inert result (no throw) so the
- * gateway continues to boot with partial config.
+ * The retired adapter returns a neutral result without reading configuration or
+ * making a provider request, so stale settings cannot reactivate a billed call.
  */
 export async function analyzeDocument(
   modelId: string,
   source: AnalyzeSource,
 ): Promise<AnalyzeOutcome> {
-  if (!isConfigured()) {
-    return {
-      status: 'notConfigured',
-      error: 'DOCINTEL_ENDPOINT or DOCINTEL_KEY not set. Add them to the MCP server environment.',
-    };
-  }
-
-  const ep = endpoint();
-  const key = apiKey();
-  const analyzeUrl =
-    `${ep}/documentintelligence/documentModels/${encodeURIComponent(modelId)}:analyze` +
-    `?api-version=${API_VERSION}`;
-
-  const body: Record<string, string> = {};
-  if (source.urlSource) body['urlSource'] = source.urlSource;
-  if (source.base64Source) body['base64Source'] = source.base64Source;
-
-  // --- Submit analysis job ---
-  // Non-idempotent: starts a billed Document Intelligence analysis job. retries:0 so a
-  // timeout never submits a duplicate (and doubly-billed) analysis.
-  const submitRes = await fetchWithBudget(analyzeUrl, {
-    method: 'POST',
-    headers: {
-      'Ocp-Apim-Subscription-Key': key,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  }, { retries: 0 });
-  const submitStatus = submitRes.status;
-  await submitRes.arrayBuffer(); // drain the body to release the connection
-
-  if (submitStatus !== 202) {
-    // Non-202 means immediate error — drain and surface it
-    throw new DocIntelApiError({
-      code: `docintel_${submitStatus}`,
-      status: submitStatus,
-      message: `Document Intelligence submit returned HTTP ${submitStatus} (expected 202).`,
-      nextStep: 'Verify DOCINTEL_ENDPOINT and DOCINTEL_KEY. Check Azure portal for quota limits.',
-    });
-  }
-
-  const operationLocation = submitRes.headers.get('operation-location');
-  if (!operationLocation) {
-    throw new DocIntelApiError({
-      code: 'docintel_missing_operation_location',
-      status: 202,
-      message: 'Azure DI returned 202 but no Operation-Location header.',
-      nextStep: 'This is an Azure API contract violation — raise with Azure Support.',
-    });
-  }
-
-  // --- Poll until terminal state or timeout ---
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
-
-  while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS);
-
-    // Read-only poll: safe to retry once on a network blip / 429 / 5xx.
-    const pollRes = await fetchWithBudget(operationLocation, {
-      method: 'GET',
-      headers: { 'Ocp-Apim-Subscription-Key': key },
-    }, { retries: 1 });
-    const pollStatus = pollRes.status;
-    const pollText = await pollRes.text();
-    let pollData: any;
-    try { pollData = JSON.parse(pollText); } catch { pollData = { raw: pollText }; }
-
-    if (pollStatus >= 400) {
-      throw new DocIntelApiError({
-        code: `docintel_poll_${pollStatus}`,
-        status: pollStatus,
-        message: pollData?.error?.message ?? `Poll request returned HTTP ${pollStatus}.`,
-        nextStep: 'Operation-Location URL may have expired or key is invalid.',
-      });
-    }
-
-    const opStatus: string = pollData?.status ?? '';
-
-    if (opStatus === 'succeeded') {
-      return { status: 'succeeded', analyzeResult: pollData.analyzeResult ?? pollData };
-    }
-
-    if (opStatus === 'failed') {
-      const errMsg = pollData?.error?.message ?? 'Azure DI reported operation failed.';
-      return { status: 'failed', error: errMsg };
-    }
-
-    // opStatus is 'running' or 'notStarted' — keep polling
-  }
-
+  // Azure Document Intelligence is retired with the deleted Azure estate. Keep the
+  // adapter source-owned for historical reference, but fail closed before reading
+  // configuration or touching the provider. This also prevents a stale secret from
+  // accidentally reactivating a billed external call.
+  void modelId;
+  void source;
   return {
-    status: 'timedOut',
-    error: `Document Intelligence analysis did not complete within ${POLL_TIMEOUT_MS / 1000}s.`,
+    status: 'retired',
+    error: 'Azure Document Intelligence is retired; no provider call was attempted.',
   };
-}
 
-// ---- helpers ----
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

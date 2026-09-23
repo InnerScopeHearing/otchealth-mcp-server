@@ -1,9 +1,8 @@
 /**
  * MCP tool: docintel_analyze_invoice
  *
- * Required env vars (read by src/docintel/client.ts):
- *   DOCINTEL_ENDPOINT  – Azure Document Intelligence endpoint
- *   DOCINTEL_KEY       – Azure subscription key
+ * Retired compatibility adapter. Former provider configuration is obsolete and
+ * is not read. Calls fail closed before any provider request.
  *
  * PHI / RING SAFETY WARNING:
  *   This gateway is NOT covered by a BAA. NEVER route PHI, MedReview
@@ -44,10 +43,10 @@ export function registerDocintelAnalyzeInvoice(server: McpServer, callerHash: Ca
     name: 'docintel_analyze_invoice',
     category: 'read',
     annotations: {
-      title: 'Analyze invoice with Azure Document Intelligence',
+      title: 'Retired invoice analysis adapter',
       description:
-        'Extracts structured fields from a finance invoice (vendor, dates, totals, line items) ' +
-        'using Azure Document Intelligence prebuilt-invoice model. ' +
+        'Historical invoice extraction is retired. This compatibility adapter fails closed before provider access ' +
+        'and returns a neutral retired result. ' +
         'For CFO agent / Xero feed use only. PHI and MedReview documents are PROHIBITED — ' +
         'this gateway has no BAA. Supply either urlSource or base64Source.',
       readOnlyHint: true,
