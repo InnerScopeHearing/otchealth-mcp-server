@@ -50,6 +50,13 @@ test('isToolInLaneAllowlist: prefix* match', () => {
   assert.equal(isToolInLaneAllowlist('exec', 'depot_anything_else_entirely'), true);
 });
 
+test('exact exclusions take precedence over broad family matches without narrowing neighboring tools', () => {
+  assert.equal(isToolInLaneAllowlist('cto', 'github_graphrag_observation_receipt_get'), true);
+  assert.equal(isToolInLaneAllowlist('developer', 'github_create_branch'), true);
+  assert.equal(isToolInLaneAllowlist('developer', 'github_graphrag_observation_receipt_get'), false);
+  assert.equal(isToolInLaneAllowlist('exec', 'github_graphrag_observation_receipt_get'), false);
+});
+
 test('isToolInLaneAllowlist: cto (2026-08-02 onward) is an explicit curated list, not a wildcard -- a literal seed member matches, an arbitrary same-service name does not', () => {
   // CTO_M365_CURATED replaced the old azure_*/github_*/... wildcards for cto specifically (root cause:
   // those wildcards admitted 99% of the whole catalog, defeating M365 curation -- see LANE_TOOLSETS's
@@ -97,7 +104,10 @@ test('prefix patterns end in a literal asterisk and are matched by startsWith, n
   // convention) so a future edit cannot accidentally introduce a real regex metacharacter.
   for (const lane of KNOWN_INTERNAL_LANES) {
     for (const pattern of LANE_TOOLSETS[lane]) {
-      if (pattern.includes('*')) {
+      if (pattern.startsWith('!')) {
+        assert.ok(pattern.length > 1, `${lane}'s exclusion must name a tool`);
+        assert.equal(pattern.includes('*'), false, `${lane}'s exclusion "${pattern}" must be exact, not a wildcard`);
+      } else if (pattern.includes('*')) {
         assert.ok(pattern.endsWith('*'), `${lane}'s pattern "${pattern}" must end in *, not contain one mid-string`);
       }
     }

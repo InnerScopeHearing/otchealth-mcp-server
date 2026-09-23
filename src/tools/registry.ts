@@ -82,6 +82,8 @@ import { EXEC_RING } from './kb/search-privileged.js';
 // the static connector token) sees the full ~850-tool catalog unchanged (see isConnectorSurface() in
 // server/request-context.ts).
 // ───────────────────────────────────────────────────────────────────────────────────────────────
+const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'brain_graph_search', 'web_search', 'kb_search', 'kb_search_privileged',
   // n8n control-plane visibility is required for the CTO and Developer ship lanes to
@@ -188,7 +190,6 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'github_merge_pull_request', 'github_pr_create_review', 'github_comment_on_issue',
   // trigger + observe CI directly (no browser, no human in the loop)
   'github_dispatch_workflow', 'github_list_workflow_runs', 'github_workflow_run_get',
-  'github_graphrag_observation_receipt_get',
   'github_workflow_run_rerun', 'github_workflow_run_list_jobs',
   // read the state you need to decide whether landing is safe
   'github_pr_get', 'github_pr_list_files', 'github_pr_list_commits', 'github_branch_get_protection',
@@ -460,6 +461,14 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // The pinned observation receipt is CTO-only, so it must not inherit the shared ship set. Keep
+  // the environment override semantics for CTO, but remove the tool from every non-CTO connector
+  // even if a shared CONNECTOR_TOOLSET override accidentally names it.
+  if (lane === 'cto') {
+    if (!env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+  } else {
+    tools.delete(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+  }
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
   // owns the migration bridge, while not advertising it to other ship lanes.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('hyperagent_discover_capabilities');

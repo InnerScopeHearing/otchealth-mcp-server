@@ -834,6 +834,10 @@ function verifyArtifactMetadata(value: unknown, repositoryId: number): { sizeByt
   return { sizeBytes, expiresAt, digest };
 }
 
+// Scope this third-party GitHub Actions artifact redirect to its exact storage host and container.
+const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOST = 'productionresultssa0.blob.core.windows.net';
+const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';
+
 function validateSignedArtifactUrl(location: string | null): URL {
   if (!location) throw new Error('missing signed URL');
   let url: URL;
@@ -843,9 +847,9 @@ function validateSignedArtifactUrl(location: string | null): URL {
     throw new Error('invalid signed URL');
   }
   const hostname = url.hostname.toLowerCase();
-  const approvedHost = hostname === 'pipelines.actions.githubusercontent.com' ||
-    hostname.endsWith('.actions.githubusercontent.com') ||
-    hostname.endsWith('.blob.core.windows.net');
+  const isGitHubActionsArtifactStorage = hostname === GITHUB_ACTIONS_ARTIFACT_STORAGE_HOST &&
+    url.pathname.startsWith(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX);
+  const approvedHost = hostname === 'pipelines.actions.githubusercontent.com' || isGitHubActionsArtifactStorage;
   if (url.protocol !== 'https:' || !approvedHost || url.username !== '' || url.password !== '' ||
       (url.port !== '' && url.port !== '443') || url.hash !== '') throw new Error('untrusted signed URL');
   return url;

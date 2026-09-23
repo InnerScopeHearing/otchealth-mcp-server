@@ -20,6 +20,7 @@ const SOURCE_ID = 'LVEV3LT7LB';
 const INGESTION_JOB_ID = 'FBHZYSWJ9D';
 const KNOWLEDGE_BASE_ID = 'XNMHPUKGDT';
 const DOWNLOAD_URL = 'https://pipelines.actions.githubusercontent.com/download/fixture?sig=mock-sensitive-url';
+const GITHUB_ACTIONS_STORAGE_URL = 'https://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=mock-sensitive-url';
 
 before(() => {
   process.env.CIO_SITE_ID = 'test';
@@ -327,6 +328,20 @@ test('pinned observation read explicitly records when GitHub does not provide an
   assert.equal(result.structuredContent?.result.archive_digest_verification, 'not_provided');
 });
 
+test('pinned observation read permits the fixed GitHub Actions artifact storage redirect without forwarding auth', async () => {
+  const requests: CapturedRequest[] = [];
+  const result = await withStubbedFetch(
+    githubStub(requests, { downloadLocation: GITHUB_ACTIONS_STORAGE_URL }),
+    () => callThroughRealMcpServer(),
+  );
+
+  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+  const storageRequest = requests.find((request) => request.url === GITHUB_ACTIONS_STORAGE_URL);
+  assert.ok(storageRequest, 'the exact GitHub Actions artifact storage URL should be fetched');
+  assert.equal(storageRequest.authorization, null, 'the GitHub installation token must not cross the storage redirect boundary');
+  assert.equal(JSON.stringify(result.structuredContent).includes('mock-sensitive-url'), false, 'the signed storage URL must not appear in the receipt');
+});
+
 test('pinned observation read validates a bounded deflated single-member ZIP with a data descriptor', async () => {
   const requests: CapturedRequest[] = [];
   const archive = zipStore([{
@@ -476,16 +491,28 @@ test('pinned observation read rejects any archive with extra or unsafe members',
     assert.equal(result.isError, true);
   });
 
-  await t.test('untrusted download host', async () => {
-    const requests: CapturedRequest[] = [];
-    const result = await withStubbedFetch(
-      githubStub(requests, { downloadLocation: 'https://evil.example/download?sig=do-not-follow' }),
-      () => callThroughRealMcpServer(),
-    );
-    assert.equal(result.isError, true);
-    assert.equal(requests.some((request) => request.url.startsWith('https://evil.example/')), false);
-    assert.equal(JSON.stringify(result).includes('do-not-follow'), false);
-  });
+  for (const [name, downloadLocation] of [
+    ['untrusted public host', 'https://evil.example/download?sig=do-not-follow'],
+    ['unlisted GitHub Actions subdomain', 'https://evil.actions.githubusercontent.com/download?sig=do-not-follow'],
+    ['unrelated blob account', 'https://example.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['GitHub storage host outside artifact path', 'https://productionresultssa0.blob.core.windows.net/company-data/fixture.zip?sig=do-not-follow'],
+    ['non-HTTPS GitHub storage URL', 'http://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['credentialed GitHub storage URL', 'https://fixture-user@productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['password-bearing GitHub storage URL', 'https://fixture-user:fixture-pass@productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['nonstandard GitHub storage port', 'https://productionresultssa0.blob.core.windows.net:444/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['fragment on GitHub storage URL', 'https://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow#fragment'],
+  ] as const) {
+    await t.test(name, async () => {
+      const requests: CapturedRequest[] = [];
+      const result = await withStubbedFetch(
+        githubStub(requests, { downloadLocation }),
+        () => callThroughRealMcpServer(),
+      );
+      assert.equal(result.isError, true);
+      assert.equal(requests.some((request) => request.url === downloadLocation), false, 'untrusted storage URL must not be fetched');
+      assert.equal(JSON.stringify(result).includes('do-not-follow'), false, 'the rejected signed URL must not be exposed');
+    });
+  }
 });
 
 test('pinned observation read rejects duplicate JSON keys and nonterminal/incorrectly bound receipts cannot imply terminal success', async (t) => {

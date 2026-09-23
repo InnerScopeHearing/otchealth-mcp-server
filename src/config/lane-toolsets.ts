@@ -19,11 +19,11 @@
  * SEED METHODOLOGY (first pass, 2026-07-22): each lane's list is a reasonable guess built from that
  * lane's documented job (see otchealth-cto/CLAUDE.md's per-lane descriptions, kb/search-privileged.ts's
  * ring model, and catalog/governance.ts's role-gated actions), NOT a usage-proven set. Entries are
- * either an EXACT tool name or a 'prefix*' pattern -- the identical matching convention used by
- * catalog/governance.ts's GovRule.pattern (this codebase's other "name or prefix*" table), so the two
- * conventions never silently diverge. Getting this perfectly right on day one is NOT the goal (report
- * mode never restricts anything); the goal is a plausible starting point that report-mode data can
- * later prove or correct.
+ * either an EXACT tool name, a 'prefix*' pattern, or an exact '!tool_name' exclusion that takes
+ * precedence over positive matches. Positive entries use the same matching convention as
+ * catalog/governance.ts's GovRule.pattern (this codebase's other "name or prefix*" table). Getting
+ * this perfectly right on day one is NOT the goal (report mode never restricts anything); the goal
+ * is a plausible starting point that report-mode data can later prove or correct.
  *
  * HOW TO REFINE FROM REAL DATA: query the gw_lane_tool_used stream (PostHog Gateway Ops project,
  * POSTHOG_GATEWAYOPS_KEY) per lane over a representative window. Add any tool/prefix that shows real,
@@ -84,7 +84,7 @@ const HEYGEN = ['heygen_*'] as const;
 // dead wildcard in a seed allowlist is harmless (it simply matches nothing), but a live one that
 // used to advertise real tools reads as a stale claim about this lane's actual capability.
 const CTO_INFRA = [
-  'github_*', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
+  'github_*', '!github_graphrag_observation_receipt_get', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
   'posthog_*', 'sentry_*', 'gumroad_*', 'docintel_*', 'graph_*', 'cio_*', 'stripe_*', 'twilio_*',
   'elevenlabs_*', 'xero_*', 'legal_blob_*', 'shopify_*', 'intercom_*', 'revenuecat_*',
   ...HEYGEN,
@@ -163,7 +163,7 @@ const CTO_M365_CURATED = [
   'depot_token_create', 'depot_token_delete', 'depot_token_list', 'depot_token_update', 'depot_trigger_build',
   'depot_usage_get', 'depot_usage_list', 'depot_usage_org_get', 'depot_workflow_cancel', 'depot_workflow_get',
   'depot_workflow_list', 'depot_workflow_rerun', 'fetch', 'gateway_fetch_result', 'github_add_labels',
-  'github_branch_get',
+  'github_branch_get', 'github_graphrag_observation_receipt_get',
 ] as const;
 const CRO_M365_CURATED = [
   'brain_search', 'catalog_list_tools', 'checkpoint', 'cio_admin_read_*', 'cio_admin_write_*',
@@ -217,7 +217,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // developer's (see kb/search-privileged.ts's ring model).
   developer: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'github_*', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
+    'github_*', '!github_graphrag_observation_receipt_get', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
     ...HEYGEN,
     // 2026-08-02: developer_wake_lite (diagnostics/developer-wake-lite.ts) was never covered by
     // any pattern above -- not catalog_* (CATALOG's wildcard), not github_*/depot_*, no exact
@@ -291,21 +291,18 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
 
 /**
  * Pure matcher: true if `toolName` is covered by `lane`'s seed allowlist -- an EXACT match, or a
- * 'prefix*' pattern match. Mirrors catalog/governance.ts's requiredRoleFor() matching convention
- * exactly (this codebase's other "name or prefix*" table) so the two never silently diverge in
- * meaning. Fail-open: an unknown lane not in LANE_TOOLSETS always returns true (see
- * isKnownInternalLane() -- callers are expected to gate on that first; this function does it
- * defensively too so it is safe to call standalone, e.g. directly from a test).
+ * 'prefix*' pattern match, unless an exact `!tool_name` exclusion matches. Exclusions take precedence
+ * regardless of list order, allowing one sensitive tool to stay out of an otherwise broad family
+ * such as github_* without narrowing the rest of that family. Fail-open: an unknown lane not in
+ * LANE_TOOLSETS always returns true (see isKnownInternalLane() -- callers are expected to gate on
+ * that first; this function does it defensively too so it is safe standalone, e.g. in a test).
  */
 export function isToolInLaneAllowlist(lane: string, toolName: string): boolean {
   const patterns = isKnownInternalLane(lane) ? LANE_TOOLSETS[lane] : undefined;
   if (!patterns) return true;
-  for (const p of patterns) {
-    if (p.endsWith('*')) {
-      if (toolName.startsWith(p.slice(0, -1))) return true;
-    } else if (toolName === p) {
-      return true;
-    }
-  }
-  return false;
+  const matches = (pattern: string) => pattern.endsWith('*')
+    ? toolName.startsWith(pattern.slice(0, -1))
+    : toolName === pattern;
+  if (patterns.some((pattern) => pattern.startsWith('!') && matches(pattern.slice(1)))) return false;
+  return patterns.some((pattern) => !pattern.startsWith('!') && matches(pattern));
 }
