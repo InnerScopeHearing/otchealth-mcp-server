@@ -82,6 +82,7 @@ test('failure-evidence tool is CTO-only and visible on the CTO callable registry
 
 test('exact repository allowlist refuses other, PHI-ring, and MedReview repositories before requests', () => {
   assert.doesNotThrow(() => assertFailureEvidenceRepoAllowed('InnerScopeHearing', 'otchealth-mcp-server'));
+  assert.doesNotThrow(() => assertFailureEvidenceRepoAllowed('InnerScopeHearing', 'otchealth-cto'));
   for (const repo of [
     ['InnerScopeHearing', 'other-repo'],
     ['InnerScopeHearing', 'medreview-production'],

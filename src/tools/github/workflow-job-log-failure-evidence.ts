@@ -5,7 +5,10 @@ import { registerTool, type CallerHashProvider } from '../registry.js';
 import { workflowJobGetLogArchive, workflowRunListJobs, GitHubFullError } from '../../github/full-client.js';
 
 export const MAX_EVIDENCE_LINES = 80;
-export const FAILURE_EVIDENCE_REPOSITORY = 'InnerScopeHearing/otchealth-mcp-server';
+const FAILURE_EVIDENCE_REPOSITORIES = new Set([
+  'InnerScopeHearing/otchealth-mcp-server',
+  'InnerScopeHearing/otchealth-cto',
+]);
 const MAX_ARCHIVE_ENTRIES = 8;
 const MAX_UNCOMPRESSED_LOG_BYTES = 2 * 1024 * 1024;
 const FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
@@ -21,7 +24,7 @@ export interface FailureEvidence {
 
 /** This first capability is deliberately narrower than the general GitHub repo allowlist. */
 export function assertFailureEvidenceRepoAllowed(owner: string, repo: string): void {
-  if (`${owner}/${repo}` !== FAILURE_EVIDENCE_REPOSITORY) {
+  if (!FAILURE_EVIDENCE_REPOSITORIES.has(`${owner}/${repo}`)) {
     throw new GitHubFullError({
       code: 'github_failure_evidence_repo_forbidden',
       status: 403,
