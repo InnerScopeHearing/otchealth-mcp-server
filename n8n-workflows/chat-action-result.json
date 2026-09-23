@@ -36,7 +36,7 @@
       ],
       "parameters": {
         "language": "javaScript",
-        "jsCode": "const crypto = require('crypto'); const secret = $env.N8N_WEBHOOK_SECRET; if (!secret) throw new Error('N8N_WEBHOOK_SECRET missing'); const h = $json.headers || {}; const raw = $binary?.data?.data ? Buffer.from($binary.data.data, 'base64').toString('utf8') : JSON.stringify($json.body || {}); const expected = crypto.createHmac('sha256', secret).update(raw, 'utf8').digest('hex'); const body = $json.body || JSON.parse(raw); const callerHash = h['x-caller-hash'] || h['X-Caller-Hash']; return [{ json: { authorized: Boolean((h['x-signature-sha256'] || h['X-Signature-Sha256']) === expected && typeof body.job_id === 'string' && body.job_id.length > 0 && typeof callerHash === 'string'), caller_hash: callerHash, body } }];"
+        "jsCode": "const crypto = require('crypto'); const secret = $env.N8N_WEBHOOK_SECRET; if (!secret) throw new Error('N8N_WEBHOOK_SECRET missing'); const h = $json.headers || {}; const raw = $binary?.data?.data ? Buffer.from($binary.data.data, 'base64').toString('utf8') : JSON.stringify($json.body || {}); const expected = crypto.createHmac('sha256', secret).update(raw, 'utf8').digest('hex'); const body = $json.body || JSON.parse(raw); const callerHash = h['x-caller-hash'] || h['X-Caller-Hash']; const authorized = Boolean((h['x-signature-sha256'] || h['X-Signature-Sha256']) === expected && typeof body.job_id === 'string' && body.job_id.length > 0 && typeof callerHash === 'string');\nconst job_payload = authorized ? { job_id: body.job_id, caller_hash: callerHash } : undefined;\nreturn [{ json: { authorized, caller_hash: callerHash, body, job_payload } }];"
       }
     },
     {
@@ -55,7 +55,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { job_id: $('Verify HMAC').first().json.body.job_id, caller_hash: $('Verify HMAC').first().json.caller_hash } }}"
+        "jsonBody": "={{ $json.job_payload }}"
       },
       "credentials": {
         "httpHeaderAuth": {
