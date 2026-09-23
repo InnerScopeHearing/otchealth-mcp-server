@@ -55,7 +55,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ job_id: $('Verify HMAC').first().json.body.job_id }) }}"
+        "jsonBody": "={{ JSON.stringify({ job_id: $('Verify HMAC').first().json.body.job_id, caller_hash: $('Verify HMAC').first().json.caller_hash }) }}"
       },
       "credentials": {
         "httpHeaderAuth": {

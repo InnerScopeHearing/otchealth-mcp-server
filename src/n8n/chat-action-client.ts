@@ -79,7 +79,7 @@ export async function submitChatAction(args: {
 export async function getChatActionJob(args: { jobId: string; callerHash: string; correlationId: string }): Promise<ChatActionJob> {
   const response = await callN8nWebhook({
     webhookPath: CHAT_ACTION_PATHS.status,
-    payload: { job_id: args.jobId },
+    payload: { job_id: args.jobId, caller_hash: args.callerHash },
     toolName: 'chat_action_status', callerHash: args.callerHash, correlationId: args.correlationId,
   });
   return requireJob(response);
@@ -88,7 +88,7 @@ export async function getChatActionJob(args: { jobId: string; callerHash: string
 export async function getChatActionResult(args: { jobId: string; callerHash: string; correlationId: string }): Promise<ChatActionJob> {
   const response = await callN8nWebhook({
     webhookPath: CHAT_ACTION_PATHS.result,
-    payload: { job_id: args.jobId },
+    payload: { job_id: args.jobId, caller_hash: args.callerHash },
     toolName: 'chat_action_result', callerHash: args.callerHash, correlationId: args.correlationId,
   });
   return requireJob(response);
