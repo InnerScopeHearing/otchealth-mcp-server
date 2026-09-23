@@ -834,8 +834,29 @@ function verifyArtifactMetadata(value: unknown, repositoryId: number): { sizeByt
   return { sizeBytes, expiresAt, digest };
 }
 
-// Scope this third-party GitHub Actions artifact redirect to its exact storage host and container.
-const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOST = 'productionresultssa0.blob.core.windows.net';
+// GitHub Actions uses a finite set of result-storage shards for signed artifact redirects.
+const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS = new Set([
+  'productionresultssa0.blob.core.windows.net',
+  'productionresultssa1.blob.core.windows.net',
+  'productionresultssa2.blob.core.windows.net',
+  'productionresultssa3.blob.core.windows.net',
+  'productionresultssa4.blob.core.windows.net',
+  'productionresultssa5.blob.core.windows.net',
+  'productionresultssa6.blob.core.windows.net',
+  'productionresultssa7.blob.core.windows.net',
+  'productionresultssa8.blob.core.windows.net',
+  'productionresultssa9.blob.core.windows.net',
+  'productionresultssa10.blob.core.windows.net',
+  'productionresultssa11.blob.core.windows.net',
+  'productionresultssa12.blob.core.windows.net',
+  'productionresultssa13.blob.core.windows.net',
+  'productionresultssa14.blob.core.windows.net',
+  'productionresultssa15.blob.core.windows.net',
+  'productionresultssa16.blob.core.windows.net',
+  'productionresultssa17.blob.core.windows.net',
+  'productionresultssa18.blob.core.windows.net',
+  'productionresultssa19.blob.core.windows.net',
+]);
 const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';
 
 function validateSignedArtifactUrl(location: string | null): URL {
@@ -847,7 +868,7 @@ function validateSignedArtifactUrl(location: string | null): URL {
     throw new Error('invalid signed URL');
   }
   const hostname = url.hostname.toLowerCase();
-  const isGitHubActionsArtifactStorage = hostname === GITHUB_ACTIONS_ARTIFACT_STORAGE_HOST &&
+  const isGitHubActionsArtifactStorage = GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS.has(hostname) &&
     url.pathname.startsWith(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX);
   const approvedHost = hostname === 'pipelines.actions.githubusercontent.com' || isGitHubActionsArtifactStorage;
   if (url.protocol !== 'https:' || !approvedHost || url.username !== '' || url.password !== '' ||

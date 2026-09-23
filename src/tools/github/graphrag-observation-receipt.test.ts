@@ -21,6 +21,7 @@ const INGESTION_JOB_ID = 'FBHZYSWJ9D';
 const KNOWLEDGE_BASE_ID = 'XNMHPUKGDT';
 const DOWNLOAD_URL = 'https://pipelines.actions.githubusercontent.com/download/fixture?sig=mock-sensitive-url';
 const GITHUB_ACTIONS_STORAGE_URL = 'https://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=mock-sensitive-url';
+const GITHUB_ACTIONS_STORAGE_URL_18 = 'https://productionresultssa18.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=mock-sensitive-url';
 
 before(() => {
   process.env.CIO_SITE_ID = 'test';
@@ -342,6 +343,19 @@ test('pinned observation read permits the fixed GitHub Actions artifact storage 
   assert.equal(JSON.stringify(result.structuredContent).includes('mock-sensitive-url'), false, 'the signed storage URL must not appear in the receipt');
 });
 
+test('pinned observation read permits a known nonzero GitHub Actions storage shard', async () => {
+  const requests: CapturedRequest[] = [];
+  const result = await withStubbedFetch(
+    githubStub(requests, { downloadLocation: GITHUB_ACTIONS_STORAGE_URL_18 }),
+    () => callThroughRealMcpServer(),
+  );
+
+  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+  const storageRequest = requests.find((request) => request.url === GITHUB_ACTIONS_STORAGE_URL_18);
+  assert.ok(storageRequest, 'the known shard-18 artifact URL should be fetched');
+  assert.equal(storageRequest.authorization, null, 'the GitHub installation token must not cross the storage redirect boundary');
+});
+
 test('pinned observation read validates a bounded deflated single-member ZIP with a data descriptor', async () => {
   const requests: CapturedRequest[] = [];
   const archive = zipStore([{
@@ -495,6 +509,7 @@ test('pinned observation read rejects any archive with extra or unsafe members',
     ['untrusted public host', 'https://evil.example/download?sig=do-not-follow'],
     ['unlisted GitHub Actions subdomain', 'https://evil.actions.githubusercontent.com/download?sig=do-not-follow'],
     ['unrelated blob account', 'https://example.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['out-of-range GitHub Actions storage shard', 'https://productionresultssa20.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
     ['GitHub storage host outside artifact path', 'https://productionresultssa0.blob.core.windows.net/company-data/fixture.zip?sig=do-not-follow'],
     ['non-HTTPS GitHub storage URL', 'http://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
     ['credentialed GitHub storage URL', 'https://fixture-user@productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
