@@ -55,7 +55,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ action: $('Verify HMAC').first().json.body.action, request: $('Verify HMAC').first().json.body.request, idempotency_key: $('Verify HMAC').first().json.body.idempotency_key, correlation_id: $('Verify HMAC').first().json.correlation_id, caller_hash: $('Verify HMAC').first().json.caller_hash, caller_agent: $('Verify HMAC').first().json.body.caller_agent }) }}"
+        "jsonBody": "={{ { action: $('Verify HMAC').first().json.body.action, request: $('Verify HMAC').first().json.body.request, idempotency_key: $('Verify HMAC').first().json.body.idempotency_key, correlation_id: $('Verify HMAC').first().json.correlation_id, caller_hash: $('Verify HMAC').first().json.caller_hash, caller_agent: $('Verify HMAC').first().json.body.caller_agent } }}"
       },
       "credentials": {
         "httpHeaderAuth": {
@@ -138,7 +138,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ job_id: $('Persist Opaque Job').first().json.result.job_id, caller_hash: $('Verify HMAC').first().json.caller_hash }) }}"
+        "jsonBody": "={{ { job_id: $('Persist Opaque Job').first().json.result.job_id, caller_hash: $('Verify HMAC').first().json.caller_hash } }}"
       },
       "credentials": {
         "httpHeaderAuth": {
