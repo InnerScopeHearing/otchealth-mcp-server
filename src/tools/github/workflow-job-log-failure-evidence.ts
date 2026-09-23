@@ -2,11 +2,12 @@ import { inflateRawSync } from 'node:zlib';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { assertRepoAllowed } from '../../github/api-client.js';
 import { workflowJobGetLogArchive, workflowRunListJobs, GitHubFullError } from '../../github/full-client.js';
 
 export const MAX_EVIDENCE_LINES = 80;
 export const MAX_EVIDENCE_LINE_BYTES = 4_000;
+export const FAILURE_EVIDENCE_REPOSITORY = 'InnerScopeHearing/otchealth-mcp-server';
+export const WITHHELD_SOURCE_FILE = '[withheld]';
 const MAX_ARCHIVE_ENTRIES = 8;
 const MAX_UNCOMPRESSED_LOG_BYTES = 2 * 1024 * 1024;
 const FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
@@ -17,6 +18,30 @@ export interface FailureEvidence {
   redacted_count: number;
   truncated: boolean;
   source_file: string;
+}
+
+/** This first capability is deliberately narrower than the general GitHub repo allowlist. */
+export function assertFailureEvidenceRepoAllowed(owner: string, repo: string): void {
+  if (`${owner}/${repo}` !== FAILURE_EVIDENCE_REPOSITORY) {
+    throw new GitHubFullError({
+      code: 'github_failure_evidence_repo_forbidden',
+      status: 403,
+      message: 'Failure evidence is unavailable for this repository.',
+      nextStep: 'Use the initially supported repository for bounded failure evidence.',
+    });
+  }
+}
+
+export function verifyFailureJobMetadata(jobs: readonly any[], jobId: number): any {
+  const job = jobs.find((candidate) => candidate?.id === jobId);
+  if (!job || typeof job.id !== 'number') throw new GitHubFullError({ code: 'github_job_metadata_mismatch', status: 409, message: 'The requested job is not part of the specified workflow run.', nextStep: 'Verify the run_id and exact job_id.' });
+  if (job.status !== 'completed' || !FAILURE_CONCLUSIONS.has(String(job.conclusion))) throw new GitHubFullError({ code: 'github_job_not_failed', status: 409, message: 'Failure evidence is available only for a completed failed job.', nextStep: 'Use a completed job with a failure conclusion.' });
+  return job;
+}
+
+export function safeFailureEvidenceError(error: unknown, phase: 'metadata' | 'log'): GitHubFullError {
+  if (error instanceof GitHubFullError) return new GitHubFullError({ code: error.code, status: error.status, message: `GitHub job ${phase} retrieval failed.`, nextStep: `Verify the GitHub App can read ${phase} for this repository.` });
+  return new GitHubFullError({ code: `github_job_${phase}_error`, status: 502, message: `GitHub job ${phase} retrieval failed.`, nextStep: `Verify the GitHub App can read ${phase} for this repository.` });
 }
 
 /** Remove URLs, authorization/header values, and common secret-shaped values before any output. */
@@ -106,26 +131,20 @@ export function registerGitHubWorkflowJobLogFailureEvidence(server: McpServer, c
       job: z.object({ id: z.number(), name: z.string().nullable(), conclusion: z.string().nullable(), status: z.string().nullable() }),
       evidence: z.object({ lines: z.array(z.string()), total_lines: z.number(), redacted_count: z.number(), truncated: z.boolean(), source_file: z.string() }),
     },
-    handler: async (input, ctx) => {
-      assertRepoAllowed(ctx.callerAgent, input.owner, input.repo);
+    handler: async (input, _ctx) => {
+      // This exact allowlist runs before any GitHub request, including metadata verification, and
+      // intentionally rejects PHI/MedReview and every other repository even for CTO callers.
+      assertFailureEvidenceRepoAllowed(input.owner, input.repo);
       let jobs: any[];
       try { jobs = await workflowRunListJobs(input.owner, input.repo, input.run_id, 'all'); }
-      catch (error) {
-        if (error instanceof GitHubFullError) throw new GitHubFullError({ code: error.code, status: error.status, message: 'GitHub job metadata verification failed.', nextStep: 'Verify the GitHub App can read this repository and workflow run.' });
-        throw new Error('GitHub job metadata verification failed.');
-      }
-      const job = jobs.find((candidate) => candidate?.id === input.job_id);
-      if (!job || typeof job.id !== 'number') throw new GitHubFullError({ code: 'github_job_metadata_mismatch', status: 409, message: 'The requested job is not part of the specified workflow run.', nextStep: 'Verify the run_id and exact job_id.' });
-      if (job.status !== 'completed' || !FAILURE_CONCLUSIONS.has(String(job.conclusion))) throw new GitHubFullError({ code: 'github_job_not_failed', status: 409, message: 'Failure evidence is available only for a completed failed job.', nextStep: 'Use a completed job with a failure conclusion.' });
+      catch (error) { throw safeFailureEvidenceError(error, 'metadata'); }
+      const job = verifyFailureJobMetadata(jobs, input.job_id);
       let archive: Uint8Array;
       try { archive = await workflowJobGetLogArchive(input.owner, input.repo, input.job_id); }
-      catch (error) {
-        if (error instanceof GitHubFullError) throw new GitHubFullError({ code: error.code, status: error.status, message: 'GitHub job log retrieval failed.', nextStep: 'Verify the GitHub App can read Actions job logs for this repository.' });
-        throw new Error('GitHub job log retrieval failed.');
-      }
+      catch (error) { throw safeFailureEvidenceError(error, 'log'); }
       const extracted = extractJobLogText(archive);
       const evidence = summarizeFailureEvidence(extracted.text, input.start_line ?? 1, input.max_lines ?? MAX_EVIDENCE_LINES);
-      evidence.source_file = sanitizeLogLine(extracted.source_file).line;
+      evidence.source_file = WITHHELD_SOURCE_FILE;
       const safeJobName = typeof job.name === 'string' ? sanitizeLogLine(job.name.slice(0, 256)).line : null;
       return { data: { job: { id: job.id, name: safeJobName, conclusion: job.conclusion ?? null, status: job.status ?? null }, evidence }, summary: `Bounded sanitized failure evidence for job #${job.id}.` };
     },

@@ -5,6 +5,10 @@ import { deflateRawSync } from 'node:zlib';
 let extractJobLogText: typeof import('./workflow-job-log-failure-evidence.js').extractJobLogText;
 let sanitizeLogLine: typeof import('./workflow-job-log-failure-evidence.js').sanitizeLogLine;
 let summarizeFailureEvidence: typeof import('./workflow-job-log-failure-evidence.js').summarizeFailureEvidence;
+let assertFailureEvidenceRepoAllowed: typeof import('./workflow-job-log-failure-evidence.js').assertFailureEvidenceRepoAllowed;
+let verifyFailureJobMetadata: typeof import('./workflow-job-log-failure-evidence.js').verifyFailureJobMetadata;
+let safeFailureEvidenceError: typeof import('./workflow-job-log-failure-evidence.js').safeFailureEvidenceError;
+let WITHHELD_SOURCE_FILE: typeof import('./workflow-job-log-failure-evidence.js').WITHHELD_SOURCE_FILE;
 let requiredRoleFor: typeof import('../../catalog/governance.js').requiredRoleFor;
 let roleAllows: typeof import('../../catalog/governance.js').roleAllows;
 let CTO_SHIP_LANE_TOOLSET: typeof import('../registry.js').CTO_SHIP_LANE_TOOLSET;
@@ -16,7 +20,7 @@ before(async () => {
   process.env.PERPLEXITY_CONNECTOR_TOKEN ??= 'a'.repeat(32);
   process.env.ADMIN_REVOKE_TOKEN ??= 'b'.repeat(32);
   process.env.N8N_WEBHOOK_SECRET ??= 'c'.repeat(32);
-  ({ extractJobLogText, sanitizeLogLine, summarizeFailureEvidence } = await import('./workflow-job-log-failure-evidence.js'));
+  ({ extractJobLogText, sanitizeLogLine, summarizeFailureEvidence, assertFailureEvidenceRepoAllowed, verifyFailureJobMetadata, safeFailureEvidenceError, WITHHELD_SOURCE_FILE } = await import('./workflow-job-log-failure-evidence.js'));
   ({ requiredRoleFor, roleAllows } = await import('../../catalog/governance.js'));
   ({ CTO_SHIP_LANE_TOOLSET } = await import('../registry.js'));
 });
@@ -71,4 +75,34 @@ test('failure-evidence tool is CTO-only and visible on the CTO callable registry
   for (const lane of ['developer', 'cfo', 'clo', 'coo', 'cro', '']) assert.equal(roleAllows(gov!.role, lane), false);
   assert.ok(CTO_SHIP_LANE_TOOLSET.includes('github_workflow_run_list_artifacts'));
   assert.ok(CTO_SHIP_LANE_TOOLSET.includes('github_workflow_job_log_failure_evidence'));
+});
+
+test('exact repository allowlist refuses other, PHI-ring, and MedReview repositories before requests', () => {
+  assert.doesNotThrow(() => assertFailureEvidenceRepoAllowed('InnerScopeHearing', 'otchealth-mcp-server'));
+  for (const repo of [
+    ['InnerScopeHearing', 'other-repo'],
+    ['InnerScopeHearing', 'medreview-production'],
+    ['other-owner', 'otchealth-mcp-server'],
+  ]) assert.throws(() => assertFailureEvidenceRepoAllowed(repo[0], repo[1]), /unavailable|repository/i);
+});
+
+test('metadata fence refuses run/job mismatch and completed success jobs', () => {
+  assert.throws(() => verifyFailureJobMetadata([{ id: 8, status: 'completed', conclusion: 'failure' }], 9), /not part/i);
+  assert.throws(() => verifyFailureJobMetadata([{ id: 8, status: 'completed', conclusion: 'success' }], 8), /completed failed/i);
+  assert.equal(verifyFailureJobMetadata([{ id: 8, status: 'completed', conclusion: 'failure', name: 'test' }], 8).id, 8);
+});
+
+test('remote metadata and log errors are bounded and cannot echo secrets or archive/source names', () => {
+  const upstream = new Error('https://signed.example/log.zip?token=ghp_secret');
+  const metadataError = safeFailureEvidenceError(upstream, 'metadata');
+  const logError = safeFailureEvidenceError(upstream, 'log');
+  for (const error of [metadataError, logError]) {
+    assert.doesNotMatch(error.message, /signed|ghp_|token=|zip/i);
+    assert.doesNotMatch(error.nextStep, /signed|ghp_|token=|zip/i);
+  }
+  assert.equal(WITHHELD_SOURCE_FILE, '[withheld]');
+  const evidence = summarizeFailureEvidence('archive-secret=ghp_secret\nsource-name=private.log', 1, 2);
+  evidence.source_file = WITHHELD_SOURCE_FILE;
+  assert.equal(evidence.source_file, '[withheld]');
+  assert.doesNotMatch(JSON.stringify(evidence), /ghp_secret|archive-secret=ghp_secret/);
 });
