@@ -148,11 +148,13 @@
     },
     "Verify HMAC": {
       "main": [
-        {
-          "node": "Authorized?",
-          "type": "main",
-          "index": 0
-        }
+        [
+          {
+            "node": "Authorized?",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Authorized?": {

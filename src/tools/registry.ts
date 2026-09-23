@@ -90,6 +90,7 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // chat_action_* surface below, rather than receiving workflow administration.
   'n8n_list_workflows', 'n8n_create_workflow', 'n8n_update_workflow',
   'n8n_activate_workflow', 'n8n_deactivate_workflow',
+  'n8n_get_execution',
   'n8n_credential_list', 'n8n_credential_schema_get',
   'n8n_variable_list',
   // web_research / web_extract (Task G-3, 2026-09-03): web_search's own deeper-research and
