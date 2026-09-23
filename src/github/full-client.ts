@@ -330,6 +330,7 @@ export async function prUpdate(opts: {
   state?: 'open' | 'closed';
   base?: string;
   maintainerCanModify?: boolean;
+  draft?: boolean;
 }): Promise<any> {
   assertNotPhi(opts.repo);
   const body: Record<string, unknown> = {};
@@ -338,6 +339,7 @@ export async function prUpdate(opts: {
   if (opts.state !== undefined) body.state = opts.state;
   if (opts.base !== undefined) body.base = opts.base;
   if (opts.maintainerCanModify !== undefined) body.maintainer_can_modify = opts.maintainerCanModify;
+  if (opts.draft !== undefined) body.draft = opts.draft;
   const { data } = await ghSend<any>('PATCH', `/repos/${O(opts.owner)}/${O(opts.repo)}/pulls/${opts.pullNumber}`, body);
   return data;
 }

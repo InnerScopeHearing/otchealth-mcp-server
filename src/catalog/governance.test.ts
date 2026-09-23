@@ -47,6 +47,12 @@ test('github_pr_update specifically allows cto and developer only (write_simple 
   assert.ok(!roleAllows(gov?.role ?? '', 'cfo'));
 });
 
+test('github_pr_ready_for_review is CTO-only release control', () => {
+  const gov = requiredRoleFor('github_pr_ready_for_review');
+  assert.equal(gov?.role, 'cto');
+  assert.ok(!roleAllows(gov?.role ?? '', 'developer'));
+});
+
 test('workflow-run readers are intentionally ungated (reads are not an escalation)', () => {
   for (const name of CONNECTOR_READ_TOOLS) {
     assert.equal(requiredRoleFor(name), null, `${name} is a read; it should carry no role gate`);
