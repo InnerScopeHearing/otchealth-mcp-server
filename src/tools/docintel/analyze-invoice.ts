@@ -44,10 +44,10 @@ export function registerDocintelAnalyzeInvoice(server: McpServer, callerHash: Ca
     name: 'docintel_analyze_invoice',
     category: 'read',
     annotations: {
-      title: 'Analyze invoice with Azure Document Intelligence',
+      title: 'Retired invoice analysis adapter',
       description:
         'Extracts structured fields from a finance invoice (vendor, dates, totals, line items) ' +
-        'using Azure Document Intelligence prebuilt-invoice model. ' +
+        'The historical Azure Document Intelligence adapter is retired and fails closed before provider access. ' +
         'For CFO agent / Xero feed use only. PHI and MedReview documents are PROHIBITED — ' +
         'this gateway has no BAA. Supply either urlSource or base64Source.',
       readOnlyHint: true,

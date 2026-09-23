@@ -51,10 +51,10 @@ export function registerDocintelAnalyzeContract(server: McpServer, callerHash: C
     name: 'docintel_analyze_contract',
     category: 'read',
     annotations: {
-      title: 'Analyze contract with Azure Document Intelligence',
+      title: 'Retired contract analysis adapter',
       description:
         'Extracts structured fields from a commercial contract (parties, dates, duration, ' +
-        'key clauses) using Azure Document Intelligence prebuilt-contract model. ' +
+        'key clauses). The historical Azure Document Intelligence adapter is retired and fails closed before provider access. ' +
         'For CLO agent use only. PHI and MedReview documents are PROHIBITED — ' +
         'this gateway has no BAA. Output stays on trusted engines; never auto-published. ' +
         'Supply either urlSource or base64Source.',
