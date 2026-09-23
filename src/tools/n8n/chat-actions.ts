@@ -21,7 +21,7 @@ export function registerN8nChatActions(server: McpServer, callerHash: CallerHash
       const refusal = ctx.callerAgent === 'clo-personal' ? 'clo-personal is not available through the ordinary Chat action bridge' : rejectPersonalLegalInput(input.request);
       if (refusal) return { data: { submitted: false, reason: refusal }, summary: `Refused: ${refusal}.` };
       if (ctx.dryRun) return { data: { submitted: false, dry_run: true, reason: 'dry_run: no n8n job created.' }, summary: `DRY RUN: would submit ${input.action}.` };
-      const job = await submitChatAction({ action: input.action, request: input.request, idempotencyKey: input.idempotency_key, callerHash: ctx.callerHash, correlationId: ctx.correlationId });
+      const job = await submitChatAction({ action: input.action, request: input.request, idempotencyKey: input.idempotency_key, callerHash: ctx.callerHash, callerAgent: ctx.callerAgent, correlationId: ctx.correlationId });
       return { data: { submitted: true, job_id: job.job_id, status: job.status }, summary: `Submitted ${input.action} as durable job ${job.job_id}.` };
     },
   }, callerHash);

@@ -64,13 +64,14 @@ export async function submitChatAction(args: {
   request: Record<string, unknown>;
   idempotencyKey: string;
   callerHash: string;
+  callerAgent: string;
   correlationId: string;
 }): Promise<ChatActionJob> {
   const refusal = rejectPersonalLegalInput(args.request);
   if (refusal) throw new Error(refusal);
   const response = await callN8nWebhook({
     webhookPath: CHAT_ACTION_PATHS.submit,
-    payload: { action: args.action, request: args.request, idempotency_key: args.idempotencyKey },
+    payload: { action: args.action, request: args.request, idempotency_key: args.idempotencyKey, caller_agent: args.callerAgent },
     toolName: 'chat_action_submit', callerHash: args.callerHash, correlationId: args.correlationId,
   });
   return requireJob(response);

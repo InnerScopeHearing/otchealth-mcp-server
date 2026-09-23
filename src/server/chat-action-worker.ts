@@ -3,8 +3,8 @@ import { rejectPersonalLegalInput } from '../n8n/chat-action-client.js';
 import type { ChatActionJob } from './chat-action-jobs.js';
 
 export interface ChatActionExecutor {
-  brainSearch(request: Record<string, unknown>, callerHash: string): Promise<unknown>;
-  checkpoint(request: Record<string, unknown>, callerHash: string): Promise<unknown>;
+  brainSearch(request: Record<string, unknown>, context: { callerHash: string; callerAgent: string; correlationId: string }): Promise<unknown>;
+  checkpoint(request: Record<string, unknown>, context: { callerHash: string; callerAgent: string; correlationId: string }): Promise<unknown>;
 }
 
 export interface ChatActionWorkerDeps {
@@ -39,8 +39,8 @@ export async function runQueuedChatActionJob(
   await deps.replaceDoc(JOBS, jobId, jobId, running as unknown as Record<string, unknown>);
   try {
     const result = current.action === 'brain_search'
-      ? await deps.execute.brainSearch(current.request, current.caller_hash)
-      : await deps.execute.checkpoint(current.request, current.caller_hash);
+      ? await deps.execute.brainSearch(current.request, { callerHash: current.caller_hash, callerAgent: current.caller_agent, correlationId: String(current.request.correlation_id ?? current.id) })
+      : await deps.execute.checkpoint(current.request, { callerHash: current.caller_hash, callerAgent: current.caller_agent, correlationId: String(current.request.correlation_id ?? current.id) });
     const done = terminal(running, 'succeeded', result);
     await deps.replaceDoc(JOBS, jobId, jobId, done as unknown as Record<string, unknown>);
     return { status: done.status, job_id: done.id };

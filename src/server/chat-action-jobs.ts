@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { createDoc, isConfigured, readDoc } from '../agentstate/store.js';
 import { rejectPersonalLegalInput, CHAT_ACTIONS } from '../n8n/chat-action-client.js';
 
-const Submit = z.object({ action: z.enum(CHAT_ACTIONS), request: z.record(z.unknown()), idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{8,255}$/), correlation_id: z.string().min(1).max(255), caller_hash: z.string().min(8).max(255) }).strict();
+const COMPANY_LANES = new Set(['cto', 'developer', 'coo', 'cro', 'cfo', 'clo', 'exec']);
+const Submit = z.object({ action: z.enum(CHAT_ACTIONS), request: z.record(z.unknown()), idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{8,255}$/), correlation_id: z.string().min(1).max(255), caller_hash: z.string().min(8).max(255), caller_agent: z.string().min(1).max(64) }).strict();
 const Read = z.object({ job_id: z.string().regex(/^caj_[a-f0-9]{64}$/), caller_hash: z.string().min(8).max(255) }).strict();
 const JOBS = 'events';
 const SERVICE_TOKEN_ENV = 'N8N_GATEWAY_SERVICE_TOKEN';
@@ -13,6 +14,7 @@ export interface ChatActionJob {
   id: string;
   type: 'chat_action_job';
   caller_hash: string;
+  caller_agent: string;
   action: (typeof CHAT_ACTIONS)[number];
   request: Record<string, unknown>;
   idempotency_key_hash: string;
@@ -42,15 +44,16 @@ function project(job: ChatActionJob): Record<string, unknown> {
 export async function createChatActionJob(input: z.infer<typeof Submit>, deps = { createDoc, readDoc, configured: isConfigured }): Promise<{ job: ChatActionJob; replayed: boolean }> {
   const refusal = rejectPersonalLegalInput(input.request);
   if (refusal) throw new Error(refusal);
+  if (!COMPANY_LANES.has(input.caller_agent)) throw new Error('chat_action_caller_lane_not_allowed');
   const id = jobId(input.caller_hash, input.idempotency_key);
   const existing = await deps.readDoc(JOBS, id, id) as ChatActionJob | null;
-  const payloadHash = digest(JSON.stringify({ action: input.action, request: input.request, caller_hash: input.caller_hash }));
+  const payloadHash = digest(JSON.stringify({ action: input.action, request: input.request, caller_hash: input.caller_hash, caller_agent: input.caller_agent }));
   if (existing) {
-    if (existing.idempotency_key_hash !== digest(`${input.caller_hash}\u0000${input.idempotency_key}`) || existing.action !== input.action || digest(JSON.stringify({ action: existing.action, request: existing.request, caller_hash: existing.caller_hash })) !== payloadHash) throw new Error('chat_action_idempotency_conflict');
+    if (existing.idempotency_key_hash !== digest(`${input.caller_hash}\u0000${input.idempotency_key}`) || existing.action !== input.action || existing.caller_agent !== input.caller_agent || digest(JSON.stringify({ action: existing.action, request: existing.request, caller_hash: existing.caller_hash, caller_agent: existing.caller_agent })) !== payloadHash) throw new Error('chat_action_idempotency_conflict');
     return { job: existing, replayed: true };
   }
   const now = new Date().toISOString();
-  const job: ChatActionJob = { id, type: 'chat_action_job', caller_hash: input.caller_hash, action: input.action, request: input.request, idempotency_key_hash: digest(`${input.caller_hash}\u0000${input.idempotency_key}`), status: 'queued', created_at: now, updated_at: now };
+  const job: ChatActionJob = { id, type: 'chat_action_job', caller_hash: input.caller_hash, caller_agent: input.caller_agent, action: input.action, request: input.request, idempotency_key_hash: digest(`${input.caller_hash}\u0000${input.idempotency_key}`), status: 'queued', created_at: now, updated_at: now };
   try { await deps.createDoc(JOBS, id, job as unknown as Record<string, unknown>); } catch (error) {
     const replay = await deps.readDoc(JOBS, id, id) as ChatActionJob | null;
     if (replay) return { job: replay, replayed: true };
