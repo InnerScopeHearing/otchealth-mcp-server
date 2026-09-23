@@ -190,6 +190,7 @@ function makeArtifact(overrides: Record<string, unknown> = {}): Record<string, u
 }
 
 type StubOverrides = {
+  tokenMintResponse?: Response;
   repo?: Record<string, unknown>;
   run?: Record<string, unknown>;
   workflowBlobSha?: string;
@@ -210,6 +211,7 @@ function githubStub(captured: CapturedRequest[], overrides: StubOverrides = {}):
     captured.push({ url: url.toString(), authorization: headers.get('authorization'), method: init.method ?? 'GET' });
 
     if (url.origin === 'https://api.github.com' && url.pathname === '/app/installations/789/access_tokens') {
+      if (overrides.tokenMintResponse) return overrides.tokenMintResponse;
       return new Response(JSON.stringify({ token: 'ghs_test_token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }), { status: 201 });
     }
     if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}`) {
@@ -278,6 +280,138 @@ async function callThroughRealMcpServer(
     await mcp.close();
   }
 }
+
+test('pinned observation reader bounds and validates installation-token mint responses', async (t) => {
+  await t.test('oversized token response is rejected before its body is consumed', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenResponseBody = Buffer.from(`oversized-token-sentinel-${'x'.repeat(16 * 1024)}`);
+    let bodyPulled = false;
+    let bodyCancelled = false;
+    const tokenMintResponse = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        bodyPulled = true;
+        controller.enqueue(tokenResponseBody);
+        controller.close();
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    }, { highWaterMark: 0 }), {
+      status: 201,
+      headers: { 'content-length': String(tokenResponseBody.length) },
+    });
+
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    assert.equal(bodyPulled, false, 'a declared oversized body must be rejected before reading');
+    assert.equal(bodyCancelled, true, 'the oversized response body must be cancelled');
+    assert.equal(requests.length, 1, 'no repository request should follow a rejected token response');
+    assert.equal(JSON.stringify(result).includes('oversized-token-sentinel'), false);
+  });
+
+  await t.test('oversized streamed token chunk is rejected before copying', async () => {
+    const requests: CapturedRequest[] = [];
+    const oversizedChunk = new Uint8Array(16 * 1024 + 1).fill(0x61);
+    let bodyPulled = false;
+    let bodyDrained = false;
+    let bodyCancelled = false;
+    let pullCount = 0;
+    const tokenMintResponse = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pullCount++ === 0) {
+          bodyPulled = true;
+          controller.enqueue(oversizedChunk);
+          return;
+        }
+        bodyDrained = true;
+        controller.close();
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    }, { highWaterMark: 0 }), { status: 201 });
+
+    const originalBufferFrom = Buffer.from;
+    let copiedOversizedChunk = false;
+    let result: Awaited<ReturnType<typeof callThroughRealMcpServer>>;
+    Buffer.from = ((value: unknown, ...args: unknown[]) => {
+      if (value === oversizedChunk) copiedOversizedChunk = true;
+      return Reflect.apply(originalBufferFrom, Buffer, [value, ...args]);
+    }) as typeof Buffer.from;
+    try {
+      result = await withStubbedFetch(
+        githubStub(requests, { tokenMintResponse }),
+        () => callThroughRealMcpServer(),
+      );
+    } finally {
+      Buffer.from = originalBufferFrom;
+    }
+
+    assert.equal(result.isError, true);
+    assert.equal(bodyPulled, true, 'the reader must inspect a streamed chunk without a declared length');
+    assert.equal(bodyDrained, false, 'the body must be cancelled rather than fully drained');
+    assert.equal(bodyCancelled, true, 'the oversized stream must be cancelled');
+    assert.equal(copiedOversizedChunk, false, 'the oversized chunk must be rejected before Buffer.from copies it');
+    assert.equal(requests.length, 1, 'no repository request should follow a rejected token response');
+  });
+
+  await t.test('malformed token JSON becomes a sanitized reader failure', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenMintResponse = new Response('malformed-token-provider-sentinel', { status: 201 });
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('malformed-token-provider-sentinel'), false);
+    assert.equal(requests.length, 1);
+  });
+
+  await t.test('invalid token shape becomes a sanitized reader failure', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenMintResponse = new Response(JSON.stringify({
+      message: 'invalid-token-shape-sentinel',
+      token: null,
+      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    }), { status: 201 });
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('invalid-token-shape-sentinel'), false);
+    assert.equal(requests.length, 1);
+  });
+
+  await t.test('provider error body becomes a sanitized reader failure', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenMintResponse = new Response(JSON.stringify({ message: 'provider-error-body-sentinel' }), { status: 500 });
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('provider-error-body-sentinel'), false);
+    assert.equal(requests.length, 1);
+  });
+
+  await t.test('valid bounded token response allows the fixed receipt read', async () => {
+    const requests: CapturedRequest[] = [];
+    const result = await withStubbedFetch(githubStub(requests), () => callThroughRealMcpServer());
+
+    assert.equal(result.isError, undefined);
+    assert.equal(requests.filter((request) => request.url.endsWith('/app/installations/789/access_tokens')).length, 1);
+    assert.ok(requests.some((request) =>
+      request.url === `https://api.github.com/repos/${REPOSITORY}` && request.authorization === 'Bearer ghs_test_token'));
+  });
+});
 
 test('pinned observation read verifies provenance, returns only sanitized structure, and drops auth at the signed download boundary', async () => {
   const requests: CapturedRequest[] = [];

@@ -672,6 +672,7 @@ export async function workflowRunListArtifacts(owner: string, repo: string, runI
 
 const PINNED_OBSERVATION_API = 'https://api.github.com';
 const PINNED_OBSERVATION_MAX_METADATA_BYTES = 128 * 1024;
+const PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES = 16 * 1024;
 const PINNED_OBSERVATION_TIMEOUT_MS = 8000;
 const PINNED_OBSERVATION_ERROR = {
   code: 'github_observation_receipt_unverified',
@@ -679,6 +680,9 @@ const PINNED_OBSERVATION_ERROR = {
   message: 'The pinned GraphRAG observation receipt could not be verified.',
   nextStep: 'Check GitHub access and the fixed run and artifact provenance, then retry.',
 } as const;
+
+let pinnedObservationCachedToken: string | null = null;
+let pinnedObservationTokenExpiresAt = 0;
 
 function requireRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('invalid metadata');
@@ -745,6 +749,60 @@ async function readBoundedResponseBytes(response: Response, maxBytes: number): P
   }
   if (timedOut) throw new Error('response body timed out');
   return Buffer.concat(chunks, totalBytes);
+}
+
+async function getPinnedObservationInstallationToken(): Promise<string> {
+  const now = Date.now();
+  if (pinnedObservationCachedToken && now < pinnedObservationTokenExpiresAt - 60_000) {
+    return pinnedObservationCachedToken;
+  }
+
+  const installationId = env.GITHUB_APP_INSTALLATION_ID;
+  if (!installationId) throw new Error('GitHub installation is not configured');
+
+  const tokenUrl = new URL(
+    `/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
+    PINNED_OBSERVATION_API,
+  );
+  const response = await fetchWithBudget(tokenUrl, {
+    method: 'POST',
+    redirect: 'error',
+    headers: {
+      ...GITHUB_HEADERS,
+      Authorization: `Bearer ${mintJwt()}`,
+    },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+
+  if (response.status !== 201) {
+    await cancelResponseBody(response);
+    throw new Error('GitHub installation token request failed');
+  }
+
+  const bytes = await readBoundedResponseBytes(response, PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES);
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error('Invalid GitHub installation token response');
+  }
+
+  const tokenResponse = requireRecord(parseStrictJson(text, PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES));
+  const token = tokenResponse.token;
+  const expiresAt = tokenResponse.expires_at;
+  if (typeof token !== 'string' || token.length === 0 || token.length > 4096 ||
+      token.trim() !== token || /[\u0000-\u001f\u007f]/.test(token) || typeof expiresAt !== 'string') {
+    throw new Error('Invalid GitHub installation token response');
+  }
+
+  const expiresAtMs = Date.parse(expiresAt);
+  const validatedAt = Date.now();
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= validatedAt) {
+    throw new Error('Invalid GitHub installation token expiry');
+  }
+
+  pinnedObservationCachedToken = token;
+  pinnedObservationTokenExpiresAt = Math.min(expiresAtMs, validatedAt + 55 * 60 * 1000);
+  return token;
 }
 
 async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unknown> {
@@ -945,7 +1003,7 @@ export interface PinnedGraphRagObservationResult {
  */
 export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraphRagObservationResult> {
   try {
-    const token = await getInstallationToken();
+    const token = await getPinnedObservationInstallationToken();
     if (typeof token !== 'string' || token.length === 0 || token.length > 4096) throw new Error('invalid installation token');
 
     const repoPath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}`;
