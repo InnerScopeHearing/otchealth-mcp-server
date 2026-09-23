@@ -84,6 +84,14 @@ import { EXEC_RING } from './kb/search-privileged.js';
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'brain_graph_search', 'web_search', 'kb_search', 'kb_search_privileged',
+  // n8n control-plane visibility is required for the CTO and Developer ship lanes to
+  // import and operate the bounded ordinary-Chat action bridge.  The handlers retain
+  // their own role and write governance checks.  Other company seats use the bounded
+  // chat_action_* surface below, rather than receiving workflow administration.
+  'n8n_list_workflows', 'n8n_create_workflow', 'n8n_update_workflow',
+  'n8n_activate_workflow', 'n8n_deactivate_workflow',
+  'n8n_credential_list', 'n8n_credential_schema_get',
+  'n8n_variable_list',
   // web_research / web_extract (Task G-3, 2026-09-03): web_search's own deeper-research and
   // fetch-a-known-URL siblings, added in the SAME change that registers them -- see web-search.ts's
   // omission-class comments above for why a tool is not done until it is visible here too.
