@@ -144,6 +144,7 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'github_add_labels', requiredRole: ['cto', 'developer'], reason: 'Label writes: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   { pattern: 'github_create_release', requiredRole: ['cto', 'developer'], reason: 'Releases (single initiator): cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   { pattern: 'github_dispatch_workflow', requiredRole: ['cto', 'developer'], reason: 'Workflow dispatch triggers builds/deploys: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_workflow_job_log_failure_evidence', requiredRole: 'cto', reason: 'Failure-log evidence can expose repository secrets and is restricted to the CTO lane; output is bounded and sanitized.' },
   // Netlify deploy + env + hooks are CTO-owned infra. NOT part of the 2026-07-26 directive (which
   // was scoped to GitHub + Depot specifically) -- stays CTO-only.
   { pattern: 'netlify_trigger_deploy', requiredRole: 'cto', reason: 'Production deploys are CTO-only.' },

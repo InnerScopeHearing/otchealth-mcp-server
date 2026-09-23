@@ -340,6 +340,7 @@ import { registerGitHubWorkflowRunGet } from './github/workflow-run-get.js';
 import { registerGitHubWorkflowRunListArtifacts } from './github/workflow-run-list-artifacts.js';
 import { registerGitHubWorkflowRunListJobs } from './github/workflow-run-list-jobs.js';
 import { registerGitHubWorkflowRunRerun } from './github/workflow-run-rerun.js';
+import { registerGitHubWorkflowJobLogFailureEvidence } from './github/workflow-job-log-failure-evidence.js';
 import { registerGraphAttachmentAdd } from './graph/attachment-add.js';
 import { registerGraphAttachmentGet } from './graph/attachment-get.js';
 import { registerGraphAttachmentList } from './graph/attachment-list.js';
@@ -1395,6 +1396,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubWorkflowRunListArtifacts(server, callerHash);
   registerGitHubWorkflowRunListJobs(server, callerHash);
   registerGitHubWorkflowRunRerun(server, callerHash);
+  registerGitHubWorkflowJobLogFailureEvidence(server, callerHash);
   registerGraphAttachmentAdd(server, callerHash);
   registerGraphAttachmentGet(server, callerHash);
   registerGraphAttachmentList(server, callerHash);

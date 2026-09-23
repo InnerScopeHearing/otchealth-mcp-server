@@ -188,7 +188,8 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'github_merge_pull_request', 'github_pr_create_review', 'github_comment_on_issue',
   // trigger + observe CI directly (no browser, no human in the loop)
   'github_dispatch_workflow', 'github_list_workflow_runs', 'github_workflow_run_get',
-  'github_workflow_run_rerun', 'github_workflow_run_list_jobs',
+  'github_workflow_run_rerun', 'github_workflow_run_list_jobs', 'github_workflow_run_list_artifacts',
+  'github_workflow_job_log_failure_evidence',
   // read the state you need to decide whether landing is safe
   'github_pr_get', 'github_pr_list_files', 'github_pr_list_commits', 'github_branch_get_protection',
   'github_repo_list_branches', 'github_commit_get', 'github_commit_compare',

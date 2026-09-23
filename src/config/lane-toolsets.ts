@@ -163,7 +163,7 @@ const CTO_M365_CURATED = [
   'depot_token_create', 'depot_token_delete', 'depot_token_list', 'depot_token_update', 'depot_trigger_build',
   'depot_usage_get', 'depot_usage_list', 'depot_usage_org_get', 'depot_workflow_cancel', 'depot_workflow_get',
   'depot_workflow_list', 'depot_workflow_rerun', 'fetch', 'gateway_fetch_result', 'github_add_labels',
-  'github_branch_get',
+  'github_branch_get', 'github_workflow_run_list_artifacts', 'github_workflow_job_log_failure_evidence',
 ] as const;
 const CRO_M365_CURATED = [
   'brain_search', 'catalog_list_tools', 'checkpoint', 'cio_admin_read_*', 'cio_admin_write_*',

@@ -125,6 +125,49 @@ async function ghGet<T = any>(path: string): Promise<T> {
   return data as T;
 }
 
+/**
+ * GET a single Actions job's log archive, with a hard compressed-byte ceiling.
+ * The archive is intentionally returned only to the bounded evidence parser. No caller should
+ * expose this response, its URL, or its bytes directly.
+ */
+export async function workflowJobGetLogArchive(owner: string, repo: string, jobId: number, maxBytes = 4 * 1024 * 1024): Promise<Uint8Array> {
+  const token = await getInstallationToken();
+  const res = await fetchWithBudget(`https://api.github.com/repos/${O(owner)}/${O(repo)}/actions/jobs/${jobId}/logs`, {
+    method: 'GET',
+    headers: { ...GITHUB_HEADERS, Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}` },
+  }, { retries: 1 });
+  if (res.status >= 400) {
+    throw new GitHubFullError({ code: `github_${res.status}`, status: res.status, message: 'GitHub job log retrieval failed.', nextStep: 'Verify the GitHub App installation can read Actions job logs for this repository.' });
+  }
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const body = new Uint8Array(await res.arrayBuffer());
+    if (body.byteLength > maxBytes) throw new GitHubFullError({ code: 'github_log_archive_too_large', status: 413, message: 'GitHub job log archive exceeds the bounded evidence limit.', nextStep: 'Request a narrower job or inspect the run in GitHub.' });
+    return body;
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = next.value;
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new GitHubFullError({ code: 'github_log_archive_too_large', status: 413, message: 'GitHub job log archive exceeds the bounded evidence limit.', nextStep: 'Request a narrower job or inspect the run in GitHub.' });
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
+  return out;
+}
+
 async function ghSend<T = any>(
   method: 'POST' | 'PATCH' | 'PUT' | 'DELETE',
   path: string,
