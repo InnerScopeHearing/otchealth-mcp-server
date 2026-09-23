@@ -173,15 +173,45 @@ const AZURE_BLOB_UNMIGRATED: Readonly<Record<string, string>> = Object.freeze({
     'FLAGGED: HEADs a pointer in the SAME commons container memory/store.ts just migrated, but via its own SAS builder and with no BLOB_BACKEND branch. Out of this change\'s scope (pointer resolution, not the memory feed); it will fail against a dead Azure. Its owner should route it through the same S3 path.',
 });
 
+/**
+ * The fixed GraphRAG receipt reader follows one GitHub Actions artifact redirect through Azure Blob
+ * object storage. This is not an Azure estate dependency and must not become a file-level exemption:
+ * the only allowed occurrences are the finite productionresultssa0..19 host set and its artifact-
+ * container path check in validateSignedArtifactUrl(). Any second Blob reference, unlisted result
+ * host, or broader host use remains an offender.
+ */
+function isNarrowGitHubActionsArtifactRedirectBlobUse(path: string, text: string): boolean {
+  if (path !== 'github/full-client.ts') return false;
+  const source = stripComments(text);
+  const blobReferences = source.match(/blob\.core\.windows\.net/g) ?? [];
+  const storageHosts = source.match(/'productionresultssa\d+\.blob\.core\.windows\.net'/g) ?? [];
+  const expectedStorageHosts = Array.from(
+    { length: 20 },
+    (_, shard) => `'productionresultssa${shard}.blob.core.windows.net'`,
+  );
+  const validator = functionBody(source, 'validateSignedArtifactUrl');
+  return validator.length > 0 &&
+    source.includes('const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS = new Set([') &&
+    blobReferences.length === 20 &&
+    storageHosts.length === expectedStorageHosts.length &&
+    storageHosts.every((host, index) => host === expectedStorageHosts[index]) &&
+    source.includes("const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';") &&
+    (source.match(/GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS/g) ?? []).length === 2 &&
+    (source.match(/GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX/g) ?? []).length === 2 &&
+    /GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS\.has\(hostname\)\s*&&\s*url\.pathname\.startsWith\(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX\)/.test(validator);
+}
+
+function isUnapprovedAzureBlobReference(path: string, text: string): boolean {
+  if (!/blob\.core\.windows\.net/.test(stripComments(text))) return false;
+  return !(path in BLOB_BACKEND_AWARE_STORES) &&
+    !(path in AZURE_BLOB_UNMIGRATED) &&
+    !isNarrowGitHubActionsArtifactRedirectBlobUse(path, text);
+}
+
 test('no file builds an Azure Blob URL unless it is a declared, BLOB_BACKEND-aware store', () => {
   // The GENERAL form of the defect. memory/store.ts would have appeared here on day one: a second
   // hand-rolled Azure Blob client that no import-based or env-var-based scan could see.
-  const offenders = FILES.filter(
-    (f) =>
-      /blob\.core\.windows\.net/.test(stripComments(f.text)) &&
-      !(f.path in BLOB_BACKEND_AWARE_STORES) &&
-      !(f.path in AZURE_BLOB_UNMIGRATED),
-  ).map((f) => f.path);
+  const offenders = FILES.filter((f) => isUnapprovedAzureBlobReference(f.path, f.text)).map((f) => f.path);
 
   assert.deepEqual(
     offenders,
@@ -190,6 +220,30 @@ test('no file builds an Azure Blob URL unless it is a declared, BLOB_BACKEND-awa
       'reads AND the writes through a store that honours the selector, or add the file to ' +
       'AZURE_BLOB_UNMIGRATED with the reason it cannot be migrated yet.',
   );
+});
+
+test('the fixed GitHub Actions redirect allowance cannot hide broad or unrelated Blob use', () => {
+  const fixedReader = FILES.find((f) => f.path === 'github/full-client.ts');
+  assert.ok(fixedReader, 'the fixed receipt reader source must exist');
+  assert.equal(isUnapprovedAzureBlobReference(fixedReader!.path, fixedReader!.text), false, 'the exact GitHub Actions redirect is permitted');
+
+  const unrelatedBlob = `function readCompanyObject(account, key) {
+    return \`https://\${account}.blob.core.windows.net/company/\${key}\`;
+  }`;
+  assert.equal(isUnapprovedAzureBlobReference('tools/company-object.ts', unrelatedBlob), true, 'an unrelated Azure Blob URL remains an offender');
+  assert.equal(isUnapprovedAzureBlobReference(fixedReader!.path, `${fixedReader!.text}\n${unrelatedBlob}`), true, 'the fixed reader file cannot gain a second Blob use');
+
+  const widenedHostCheck = fixedReader!.text.replace(
+    /GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS\.has\(hostname\)\s*&&\s*url\.pathname\.startsWith\(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX\)/,
+    "hostname.endsWith('.blob.core.windows.net')",
+  );
+  assert.equal(isUnapprovedAzureBlobReference(fixedReader!.path, widenedHostCheck), true, 'the guard rejects a broad host suffix in the fixed reader');
+
+  const outOfRangeHost = fixedReader!.text.replace(
+    "  'productionresultssa19.blob.core.windows.net',",
+    "  'productionresultssa19.blob.core.windows.net',\n  'productionresultssa20.blob.core.windows.net',",
+  );
+  assert.equal(isUnapprovedAzureBlobReference(fixedReader!.path, outOfRangeHost), true, 'the guard rejects a storage shard outside 0..19');
 });
 
 test('every declared BLOB_BACKEND-aware store really does consult the selector', () => {

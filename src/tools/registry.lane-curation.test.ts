@@ -294,7 +294,7 @@ for (const [lane, upperBound, mustInclude] of [
   // 'checkpoint' when the 13 azure_* tools (and their CTO_M365_CURATED entries) were deleted
   // outright -- both are real, still-registered CTO_M365_CURATED members, so this proves the same
   // thing.
-  ['cto', 240, ['brain_search', 'checkpoint', 'github_branch_get', 'cio_admin_read_workspace_health']],
+  ['cto', 240, ['brain_search', 'checkpoint', 'github_branch_get', 'github_graphrag_observation_receipt_get', 'cio_admin_read_workspace_health']],
   ['cro', 240, ['brain_search', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
   // 2026-08-02: developer_wake_lite was silently excluded from the developer lane's M365-curated
   // registration (no wildcard/exact match in LANE_TOOLSETS.developer covered it) -- invisible to
@@ -331,3 +331,16 @@ for (const [lane, upperBound, mustInclude] of [
     }
   });
 }
+
+test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Developer despite github_*', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  const receiptTool = 'github_graphrag_observation_receipt_get';
+  const receiptAlias = 'graphrag_observation_receipt_get';
+  const ctoNames = await registeredToolNames('cto', true);
+  const developerNames = await registeredToolNames('developer', true);
+
+  assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
+  assert.equal(developerNames.includes(receiptTool), false, 'Developer M365 must exclude the canonical reader despite github_*');
+  assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
+  assert.ok(developerNames.length <= 200, `Developer M365 catalog must stay at or under 200 tools, got ${developerNames.length}`);
+});
