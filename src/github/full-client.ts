@@ -12,9 +12,17 @@
  * Scope boundary: repo-level only. NO org admin, billing, or secrets endpoints.
  */
 
-import { createSign } from 'node:crypto';
+import { createHash, createSign } from 'node:crypto';
+import { TextDecoder } from 'node:util';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import {
+  extractPinnedReceiptJson,
+  MAX_GRAPHRAG_ARCHIVE_BYTES,
+  parseStrictJson,
+  PINNED_GRAPHRAG_OBSERVATION,
+  validatePinnedObservationReceipt,
+} from './graphrag-observation-receipt.js';
 
 const env = loadEnv();
 
@@ -660,6 +668,312 @@ export async function workflowRunListJobs(owner: string, repo: string, runId: nu
 export async function workflowRunListArtifacts(owner: string, repo: string, runId: number): Promise<any[]> {
   const data = await ghGet<{ artifacts: any[] }>(`/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/artifacts`);
   return Array.isArray(data?.artifacts) ? data.artifacts : [];
+}
+
+const PINNED_OBSERVATION_API = 'https://api.github.com';
+const PINNED_OBSERVATION_MAX_METADATA_BYTES = 128 * 1024;
+const PINNED_OBSERVATION_TIMEOUT_MS = 8000;
+const PINNED_OBSERVATION_ERROR = {
+  code: 'github_observation_receipt_unverified',
+  status: 0,
+  message: 'The pinned GraphRAG observation receipt could not be verified.',
+  nextStep: 'Check GitHub access and the fixed run and artifact provenance, then retry.',
+} as const;
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('invalid metadata');
+  return value as Record<string, unknown>;
+}
+
+function requireSafeInteger(value: unknown, min = 0): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) throw new Error('invalid metadata');
+  return value;
+}
+
+function requireString(value: unknown, expected?: string): string {
+  if (typeof value !== 'string' || (expected !== undefined && value !== expected)) throw new Error('invalid metadata');
+  return value;
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A body discard is best-effort and must not replace the fixed public error below.
+  }
+}
+
+async function readBoundedResponseBytes(response: Response, maxBytes: number): Promise<Buffer> {
+  const lengthHeader = response.headers.get('content-length');
+  let declaredLength: number | undefined;
+  if (lengthHeader !== null) {
+    if (!/^(?:0|[1-9]\d*)$/.test(lengthHeader)) {
+      await cancelResponseBody(response);
+      throw new Error('invalid response length');
+    }
+    declaredLength = Number(lengthHeader);
+    if (!Number.isSafeInteger(declaredLength) || declaredLength > maxBytes) {
+      await cancelResponseBody(response);
+      throw new Error('response too large');
+    }
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('missing response body');
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    void reader.cancel().catch(() => undefined);
+  }, PINNED_OBSERVATION_TIMEOUT_MS);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        try { await reader.cancel(); } catch { /* keep the bounded parse failure */ }
+        throw new Error('response too large');
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+  if (timedOut) throw new Error('response body timed out');
+  return Buffer.concat(chunks, totalBytes);
+}
+
+async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unknown> {
+  const url = new URL(path, PINNED_OBSERVATION_API);
+  if (url.origin !== PINNED_OBSERVATION_API) throw new Error('invalid fixed GitHub API URL');
+  const response = await fetchWithBudget(url, {
+    method: 'GET',
+    redirect: 'error',
+    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  if (response.status !== 200) {
+    await cancelResponseBody(response);
+    throw new Error('GitHub API request failed');
+  }
+  const bytes = await readBoundedResponseBytes(response, PINNED_OBSERVATION_MAX_METADATA_BYTES);
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error('invalid GitHub API response');
+  }
+  return parseStrictJson(text, PINNED_OBSERVATION_MAX_METADATA_BYTES);
+}
+
+function verifyRepositoryMetadata(value: unknown): number {
+  const repo = requireRecord(value);
+  if (requireString(repo.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository ||
+      requireString(repo.name, PINNED_GRAPHRAG_OBSERVATION.repo) !== PINNED_GRAPHRAG_OBSERVATION.repo) throw new Error('repository mismatch');
+  const owner = requireRecord(repo.owner);
+  requireString(owner.login, PINNED_GRAPHRAG_OBSERVATION.owner);
+  return requireSafeInteger(repo.id, 1);
+}
+
+function verifyRunMetadata(value: unknown, repositoryId: number): void {
+  const run = requireRecord(value);
+  if (requireSafeInteger(run.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.runId ||
+      requireString(run.name, PINNED_GRAPHRAG_OBSERVATION.workflowName) !== PINNED_GRAPHRAG_OBSERVATION.workflowName ||
+      requireString(run.path, PINNED_GRAPHRAG_OBSERVATION.workflowPath) !== PINNED_GRAPHRAG_OBSERVATION.workflowPath ||
+      requireString(run.event, 'workflow_dispatch') !== 'workflow_dispatch' ||
+      requireString(run.status, 'completed') !== 'completed' ||
+      requireString(run.conclusion, 'success') !== 'success' ||
+      requireString(run.head_branch, 'main') !== 'main' ||
+      requireString(run.head_sha, PINNED_GRAPHRAG_OBSERVATION.headSha) !== PINNED_GRAPHRAG_OBSERVATION.headSha) {
+    throw new Error('run mismatch');
+  }
+  const sourceRepository = requireRecord(run.repository);
+  const headRepository = requireRecord(run.head_repository);
+  if (requireSafeInteger(sourceRepository.id, 1) !== repositoryId ||
+      requireString(sourceRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository ||
+      requireSafeInteger(headRepository.id, 1) !== repositoryId ||
+      requireString(headRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository) {
+    throw new Error('run repository mismatch');
+  }
+}
+
+function verifyContentBlob(value: unknown, path: string, expectedSha: string): void {
+  const content = requireRecord(value);
+  if (requireString(content.type, 'file') !== 'file' || requireString(content.path, path) !== path ||
+      requireString(content.sha, expectedSha) !== expectedSha) throw new Error('source provenance mismatch');
+}
+
+function verifyArtifactMetadata(value: unknown, repositoryId: number): { sizeBytes: number; expiresAt: number; digest: string | null } {
+  const artifact = requireRecord(value);
+  if (requireSafeInteger(artifact.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.artifactId ||
+      requireString(artifact.name, PINNED_GRAPHRAG_OBSERVATION.artifactName) !== PINNED_GRAPHRAG_OBSERVATION.artifactName ||
+      artifact.expired !== false) throw new Error('artifact mismatch');
+  const sizeBytes = requireSafeInteger(artifact.size_in_bytes, 1);
+  if (sizeBytes > MAX_GRAPHRAG_ARCHIVE_BYTES) throw new Error('artifact too large');
+  if (typeof artifact.expires_at !== 'string') throw new Error('artifact expiry missing');
+  const expiresAt = Date.parse(artifact.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error('artifact expired');
+
+  const workflowRun = requireRecord(artifact.workflow_run);
+  if (requireSafeInteger(workflowRun.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.runId ||
+      requireSafeInteger(workflowRun.repository_id, 1) !== repositoryId ||
+      requireSafeInteger(workflowRun.head_repository_id, 1) !== repositoryId ||
+      requireString(workflowRun.head_branch, 'main') !== 'main' ||
+      requireString(workflowRun.head_sha, PINNED_GRAPHRAG_OBSERVATION.headSha) !== PINNED_GRAPHRAG_OBSERVATION.headSha) {
+    throw new Error('artifact provenance mismatch');
+  }
+
+  let digest: string | null = null;
+  if (artifact.digest !== undefined && artifact.digest !== null) {
+    if (typeof artifact.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(artifact.digest)) throw new Error('invalid artifact digest');
+    digest = artifact.digest.slice('sha256:'.length);
+  }
+  return { sizeBytes, expiresAt, digest };
+}
+
+function validateSignedArtifactUrl(location: string | null): URL {
+  if (!location) throw new Error('missing signed URL');
+  let url: URL;
+  try {
+    url = new URL(location);
+  } catch {
+    throw new Error('invalid signed URL');
+  }
+  const hostname = url.hostname.toLowerCase();
+  const approvedHost = hostname === 'pipelines.actions.githubusercontent.com' ||
+    hostname.endsWith('.actions.githubusercontent.com') ||
+    hostname.endsWith('.blob.core.windows.net');
+  if (url.protocol !== 'https:' || !approvedHost || url.username !== '' || url.password !== '' ||
+      (url.port !== '' && url.port !== '443') || url.hash !== '') throw new Error('untrusted signed URL');
+  return url;
+}
+
+async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
+  const archivePath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}/zip`;
+  const archiveUrl = new URL(archivePath, PINNED_OBSERVATION_API);
+  const redirectResponse = await fetchWithBudget(archiveUrl, {
+    method: 'GET',
+    redirect: 'manual',
+    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  const location = redirectResponse.headers.get('location');
+  await cancelResponseBody(redirectResponse);
+  if (redirectResponse.status !== 302) throw new Error('unexpected artifact response');
+  const signedUrl = validateSignedArtifactUrl(location);
+
+  // A GitHub installation token is intentionally not sent to the signed object-storage URL.
+  const downloadResponse = await fetchWithBudget(signedUrl, {
+    method: 'GET',
+    redirect: 'error',
+    headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  if (downloadResponse.status !== 200 || downloadResponse.redirected) {
+    await cancelResponseBody(downloadResponse);
+    throw new Error('artifact download failed');
+  }
+  if (downloadResponse.url) {
+    let finalUrl: URL;
+    try { finalUrl = new URL(downloadResponse.url); } catch {
+      await cancelResponseBody(downloadResponse);
+      throw new Error('invalid final download URL');
+    }
+    if (finalUrl.href !== signedUrl.href) {
+      await cancelResponseBody(downloadResponse);
+      throw new Error('unexpected download redirect');
+    }
+  }
+  return readBoundedResponseBytes(downloadResponse, MAX_GRAPHRAG_ARCHIVE_BYTES);
+}
+
+export interface PinnedGraphRagObservationResult {
+  schema: typeof PINNED_GRAPHRAG_OBSERVATION.resultSchema;
+  repository: typeof PINNED_GRAPHRAG_OBSERVATION.repository;
+  run_id: typeof PINNED_GRAPHRAG_OBSERVATION.runId;
+  artifact_id: typeof PINNED_GRAPHRAG_OBSERVATION.artifactId;
+  artifact_name: typeof PINNED_GRAPHRAG_OBSERVATION.artifactName;
+  receipt_schema: typeof PINNED_GRAPHRAG_OBSERVATION.receiptSchema;
+  knowledge_base_binding_verified: true;
+  read_only: true;
+  source_id: typeof PINNED_GRAPHRAG_OBSERVATION.sourceId;
+  ingestion_job_id: typeof PINNED_GRAPHRAG_OBSERVATION.ingestionJobId;
+  provider_status: 'COMPLETE' | 'FAILED' | 'STOPPED' | 'NONTERMINAL';
+  terminal: boolean;
+  terminal_statistics: ReturnType<typeof validatePinnedObservationReceipt>['terminal_statistics'];
+  progress_statistics: ReturnType<typeof validatePinnedObservationReceipt>['progress_statistics'];
+  provider_updated_at_present: boolean;
+  workflow_provenance_verified: true;
+  artifact_metadata_verified: true;
+  archive_digest_verification: 'verified' | 'not_provided';
+  archive_sha256: string;
+  archive_bytes: number;
+  receipt_sha256: string;
+  receipt_bytes: number;
+}
+
+/**
+ * Retrieve and validate one fixed, historical GraphRAG observation artifact. This intentionally
+ * accepts no repository, run, artifact, URL, or path supplied by the caller and never returns the
+ * receipt's provider timestamp or any source content.
+ */
+export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraphRagObservationResult> {
+  try {
+    const token = await getInstallationToken();
+    if (typeof token !== 'string' || token.length === 0 || token.length > 4096) throw new Error('invalid installation token');
+
+    const repoPath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}`;
+    const repositoryId = verifyRepositoryMetadata(await pinnedGitHubApiGetJson(repoPath, token));
+    const runPath = `${repoPath}/actions/runs/${PINNED_GRAPHRAG_OBSERVATION.runId}`;
+    verifyRunMetadata(await pinnedGitHubApiGetJson(runPath, token), repositoryId);
+
+    const workflowUrl = new URL(`${repoPath}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`, PINNED_OBSERVATION_API);
+    workflowUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
+    const producerUrl = new URL(`${repoPath}/contents/${PINNED_GRAPHRAG_OBSERVATION.producerPath}`, PINNED_OBSERVATION_API);
+    producerUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
+    verifyContentBlob(
+      await pinnedGitHubApiGetJson(`${workflowUrl.pathname}${workflowUrl.search}`, token),
+      '.github/workflows/observe-managed-graphrag-company-fifth-source.yml',
+      PINNED_GRAPHRAG_OBSERVATION.workflowBlobSha,
+    );
+    verifyContentBlob(
+      await pinnedGitHubApiGetJson(`${producerUrl.pathname}${producerUrl.search}`, token),
+      PINNED_GRAPHRAG_OBSERVATION.producerPath,
+      PINNED_GRAPHRAG_OBSERVATION.producerBlobSha,
+    );
+
+    const artifactPath = `${repoPath}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}`;
+    const artifactMetadata = verifyArtifactMetadata(await pinnedGitHubApiGetJson(artifactPath, token), repositoryId);
+    const archive = await downloadPinnedArtifactArchive(token);
+    // size_in_bytes is bounded as repository metadata, while the transfer itself is independently
+    // bounded by readBoundedResponseBytes. Do not assume the metadata size has ZIP-transfer semantics.
+    if (Date.now() >= artifactMetadata.expiresAt) throw new Error('artifact expired');
+
+    const archiveSha256 = createHash('sha256').update(archive).digest('hex');
+    if (artifactMetadata.digest !== null && artifactMetadata.digest !== archiveSha256) throw new Error('artifact digest mismatch');
+    const receiptBytes = extractPinnedReceiptJson(archive);
+    const receipt = validatePinnedObservationReceipt(receiptBytes);
+    return {
+      schema: PINNED_GRAPHRAG_OBSERVATION.resultSchema,
+      repository: PINNED_GRAPHRAG_OBSERVATION.repository,
+      run_id: PINNED_GRAPHRAG_OBSERVATION.runId,
+      artifact_id: PINNED_GRAPHRAG_OBSERVATION.artifactId,
+      artifact_name: PINNED_GRAPHRAG_OBSERVATION.artifactName,
+      knowledge_base_binding_verified: true,
+      ...receipt,
+      workflow_provenance_verified: true,
+      artifact_metadata_verified: true,
+      archive_digest_verification: artifactMetadata.digest === null ? 'not_provided' : 'verified',
+      archive_sha256: archiveSha256,
+      archive_bytes: archive.length,
+      receipt_sha256: createHash('sha256').update(receiptBytes).digest('hex'),
+      receipt_bytes: receiptBytes.length,
+    };
+  } catch {
+    // Never surface a GitHub error body, signed object URL, malformed receipt value, or token detail.
+    throw new GitHubFullError(PINNED_OBSERVATION_ERROR);
+  }
 }
 
 /** POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel */

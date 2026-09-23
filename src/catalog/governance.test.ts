@@ -53,6 +53,15 @@ test('workflow-run readers are intentionally ungated (reads are not an escalatio
   }
 });
 
+test('pinned GraphRAG observation receipt reader is CTO-only', () => {
+  const gov = requiredRoleFor('github_graphrag_observation_receipt_get');
+  assert.ok(gov, 'the pinned receipt reader must have an explicit role gate');
+  assert.ok(roleAllows(gov!.role, 'cto'));
+  for (const other of [...OTHER_LANES, 'developer', 'exec']) {
+    assert.ok(!roleAllows(gov!.role, other), `the pinned receipt reader must refuse lane "${other}"`);
+  }
+});
+
 test('depot_* is role-gated to cto/developer only (2026-07-26 widen -- full Depot read+write for developer)', () => {
   const gov = requiredRoleFor('depot_trigger_build');
   assert.ok(gov, 'depot_trigger_build must have a governance rule');
