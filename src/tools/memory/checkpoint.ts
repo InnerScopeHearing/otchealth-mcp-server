@@ -4,7 +4,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { registerTool, type CallerHashProvider } from '../registry.js';
+import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isConfigured } from '../../agentstate/store.js';
 import { writeMemory, recordMemoryIndexOutcome } from '../../agentstate/memory.js';
 import { MEMORY_KINDS } from '../../agentstate/agents.js';
@@ -146,6 +146,24 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         idempotentHint: false,
         openWorldHint: true,
       },
+      // Ordinary Chat receives the equivalent schema with no field-level prose. This is a
+      // connector-metadata projection only; registerTool keeps the detailed internal schema and
+      // the handler, delivery, MNPI, and capture-pressure behavior below unchanged.
+      connectorInputShape: {
+        agent: z.string(),
+        summary: z.string().optional(),
+        memories: z
+          .array(
+            z.object({
+              kind: z.enum(MEMORY_KINDS),
+              text: z.string().min(1),
+              tags: z.array(z.string()).optional(),
+              supersedes: z.string().optional(),
+            }),
+          )
+          .max(20)
+          .optional(),
+      },
       inputShape: {
         agent: z.string().describe('Agent lane to checkpoint (lowercase id, e.g. "cto", "developer").'),
         summary: z
@@ -281,4 +299,15 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
     },
     callerHash,
   );
+}
+
+/** Direct in-process adapter for durable workers. It captures the exact handler definition used by
+ * registerCheckpoint, so the checkpoint's existing MNPI gate, delivery accounting, indexing, and
+ * capture-pressure behavior remain one implementation. */
+export async function handleCheckpoint(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResultPayload> {
+  let handler: ((value: any, context: ToolContext) => Promise<ToolResultPayload>) | undefined;
+  const captureRegister = ((_server: McpServer, definition: any) => { handler = definition.handler; }) as typeof registerTool;
+  registerCheckpoint({} as McpServer, () => ctx.callerHash, { register: captureRegister });
+  if (!handler) throw new Error('checkpoint_handler_unavailable');
+  return handler(input, ctx);
 }

@@ -17,3 +17,10 @@ test('executor fails closed for unknown and personal lanes', async () => {
   await assert.rejects(() => executor.checkpoint({}, { callerHash: 'hash-123456', callerAgent: 'unknown', correlationId: 'corr-123' }), /caller_lane_not_allowed/);
   await assert.rejects(() => executor.checkpoint({ agent: 'clo-personal' }, { callerHash: 'hash-123456', callerAgent: 'clo-personal', correlationId: 'corr-123' }), /caller_lane_not_allowed/);
 });
+
+test('exported checkpoint adapter returns a bounded result for a company lane', async () => {
+  const { handleCheckpoint } = await import('../tools/memory/checkpoint.js');
+  const result = await handleCheckpoint({ agent: 'coo', memories: [] }, { callerHash: 'hash-123456', callerAgent: 'coo', correlationId: 'corr-123', dryRun: false, acknowledgeWarning: false });
+  assert.equal(typeof result.data, 'object');
+  assert.equal((result.data as Record<string, unknown>).checkpoint, false);
+});
