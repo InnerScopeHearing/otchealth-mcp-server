@@ -552,6 +552,7 @@ test('pinned observation read refuses expired artifacts and mismatching GitHub a
     const expired = makeArtifact({ expired: true, expires_at: '2020-01-01T00:00:00Z' });
     const result = await withStubbedFetch(githubStub(requests, { artifact: expired }), () => callThroughRealMcpServer());
     assert.equal(result.isError, true);
+    assert.equal(result.structuredContent?.error?.internal_diagnostic?.stage, 'artifact_metadata');
     assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
   });
 
