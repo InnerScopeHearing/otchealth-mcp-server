@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { TaskClass } from '../safety/task-tool-pack-selection.js';
 
 export interface RequestContext {
   callerHash: string;
@@ -12,6 +13,8 @@ export interface RequestContext {
    * AuthContext.m365_static_auth doc comment for why.
    */
   m365StaticAuth?: boolean;
+  /** A caller-supplied tool-discovery selector. It never changes the authenticated caller identity. */
+  taskClass?: TaskClass;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
@@ -27,6 +30,11 @@ export function currentCorrelationId(): string {
 /** The agent identity derived from the caller's OAuth token (per-agent client), or '' if unknown. */
 export function currentCallerAgent(): string {
   return requestContext.getStore()?.callerAgent ?? '';
+}
+
+/** The task class parsed from the current authenticated /mcp request, if one is active. */
+export function currentTaskClass(): TaskClass | undefined {
+  return requestContext.getStore()?.taskClass;
 }
 
 /** True when the current request is a Claude Chat (DCR) connector — gets the curated toolset. */

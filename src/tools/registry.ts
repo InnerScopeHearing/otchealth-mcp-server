@@ -20,7 +20,7 @@ import {
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
-import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
+import { currentCallerAgent, currentTaskClass, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
 import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult } from './result-store.js';
 import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from './hyperagent/ring.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
@@ -46,6 +46,7 @@ import {
   recordLaneToolUsage,
 } from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
+import { isTaskScopedToolInPack } from '../safety/task-tool-pack-selection.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -314,6 +315,8 @@ export const EXTERNAL_READONLY_TOOLSET: readonly string[] = [
   // exactly like web_search does. See web-research.ts / web-extract.ts headers.
   'web_research', 'web_extract',
 ] as const;
+
+const EXTERNAL_READONLY_TOOLSET_LOOKUP: ReadonlySet<string> = new Set(EXTERNAL_READONLY_TOOLSET);
 
 /**
  * The seat-memory baseline every ROLE-elevated connector (occ_gpt_* / URL-only owner-code
@@ -897,6 +900,15 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     ? null
     : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth(), curateLaneOverrides);
   if (catalogCuration && !catalogCuration.advertise) return;
+  // Task-class discovery is the last catalog filter. It can only remove tools that passed the
+  // authenticated caller's existing connector and optional lane-curation gates above. The class
+  // comes from an untrusted request header, selects presentation only, and never changes callerAgent
+  // or the role/ring/write checks in this handler.
+  const taskClass = currentTaskClass();
+  if (
+    taskClass !== undefined
+    && !isTaskScopedToolInPack(taskClass, laneForThisTool, canonicalName, EXTERNAL_READONLY_TOOLSET_LOOKUP)
+  ) return;
   // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
   // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
   // fake "service" derived from the alias's stripped bare name (e.g. "containerapp" instead of
