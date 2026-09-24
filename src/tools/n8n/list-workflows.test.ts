@@ -84,7 +84,9 @@ test('n8n_list_workflows preserves its filters and returns an allowlisted metada
     nodes: [{ name: 'private node', credentials: { apiKey: 'NODE_SECRET_SENTINEL' } }],
     connections: { private: 'CONNECTION_SENTINEL' },
     settings: { saveDataErrorExecution: 'SETTINGS_SENTINEL' },
+    staticData: { private: 'STATIC_DATA_SENTINEL' },
     credentials: { apiKey: 'CREDENTIALS_SENTINEL' },
+    credentialMetadata: { name: 'CREDENTIAL_METADATA_SENTINEL' },
     credential: { token: 'CREDENTIAL_SENTINEL' },
   };
   const { response, urls } = await callListTool(
@@ -108,7 +110,8 @@ test('n8n_list_workflows preserves its filters and returns an allowlisted metada
   const serialized = JSON.stringify(response);
   for (const marker of [
     'TAG_CREDENTIAL_SENTINEL', 'NODE_SECRET_SENTINEL', 'CONNECTION_SENTINEL',
-    'SETTINGS_SENTINEL', 'CREDENTIALS_SENTINEL', 'CREDENTIAL_SENTINEL',
+    'SETTINGS_SENTINEL', 'STATIC_DATA_SENTINEL', 'CREDENTIALS_SENTINEL',
+    'CREDENTIAL_METADATA_SENTINEL', 'CREDENTIAL_SENTINEL',
   ]) {
     assert.equal(serialized.includes(marker), false, `${marker} must not be returned`);
   }
@@ -121,6 +124,38 @@ test('n8n_list_workflows preserves its filters and returns an allowlisted metada
     ['name', 'customer'],
     ['tags', 'production'],
   ]);
+});
+
+test('n8n_list_workflows applies its documented default page size', async () => {
+  const { response, urls } = await callListTool({ data: [{ id: 'wf-default' }] });
+
+  assert.equal(response.isError, undefined);
+  const requestUrl = new URL(urls.find((url) => url.includes('/api/v1/workflows'))!);
+  assert.equal(requestUrl.searchParams.get('limit'), '100');
+  assert.deepEqual(resultData(response), {
+    workflows: [{ id: 'wf-default' }],
+    count: 1,
+    next_cursor: null,
+  });
+});
+
+test('n8n_list_workflows fails closed when n8n returns more records than requested', async () => {
+  const { response } = await callListTool(
+    { data: [{ id: 'wf-1' }, { id: 'wf-2' }], nextCursor: 'next-cursor' },
+    { limit: 1 },
+  );
+
+  assert.equal(response.isError, true);
+  const serialized = JSON.stringify(response);
+  assert.equal(serialized.includes('wf-2'), false);
+  assert.match(serialized, /invalid workflow list metadata/);
+});
+
+test('n8n_list_workflows rejects a page limit above 250 before making an n8n request', async () => {
+  const { response, urls } = await callListTool({ data: [] }, { limit: 251 });
+
+  assert.equal(response.isError, true);
+  assert.equal(urls.some((url) => url.includes('/api/v1/workflows')), false);
 });
 
 test('n8n_list_workflows drops oversized non-allowlisted workflow data before measuring the response', async () => {
