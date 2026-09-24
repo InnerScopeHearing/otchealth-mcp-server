@@ -20,7 +20,12 @@ import {
 import { applyGuardrail, type ComplianceWarning } from '../compliance/guardrail.js';
 import { recordTool, deriveService } from '../catalog/catalog.js';
 import { requiredRoleFor, roleAllows } from '../catalog/governance.js';
-import { currentCallerAgent, isConnectorSurface, isM365StaticAuth } from '../server/request-context.js';
+import {
+  currentCallerAgent,
+  currentFixedMcpToolProfile,
+  isConnectorSurface,
+  isM365StaticAuth,
+} from '../server/request-context.js';
 import { shouldOffload, offloadResult, extractResultSummary, mayOffloadToolResult } from './result-store.js';
 import { WEFUNDER_CAMPAIGN_DIRECTOR_LANE } from './hyperagent/ring.js';
 import { HEYGEN_DATA_TOOLS, HEYGEN_PREFLIGHT_TOOLS } from './heygen/access.js';
@@ -46,6 +51,7 @@ import {
   recordLaneToolUsage,
 } from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
+import { isFixedMcpProfileToolAllowed } from '../safety/fixed-mcp-tool-profiles.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -897,6 +903,19 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     ? null
     : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth(), curateLaneOverrides);
   if (catalogCuration && !catalogCuration.advertise) return;
+  // A fixed endpoint can further narrow presentation for clients that cannot reliably send a
+  // per-task header. This check runs after connector/lane curation and uses the canonical name so
+  // generated aliases cannot escape the selected profile. It does not replace handler auth gates.
+  const fixedProfile = currentFixedMcpToolProfile();
+  if (
+    fixedProfile &&
+    !isFixedMcpProfileToolAllowed(
+      fixedProfile,
+      canonicalName,
+      laneForThisTool,
+      EXTERNAL_READONLY_TOOLSET,
+    )
+  ) return;
   // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
   // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
   // fake "service" derived from the alias's stripped bare name (e.g. "containerapp" instead of

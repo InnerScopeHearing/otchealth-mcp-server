@@ -11,6 +11,10 @@ import { logger, newCorrelationId } from '../audit/logger.js';
 import { currentCallerHash, requestContext } from './request-context.js';
 import { registerAllTools } from '../tools/index.js';
 import { wrapCompressibleResponse } from './compress-response.js';
+import {
+  FIXED_MCP_PROFILE_ROUTES,
+  type FixedMcpToolProfile,
+} from '../safety/fixed-mcp-tool-profiles.js';
 
 const SERVER_INFO = {
   name: 'otchealth-mcp',
@@ -89,89 +93,102 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     );
   }
 
-  app.post('/mcp', async (request: FastifyRequest, reply: FastifyReply) => {
-    const ctx = await requireConnectorAuth(request, reply);
-    if (!ctx) return;
-    const correlationId = newCorrelationId();
-    reply.raw.setHeader('x-correlation-id', correlationId);
+  const registerMcpPostRoute = (path: string, fixedProfile?: FixedMcpToolProfile): void => {
+    app.post(path, async (request: FastifyRequest, reply: FastifyReply) => {
+      const ctx = await requireConnectorAuth(request, reply);
+      if (!ctx) return;
+      const correlationId = newCorrelationId();
+      reply.raw.setHeader('x-correlation-id', correlationId);
 
-    await requestContext.run(
-      {
-        callerHash: ctx.caller_hash,
-        correlationId,
-        callerAgent: ctx.caller_agent,
-        connectorSurface: ctx.connector_surface,
-        m365StaticAuth: ctx.m365_static_auth,
-      },
-      async () => {
-        // serverOptions() advertises listChanged (so a Custom MCP client cannot cache an earlier
-        // curated tools/list across a deploy) plus, when MCP_STUB_RESOURCES_MODE is on, the empty
-        // resources/prompts capabilities Codex's availability probe requires. Tool availability
-        // still remains authorization- and lane-specific at registration time.
-        const mcp = new McpServer(SERVER_INFO, serverOptions());
-        if (stubResourceListsEnabled()) applyStubResourceHandlers(mcp);
-        registerAllTools(mcp, currentCallerHash);
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined,
-          enableJsonResponse: true,
-        });
+      await requestContext.run(
+        {
+          callerHash: ctx.caller_hash,
+          correlationId,
+          callerAgent: ctx.caller_agent,
+          connectorSurface: ctx.connector_surface,
+          m365StaticAuth: ctx.m365_static_auth,
+          ...(fixedProfile ? { fixedMcpToolProfile: fixedProfile } : {}),
+        },
+        async () => {
+          // serverOptions() advertises listChanged (so a Custom MCP client cannot cache an earlier
+          // curated tools/list across a deploy) plus, when MCP_STUB_RESOURCES_MODE is on, the empty
+          // resources/prompts capabilities Codex's availability probe requires. Tool availability
+          // still remains authorization- and lane-specific at registration time.
+          const mcp = new McpServer(SERVER_INFO, serverOptions());
+          if (stubResourceListsEnabled()) applyStubResourceHandlers(mcp);
+          registerAllTools(mcp, currentCallerHash);
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined,
+            enableJsonResponse: true,
+          });
 
-        // Clean up after the response so we don't leak listeners.
-        const cleanup = (): void => {
-          void transport.close().catch(() => {});
-          void mcp.close().catch(() => {});
-        };
+          // Clean up after the response so we don't leak listeners.
+          const cleanup = (): void => {
+            void transport.close().catch(() => {});
+            void mcp.close().catch(() => {});
+          };
 
-        try {
-          await mcp.connect(transport);
-          reply.hijack();
-          reply.raw.once('close', cleanup);
-          // Compress the JSON response (the ~1.9MB tools/list catalog gzips ~16x). The wrapper only
-          // intercepts writeHead/write/end and only for compressible JSON/text; SSE and clients that
-          // do not accept gzip pass through the real socket untouched. Cleanup stays on reply.raw.
-          const res = wrapCompressibleResponse(reply.raw, request.headers['accept-encoding']);
-          await transport.handleRequest(request.raw, res, request.body);
-        } catch (err) {
-          logger.error(
-            {
-              type: 'mcp_transport_error',
-              correlation_id: correlationId,
-              err: (err as Error).message,
-            },
-            'mcp transport error',
-          );
-          cleanup();
-          if (!reply.raw.headersSent) {
-            reply.raw.statusCode = 500;
-            reply.raw.setHeader('content-type', 'application/json');
-            reply.raw.end(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                error: {
-                  code: -32603,
-                  message: 'Internal MCP transport error',
-                  data: { correlation_id: correlationId },
-                },
-                id: null,
-              }),
+          try {
+            await mcp.connect(transport);
+            reply.hijack();
+            reply.raw.once('close', cleanup);
+            // Compress the JSON response (the ~1.9MB tools/list catalog gzips ~16x). The wrapper only
+            // intercepts writeHead/write/end and only for compressible JSON/text; SSE and clients that
+            // do not accept gzip pass through the real socket untouched. Cleanup stays on reply.raw.
+            const res = wrapCompressibleResponse(reply.raw, request.headers['accept-encoding']);
+            await transport.handleRequest(request.raw, res, request.body);
+          } catch (err) {
+            logger.error(
+              {
+                type: 'mcp_transport_error',
+                correlation_id: correlationId,
+                err: (err as Error).message,
+              },
+              'mcp transport error',
             );
-          } else {
-            reply.raw.end();
+            cleanup();
+            if (!reply.raw.headersSent) {
+              reply.raw.statusCode = 500;
+              reply.raw.setHeader('content-type', 'application/json');
+              reply.raw.end(
+                JSON.stringify({
+                  jsonrpc: '2.0',
+                  error: {
+                    code: -32603,
+                    message: 'Internal MCP transport error',
+                    data: { correlation_id: correlationId },
+                  },
+                  id: null,
+                }),
+              );
+            } else {
+              reply.raw.end();
+            }
           }
-        }
-      },
-    );
-  });
+        },
+      );
+    });
+  };
 
-  app.get('/mcp', async (_request, reply) => {
+  registerMcpPostRoute('/mcp');
+  for (const route of FIXED_MCP_PROFILE_ROUTES) {
+    registerMcpPostRoute(route.path, route.profile);
+  }
+
+  const methodNotAllowed = async (_request: FastifyRequest, reply: FastifyReply) => {
     await reply.code(405).send({
       jsonrpc: '2.0',
       error: {
         code: -32000,
         message:
-          'Method Not Allowed. This MCP server runs in stateless JSON mode; use POST /mcp.',
+          'Method Not Allowed. This MCP server runs in stateless JSON mode; use the matching POST MCP endpoint.',
       },
       id: null,
     });
-  });
+  };
+
+  app.get('/mcp', methodNotAllowed);
+  for (const route of FIXED_MCP_PROFILE_ROUTES) {
+    app.get(route.path, methodNotAllowed);
+  }
 }

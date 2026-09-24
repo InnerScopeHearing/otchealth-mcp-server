@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { FixedMcpToolProfile } from '../safety/fixed-mcp-tool-profiles.js';
 
 export interface RequestContext {
   callerHash: string;
@@ -12,6 +13,8 @@ export interface RequestContext {
    * AuthContext.m365_static_auth doc comment for why.
    */
   m365StaticAuth?: boolean;
+  /** Server-selected presentation profile bound by an exact fixed MCP endpoint route. */
+  fixedMcpToolProfile?: FixedMcpToolProfile;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
@@ -37,4 +40,9 @@ export function isConnectorSurface(): boolean {
 /** True when the current request authenticated via an M365 declarative-agent static token. */
 export function isM365StaticAuth(): boolean {
   return requestContext.getStore()?.m365StaticAuth === true;
+}
+
+/** Fixed MCP presentation profile selected by the route, if this request used a profile endpoint. */
+export function currentFixedMcpToolProfile(): FixedMcpToolProfile | undefined {
+  return requestContext.getStore()?.fixedMcpToolProfile;
 }
