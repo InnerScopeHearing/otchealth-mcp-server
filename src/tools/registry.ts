@@ -46,6 +46,7 @@ import {
   recordLaneToolUsage,
 } from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
+import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -649,7 +650,9 @@ function parseUpstreamToolError(err: unknown): { code: string; nextStep: string;
   const candidate = err as Record<string, unknown>;
   if (typeof candidate.code !== 'string') return null;
   if (typeof candidate.nextStep !== 'string') return null;
-  if (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError')) {
+  const isPinnedObservationError = candidate.name === 'PinnedObservationReaderError' &&
+    candidate.code === 'github_observation_receipt_unverified';
+  if (!isPinnedObservationError && (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError'))) {
     return null;
   }
   return {
@@ -1438,6 +1441,8 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           next_step: nextStep,
         };
         if (upstreamStatus !== undefined) errPayload.upstream_status = upstreamStatus;
+        const internalDiagnostic = projectPinnedObservationDiagnostic(err, callerAgent, correlationId);
+        if (internalDiagnostic) errPayload.internal_diagnostic = internalDiagnostic;
         logToolEnd({
           correlation_id: correlationId,
           tool: def.name,
