@@ -6,6 +6,7 @@ export const PINNED_OBSERVATION_FAILURE_STAGES = [
   'producer_blob_provenance',
   'artifact_metadata',
   'artifact_download',
+  'artifact_expiry',
   'archive_digest',
   'zip_receipt_extraction',
   'receipt_schema',
@@ -25,10 +26,11 @@ const PINNED_OBSERVATION_FAILURE_STAGE_SET: ReadonlySet<string> = new Set(PINNED
 /** Project only a fixed, non-sensitive stage code to the authenticated CTO caller. */
 export function projectPinnedObservationDiagnostic(
   error: unknown,
+  canonicalToolName: string,
   callerAgent: string,
   correlationId: string,
 ): PinnedObservationInternalDiagnostic | null {
-  if (callerAgent !== 'cto' || !error || typeof error !== 'object') return null;
+  if (canonicalToolName !== 'github_graphrag_observation_receipt_get' || callerAgent !== 'cto' || !error || typeof error !== 'object') return null;
   const candidate = error as Record<string, unknown>;
   if (candidate.name !== 'PinnedObservationReaderError' || candidate.code !== 'github_observation_receipt_unverified') return null;
 

@@ -1049,9 +1049,11 @@ export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraph
     const archive = await downloadPinnedArtifactArchive(token);
     // size_in_bytes is bounded as repository metadata, while the transfer itself is independently
     // bounded by readBoundedResponseBytes. Do not assume the metadata size has ZIP-transfer semantics.
-    failureStage = 'archive_digest';
+    // Metadata verification rejects an already-expired artifact; this re-check catches expiry during download.
+    failureStage = 'artifact_expiry';
     if (Date.now() >= artifactMetadata.expiresAt) throw new Error('artifact expired');
 
+    failureStage = 'archive_digest';
     const archiveSha256 = createHash('sha256').update(archive).digest('hex');
     if (artifactMetadata.digest !== null && artifactMetadata.digest !== archiveSha256) throw new Error('artifact digest mismatch');
     failureStage = 'zip_receipt_extraction';

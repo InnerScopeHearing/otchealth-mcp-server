@@ -16,7 +16,7 @@ test('pinned observation diagnostic projection is CTO-only, allowlisted, and dro
     },
   };
 
-  const projected = projectPinnedObservationDiagnostic(error, 'cto', 'synthetic-correlation');
+  const projected = projectPinnedObservationDiagnostic(error, 'github_graphrag_observation_receipt_get', 'cto', 'synthetic-correlation');
   assert.deepEqual(projected, {
     type: 'github_observation_receipt',
     stage: 'archive_digest',
@@ -25,13 +25,17 @@ test('pinned observation diagnostic projection is CTO-only, allowlisted, and dro
   assert.equal(JSON.stringify(projected).includes('synthetic-provider-metadata-must-not-leak'), false);
   assert.equal(JSON.stringify(projected).includes('synthetic-secret'), false);
   assert.equal(JSON.stringify(projected).includes('synthetic-token'), false);
-  assert.equal(projectPinnedObservationDiagnostic(error, 'developer', 'synthetic-correlation'), null);
+  assert.equal(projectPinnedObservationDiagnostic(error, 'github_graphrag_observation_receipt_get', 'developer', 'synthetic-correlation'), null);
+  assert.equal(projectPinnedObservationDiagnostic({
+    ...error,
+    name: 'PinnedObservationReaderError',
+  }, 'github_repository_get', 'cto', 'synthetic-correlation'), null, 'a forged matching error from another canonical tool must not expose the stage');
   assert.equal(projectPinnedObservationDiagnostic({
     ...error,
     internalDiagnostic: { type: 'github_observation_receipt', stage: 'provider-response-body' },
-  }, 'cto', 'synthetic-correlation'), null);
+  }, 'github_graphrag_observation_receipt_get', 'cto', 'synthetic-correlation'), null);
   assert.equal(projectPinnedObservationDiagnostic({
     ...error,
     name: 'Error',
-  }, 'cto', 'synthetic-correlation'), null);
+  }, 'github_graphrag_observation_receipt_get', 'cto', 'synthetic-correlation'), null);
 });
