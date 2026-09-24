@@ -16,6 +16,7 @@ import { createHash, createSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import type { PinnedObservationFailureStage } from '../audit/internal-diagnostics.js';
 import {
   extractPinnedReceiptJson,
   MAX_GRAPHRAG_ARCHIVE_BYTES,
@@ -39,6 +40,16 @@ export class GitHubFullError extends Error {
     this.code = a.code;
     this.status = a.status;
     this.nextStep = a.nextStep;
+  }
+}
+
+class PinnedObservationReaderError extends GitHubFullError {
+  readonly internalDiagnostic: { type: 'github_observation_receipt'; stage: PinnedObservationFailureStage };
+
+  constructor(stage: PinnedObservationFailureStage) {
+    super(PINNED_OBSERVATION_ERROR);
+    this.name = 'PinnedObservationReaderError';
+    this.internalDiagnostic = { type: 'github_observation_receipt', stage };
   }
 }
 
@@ -1002,24 +1013,29 @@ export interface PinnedGraphRagObservationResult {
  * receipt's provider timestamp or any source content.
  */
 export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraphRagObservationResult> {
+  let failureStage: PinnedObservationFailureStage = 'installation_token';
   try {
     const token = await getPinnedObservationInstallationToken();
     if (typeof token !== 'string' || token.length === 0 || token.length > 4096) throw new Error('invalid installation token');
 
     const repoPath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}`;
+    failureStage = 'repository_metadata';
     const repositoryId = verifyRepositoryMetadata(await pinnedGitHubApiGetJson(repoPath, token));
     const runPath = `${repoPath}/actions/runs/${PINNED_GRAPHRAG_OBSERVATION.runId}`;
+    failureStage = 'workflow_run_metadata';
     verifyRunMetadata(await pinnedGitHubApiGetJson(runPath, token), repositoryId);
 
     const workflowUrl = new URL(`${repoPath}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`, PINNED_OBSERVATION_API);
     workflowUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
     const producerUrl = new URL(`${repoPath}/contents/${PINNED_GRAPHRAG_OBSERVATION.producerPath}`, PINNED_OBSERVATION_API);
     producerUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
+    failureStage = 'workflow_blob_provenance';
     verifyContentBlob(
       await pinnedGitHubApiGetJson(`${workflowUrl.pathname}${workflowUrl.search}`, token),
       '.github/workflows/observe-managed-graphrag-company-fifth-source.yml',
       PINNED_GRAPHRAG_OBSERVATION.workflowBlobSha,
     );
+    failureStage = 'producer_blob_provenance';
     verifyContentBlob(
       await pinnedGitHubApiGetJson(`${producerUrl.pathname}${producerUrl.search}`, token),
       PINNED_GRAPHRAG_OBSERVATION.producerPath,
@@ -1027,16 +1043,24 @@ export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraph
     );
 
     const artifactPath = `${repoPath}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}`;
+    failureStage = 'artifact_metadata';
     const artifactMetadata = verifyArtifactMetadata(await pinnedGitHubApiGetJson(artifactPath, token), repositoryId);
+    failureStage = 'artifact_download';
     const archive = await downloadPinnedArtifactArchive(token);
     // size_in_bytes is bounded as repository metadata, while the transfer itself is independently
     // bounded by readBoundedResponseBytes. Do not assume the metadata size has ZIP-transfer semantics.
+    // Metadata verification rejects an already-expired artifact; this re-check catches expiry during download.
+    failureStage = 'artifact_expiry';
     if (Date.now() >= artifactMetadata.expiresAt) throw new Error('artifact expired');
 
+    failureStage = 'archive_digest';
     const archiveSha256 = createHash('sha256').update(archive).digest('hex');
     if (artifactMetadata.digest !== null && artifactMetadata.digest !== archiveSha256) throw new Error('artifact digest mismatch');
+    failureStage = 'zip_receipt_extraction';
     const receiptBytes = extractPinnedReceiptJson(archive);
+    failureStage = 'receipt_schema';
     const receipt = validatePinnedObservationReceipt(receiptBytes);
+    failureStage = 'result_projection';
     return {
       schema: PINNED_GRAPHRAG_OBSERVATION.resultSchema,
       repository: PINNED_GRAPHRAG_OBSERVATION.repository,
@@ -1055,7 +1079,7 @@ export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraph
     };
   } catch {
     // Never surface a GitHub error body, signed object URL, malformed receipt value, or token detail.
-    throw new GitHubFullError(PINNED_OBSERVATION_ERROR);
+    throw new PinnedObservationReaderError(failureStage);
   }
 }
 
