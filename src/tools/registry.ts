@@ -46,6 +46,7 @@ import {
   recordLaneToolUsage,
 } from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
+import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -644,12 +645,15 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   canonicalName?: string;
 }
 
-function parseUpstreamToolError(err: unknown): { code: string; nextStep: string; status?: number } | null {
+function parseUpstreamToolError(err: unknown, canonicalName: string): { code: string; nextStep: string; status?: number } | null {
   if (!err || typeof err !== 'object') return null;
   const candidate = err as Record<string, unknown>;
   if (typeof candidate.code !== 'string') return null;
   if (typeof candidate.nextStep !== 'string') return null;
-  if (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError')) {
+  const isPinnedObservationError = canonicalName === 'github_graphrag_observation_receipt_get' &&
+    candidate.name === 'PinnedObservationReaderError' &&
+    candidate.code === 'github_observation_receipt_unverified';
+  if (!isPinnedObservationError && (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError'))) {
     return null;
   }
   return {
@@ -1426,7 +1430,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         let errorCode = 'tool_error';
         let nextStep = 'Check server logs for the correlation_id.';
         let upstreamStatus: number | undefined;
-        const upstreamErr = parseUpstreamToolError(err);
+        const upstreamErr = parseUpstreamToolError(err, canonicalName);
         if (upstreamErr) {
           errorCode = upstreamErr.code;
           nextStep = upstreamErr.nextStep;
@@ -1438,6 +1442,8 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           next_step: nextStep,
         };
         if (upstreamStatus !== undefined) errPayload.upstream_status = upstreamStatus;
+        const internalDiagnostic = projectPinnedObservationDiagnostic(err, canonicalName, callerAgent, correlationId);
+        if (internalDiagnostic) errPayload.internal_diagnostic = internalDiagnostic;
         logToolEnd({
           correlation_id: correlationId,
           tool: def.name,
