@@ -645,12 +645,13 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   canonicalName?: string;
 }
 
-function parseUpstreamToolError(err: unknown): { code: string; nextStep: string; status?: number } | null {
+function parseUpstreamToolError(err: unknown, canonicalName: string): { code: string; nextStep: string; status?: number } | null {
   if (!err || typeof err !== 'object') return null;
   const candidate = err as Record<string, unknown>;
   if (typeof candidate.code !== 'string') return null;
   if (typeof candidate.nextStep !== 'string') return null;
-  const isPinnedObservationError = candidate.name === 'PinnedObservationReaderError' &&
+  const isPinnedObservationError = canonicalName === 'github_graphrag_observation_receipt_get' &&
+    candidate.name === 'PinnedObservationReaderError' &&
     candidate.code === 'github_observation_receipt_unverified';
   if (!isPinnedObservationError && (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError'))) {
     return null;
@@ -1429,7 +1430,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         let errorCode = 'tool_error';
         let nextStep = 'Check server logs for the correlation_id.';
         let upstreamStatus: number | undefined;
-        const upstreamErr = parseUpstreamToolError(err);
+        const upstreamErr = parseUpstreamToolError(err, canonicalName);
         if (upstreamErr) {
           errorCode = upstreamErr.code;
           nextStep = upstreamErr.nextStep;
