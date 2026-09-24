@@ -929,164 +929,166 @@ const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS = new Set([
 const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';
 
 function validateSignedArtifactUrl(location: string | null): URL {
-  if (!location) throw new Error('missing si…23728 tokens truncated…(COLD_START_MESSAGE);
-        if (capturePressure?.nudge) capturePlanePrelude.push(buildCaptureNudgeMessage(capturePressure.mutations));
-        // Composes with (does not replace) the cold_start/capture_pressure prelude lines above --
-        // all three channel into the SAME capturePlanePrelude array/text block.
-        if (jitDoctrine.pitfalls.length) {
-          capturePlanePrelude.push(`DOCTRINE: ${jitDoctrine.pitfalls.join(' | ')}`);
-        }
-        let text = buildTextContent(
-          { ...payload, data: result },
-          warning,
-          capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
-        );
+  if (!location) throw new Error('missing signed URL');
+  let url: URL;
+  try {
+    url = new URL(location);
+  } catch {
+    throw new Error('invalid signed URL');
+  }
+  const hostname = url.hostname.toLowerCase();
+  const isGitHubActionsArtifactStorage = GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS.has(hostname) &&
+    url.pathname.startsWith(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX);
+  const approvedHost = hostname === 'pipelines.actions.githubusercontent.com' || isGitHubActionsArtifactStorage;
+  if (url.protocol !== 'https:' || !approvedHost || url.username !== '' || url.password !== '' ||
+      (url.port !== '' && url.port !== '443') || url.hash !== '') throw new Error('untrusted signed URL');
+  return url;
+}
 
-        // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
-        // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
-        // Fail-open: offloadResult returns null on any error, so we keep the full inline result.
-        // Small results are untouched (backward-compatible).
-        //
-        // M365 EXCEPTION (2026-07-25): skip offloading entirely for M365 declarative-agent static-
-        // token callers (isM365StaticAuth()). Confirmed via direct reproduction that M365 Copilot's
-        // own tool-calling orchestrator does NOT reliably chain into gateway_fetch_result when it
-        // sees the offload stub -- it reports "no content available" instead, even when
-        // gateway_fetch_result is a declared, callable tool on that same agent (Matt hit this live on
-        // wake(), whose payload is routinely >40KB). Other engines (Claude Code, Hyperagent) are
-        // UNCHANGED -- they reliably use the two-hop pattern today, so this is scoped narrowly to the
-        // one consumer confirmed not to support it, not a global behavior change.
-        // The dedicated source may contain investor material. The shared result cache has no
-        // caller binding, so this principal must keep its payload inline, never in that cache.
-        // gateway_fetch_result is already the terminal, bounded pagination transport. Re-offloading
-        // one of its pages creates an unusable result-id chain instead of delivering that page.
-        if (
-          mayOffloadToolResult(canonicalName) &&
-          callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE &&
-          shouldOffload(text) &&
-          !isM365StaticAuth()
-        ) {
-          const off = await offloadResult(text, result, correlationId, callerHash);
-          if (off) {
-            text = off.preview;
-            // Bounded inline summary (pagination.itemCount/pageCount, shim page counts, array
-            // lengths) so a caller sizing a population never has to page to the tail (issue #291a).
-            const summary = extractResultSummary(result);
-            structured.result = {
-              _jit_offloaded: true,
-              result_id: off.resultId,
-              total_bytes: off.totalBytes,
-              ...(summary ? { summary } : {}),
-              note: 'Full payload offloaded to keep context small; call gateway_fetch_result(result_id).',
-            };
-          }
-        }
+async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
+  const archivePath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}/zip`;
+  const archiveUrl = new URL(archivePath, PINNED_OBSERVATION_API);
+  const redirectResponse = await fetchWithBudget(archiveUrl, {
+    method: 'GET',
+    redirect: 'manual',
+    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  const location = redirectResponse.headers.get('location');
+  await cancelResponseBody(redirectResponse);
+  if (redirectResponse.status !== 302) throw new Error('unexpected artifact response');
+  const signedUrl = validateSignedArtifactUrl(location);
 
-        return {
-          content: [{ type: 'text', text }],
-          structuredContent: structured,
-        };
-      } catch (err) {
-        const e = err as Error;
-        let errorCode = 'tool_error';
-        let nextStep = 'Check server logs for the correlation_id.';
-        let upstreamStatus: number | undefined;
-        const upstreamErr = parseUpstreamToolError(err);
-        if (upstreamErr) {
-          errorCode = upstreamErr.code;
-          nextStep = upstreamErr.nextStep;
-          upstreamStatus = upstreamErr.status;
-        }
-        const errPayload: Record<string, unknown> = {
-          code: errorCode,
-          message: e.message,
-          next_step: nextStep,
-        };
-        if (upstreamStatus !== undefined) errPayload.upstream_status = upstreamStatus;
-        const internalDiagnostic = projectPinnedObservationDiagnostic(err, callerAgent, correlationId);
-        if (internalDiagnostic) errPayload.internal_diagnostic = internalDiagnostic;
-        logToolEnd({
-          correlation_id: correlationId,
-          tool: def.name,
-          caller_hash: callerHash,
-          outcome: 'error',
-          latency_ms: Date.now() - started,
-          error_code: errorCode,
-          error_message: e.message,
-        });
-        return {
-          isError: true,
-          content: [
-            {
-              type: 'text',
-              text: `Tool ${def.name} failed: ${e.message}\nNext step: ${nextStep}\ncorrelation_id: ${correlationId}`,
-            },
-          ],
-          structuredContent: {
-            result: null,
-            compliance_warning: null,
-            correlation_id: correlationId,
-            dry_run: dryRun,
-            error: errPayload,
-          },
-        };
-      }
-    },
-  );
-
-  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED + HARDENED 2026-07-28): M365 Copilot's own
-  // tool-calling orchestrator has been observed splitting a registered tool name on its first
-  // underscore and calling only the remainder -- confirmed precedent in memory/recall-alias.ts
-  // (2026-07-25: "memory_recall" -> "recall"), then "github_repo_get" -> "repo_get" and
-  // "depot_run_list" -> "run_list" (2026-07-26). Originally scoped to just the github_/depot_
-  // prefixes. WIDENED 2026-07-28 after a live Developer-agent diagnostic run (Matt, in production
-  // M365 Copilot) hit the SAME failure on "catalog_probe" -> "probe" and "developer_wake_lite" ->
-  // "wake_lite" -- proving the behavior is generic to ANY underscored tool name.
-  //
-  // THIS BLOCK ONLY COLLECTS CANDIDATES -- it never registers an alias directly. See
-  // finalizeM365Aliases() above for why (a single-pass "first tool through wins" policy was found,
-  // in review, to be able to SILENTLY MIS-ROUTE a call to the wrong tool's handler when 3+ tools
-  // collide on the same stripped name, e.g. n8n_workflow_get / github_workflow_get /
-  // depot_workflow_get all -> "workflow_get" -- not merely leave the loser unreachable). Every
-  // primary (non-alias) registration is also tracked in primaryNamesFor() UNCONDITIONALLY (not just
-  // for M365 requests) so finalizeM365Aliases() can exclude any candidate name a REAL tool already
-  // owns (e.g. "search"/"fetch"/"recall") regardless of registration order.
-  //
-  // SCOPE (review finding): candidate collection itself is gated behind isM365StaticAuth() -- an
-  // unconditional version would collect (and eventually finalize) a compatibility alias for nearly
-  // the whole ~850-tool catalog on EVERY request (Claude Code, Hyperagent, connector clients too),
-  // materially inflating tools/list size and prompt-token cost for callers that never needed M365
-  // compatibility. Each per-request McpServer instance is stateless (server/mcp.ts), so this
-  // correctly scopes the extra registrations to only the M365 static-auth request that needs them.
-  //
-  // GOVERNANCE BYPASS (review finding, the security one): an alias is a recursive registerTool()
-  // call with `{...def, name: aliasName}`, so EVERY name-pattern-based gate inside the handler
-  // (requiredRoleFor, lane curation, JIT doctrine) was evaluating against the STRIPPED name, not the
-  // real tool -- e.g. "containerapp_get" (alias of the CTO-only azure_containerapp_get) doesn't
-  // match the `azure_*` governance pattern, so ANY authenticated lane could call it unrestricted.
-  // Fixed by passing `canonicalName: def.name` into the alias's def (see ToolDefinition's doc
-  // comment) so those gates evaluate the real tool's identity while `name` stays only the SDK
-  // lookup key / what the caller actually invokes.
-  if (!isAlias) {
-    primaryNamesFor(server).add(def.name);
-    if (isM365StaticAuth()) {
-      const stripped = /^[^_]+_(.+)$/.exec(def.name);
-      if (stripped) {
-        const aliasName = stripped[1];
-        const bucket = aliasCandidatesFor(server);
-        const list = bucket.get(aliasName) ?? [];
-        // Type erasure to the WeakMap's fixed shape is safe here: def is only ever forwarded
-        // opaquely into a later registerTool() call (finalizeM365Aliases), never inspected by
-        // field-specific generic logic.
-        list.push({ canonicalName: def.name, def: def as unknown as ToolDefinition<ZodRawShape, ZodRawShape> });
-        bucket.set(aliasName, list);
-        // DEDUP FIX (2026-08-02): remember this primary's RegisteredTool handle so
-        // finalizeM365Aliases() can `.remove()` it once it knows whether `aliasName` actually
-        // ended up unambiguous (only known after every tool in this request has registered). See
-        // primaryHandlesByServer's header comment above for why this matters.
-        primaryHandlesFor(server).set(def.name, registeredHandle);
-      }
+  // A GitHub installation token is intentionally not sent to the signed object-storage URL.
+  const downloadResponse = await fetchWithBudget(signedUrl, {
+    method: 'GET',
+    redirect: 'error',
+    headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  if (downloadResponse.status !== 200 || downloadResponse.redirected) {
+    await cancelResponseBody(downloadResponse);
+    throw new Error('artifact download failed');
+  }
+  if (downloadResponse.url) {
+    let finalUrl: URL;
+    try { finalUrl = new URL(downloadResponse.url); } catch {
+      await cancelResponseBody(downloadResponse);
+      throw new Error('invalid final download URL');
     }
+    if (finalUrl.href !== signedUrl.href) {
+      await cancelResponseBody(downloadResponse);
+      throw new Error('unexpected download redirect');
+    }
+  }
+  return readBoundedResponseBytes(downloadResponse, MAX_GRAPHRAG_ARCHIVE_BYTES);
+}
+
+export interface PinnedGraphRagObservationResult {
+  schema: typeof PINNED_GRAPHRAG_OBSERVATION.resultSchema;
+  repository: typeof PINNED_GRAPHRAG_OBSERVATION.repository;
+  run_id: typeof PINNED_GRAPHRAG_OBSERVATION.runId;
+  artifact_id: typeof PINNED_GRAPHRAG_OBSERVATION.artifactId;
+  artifact_name: typeof PINNED_GRAPHRAG_OBSERVATION.artifactName;
+  receipt_schema: typeof PINNED_GRAPHRAG_OBSERVATION.receiptSchema;
+  knowledge_base_binding_verified: true;
+  read_only: true;
+  source_id: typeof PINNED_GRAPHRAG_OBSERVATION.sourceId;
+  ingestion_job_id: typeof PINNED_GRAPHRAG_OBSERVATION.ingestionJobId;
+  provider_status: 'COMPLETE' | 'FAILED' | 'STOPPED' | 'NONTERMINAL';
+  terminal: boolean;
+  terminal_statistics: ReturnType<typeof validatePinnedObservationReceipt>['terminal_statistics'];
+  progress_statistics: ReturnType<typeof validatePinnedObservationReceipt>['progress_statistics'];
+  provider_updated_at_present: boolean;
+  workflow_provenance_verified: true;
+  artifact_metadata_verified: true;
+  archive_digest_verification: 'verified' | 'not_provided';
+  archive_sha256: string;
+  archive_bytes: number;
+  receipt_sha256: string;
+  receipt_bytes: number;
+}
+
+/**
+ * Retrieve and validate one fixed, historical GraphRAG observation artifact. This intentionally
+ * accepts no repository, run, artifact, URL, or path supplied by the caller and never returns the
+ * receipt's provider timestamp or any source content.
+ */
+export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraphRagObservationResult> {
+  let failureStage: PinnedObservationFailureStage = 'installation_token';
+  try {
+    const token = await getPinnedObservationInstallationToken();
+    if (typeof token !== 'string' || token.length === 0 || token.length > 4096) throw new Error('invalid installation token');
+
+    const repoPath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}`;
+    failureStage = 'repository_metadata';
+    const repositoryId = verifyRepositoryMetadata(await pinnedGitHubApiGetJson(repoPath, token));
+    const runPath = `${repoPath}/actions/runs/${PINNED_GRAPHRAG_OBSERVATION.runId}`;
+    failureStage = 'workflow_run_metadata';
+    verifyRunMetadata(await pinnedGitHubApiGetJson(runPath, token), repositoryId);
+
+    const workflowUrl = new URL(`${repoPath}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`, PINNED_OBSERVATION_API);
+    workflowUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
+    const producerUrl = new URL(`${repoPath}/contents/${PINNED_GRAPHRAG_OBSERVATION.producerPath}`, PINNED_OBSERVATION_API);
+    producerUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
+    failureStage = 'workflow_blob_provenance';
+    verifyContentBlob(
+      await pinnedGitHubApiGetJson(`${workflowUrl.pathname}${workflowUrl.search}`, token),
+      '.github/workflows/observe-managed-graphrag-company-fifth-source.yml',
+      PINNED_GRAPHRAG_OBSERVATION.workflowBlobSha,
+    );
+    failureStage = 'producer_blob_provenance';
+    verifyContentBlob(
+      await pinnedGitHubApiGetJson(`${producerUrl.pathname}${producerUrl.search}`, token),
+      PINNED_GRAPHRAG_OBSERVATION.producerPath,
+      PINNED_GRAPHRAG_OBSERVATION.producerBlobSha,
+    );
+
+    const artifactPath = `${repoPath}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}`;
+    failureStage = 'artifact_metadata';
+    const artifactMetadata = verifyArtifactMetadata(await pinnedGitHubApiGetJson(artifactPath, token), repositoryId);
+    failureStage = 'artifact_download';
+    const archive = await downloadPinnedArtifactArchive(token);
+    // size_in_bytes is bounded as repository metadata, while the transfer itself is independently
+    // bounded by readBoundedResponseBytes. Do not assume the metadata size has ZIP-transfer semantics.
+    failureStage = 'archive_digest';
+    if (Date.now() >= artifactMetadata.expiresAt) throw new Error('artifact expired');
+
+    const archiveSha256 = createHash('sha256').update(archive).digest('hex');
+    if (artifactMetadata.digest !== null && artifactMetadata.digest !== archiveSha256) throw new Error('artifact digest mismatch');
+    failureStage = 'zip_receipt_extraction';
+    const receiptBytes = extractPinnedReceiptJson(archive);
+    failureStage = 'receipt_schema';
+    const receipt = validatePinnedObservationReceipt(receiptBytes);
+    failureStage = 'result_projection';
+    return {
+      schema: PINNED_GRAPHRAG_OBSERVATION.resultSchema,
+      repository: PINNED_GRAPHRAG_OBSERVATION.repository,
+      run_id: PINNED_GRAPHRAG_OBSERVATION.runId,
+      artifact_id: PINNED_GRAPHRAG_OBSERVATION.artifactId,
+      artifact_name: PINNED_GRAPHRAG_OBSERVATION.artifactName,
+      knowledge_base_binding_verified: true,
+      ...receipt,
+      workflow_provenance_verified: true,
+      artifact_metadata_verified: true,
+      archive_digest_verification: artifactMetadata.digest === null ? 'not_provided' : 'verified',
+      archive_sha256: archiveSha256,
+      archive_bytes: archive.length,
+      receipt_sha256: createHash('sha256').update(receiptBytes).digest('hex'),
+      receipt_bytes: receiptBytes.length,
+    };
+  } catch {
+    // Never surface a GitHub error body, signed object URL, malformed receipt value, or token detail.
+    throw new PinnedObservationReaderError(failureStage);
   }
 }
 
-export type CallerHashProvider = () => string;
+/** POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel */
+export async function workflowRunCancel(owner: string, repo: string, runId: number): Promise<void> {
+  assertNotPhi(repo);
+  await ghSend<void>('POST', `/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/cancel`);
+}
+
+/** POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun */
+export async function workflowRunRerun(owner: string, repo: string, runId: number, enableDebugLogging = false): Promise<void> {
+  assertNotPhi(repo);
+  await ghSend<void>('POST', `/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/rerun`, { enable_debug_logging: enableDebugLogging });
+}
