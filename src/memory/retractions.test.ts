@@ -121,3 +121,53 @@ test('collectRetractedByAgent trims a supersedes value, matching collectRetracte
   assert.ok(byAgent.get('cto')?.has('20260730-001'));
   assert.equal(byAgent.get('cto')?.has('  20260730-001  '), false);
 });
+
+test('collectRetractedByAgent normalizes a full superseded doc id owned by the correcting agent', () => {
+  const byAgent = collectRetractedByAgent([
+    { agent: 'cto', supersedes: 'cto__shared-id' },
+    { agent: 'coo', supersedes: 'coo__shared-id' },
+    { agent: 'cfo', supersedes: 'cfo__shared-id' },
+  ]);
+  assert.deepEqual([...byAgent.get('cto') ?? []], ['shared-id']);
+  assert.deepEqual([...byAgent.get('coo') ?? []], ['shared-id']);
+  assert.deepEqual([...byAgent.get('cfo') ?? []], ['shared-id']);
+});
+
+test('same-agent full supersedes ids retract the matching composite search hits', () => {
+  const byAgent = collectRetractedByAgent([
+    { agent: 'cto', supersedes: 'cto__shared-id' },
+    { agent: 'coo', supersedes: 'coo__shared-id' },
+    { agent: 'cfo', supersedes: 'cfo__shared-id' },
+  ]);
+  const { kept, dropped } = filterRetractedByAgent([
+    { id: 'cto__shared-id' },
+    { id: 'coo__shared-id' },
+    { id: 'cfo__shared-id' },
+    { id: 'cfo__still-live' },
+  ], byAgent);
+  assert.deepEqual(kept.map((hit) => hit.id), ['cfo__still-live']);
+  assert.deepEqual(dropped.sort(), ['cfo__shared-id', 'coo__shared-id', 'cto__shared-id']);
+});
+
+test('collectRetractedByAgent preserves bare and mismatched-owner supersedes pointers', () => {
+  const byAgent = collectRetractedByAgent([
+    { agent: 'cto', supersedes: 'bare-id' },
+    { agent: 'cto', supersedes: 'coo__owned-by-coo' },
+    { agent: 'coo', supersedes: 'cfo__owned-by-cfo' },
+  ]);
+  assert.deepEqual([...byAgent.get('cto') ?? []].sort(), ['bare-id', 'coo__owned-by-coo']);
+  assert.deepEqual([...byAgent.get('coo') ?? []], ['cfo__owned-by-cfo']);
+});
+
+test('a mismatched owner prefix cannot suppress another agent entry with the same suffix', () => {
+  const byAgent = collectRetractedByAgent([
+    { agent: 'cto', supersedes: 'coo__shared-id' },
+  ]);
+  const { kept, dropped } = filterRetractedByAgent([
+    { id: 'cto__shared-id' },
+    { id: 'coo__shared-id' },
+    { id: 'cfo__shared-id' },
+  ], byAgent);
+  assert.deepEqual(kept.map((hit) => hit.id), ['cto__shared-id', 'coo__shared-id', 'cfo__shared-id']);
+  assert.deepEqual(dropped, []);
+});
