@@ -105,6 +105,7 @@ test('engineering tools/list intersects the CTO connector allowlist and excludes
   assert.ok(!actual.includes('kb_search_privileged'));
   assert.ok(!actual.includes('legal_blob_get'));
   assert.ok(!actual.includes('memory_write'));
+  assert.ok(actual.length >= 10, 'bounded pack should expose at least 10 tools');
   assert.ok(actual.length <= 40, 'bounded pack should stay under 40 tools');
 });
 
