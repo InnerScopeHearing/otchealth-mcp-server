@@ -241,10 +241,17 @@ export function registerMailArchiveTools(server: McpServer, callerHash: CallerHa
         if (!isMailArchiveAllowed(ctx.callerAgent)) return mailRingRefusal('mail_archive_save_attachment_to_dataroom', ctx.callerAgent);
         if (!mailArchiveConfigured()) return unconfigured('mail_archive_save_attachment_to_dataroom');
         const env = loadEnv();
-        if (!env.AZURE_CFO_STORAGE_KEY) {
+        // Mirror kb_ingest_drive_file.ts's gate exactly (same destination container, same putBlobRaw
+        // writer). Under BLOB_BACKEND=s3, putBlobRaw's cfo-source-docs branch writes to S3 and never
+        // reads AZURE_CFO_STORAGE_KEY, which is legitimately empty now that the Azure subscription is
+        // permanently deleted (2026-08-13). Only the Azure SharedKey backend still needs that key.
+        const needsAzureKey = env.BLOB_BACKEND !== 's3';
+        if (!env.AZURE_CFO_STORAGE_ACCOUNT || (needsAzureKey && !env.AZURE_CFO_STORAGE_KEY)) {
           return {
             data: { error: 'unconfigured' },
-            summary: 'mail_archive_save_attachment_to_dataroom: the finance dataroom is not configured (AZURE_CFO_STORAGE_KEY unset).',
+            summary: needsAzureKey
+              ? 'mail_archive_save_attachment_to_dataroom: the finance dataroom is not configured for Azure writes (AZURE_CFO_STORAGE_ACCOUNT / AZURE_CFO_STORAGE_KEY unset).'
+              : 'mail_archive_save_attachment_to_dataroom: the finance dataroom is not configured for S3 writes (AZURE_CFO_STORAGE_ACCOUNT unset).',
           };
         }
 
