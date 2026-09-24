@@ -684,7 +684,9 @@ export interface AwsConnectionReportArtifactInspection {
   repository_binding_verified: true;
   workflow_run_binding_verified: true;
   artifact_binding_verified: true;
-  archive_digest_verified: true;
+  archive_digest_verified: boolean;
+  archive_digest_status: 'github_artifact_digest_verified' | 'caller_expected_digest_only';
+  caller_expected_digest_match: true;
   archive_bytes: number;
   aggregate_only: boolean;
   redaction_pass: boolean;
@@ -1039,7 +1041,7 @@ export async function inspectAwsConnectionReportArtifact(
     const token = await getInstallationToken();
     if (typeof token !== 'string' || token.length === 0 || token.length > 4096) throw new Error('invalid installation token');
     const archive = await downloadAwsConnectionReportArtifactArchive(owner, repo, artifactId, token);
-    const inspection = inspectAwsConnectionReportArchive(archive, binding.expectedSha256);
+    const inspection = inspectAwsConnectionReportArchive(archive, binding.expectedSha256, binding.trustedArchiveSha256);
     return {
       schema: 'otchealth-github-aws-connection-report-inspection-v1',
       run_id: runId,
@@ -1047,7 +1049,9 @@ export async function inspectAwsConnectionReportArtifact(
       repository_binding_verified: true,
       workflow_run_binding_verified: true,
       artifact_binding_verified: true,
-      archive_digest_verified: true,
+      archive_digest_verified: inspection.archiveDigestVerified,
+      archive_digest_status: inspection.archiveDigestStatus,
+      caller_expected_digest_match: inspection.callerExpectedDigestMatch,
       archive_bytes: inspection.archiveBytes,
       aggregate_only: inspection.aggregateOnly,
       redaction_pass: inspection.redactionPass,

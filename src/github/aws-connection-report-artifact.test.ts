@@ -13,8 +13,9 @@ import {
 const REPOSITORY_ID = 23456;
 const RUN_ID = 9001;
 const ARTIFACT_ID = 7002;
-const REPORT_FILE = 'report.json';
+const REPORT_FILE = 'aws-connection-report.json';
 const RECEIPT_FILE = 'receipt.json';
+const SYNTHETIC_GITHUB_TOKEN = `ghp_${'a'.repeat(36)}`;
 
 type ZipMember = { name: string; data: Buffer; method?: 'store' | 'deflate'; dataDescriptor?: boolean; externalAttributes?: number };
 
@@ -94,42 +95,71 @@ function makeReport(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
-function makeArchive(report: Record<string, unknown>, receiptOverrides: Record<string, unknown> = {}): Buffer {
+function makeArchive(
+  report: Record<string, unknown>,
+  receiptOverrides: Record<string, unknown> = {},
+  reportFile = REPORT_FILE,
+  receiptFile = RECEIPT_FILE,
+): Buffer {
   const reportBytes = Buffer.from(JSON.stringify(report), 'utf8');
   const receipt = {
     schema: 'ai-os-aws-redacted-report-receipt-v1',
-    report_file: REPORT_FILE,
+    report_file: reportFile,
     report_sha256: createHash('sha256').update(reportBytes).digest('hex'),
     report_bytes: reportBytes.length,
-    retrieval: 'workflow-artifact',
+    retrieval: 'GitHub Actions artifact aws-connection-report, artifact file aws-report-artifact/aws-connection-report.json',
     ...receiptOverrides,
   };
   const receiptBytes = Buffer.from(JSON.stringify(receipt), 'utf8');
   return makeZip([
-    { name: REPORT_FILE, data: reportBytes, method: 'deflate', dataDescriptor: true },
-    { name: RECEIPT_FILE, data: receiptBytes, method: 'deflate' },
+    { name: reportFile, data: reportBytes, method: 'deflate', dataDescriptor: true },
+    { name: receiptFile, data: receiptBytes, method: 'deflate' },
   ]);
 }
 
 function makeBinding(overrides: Record<string, unknown> = {}): Parameters<typeof validateAwsConnectionReportArtifactBinding>[0] {
   const expectedSha256 = 'a'.repeat(64);
-  const runArtifact = { id: ARTIFACT_ID, name: AWS_CONNECTION_REPORT_ARTIFACT.name };
+  const headSha = 'f'.repeat(40);
+  const workflowRunBinding = {
+    id: RUN_ID,
+    repository_id: REPOSITORY_ID,
+    head_repository_id: REPOSITORY_ID,
+    head_branch: 'main',
+    head_sha: headSha,
+  };
+  const runArtifact = {
+    id: ARTIFACT_ID,
+    name: AWS_CONNECTION_REPORT_ARTIFACT.name,
+    workflow_run: workflowRunBinding,
+  };
   const artifact = {
     id: ARTIFACT_ID,
     name: AWS_CONNECTION_REPORT_ARTIFACT.name,
     size_in_bytes: 512,
     expired: false,
     digest: `sha256:${expectedSha256}`,
-    workflow_run: { id: RUN_ID, repository_id: REPOSITORY_ID },
+    workflow_run: workflowRunBinding,
   };
+  const fullName = `${AWS_CONNECTION_REPORT_ARTIFACT.owner}/${AWS_CONNECTION_REPORT_ARTIFACT.repo}`;
   return {
     owner: AWS_CONNECTION_REPORT_ARTIFACT.owner,
     repo: AWS_CONNECTION_REPORT_ARTIFACT.repo,
     runId: RUN_ID,
     artifactId: ARTIFACT_ID,
     expectedSha256,
-    repository: { id: REPOSITORY_ID, full_name: `${AWS_CONNECTION_REPORT_ARTIFACT.owner}/${AWS_CONNECTION_REPORT_ARTIFACT.repo}` },
-    run: { id: RUN_ID, repository: { id: REPOSITORY_ID, full_name: `${AWS_CONNECTION_REPORT_ARTIFACT.owner}/${AWS_CONNECTION_REPORT_ARTIFACT.repo}` } },
+    repository: { id: REPOSITORY_ID, full_name: fullName },
+    run: {
+      id: RUN_ID,
+      name: 'aws-health-monitor',
+      path: AWS_CONNECTION_REPORT_ARTIFACT.workflowPath,
+      event: 'schedule',
+      status: 'completed',
+      conclusion: 'success',
+      head_branch: 'main',
+      head_sha: headSha,
+      repository: { id: REPOSITORY_ID, full_name: fullName },
+      head_repository: { id: REPOSITORY_ID, full_name: fullName },
+    },
     runArtifacts: [runArtifact],
     artifact,
     ...overrides,
@@ -140,6 +170,7 @@ test('validates exact repository, run, artifact, name, digest, and bounded metad
   const result = validateAwsConnectionReportArtifactBinding(makeBinding());
   assert.equal(result.archiveSizeBytes, 512);
   assert.equal(result.expectedSha256, 'a'.repeat(64));
+  assert.equal(result.trustedArchiveSha256, 'a'.repeat(64));
 });
 
 test('rejects repository, run, membership, artifact, digest, expiry, and size mismatches generically', () => {
@@ -160,13 +191,57 @@ test('rejects repository, run, membership, artifact, digest, expiry, and size mi
   }
 });
 
+test('rejects artifacts unless the trusted producer workflow and successful main run are bound exactly', () => {
+  const baseRun = makeBinding().run as Record<string, unknown>;
+  const baseArtifact = makeBinding().artifact as Record<string, unknown>;
+  const workflowBinding = (baseArtifact.workflow_run as Record<string, unknown>);
+  const cases = [
+    makeBinding({ run: { ...baseRun, path: '.github/workflows/unapproved.yml@refs/heads/main' } }),
+    makeBinding({ run: { ...baseRun, head_repository: { id: REPOSITORY_ID + 1, full_name: 'other/repo' } } }),
+    makeBinding({ run: { ...baseRun, head_branch: 'feature/untrusted' } }),
+    makeBinding({ run: { ...baseRun, path: '.github/workflows/aws-health-monitor.yml@refs/heads/release' } }),
+    makeBinding({ run: { ...baseRun, event: 'pull_request' } }),
+    makeBinding({ run: { ...baseRun, status: 'in_progress', conclusion: null } }),
+    makeBinding({ run: { ...baseRun, status: 'completed', conclusion: 'failure' } }),
+    makeBinding({
+      artifact: {
+        ...baseArtifact,
+        workflow_run: { ...workflowBinding, head_sha: 'e'.repeat(40) },
+      },
+    }),
+  ];
+  for (const binding of cases) {
+    assert.throws(() => validateAwsConnectionReportArtifactBinding(binding), /artifact provenance is invalid/);
+  }
+});
+
+test('does not call a caller-supplied archive digest independently verified when API digest is absent', () => {
+  const archive = makeArchive(makeReport());
+  const callerExpectedSha256 = createHash('sha256').update(archive).digest('hex');
+  const result = inspectAwsConnectionReportArchive(archive, callerExpectedSha256);
+  assert.equal(result.archiveDigestVerified, false);
+  assert.equal(result.archiveDigestStatus, 'caller_expected_digest_only');
+  assert.equal(result.callerExpectedDigestMatch, true);
+
+  const apiDigestResult = inspectAwsConnectionReportArchive(archive, callerExpectedSha256, callerExpectedSha256);
+  assert.equal(apiDigestResult.archiveDigestVerified, true);
+  assert.equal(apiDigestResult.archiveDigestStatus, 'github_artifact_digest_verified');
+
+  const bindingWithoutApiDigest = makeBinding({
+    artifact: { ...(makeBinding().artifact as object), digest: undefined },
+  });
+  assert.equal(validateAwsConnectionReportArtifactBinding(bindingWithoutApiDigest).trustedArchiveSha256, null);
+});
+
 test('verifies a bounded archive digest and returns only aggregate and redaction results', () => {
   const archive = makeArchive(makeReport());
   const expectedSha256 = createHash('sha256').update(archive).digest('hex');
-  const result = inspectAwsConnectionReportArchive(archive, expectedSha256);
+  const result = inspectAwsConnectionReportArchive(archive, expectedSha256, expectedSha256);
   assert.deepEqual(result, {
     archiveBytes: archive.length,
     archiveDigestVerified: true,
+    archiveDigestStatus: 'github_artifact_digest_verified',
+    callerExpectedDigestMatch: true,
     aggregateOnly: true,
     redactionPass: true,
   });
@@ -193,6 +268,38 @@ test('returns policy failures for a bounded detailed report instead of surfacing
   assert.equal(result.aggregateOnly, false);
   assert.equal(result.redactionPass, false);
   assert.equal(JSON.stringify(result).includes('resources'), false);
+});
+
+test('requires exact receipt retrieval metadata and rejects credential-shaped schema, filename, and status values', () => {
+  const cases = [
+    makeArchive(makeReport({ schema: SYNTHETIC_GITHUB_TOKEN })),
+    makeArchive(makeReport(), { retrieval: SYNTHETIC_GITHUB_TOKEN }),
+    makeArchive(makeReport({ state: SYNTHETIC_GITHUB_TOKEN })),
+    makeArchive(makeReport({ state: 'ok ' })),
+  ];
+  for (const archive of cases) {
+    const result = inspectAwsConnectionReportArchive(archive, createHash('sha256').update(archive).digest('hex'));
+    assert.equal(result.redactionPass, false);
+    assert.equal(JSON.stringify(result).includes(SYNTHETIC_GITHUB_TOKEN), false);
+  }
+  const unsafeFilenameArchive = makeArchive(makeReport(), {}, `${SYNTHETIC_GITHUB_TOKEN}.json`);
+  assert.throws(
+    () => inspectAwsConnectionReportArchive(unsafeFilenameArchive, createHash('sha256').update(unsafeFilenameArchive).digest('hex')),
+    (error: unknown) => error instanceof Error && /archive verification failed/.test(error.message) &&
+      !error.message.includes(SYNTHETIC_GITHUB_TOKEN),
+  );
+  const unsafeReceiptSchemaArchive = makeArchive(makeReport(), { schema: SYNTHETIC_GITHUB_TOKEN });
+  assert.throws(
+    () => inspectAwsConnectionReportArchive(unsafeReceiptSchemaArchive, createHash('sha256').update(unsafeReceiptSchemaArchive).digest('hex')),
+    (error: unknown) => error instanceof Error && /archive verification failed/.test(error.message) &&
+      !error.message.includes(SYNTHETIC_GITHUB_TOKEN),
+  );
+  const unsafeReceiptFilenameArchive = makeArchive(makeReport(), {}, REPORT_FILE, `${SYNTHETIC_GITHUB_TOKEN}.json`);
+  assert.throws(
+    () => inspectAwsConnectionReportArchive(unsafeReceiptFilenameArchive, createHash('sha256').update(unsafeReceiptFilenameArchive).digest('hex')),
+    (error: unknown) => error instanceof Error && /archive verification failed/.test(error.message) &&
+      !error.message.includes(SYNTHETIC_GITHUB_TOKEN),
+  );
 });
 
 test('reports receipt redaction failure without surfacing path-like retrieval metadata', () => {

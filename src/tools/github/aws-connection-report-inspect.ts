@@ -13,7 +13,7 @@ export function registerGitHubAwsConnectionReportInspect(server: McpServer, call
     category: 'read',
     annotations: {
       title: 'GitHub: inspect AWS connection report safely',
-      description: 'Verify one AWS connection report artifact in the fixed CTO repository. The bounded archive is inspected in memory and the result contains provenance, digest, aggregate-only, and redaction pass or fail fields only. Report contents and signed URLs are never returned. CTO only.',
+      description: 'Inspect one AWS connection report artifact from the approved producer workflow in the fixed CTO repository. The bounded archive is inspected in memory and the result contains provenance, an explicit trusted-digest status, aggregate-only, and redaction pass or fail fields only. Report contents and signed URLs are never returned. CTO only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -33,7 +33,9 @@ export function registerGitHubAwsConnectionReportInspect(server: McpServer, call
       repository_binding_verified: z.literal(true),
       workflow_run_binding_verified: z.literal(true),
       artifact_binding_verified: z.literal(true),
-      archive_digest_verified: z.literal(true),
+      archive_digest_verified: z.boolean(),
+      archive_digest_status: z.enum(['github_artifact_digest_verified', 'caller_expected_digest_only']),
+      caller_expected_digest_match: z.literal(true),
       archive_bytes: z.number().int().positive().max(MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES),
       aggregate_only: z.boolean(),
       redaction_pass: z.boolean(),
@@ -50,7 +52,7 @@ export function registerGitHubAwsConnectionReportInspect(server: McpServer, call
       );
       return {
         data: result,
-        summary: `AWS report provenance and digest verified; aggregate-only=${result.aggregate_only}; redaction-pass=${result.redaction_pass}.`,
+        summary: `AWS report producer provenance verified; archive-digest-status=${result.archive_digest_status}; aggregate-only=${result.aggregate_only}; redaction-pass=${result.redaction_pass}.`,
       };
     },
   }, callerHash);

@@ -8,6 +8,13 @@ export const AWS_CONNECTION_REPORT_ARTIFACT = Object.freeze({
   repo: 'otchealth-cto',
   name: 'aws-connection-report',
   receiptSchema: 'ai-os-aws-redacted-report-receipt-v1',
+  workflowName: 'aws-health-monitor',
+  workflowPath: '.github/workflows/aws-health-monitor.yml@main',
+  headBranch: 'main',
+  allowedEvents: Object.freeze(['schedule', 'workflow_dispatch'] as const),
+  reportFile: 'aws-connection-report.json',
+  receiptFile: 'receipt.json',
+  retrieval: 'GitHub Actions artifact aws-connection-report, artifact file aws-report-artifact/aws-connection-report.json',
 });
 
 export const MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES = 1024 * 1024;
@@ -46,8 +53,11 @@ const SAFE_STATUS_VALUES = new Set([
   'ok', 'healthy', 'unhealthy', 'warning', 'warn', 'failed', 'failure', 'error', 'active', 'inactive',
   'running', 'stopped', 'available', 'unavailable', 'disabled', 'enabled', 'present', 'absent', 'clear',
   'alarm', 'complete', 'pass', 'passed', 'success', 'skipped', 'unknown', 'not_applicable',
-  'not_configured', 'none',
+  'not_configured', 'none', 'partial', 'not_enrolled', 'refused', 'container_shape_invalid',
+  'ambiguous_or_plaintext_withheld', 'secret_reference_invalid', 'secret_reference', 'attention',
 ]);
+// The trusted report producer currently emits no schema member in the report body.
+const SAFE_REPORT_SCHEMA_VALUES: ReadonlySet<string> = new Set();
 const AGGREGATE_CONTAINER_KEYS = new Set([
   'scope', 'summary', 'checks', 'services', 'service_status_counts', 'status_counts', 'errors', 'warnings',
   'ecs', 'gateway_http', 'rds', 'opensearch', 'neptune_stopper_alarm', 'cloudtrail_signin_metadata_last_hour',
@@ -82,13 +92,16 @@ export interface AwsConnectionReportArtifactBindingInput {
 
 export interface ValidatedAwsConnectionReportArtifactBinding {
   expectedSha256: string;
+  trustedArchiveSha256: string | null;
   repositoryId: number;
   archiveSizeBytes: number;
 }
 
 export interface AwsConnectionReportArchiveInspection {
   archiveBytes: number;
-  archiveDigestVerified: true;
+  archiveDigestVerified: boolean;
+  archiveDigestStatus: 'github_artifact_digest_verified' | 'caller_expected_digest_only';
+  callerExpectedDigestMatch: true;
   aggregateOnly: boolean;
   redactionPass: boolean;
 }
@@ -118,6 +131,18 @@ function normalizeSha256(value: unknown): string {
   return normalized.toLowerCase();
 }
 
+function validateArtifactWorkflowRun(
+  value: unknown,
+  runId: number,
+  repositoryId: number,
+  headSha: string,
+): void {
+  const workflowRun = asRecord(value);
+  if (workflowRun.id !== runId || workflowRun.repository_id !== repositoryId ||
+      workflowRun.head_repository_id !== repositoryId || workflowRun.head_branch !== AWS_CONNECTION_REPORT_ARTIFACT.headBranch ||
+      workflowRun.head_sha !== headSha) return invalidProvenance();
+}
+
 export function validateAwsConnectionReportArtifactBinding(
   input: AwsConnectionReportArtifactBindingInput,
 ): ValidatedAwsConnectionReportArtifactBinding {
@@ -138,6 +163,15 @@ export function validateAwsConnectionReportArtifactBinding(
     if (run.id !== runId) return invalidProvenance();
     const runRepository = asRecord(run.repository);
     if (runRepository.id !== repositoryId || runRepository.full_name !== fullName) return invalidProvenance();
+    const headRepository = asRecord(run.head_repository);
+    if (headRepository.id !== repositoryId || headRepository.full_name !== fullName ||
+        run.head_branch !== AWS_CONNECTION_REPORT_ARTIFACT.headBranch ||
+        typeof run.head_sha !== 'string' || !/^[a-f0-9]{40}$/i.test(run.head_sha) ||
+        run.name !== AWS_CONNECTION_REPORT_ARTIFACT.workflowName ||
+        run.path !== AWS_CONNECTION_REPORT_ARTIFACT.workflowPath ||
+        !AWS_CONNECTION_REPORT_ARTIFACT.allowedEvents.includes(run.event as 'schedule' | 'workflow_dispatch') ||
+        run.status !== 'completed' || run.conclusion !== 'success') return invalidProvenance();
+    const headSha = run.head_sha.toLowerCase();
 
     if (!Array.isArray(input.runArtifacts)) return invalidProvenance();
     const listedMatches = input.runArtifacts.filter((value) => {
@@ -147,10 +181,7 @@ export function validateAwsConnectionReportArtifactBinding(
     if (listedMatches.length !== 1) return invalidProvenance();
     const listedArtifact = asRecord(listedMatches[0]);
     if (listedArtifact.name !== AWS_CONNECTION_REPORT_ARTIFACT.name) return invalidProvenance();
-    if (listedArtifact.workflow_run !== undefined) {
-      const listedRun = asRecord(listedArtifact.workflow_run);
-      if (listedRun.id !== runId) return invalidProvenance();
-    }
+    validateArtifactWorkflowRun(listedArtifact.workflow_run, runId, repositoryId, headSha);
 
     const artifact = asRecord(input.artifact);
     if (artifact.id !== artifactId || artifact.name !== AWS_CONNECTION_REPORT_ARTIFACT.name || artifact.expired !== false) {
@@ -159,13 +190,13 @@ export function validateAwsConnectionReportArtifactBinding(
     const archiveSizeBytes = safeInteger(artifact.size_in_bytes, 1);
     if (archiveSizeBytes > MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES) return invalidProvenance();
 
-    const workflowRun = asRecord(artifact.workflow_run);
-    if (workflowRun.id !== runId || workflowRun.repository_id !== repositoryId) return invalidProvenance();
-    if (artifact.digest !== undefined && artifact.digest !== null && normalizeSha256(artifact.digest) !== expectedSha256) {
-      return invalidProvenance();
-    }
+    validateArtifactWorkflowRun(artifact.workflow_run, runId, repositoryId, headSha);
+    const trustedArchiveSha256 = artifact.digest === undefined || artifact.digest === null
+      ? null
+      : normalizeSha256(artifact.digest);
+    if (trustedArchiveSha256 !== null && trustedArchiveSha256 !== expectedSha256) return invalidProvenance();
 
-    return { expectedSha256, repositoryId, archiveSizeBytes };
+    return { expectedSha256, trustedArchiveSha256, repositoryId, archiveSizeBytes };
   } catch {
     return invalidProvenance();
   }
@@ -411,21 +442,19 @@ function hasSensitiveValue(value: string): boolean {
 }
 
 function safeStatusValue(value: string): boolean {
-  return SAFE_STATUS_VALUES.has(value.trim().toLowerCase().replace(/[ -]+/g, '_'));
+  return SAFE_STATUS_VALUES.has(value);
 }
 
 function safeReportString(key: string, value: string): boolean {
   if (key === 'observed_at_utc') return SAFE_ISO_TIMESTAMP.test(value);
-  if (key === 'schema') return /^[a-z0-9][a-z0-9._-]{0,95}$/i.test(value);
+  if (key === 'schema') return SAFE_REPORT_SCHEMA_VALUES.has(value);
   return AGGREGATE_STATUS_KEYS.has(key) && safeStatusValue(value);
 }
 
 function safeReceiptMetadata(receipt: Record<string, unknown>): boolean {
-  const retrieval = receipt.retrieval;
-  const reportFile = receipt.report_file;
-  return typeof retrieval === 'string' && retrieval.length > 0 && retrieval.length <= 256 &&
-    /^[a-z0-9 _.,-]+$/i.test(retrieval) && !hasSensitiveValue(retrieval) && !/[\\/]/.test(retrieval) &&
-    typeof reportFile === 'string' && !hasSensitiveValue(reportFile) && !hasSensitiveKey(reportFile.replace(/\.json$/i, ''));
+  return receipt.schema === AWS_CONNECTION_REPORT_ARTIFACT.receiptSchema &&
+    receipt.report_file === AWS_CONNECTION_REPORT_ARTIFACT.reportFile &&
+    receipt.retrieval === AWS_CONNECTION_REPORT_ARTIFACT.retrieval;
 }
 
 function analyzeReport(value: unknown, strictAggregation: boolean, depth = 0, key = ''): boolean {
@@ -465,12 +494,17 @@ function requireExactKeys(record: Record<string, unknown>, expected: readonly st
 export function inspectAwsConnectionReportArchive(
   archive: Buffer,
   expectedSha256: string,
+  trustedArchiveSha256?: string | null,
 ): AwsConnectionReportArchiveInspection {
   try {
     if (!Buffer.isBuffer(archive) || archive.length === 0 || archive.length > MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES) return invalidArchive();
     const normalizedExpectedSha256 = normalizeSha256(expectedSha256);
+    const normalizedTrustedSha256 = trustedArchiveSha256 === undefined || trustedArchiveSha256 === null
+      ? null
+      : normalizeSha256(trustedArchiveSha256);
     const archiveSha256 = createHash('sha256').update(archive).digest('hex');
-    if (archiveSha256 !== normalizedExpectedSha256) return invalidArchive();
+    if (archiveSha256 !== normalizedExpectedSha256 ||
+        (normalizedTrustedSha256 !== null && archiveSha256 !== normalizedTrustedSha256)) return invalidArchive();
 
     const members = extractJsonMembers(archive);
     const parsedMembers = members.map((member) => ({ ...member, value: parseJsonMember(member.bytes) }));
@@ -485,7 +519,9 @@ export function inspectAwsConnectionReportArchive(
     if (reportMembers.length !== 1) return invalidArchive();
     const reportMember = reportMembers[0]!;
 
-    if (receipt.report_file !== reportMember.name || typeof receipt.report_file !== 'string' ||
+    if (receiptMember.name !== AWS_CONNECTION_REPORT_ARTIFACT.receiptFile ||
+        receipt.report_file !== AWS_CONNECTION_REPORT_ARTIFACT.reportFile || reportMember.name !== AWS_CONNECTION_REPORT_ARTIFACT.reportFile ||
+        typeof receipt.report_file !== 'string' ||
         typeof receipt.report_sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(receipt.report_sha256) ||
         receipt.report_sha256.toLowerCase() !== createHash('sha256').update(reportMember.bytes).digest('hex') ||
         receipt.report_bytes !== reportMember.bytes.length) return invalidArchive();
@@ -494,7 +530,11 @@ export function inspectAwsConnectionReportArchive(
     const redactionPass = analyzeReport(reportMember.value, false) && safeReceiptMetadata(receipt);
     return {
       archiveBytes: archive.length,
-      archiveDigestVerified: true,
+      archiveDigestVerified: normalizedTrustedSha256 !== null,
+      archiveDigestStatus: normalizedTrustedSha256 === null
+        ? 'caller_expected_digest_only'
+        : 'github_artifact_digest_verified',
+      callerExpectedDigestMatch: true,
       aggregateOnly,
       redactionPass,
     };
