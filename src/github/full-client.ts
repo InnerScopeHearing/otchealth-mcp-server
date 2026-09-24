@@ -16,6 +16,7 @@ import { createHash, createSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import type { PinnedObservationFailureStage } from '../audit/internal-diagnostics.js';
 import {
   extractPinnedReceiptJson,
   MAX_GRAPHRAG_ARCHIVE_BYTES,
@@ -39,6 +40,16 @@ export class GitHubFullError extends Error {
     this.code = a.code;
     this.status = a.status;
     this.nextStep = a.nextStep;
+  }
+}
+
+class PinnedObservationReaderError extends GitHubFullError {
+  readonly internalDiagnostic: { type: 'github_observation_receipt'; stage: PinnedObservationFailureStage };
+
+  constructor(stage: PinnedObservationFailureStage) {
+    super(PINNED_OBSERVATION_ERROR);
+    this.name = 'PinnedObservationReaderError';
+    this.internalDiagnostic = { type: 'github_observation_receipt', stage };
   }
 }
 
@@ -715,358 +726,704 @@ async function readBoundedResponseBytes(response: Response, maxBytes: number): P
       await cancelResponseBody(response);
       throw new Error('invalid response length');
     }
-    declaredLength = Number(lengthHeader);
-    if (!Number.isSafeInteger(declaredLength) || declaredLength > maxBytes) {
-      await cancelResponseBody(response);
-      throw new Error('response too large');
+    declaredLength = N…29633 tokens truncated…ngth, 12);
+      localParts.push(descriptor);
+      descriptorLength = descriptor.length;
     }
+
+    const central = Buffer.alloc(46 + name.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(0x0314, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(flags, 8);
+    central.writeUInt16LE(method, 10);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(member.data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt32LE(0, 36);
+    central.writeUInt32LE(member.externalAttributes ?? 0, 38);
+    central.writeUInt32LE(localOffset, 42);
+    name.copy(central, 46);
+    centralParts.push(central);
+    localOffset += local.length + compressed.length + descriptorLength;
   }
 
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('missing response body');
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    void reader.cancel().catch(() => undefined);
-  }, PINNED_OBSERVATION_TIMEOUT_MS);
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value.byteLength > maxBytes - totalBytes) {
-        try { await reader.cancel(); } catch { /* keep the bounded parse failure */ }
-        throw new Error('response too large');
-      }
-      const chunk = Buffer.from(value);
-      totalBytes += chunk.length;
-      chunks.push(chunk);
-    }
-  } finally {
-    clearTimeout(timer);
-    reader.releaseLock();
-  }
-  if (timedOut) throw new Error('response body timed out');
-  return Buffer.concat(chunks, totalBytes);
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(members.length, 8);
+  end.writeUInt16LE(members.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(localOffset, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDirectory, end]);
 }
 
-async function getPinnedObservationInstallationToken(): Promise<string> {
-  const now = Date.now();
-  if (pinnedObservationCachedToken && now < pinnedObservationTokenExpiresAt - 60_000) {
-    return pinnedObservationCachedToken;
-  }
-
-  const installationId = env.GITHUB_APP_INSTALLATION_ID;
-  if (!installationId) throw new Error('GitHub installation is not configured');
-
-  const tokenUrl = new URL(
-    `/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
-    PINNED_OBSERVATION_API,
-  );
-  const response = await fetchWithBudget(tokenUrl, {
-    method: 'POST',
-    redirect: 'error',
-    headers: {
-      ...GITHUB_HEADERS,
-      Authorization: `Bearer ${mintJwt()}`,
+function makeReceipt(overrides: Record<string, unknown> = {}): string {
+  const receipt = {
+    schema: 'managed-graphrag-company-fifth-source-provider-observation-v2',
+    read_only: true,
+    knowledge_base_id: KNOWLEDGE_BASE_ID,
+    source_id: SOURCE_ID,
+    ingestion_job_id: INGESTION_JOB_ID,
+    provider_status: 'COMPLETE',
+    provider_updated_at: '2026-09-16T12:00:00Z',
+    terminal: true,
+    terminal_statistics: {
+      numberOfDocumentsScanned: 112,
+      numberOfNewDocumentsIndexed: 109,
+      numberOfModifiedDocumentsIndexed: 0,
+      numberOfDocumentsDeleted: 0,
+      numberOfDocumentsFailed: 3,
     },
-  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
-
-  if (response.status !== 201) {
-    await cancelResponseBody(response);
-    throw new Error('GitHub installation token request failed');
-  }
-
-  const bytes = await readBoundedResponseBytes(response, PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES);
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    throw new Error('Invalid GitHub installation token response');
-  }
-
-  const tokenResponse = requireRecord(parseStrictJson(text, PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES));
-  const token = tokenResponse.token;
-  const expiresAt = tokenResponse.expires_at;
-  if (typeof token !== 'string' || token.length === 0 || token.length > 4096 ||
-      token.trim() !== token || /[\u0000-\u001f\u007f]/.test(token) || typeof expiresAt !== 'string') {
-    throw new Error('Invalid GitHub installation token response');
-  }
-
-  const expiresAtMs = Date.parse(expiresAt);
-  const validatedAt = Date.now();
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= validatedAt) {
-    throw new Error('Invalid GitHub installation token expiry');
-  }
-
-  pinnedObservationCachedToken = token;
-  pinnedObservationTokenExpiresAt = Math.min(expiresAtMs, validatedAt + 55 * 60 * 1000);
-  return token;
+    progress_statistics: null,
+    ...overrides,
+  };
+  return JSON.stringify(receipt);
 }
 
-async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unknown> {
-  const url = new URL(path, PINNED_OBSERVATION_API);
-  if (url.origin !== PINNED_OBSERVATION_API) throw new Error('invalid fixed GitHub API URL');
-  const response = await fetchWithBudget(url, {
-    method: 'GET',
-    redirect: 'error',
-    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
-  if (response.status !== 200) {
-    await cancelResponseBody(response);
-    throw new Error('GitHub API request failed');
-  }
-  const bytes = await readBoundedResponseBytes(response, PINNED_OBSERVATION_MAX_METADATA_BYTES);
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    throw new Error('invalid GitHub API response');
-  }
-  return parseStrictJson(text, PINNED_OBSERVATION_MAX_METADATA_BYTES);
+function makeRepo(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: REPOSITORY_ID,
+    name: 'otchealth-cto',
+    full_name: REPOSITORY,
+    owner: { login: 'InnerScopeHearing' },
+    ...overrides,
+  };
 }
 
-function verifyRepositoryMetadata(value: unknown): number {
-  const repo = requireRecord(value);
-  if (requireString(repo.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository ||
-      requireString(repo.name, PINNED_GRAPHRAG_OBSERVATION.repo) !== PINNED_GRAPHRAG_OBSERVATION.repo) throw new Error('repository mismatch');
-  const owner = requireRecord(repo.owner);
-  requireString(owner.login, PINNED_GRAPHRAG_OBSERVATION.owner);
-  return requireSafeInteger(repo.id, 1);
+function makeRun(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: RUN_ID,
+    name: 'Observe sealed company GraphRAG fifth-source ingestion',
+    path: WORKFLOW_PATH,
+    event: 'workflow_dispatch',
+    status: 'completed',
+    conclusion: 'success',
+    head_branch: 'main',
+    head_sha: HEAD_SHA,
+    repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
+    head_repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
+    ...overrides,
+  };
 }
 
-function verifyRunMetadata(value: unknown, repositoryId: number): void {
-  const run = requireRecord(value);
-  if (requireSafeInteger(run.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.runId ||
-      requireString(run.name, PINNED_GRAPHRAG_OBSERVATION.workflowName) !== PINNED_GRAPHRAG_OBSERVATION.workflowName ||
-      requireString(run.path, PINNED_GRAPHRAG_OBSERVATION.workflowPath) !== PINNED_GRAPHRAG_OBSERVATION.workflowPath ||
-      requireString(run.event, 'workflow_dispatch') !== 'workflow_dispatch' ||
-      requireString(run.status, 'completed') !== 'completed' ||
-      requireString(run.conclusion, 'success') !== 'success' ||
-      requireString(run.head_branch, 'main') !== 'main' ||
-      requireString(run.head_sha, PINNED_GRAPHRAG_OBSERVATION.headSha) !== PINNED_GRAPHRAG_OBSERVATION.headSha) {
-    throw new Error('run mismatch');
-  }
-  const sourceRepository = requireRecord(run.repository);
-  const headRepository = requireRecord(run.head_repository);
-  if (requireSafeInteger(sourceRepository.id, 1) !== repositoryId ||
-      requireString(sourceRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository ||
-      requireSafeInteger(headRepository.id, 1) !== repositoryId ||
-      requireString(headRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository) {
-    throw new Error('run repository mismatch');
-  }
+function makeArtifact(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: ARTIFACT_ID,
+    name: ARTIFACT_NAME,
+    size_in_bytes: 2048,
+    expired: false,
+    created_at: '2026-09-16T12:00:00Z',
+    expires_at: '2099-01-01T00:00:00Z',
+    digest: null,
+    workflow_run: {
+      id: RUN_ID,
+      repository_id: REPOSITORY_ID,
+      head_repository_id: REPOSITORY_ID,
+      head_branch: 'main',
+      head_sha: HEAD_SHA,
+    },
+    ...overrides,
+  };
 }
 
-function verifyContentBlob(value: unknown, path: string, expectedSha: string): void {
-  const content = requireRecord(value);
-  if (requireString(content.type, 'file') !== 'file' || requireString(content.path, path) !== path ||
-      requireString(content.sha, expectedSha) !== expectedSha) throw new Error('source provenance mismatch');
-}
+type StubOverrides = {
+  tokenMintResponse?: Response;
+  repo?: Record<string, unknown>;
+  run?: Record<string, unknown>;
+  workflowBlobSha?: string;
+  producerBlobSha?: string;
+  artifact?: Record<string, unknown>;
+  archive?: Buffer;
+  downloadChunk?: Uint8Array;
+  downloadLocation?: string;
+};
 
-function verifyArtifactMetadata(value: unknown, repositoryId: number): { sizeBytes: number; expiresAt: number; digest: string | null } {
-  const artifact = requireRecord(value);
-  if (requireSafeInteger(artifact.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.artifactId ||
-      requireString(artifact.name, PINNED_GRAPHRAG_OBSERVATION.artifactName) !== PINNED_GRAPHRAG_OBSERVATION.artifactName ||
-      artifact.expired !== false) throw new Error('artifact mismatch');
-  const sizeBytes = requireSafeInteger(artifact.size_in_bytes, 1);
-  if (sizeBytes > MAX_GRAPHRAG_ARCHIVE_BYTES) throw new Error('artifact too large');
-  if (typeof artifact.expires_at !== 'string') throw new Error('artifact expiry missing');
-  const expiresAt = Date.parse(artifact.expires_at);
-  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error('artifact expired');
+type CapturedRequest = { url: string; authorization: string | null; method: string };
 
-  const workflowRun = requireRecord(artifact.workflow_run);
-  if (requireSafeInteger(workflowRun.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.runId ||
-      requireSafeInteger(workflowRun.repository_id, 1) !== repositoryId ||
-      requireSafeInteger(workflowRun.head_repository_id, 1) !== repositoryId ||
-      requireString(workflowRun.head_branch, 'main') !== 'main' ||
-      requireString(workflowRun.head_sha, PINNED_GRAPHRAG_OBSERVATION.headSha) !== PINNED_GRAPHRAG_OBSERVATION.headSha) {
-    throw new Error('artifact provenance mismatch');
-  }
+function githubStub(captured: CapturedRequest[], overrides: StubOverrides = {}): typeof fetch {
+  const archive = overrides.archive ?? zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
+  return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = new URL(String(input));
+    const headers = new Headers(init.headers);
+    captured.push({ url: url.toString(), authorization: headers.get('authorization'), method: init.method ?? 'GET' });
 
-  let digest: string | null = null;
-  if (artifact.digest !== undefined && artifact.digest !== null) {
-    if (typeof artifact.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(artifact.digest)) throw new Error('invalid artifact digest');
-    digest = artifact.digest.slice('sha256:'.length);
-  }
-  return { sizeBytes, expiresAt, digest };
-}
-
-// GitHub Actions uses a finite set of result-storage shards for signed artifact redirects.
-const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS = new Set([
-  'productionresultssa0.blob.core.windows.net',
-  'productionresultssa1.blob.core.windows.net',
-  'productionresultssa2.blob.core.windows.net',
-  'productionresultssa3.blob.core.windows.net',
-  'productionresultssa4.blob.core.windows.net',
-  'productionresultssa5.blob.core.windows.net',
-  'productionresultssa6.blob.core.windows.net',
-  'productionresultssa7.blob.core.windows.net',
-  'productionresultssa8.blob.core.windows.net',
-  'productionresultssa9.blob.core.windows.net',
-  'productionresultssa10.blob.core.windows.net',
-  'productionresultssa11.blob.core.windows.net',
-  'productionresultssa12.blob.core.windows.net',
-  'productionresultssa13.blob.core.windows.net',
-  'productionresultssa14.blob.core.windows.net',
-  'productionresultssa15.blob.core.windows.net',
-  'productionresultssa16.blob.core.windows.net',
-  'productionresultssa17.blob.core.windows.net',
-  'productionresultssa18.blob.core.windows.net',
-  'productionresultssa19.blob.core.windows.net',
-]);
-const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';
-
-function validateSignedArtifactUrl(location: string | null): URL {
-  if (!location) throw new Error('missing signed URL');
-  let url: URL;
-  try {
-    url = new URL(location);
-  } catch {
-    throw new Error('invalid signed URL');
-  }
-  const hostname = url.hostname.toLowerCase();
-  const isGitHubActionsArtifactStorage = GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS.has(hostname) &&
-    url.pathname.startsWith(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX);
-  const approvedHost = hostname === 'pipelines.actions.githubusercontent.com' || isGitHubActionsArtifactStorage;
-  if (url.protocol !== 'https:' || !approvedHost || url.username !== '' || url.password !== '' ||
-      (url.port !== '' && url.port !== '443') || url.hash !== '') throw new Error('untrusted signed URL');
-  return url;
-}
-
-async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
-  const archivePath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}/zip`;
-  const archiveUrl = new URL(archivePath, PINNED_OBSERVATION_API);
-  const redirectResponse = await fetchWithBudget(archiveUrl, {
-    method: 'GET',
-    redirect: 'manual',
-    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
-  const location = redirectResponse.headers.get('location');
-  await cancelResponseBody(redirectResponse);
-  if (redirectResponse.status !== 302) throw new Error('unexpected artifact response');
-  const signedUrl = validateSignedArtifactUrl(location);
-
-  // A GitHub installation token is intentionally not sent to the signed object-storage URL.
-  const downloadResponse = await fetchWithBudget(signedUrl, {
-    method: 'GET',
-    redirect: 'error',
-    headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
-  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
-  if (downloadResponse.status !== 200 || downloadResponse.redirected) {
-    await cancelResponseBody(downloadResponse);
-    throw new Error('artifact download failed');
-  }
-  if (downloadResponse.url) {
-    let finalUrl: URL;
-    try { finalUrl = new URL(downloadResponse.url); } catch {
-      await cancelResponseBody(downloadResponse);
-      throw new Error('invalid final download URL');
+    if (url.origin === 'https://api.github.com' && url.pathname === '/app/installations/789/access_tokens') {
+      if (overrides.tokenMintResponse) return overrides.tokenMintResponse;
+      return new Response(JSON.stringify({ token: 'ghs_test_token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }), { status: 201 });
     }
-    if (finalUrl.href !== signedUrl.href) {
-      await cancelResponseBody(downloadResponse);
-      throw new Error('unexpected download redirect');
+    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}`) {
+      return new Response(JSON.stringify(overrides.repo ?? makeRepo()), { status: 200 });
     }
-  }
-  return readBoundedResponseBytes(downloadResponse, MAX_GRAPHRAG_ARCHIVE_BYTES);
+    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`) {
+      return new Response(JSON.stringify(overrides.run ?? makeRun()), { status: 200 });
+    }
+    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`) {
+      return new Response(JSON.stringify({ type: 'file', path: '.github/workflows/observe-managed-graphrag-company-fifth-source.yml', sha: overrides.workflowBlobSha ?? WORKFLOW_BLOB_SHA }), { status: 200 });
+    }
+    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/contents/scripts/observe_managed_graphrag_company_fifth_source.py`) {
+      return new Response(JSON.stringify({ type: 'file', path: 'scripts/observe_managed_graphrag_company_fifth_source.py', sha: overrides.producerBlobSha ?? PRODUCER_BLOB_SHA }), { status: 200 });
+    }
+    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}`) {
+      return new Response(JSON.stringify(overrides.artifact ?? makeArtifact()), { status: 200 });
+    }
+    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip`) {
+      return new Response(null, { status: 302, headers: { location: overrides.downloadLocation ?? DOWNLOAD_URL } });
+    }
+    if (url.toString() === (overrides.downloadLocation ?? DOWNLOAD_URL)) {
+      const chunk = overrides.downloadChunk;
+      if (chunk) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(chunk);
+            controller.close();
+          },
+        }), { status: 200 });
+      }
+      return new Response(archive, { status: 200, headers: { 'content-length': String(archive.length) } });
+    }
+    throw new Error('unexpected mocked GitHub request');
+  }) as typeof fetch;
 }
 
-export interface PinnedGraphRagObservationResult {
-  schema: typeof PINNED_GRAPHRAG_OBSERVATION.resultSchema;
-  repository: typeof PINNED_GRAPHRAG_OBSERVATION.repository;
-  run_id: typeof PINNED_GRAPHRAG_OBSERVATION.runId;
-  artifact_id: typeof PINNED_GRAPHRAG_OBSERVATION.artifactId;
-  artifact_name: typeof PINNED_GRAPHRAG_OBSERVATION.artifactName;
-  receipt_schema: typeof PINNED_GRAPHRAG_OBSERVATION.receiptSchema;
-  knowledge_base_binding_verified: true;
-  read_only: true;
-  source_id: typeof PINNED_GRAPHRAG_OBSERVATION.sourceId;
-  ingestion_job_id: typeof PINNED_GRAPHRAG_OBSERVATION.ingestionJobId;
-  provider_status: 'COMPLETE' | 'FAILED' | 'STOPPED' | 'NONTERMINAL';
-  terminal: boolean;
-  terminal_statistics: ReturnType<typeof validatePinnedObservationReceipt>['terminal_statistics'];
-  progress_statistics: ReturnType<typeof validatePinnedObservationReceipt>['progress_statistics'];
-  provider_updated_at_present: boolean;
-  workflow_provenance_verified: true;
-  artifact_metadata_verified: true;
-  archive_digest_verification: 'verified' | 'not_provided';
-  archive_sha256: string;
-  archive_bytes: number;
-  receipt_sha256: string;
-  receipt_bytes: number;
-}
-
-/**
- * Retrieve and validate one fixed, historical GraphRAG observation artifact. This intentionally
- * accepts no repository, run, artifact, URL, or path supplied by the caller and never returns the
- * receipt's provider timestamp or any source content.
- */
-export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraphRagObservationResult> {
+async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = stub;
   try {
-    const token = await getPinnedObservationInstallationToken();
-    if (typeof token !== 'string' || token.length === 0 || token.length > 4096) throw new Error('invalid installation token');
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
 
-    const repoPath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}`;
-    const repositoryId = verifyRepositoryMetadata(await pinnedGitHubApiGetJson(repoPath, token));
-    const runPath = `${repoPath}/actions/runs/${PINNED_GRAPHRAG_OBSERVATION.runId}`;
-    verifyRunMetadata(await pinnedGitHubApiGetJson(runPath, token), repositoryId);
+async function callThroughRealMcpServer(
+  args: Record<string, unknown> = {},
+  callerAgent = 'cto',
+): Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }>; structuredContent?: any }> {
+  const { registerGitHubGraphRagObservationReceipt } = await import('./graphrag-observation-receipt.js');
+  const { requestContext } = await import('../../server/request-context.js');
+  const mcp = new McpServer({ name: 'test', version: '0' }, { capabilities: { tools: { listChanged: true }, logging: {} } });
+  registerGitHubGraphRagObservationReceipt(mcp, () => 'test-caller-hash');
 
-    const workflowUrl = new URL(`${repoPath}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`, PINNED_OBSERVATION_API);
-    workflowUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
-    const producerUrl = new URL(`${repoPath}/contents/${PINNED_GRAPHRAG_OBSERVATION.producerPath}`, PINNED_OBSERVATION_API);
-    producerUrl.searchParams.set('ref', PINNED_GRAPHRAG_OBSERVATION.headSha);
-    verifyContentBlob(
-      await pinnedGitHubApiGetJson(`${workflowUrl.pathname}${workflowUrl.search}`, token),
-      '.github/workflows/observe-managed-graphrag-company-fifth-source.yml',
-      PINNED_GRAPHRAG_OBSERVATION.workflowBlobSha,
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test-client', version: '0' }, { capabilities: {} });
+  await Promise.all([mcp.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    return await requestContext.run(
+      { callerHash: 'test-caller-hash', correlationId: 'test-correlation', callerAgent },
+      () => client.callTool({ name: 'github_graphrag_observation_receipt_get', arguments: args }) as ReturnType<typeof client.callTool>,
     );
-    verifyContentBlob(
-      await pinnedGitHubApiGetJson(`${producerUrl.pathname}${producerUrl.search}`, token),
-      PINNED_GRAPHRAG_OBSERVATION.producerPath,
-      PINNED_GRAPHRAG_OBSERVATION.producerBlobSha,
+  } finally {
+    await client.close();
+    await mcp.close();
+  }
+}
+
+test('pinned observation reader bounds and validates installation-token mint responses', async (t) => {
+  await t.test('oversized token response is rejected before its body is consumed', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenResponseBody = Buffer.from(`oversized-token-sentinel-${'x'.repeat(16 * 1024)}`);
+    let bodyPulled = false;
+    let bodyCancelled = false;
+    const tokenMintResponse = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        bodyPulled = true;
+        controller.enqueue(tokenResponseBody);
+        controller.close();
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    }, { highWaterMark: 0 }), {
+      status: 201,
+      headers: { 'content-length': String(tokenResponseBody.length) },
+    });
+
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
     );
 
-    const artifactPath = `${repoPath}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}`;
-    const artifactMetadata = verifyArtifactMetadata(await pinnedGitHubApiGetJson(artifactPath, token), repositoryId);
-    const archive = await downloadPinnedArtifactArchive(token);
-    // size_in_bytes is bounded as repository metadata, while the transfer itself is independently
-    // bounded by readBoundedResponseBytes. Do not assume the metadata size has ZIP-transfer semantics.
-    if (Date.now() >= artifactMetadata.expiresAt) throw new Error('artifact expired');
+    assert.equal(result.isError, true);
+    assert.equal(bodyPulled, false, 'a declared oversized body must be rejected before reading');
+    assert.equal(bodyCancelled, true, 'the oversized response body must be cancelled');
+    assert.equal(requests.length, 1, 'no repository request should follow a rejected token response');
+    assert.equal(JSON.stringify(result).includes('oversized-token-sentinel'), false);
+  });
 
-    const archiveSha256 = createHash('sha256').update(archive).digest('hex');
-    if (artifactMetadata.digest !== null && artifactMetadata.digest !== archiveSha256) throw new Error('artifact digest mismatch');
-    const receiptBytes = extractPinnedReceiptJson(archive);
-    const receipt = validatePinnedObservationReceipt(receiptBytes);
-    return {
-      schema: PINNED_GRAPHRAG_OBSERVATION.resultSchema,
-      repository: PINNED_GRAPHRAG_OBSERVATION.repository,
-      run_id: PINNED_GRAPHRAG_OBSERVATION.runId,
-      artifact_id: PINNED_GRAPHRAG_OBSERVATION.artifactId,
-      artifact_name: PINNED_GRAPHRAG_OBSERVATION.artifactName,
-      knowledge_base_binding_verified: true,
-      ...receipt,
-      workflow_provenance_verified: true,
-      artifact_metadata_verified: true,
-      archive_digest_verification: artifactMetadata.digest === null ? 'not_provided' : 'verified',
-      archive_sha256: archiveSha256,
-      archive_bytes: archive.length,
-      receipt_sha256: createHash('sha256').update(receiptBytes).digest('hex'),
-      receipt_bytes: receiptBytes.length,
-    };
-  } catch {
-    // Never surface a GitHub error body, signed object URL, malformed receipt value, or token detail.
-    throw new GitHubFullError(PINNED_OBSERVATION_ERROR);
+  await t.test('oversized streamed token chunk is rejected before copying', async () => {
+    const requests: CapturedRequest[] = [];
+    const oversizedChunk = new Uint8Array(16 * 1024 + 1).fill(0x61);
+    let bodyPulled = false;
+    let bodyDrained = false;
+    let bodyCancelled = false;
+    let pullCount = 0;
+    const tokenMintResponse = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pullCount++ === 0) {
+          bodyPulled = true;
+          controller.enqueue(oversizedChunk);
+          return;
+        }
+        bodyDrained = true;
+        controller.close();
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    }, { highWaterMark: 0 }), { status: 201 });
+
+    const originalBufferFrom = Buffer.from;
+    let copiedOversizedChunk = false;
+    let result: Awaited<ReturnType<typeof callThroughRealMcpServer>>;
+    Buffer.from = ((value: unknown, ...args: unknown[]) => {
+      if (value === oversizedChunk) copiedOversizedChunk = true;
+      return Reflect.apply(originalBufferFrom, Buffer, [value, ...args]);
+    }) as typeof Buffer.from;
+    try {
+      result = await withStubbedFetch(
+        githubStub(requests, { tokenMintResponse }),
+        () => callThroughRealMcpServer(),
+      );
+    } finally {
+      Buffer.from = originalBufferFrom;
+    }
+
+    assert.equal(result.isError, true);
+    assert.equal(bodyPulled, true, 'the reader must inspect a streamed chunk without a declared length');
+    assert.equal(bodyDrained, false, 'the body must be cancelled rather than fully drained');
+    assert.equal(bodyCancelled, true, 'the oversized stream must be cancelled');
+    assert.equal(copiedOversizedChunk, false, 'the oversized chunk must be rejected before Buffer.from copies it');
+    assert.equal(requests.length, 1, 'no repository request should follow a rejected token response');
+  });
+
+  await t.test('malformed token JSON becomes a sanitized reader failure', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenMintResponse = new Response('malformed-token-provider-sentinel', { status: 201 });
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('malformed-token-provider-sentinel'), false);
+    assert.equal(requests.length, 1);
+  });
+
+  await t.test('invalid token shape becomes a sanitized reader failure', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenMintResponse = new Response(JSON.stringify({
+      message: 'invalid-token-shape-sentinel',
+      token: null,
+      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    }), { status: 201 });
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('invalid-token-shape-sentinel'), false);
+    assert.equal(requests.length, 1);
+  });
+
+  await t.test('provider error body becomes a sanitized reader failure', async () => {
+    const requests: CapturedRequest[] = [];
+    const tokenMintResponse = new Response(JSON.stringify({ message: 'provider-error-body-sentinel' }), { status: 500 });
+    const result = await withStubbedFetch(
+      githubStub(requests, { tokenMintResponse }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('provider-error-body-sentinel'), false);
+    assert.equal(requests.length, 1);
+  });
+
+  await t.test('valid bounded token response allows the fixed receipt read', async () => {
+    const requests: CapturedRequest[] = [];
+    const result = await withStubbedFetch(githubStub(requests), () => callThroughRealMcpServer());
+
+    assert.equal(result.isError, undefined);
+    assert.equal(requests.filter((request) => request.url.endsWith('/app/installations/789/access_tokens')).length, 1);
+    assert.ok(requests.some((request) =>
+      request.url === `https://api.github.com/repos/${REPOSITORY}` && request.authorization === 'Bearer ghs_test_token'));
+  });
+});
+
+test('pinned observation read verifies provenance, returns only sanitized structure, and drops auth at the signed download boundary', async () => {
+  const requests: CapturedRequest[] = [];
+  const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
+  const digest = createHash('sha256').update(archive).digest('hex');
+  const artifact = makeArtifact({ digest: `sha256:${digest}`, size_in_bytes: archive.length });
+  const result = await withStubbedFetch(githubStub(requests, { archive, artifact }), () => callThroughRealMcpServer());
+
+  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+  const output = result.structuredContent?.result;
+  assert.equal(output.schema, 'otchealth-github-managed-graphrag-observation-validation-v1');
+  assert.equal(output.run_id, RUN_ID);
+  assert.equal(output.artifact_id, ARTIFACT_ID);
+  assert.equal(output.knowledge_base_binding_verified, true);
+  assert.equal(output.source_id, SOURCE_ID);
+  assert.equal(output.ingestion_job_id, INGESTION_JOB_ID);
+  assert.equal(output.provider_status, 'COMPLETE');
+  assert.equal(output.terminal, true);
+  assert.deepEqual(output.terminal_statistics, {
+    numberOfDocumentsScanned: 112,
+    numberOfNewDocumentsIndexed: 109,
+    numberOfModifiedDocumentsIndexed: 0,
+    numberOfDocumentsDeleted: 0,
+    numberOfDocumentsFailed: 3,
+  });
+  assert.equal(output.progress_statistics, null);
+  assert.equal(output.workflow_provenance_verified, true);
+  assert.equal(output.archive_digest_verification, 'verified');
+  assert.equal(output.receipt_sha256.length, 64);
+  assert.equal(output.archive_sha256.length, 64);
+  assert.equal(JSON.stringify(output).includes('mock-sensitive-url'), false);
+  assert.equal(Object.hasOwn(output, 'provider_updated_at'), false);
+  assert.equal(output.provider_updated_at_present, true);
+  assert.equal(JSON.stringify(output).includes('raw'), false);
+
+  const archiveRequest = requests.find((request) => request.url === `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip`);
+  const signedDownloadRequest = requests.find((request) => request.url === DOWNLOAD_URL);
+  assert.ok(archiveRequest?.authorization?.startsWith('Bearer '), 'the API archive request must use the installation token');
+  assert.ok(signedDownloadRequest, 'the GitHub-provided signed URL must be fetched');
+  assert.equal(signedDownloadRequest.authorization, null, 'the GitHub installation token must not cross the redirect boundary');
+  assert.ok(requests.some((request) => request.url.includes(`/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml?ref=${HEAD_SHA}`)));
+  assert.ok(requests.some((request) => request.url.includes(`/contents/scripts/observe_managed_graphrag_company_fifth_source.py?ref=${HEAD_SHA}`)));
+});
+
+test('pinned observation read explicitly records when GitHub does not provide an archive digest', async () => {
+  const requests: CapturedRequest[] = [];
+  const result = await withStubbedFetch(githubStub(requests, { artifact: makeArtifact({ digest: null }) }), () => callThroughRealMcpServer());
+  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+  assert.equal(result.structuredContent?.result.archive_digest_verification, 'not_provided');
+});
+
+test('pinned observation read permits the fixed GitHub Actions artifact storage redirect without forwarding auth', async () => {
+  const requests: CapturedRequest[] = [];
+  const result = await withStubbedFetch(
+    githubStub(requests, { downloadLocation: GITHUB_ACTIONS_STORAGE_URL }),
+    () => callThroughRealMcpServer(),
+  );
+
+  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+  const storageRequest = requests.find((request) => request.url === GITHUB_ACTIONS_STORAGE_URL);
+  assert.ok(storageRequest, 'the exact GitHub Actions artifact storage URL should be fetched');
+  assert.equal(storageRequest.authorization, null, 'the GitHub installation token must not cross the storage redirect boundary');
+  assert.equal(JSON.stringify(result.structuredContent).includes('mock-sensitive-url'), false, 'the signed storage URL must not appear in the receipt');
+});
+
+test('pinned observation read permits a known nonzero GitHub Actions storage shard', async () => {
+  const requests: CapturedRequest[] = [];
+  const result = await withStubbedFetch(
+    githubStub(requests, { downloadLocation: GITHUB_ACTIONS_STORAGE_URL_18 }),
+    () => callThroughRealMcpServer(),
+  );
+
+  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+  const storageRequest = requests.find((request) => request.url === GITHUB_ACTIONS_STORAGE_URL_18);
+  assert.ok(storageRequest, 'the known shard-18 artifact URL should be fetched');
+  assert.equal(storageRequest.authorization, null, 'the GitHub installation token must not cross the storage redirect boundary');
+});
+
+test('pinned observation read validates a bounded deflated single-member ZIP with a data descriptor', async () => {
+  const requests: CapturedRequest[] = [];
+  const archive = zipStore([{
+    name: 'receipt.json',
+    data: Buffer.from(makeReceipt(), 'utf8'),
+    method: 'deflate',
+    dataDescriptor: true,
+  }]);
+  const digest = createHash('sha256').update(archive).digest('hex');
+  const artifact = makeArtifact({ digest: `sha256:${digest}`, size_in_bytes: archive.length });
+  const result = await withStubbedFetch(githubStub(requests, { archive, artifact }), () => callThroughRealMcpServer());
+  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+  assert.equal(result.structuredContent?.result.archive_digest_verification, 'verified');
+  assert.equal(result.structuredContent?.result.terminal, true);
+});
+
+test('pinned observation read refuses wrong run provenance before downloading any archive', async () => {
+  const requests: CapturedRequest[] = [];
+  const result = await withStubbedFetch(
+    githubStub(requests, { run: makeRun({ head_sha: '0'.repeat(40) }) }),
+    () => callThroughRealMcpServer(),
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
+  assert.equal(JSON.stringify(result).includes(HEAD_SHA), false);
+});
+
+test('pinned observation read refuses a changed producer source or artifact run binding', async (t) => {
+  await t.test('producer blob changed', async () => {
+    const requests: CapturedRequest[] = [];
+    const result = await withStubbedFetch(
+      githubStub(requests, { producerBlobSha: '0'.repeat(40) }),
+      () => callThroughRealMcpServer(),
+    );
+    assert.equal(result.isError, true);
+    assert.equal(requests.some((request) => request.url.includes(`/actions/artifacts/${ARTIFACT_ID}`)), false);
+  });
+
+  await t.test('artifact bound to another head', async () => {
+    const requests: CapturedRequest[] = [];
+    const artifact = makeArtifact({
+      workflow_run: {
+        id: RUN_ID,
+        repository_id: REPOSITORY_ID,
+        head_repository_id: REPOSITORY_ID,
+        head_branch: 'main',
+        head_sha: '0'.repeat(40),
+      },
+    });
+    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+    assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
+  });
+});
+
+test('pinned observation read refuses expired artifacts and mismatching GitHub archive digests', async (t) => {
+  await t.test('expired artifact', async () => {
+    const requests: CapturedRequest[] = [];
+    const expired = makeArtifact({ expired: true, expires_at: '2020-01-01T00:00:00Z' });
+    const result = await withStubbedFetch(githubStub(requests, { artifact: expired }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+    assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
+  });
+
+  await t.test('digest mismatch', async () => {
+    const requests: CapturedRequest[] = [];
+    const artifact = makeArtifact({ digest: `sha256:${'0'.repeat(64)}` });
+    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('0'.repeat(64)), false);
+  });
+
+  await t.test('malformed digest', async () => {
+    const requests: CapturedRequest[] = [];
+    const artifact = makeArtifact({ digest: 'md5:abcd' });
+    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
+
+  await t.test('artifact metadata size above the archive cap', async () => {
+    const requests: CapturedRequest[] = [];
+    const artifact = makeArtifact({ size_in_bytes: 1024 * 1024 + 1 });
+    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+    assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
+  });
+});
+
+test('pinned observation read rejects any archive with extra or unsafe members', async (t) => {
+  await t.test('extra member', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([
+      { name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') },
+      { name: 'private.txt', data: Buffer.from('never return', 'utf8') },
+    ]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('never return'), false);
+  });
+
+  await t.test('unsafe member path', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: '../receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
+
+  await t.test('archive byte limit', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = Buffer.alloc(1024 * 1024 + 1);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
+
+  await t.test('single oversized response chunk is rejected before copying', async () => {
+    const requests: CapturedRequest[] = [];
+    const oversizedChunk = new Uint8Array(MAX_GRAPHRAG_ARCHIVE_BYTES + 1);
+    const stub = githubStub(requests, { downloadChunk: oversizedChunk });
+    const originalBufferFrom = Buffer.from;
+    let copiedOversizedChunk = false;
+    let result: Awaited<ReturnType<typeof callThroughRealMcpServer>>;
+
+    Buffer.from = ((value: unknown, ...args: unknown[]) => {
+      if (value === oversizedChunk) {
+        copiedOversizedChunk = true;
+        throw new Error('oversized response chunk reached Buffer.from');
+      }
+      return Reflect.apply(originalBufferFrom, Buffer, [value, ...args]);
+    }) as typeof Buffer.from;
+    try {
+      result = await withStubbedFetch(stub, () => callThroughRealMcpServer());
+    } finally {
+      Buffer.from = originalBufferFrom;
+    }
+
+    assert.equal(result.isError, true);
+    assert.ok(requests.some((request) => request.url === DOWNLOAD_URL), 'the test must reach the streamed archive response');
+    assert.equal(copiedOversizedChunk, false, 'the oversized chunk must be rejected before Buffer.from copies it');
+  });
+
+  await t.test('receipt extraction byte limit', async () => {
+    const requests: CapturedRequest[] = [];
+    const oversized = Buffer.alloc(32 * 1024 + 1, 0x61);
+    const archive = zipStore([{ name: 'receipt.json', data: oversized }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
+
+  for (const [name, downloadLocation] of [
+    ['untrusted public host', 'https://evil.example/download?sig=do-not-follow'],
+    ['unlisted GitHub Actions subdomain', 'https://evil.actions.githubusercontent.com/download?sig=do-not-follow'],
+    ['unrelated blob account', 'https://example.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['out-of-range GitHub Actions storage shard', 'https://productionresultssa20.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['GitHub storage host outside artifact path', 'https://productionresultssa0.blob.core.windows.net/company-data/fixture.zip?sig=do-not-follow'],
+    ['non-HTTPS GitHub storage URL', 'http://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['credentialed GitHub storage URL', 'https://fixture-user@productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['password-bearing GitHub storage URL', 'https://fixture-user:fixture-pass@productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['nonstandard GitHub storage port', 'https://productionresultssa0.blob.core.windows.net:444/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
+    ['fragment on GitHub storage URL', 'https://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow#fragment'],
+  ] as const) {
+    await t.test(name, async () => {
+      const requests: CapturedRequest[] = [];
+      const result = await withStubbedFetch(
+        githubStub(requests, { downloadLocation }),
+        () => callThroughRealMcpServer(),
+      );
+      assert.equal(result.isError, true);
+      assert.equal(requests.some((request) => request.url === downloadLocation), false, 'untrusted storage URL must not be fetched');
+      assert.equal(JSON.stringify(result).includes('do-not-follow'), false, 'the rejected signed URL must not be exposed');
+    });
   }
-}
+});
 
-/** POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel */
-export async function workflowRunCancel(owner: string, repo: string, runId: number): Promise<void> {
-  assertNotPhi(repo);
-  await ghSend<void>('POST', `/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/cancel`);
-}
+test('pinned observation read rejects duplicate JSON keys and nonterminal/incorrectly bound receipts cannot imply terminal success', async (t) => {
+  await t.test('duplicate schema key', async () => {
+    const requests: CapturedRequest[] = [];
+    const raw = makeReceipt().replace('"schema":"managed-graphrag-company-fifth-source-provider-observation-v2"', '"schema":"wrong","schema":"managed-graphrag-company-fifth-source-provider-observation-v2"');
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(raw, 'utf8') }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
 
-/** POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun */
-export async function workflowRunRerun(owner: string, repo: string, runId: number, enableDebugLogging = false): Promise<void> {
-  assertNotPhi(repo);
-  await ghSend<void>('POST', `/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/rerun`, { enable_debug_logging: enableDebugLogging });
-}
+  await t.test('source mismatch', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({ source_id: 'AAAAAAAAAA' }), 'utf8') }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
+
+  await t.test('unrecognized top-level field', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({ document_text: 'must not pass through' }), 'utf8') }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+    assert.equal(JSON.stringify(result).includes('must not pass through'), false);
+  });
+
+  await t.test('boolean counter is not accepted as an integer', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({
+      terminal_statistics: {
+        numberOfDocumentsScanned: 112,
+        numberOfNewDocumentsIndexed: 109,
+        numberOfModifiedDocumentsIndexed: 0,
+        numberOfDocumentsDeleted: 0,
+        numberOfDocumentsFailed: true,
+      },
+    }), 'utf8') }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
+
+  await t.test('terminal flag must agree with provider terminal status', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({ terminal: false }), 'utf8') }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+  });
+
+  await t.test('nonterminal observation', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({
+      provider_status: 'IN_PROGRESS',
+      terminal: false,
+      terminal_statistics: null,
+      progress_statistics: { numberOfDocumentsScanned: 17 },
+    }), 'utf8') }]);
+    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
+    assert.ok(!result.isError, `expected the valid progress observation to be represented, got ${JSON.stringify(result)}`);
+    assert.equal(result.structuredContent?.result.terminal, false);
+    assert.equal(result.structuredContent?.result.provider_status, 'NONTERMINAL');
+    assert.deepEqual(result.structuredContent?.result.progress_statistics, { numberOfDocumentsScanned: 17 });
+    assert.notEqual(result.structuredContent?.result.status, 'terminal_observation_validated');
+  });
+});
+
+test('pinned observation reader is CTO-only', async () => {
+  const requests: CapturedRequest[] = [];
+  const result = await withStubbedFetch(githubStub(requests), () => callThroughRealMcpServer({}, 'developer'));
+  assert.equal(result.isError, true);
+  assert.equal(requests.length, 0, 'role refusal must happen before GitHub API access');
+});
+
+test('pinned observation failure exposes only an allowlisted stage to CTO', async () => {
+  const requests: CapturedRequest[] = [];
+  const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
+  const artifact = makeArtifact({
+    digest: `sha256:${'0'.repeat(64)}`,
+    size_in_bytes: archive.length,
+    provider_metadata_sentinel: 'synthetic-provider-metadata-must-not-leak',
+  });
+  const result = await withStubbedFetch(
+    githubStub(requests, { archive, artifact }),
+    () => callThroughRealMcpServer(),
+  );
+
+  assert.equal(result.isError, true);
+  const correlationId = result.structuredContent?.correlation_id;
+  assert.equal(typeof correlationId, 'string');
+  assert.equal(result.structuredContent?.error?.code, 'github_observation_receipt_unverified');
+  assert.equal(result.structuredContent?.error?.message, 'The pinned GraphRAG observation receipt could not be verified.');
+  assert.deepEqual(result.structuredContent?.error?.internal_diagnostic, {
+    type: 'github_observation_receipt',
+    stage: 'archive_digest',
+    correlation_id: correlationId,
+  });
+  assert.equal(result.content[0]?.text?.includes('archive_digest'), false, 'user-facing text must remain generic');
+  assert.equal(JSON.stringify(result).includes('synthetic-provider-metadata-must-not-leak'), false);
+  assert.equal(JSON.stringify(result).includes('mock-sensitive-url'), false);
+  assert.equal(JSON.stringify(result).includes('ghs_test_token'), false);
+  assert.ok(requests.some((request) => request.url === DOWNLOAD_URL), 'the validated receipt ZIP must be downloaded before digest failure');
+});
+
+test('non-CTO failure responses never include pinned observation diagnostics', async () => {
+  const requests: CapturedRequest[] = [];
+  const artifact = makeArtifact({
+    name: 'synthetic-provider-metadata-must-not-leak',
+    provider_metadata_sentinel: 'synthetic-provider-metadata-must-not-leak',
+  });
+  const result = await withStubbedFetch(
+    githubStub(requests, { artifact }),
+    () => callThroughRealMcpServer({}, 'developer'),
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(typeof result.structuredContent?.correlation_id, 'string');
+  assert.equal(result.structuredContent?.error?.internal_diagnostic, undefined);
+  assert.equal(JSON.stringify(result).includes('archive_digest'), false);
+  assert.equal(JSON.stringify(result).includes('synthetic-provider-metadata-must-not-leak'), false);
+  assert.equal(requests.length, 0, 'non-CTO role refusal must happen before GitHub API access');
+});
