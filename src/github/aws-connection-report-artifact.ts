@@ -92,15 +92,15 @@ export interface AwsConnectionReportArtifactBindingInput {
 
 export interface ValidatedAwsConnectionReportArtifactBinding {
   expectedSha256: string;
-  trustedArchiveSha256: string | null;
+  trustedArchiveSha256: string;
   repositoryId: number;
   archiveSizeBytes: number;
 }
 
 export interface AwsConnectionReportArchiveInspection {
   archiveBytes: number;
-  archiveDigestVerified: boolean;
-  archiveDigestStatus: 'github_artifact_digest_verified' | 'caller_expected_digest_only';
+  archiveDigestVerified: true;
+  archiveDigestStatus: 'github_artifact_digest_verified';
   callerExpectedDigestMatch: true;
   aggregateOnly: boolean;
   redactionPass: boolean;
@@ -181,6 +181,8 @@ export function validateAwsConnectionReportArtifactBinding(
     if (listedMatches.length !== 1) return invalidProvenance();
     const listedArtifact = asRecord(listedMatches[0]);
     if (listedArtifact.name !== AWS_CONNECTION_REPORT_ARTIFACT.name) return invalidProvenance();
+    const listedArchiveSha256 = normalizeSha256(listedArtifact.digest);
+    if (listedArchiveSha256 !== expectedSha256) return invalidProvenance();
     validateArtifactWorkflowRun(listedArtifact.workflow_run, runId, repositoryId, headSha);
 
     const artifact = asRecord(input.artifact);
@@ -191,10 +193,8 @@ export function validateAwsConnectionReportArtifactBinding(
     if (archiveSizeBytes > MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES) return invalidProvenance();
 
     validateArtifactWorkflowRun(artifact.workflow_run, runId, repositoryId, headSha);
-    const trustedArchiveSha256 = artifact.digest === undefined || artifact.digest === null
-      ? null
-      : normalizeSha256(artifact.digest);
-    if (trustedArchiveSha256 !== null && trustedArchiveSha256 !== expectedSha256) return invalidProvenance();
+    const trustedArchiveSha256 = normalizeSha256(artifact.digest);
+    if (trustedArchiveSha256 !== listedArchiveSha256 || trustedArchiveSha256 !== expectedSha256) return invalidProvenance();
 
     return { expectedSha256, trustedArchiveSha256, repositoryId, archiveSizeBytes };
   } catch {
@@ -441,6 +441,10 @@ function hasSensitiveValue(value: string): boolean {
   return SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(value));
 }
 
+function hasSensitiveNumericValue(value: number): boolean {
+  return /^\d{12}$/.test(String(value));
+}
+
 function safeStatusValue(value: string): boolean {
   return SAFE_STATUS_VALUES.has(value);
 }
@@ -479,7 +483,7 @@ function analyzeReport(value: unknown, strictAggregation: boolean, depth = 0, ke
     return !hasSensitiveValue(value) && safeReportString(key, value);
   }
   if (typeof value === 'number') {
-    return Number.isSafeInteger(value) && value >= 0 && AGGREGATE_NUMBER_KEY.test(key);
+    return Number.isSafeInteger(value) && value >= 0 && AGGREGATE_NUMBER_KEY.test(key) && !hasSensitiveNumericValue(value);
   }
   if (typeof value === 'boolean') return AGGREGATE_BOOLEAN_KEY.test(key);
   if (value === null) return AGGREGATE_NUMBER_KEY.test(key) || AGGREGATE_STATUS_KEYS.has(key);
@@ -494,17 +498,14 @@ function requireExactKeys(record: Record<string, unknown>, expected: readonly st
 export function inspectAwsConnectionReportArchive(
   archive: Buffer,
   expectedSha256: string,
-  trustedArchiveSha256?: string | null,
+  trustedArchiveSha256: string,
 ): AwsConnectionReportArchiveInspection {
   try {
     if (!Buffer.isBuffer(archive) || archive.length === 0 || archive.length > MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES) return invalidArchive();
     const normalizedExpectedSha256 = normalizeSha256(expectedSha256);
-    const normalizedTrustedSha256 = trustedArchiveSha256 === undefined || trustedArchiveSha256 === null
-      ? null
-      : normalizeSha256(trustedArchiveSha256);
+    const normalizedTrustedSha256 = normalizeSha256(trustedArchiveSha256);
     const archiveSha256 = createHash('sha256').update(archive).digest('hex');
-    if (archiveSha256 !== normalizedExpectedSha256 ||
-        (normalizedTrustedSha256 !== null && archiveSha256 !== normalizedTrustedSha256)) return invalidArchive();
+    if (archiveSha256 !== normalizedExpectedSha256 || archiveSha256 !== normalizedTrustedSha256) return invalidArchive();
 
     const members = extractJsonMembers(archive);
     const parsedMembers = members.map((member) => ({ ...member, value: parseJsonMember(member.bytes) }));
@@ -530,10 +531,8 @@ export function inspectAwsConnectionReportArchive(
     const redactionPass = analyzeReport(reportMember.value, false) && safeReceiptMetadata(receipt);
     return {
       archiveBytes: archive.length,
-      archiveDigestVerified: normalizedTrustedSha256 !== null,
-      archiveDigestStatus: normalizedTrustedSha256 === null
-        ? 'caller_expected_digest_only'
-        : 'github_artifact_digest_verified',
+      archiveDigestVerified: true,
+      archiveDigestStatus: 'github_artifact_digest_verified',
       callerExpectedDigestMatch: true,
       aggregateOnly,
       redactionPass,

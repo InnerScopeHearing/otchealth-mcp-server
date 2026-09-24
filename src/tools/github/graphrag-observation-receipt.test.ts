@@ -202,10 +202,11 @@ function makeAwsRun(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
-function makeAwsRunArtifact(): Record<string, unknown> {
+function makeAwsRunArtifact(digest: string | null): Record<string, unknown> {
   return {
     id: AWS_REPORT_ARTIFACT_ID,
     name: AWS_CONNECTION_REPORT_ARTIFACT.name,
+    digest: digest === null ? null : `sha256:${digest}`,
     workflow_run: makeAwsWorkflowRunBinding(),
   };
 }
@@ -233,9 +234,19 @@ function makeArtifact(overrides: Record<string, unknown> = {}): Record<string, u
 function makeAwsReportArchive(): Buffer {
   const reportBytes = Buffer.from(JSON.stringify({
     observed_at_utc: '2026-09-24T12:00:00Z',
-    account_number: AWS_REPORT_CONTENT_SENTINEL,
-    scope: { status: 'complete' },
-    resources: [{ resource_name: 'resource-name-sentinel' }],
+    account: AWS_REPORT_CONTENT_SENTINEL,
+    region: 'REGION_FIXTURE_SENTINEL',
+    scope: 'producer scope free text sentinel',
+    ecs: { status: 'healthy', service_name: 'service-name-sentinel' },
+    gateway_http: { healthy: true, readiness_message: 'gateway free text sentinel' },
+    rds: { status: 'ok', resource_id: 'database-resource-sentinel' },
+    opensearch: { status: 'ok', domain_name: 'domain-name-sentinel' },
+    neptune_stopper_alarm: { status: 'ok' },
+    cloudtrail_signin_metadata_last_hour: {
+      status: 'partial',
+      events: [{ principal: 'principal-sentinel', detail: 'event free text sentinel' }],
+    },
+    errors: ['producer error free text sentinel'],
   }), 'utf8');
   const receiptBytes = Buffer.from(JSON.stringify({
     schema: 'ai-os-aws-redacted-report-receipt-v1',
@@ -304,7 +315,7 @@ function githubStub(captured: CapturedRequest[], overrides: StubOverrides = {}):
       return new Response(JSON.stringify(overrides.awsRun ?? makeAwsRun()), { status: 200 });
     }
     if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/runs/${AWS_REPORT_RUN_ID}/artifacts`) {
-      return new Response(JSON.stringify({ artifacts: overrides.awsRunArtifacts ?? [makeAwsRunArtifact()] }), { status: 200 });
+      return new Response(JSON.stringify({ artifacts: overrides.awsRunArtifacts ?? [makeAwsRunArtifact(awsDigest)] }), { status: 200 });
     }
     if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`) {
       return new Response(JSON.stringify({ type: 'file', path: '.github/workflows/observe-managed-graphrag-company-fifth-source.yml', sha: overrides.workflowBlobSha ?? WORKFLOW_BLOB_SHA }), { status: 200 });
@@ -393,6 +404,28 @@ async function callThroughAwsReportMcpServer(
     return await requestContext.run(
       { callerHash: 'test-caller-hash', correlationId: 'test-correlation', callerAgent },
       () => client.callTool({ name: 'github_aws_connection_report_inspect', arguments: args }) as ReturnType<typeof client.callTool>,
+    );
+  } finally {
+    await client.close();
+    await mcp.close();
+  }
+}
+
+async function callThroughArtifactListMcpServer(
+  args: Record<string, unknown>,
+  callerAgent = 'cto',
+): Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }>; structuredContent?: any }> {
+  const { registerGitHubWorkflowRunListArtifacts } = await import('./workflow-run-list-artifacts.js');
+  const { requestContext } = await import('../../server/request-context.js');
+  const mcp = new McpServer({ name: 'test', version: '0' }, { capabilities: { tools: { listChanged: true }, logging: {} } });
+  registerGitHubWorkflowRunListArtifacts(mcp, () => 'test-caller-hash');
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test-client', version: '0' }, { capabilities: {} });
+  await Promise.all([mcp.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    return await requestContext.run(
+      { callerHash: 'test-caller-hash', correlationId: 'test-correlation', callerAgent },
+      () => client.callTool({ name: 'github_workflow_run_list_artifacts', arguments: args }) as ReturnType<typeof client.callTool>,
     );
   } finally {
     await client.close();
@@ -853,23 +886,37 @@ test('pinned observation reader is CTO-only', async () => {
   assert.equal(requests.length, 0, 'role refusal must happen before GitHub API access');
 });
 
-test('AWS report inspector binds run and artifact, drops auth at storage, and returns only policy flags', async () => {
+test('AWS report listing digest and run binding flow into the bounded inspector', async () => {
   const requests: CapturedRequest[] = [];
   const archive = makeAwsReportArchive();
   const digest = createHash('sha256').update(archive).digest('hex');
-  const result = await withStubbedFetch(
-    githubStub(requests, { awsArchive: archive, awsArtifact: makeAwsArtifact(digest, archive.length) }),
-    () => callThroughAwsReportMcpServer({
+  const results = await withStubbedFetch(githubStub(requests, {
+    awsArchive: archive,
+    awsArtifact: makeAwsArtifact(digest, archive.length),
+  }), async () => {
+    const listing = await callThroughArtifactListMcpServer({
       owner: AWS_CONNECTION_REPORT_ARTIFACT.owner,
       repo: AWS_CONNECTION_REPORT_ARTIFACT.repo,
       run_id: AWS_REPORT_RUN_ID,
-      artifact_id: AWS_REPORT_ARTIFACT_ID,
-      expected_sha256: digest,
-    }),
-  );
+    });
+    const listed = listing.structuredContent?.result?.artifacts?.[0];
+    const inspection = await callThroughAwsReportMcpServer({
+      owner: AWS_CONNECTION_REPORT_ARTIFACT.owner,
+      repo: AWS_CONNECTION_REPORT_ARTIFACT.repo,
+      run_id: AWS_REPORT_RUN_ID,
+      artifact_id: listed?.id,
+      expected_sha256: listed?.digest,
+    });
+    return { listing, listed, inspection };
+  });
 
-  assert.equal(result.isError, undefined);
-  const output = result.structuredContent?.result;
+  assert.equal(results.listing.isError, undefined);
+  assert.equal(results.listed?.digest, `sha256:${digest}`);
+  assert.deepEqual(results.listed?.workflow_run, makeAwsWorkflowRunBinding());
+  assert.equal(Object.hasOwn(results.listed ?? {}, 'url'), false);
+  assert.equal(Object.hasOwn(results.listed ?? {}, 'archive_download_url'), false);
+  assert.equal(results.inspection.isError, undefined);
+  const output = results.inspection.structuredContent?.result;
   assert.equal(output.schema, 'otchealth-github-aws-connection-report-inspection-v1');
   assert.equal(output.run_id, AWS_REPORT_RUN_ID);
   assert.equal(output.artifact_id, AWS_REPORT_ARTIFACT_ID);
@@ -886,11 +933,13 @@ test('AWS report inspector binds run and artifact, drops auth at storage, and re
   assert.equal(storageRequest.authorization, null, 'the GitHub installation token must not cross the signed storage boundary');
   assert.ok(requests.some((request) => request.url.endsWith(`/actions/runs/${AWS_REPORT_RUN_ID}/artifacts`)));
   assert.ok(requests.some((request) => request.url.endsWith(`/actions/artifacts/${AWS_REPORT_ARTIFACT_ID}`)));
-  const serialized = JSON.stringify(result);
+  const serialized = JSON.stringify(results.inspection);
   assert.equal(serialized.includes(AWS_REPORT_DOWNLOAD_URL), false);
   assert.equal(serialized.includes(digest), false);
   assert.equal(serialized.includes(AWS_REPORT_CONTENT_SENTINEL), false);
-  assert.equal(serialized.includes('resource-name-sentinel'), false);
+  assert.equal(serialized.includes('REGION_FIXTURE_SENTINEL'), false);
+  assert.equal(serialized.includes('service-name-sentinel'), false);
+  assert.equal(serialized.includes('producer error free text sentinel'), false);
   assert.equal(serialized.includes(AWS_CONNECTION_REPORT_ARTIFACT.reportFile), false);
   assert.equal(serialized.includes('receipt.json'), false);
 });
@@ -941,28 +990,53 @@ test('AWS report inspector refuses unapproved workflow, source, ref, event, and 
   assert.equal(artifactMismatchRequests.some((request) => request.url.endsWith(`/actions/artifacts/${AWS_REPORT_ARTIFACT_ID}/zip`)), false);
 });
 
-test('AWS report inspector reports caller digest only when the API omits its archive digest', async () => {
+test('AWS report inspector rejects missing or mismatched GitHub digest evidence before archive download', async (t) => {
   const requests: CapturedRequest[] = [];
   const archive = makeAwsReportArchive();
   const digest = createHash('sha256').update(archive).digest('hex');
-  const artifactWithoutDigest = { ...makeAwsArtifact(digest, archive.length), digest: null };
-  const result = await withStubbedFetch(
-    githubStub(requests, { awsArchive: archive, awsArtifact: artifactWithoutDigest }),
-    () => callThroughAwsReportMcpServer({
-      owner: AWS_CONNECTION_REPORT_ARTIFACT.owner,
-      repo: AWS_CONNECTION_REPORT_ARTIFACT.repo,
-      run_id: AWS_REPORT_RUN_ID,
-      artifact_id: AWS_REPORT_ARTIFACT_ID,
-      expected_sha256: digest,
-    }),
-  );
-  assert.equal(result.isError, undefined);
-  const output = result.structuredContent?.result;
-  assert.equal(output.archive_digest_verified, false);
-  assert.equal(output.archive_digest_status, 'caller_expected_digest_only');
-  assert.equal(output.caller_expected_digest_match, true);
-  assert.equal(JSON.stringify(result).includes(AWS_REPORT_DOWNLOAD_URL), false);
-  assert.equal(JSON.stringify(result).includes(digest), false);
+  const cases: Array<{ name: string; overrides: StubOverrides; expectedDigest?: string }> = [
+    {
+      name: 'missing list digest',
+      overrides: { awsRunArtifacts: [makeAwsRunArtifact(null)] },
+    },
+    {
+      name: 'mismatching list digest',
+      overrides: { awsRunArtifacts: [makeAwsRunArtifact('b'.repeat(64))] },
+    },
+    {
+      name: 'missing artifact detail digest',
+      overrides: { awsArtifact: { ...makeAwsArtifact(digest, archive.length), digest: null } },
+    },
+    {
+      name: 'mismatching artifact detail digest',
+      overrides: { awsArtifact: makeAwsArtifact('b'.repeat(64), archive.length) },
+    },
+    {
+      name: 'caller digest differs from GitHub metadata',
+      overrides: {},
+      expectedDigest: 'b'.repeat(64),
+    },
+  ];
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const captured: CapturedRequest[] = [];
+      const result = await withStubbedFetch(
+        githubStub(captured, { awsArchive: archive, ...item.overrides }),
+        () => callThroughAwsReportMcpServer({
+          owner: AWS_CONNECTION_REPORT_ARTIFACT.owner,
+          repo: AWS_CONNECTION_REPORT_ARTIFACT.repo,
+          run_id: AWS_REPORT_RUN_ID,
+          artifact_id: AWS_REPORT_ARTIFACT_ID,
+          expected_sha256: item.expectedDigest ?? `sha256:${digest}`,
+        }),
+      );
+      assert.equal(result.isError, true);
+      assert.equal(captured.some((request) => request.url.endsWith(`/actions/artifacts/${AWS_REPORT_ARTIFACT_ID}/zip`)), false);
+      assert.equal(JSON.stringify(result).includes(AWS_REPORT_DOWNLOAD_URL), false);
+      assert.equal(JSON.stringify(result).includes(digest), false);
+      assert.equal(JSON.stringify(result).includes(AWS_REPORT_CONTENT_SENTINEL), false);
+    });
+  }
 });
 
 test('AWS report inspector rejects an oversized archive without exposing it', async () => {

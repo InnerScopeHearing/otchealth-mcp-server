@@ -684,8 +684,8 @@ export interface AwsConnectionReportArtifactInspection {
   repository_binding_verified: true;
   workflow_run_binding_verified: true;
   artifact_binding_verified: true;
-  archive_digest_verified: boolean;
-  archive_digest_status: 'github_artifact_digest_verified' | 'caller_expected_digest_only';
+  archive_digest_verified: true;
+  archive_digest_status: 'github_artifact_digest_verified';
   caller_expected_digest_match: true;
   archive_bytes: number;
   aggregate_only: boolean;
