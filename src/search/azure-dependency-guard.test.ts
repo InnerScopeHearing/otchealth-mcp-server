@@ -174,14 +174,30 @@ const AZURE_BLOB_UNMIGRATED: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * The fixed GraphRAG receipt reader follows one GitHub Actions artifact redirect through Azure Blob
- * object storage. This is not an Azure estate dependency and must not become a file-level exemption:
- * the only allowed occurrences are the finite productionresultssa0..19 host set and its artifact-
- * container path check in validateSignedArtifactUrl(). Any second Blob reference, unlisted result
- * host, or broader host use remains an offender.
+ * The fixed GitHub artifact readers follow one GitHub Actions redirect through Azure Blob object
+ * storage. This is not an Azure estate dependency and must not become a file-level exemption: the
+ * only allowed occurrences are the finite productionresultssa0..19 host set and its
+ * `/actions-results/` path check. Any second Blob reference, unlisted result host, or broader host
+ * use remains an offender.
  */
+const GITHUB_ACTIONS_ARTIFACT_REDIRECT_POLICIES = Object.freeze({
+  'github/full-client.ts': {
+    storageHosts: 'GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS',
+    storagePathPrefix: 'GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX',
+    validator: 'validateSignedArtifactUrl',
+  },
+  'github/aws-connection-report-artifact.ts': {
+    storageHosts: 'ARTIFACT_STORAGE_HOSTS',
+    storagePathPrefix: 'ARTIFACT_STORAGE_PATH_PREFIX',
+    validator: 'validateGitHubActionsArtifactDownloadUrl',
+  },
+});
+
 function isNarrowGitHubActionsArtifactRedirectBlobUse(path: string, text: string): boolean {
-  if (path !== 'github/full-client.ts') return false;
+  const policy = GITHUB_ACTIONS_ARTIFACT_REDIRECT_POLICIES[
+    path as keyof typeof GITHUB_ACTIONS_ARTIFACT_REDIRECT_POLICIES
+  ];
+  if (!policy) return false;
   const source = stripComments(text);
   const blobReferences = source.match(/blob\.core\.windows\.net/g) ?? [];
   const storageHosts = source.match(/'productionresultssa\d+\.blob\.core\.windows\.net'/g) ?? [];
@@ -189,16 +205,16 @@ function isNarrowGitHubActionsArtifactRedirectBlobUse(path: string, text: string
     { length: 20 },
     (_, shard) => `'productionresultssa${shard}.blob.core.windows.net'`,
   );
-  const validator = functionBody(source, 'validateSignedArtifactUrl');
+  const validator = functionBody(source, policy.validator);
   return validator.length > 0 &&
-    source.includes('const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS = new Set([') &&
+    source.includes(`const ${policy.storageHosts} = new Set([`) &&
     blobReferences.length === 20 &&
     storageHosts.length === expectedStorageHosts.length &&
     storageHosts.every((host, index) => host === expectedStorageHosts[index]) &&
-    source.includes("const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';") &&
-    (source.match(/GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS/g) ?? []).length === 2 &&
-    (source.match(/GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX/g) ?? []).length === 2 &&
-    /GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS\.has\(hostname\)\s*&&\s*url\.pathname\.startsWith\(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX\)/.test(validator);
+    source.includes(`const ${policy.storagePathPrefix} = '/actions-results/';`) &&
+    (source.match(new RegExp(policy.storageHosts, 'g')) ?? []).length === 2 &&
+    (source.match(new RegExp(policy.storagePathPrefix, 'g')) ?? []).length === 2 &&
+    new RegExp(`${policy.storageHosts}\\.has\\(hostname\\)\\s*&&\\s*url\\.pathname\\.startsWith\\(${policy.storagePathPrefix}\\)`).test(validator);
 }
 
 function isUnapprovedAzureBlobReference(path: string, text: string): boolean {
@@ -223,7 +239,8 @@ test('no file builds an Azure Blob URL unless it is a declared, BLOB_BACKEND-awa
 });
 
 test('the fixed GitHub Actions redirect allowance cannot hide broad or unrelated Blob use', () => {
-  const fixedReader = FILES.find((f) => f.path === 'github/full-client.ts');
+  const fixedReader = FILES.find((f) => f.path === 'github/aws-connection-report-artifact.ts') ??
+    FILES.find((f) => f.path === 'github/full-client.ts');
   assert.ok(fixedReader, 'the fixed receipt reader source must exist');
   assert.equal(isUnapprovedAzureBlobReference(fixedReader!.path, fixedReader!.text), false, 'the exact GitHub Actions redirect is permitted');
 
@@ -233,8 +250,14 @@ test('the fixed GitHub Actions redirect allowance cannot hide broad or unrelated
   assert.equal(isUnapprovedAzureBlobReference('tools/company-object.ts', unrelatedBlob), true, 'an unrelated Azure Blob URL remains an offender');
   assert.equal(isUnapprovedAzureBlobReference(fixedReader!.path, `${fixedReader!.text}\n${unrelatedBlob}`), true, 'the fixed reader file cannot gain a second Blob use');
 
+  const storageHosts = fixedReader!.path === 'github/aws-connection-report-artifact.ts'
+    ? 'ARTIFACT_STORAGE_HOSTS'
+    : 'GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS';
+  const storagePathPrefix = fixedReader!.path === 'github/aws-connection-report-artifact.ts'
+    ? 'ARTIFACT_STORAGE_PATH_PREFIX'
+    : 'GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX';
   const widenedHostCheck = fixedReader!.text.replace(
-    /GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS\.has\(hostname\)\s*&&\s*url\.pathname\.startsWith\(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX\)/,
+    new RegExp(`${storageHosts}\\.has\\(hostname\\)\\s*&&\\s*url\\.pathname\\.startsWith\\(${storagePathPrefix}\\)`),
     "hostname.endsWith('.blob.core.windows.net')",
   );
   assert.equal(isUnapprovedAzureBlobReference(fixedReader!.path, widenedHostCheck), true, 'the guard rejects a broad host suffix in the fixed reader');

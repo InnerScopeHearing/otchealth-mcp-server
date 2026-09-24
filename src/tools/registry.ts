@@ -83,6 +83,11 @@ import { EXEC_RING } from './kb/search-privileged.js';
 // server/request-context.ts).
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+const CTO_ONLY_GITHUB_ARTIFACT_TOOLS = [
+  CTO_ONLY_GITHUB_RECEIPT_TOOL,
+  'github_workflow_run_list_artifacts',
+  'github_aws_connection_report_inspect',
+] as const;
 
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'brain_graph_search', 'web_search', 'kb_search', 'kb_search_privileged',
@@ -473,13 +478,15 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
-  // The pinned observation receipt is CTO-only, so it must not inherit the shared ship set. Keep
-  // the environment override semantics for CTO, but remove the tool from every non-CTO connector
-  // even if a shared CONNECTOR_TOOLSET override accidentally names it.
+  // GitHub artifact metadata and bounded artifact inspection are CTO-only. They must not inherit
+  // the shared ship set. Keep the environment override semantics for CTO, but remove these tools
+  // from every non-CTO connector even if a shared CONNECTOR_TOOLSET override accidentally names one.
   if (lane === 'cto') {
-    if (!env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+    if (!env.CONNECTOR_TOOLSET) {
+      for (const name of CTO_ONLY_GITHUB_ARTIFACT_TOOLS) tools.add(name);
+    }
   } else {
-    tools.delete(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+    for (const name of CTO_ONLY_GITHUB_ARTIFACT_TOOLS) tools.delete(name);
   }
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
   // owns the migration bridge, while not advertising it to other ship lanes.

@@ -217,7 +217,8 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // developer's (see kb/search-privileged.ts's ring model).
   developer: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'github_*', '!github_graphrag_observation_receipt_get', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
+    'github_*', '!github_graphrag_observation_receipt_get', '!github_workflow_run_list_artifacts',
+    '!github_aws_connection_report_inspect', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
     ...HEYGEN,
     // 2026-08-02: developer_wake_lite (diagnostics/developer-wake-lite.ts) was never covered by
     // any pattern above -- not catalog_* (CATALOG's wildcard), not github_*/depot_*, no exact

@@ -222,7 +222,7 @@ class StrictJsonScanner {
   private nodes = 0;
   private static readonly numberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 
-  constructor(private readonly input: string) {}
+  constructor(private readonly input: string, private readonly maxNodes: number) {}
 
   scan(): void {
     this.readValue(0);
@@ -267,7 +267,7 @@ class StrictJsonScanner {
 
   private readValue(depth: number): void {
     this.skipWhitespace();
-    if (depth > 32 || ++this.nodes > 4096) invalid();
+    if (depth > 32 || ++this.nodes > this.maxNodes) invalid();
     const char = this.input[this.offset];
     if (char === '"') {
       this.readString();
@@ -342,10 +342,11 @@ class StrictJsonScanner {
   }
 }
 
-export function parseStrictJson(text: string, maxBytes = MAX_GRAPHRAG_RECEIPT_BYTES): unknown {
+export function parseStrictJson(text: string, maxBytes = MAX_GRAPHRAG_RECEIPT_BYTES, maxNodes = 4096): unknown {
   if (Buffer.byteLength(text, 'utf8') > maxBytes) invalid();
+  if (!Number.isSafeInteger(maxNodes) || maxNodes < 1) invalid();
   try {
-    new StrictJsonScanner(text).scan();
+    new StrictJsonScanner(text, maxNodes).scan();
     return JSON.parse(text) as unknown;
   } catch {
     return invalid();

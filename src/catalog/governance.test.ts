@@ -24,6 +24,11 @@ const CONNECTOR_WRITE_TOOLS = [
 ];
 
 const CONNECTOR_READ_TOOLS = ['github_list_workflow_runs', 'github_workflow_run_get'];
+const CTO_ONLY_GITHUB_ARTIFACT_TOOLS = [
+  'github_graphrag_observation_receipt_get',
+  'github_workflow_run_list_artifacts',
+  'github_aws_connection_report_inspect',
+];
 
 // A representative sample of OTHER write-enabled lanes that must NOT gain access from this widen.
 const OTHER_LANES = ['cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', ''];
@@ -59,6 +64,17 @@ test('pinned GraphRAG observation receipt reader is CTO-only', () => {
   assert.ok(roleAllows(gov!.role, 'cto'));
   for (const other of [...OTHER_LANES, 'developer', 'exec']) {
     assert.ok(!roleAllows(gov!.role, other), `the pinned receipt reader must refuse lane "${other}"`);
+  }
+});
+
+test('GitHub artifact metadata and report inspection are CTO-only', () => {
+  for (const name of CTO_ONLY_GITHUB_ARTIFACT_TOOLS) {
+    const gov = requiredRoleFor(name);
+    assert.ok(gov, `${name} must have an explicit role gate`);
+    assert.ok(roleAllows(gov!.role, 'cto'), `${name} must allow the CTO`);
+    for (const other of [...OTHER_LANES, 'developer', 'exec', 'wefunder-campaign-director']) {
+      assert.ok(!roleAllows(gov!.role, other), `${name} must refuse lane "${other}"`);
+    }
   }
 });
 
