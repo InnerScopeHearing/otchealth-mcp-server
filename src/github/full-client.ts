@@ -726,704 +726,367 @@ async function readBoundedResponseBytes(response: Response, maxBytes: number): P
       await cancelResponseBody(response);
       throw new Error('invalid response length');
     }
-    declaredLength = N…29633 tokens truncated…ngth, 12);
-      localParts.push(descriptor);
-      descriptorLength = descriptor.length;
+    declaredLength = Number(lengthHeader);
+    if (!Number.isSafeInteger(declaredLength) || declaredLength > maxBytes) {
+      await cancelResponseBody(response);
+      throw new Error('response too large');
     }
-
-    const central = Buffer.alloc(46 + name.length);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(0x0314, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(flags, 8);
-    central.writeUInt16LE(method, 10);
-    central.writeUInt32LE(checksum, 16);
-    central.writeUInt32LE(compressed.length, 20);
-    central.writeUInt32LE(member.data.length, 24);
-    central.writeUInt16LE(name.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt32LE(0, 36);
-    central.writeUInt32LE(member.externalAttributes ?? 0, 38);
-    central.writeUInt32LE(localOffset, 42);
-    name.copy(central, 46);
-    centralParts.push(central);
-    localOffset += local.length + compressed.length + descriptorLength;
   }
 
-  const centralDirectory = Buffer.concat(centralParts);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(members.length, 8);
-  end.writeUInt16LE(members.length, 10);
-  end.writeUInt32LE(centralDirectory.length, 12);
-  end.writeUInt32LE(localOffset, 16);
-  end.writeUInt16LE(0, 20);
-  return Buffer.concat([...localParts, centralDirectory, end]);
-}
-
-function makeReceipt(overrides: Record<string, unknown> = {}): string {
-  const receipt = {
-    schema: 'managed-graphrag-company-fifth-source-provider-observation-v2',
-    read_only: true,
-    knowledge_base_id: KNOWLEDGE_BASE_ID,
-    source_id: SOURCE_ID,
-    ingestion_job_id: INGESTION_JOB_ID,
-    provider_status: 'COMPLETE',
-    provider_updated_at: '2026-09-16T12:00:00Z',
-    terminal: true,
-    terminal_statistics: {
-      numberOfDocumentsScanned: 112,
-      numberOfNewDocumentsIndexed: 109,
-      numberOfModifiedDocumentsIndexed: 0,
-      numberOfDocumentsDeleted: 0,
-      numberOfDocumentsFailed: 3,
-    },
-    progress_statistics: null,
-    ...overrides,
-  };
-  return JSON.stringify(receipt);
-}
-
-function makeRepo(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    id: REPOSITORY_ID,
-    name: 'otchealth-cto',
-    full_name: REPOSITORY,
-    owner: { login: 'InnerScopeHearing' },
-    ...overrides,
-  };
-}
-
-function makeRun(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    id: RUN_ID,
-    name: 'Observe sealed company GraphRAG fifth-source ingestion',
-    path: WORKFLOW_PATH,
-    event: 'workflow_dispatch',
-    status: 'completed',
-    conclusion: 'success',
-    head_branch: 'main',
-    head_sha: HEAD_SHA,
-    repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
-    head_repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
-    ...overrides,
-  };
-}
-
-function makeArtifact(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    id: ARTIFACT_ID,
-    name: ARTIFACT_NAME,
-    size_in_bytes: 2048,
-    expired: false,
-    created_at: '2026-09-16T12:00:00Z',
-    expires_at: '2099-01-01T00:00:00Z',
-    digest: null,
-    workflow_run: {
-      id: RUN_ID,
-      repository_id: REPOSITORY_ID,
-      head_repository_id: REPOSITORY_ID,
-      head_branch: 'main',
-      head_sha: HEAD_SHA,
-    },
-    ...overrides,
-  };
-}
-
-type StubOverrides = {
-  tokenMintResponse?: Response;
-  repo?: Record<string, unknown>;
-  run?: Record<string, unknown>;
-  workflowBlobSha?: string;
-  producerBlobSha?: string;
-  artifact?: Record<string, unknown>;
-  archive?: Buffer;
-  downloadChunk?: Uint8Array;
-  downloadLocation?: string;
-};
-
-type CapturedRequest = { url: string; authorization: string | null; method: string };
-
-function githubStub(captured: CapturedRequest[], overrides: StubOverrides = {}): typeof fetch {
-  const archive = overrides.archive ?? zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
-  return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
-    const url = new URL(String(input));
-    const headers = new Headers(init.headers);
-    captured.push({ url: url.toString(), authorization: headers.get('authorization'), method: init.method ?? 'GET' });
-
-    if (url.origin === 'https://api.github.com' && url.pathname === '/app/installations/789/access_tokens') {
-      if (overrides.tokenMintResponse) return overrides.tokenMintResponse;
-      return new Response(JSON.stringify({ token: 'ghs_test_token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }), { status: 201 });
-    }
-    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}`) {
-      return new Response(JSON.stringify(overrides.repo ?? makeRepo()), { status: 200 });
-    }
-    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`) {
-      return new Response(JSON.stringify(overrides.run ?? makeRun()), { status: 200 });
-    }
-    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`) {
-      return new Response(JSON.stringify({ type: 'file', path: '.github/workflows/observe-managed-graphrag-company-fifth-source.yml', sha: overrides.workflowBlobSha ?? WORKFLOW_BLOB_SHA }), { status: 200 });
-    }
-    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/contents/scripts/observe_managed_graphrag_company_fifth_source.py`) {
-      return new Response(JSON.stringify({ type: 'file', path: 'scripts/observe_managed_graphrag_company_fifth_source.py', sha: overrides.producerBlobSha ?? PRODUCER_BLOB_SHA }), { status: 200 });
-    }
-    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}`) {
-      return new Response(JSON.stringify(overrides.artifact ?? makeArtifact()), { status: 200 });
-    }
-    if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip`) {
-      return new Response(null, { status: 302, headers: { location: overrides.downloadLocation ?? DOWNLOAD_URL } });
-    }
-    if (url.toString() === (overrides.downloadLocation ?? DOWNLOAD_URL)) {
-      const chunk = overrides.downloadChunk;
-      if (chunk) {
-        return new Response(new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(chunk);
-            controller.close();
-          },
-        }), { status: 200 });
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('missing response body');
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    void reader.cancel().catch(() => undefined);
+  }, PINNED_OBSERVATION_TIMEOUT_MS);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > maxBytes - totalBytes) {
+        try { await reader.cancel(); } catch { /* keep the bounded parse failure */ }
+        throw new Error('response too large');
       }
-      return new Response(archive, { status: 200, headers: { 'content-length': String(archive.length) } });
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
+      chunks.push(chunk);
     }
-    throw new Error('unexpected mocked GitHub request');
-  }) as typeof fetch;
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+  if (timedOut) throw new Error('response body timed out');
+  return Buffer.concat(chunks, totalBytes);
 }
 
-async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
-  const original = globalThis.fetch;
-  globalThis.fetch = stub;
+async function getPinnedObservationInstallationToken(): Promise<string> {
+  const now = Date.now();
+  if (pinnedObservationCachedToken && now < pinnedObservationTokenExpiresAt - 60_000) {
+    return pinnedObservationCachedToken;
+  }
+
+  const installationId = env.GITHUB_APP_INSTALLATION_ID;
+  if (!installationId) throw new Error('GitHub installation is not configured');
+
+  const tokenUrl = new URL(
+    `/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
+    PINNED_OBSERVATION_API,
+  );
+  const response = await fetchWithBudget(tokenUrl, {
+    method: 'POST',
+    redirect: 'error',
+    headers: {
+      ...GITHUB_HEADERS,
+      Authorization: `Bearer ${mintJwt()}`,
+    },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+
+  if (response.status !== 201) {
+    await cancelResponseBody(response);
+    throw new Error('GitHub installation token request failed');
+  }
+
+  const bytes = await readBoundedResponseBytes(response, PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES);
+  let text: string;
   try {
-    return await run();
-  } finally {
-    globalThis.fetch = original;
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error('Invalid GitHub installation token response');
+  }
+
+  const tokenResponse = requireRecord(parseStrictJson(text, PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES));
+  const token = tokenResponse.token;
+  const expiresAt = tokenResponse.expires_at;
+  if (typeof token !== 'string' || token.length === 0 || token.length > 4096 ||
+      token.trim() !== token || /[\u0000-\u001f\u007f]/.test(token) || typeof expiresAt !== 'string') {
+    throw new Error('Invalid GitHub installation token response');
+  }
+
+  const expiresAtMs = Date.parse(expiresAt);
+  const validatedAt = Date.now();
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= validatedAt) {
+    throw new Error('Invalid GitHub installation token expiry');
+  }
+
+  pinnedObservationCachedToken = token;
+  pinnedObservationTokenExpiresAt = Math.min(expiresAtMs, validatedAt + 55 * 60 * 1000);
+  return token;
+}
+
+async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unknown> {
+  const url = new URL(path, PINNED_OBSERVATION_API);
+  if (url.origin !== PINNED_OBSERVATION_API) throw new Error('invalid fixed GitHub API URL');
+  const response = await fetchWithBudget(url, {
+    method: 'GET',
+    redirect: 'error',
+    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  if (response.status !== 200) {
+    await cancelResponseBody(response);
+    throw new Error('GitHub API request failed');
+  }
+  const bytes = await readBoundedResponseBytes(response, PINNED_OBSERVATION_MAX_METADATA_BYTES);
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error('invalid GitHub API response');
+  }
+  return parseStrictJson(text, PINNED_OBSERVATION_MAX_METADATA_BYTES);
+}
+
+function verifyRepositoryMetadata(value: unknown): number {
+  const repo = requireRecord(value);
+  if (requireString(repo.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository ||
+      requireString(repo.name, PINNED_GRAPHRAG_OBSERVATION.repo) !== PINNED_GRAPHRAG_OBSERVATION.repo) throw new Error('repository mismatch');
+  const owner = requireRecord(repo.owner);
+  requireString(owner.login, PINNED_GRAPHRAG_OBSERVATION.owner);
+  return requireSafeInteger(repo.id, 1);
+}
+
+function verifyRunMetadata(value: unknown, repositoryId: number): void {
+  const run = requireRecord(value);
+  if (requireSafeInteger(run.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.runId ||
+      requireString(run.name, PINNED_GRAPHRAG_OBSERVATION.workflowName) !== PINNED_GRAPHRAG_OBSERVATION.workflowName ||
+      requireString(run.path, PINNED_GRAPHRAG_OBSERVATION.workflowPath) !== PINNED_GRAPHRAG_OBSERVATION.workflowPath ||
+      requireString(run.event, 'workflow_dispatch') !== 'workflow_dispatch' ||
+      requireString(run.status, 'completed') !== 'completed' ||
+      requireString(run.conclusion, 'success') !== 'success' ||
+      requireString(run.head_branch, 'main') !== 'main' ||
+      requireString(run.head_sha, PINNED_GRAPHRAG_OBSERVATION.headSha) !== PINNED_GRAPHRAG_OBSERVATION.headSha) {
+    throw new Error('run mismatch');
+  }
+  const sourceRepository = requireRecord(run.repository);
+  const headRepository = requireRecord(run.head_repository);
+  if (requireSafeInteger(sourceRepository.id, 1) !== repositoryId ||
+      requireString(sourceRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository ||
+      requireSafeInteger(headRepository.id, 1) !== repositoryId ||
+      requireString(headRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository) {
+    throw new Error('run repository mismatch');
   }
 }
 
-async function callThroughRealMcpServer(
-  args: Record<string, unknown> = {},
-  callerAgent = 'cto',
-): Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }>; structuredContent?: any }> {
-  const { registerGitHubGraphRagObservationReceipt } = await import('./graphrag-observation-receipt.js');
-  const { requestContext } = await import('../../server/request-context.js');
-  const mcp = new McpServer({ name: 'test', version: '0' }, { capabilities: { tools: { listChanged: true }, logging: {} } });
-  registerGitHubGraphRagObservationReceipt(mcp, () => 'test-caller-hash');
-
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'test-client', version: '0' }, { capabilities: {} });
-  await Promise.all([mcp.connect(serverTransport), client.connect(clientTransport)]);
-  try {
-    return await requestContext.run(
-      { callerHash: 'test-caller-hash', correlationId: 'test-correlation', callerAgent },
-      () => client.callTool({ name: 'github_graphrag_observation_receipt_get', arguments: args }) as ReturnType<typeof client.callTool>,
-    );
-  } finally {
-    await client.close();
-    await mcp.close();
-  }
+function verifyContentBlob(value: unknown, path: string, expectedSha: string): void {
+  const content = requireRecord(value);
+  if (requireString(content.type, 'file') !== 'file' || requireString(content.path, path) !== path ||
+      requireString(content.sha, expectedSha) !== expectedSha) throw new Error('source provenance mismatch');
 }
 
-test('pinned observation reader bounds and validates installation-token mint responses', async (t) => {
-  await t.test('oversized token response is rejected before its body is consumed', async () => {
-    const requests: CapturedRequest[] = [];
-    const tokenResponseBody = Buffer.from(`oversized-token-sentinel-${'x'.repeat(16 * 1024)}`);
-    let bodyPulled = false;
-    let bodyCancelled = false;
-    const tokenMintResponse = new Response(new ReadableStream<Uint8Array>({
-      pull(controller) {
-        bodyPulled = true;
-        controller.enqueue(tokenResponseBody);
-        controller.close();
-      },
-      cancel() {
-        bodyCancelled = true;
-      },
-    }, { highWaterMark: 0 }), {
-      status: 201,
-      headers: { 'content-length': String(tokenResponseBody.length) },
-    });
+function verifyArtifactMetadata(value: unknown, repositoryId: number): { sizeBytes: number; expiresAt: number; digest: string | null } {
+  const artifact = requireRecord(value);
+  if (requireSafeInteger(artifact.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.artifactId ||
+      requireString(artifact.name, PINNED_GRAPHRAG_OBSERVATION.artifactName) !== PINNED_GRAPHRAG_OBSERVATION.artifactName ||
+      artifact.expired !== false) throw new Error('artifact mismatch');
+  const sizeBytes = requireSafeInteger(artifact.size_in_bytes, 1);
+  if (sizeBytes > MAX_GRAPHRAG_ARCHIVE_BYTES) throw new Error('artifact too large');
+  if (typeof artifact.expires_at !== 'string') throw new Error('artifact expiry missing');
+  const expiresAt = Date.parse(artifact.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error('artifact expired');
 
-    const result = await withStubbedFetch(
-      githubStub(requests, { tokenMintResponse }),
-      () => callThroughRealMcpServer(),
-    );
+  const workflowRun = requireRecord(artifact.workflow_run);
+  if (requireSafeInteger(workflowRun.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.runId ||
+      requireSafeInteger(workflowRun.repository_id, 1) !== repositoryId ||
+      requireSafeInteger(workflowRun.head_repository_id, 1) !== repositoryId ||
+      requireString(workflowRun.head_branch, 'main') !== 'main' ||
+      requireString(workflowRun.head_sha, PINNED_GRAPHRAG_OBSERVATION.headSha) !== PINNED_GRAPHRAG_OBSERVATION.headSha) {
+    throw new Error('artifact provenance mismatch');
+  }
 
-    assert.equal(result.isError, true);
-    assert.equal(bodyPulled, false, 'a declared oversized body must be rejected before reading');
-    assert.equal(bodyCancelled, true, 'the oversized response body must be cancelled');
-    assert.equal(requests.length, 1, 'no repository request should follow a rejected token response');
-    assert.equal(JSON.stringify(result).includes('oversized-token-sentinel'), false);
-  });
+  let digest: string | null = null;
+  if (artifact.digest !== undefined && artifact.digest !== null) {
+    if (typeof artifact.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(artifact.digest)) throw new Error('invalid artifact digest');
+    digest = artifact.digest.slice('sha256:'.length);
+  }
+  return { sizeBytes, expiresAt, digest };
+}
 
-  await t.test('oversized streamed token chunk is rejected before copying', async () => {
-    const requests: CapturedRequest[] = [];
-    const oversizedChunk = new Uint8Array(16 * 1024 + 1).fill(0x61);
-    let bodyPulled = false;
-    let bodyDrained = false;
-    let bodyCancelled = false;
-    let pullCount = 0;
-    const tokenMintResponse = new Response(new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (pullCount++ === 0) {
-          bodyPulled = true;
-          controller.enqueue(oversizedChunk);
-          return;
+// GitHub Actions uses a finite set of result-storage shards for signed artifact redirects.
+const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS = new Set([
+  'productionresultssa0.blob.core.windows.net',
+  'productionresultssa1.blob.core.windows.net',
+  'productionresultssa2.blob.core.windows.net',
+  'productionresultssa3.blob.core.windows.net',
+  'productionresultssa4.blob.core.windows.net',
+  'productionresultssa5.blob.core.windows.net',
+  'productionresultssa6.blob.core.windows.net',
+  'productionresultssa7.blob.core.windows.net',
+  'productionresultssa8.blob.core.windows.net',
+  'productionresultssa9.blob.core.windows.net',
+  'productionresultssa10.blob.core.windows.net',
+  'productionresultssa11.blob.core.windows.net',
+  'productionresultssa12.blob.core.windows.net',
+  'productionresultssa13.blob.core.windows.net',
+  'productionresultssa14.blob.core.windows.net',
+  'productionresultssa15.blob.core.windows.net',
+  'productionresultssa16.blob.core.windows.net',
+  'productionresultssa17.blob.core.windows.net',
+  'productionresultssa18.blob.core.windows.net',
+  'productionresultssa19.blob.core.windows.net',
+]);
+const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';
+
+function validateSignedArtifactUrl(location: string | null): URL {
+  if (!location) throw new Error('missing si…23728 tokens truncated…(COLD_START_MESSAGE);
+        if (capturePressure?.nudge) capturePlanePrelude.push(buildCaptureNudgeMessage(capturePressure.mutations));
+        // Composes with (does not replace) the cold_start/capture_pressure prelude lines above --
+        // all three channel into the SAME capturePlanePrelude array/text block.
+        if (jitDoctrine.pitfalls.length) {
+          capturePlanePrelude.push(`DOCTRINE: ${jitDoctrine.pitfalls.join(' | ')}`);
         }
-        bodyDrained = true;
-        controller.close();
-      },
-      cancel() {
-        bodyCancelled = true;
-      },
-    }, { highWaterMark: 0 }), { status: 201 });
+        let text = buildTextContent(
+          { ...payload, data: result },
+          warning,
+          capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
+        );
 
-    const originalBufferFrom = Buffer.from;
-    let copiedOversizedChunk = false;
-    let result: Awaited<ReturnType<typeof callThroughRealMcpServer>>;
-    Buffer.from = ((value: unknown, ...args: unknown[]) => {
-      if (value === oversizedChunk) copiedOversizedChunk = true;
-      return Reflect.apply(originalBufferFrom, Buffer, [value, ...args]);
-    }) as typeof Buffer.from;
-    try {
-      result = await withStubbedFetch(
-        githubStub(requests, { tokenMintResponse }),
-        () => callThroughRealMcpServer(),
-      );
-    } finally {
-      Buffer.from = originalBufferFrom;
-    }
+        // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
+        // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
+        // Fail-open: offloadResult returns null on any error, so we keep the full inline result.
+        // Small results are untouched (backward-compatible).
+        //
+        // M365 EXCEPTION (2026-07-25): skip offloading entirely for M365 declarative-agent static-
+        // token callers (isM365StaticAuth()). Confirmed via direct reproduction that M365 Copilot's
+        // own tool-calling orchestrator does NOT reliably chain into gateway_fetch_result when it
+        // sees the offload stub -- it reports "no content available" instead, even when
+        // gateway_fetch_result is a declared, callable tool on that same agent (Matt hit this live on
+        // wake(), whose payload is routinely >40KB). Other engines (Claude Code, Hyperagent) are
+        // UNCHANGED -- they reliably use the two-hop pattern today, so this is scoped narrowly to the
+        // one consumer confirmed not to support it, not a global behavior change.
+        // The dedicated source may contain investor material. The shared result cache has no
+        // caller binding, so this principal must keep its payload inline, never in that cache.
+        // gateway_fetch_result is already the terminal, bounded pagination transport. Re-offloading
+        // one of its pages creates an unusable result-id chain instead of delivering that page.
+        if (
+          mayOffloadToolResult(canonicalName) &&
+          callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE &&
+          shouldOffload(text) &&
+          !isM365StaticAuth()
+        ) {
+          const off = await offloadResult(text, result, correlationId, callerHash);
+          if (off) {
+            text = off.preview;
+            // Bounded inline summary (pagination.itemCount/pageCount, shim page counts, array
+            // lengths) so a caller sizing a population never has to page to the tail (issue #291a).
+            const summary = extractResultSummary(result);
+            structured.result = {
+              _jit_offloaded: true,
+              result_id: off.resultId,
+              total_bytes: off.totalBytes,
+              ...(summary ? { summary } : {}),
+              note: 'Full payload offloaded to keep context small; call gateway_fetch_result(result_id).',
+            };
+          }
+        }
 
-    assert.equal(result.isError, true);
-    assert.equal(bodyPulled, true, 'the reader must inspect a streamed chunk without a declared length');
-    assert.equal(bodyDrained, false, 'the body must be cancelled rather than fully drained');
-    assert.equal(bodyCancelled, true, 'the oversized stream must be cancelled');
-    assert.equal(copiedOversizedChunk, false, 'the oversized chunk must be rejected before Buffer.from copies it');
-    assert.equal(requests.length, 1, 'no repository request should follow a rejected token response');
-  });
-
-  await t.test('malformed token JSON becomes a sanitized reader failure', async () => {
-    const requests: CapturedRequest[] = [];
-    const tokenMintResponse = new Response('malformed-token-provider-sentinel', { status: 201 });
-    const result = await withStubbedFetch(
-      githubStub(requests, { tokenMintResponse }),
-      () => callThroughRealMcpServer(),
-    );
-
-    assert.equal(result.isError, true);
-    assert.equal(JSON.stringify(result).includes('malformed-token-provider-sentinel'), false);
-    assert.equal(requests.length, 1);
-  });
-
-  await t.test('invalid token shape becomes a sanitized reader failure', async () => {
-    const requests: CapturedRequest[] = [];
-    const tokenMintResponse = new Response(JSON.stringify({
-      message: 'invalid-token-shape-sentinel',
-      token: null,
-      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-    }), { status: 201 });
-    const result = await withStubbedFetch(
-      githubStub(requests, { tokenMintResponse }),
-      () => callThroughRealMcpServer(),
-    );
-
-    assert.equal(result.isError, true);
-    assert.equal(JSON.stringify(result).includes('invalid-token-shape-sentinel'), false);
-    assert.equal(requests.length, 1);
-  });
-
-  await t.test('provider error body becomes a sanitized reader failure', async () => {
-    const requests: CapturedRequest[] = [];
-    const tokenMintResponse = new Response(JSON.stringify({ message: 'provider-error-body-sentinel' }), { status: 500 });
-    const result = await withStubbedFetch(
-      githubStub(requests, { tokenMintResponse }),
-      () => callThroughRealMcpServer(),
-    );
-
-    assert.equal(result.isError, true);
-    assert.equal(JSON.stringify(result).includes('provider-error-body-sentinel'), false);
-    assert.equal(requests.length, 1);
-  });
-
-  await t.test('valid bounded token response allows the fixed receipt read', async () => {
-    const requests: CapturedRequest[] = [];
-    const result = await withStubbedFetch(githubStub(requests), () => callThroughRealMcpServer());
-
-    assert.equal(result.isError, undefined);
-    assert.equal(requests.filter((request) => request.url.endsWith('/app/installations/789/access_tokens')).length, 1);
-    assert.ok(requests.some((request) =>
-      request.url === `https://api.github.com/repos/${REPOSITORY}` && request.authorization === 'Bearer ghs_test_token'));
-  });
-});
-
-test('pinned observation read verifies provenance, returns only sanitized structure, and drops auth at the signed download boundary', async () => {
-  const requests: CapturedRequest[] = [];
-  const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
-  const digest = createHash('sha256').update(archive).digest('hex');
-  const artifact = makeArtifact({ digest: `sha256:${digest}`, size_in_bytes: archive.length });
-  const result = await withStubbedFetch(githubStub(requests, { archive, artifact }), () => callThroughRealMcpServer());
-
-  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
-  const output = result.structuredContent?.result;
-  assert.equal(output.schema, 'otchealth-github-managed-graphrag-observation-validation-v1');
-  assert.equal(output.run_id, RUN_ID);
-  assert.equal(output.artifact_id, ARTIFACT_ID);
-  assert.equal(output.knowledge_base_binding_verified, true);
-  assert.equal(output.source_id, SOURCE_ID);
-  assert.equal(output.ingestion_job_id, INGESTION_JOB_ID);
-  assert.equal(output.provider_status, 'COMPLETE');
-  assert.equal(output.terminal, true);
-  assert.deepEqual(output.terminal_statistics, {
-    numberOfDocumentsScanned: 112,
-    numberOfNewDocumentsIndexed: 109,
-    numberOfModifiedDocumentsIndexed: 0,
-    numberOfDocumentsDeleted: 0,
-    numberOfDocumentsFailed: 3,
-  });
-  assert.equal(output.progress_statistics, null);
-  assert.equal(output.workflow_provenance_verified, true);
-  assert.equal(output.archive_digest_verification, 'verified');
-  assert.equal(output.receipt_sha256.length, 64);
-  assert.equal(output.archive_sha256.length, 64);
-  assert.equal(JSON.stringify(output).includes('mock-sensitive-url'), false);
-  assert.equal(Object.hasOwn(output, 'provider_updated_at'), false);
-  assert.equal(output.provider_updated_at_present, true);
-  assert.equal(JSON.stringify(output).includes('raw'), false);
-
-  const archiveRequest = requests.find((request) => request.url === `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip`);
-  const signedDownloadRequest = requests.find((request) => request.url === DOWNLOAD_URL);
-  assert.ok(archiveRequest?.authorization?.startsWith('Bearer '), 'the API archive request must use the installation token');
-  assert.ok(signedDownloadRequest, 'the GitHub-provided signed URL must be fetched');
-  assert.equal(signedDownloadRequest.authorization, null, 'the GitHub installation token must not cross the redirect boundary');
-  assert.ok(requests.some((request) => request.url.includes(`/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml?ref=${HEAD_SHA}`)));
-  assert.ok(requests.some((request) => request.url.includes(`/contents/scripts/observe_managed_graphrag_company_fifth_source.py?ref=${HEAD_SHA}`)));
-});
-
-test('pinned observation read explicitly records when GitHub does not provide an archive digest', async () => {
-  const requests: CapturedRequest[] = [];
-  const result = await withStubbedFetch(githubStub(requests, { artifact: makeArtifact({ digest: null }) }), () => callThroughRealMcpServer());
-  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
-  assert.equal(result.structuredContent?.result.archive_digest_verification, 'not_provided');
-});
-
-test('pinned observation read permits the fixed GitHub Actions artifact storage redirect without forwarding auth', async () => {
-  const requests: CapturedRequest[] = [];
-  const result = await withStubbedFetch(
-    githubStub(requests, { downloadLocation: GITHUB_ACTIONS_STORAGE_URL }),
-    () => callThroughRealMcpServer(),
-  );
-
-  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
-  const storageRequest = requests.find((request) => request.url === GITHUB_ACTIONS_STORAGE_URL);
-  assert.ok(storageRequest, 'the exact GitHub Actions artifact storage URL should be fetched');
-  assert.equal(storageRequest.authorization, null, 'the GitHub installation token must not cross the storage redirect boundary');
-  assert.equal(JSON.stringify(result.structuredContent).includes('mock-sensitive-url'), false, 'the signed storage URL must not appear in the receipt');
-});
-
-test('pinned observation read permits a known nonzero GitHub Actions storage shard', async () => {
-  const requests: CapturedRequest[] = [];
-  const result = await withStubbedFetch(
-    githubStub(requests, { downloadLocation: GITHUB_ACTIONS_STORAGE_URL_18 }),
-    () => callThroughRealMcpServer(),
-  );
-
-  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
-  const storageRequest = requests.find((request) => request.url === GITHUB_ACTIONS_STORAGE_URL_18);
-  assert.ok(storageRequest, 'the known shard-18 artifact URL should be fetched');
-  assert.equal(storageRequest.authorization, null, 'the GitHub installation token must not cross the storage redirect boundary');
-});
-
-test('pinned observation read validates a bounded deflated single-member ZIP with a data descriptor', async () => {
-  const requests: CapturedRequest[] = [];
-  const archive = zipStore([{
-    name: 'receipt.json',
-    data: Buffer.from(makeReceipt(), 'utf8'),
-    method: 'deflate',
-    dataDescriptor: true,
-  }]);
-  const digest = createHash('sha256').update(archive).digest('hex');
-  const artifact = makeArtifact({ digest: `sha256:${digest}`, size_in_bytes: archive.length });
-  const result = await withStubbedFetch(githubStub(requests, { archive, artifact }), () => callThroughRealMcpServer());
-  assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
-  assert.equal(result.structuredContent?.result.archive_digest_verification, 'verified');
-  assert.equal(result.structuredContent?.result.terminal, true);
-});
-
-test('pinned observation read refuses wrong run provenance before downloading any archive', async () => {
-  const requests: CapturedRequest[] = [];
-  const result = await withStubbedFetch(
-    githubStub(requests, { run: makeRun({ head_sha: '0'.repeat(40) }) }),
-    () => callThroughRealMcpServer(),
-  );
-
-  assert.equal(result.isError, true);
-  assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
-  assert.equal(JSON.stringify(result).includes(HEAD_SHA), false);
-});
-
-test('pinned observation read refuses a changed producer source or artifact run binding', async (t) => {
-  await t.test('producer blob changed', async () => {
-    const requests: CapturedRequest[] = [];
-    const result = await withStubbedFetch(
-      githubStub(requests, { producerBlobSha: '0'.repeat(40) }),
-      () => callThroughRealMcpServer(),
-    );
-    assert.equal(result.isError, true);
-    assert.equal(requests.some((request) => request.url.includes(`/actions/artifacts/${ARTIFACT_ID}`)), false);
-  });
-
-  await t.test('artifact bound to another head', async () => {
-    const requests: CapturedRequest[] = [];
-    const artifact = makeArtifact({
-      workflow_run: {
-        id: RUN_ID,
-        repository_id: REPOSITORY_ID,
-        head_repository_id: REPOSITORY_ID,
-        head_branch: 'main',
-        head_sha: '0'.repeat(40),
-      },
-    });
-    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-    assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
-  });
-});
-
-test('pinned observation read refuses expired artifacts and mismatching GitHub archive digests', async (t) => {
-  await t.test('expired artifact', async () => {
-    const requests: CapturedRequest[] = [];
-    const expired = makeArtifact({ expired: true, expires_at: '2020-01-01T00:00:00Z' });
-    const result = await withStubbedFetch(githubStub(requests, { artifact: expired }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-    assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
-  });
-
-  await t.test('digest mismatch', async () => {
-    const requests: CapturedRequest[] = [];
-    const artifact = makeArtifact({ digest: `sha256:${'0'.repeat(64)}` });
-    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-    assert.equal(JSON.stringify(result).includes('0'.repeat(64)), false);
-  });
-
-  await t.test('malformed digest', async () => {
-    const requests: CapturedRequest[] = [];
-    const artifact = makeArtifact({ digest: 'md5:abcd' });
-    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  await t.test('artifact metadata size above the archive cap', async () => {
-    const requests: CapturedRequest[] = [];
-    const artifact = makeArtifact({ size_in_bytes: 1024 * 1024 + 1 });
-    const result = await withStubbedFetch(githubStub(requests, { artifact }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-    assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
-  });
-});
-
-test('pinned observation read rejects any archive with extra or unsafe members', async (t) => {
-  await t.test('extra member', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = zipStore([
-      { name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') },
-      { name: 'private.txt', data: Buffer.from('never return', 'utf8') },
-    ]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-    assert.equal(JSON.stringify(result).includes('never return'), false);
-  });
-
-  await t.test('unsafe member path', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = zipStore([{ name: '../receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  await t.test('archive byte limit', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = Buffer.alloc(1024 * 1024 + 1);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  await t.test('single oversized response chunk is rejected before copying', async () => {
-    const requests: CapturedRequest[] = [];
-    const oversizedChunk = new Uint8Array(MAX_GRAPHRAG_ARCHIVE_BYTES + 1);
-    const stub = githubStub(requests, { downloadChunk: oversizedChunk });
-    const originalBufferFrom = Buffer.from;
-    let copiedOversizedChunk = false;
-    let result: Awaited<ReturnType<typeof callThroughRealMcpServer>>;
-
-    Buffer.from = ((value: unknown, ...args: unknown[]) => {
-      if (value === oversizedChunk) {
-        copiedOversizedChunk = true;
-        throw new Error('oversized response chunk reached Buffer.from');
+        return {
+          content: [{ type: 'text', text }],
+          structuredContent: structured,
+        };
+      } catch (err) {
+        const e = err as Error;
+        let errorCode = 'tool_error';
+        let nextStep = 'Check server logs for the correlation_id.';
+        let upstreamStatus: number | undefined;
+        const upstreamErr = parseUpstreamToolError(err);
+        if (upstreamErr) {
+          errorCode = upstreamErr.code;
+          nextStep = upstreamErr.nextStep;
+          upstreamStatus = upstreamErr.status;
+        }
+        const errPayload: Record<string, unknown> = {
+          code: errorCode,
+          message: e.message,
+          next_step: nextStep,
+        };
+        if (upstreamStatus !== undefined) errPayload.upstream_status = upstreamStatus;
+        const internalDiagnostic = projectPinnedObservationDiagnostic(err, callerAgent, correlationId);
+        if (internalDiagnostic) errPayload.internal_diagnostic = internalDiagnostic;
+        logToolEnd({
+          correlation_id: correlationId,
+          tool: def.name,
+          caller_hash: callerHash,
+          outcome: 'error',
+          latency_ms: Date.now() - started,
+          error_code: errorCode,
+          error_message: e.message,
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Tool ${def.name} failed: ${e.message}\nNext step: ${nextStep}\ncorrelation_id: ${correlationId}`,
+            },
+          ],
+          structuredContent: {
+            result: null,
+            compliance_warning: null,
+            correlation_id: correlationId,
+            dry_run: dryRun,
+            error: errPayload,
+          },
+        };
       }
-      return Reflect.apply(originalBufferFrom, Buffer, [value, ...args]);
-    }) as typeof Buffer.from;
-    try {
-      result = await withStubbedFetch(stub, () => callThroughRealMcpServer());
-    } finally {
-      Buffer.from = originalBufferFrom;
+    },
+  );
+
+  // M365 PREFIX-STRIP COMPAT SHIM (2026-07-26, WIDENED + HARDENED 2026-07-28): M365 Copilot's own
+  // tool-calling orchestrator has been observed splitting a registered tool name on its first
+  // underscore and calling only the remainder -- confirmed precedent in memory/recall-alias.ts
+  // (2026-07-25: "memory_recall" -> "recall"), then "github_repo_get" -> "repo_get" and
+  // "depot_run_list" -> "run_list" (2026-07-26). Originally scoped to just the github_/depot_
+  // prefixes. WIDENED 2026-07-28 after a live Developer-agent diagnostic run (Matt, in production
+  // M365 Copilot) hit the SAME failure on "catalog_probe" -> "probe" and "developer_wake_lite" ->
+  // "wake_lite" -- proving the behavior is generic to ANY underscored tool name.
+  //
+  // THIS BLOCK ONLY COLLECTS CANDIDATES -- it never registers an alias directly. See
+  // finalizeM365Aliases() above for why (a single-pass "first tool through wins" policy was found,
+  // in review, to be able to SILENTLY MIS-ROUTE a call to the wrong tool's handler when 3+ tools
+  // collide on the same stripped name, e.g. n8n_workflow_get / github_workflow_get /
+  // depot_workflow_get all -> "workflow_get" -- not merely leave the loser unreachable). Every
+  // primary (non-alias) registration is also tracked in primaryNamesFor() UNCONDITIONALLY (not just
+  // for M365 requests) so finalizeM365Aliases() can exclude any candidate name a REAL tool already
+  // owns (e.g. "search"/"fetch"/"recall") regardless of registration order.
+  //
+  // SCOPE (review finding): candidate collection itself is gated behind isM365StaticAuth() -- an
+  // unconditional version would collect (and eventually finalize) a compatibility alias for nearly
+  // the whole ~850-tool catalog on EVERY request (Claude Code, Hyperagent, connector clients too),
+  // materially inflating tools/list size and prompt-token cost for callers that never needed M365
+  // compatibility. Each per-request McpServer instance is stateless (server/mcp.ts), so this
+  // correctly scopes the extra registrations to only the M365 static-auth request that needs them.
+  //
+  // GOVERNANCE BYPASS (review finding, the security one): an alias is a recursive registerTool()
+  // call with `{...def, name: aliasName}`, so EVERY name-pattern-based gate inside the handler
+  // (requiredRoleFor, lane curation, JIT doctrine) was evaluating against the STRIPPED name, not the
+  // real tool -- e.g. "containerapp_get" (alias of the CTO-only azure_containerapp_get) doesn't
+  // match the `azure_*` governance pattern, so ANY authenticated lane could call it unrestricted.
+  // Fixed by passing `canonicalName: def.name` into the alias's def (see ToolDefinition's doc
+  // comment) so those gates evaluate the real tool's identity while `name` stays only the SDK
+  // lookup key / what the caller actually invokes.
+  if (!isAlias) {
+    primaryNamesFor(server).add(def.name);
+    if (isM365StaticAuth()) {
+      const stripped = /^[^_]+_(.+)$/.exec(def.name);
+      if (stripped) {
+        const aliasName = stripped[1];
+        const bucket = aliasCandidatesFor(server);
+        const list = bucket.get(aliasName) ?? [];
+        // Type erasure to the WeakMap's fixed shape is safe here: def is only ever forwarded
+        // opaquely into a later registerTool() call (finalizeM365Aliases), never inspected by
+        // field-specific generic logic.
+        list.push({ canonicalName: def.name, def: def as unknown as ToolDefinition<ZodRawShape, ZodRawShape> });
+        bucket.set(aliasName, list);
+        // DEDUP FIX (2026-08-02): remember this primary's RegisteredTool handle so
+        // finalizeM365Aliases() can `.remove()` it once it knows whether `aliasName` actually
+        // ended up unambiguous (only known after every tool in this request has registered). See
+        // primaryHandlesByServer's header comment above for why this matters.
+        primaryHandlesFor(server).set(def.name, registeredHandle);
+      }
     }
-
-    assert.equal(result.isError, true);
-    assert.ok(requests.some((request) => request.url === DOWNLOAD_URL), 'the test must reach the streamed archive response');
-    assert.equal(copiedOversizedChunk, false, 'the oversized chunk must be rejected before Buffer.from copies it');
-  });
-
-  await t.test('receipt extraction byte limit', async () => {
-    const requests: CapturedRequest[] = [];
-    const oversized = Buffer.alloc(32 * 1024 + 1, 0x61);
-    const archive = zipStore([{ name: 'receipt.json', data: oversized }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  for (const [name, downloadLocation] of [
-    ['untrusted public host', 'https://evil.example/download?sig=do-not-follow'],
-    ['unlisted GitHub Actions subdomain', 'https://evil.actions.githubusercontent.com/download?sig=do-not-follow'],
-    ['unrelated blob account', 'https://example.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
-    ['out-of-range GitHub Actions storage shard', 'https://productionresultssa20.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
-    ['GitHub storage host outside artifact path', 'https://productionresultssa0.blob.core.windows.net/company-data/fixture.zip?sig=do-not-follow'],
-    ['non-HTTPS GitHub storage URL', 'http://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
-    ['credentialed GitHub storage URL', 'https://fixture-user@productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
-    ['password-bearing GitHub storage URL', 'https://fixture-user:fixture-pass@productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
-    ['nonstandard GitHub storage port', 'https://productionresultssa0.blob.core.windows.net:444/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow'],
-    ['fragment on GitHub storage URL', 'https://productionresultssa0.blob.core.windows.net/actions-results/35170671551/10476469182/fixture.zip?sig=do-not-follow#fragment'],
-  ] as const) {
-    await t.test(name, async () => {
-      const requests: CapturedRequest[] = [];
-      const result = await withStubbedFetch(
-        githubStub(requests, { downloadLocation }),
-        () => callThroughRealMcpServer(),
-      );
-      assert.equal(result.isError, true);
-      assert.equal(requests.some((request) => request.url === downloadLocation), false, 'untrusted storage URL must not be fetched');
-      assert.equal(JSON.stringify(result).includes('do-not-follow'), false, 'the rejected signed URL must not be exposed');
-    });
   }
-});
+}
 
-test('pinned observation read rejects duplicate JSON keys and nonterminal/incorrectly bound receipts cannot imply terminal success', async (t) => {
-  await t.test('duplicate schema key', async () => {
-    const requests: CapturedRequest[] = [];
-    const raw = makeReceipt().replace('"schema":"managed-graphrag-company-fifth-source-provider-observation-v2"', '"schema":"wrong","schema":"managed-graphrag-company-fifth-source-provider-observation-v2"');
-    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(raw, 'utf8') }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  await t.test('source mismatch', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({ source_id: 'AAAAAAAAAA' }), 'utf8') }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  await t.test('unrecognized top-level field', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({ document_text: 'must not pass through' }), 'utf8') }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-    assert.equal(JSON.stringify(result).includes('must not pass through'), false);
-  });
-
-  await t.test('boolean counter is not accepted as an integer', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({
-      terminal_statistics: {
-        numberOfDocumentsScanned: 112,
-        numberOfNewDocumentsIndexed: 109,
-        numberOfModifiedDocumentsIndexed: 0,
-        numberOfDocumentsDeleted: 0,
-        numberOfDocumentsFailed: true,
-      },
-    }), 'utf8') }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  await t.test('terminal flag must agree with provider terminal status', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({ terminal: false }), 'utf8') }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.equal(result.isError, true);
-  });
-
-  await t.test('nonterminal observation', async () => {
-    const requests: CapturedRequest[] = [];
-    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt({
-      provider_status: 'IN_PROGRESS',
-      terminal: false,
-      terminal_statistics: null,
-      progress_statistics: { numberOfDocumentsScanned: 17 },
-    }), 'utf8') }]);
-    const result = await withStubbedFetch(githubStub(requests, { archive }), () => callThroughRealMcpServer());
-    assert.ok(!result.isError, `expected the valid progress observation to be represented, got ${JSON.stringify(result)}`);
-    assert.equal(result.structuredContent?.result.terminal, false);
-    assert.equal(result.structuredContent?.result.provider_status, 'NONTERMINAL');
-    assert.deepEqual(result.structuredContent?.result.progress_statistics, { numberOfDocumentsScanned: 17 });
-    assert.notEqual(result.structuredContent?.result.status, 'terminal_observation_validated');
-  });
-});
-
-test('pinned observation reader is CTO-only', async () => {
-  const requests: CapturedRequest[] = [];
-  const result = await withStubbedFetch(githubStub(requests), () => callThroughRealMcpServer({}, 'developer'));
-  assert.equal(result.isError, true);
-  assert.equal(requests.length, 0, 'role refusal must happen before GitHub API access');
-});
-
-test('pinned observation failure exposes only an allowlisted stage to CTO', async () => {
-  const requests: CapturedRequest[] = [];
-  const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
-  const artifact = makeArtifact({
-    digest: `sha256:${'0'.repeat(64)}`,
-    size_in_bytes: archive.length,
-    provider_metadata_sentinel: 'synthetic-provider-metadata-must-not-leak',
-  });
-  const result = await withStubbedFetch(
-    githubStub(requests, { archive, artifact }),
-    () => callThroughRealMcpServer(),
-  );
-
-  assert.equal(result.isError, true);
-  const correlationId = result.structuredContent?.correlation_id;
-  assert.equal(typeof correlationId, 'string');
-  assert.equal(result.structuredContent?.error?.code, 'github_observation_receipt_unverified');
-  assert.equal(result.structuredContent?.error?.message, 'The pinned GraphRAG observation receipt could not be verified.');
-  assert.deepEqual(result.structuredContent?.error?.internal_diagnostic, {
-    type: 'github_observation_receipt',
-    stage: 'archive_digest',
-    correlation_id: correlationId,
-  });
-  assert.equal(result.content[0]?.text?.includes('archive_digest'), false, 'user-facing text must remain generic');
-  assert.equal(JSON.stringify(result).includes('synthetic-provider-metadata-must-not-leak'), false);
-  assert.equal(JSON.stringify(result).includes('mock-sensitive-url'), false);
-  assert.equal(JSON.stringify(result).includes('ghs_test_token'), false);
-  assert.ok(requests.some((request) => request.url === DOWNLOAD_URL), 'the validated receipt ZIP must be downloaded before digest failure');
-});
-
-test('non-CTO failure responses never include pinned observation diagnostics', async () => {
-  const requests: CapturedRequest[] = [];
-  const artifact = makeArtifact({
-    name: 'synthetic-provider-metadata-must-not-leak',
-    provider_metadata_sentinel: 'synthetic-provider-metadata-must-not-leak',
-  });
-  const result = await withStubbedFetch(
-    githubStub(requests, { artifact }),
-    () => callThroughRealMcpServer({}, 'developer'),
-  );
-
-  assert.equal(result.isError, true);
-  assert.equal(typeof result.structuredContent?.correlation_id, 'string');
-  assert.equal(result.structuredContent?.error?.internal_diagnostic, undefined);
-  assert.equal(JSON.stringify(result).includes('archive_digest'), false);
-  assert.equal(JSON.stringify(result).includes('synthetic-provider-metadata-must-not-leak'), false);
-  assert.equal(requests.length, 0, 'non-CTO role refusal must happen before GitHub API access');
-});
+export type CallerHashProvider = () => string;
