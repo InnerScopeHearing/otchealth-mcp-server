@@ -621,6 +621,8 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
    */
   connectorInputShapeByLane?: Readonly<Record<string, Partial<Shape>>>;
   outputShape: Output;
+  /** Maximum UTF-8 bytes for the complete inline MCP response, including text and structured content. */
+  maxResponseBytes?: number;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
   redactInputForLog?: (input: Record<string, unknown>) => unknown;
@@ -1377,6 +1379,22 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           warning,
           capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
         );
+
+        // Per-tool response ceiling. Measure the inline success envelope before JIT handling, so a
+        // constrained tool fails closed instead of persisting an oversized result for later retrieval.
+        // Tools without maxResponseBytes keep the existing response behavior.
+        if (def.maxResponseBytes !== undefined) {
+          const serializedResponse = JSON.stringify({
+            content: [{ type: 'text', text }],
+            structuredContent: structured,
+          });
+          if (serializedResponse === undefined) {
+            throw new Error(`Tool ${def.name} response could not be sized safely.`);
+          }
+          if (Buffer.byteLength(serializedResponse, 'utf8') > def.maxResponseBytes) {
+            throw new Error(`Tool ${def.name} response exceeded its configured size limit.`);
+          }
+        }
 
         // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
         // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
