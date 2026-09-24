@@ -1,27 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Satisfy loadEnv()'s required vars (foundry.ts's cfg() goes through loadEnv), then configure
-// both Foundry and Azure AI Search so agenticRecall's real code paths (not the 'unconfigured'
-// early return) run.
+// Satisfy loadEnv()'s required vars, explicitly select the supported OpenAI embeddings route,
+// and configure Azure Search so agenticRecall's real code paths run. Provider I/O is stubbed
+// below, so this fixture never contacts either service.
 process.env.CIO_SITE_ID ||= 'test';
 process.env.CIO_TRACK_KEY ||= 'test';
 process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
-// Pin the pre-2026-08-28 backend defaults (env.ts's SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
-// LLM_PROVIDER/WEB_SEARCH_PROVIDER/BLOB_BACKEND/STATE_BACKEND now default to their AWS-native
-// replacements) so this file keeps exercising exactly the Azure/Foundry/Cosmos code path it was
-// written for -- those paths stay inert-but-present and still need this coverage.
+// Pin the backend used by this fixture. Foundry is retired, so positive embedding behavior is
+// exercised through OpenAI with a synthetic key and a local fetch stub.
 process.env.STATE_BACKEND ||= 'cosmos';
 process.env.BLOB_BACKEND ||= 'azure';
-process.env.SEARCH_BACKEND ||= 'azure';
-process.env.LLM_PROVIDER ||= 'foundry';
-process.env.EMBEDDINGS_PROVIDER ||= 'foundry';
+process.env.SEARCH_BACKEND = 'azure';
+process.env.LLM_PROVIDER = 'openai';
+process.env.EMBEDDINGS_PROVIDER = 'openai';
+process.env.OPENAI_API_KEY = 'synthetic-test-key';
 process.env.WEB_SEARCH_PROVIDER ||= 'azure';
-process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
-process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
@@ -43,7 +40,7 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
 }
 
 function isEmbeddingsUrl(url: string): boolean {
-  return url.includes('/openai/deployments/') && url.includes('/embeddings');
+  return url.includes('/v1/embeddings') || (url.includes('/openai/deployments/') && url.includes('/embeddings'));
 }
 
 function isSearchUrl(url: string): boolean {

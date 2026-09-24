@@ -1,27 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Satisfy loadEnv()'s required vars, then configure both Foundry and Azure AI Search so the
-// integration-style tests below can exercise deepRetrieve's REAL code paths (not just the
-// 'unconfigured' early return). Mirrors src/memory/agentic.test.ts / src/azure/search.test.ts.
+// Satisfy loadEnv()'s required vars, explicitly select the supported OpenAI chat and embeddings
+// routes, and configure Azure Search so the integration-style tests below exercise deepRetrieve's
+// real code paths. All provider I/O is stubbed below, so this fixture never contacts either service.
 process.env.CIO_SITE_ID ||= 'test';
 process.env.CIO_TRACK_KEY ||= 'test';
 process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
-// Pin the pre-2026-08-28 backend defaults (env.ts's SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
-// LLM_PROVIDER/WEB_SEARCH_PROVIDER/BLOB_BACKEND/STATE_BACKEND now default to their AWS-native
-// replacements) so this file keeps exercising exactly the Azure/Foundry/Cosmos code path it was
-// written for -- those paths stay inert-but-present and still need this coverage.
+// Pin the backend used by this fixture. Foundry is retired, so positive chat and embedding
+// behavior is exercised through OpenAI with a synthetic key and a local fetch stub.
 process.env.STATE_BACKEND ||= 'cosmos';
 process.env.BLOB_BACKEND ||= 'azure';
-process.env.SEARCH_BACKEND ||= 'azure';
-process.env.LLM_PROVIDER ||= 'foundry';
-process.env.EMBEDDINGS_PROVIDER ||= 'foundry';
+process.env.SEARCH_BACKEND = 'azure';
+process.env.LLM_PROVIDER = 'openai';
+process.env.EMBEDDINGS_PROVIDER = 'openai';
+process.env.OPENAI_API_KEY = 'synthetic-test-key';
 process.env.WEB_SEARCH_PROVIDER ||= 'azure';
-process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
-process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
@@ -61,10 +58,10 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
 }
 
 function isEmbeddingsUrl(url: string): boolean {
-  return url.includes('/openai/deployments/') && url.includes('/embeddings');
+  return url.includes('/v1/embeddings') || (url.includes('/openai/deployments/') && url.includes('/embeddings'));
 }
 function isChatUrl(url: string): boolean {
-  return url.includes('/openai/deployments/') && url.includes('/chat/completions');
+  return url.includes('/chat/completions');
 }
 function isSearchUrl(url: string): boolean {
   return url.includes('/indexes/') && url.includes('/docs/search');
@@ -561,11 +558,9 @@ test('deepRetrieve SECURITY: Content Safety retired -- enforce mode never calls 
   if (prev.key !== undefined) process.env.CONTENT_SAFETY_KEY = prev.key; else delete process.env.CONTENT_SAFETY_KEY;
 });
 
-test('deepRetrieve FAIL-OPEN: Foundry unconfigured (plan/refine/synth all skip) still returns real search hits', async () => {
-  // Reset the module's cached env by using a fresh process.env snapshot is not possible mid-process
-  // (loadEnv caches), so instead simulate "Foundry down" by making every chat/embeddings call fail --
-  // this exercises the SAME inline fail-open branches (chat() throwing) as an unconfigured Foundry
-  // would via foundryConfigured() === false, without fighting the module-level env cache.
+test('deepRetrieve FAIL-OPEN: OpenAI chat and embeddings unavailable (plan/refine/synth all skip) still returns real search hits', async () => {
+  // Simulate provider unavailability with the local fetch stub. This exercises the fail-open
+  // branches without contacting OpenAI or changing the module's cached provider configuration.
   await withStubbedFetch(
     (async (url: string | URL) => {
       const u = String(url);
