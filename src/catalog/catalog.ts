@@ -71,7 +71,7 @@ export interface ServiceInfo {
   description: string;
   ring: 'non-phi' | 'phi-carved-out';
   auth: string;
-  status: 'wired' | 'planned';
+  status: 'wired' | 'planned' | 'retired';
   /** Capabilities the service offers that are NOT yet wired as gateway tools. */
   available: string[];
   /** Governance rule for this service's actions (who may EXECUTE), surfaced in the master catalog. */
@@ -158,9 +158,9 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     available: [], rule: 'Only PUBLIC personas served; exec personas (cto/cfo) withheld.',
   },
   docintel: {
-    description: 'Azure Document Intelligence: invoice (CFO) + contract (CLO) analysis. Non-BAA — never PHI.',
-    ring: 'non-phi', auth: 'DOCINTEL_ENDPOINT / DOCINTEL_KEY', status: 'wired',
-    available: [], rule: 'Never send PHI/MedReview documents through this gateway.',
+    description: 'Retired Azure Document Intelligence adapter. Historical invoice and contract tools remain source-visible for reconciliation but fail closed before provider access.',
+    ring: 'non-phi', auth: 'none, retired', status: 'retired',
+    available: [], rule: 'Fail closed: no Azure Document Intelligence call is permitted. Use an explicitly approved AWS replacement when one is implemented.',
   },
   kb: {
     description: 'Fleet knowledge retrieval through SEARCH_BACKEND (OpenSearch in the AWS estate; commons open; finance/legal ring-gated).',
@@ -173,13 +173,13 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     available: [],
   },
   shield: {
-    description: 'Azure AI Content Safety Prompt Shields (jailbreak / indirect-injection defense).',
-    ring: 'non-phi', auth: 'CONTENT_SAFETY_ENDPOINT / CONTENT_SAFETY_KEY', status: 'wired',
+    description: 'Prompt Shields through Amazon Bedrock Guardrails. Azure Content Safety is retired and is never called.',
+    ring: 'non-phi', auth: 'GUARDRAIL_PROVIDER=bedrock / BEDROCK_GUARDRAIL_ID', status: 'wired',
     available: [],
   },
   groundedness: {
-    description: 'Azure AI Content Safety groundedness detection (anti-hallucination check).',
-    ring: 'non-phi', auth: 'CONTENT_SAFETY_ENDPOINT / CONTENT_SAFETY_KEY', status: 'wired',
+    description: 'Groundedness through Amazon Bedrock Guardrails contextual grounding. Azure Content Safety is retired and is never called.',
+    ring: 'non-phi', auth: 'GUARDRAIL_PROVIDER=bedrock / BEDROCK_GUARDRAIL_ID', status: 'wired',
     available: [],
   },
   elevenlabs: {

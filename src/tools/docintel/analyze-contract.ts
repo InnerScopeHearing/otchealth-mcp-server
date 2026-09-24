@@ -1,9 +1,8 @@
 /**
  * MCP tool: docintel_analyze_contract
  *
- * Required env vars (read by src/docintel/client.ts):
- *   DOCINTEL_ENDPOINT  – Azure Document Intelligence endpoint
- *   DOCINTEL_KEY       – Azure subscription key
+ * Retired compatibility adapter. Former provider configuration is obsolete and
+ * is not read. Calls fail closed before any provider request.
  *
  * PHI / RING SAFETY WARNING:
  *   This gateway is NOT covered by a BAA. NEVER route PHI, MedReview
@@ -51,10 +50,10 @@ export function registerDocintelAnalyzeContract(server: McpServer, callerHash: C
     name: 'docintel_analyze_contract',
     category: 'read',
     annotations: {
-      title: 'Analyze contract with Azure Document Intelligence',
+      title: 'Retired contract analysis adapter',
       description:
-        'Extracts structured fields from a commercial contract (parties, dates, duration, ' +
-        'key clauses) using Azure Document Intelligence prebuilt-contract model. ' +
+        'Historical contract extraction is retired. This compatibility adapter fails closed before provider access ' +
+        'and returns a neutral retired result. ' +
         'For CLO agent use only. PHI and MedReview documents are PROHIBITED — ' +
         'this gateway has no BAA. Output stays on trusted engines; never auto-published. ' +
         'Supply either urlSource or base64Source.',

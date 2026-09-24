@@ -36,7 +36,7 @@
       ],
       "parameters": {
         "language": "javaScript",
-        "jsCode": "const crypto = require('crypto');\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET missing');\nconst h = $json.headers || {};\nconst raw = $binary?.data?.data ? Buffer.from($binary.data.data, 'base64').toString('utf8') : JSON.stringify($json.body || {});\nconst expected = crypto.createHmac('sha256', secret).update(raw, 'utf8').digest('hex');\nconst supplied = h['x-signature-sha256'] || h['X-Signature-Sha256'];\nif (!supplied || supplied !== expected) return [{ json: { authorized: false } }];\nconst body = $json.body || JSON.parse(raw);\nconst companyLanes = new Set(['cto','developer','coo','cro','cfo','clo','exec']);\nif (!body.action || !['brain_search','checkpoint'].includes(body.action) || typeof body.idempotency_key !== 'string' || !body.request || !companyLanes.has(body.caller_agent) || JSON.stringify(body).toLowerCase().includes('clo-personal')) return [{ json: { authorized: false, reason: 'invalid_action_request' } }];\nreturn [{ json: { authorized: true, body, correlation_id: h['x-correlation-id'], caller_hash: h['x-caller-hash'] } }];"
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET missing');\nconst h = $json.headers || {};\nconst raw = $binary?.data?.data ? Buffer.from($binary.data.data, 'base64').toString('utf8') : JSON.stringify($json.body || {});\nconst expected = crypto.createHmac('sha256', secret).update(raw, 'utf8').digest('hex');\nconst supplied = h['x-signature-sha256'] || h['X-Signature-Sha256'];\nif (!supplied || supplied !== expected) return [{ json: { authorized: false } }];\nconst body = $json.body || JSON.parse(raw);\nconst companyLanes = new Set(['cto','developer','coo','cro','cfo','clo','exec']);\nif (!body.action || !['brain_search','checkpoint'].includes(body.action) || typeof body.idempotency_key !== 'string' || !body.request || !companyLanes.has(body.caller_agent) || JSON.stringify(body).toLowerCase().includes('clo-personal')) return [{ json: { authorized: false, reason: 'invalid_action_request' } }];\nconst job_payload = { action: body.action, request: body.request, idempotency_key: body.idempotency_key, correlation_id: h['x-correlation-id'], caller_hash: h['x-caller-hash'], caller_agent: body.caller_agent };\nreturn [{ json: { authorized: true, body, job_payload, correlation_id: h['x-correlation-id'], caller_hash: h['x-caller-hash'] } }];"
       }
     },
     {
@@ -55,7 +55,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ action: $('Verify HMAC').first().json.body.action, request: $('Verify HMAC').first().json.body.request, idempotency_key: $('Verify HMAC').first().json.body.idempotency_key, correlation_id: $('Verify HMAC').first().json.correlation_id, caller_hash: $('Verify HMAC').first().json.caller_hash, caller_agent: $('Verify HMAC').first().json.body.caller_agent }) }}"
+        "jsonBody": "={{ $json.job_payload }}"
       },
       "credentials": {
         "httpHeaderAuth": {
@@ -138,12 +138,26 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ job_id: $('Persist Opaque Job').first().json.result.job_id, caller_hash: $('Verify HMAC').first().json.caller_hash }) }}"
+        "jsonBody": "={{ $json }}"
       },
       "credentials": {
         "httpHeaderAuth": {
           "name": "OTCHealth Gateway Service"
         }
+      }
+    },
+    {
+      "id": "prepare-run-payload",
+      "name": "Prepare Run Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        220
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const job_id = $json?.result?.job_id;\nconst caller_hash = $('Verify HMAC').first().json.caller_hash;\nif (typeof job_id !== 'string' || typeof caller_hash !== 'string') throw new Error('missing_chat_action_run_payload');\nreturn [{ json: { job_id, caller_hash } }];"
       }
     }
   ],
@@ -163,7 +177,7 @@
       "main": [
         [
           {
-            "node": "Run Queued Action",
+            "node": "Prepare Run Payload",
             "type": "main",
             "index": 0
           }
@@ -172,11 +186,13 @@
     },
     "Verify HMAC": {
       "main": [
-        {
-          "node": "Authorized?",
-          "type": "main",
-          "index": 0
-        }
+        [
+          {
+            "node": "Authorized?",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Authorized?": {
@@ -202,6 +218,17 @@
         [
           {
             "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run Payload": {
+      "main": [
+        [
+          {
+            "node": "Run Queued Action",
             "type": "main",
             "index": 0
           }

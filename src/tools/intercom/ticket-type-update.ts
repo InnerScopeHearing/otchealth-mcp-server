@@ -15,12 +15,21 @@ export function registerIntercomTicketTypeUpdate(server: McpServer, callerHash: 
       idempotentHint: true,
       openWorldHint: true,
     },
+    connectorDescription: 'Update a ticket type name, icon, or archived status. The COO connector cannot edit free-text descriptions. Defaults to dry_run.',
     inputShape: {
       ticket_type_id: z.string().describe('Intercom ticket type ID.'),
       name: z.string().optional().describe('New ticket type name.'),
       description: z.string().optional().describe('New description.'),
       icon: z.string().optional().describe('New emoji icon.'),
       archived: z.boolean().optional().describe('Set to true to archive this ticket type.'),
+    },
+    connectorInputShapeByLane: {
+      coo: {
+        ticket_type_id: z.string().describe('Intercom ticket type ID.'),
+        name: z.string().optional().describe('New ticket type name.'),
+        icon: z.string().optional().describe('New emoji icon.'),
+        archived: z.boolean().optional().describe('Set to true to archive this ticket type.'),
+      },
     },
     outputShape: {
       executed: z.boolean(),

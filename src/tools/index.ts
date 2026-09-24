@@ -335,6 +335,7 @@ import { registerGitHubWorkflowDisable } from './github/workflow-disable.js';
 import { registerGitHubWorkflowEnable } from './github/workflow-enable.js';
 import { registerGitHubWorkflowGet } from './github/workflow-get.js';
 import { registerGitHubWorkflowList } from './github/workflow-list.js';
+import { registerGitHubGraphRagObservationReceipt } from './github/graphrag-observation-receipt.js';
 import { registerGitHubWorkflowRunCancel } from './github/workflow-run-cancel.js';
 import { registerGitHubWorkflowRunGet } from './github/workflow-run-get.js';
 import { registerGitHubWorkflowRunListArtifacts } from './github/workflow-run-list-artifacts.js';
@@ -1390,6 +1391,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubWorkflowEnable(server, callerHash);
   registerGitHubWorkflowGet(server, callerHash);
   registerGitHubWorkflowList(server, callerHash);
+  registerGitHubGraphRagObservationReceipt(server, callerHash);
   registerGitHubWorkflowRunCancel(server, callerHash);
   registerGitHubWorkflowRunGet(server, callerHash);
   registerGitHubWorkflowRunListArtifacts(server, callerHash);
