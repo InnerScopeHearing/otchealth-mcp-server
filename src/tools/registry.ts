@@ -1441,7 +1441,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           next_step: nextStep,
         };
         if (upstreamStatus !== undefined) errPayload.upstream_status = upstreamStatus;
-        const internalDiagnostic = projectPinnedObservationDiagnostic(err, callerAgent, correlationId);
+        const internalDiagnostic = projectPinnedObservationDiagnostic(err, canonicalName, callerAgent, correlationId);
         if (internalDiagnostic) errPayload.internal_diagnostic = internalDiagnostic;
         logToolEnd({
           correlation_id: correlationId,
