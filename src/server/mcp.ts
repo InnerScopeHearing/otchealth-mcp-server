@@ -6,10 +6,11 @@ import {
   ListResourceTemplatesRequestSchema,
   ListResourcesRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { requireConnectorAuth } from '../auth/bearer.js';
+import { requireConnectorAuth, type AuthContext } from '../auth/bearer.js';
 import { logger, newCorrelationId } from '../audit/logger.js';
-import { currentCallerHash, requestContext } from './request-context.js';
+import { currentCallerHash, requestContext, type RequestContext } from './request-context.js';
 import { registerAllTools } from '../tools/index.js';
+import { parseTaskClassHeader, TASK_CLASS_HEADER } from '../safety/task-tool-pack-selection.js';
 import { wrapCompressibleResponse } from './compress-response.js';
 
 const SERVER_INFO = {
@@ -67,6 +68,22 @@ export function applyStubResourceHandlers(mcp: McpServer): void {
   mcp.server.setRequestHandler(ListPromptsRequestSchema, () => ({ prompts: [] }));
 }
 
+/** Build request-local identity from the authenticated context and parse task class separately. */
+export function requestContextForMcpRequest(
+  auth: AuthContext,
+  correlationId: string,
+  taskClassHeader: unknown,
+): RequestContext {
+  return {
+    callerHash: auth.caller_hash,
+    correlationId,
+    callerAgent: auth.caller_agent,
+    connectorSurface: auth.connector_surface,
+    m365StaticAuth: auth.m365_static_auth,
+    taskClass: parseTaskClassHeader(taskClassHeader),
+  };
+}
+
 /**
  * Canonical stateless pattern (per MCP SDK docs): build a fresh McpServer +
  * Transport per request. Reusing one McpServer across multiple connected
@@ -96,13 +113,9 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     reply.raw.setHeader('x-correlation-id', correlationId);
 
     await requestContext.run(
-      {
-        callerHash: ctx.caller_hash,
-        correlationId,
-        callerAgent: ctx.caller_agent,
-        connectorSurface: ctx.connector_surface,
-        m365StaticAuth: ctx.m365_static_auth,
-      },
+      // This is only a post-authentication discovery selector. callerAgent remains sourced from
+      // the authenticated token above, and every stateless request must carry the header again.
+      requestContextForMcpRequest(ctx, correlationId, request.headers[TASK_CLASS_HEADER]),
       async () => {
         // serverOptions() advertises listChanged (so a Custom MCP client cannot cache an earlier
         // curated tools/list across a deploy) plus, when MCP_STUB_RESOURCES_MODE is on, the empty
