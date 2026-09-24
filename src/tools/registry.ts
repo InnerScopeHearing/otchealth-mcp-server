@@ -413,8 +413,20 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  * exact duties its instruction block names. External read baseline + the seat-memory baseline +
  * the ledger coordination verbs. No commerce, no legal, no engineering, no privileged RAG.
  */
+/**
+ * The COO ordinary-Chat Intercom surface is limited to support-team metadata, ticket-type metadata,
+ * and two reversible settings writes. Customer/contact/conversation/ticket contents, public help
+ * content, bulk actions, and irreversible mutations stay outside this connector allowlist.
+ */
+export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
+  'intercom_admin_set_away',
+  'intercom_team_get', 'intercom_team_list',
+  'intercom_ticket_type_get', 'intercom_ticket_type_list', 'intercom_ticket_type_update',
+] as const;
+
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  ...COO_INTERCOM_CONNECTOR_TOOLSET,
   'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // This diagnostic is intentionally safe on the constrained coordination surface.
   'catalog_probe',
@@ -603,6 +615,11 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
    * Internal clients always receive inputShape unchanged.
    */
   connectorInputShape?: Shape;
+  /**
+   * Optional lane-specific connector schemas. A lane projection may omit fields only when the
+   * handler safely defaults or ignores them; internal clients always receive inputShape unchanged.
+   */
+  connectorInputShapeByLane?: Readonly<Record<string, Partial<Shape>>>;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
@@ -892,12 +909,15 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     description: def.annotations.description,
     readOnly: def.annotations.readOnlyHint,
   });
-  // Only an explicitly opted-in tool receives the neutral connector projection. This changes
-  // metadata serialization, not handler inputs, authorization, or validation. The internal
-  // Work/Codex path always retains the full descriptive schema.
-  const useConnectorInputProjection = connectorSurfaceForThisTool && Boolean(def.connectorInputShape);
+  // Only an explicitly opted-in tool receives a connector projection. A lane-specific projection
+  // takes precedence over the neutral projection; strict validation uses the selected public schema,
+  // while handler authorization and the internal Work/Codex input shape remain unchanged.
+  const connectorInputProjection = connectorSurfaceForThisTool
+    ? def.connectorInputShapeByLane?.[laneForThisTool] ?? def.connectorInputShape
+    : undefined;
+  const useConnectorInputProjection = Boolean(connectorInputProjection);
   const inputShape: ZodRawShape = {
-    ...(useConnectorInputProjection ? def.connectorInputShape! : def.inputShape),
+    ...(useConnectorInputProjection ? connectorInputProjection! : def.inputShape),
     ...(useConnectorInputProjection ? CONNECTOR_COMMON_INPUT : COMMON_INPUT),
   };
   // outputSchema is wrapped: every tool reports compliance_warning + result. HeyGen's production
