@@ -336,11 +336,23 @@ test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Dev
   process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
   const receiptTool = 'github_graphrag_observation_receipt_get';
   const receiptAlias = 'graphrag_observation_receipt_get';
+  const ctoOnlyArtifactTools = [
+    'github_graphrag_observation_receipt_get',
+    'github_workflow_run_list_artifacts',
+    'github_aws_connection_report_inspect',
+  ];
   const ctoNames = await registeredToolNames('cto', true);
   const developerNames = await registeredToolNames('developer', true);
 
   assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
-  assert.equal(developerNames.includes(receiptTool), false, 'Developer M365 must exclude the canonical reader despite github_*');
+  for (const tool of ctoOnlyArtifactTools) {
+    const alias = /^[^_]+_(.+)$/.exec(tool)?.[1];
+    assert.equal(
+      developerNames.includes(tool) || (!!alias && developerNames.includes(alias)),
+      false,
+      `Developer M365 must exclude CTO-only artifact tool ${tool} and its generated alias despite github_*`,
+    );
+  }
   assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
   assert.ok(developerNames.length <= 200, `Developer M365 catalog must stay at or under 200 tools, got ${developerNames.length}`);
 });
