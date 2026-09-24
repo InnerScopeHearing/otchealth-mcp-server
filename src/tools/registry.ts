@@ -615,6 +615,11 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
    * Internal clients always receive inputShape unchanged.
    */
   connectorInputShape?: Shape;
+  /**
+   * Optional lane-specific connector schemas. A lane projection may omit fields only when the
+   * handler safely defaults or ignores them; internal clients always receive inputShape unchanged.
+   */
+  connectorInputShapeByLane?: Readonly<Record<string, Partial<Shape>>>;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
@@ -904,12 +909,15 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     description: def.annotations.description,
     readOnly: def.annotations.readOnlyHint,
   });
-  // Only an explicitly opted-in tool receives the neutral connector projection. This changes
-  // metadata serialization, not handler inputs, authorization, or validation. The internal
-  // Work/Codex path always retains the full descriptive schema.
-  const useConnectorInputProjection = connectorSurfaceForThisTool && Boolean(def.connectorInputShape);
+  // Only an explicitly opted-in tool receives a connector projection. A lane-specific projection
+  // takes precedence over the neutral projection; strict validation uses the selected public schema,
+  // while handler authorization and the internal Work/Codex input shape remain unchanged.
+  const connectorInputProjection = connectorSurfaceForThisTool
+    ? def.connectorInputShapeByLane?.[laneForThisTool] ?? def.connectorInputShape
+    : undefined;
+  const useConnectorInputProjection = Boolean(connectorInputProjection);
   const inputShape: ZodRawShape = {
-    ...(useConnectorInputProjection ? def.connectorInputShape! : def.inputShape),
+    ...(useConnectorInputProjection ? connectorInputProjection! : def.inputShape),
     ...(useConnectorInputProjection ? CONNECTOR_COMMON_INPUT : COMMON_INPUT),
   };
   // outputSchema is wrapped: every tool reports compliance_warning + result. HeyGen's production

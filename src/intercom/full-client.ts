@@ -46,6 +46,21 @@ function requireToken(): string {
   return env.INTERCOM_ACCESS_TOKEN;
 }
 
+function safeIntercomPathSegment(value: string, field: string): string {
+  // These IDs are interpolated into endpoint paths. Restrict them to URI-unreserved characters,
+  // reject dot segments explicitly, and encode at the shared request boundary so caller input can
+  // never add path segments, query parameters, or fragments.
+  if (!value || value === '.' || value === '..' || /[^A-Za-z0-9._~-]/.test(value)) {
+    throw new IntercomFullError({
+      code: 'intercom_invalid_path_segment',
+      status: 0,
+      message: `Invalid ${field}: expected a single Intercom path segment.`,
+      nextStep: 'Use a valid Intercom ID from the corresponding list tool.',
+    });
+  }
+  return encodeURIComponent(value);
+}
+
 function mapError(status: number, path: string, body: string): IntercomFullError {
   let upstream: unknown = body;
   try { upstream = JSON.parse(body); } catch { /* keep raw */ }
@@ -675,7 +690,8 @@ export interface SetAdminAwayOpts {
 }
 
 export async function fcSetAdminAway(opts: SetAdminAwayOpts): Promise<any> {
-  return iWrite('PUT', `/admins/${opts.admin_id}/away`, {
+  const adminId = safeIntercomPathSegment(opts.admin_id, 'admin_id');
+  return iWrite('PUT', `/admins/${adminId}/away`, {
     away_mode_enabled: opts.away_mode_enabled,
     away_mode_reassign: opts.away_mode_reassign,
   });
@@ -690,7 +706,7 @@ export async function fcListTeams(): Promise<any> {
 }
 
 export async function fcGetTeam(team_id: string): Promise<any> {
-  return iGet(`/teams/${team_id}`);
+  return iGet(`/teams/${safeIntercomPathSegment(team_id, 'team_id')}`);
 }
 
 // ===========================================================================
@@ -702,7 +718,7 @@ export async function fcListTicketTypes(): Promise<any> {
 }
 
 export async function fcGetTicketType(ticket_type_id: string): Promise<any> {
-  return iGet(`/ticket_types/${ticket_type_id}`);
+  return iGet(`/ticket_types/${safeIntercomPathSegment(ticket_type_id, 'ticket_type_id')}`);
 }
 
 export interface CreateTicketTypeOpts {
@@ -726,7 +742,7 @@ export interface UpdateTicketTypeOpts {
 
 export async function fcUpdateTicketType(opts: UpdateTicketTypeOpts): Promise<any> {
   const { ticket_type_id, ...payload } = opts;
-  return iWrite('PUT', `/ticket_types/${ticket_type_id}`, payload);
+  return iWrite('PUT', `/ticket_types/${safeIntercomPathSegment(ticket_type_id, 'ticket_type_id')}`, payload);
 }
 
 // ===========================================================================

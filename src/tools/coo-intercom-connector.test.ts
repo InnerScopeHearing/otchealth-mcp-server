@@ -34,6 +34,7 @@ before(() => {
     PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
     ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    INTERCOM_ACCESS_TOKEN: 'synthetic-intercom-token',
   };
   for (const [key, value] of Object.entries(required)) process.env[key] ??= value;
   process.env.DRY_RUN_DEFAULT = 'true';
@@ -54,6 +55,10 @@ interface ConnectorHarness {
 
 interface ToolSummary {
   name: string;
+  inputSchema?: {
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
   annotations?: {
     readOnlyHint?: boolean;
     destructiveHint?: boolean;
@@ -62,14 +67,13 @@ interface ToolSummary {
   };
 }
 
-async function bootConnector(lane: string): Promise<ConnectorHarness> {
-  const { registerAllTools } = await import('./index.js');
+async function bootConnector(lane: string, connectorSurface = true, intercomOnly = false): Promise<ConnectorHarness> {
   const { requestContext } = await import('../server/request-context.js');
   const context = {
     callerHash: `test-${lane}`,
     correlationId: `test-${lane}-correlation`,
     callerAgent: lane,
-    connectorSurface: true,
+    connectorSurface,
   };
   const server = new McpServer(
     { name: `test-${lane}-connector`, version: '0' },
@@ -77,7 +81,16 @@ async function bootConnector(lane: string): Promise<ConnectorHarness> {
   );
 
   await requestContext.run(context, async () => {
-    registerAllTools(server, () => context.callerHash);
+    const callerHash = () => context.callerHash;
+    if (intercomOnly) {
+      const { registerIntercomAdminSetAway } = await import('./intercom/admin-set-away.js');
+      const { registerIntercomTicketTypeUpdate } = await import('./intercom/ticket-type-update.js');
+      registerIntercomAdminSetAway(server, callerHash);
+      registerIntercomTicketTypeUpdate(server, callerHash);
+    } else {
+      const { registerAllTools } = await import('./index.js');
+      registerAllTools(server, callerHash);
+    }
   });
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -160,6 +173,63 @@ test('COO Intercom writes retain the MCP write-approval annotation and default t
     assert.equal(structured?.result?.executed, false);
   } finally {
     await connector.close();
+  }
+});
+
+test('COO connector omits auto-reassignment and ticket-type description while internal schema remains full', async () => {
+  const originalFetch = globalThis.fetch;
+  const writes: Array<{ path: string; body: unknown }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : null;
+    writes.push({ path: url.pathname, body });
+    return new Response('{}', { status: 200 });
+  };
+
+  const connector = await bootConnector('coo', true, true);
+  try {
+    const tools = new Map((await connector.listTools()).map((tool) => [tool.name, tool]));
+    const awayProperties = tools.get('intercom_admin_set_away')?.inputSchema?.properties ?? {};
+    const ticketTypeProperties = tools.get('intercom_ticket_type_update')?.inputSchema?.properties ?? {};
+    assert.equal(Object.hasOwn(awayProperties, 'away_mode_reassign'), false);
+    assert.equal(Object.hasOwn(ticketTypeProperties, 'description'), false);
+
+    const awayWithAutoReassign = await connector.callTool('intercom_admin_set_away', {
+      admin_id: 'synthetic-admin-id',
+      away_mode_enabled: true,
+      away_mode_reassign: true,
+      dry_run: false,
+    });
+    assert.equal(awayWithAutoReassign.isError, undefined);
+    assert.equal((awayWithAutoReassign.structuredContent as { dry_run?: boolean } | undefined)?.dry_run, false);
+
+    const updateWithDescription = await connector.callTool('intercom_ticket_type_update', {
+      ticket_type_id: 'synthetic-ticket-type-id',
+      description: 'synthetic sensitive text',
+      dry_run: false,
+    });
+    assert.equal(updateWithDescription.isError, undefined);
+    assert.equal((updateWithDescription.structuredContent as { dry_run?: boolean } | undefined)?.dry_run, false);
+    assert.deepEqual(writes, [
+      {
+        path: '/admins/synthetic-admin-id/away',
+        body: { away_mode_enabled: true, away_mode_reassign: false },
+      },
+      { path: '/ticket_types/synthetic-ticket-type-id', body: {} },
+    ]);
+    assert.equal(JSON.stringify(writes).includes('synthetic sensitive text'), false);
+  } finally {
+    await connector.close();
+    globalThis.fetch = originalFetch;
+  }
+
+  const internal = await bootConnector('coo', false, true);
+  try {
+    const tools = new Map((await internal.listTools()).map((tool) => [tool.name, tool]));
+    assert.equal(Object.hasOwn(tools.get('intercom_admin_set_away')?.inputSchema?.properties ?? {}, 'away_mode_reassign'), true);
+    assert.equal(Object.hasOwn(tools.get('intercom_ticket_type_update')?.inputSchema?.properties ?? {}, 'description'), true);
+  } finally {
+    await internal.close();
   }
 });
 
