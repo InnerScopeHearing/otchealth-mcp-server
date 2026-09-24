@@ -23,6 +23,13 @@ import {
   PINNED_GRAPHRAG_OBSERVATION,
   validatePinnedObservationReceipt,
 } from './graphrag-observation-receipt.js';
+import {
+  AWS_CONNECTION_REPORT_ARTIFACT,
+  inspectAwsConnectionReportArchive,
+  MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES,
+  validateAwsConnectionReportArtifactBinding,
+  validateGitHubActionsArtifactDownloadUrl,
+} from './aws-connection-report-artifact.js';
 
 const env = loadEnv();
 
@@ -670,6 +677,26 @@ export async function workflowRunListArtifacts(owner: string, repo: string, runI
   return Array.isArray(data?.artifacts) ? data.artifacts : [];
 }
 
+export interface AwsConnectionReportArtifactInspection {
+  schema: 'otchealth-github-aws-connection-report-inspection-v1';
+  run_id: number;
+  artifact_id: number;
+  repository_binding_verified: true;
+  workflow_run_binding_verified: true;
+  artifact_binding_verified: true;
+  archive_digest_verified: true;
+  archive_bytes: number;
+  aggregate_only: boolean;
+  redaction_pass: boolean;
+}
+
+const AWS_CONNECTION_REPORT_INSPECTION_ERROR = {
+  code: 'github_aws_report_artifact_unverified',
+  status: 0,
+  message: 'The AWS connection report artifact could not be verified.',
+  nextStep: 'Check the fixed repository, workflow run, artifact and expected digest, then retry.',
+} as const;
+
 const PINNED_OBSERVATION_API = 'https://api.github.com';
 const PINNED_OBSERVATION_MAX_METADATA_BYTES = 128 * 1024;
 const PINNED_OBSERVATION_MAX_TOKEN_RESPONSE_BYTES = 16 * 1024;
@@ -892,48 +919,6 @@ function verifyArtifactMetadata(value: unknown, repositoryId: number): { sizeByt
   return { sizeBytes, expiresAt, digest };
 }
 
-// GitHub Actions uses a finite set of result-storage shards for signed artifact redirects.
-const GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS = new Set([
-  'productionresultssa0.blob.core.windows.net',
-  'productionresultssa1.blob.core.windows.net',
-  'productionresultssa2.blob.core.windows.net',
-  'productionresultssa3.blob.core.windows.net',
-  'productionresultssa4.blob.core.windows.net',
-  'productionresultssa5.blob.core.windows.net',
-  'productionresultssa6.blob.core.windows.net',
-  'productionresultssa7.blob.core.windows.net',
-  'productionresultssa8.blob.core.windows.net',
-  'productionresultssa9.blob.core.windows.net',
-  'productionresultssa10.blob.core.windows.net',
-  'productionresultssa11.blob.core.windows.net',
-  'productionresultssa12.blob.core.windows.net',
-  'productionresultssa13.blob.core.windows.net',
-  'productionresultssa14.blob.core.windows.net',
-  'productionresultssa15.blob.core.windows.net',
-  'productionresultssa16.blob.core.windows.net',
-  'productionresultssa17.blob.core.windows.net',
-  'productionresultssa18.blob.core.windows.net',
-  'productionresultssa19.blob.core.windows.net',
-]);
-const GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX = '/actions-results/';
-
-function validateSignedArtifactUrl(location: string | null): URL {
-  if (!location) throw new Error('missing signed URL');
-  let url: URL;
-  try {
-    url = new URL(location);
-  } catch {
-    throw new Error('invalid signed URL');
-  }
-  const hostname = url.hostname.toLowerCase();
-  const isGitHubActionsArtifactStorage = GITHUB_ACTIONS_ARTIFACT_STORAGE_HOSTS.has(hostname) &&
-    url.pathname.startsWith(GITHUB_ACTIONS_ARTIFACT_STORAGE_PATH_PREFIX);
-  const approvedHost = hostname === 'pipelines.actions.githubusercontent.com' || isGitHubActionsArtifactStorage;
-  if (url.protocol !== 'https:' || !approvedHost || url.username !== '' || url.password !== '' ||
-      (url.port !== '' && url.port !== '443') || url.hash !== '') throw new Error('untrusted signed URL');
-  return url;
-}
-
 async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
   const archivePath = `/repos/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.owner)}/${encodeURIComponent(PINNED_GRAPHRAG_OBSERVATION.repo)}/actions/artifacts/${PINNED_GRAPHRAG_OBSERVATION.artifactId}/zip`;
   const archiveUrl = new URL(archivePath, PINNED_OBSERVATION_API);
@@ -945,7 +930,7 @@ async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
   const location = redirectResponse.headers.get('location');
   await cancelResponseBody(redirectResponse);
   if (redirectResponse.status !== 302) throw new Error('unexpected artifact response');
-  const signedUrl = validateSignedArtifactUrl(location);
+  const signedUrl = validateGitHubActionsArtifactDownloadUrl(location);
 
   // A GitHub installation token is intentionally not sent to the signed object-storage URL.
   const downloadResponse = await fetchWithBudget(signedUrl, {
@@ -969,6 +954,108 @@ async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
     }
   }
   return readBoundedResponseBytes(downloadResponse, MAX_GRAPHRAG_ARCHIVE_BYTES);
+}
+
+async function downloadAwsConnectionReportArtifactArchive(
+  owner: string,
+  repo: string,
+  artifactId: number,
+  token: string,
+): Promise<Buffer> {
+  const archivePath = `/repos/${O(owner)}/${O(repo)}/actions/artifacts/${artifactId}/zip`;
+  const archiveUrl = new URL(archivePath, PINNED_OBSERVATION_API);
+  const redirectResponse = await fetchWithBudget(archiveUrl, {
+    method: 'GET',
+    redirect: 'manual',
+    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  const location = redirectResponse.headers.get('location');
+  await cancelResponseBody(redirectResponse);
+  if (redirectResponse.status !== 302) throw new Error('unexpected artifact response');
+  const signedUrl = validateGitHubActionsArtifactDownloadUrl(location);
+
+  // Never send the GitHub installation token to the signed object-storage URL.
+  const downloadResponse = await fetchWithBudget(signedUrl, {
+    method: 'GET',
+    redirect: 'error',
+    headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
+  }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  if (downloadResponse.status !== 200 || downloadResponse.redirected) {
+    await cancelResponseBody(downloadResponse);
+    throw new Error('artifact download failed');
+  }
+  if (downloadResponse.url) {
+    let finalUrl: URL;
+    try { finalUrl = new URL(downloadResponse.url); } catch {
+      await cancelResponseBody(downloadResponse);
+      throw new Error('invalid final download URL');
+    }
+    if (finalUrl.href !== signedUrl.href) {
+      await cancelResponseBody(downloadResponse);
+      throw new Error('unexpected download redirect');
+    }
+  }
+  return readBoundedResponseBytes(downloadResponse, MAX_AWS_CONNECTION_REPORT_ARCHIVE_BYTES);
+}
+
+/**
+ * Verify and privately inspect the fixed AWS health-report artifact. Caller input cannot select a
+ * different repository or artifact family, and neither source bytes nor signed URLs are returned.
+ */
+export async function inspectAwsConnectionReportArtifact(
+  owner: string,
+  repo: string,
+  runId: number,
+  artifactId: number,
+  expectedSha256: string,
+): Promise<AwsConnectionReportArtifactInspection> {
+  try {
+    if (owner !== AWS_CONNECTION_REPORT_ARTIFACT.owner || repo !== AWS_CONNECTION_REPORT_ARTIFACT.repo ||
+        !Number.isSafeInteger(runId) || runId <= 0 || !Number.isSafeInteger(artifactId) || artifactId <= 0 ||
+        !/^(?:sha256:)?[a-f0-9]{64}$/i.test(expectedSha256)) {
+      throw new Error('invalid report request');
+    }
+
+    const repoPath = `/repos/${O(owner)}/${O(repo)}`;
+    const artifactPath = `${repoPath}/actions/artifacts/${artifactId}`;
+    const [repository, run, runArtifacts, artifact] = await Promise.all([
+      ghGet<Record<string, unknown>>(repoPath),
+      workflowRunGet(owner, repo, runId),
+      workflowRunListArtifacts(owner, repo, runId),
+      ghGet<Record<string, unknown>>(artifactPath),
+    ]);
+    const binding = validateAwsConnectionReportArtifactBinding({
+      owner,
+      repo,
+      runId,
+      artifactId,
+      expectedSha256,
+      repository,
+      run,
+      runArtifacts,
+      artifact,
+    });
+
+    const token = await getInstallationToken();
+    if (typeof token !== 'string' || token.length === 0 || token.length > 4096) throw new Error('invalid installation token');
+    const archive = await downloadAwsConnectionReportArtifactArchive(owner, repo, artifactId, token);
+    const inspection = inspectAwsConnectionReportArchive(archive, binding.expectedSha256);
+    return {
+      schema: 'otchealth-github-aws-connection-report-inspection-v1',
+      run_id: runId,
+      artifact_id: artifactId,
+      repository_binding_verified: true,
+      workflow_run_binding_verified: true,
+      artifact_binding_verified: true,
+      archive_digest_verified: true,
+      archive_bytes: inspection.archiveBytes,
+      aggregate_only: inspection.aggregateOnly,
+      redaction_pass: inspection.redactionPass,
+    };
+  } catch {
+    // Hide API response bodies, report contents, installation tokens, and signed artifact URLs.
+    throw new GitHubFullError(AWS_CONNECTION_REPORT_INSPECTION_ERROR);
+  }
 }
 
 export interface PinnedGraphRagObservationResult {

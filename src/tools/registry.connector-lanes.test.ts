@@ -33,6 +33,11 @@ const CLOUD_BROWSER_TOOLS = ['browser_cloud_profile_discover', 'browser_cloud_se
   'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get'];
 const CTO_CLOUD_BROWSER_PROVISIONING_TOOL = 'browser_cloud_profile_provision_public_trial';
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+const CTO_ONLY_GITHUB_ARTIFACT_TOOLS = [
+  CTO_ONLY_GITHUB_RECEIPT_TOOL,
+  'github_workflow_run_list_artifacts',
+  'github_aws_connection_report_inspect',
+] as const;
 function testEnv(): Env {
   return loadEnv();
 }
@@ -49,12 +54,14 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', ...CTO_ONLY_GITHUB_ARTIFACT_TOOLS].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
   assert.ok(set.has('brain_graph_search'), 'CTO connector must expose company-scoped GraphRAG');
   assert.ok(set.has(CTO_ONLY_GITHUB_RECEIPT_TOOL), 'CTO connector must expose the fixed observation receipt reader');
+  assert.ok(set.has('github_workflow_run_list_artifacts'), 'CTO connector must expose bounded workflow artifact metadata');
+  assert.ok(set.has('github_aws_connection_report_inspect'), 'CTO connector must expose the fixed AWS report verifier');
   // Regression guard (Task G-3, 2026-09-03): web_research/web_extract were added in the SAME
   // change that registers them, so they can't repeat the exact omission class every other guard on
   // this page documents (built + registered but invisible on every connector).
@@ -138,6 +145,20 @@ test('the fixed observation receipt is visible only on the CTO connector, not sh
   }
   const overridden = { ...testEnv(), CONNECTOR_TOOLSET: CTO_ONLY_GITHUB_RECEIPT_TOOL } as Env;
   assert.equal(connectorToolset(overridden, 'developer').has(CTO_ONLY_GITHUB_RECEIPT_TOOL), false, 'a shared override must not leak the CTO-only receipt');
+});
+
+test('GitHub artifact readers are CTO-only and stay out of shared connector overrides', () => {
+  const env = testEnv();
+  for (const name of CTO_ONLY_GITHUB_ARTIFACT_TOOLS) {
+    assert.equal(CTO_SHIP_LANE_TOOLSET.includes(name), false, `${name} must not be added to the shared ship set`);
+    assert.equal(connectorToolset(env, 'cto').has(name), true, `${name} must be visible on the CTO connector`);
+    for (const lane of ['developer', 'exec', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'external-read', 'unknown']) {
+      assert.equal(connectorToolset(env, lane).has(name), false, `${name} must not be visible on ${lane}`);
+    }
+    const sharedOverride = { ...env, CONNECTOR_TOOLSET: `brain_search,${name}` } as Env;
+    assert.equal(connectorToolset(sharedOverride, 'developer').has(name), false, `${name} must not leak through a shared override`);
+    assert.equal(connectorToolset(sharedOverride, 'external-read').has(name), false, `${name} must not leak into an external override`);
+  }
 });
 
 test('(b) developer lane gets the full ship-lane set', () => {
