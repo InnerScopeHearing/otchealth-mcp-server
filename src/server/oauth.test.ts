@@ -802,4 +802,3 @@ test('clo-personal can never be redeemed via the consent flow, even if somehow m
 
   await app.close();
 });
-
