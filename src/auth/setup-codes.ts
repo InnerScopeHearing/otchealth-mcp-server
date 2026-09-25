@@ -55,6 +55,7 @@ import {
   readDoc,
   replaceDoc,
 } from '../agentstate/store.js';
+import { CTO_MAKE_GITHUB_PILOT_LANE } from '../config/lane-toolsets.js';
 
 const CACHE_CONTAINER = 'cache';
 const SETUP_CODE_KIND = 'connector-setup-code';
@@ -68,8 +69,9 @@ const DOC_ID_PREFIX = 'connector-setup-code_';
  * inherits the CRO lane. This is
  * enforced twice: assertMintableRole() below refuses to mint it (and refuses anything not in this
  * list), and isSetupCodeDoc()'s shape check refuses to even RECOGNIZE a stored doc whose role is
- * not one of these six -- so a future bug that somehow got a bad role into storage still could not
- * be redeemed for it.
+ * not one of these explicit roles -- so a future bug that somehow got a bad role into storage still
+ * could not be redeemed for it. The Make pilot is a distinct restricted principal, not the general
+ * CTO role.
  */
 export const ELEVATION_ROLES = [
   'cto',
@@ -78,6 +80,7 @@ export const ELEVATION_ROLES = [
   'coo',
   'cro',
   'developer',
+  CTO_MAKE_GITHUB_PILOT_LANE,
   'wefunder-campaign-director',
 ] as const;
 export type ElevationRole = (typeof ELEVATION_ROLES)[number];

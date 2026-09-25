@@ -33,6 +33,7 @@ const CLOUD_BROWSER_TOOLS = ['browser_cloud_profile_discover', 'browser_cloud_se
   'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get'];
 const CTO_CLOUD_BROWSER_PROVISIONING_TOOL = 'browser_cloud_profile_provision_public_trial';
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 function testEnv(): Env {
   return loadEnv();
 }
@@ -49,12 +50,13 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
   assert.ok(set.has('brain_graph_search'), 'CTO connector must expose company-scoped GraphRAG');
   assert.ok(set.has(CTO_ONLY_GITHUB_RECEIPT_TOOL), 'CTO connector must expose the fixed observation receipt reader');
+  assert.ok(set.has(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), 'CTO connector must expose the fixed GitHub Make pilot broker');
   // Regression guard (Task G-3, 2026-09-03): web_research/web_extract were added in the SAME
   // change that registers them, so they can't repeat the exact omission class every other guard on
   // this page documents (built + registered but invisible on every connector).
@@ -130,14 +132,34 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   }
 });
 
-test('the fixed observation receipt is visible only on the CTO connector, not shared ship lanes', () => {
+test('the fixed observation receipt is CTO-only; the Make broker is CTO/pilot-only, not shared ship lanes', () => {
   assert.equal(CTO_SHIP_LANE_TOOLSET.includes(CTO_ONLY_GITHUB_RECEIPT_TOOL), false, 'CTO-only receipt must not be in the shared ship set');
+  assert.equal(CTO_SHIP_LANE_TOOLSET.includes(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), false, 'Make broker must not be in the shared ship set');
   assert.equal(connectorToolset(testEnv(), 'cto').has(CTO_ONLY_GITHUB_RECEIPT_TOOL), true);
+  assert.equal(connectorToolset(testEnv(), 'cto').has(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), true);
+  assert.equal(connectorToolset(testEnv(), 'cto-make-github-pilot').has(CTO_ONLY_GITHUB_RECEIPT_TOOL), false);
+  assert.equal(connectorToolset(testEnv(), 'cto-make-github-pilot').has(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), true);
   for (const lane of ['developer', 'exec', 'cfo', 'clo', 'clo-personal', 'cpo', 'cco', 'cro', 'coo', 'wefunder-campaign-director', 'external-read', 'unknown']) {
     assert.equal(connectorToolset(testEnv(), lane).has(CTO_ONLY_GITHUB_RECEIPT_TOOL), false, `${lane} connector must not advertise the CTO-only receipt`);
+    assert.equal(connectorToolset(testEnv(), lane).has(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), false, `${lane} connector must not advertise the restricted Make broker`);
   }
-  const overridden = { ...testEnv(), CONNECTOR_TOOLSET: CTO_ONLY_GITHUB_RECEIPT_TOOL } as Env;
+  const overridden = { ...testEnv(), CONNECTOR_TOOLSET: `${CTO_ONLY_GITHUB_RECEIPT_TOOL},${RESTRICTED_GITHUB_MAKE_BROKER_TOOL}` } as Env;
   assert.equal(connectorToolset(overridden, 'developer').has(CTO_ONLY_GITHUB_RECEIPT_TOOL), false, 'a shared override must not leak the CTO-only receipt');
+  assert.equal(connectorToolset(overridden, 'developer').has(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), false, 'a shared override must not leak the restricted Make broker');
+});
+
+test('the Make pilot identity gets exactly the broker and catalog probe even under a global connector override', () => {
+  const expected = ['catalog_probe', 'github_make_broker'];
+  const standard = connectorToolset(testEnv(), 'cto-make-github-pilot');
+  assert.deepEqual([...standard].sort(), expected);
+  assert.equal(isShipLane('cto-make-github-pilot'), false, 'the pilot is not a ship or executive-ring lane');
+  assert.equal((EXEC_RING as readonly string[]).includes('cto-make-github-pilot'), false, 'the pilot must not enter the protected ring');
+
+  const overridden = {
+    ...testEnv(),
+    CONNECTOR_TOOLSET: 'github_make_broker,catalog_probe,github_push_files,gateway_fetch_result,kb_search_privileged,legal_blob_get,memory_remember',
+  } as Env;
+  assert.deepEqual([...connectorToolset(overridden, 'cto-make-github-pilot')].sort(), expected);
 });
 
 test('(b) developer lane gets the full ship-lane set', () => {
