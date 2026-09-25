@@ -23,33 +23,17 @@ import { loadHistoricalRepairEmbeddingsConfig } from '../agentstate/runtime-conf
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { recordOpenAIUsage } from '../telemetry/openai-cost.js';
 
-const API_VERSION = '2024-08-01-preview';
-
-function cfg(): { ep: string; key: string; chat: string; high: string; embed: string } | null {
-  const e = loadEnv();
-  const ep = (e.FOUNDRY_OPENAI_ENDPOINT || '').replace(/\/+$/, '');
-  const key = e.FOUNDRY_KEY || '';
-  if (!ep || !key) return null;
-  return {
-    ep,
-    key,
-    // standard = gpt-5.1 (good); high = gpt-5.4 (strongest deployed). gpt-4.1-mini is BANNED for
-    // quality work (it failed the doc-repo summarization). gpt-5.5 pending a quota increase.
-    chat: e.FOUNDRY_CHAT_DEPLOYMENT || 'gpt-5.1',
-    high: e.FOUNDRY_HIGH_DEPLOYMENT || e.FOUNDRY_CHAT_DEPLOYMENT || 'gpt-5.4',
-    embed: e.FOUNDRY_EMBED_DEPLOYMENT || 'text-embedding-3-large',
-  };
-}
-
 /** Resolve a tier label to a deployment name. */
 export function deploymentForTier(tier?: 'standard' | 'high'): string | null {
-  const c = cfg();
-  if (!c) return null;
-  return tier === 'high' ? c.high : c.chat;
+  // Azure deployment identifiers are historical evidence only.
+  void tier;
+  return null;
 }
 
 export function foundryConfigured(): boolean {
-  return cfg() !== null;
+  // Azure Foundry is retained only as historical source evidence.  Never let a
+  // stale endpoint/key make the retired provider appear configured again.
+  return false;
 }
 
 export class FoundryError extends Error {
@@ -113,13 +97,9 @@ export function embeddingsTarget(): EmbeddingsTarget | null {
       model: 'text-embedding-3-large',
     };
   }
-  const c = cfg();
-  if (!c) return null;
-  return {
-    url: `${c.ep}/openai/deployments/${c.embed}/embeddings?api-version=${API_VERSION}`,
-    headers: { 'Content-Type': 'application/json', 'api-key': c.key },
-    model: null,
-  };
+  // The Foundry branch remains in this adapter for historical compatibility,
+  // but is permanently retired and must never be selected from configuration.
+  return null;
 }
 
 /** A least-privilege embeddings target for the bounded historical repair worker only. */
@@ -154,7 +134,7 @@ export function historicalRepairEmbeddingsConfigured(): boolean {
  * Azure Foundry deployment after its real underlying model, which is a common but not universal
  * Azure OpenAI convention, with no way for this code to verify it. That bet is UNCHANGED and still
  * exactly describes FOUNDRY_CHAT_DEPLOYMENT/FOUNDRY_HIGH_DEPLOYMENT on the Foundry branch above
- * (cfg(), still 'gpt-5.1'/'gpt-5.4') -- only the OpenAI-direct branch's own defaults move here,
+ * (historically 'gpt-5.1'/'gpt-5.4') -- only the OpenAI-direct branch's own defaults move here,
  * because gpt-5.6-{terra,sol,luna} are real api.openai.com model ids, confirmed reachable directly,
  * not an alias inherited from an unrelated Azure deployment name. OPENAI_CHAT_MODEL/
  * OPENAI_HIGH_MODEL/OPENAI_ROUTER_MODEL still override these at any time (e.g. once a newer family
@@ -186,7 +166,7 @@ const OPENAI_CHAT_API_URL = 'https://api.openai.com/v1/chat/completions';
 /** Tier -> OpenAI-direct model id, defaulting to the gpt-5.6 family (verified live 2026-09-03):
  *  terra (standard), sol (high/quality), luna (router/cheap) -- see this section's header above for
  *  the full reasoning, including why 'router' gets luna as its OWN default rather than collapsing
- *  to 'standard' the way it used to. Mirrors cfg()'s own chat/high fallback shape: high AND router
+ *  to 'standard' the way it used to. Mirrors the historical Foundry fallback shape: high AND router
  *  both fall back through OPENAI_CHAT_MODEL before their own literal (the same cascade
  *  FOUNDRY_HIGH_DEPLOYMENT uses for FOUNDRY_CHAT_DEPLOYMENT), so an operator who has set only
  *  OPENAI_CHAT_MODEL still gets it applied to every tier. The hardcoded high-tier literal is
@@ -266,25 +246,9 @@ export function chatTarget(
       resolvedLabel: model,
     };
   }
-  const c = cfg();
-  if (!c) return null;
-  // Resolve endpoint/key/deployment by tier. 'router' uses the Azure Model Router (auto-picks the
-  // cheapest-sufficient model); falls back to Foundry standard if the router isn't configured --
-  // BYTE-IDENTICAL to chat()'s pre-existing resolution order.
-  let ep = c.ep, key = c.key, deployment = deploymentOverride || (tier === 'high' ? c.high : c.chat);
-  if (tier === 'router') {
-    if (e.FOUNDRY_ROUTER_ENDPOINT && e.FOUNDRY_ROUTER_KEY) {
-      ep = e.FOUNDRY_ROUTER_ENDPOINT.replace(/\/+$/, '');
-      key = e.FOUNDRY_ROUTER_KEY;
-      deployment = deploymentOverride || e.FOUNDRY_ROUTER_DEPLOYMENT || 'model-router';
-    }
-  }
-  return {
-    url: `${ep}/openai/deployments/${deployment}/chat/completions?api-version=${API_VERSION}`,
-    headers: { 'Content-Type': 'application/json', 'api-key': key },
-    model: null,
-    resolvedLabel: deployment,
-  };
+  // The Foundry branch remains in this adapter for historical compatibility,
+  // but is permanently retired and must never be selected from configuration.
+  return null;
 }
 
 /** Is a chat() call currently reachable, for the ACTIVE provider? Provider-aware replacement for
@@ -442,8 +406,7 @@ export function promptCacheKey(deployment: string, messages: ChatMessage[]): str
 
 /** Is the Azure Model Router configured? */
 export function routerConfigured(): boolean {
-  const e = loadEnv();
-  return Boolean(e.FOUNDRY_ROUTER_ENDPOINT && e.FOUNDRY_ROUTER_KEY);
+  return false;
 }
 
 /**

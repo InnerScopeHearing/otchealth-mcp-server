@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Own file/process: SEARCH_BACKEND=opensearch here, and loadEnv() caches per process.
-// This file exercises THE scenario the telemetry exists for -- Azure Foundry (which still serves
-// embeddings even after the OpenSearch cutover) is unreachable, so the vector half of the hybrid
-// query cannot run. src/search/opensearch.ts catches that and continues keyword-only, by design.
+// Own file/process: SEARCH_BACKEND=opensearch and the supported OpenAI embeddings provider are
+// selected explicitly. This file exercises the telemetry scenario where embeddings are unavailable,
+// so the vector half of the hybrid query cannot run. src/search/opensearch.ts catches that and
+// continues keyword-only, by design.
 // The search still SUCCEEDS and every health check stays green, which is exactly why the degraded
 // flag has to come from telemetry rather than from an error path.
 process.env.CIO_SITE_ID ||= 'test';
@@ -13,18 +13,13 @@ process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
-// Pin the pre-2026-08-28 backend defaults (env.ts's SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
-// LLM_PROVIDER/WEB_SEARCH_PROVIDER/BLOB_BACKEND/STATE_BACKEND now default to their AWS-native
-// replacements) so this file keeps exercising exactly the Azure/Foundry/Cosmos code path it was
-// written for -- those paths stay inert-but-present and still need this coverage.
+// Pin synthetic, deterministic configuration. Fetch is stubbed below, so no provider is contacted.
 process.env.STATE_BACKEND ||= 'cosmos';
 process.env.BLOB_BACKEND ||= 'azure';
-process.env.SEARCH_BACKEND ||= 'azure';
-process.env.LLM_PROVIDER ||= 'foundry';
-process.env.EMBEDDINGS_PROVIDER ||= 'foundry';
+process.env.LLM_PROVIDER = 'openai';
+process.env.EMBEDDINGS_PROVIDER = 'openai';
+process.env.OPENAI_API_KEY = 'synthetic-test-key';
 process.env.WEB_SEARCH_PROVIDER ||= 'azure';
-process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
-process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 process.env.POSTHOG_GATEWAYOPS_KEY ||= 'phc_test_gatewayops_key';
 process.env.POSTHOG_HOST ||= 'https://posthog.example.invalid';
 process.env.SEARCH_BACKEND = 'opensearch';
@@ -51,7 +46,7 @@ async function run(embedFails: boolean): Promise<Array<Record<string, unknown>>>
       return new Response('{}', { status: 200 });
     }
     if (url.includes('/embeddings')) {
-      if (embedFails) throw new Error('Foundry unreachable');
+      if (embedFails) throw new Error('OpenAI embeddings unavailable');
       return new Response(JSON.stringify({ data: [{ embedding: new Array(3072).fill(0.01) }] }), {
         status: 200,
         headers: { 'content-type': 'application/json' },

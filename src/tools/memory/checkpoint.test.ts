@@ -1,29 +1,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Satisfy loadEnv()'s required vars, then configure BOTH the standard Foundry endpoint and the
-// Azure Model Router endpoint with DISTINCT hosts, so a stubbed-fetch test can tell which one a
-// call site actually asked for by inspecting the URL it hit. Mirrors src/memory/deep-retrieval.test.ts.
+// Satisfy loadEnv()'s required vars and explicitly select the supported OpenAI path. Synthetic
+// model names plus a local fetch stub make the cost-routing assertion deterministic without
+// contacting any provider.
 process.env.CIO_SITE_ID ||= 'test';
 process.env.CIO_TRACK_KEY ||= 'test';
 process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
-// Pin the pre-2026-08-28 backend defaults (env.ts's SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
-// LLM_PROVIDER/WEB_SEARCH_PROVIDER/BLOB_BACKEND/STATE_BACKEND now default to their AWS-native
-// replacements) so this file keeps exercising exactly the Azure/Foundry/Cosmos code path it was
-// written for -- those paths stay inert-but-present and still need this coverage.
+// Pin synthetic configuration for this isolated process. Foundry and its router are retired.
 process.env.STATE_BACKEND ||= 'cosmos';
 process.env.BLOB_BACKEND ||= 'azure';
 process.env.SEARCH_BACKEND ||= 'azure';
-process.env.LLM_PROVIDER ||= 'foundry';
-process.env.EMBEDDINGS_PROVIDER ||= 'foundry';
+process.env.LLM_PROVIDER = 'openai';
+process.env.EMBEDDINGS_PROVIDER = 'openai';
+process.env.OPENAI_API_KEY = 'synthetic-test-key';
+process.env.OPENAI_CHAT_MODEL = 'gpt-5.6-terra';
+process.env.OPENAI_HIGH_MODEL = 'gpt-5.6-sol';
+process.env.OPENAI_ROUTER_MODEL = 'gpt-5.6-luna';
 process.env.WEB_SEARCH_PROVIDER ||= 'azure';
-process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
-process.env.FOUNDRY_KEY ||= 'test-foundry-key';
-process.env.FOUNDRY_ROUTER_ENDPOINT ||= 'https://otchealth-router.example.invalid';
-process.env.FOUNDRY_ROUTER_KEY ||= 'test-router-key';
 
 const { parseDistillResponse, distillSummary, registerCheckpoint } = await import('./checkpoint.js');
 
@@ -150,28 +147,29 @@ test('parseDistillResponse: never throws on malformed JSON, missing memories key
   assert.deepEqual(parseDistillResponse(''), []);
 });
 
-// ── distillSummary: the LLM call site itself now asks the router, not a hardcoded tier ────────────
+// ── distillSummary: the LLM call site itself requests the cost-conscious router tier ──────────────
 
 function isChatUrl(url: string): boolean {
-  return url.includes('/openai/deployments/') && url.includes('/chat/completions');
+  return url.includes('/chat/completions');
 }
 
-test('COST ROUTER: distillSummary asks the Azure Model Router, not a hardcoded standard/high tier', async () => {
-  // Wave 6, item 6.3: this call site used to hardcode tier:'standard' (always the plain Foundry
-  // chat endpoint). It now passes tier:'router', so a configured Model Router endpoint gets the
-  // call instead of the standard deployment. Asserting on the ACTUAL fetch URL (not just the
-  // options object) proves the router really is reached end to end through chat(), not merely
-  // requested and ignored.
+test('COST ROUTING: distillSummary uses the OpenAI router-tier model, not standard/high', async () => {
+  // The retired Azure Model Router has no live route. distillSummary still requests tier:'router';
+  // on the supported OpenAI path that resolves to gpt-5.6-luna. Inspect the actual request body
+  // to prove the requested cost tier is used end to end, not merely passed as an option.
   let hitUrl: string | undefined;
+  let hitModel: string | undefined;
   await withStubbedFetch(
-    (async (url: string | URL) => {
+    (async (url: string | URL, init?: RequestInit) => {
       const u = String(url);
       if (isChatUrl(u)) {
         hitUrl = u;
+        const body = init?.body ? JSON.parse(String(init.body)) as { model?: string } : {};
+        hitModel = body.model;
         return new Response(
           JSON.stringify({
-            choices: [{ message: { content: JSON.stringify({ memories: [{ kind: 'fact', text: 'routed via the model router' }] }) } }],
-            model: 'model-router',
+            choices: [{ message: { content: JSON.stringify({ memories: [{ kind: 'fact', text: 'routed via the router tier' }] }) } }],
+            model: 'gpt-5.6-luna',
           }),
           { status: 200 },
         );
@@ -180,16 +178,10 @@ test('COST ROUTER: distillSummary asks the Azure Model Router, not a hardcoded s
     }) as typeof fetch,
     async () => {
       const out = await distillSummary('Matt decided to ship build 46 today.');
-      assert.deepEqual(out, [{ kind: 'fact', text: 'routed via the model router' }]);
+      assert.deepEqual(out, [{ kind: 'fact', text: 'routed via the router tier' }]);
     },
   );
   assert.ok(hitUrl, 'distillSummary must call the chat completions endpoint');
-  assert.ok(
-    hitUrl!.startsWith('https://otchealth-router.example.invalid/'),
-    `expected the ROUTER endpoint to be hit, got: ${hitUrl}`,
-  );
-  assert.ok(
-    !hitUrl!.includes('otchealth-foundry.example.invalid'),
-    'must not fall back to the plain standard-tier Foundry endpoint when the router is configured',
-  );
+  assert.equal(hitUrl, 'https://api.openai.com/v1/chat/completions');
+  assert.equal(hitModel, 'gpt-5.6-luna', 'router tier must not collapse to the standard or high model');
 });

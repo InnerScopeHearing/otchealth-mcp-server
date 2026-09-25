@@ -56,10 +56,9 @@ test('chatConfigured() reflects the ACTIVE provider (openai), true even though F
   assert.equal(chatConfigured(), true);
 });
 
-test('LLM_PROVIDER and EMBEDDINGS_PROVIDER move independently: this file only sets LLM_PROVIDER, so embeddings stay on Foundry', () => {
+test('LLM_PROVIDER and EMBEDDINGS_PROVIDER remain independently selected, but retired Foundry embeddings fail closed', () => {
   const t = embeddingsTarget();
-  assert.equal(t?.headers['api-key'], 'test-foundry-key', 'embeddings must still be Foundry-routed');
-  assert.equal(t?.headers.Authorization, undefined);
+  assert.equal(t, null, 'retired Foundry must not be selected even when its credentials exist');
 });
 
 test('tier "standard" defaults the OpenAI model to the gpt-5.6 family (terra), verified live 2026-09-03', () => {
