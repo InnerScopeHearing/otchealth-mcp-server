@@ -39,3 +39,77 @@ test('pinned observation diagnostic projection is CTO-only, allowlisted, and dro
     name: 'Error',
   }, 'github_graphrag_observation_receipt_get', 'cto', 'synthetic-correlation'), null);
 });
+
+test('workflow-run diagnostic projection accepts only a bounded status or fixed field name', () => {
+  const errorFor = (stage: string, detail: unknown) => ({
+    name: 'PinnedObservationReaderError',
+    code: 'github_observation_receipt_unverified',
+    message: 'The pinned GraphRAG observation receipt could not be verified.',
+    internalDiagnostic: {
+      type: 'github_observation_receipt',
+      stage,
+      detail,
+      responseBody: 'synthetic-error-body-must-not-leak',
+      token: 'synthetic-token-must-not-leak',
+    },
+  });
+
+  const status = projectPinnedObservationDiagnostic(
+    errorFor('workflow_run_metadata', {
+      kind: 'http_status',
+      status: 403,
+      responseBody: 'synthetic-nested-body-must-not-leak',
+      token: 'synthetic-nested-token-must-not-leak',
+    }),
+    'github_graphrag_observation_receipt_get',
+    'cto',
+    'synthetic-correlation',
+  );
+  assert.deepEqual(status, {
+    type: 'github_observation_receipt',
+    stage: 'workflow_run_metadata',
+    correlation_id: 'synthetic-correlation',
+    detail: { kind: 'http_status', status: 403 },
+  });
+
+  const field = projectPinnedObservationDiagnostic(
+    errorFor('workflow_run_metadata', { kind: 'run_metadata_field', field: 'head_repository.id' }),
+    'github_graphrag_observation_receipt_get',
+    'cto',
+    'synthetic-correlation',
+  );
+  assert.deepEqual(field, {
+    type: 'github_observation_receipt',
+    stage: 'workflow_run_metadata',
+    correlation_id: 'synthetic-correlation',
+    detail: { kind: 'run_metadata_field', field: 'head_repository.id' },
+  });
+
+  assert.equal(JSON.stringify(status).includes('synthetic-error-body-must-not-leak'), false);
+  assert.equal(JSON.stringify(status).includes('synthetic-nested-body-must-not-leak'), false);
+  assert.equal(JSON.stringify(status).includes('synthetic-token-must-not-leak'), false);
+  assert.equal(projectPinnedObservationDiagnostic(
+    errorFor('workflow_run_metadata', { kind: 'http_status', status: 600 }),
+    'github_graphrag_observation_receipt_get',
+    'cto',
+    'synthetic-correlation',
+  ), null);
+  assert.equal(projectPinnedObservationDiagnostic(
+    errorFor('workflow_run_metadata', { kind: 'run_metadata_field', field: 'provider_metadata' }),
+    'github_graphrag_observation_receipt_get',
+    'cto',
+    'synthetic-correlation',
+  ), null);
+  assert.equal(projectPinnedObservationDiagnostic(
+    errorFor('archive_digest', { kind: 'http_status', status: 403 }),
+    'github_graphrag_observation_receipt_get',
+    'cto',
+    'synthetic-correlation',
+  ), null);
+  assert.equal(projectPinnedObservationDiagnostic(
+    errorFor('workflow_run_metadata', { kind: 'http_status', status: 403 }),
+    'github_graphrag_observation_receipt_get',
+    'developer',
+    'synthetic-correlation',
+  ), null);
+});

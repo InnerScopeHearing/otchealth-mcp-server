@@ -193,6 +193,8 @@ type StubOverrides = {
   tokenMintResponse?: Response;
   repo?: Record<string, unknown>;
   run?: Record<string, unknown>;
+  runResponseStatus?: number;
+  runResponseBody?: string;
   workflowBlobSha?: string;
   producerBlobSha?: string;
   artifact?: Record<string, unknown>;
@@ -218,6 +220,9 @@ function githubStub(captured: CapturedRequest[], overrides: StubOverrides = {}):
       return new Response(JSON.stringify(overrides.repo ?? makeRepo()), { status: 200 });
     }
     if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`) {
+      if (overrides.runResponseStatus !== undefined) {
+        return new Response(overrides.runResponseBody ?? '', { status: overrides.runResponseStatus });
+      }
       return new Response(JSON.stringify(overrides.run ?? makeRun()), { status: 200 });
     }
     if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml`) {
@@ -801,6 +806,51 @@ test('pinned observation failure exposes only an allowlisted stage to CTO', asyn
   assert.equal(JSON.stringify(result).includes('mock-sensitive-url'), false);
   assert.equal(JSON.stringify(result).includes('ghs_test_token'), false);
   assert.ok(requests.some((request) => request.url === DOWNLOAD_URL), 'the validated receipt ZIP must be downloaded before digest failure');
+});
+
+test('pinned observation workflow-run diagnostics expose only a redacted status or field to CTO', async (t) => {
+  await t.test('HTTP failure exposes status without the response body', async () => {
+    const requests: CapturedRequest[] = [];
+    const responseBody = 'synthetic-github-error-body-must-not-leak';
+    const result = await withStubbedFetch(
+      githubStub(requests, { runResponseStatus: 403, runResponseBody: responseBody }),
+      () => callThroughRealMcpServer(),
+    );
+    const correlationId = result.structuredContent?.correlation_id;
+
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent?.error?.internal_diagnostic, {
+      type: 'github_observation_receipt',
+      stage: 'workflow_run_metadata',
+      detail: { kind: 'http_status', status: 403 },
+      correlation_id: correlationId,
+    });
+    assert.equal(result.content[0]?.text?.includes('workflow_run_metadata'), false);
+    assert.equal(JSON.stringify(result).includes(responseBody), false);
+    assert.ok(requests.some((request) => request.url.endsWith(`/actions/runs/${RUN_ID}`)));
+    assert.equal(requests.some((request) => request.url.includes('/actions/artifacts/')), false);
+  });
+
+  await t.test('metadata mismatch exposes an allowlisted field name only', async () => {
+    const requests: CapturedRequest[] = [];
+    const result = await withStubbedFetch(
+      githubStub(requests, { run: makeRun({ event: 'synthetic-event-value' }) }),
+      () => callThroughRealMcpServer(),
+    );
+    const correlationId = result.structuredContent?.correlation_id;
+
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent?.error?.internal_diagnostic, {
+      type: 'github_observation_receipt',
+      stage: 'workflow_run_metadata',
+      detail: { kind: 'run_metadata_field', field: 'event' },
+      correlation_id: correlationId,
+    });
+    assert.equal(result.content[0]?.text?.includes('workflow_run_metadata'), false);
+    assert.equal(JSON.stringify(result).includes('synthetic-event-value'), false);
+    assert.ok(requests.some((request) => request.url.endsWith(`/actions/runs/${RUN_ID}`)));
+    assert.equal(requests.some((request) => request.url.includes('/actions/artifacts/')), false);
+  });
 });
 
 test('non-CTO failure responses never include pinned observation diagnostics', async () => {
