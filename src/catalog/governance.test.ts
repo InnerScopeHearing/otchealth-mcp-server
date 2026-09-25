@@ -51,7 +51,7 @@ test('github_make_broker is CTO-only even though ordinary GitHub branch writes a
   const gov = requiredRoleFor('github_make_broker');
   assert.ok(gov, 'the Make pilot broker must have an explicit governance rule');
   assert.ok(roleAllows(gov!.role, 'cto'));
-  for (const other of ['developer', 'exec', 'coo', 'cfo', 'clo', 'cro', '']) {
+  for (const other of ['developer', 'exec', 'coo', 'cfo', 'clo', 'cro', 'cco', 'cpo', 'clo-personal', '']) {
     assert.ok(!roleAllows(gov!.role, other), `the Make pilot broker must refuse lane "${other}"`);
   }
 });
