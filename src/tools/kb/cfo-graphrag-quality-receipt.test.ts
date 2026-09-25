@@ -56,16 +56,20 @@ const control = (kind: 'reverse' | 'missing_bridge' | 'near_match' | 'personal_r
   };
 };
 function input() {
+  const positiveQuery = {
+    schema: 'cfo-graphrag-positive-query-v1', route: 'x_to_y_to_z',
+    anchors: { x: citation('x'), y: citation('y'), z: citation('z') },
+  };
   return {
     caller_agent: 'cfo', contract, coverage,
     citation_mappings: (['x', 'y', 'z', 'negative'] as const).map(slot => mapping(slot)),
     bindings: (['x', 'y', 'z', 'negative'] as const).map(slot => binding(slot)),
     citations: (['x', 'y', 'z', 'negative'] as const).map(citation),
     traversal: { scope: 'finance', scan_complete: true, answer_status: 'qualified',
-      query_sha256: sha('x-to-y-to-z'), artifact_sha256: sha('traversal-artifact'),
+      query: positiveQuery, query_sha256: sha(canonical(positiveQuery)), artifact_sha256: sha('traversal-artifact'),
       edges: [
-        { from: 'x', to: 'y', assertion_sha256: sha('xy-assertion'), evidence_sha256: sha('xy-evidence'), identity_receipt_sha256: sha('xy-identity') },
-        { from: 'y', to: 'z', assertion_sha256: sha('yz-assertion'), evidence_sha256: sha('yz-evidence'), identity_receipt_sha256: sha('yz-identity') },
+        { from: 'x', to: 'y', from_anchor: citation('x'), to_anchor: citation('y'), assertion_sha256: sha('xy-assertion'), evidence_sha256: sha('xy-evidence'), identity_receipt_sha256: sha('xy-identity') },
+        { from: 'y', to: 'z', from_anchor: citation('y'), to_anchor: citation('z'), assertion_sha256: sha('yz-assertion'), evidence_sha256: sha('yz-evidence'), identity_receipt_sha256: sha('yz-identity') },
       ] },
     negative_controls: (['reverse', 'missing_bridge', 'near_match', 'personal_ring'] as const).map(control),
   };
@@ -147,6 +151,24 @@ test('requires a complete directed X to Y to Z traversal with current evidence r
   assert.equal(projectCfoGraphQualityReceipt(reversed).status, 'rejected');
   const noIdentityReceipt = input(); noIdentityReceipt.traversal.edges[1] = { ...noIdentityReceipt.traversal.edges[1], identity_receipt_sha256: '' };
   assert.equal(projectCfoGraphQualityReceipt(noIdentityReceipt).status, 'rejected');
+  const wrongQueryDigest = input(); wrongQueryDigest.traversal.query_sha256 = sha('unrelated-query');
+  assert.equal(projectCfoGraphQualityReceipt(wrongQueryDigest).status, 'rejected');
+  const wrongQueryRoute = input(); wrongQueryRoute.traversal.query = { ...wrongQueryRoute.traversal.query, route: 'x_to_z' };
+  assert.equal(projectCfoGraphQualityReceipt(wrongQueryRoute).status, 'rejected');
+  const wrongQueryAnchors = input();
+  wrongQueryAnchors.traversal.query = { ...wrongQueryAnchors.traversal.query, anchors: { ...wrongQueryAnchors.traversal.query.anchors, x: citation('negative') } };
+  wrongQueryAnchors.traversal.query_sha256 = sha(canonical(wrongQueryAnchors.traversal.query));
+  assert.equal(projectCfoGraphQualityReceipt(wrongQueryAnchors).status, 'rejected');
+  const wrongQueryVersion = input();
+  wrongQueryVersion.traversal.query = { ...wrongQueryVersion.traversal.query, anchors: { ...wrongQueryVersion.traversal.query.anchors, y: { ...citation('y'), source_version: versions.negative } } };
+  wrongQueryVersion.traversal.query_sha256 = sha(canonical(wrongQueryVersion.traversal.query));
+  assert.equal(projectCfoGraphQualityReceipt(wrongQueryVersion).status, 'rejected');
+  const wrongEdgeEndpoint = input();
+  wrongEdgeEndpoint.traversal.edges[0] = { ...wrongEdgeEndpoint.traversal.edges[0], to_anchor: citation('z') };
+  assert.equal(projectCfoGraphQualityReceipt(wrongEdgeEndpoint).status, 'rejected');
+  const wrongEdgeVersion = input();
+  wrongEdgeVersion.traversal.edges[0] = { ...wrongEdgeVersion.traversal.edges[0], to_anchor: { ...citation('y'), source_version: versions.negative } };
+  assert.equal(projectCfoGraphQualityReceipt(wrongEdgeVersion).status, 'rejected');
 });
 
 test('requires all four negative controls and forbids any negative match', () => {

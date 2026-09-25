@@ -54,9 +54,16 @@ const citationMappingSchema = z.object({
   source_locator_sha256: hashSchema,
   provenance_receipt_sha256: hashSchema,
 }).strict();
+const positiveTraversalQuerySchema = z.object({
+  schema: z.literal('cfo-graphrag-positive-query-v1'),
+  route: z.literal('x_to_y_to_z'),
+  anchors: z.object({ x: anchorSchema, y: anchorSchema, z: anchorSchema }).strict(),
+}).strict();
 const edgeSchema = z.object({
   from: z.enum(['x', 'y', 'z']),
   to: z.enum(['x', 'y', 'z']),
+  from_anchor: anchorSchema,
+  to_anchor: anchorSchema,
   assertion_sha256: hashSchema,
   evidence_sha256: hashSchema,
   identity_receipt_sha256: hashSchema,
@@ -65,6 +72,7 @@ const traversalSchema = z.object({
   scope: z.literal('finance'),
   scan_complete: z.literal(true),
   answer_status: z.literal('qualified'),
+  query: positiveTraversalQuerySchema,
   query_sha256: hashSchema,
   artifact_sha256: hashSchema,
   edges: z.array(edgeSchema).length(2),
@@ -191,7 +199,19 @@ export function projectCfoGraphQualityReceipt(value: unknown): CfoGraphQualityRe
   if (new Set(bindingKeys).size !== SLOTS.length || bindingKeys.some(key => !anchorByKey.has(key))) return reject();
 
   const edges = input.traversal.edges;
-  if (edges[0].from !== 'x' || edges[0].to !== 'y' || edges[1].from !== 'y' || edges[1].to !== 'z' ||
+  const queryAnchors = {
+    x: input.contract.anchors.x,
+    y: input.contract.anchors.y,
+    z: input.contract.anchors.z,
+  };
+  if (canonical(input.traversal.query.anchors) !== canonical(queryAnchors) ||
+      input.traversal.query_sha256 !== hash(canonical(input.traversal.query)) ||
+      edges[0].from !== 'x' || edges[0].to !== 'y' ||
+      canonical(edges[0].from_anchor) !== canonical(input.contract.anchors.x) ||
+      canonical(edges[0].to_anchor) !== canonical(input.contract.anchors.y) ||
+      edges[1].from !== 'y' || edges[1].to !== 'z' ||
+      canonical(edges[1].from_anchor) !== canonical(input.contract.anchors.y) ||
+      canonical(edges[1].to_anchor) !== canonical(input.contract.anchors.z) ||
       new Set(edges.map(edge => `${edge.from}\0${edge.to}`)).size !== 2) return reject();
 
   const controls = input.negative_controls;
