@@ -699,4 +699,3 @@ export function issuedAgent(token: string): string | null {
   if (!claims || claims.typ !== 'access') return null;
   return claims.agent || '';
 }
-
