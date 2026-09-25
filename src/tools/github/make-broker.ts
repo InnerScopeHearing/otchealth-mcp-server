@@ -16,7 +16,7 @@ const inputShape: ZodRawShape = {
   tool_name: z.enum(MAKE_GITHUB_BROKER_TOOLS)
     .describe('Pilot allowlist: github_create_branch or github_get_file_contents.'),
   arguments: z.record(z.unknown()).describe(
-    'Strict operation arguments. Branch creation requires owner, repo, branch, from_sha. Readback requires owner, repo, path="package.json", ref.',
+    'Strict operation arguments. Branch creation requires owner and repo. Readback requires owner, repo, path="package.json". The broker derives the pilot branch and current main SHA.',
   ),
   idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{16,128}$/)
     .describe('Stable 16 to 128 character request key. Branch creation derives its claude/make-pilot ref from this key.'),
@@ -47,7 +47,7 @@ export function registerGitHubMakeBroker(server: McpServer, callerHash: CallerHa
     annotations: {
       title: 'GitHub: Make pilot broker',
       description:
-        'Narrow Make pilot for InnerScopeHearing/otchealth-mcp-server only. Allows github_create_branch on a key-derived claude/make-pilot-* ref and github_get_file_contents for package.json on that same ref. All nested arguments are strict; the branch must start at the verified current main head. Returns idempotency and correlation hashes. CTO-only; honors dry_run and gateway write gates.',
+        'Narrow Make pilot for InnerScopeHearing/otchealth-mcp-server only. Allows github_create_branch on a server-derived claude/make-pilot-* ref from verified current main and github_get_file_contents for package.json on that same key-derived ref. All nested arguments are strict. Returns idempotency and correlation hashes. CTO-only; honors dry_run and gateway write gates.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

@@ -15,14 +15,12 @@ const SOURCE_SHA = 'a'.repeat(40);
 const FILE_SHA = 'b'.repeat(40);
 const CORRELATION_ID = 'corr-make-github-pilot-001';
 
-function createBranchRequest(idempotencyKey = KEY, fromSha = SOURCE_SHA) {
+function createBranchRequest(idempotencyKey = KEY) {
   return {
     tool_name: 'github_create_branch',
     arguments: {
       owner: MAKE_GITHUB_REPOSITORY.owner,
       repo: MAKE_GITHUB_REPOSITORY.repo,
-      branch: makeGitHubBrokerBranch(idempotencyKey),
-      from_sha: fromSha,
     },
     idempotency_key: idempotencyKey,
   };
@@ -74,6 +72,7 @@ test('creates one deterministic claude pilot branch and returns idempotency and 
   assert.equal(result.dry_run, false);
   assert.equal(result.branch, makeGitHubBrokerBranch(KEY));
   assert.equal(result.sha, SOURCE_SHA);
+  assert.equal(result.from_sha, SOURCE_SHA);
   assert.equal(result.idempotency_key_sha256, makeGitHubBrokerKeyHash(KEY));
   assert.match(result.request_sha256, /^[a-f0-9]{64}$/);
   assert.equal(result.correlation_id, CORRELATION_ID);
@@ -83,12 +82,12 @@ test('creates one deterministic claude pilot branch and returns idempotency and 
 
 test('replays the same key and payload without a second GitHub write', async () => {
   const branch = makeGitHubBrokerBranch(KEY);
-  const fake = makeFakeDependencies({ branches: { [branch]: SOURCE_SHA } });
+  const fake = makeFakeDependencies({ branches: { [branch]: FILE_SHA } });
 
   const result = await executeMakeGitHubBroker(createBranchRequest(), CORRELATION_ID, fake.dependencies, false);
 
   assert.equal(result.outcome, 'replayed');
-  assert.equal(result.sha, SOURCE_SHA);
+  assert.equal(result.sha, FILE_SHA);
   assert.equal(fake.calls.creates.length, 0);
   assert.deepEqual(fake.calls.branchReads, [branch]);
 });
@@ -116,15 +115,15 @@ test('reconciles an uncertain or duplicate create acknowledgement by exact branc
 });
 
 test('rejects unknown tools, out-of-scope resources, bad refs and extra nested fields before any GitHub call', async () => {
-  const branch = makeGitHubBrokerBranch(KEY);
   const validCreate = createBranchRequest();
   const invalidRequests = [
     { ...validCreate, tool_name: 'github_dispatch_workflow' },
     { ...validCreate, arguments: { ...validCreate.arguments, owner: 'OtherOrg' } },
     { ...validCreate, arguments: { ...validCreate.arguments, repo: 'other-repo' } },
     { ...validCreate, arguments: { ...validCreate.arguments, branch: 'main' } },
-    { ...validCreate, arguments: { ...validCreate.arguments, branch: `${branch}-other` } },
+    { ...validCreate, arguments: { ...validCreate.arguments, from_sha: SOURCE_SHA } },
     { ...validCreate, arguments: { ...validCreate.arguments, unlisted: true } },
+    { ...validCreate, extra: true },
     { ...validCreate, idempotency_key: 'short' },
     {
       tool_name: 'github_get_file_contents',
@@ -132,7 +131,6 @@ test('rejects unknown tools, out-of-scope resources, bad refs and extra nested f
         owner: MAKE_GITHUB_REPOSITORY.owner,
         repo: MAKE_GITHUB_REPOSITORY.repo,
         path: '.env',
-        ref: branch,
       },
       idempotency_key: KEY,
     },
@@ -160,27 +158,38 @@ test('rejects unknown tools, out-of-scope resources, bad refs and extra nested f
   }
 });
 
-test('rejects a stale source commit before the branch write', async () => {
+test('creates from the verified current main head without asking Make to supply a SHA', async () => {
   const fake = makeFakeDependencies({ mainSha: FILE_SHA });
 
-  await assert.rejects(
-    executeMakeGitHubBroker(createBranchRequest(KEY, SOURCE_SHA), CORRELATION_ID, fake.dependencies, false),
-    isPolicyError('base_ref_mismatch'),
-  );
+  const result = await executeMakeGitHubBroker(createBranchRequest(), CORRELATION_ID, fake.dependencies, false);
 
-  assert.equal(fake.calls.creates.length, 0);
+  assert.equal(result.outcome, 'created');
+  assert.equal(result.sha, FILE_SHA);
+  assert.equal(result.from_sha, FILE_SHA);
   assert.deepEqual(fake.calls.branchReads, [makeGitHubBrokerBranch(KEY), 'main']);
+  assert.deepEqual(fake.calls.creates, [{ branch: makeGitHubBrokerBranch(KEY), fromSha: FILE_SHA }]);
 });
 
-test('rejects an existing pilot ref at a different commit without writing', async () => {
+test('rejects a missing or malformed main SHA before creating a branch', async () => {
+  for (const [mainSha, errorCode] of [[null, 'main_ref_missing'], ['not-a-sha', 'main_ref_invalid']] as const) {
+    const fake = makeFakeDependencies({ mainSha });
+    await assert.rejects(
+      executeMakeGitHubBroker(createBranchRequest(), CORRELATION_ID, fake.dependencies, false),
+      isPolicyError(errorCode),
+    );
+    assert.equal(fake.calls.creates.length, 0);
+    assert.deepEqual(fake.calls.branchReads, [makeGitHubBrokerBranch(KEY), 'main']);
+  }
+});
+
+test('replays an existing key-derived pilot ref without writing', async () => {
   const branch = makeGitHubBrokerBranch(KEY);
   const fake = makeFakeDependencies({ branches: { [branch]: FILE_SHA } });
 
-  await assert.rejects(
-    executeMakeGitHubBroker(createBranchRequest(), CORRELATION_ID, fake.dependencies, false),
-    isPolicyError('idempotency_conflict'),
-  );
+  const result = await executeMakeGitHubBroker(createBranchRequest(), CORRELATION_ID, fake.dependencies, false);
 
+  assert.equal(result.outcome, 'replayed');
+  assert.equal(result.sha, FILE_SHA);
   assert.equal(fake.calls.creates.length, 0);
   assert.deepEqual(fake.calls.branchReads, [branch]);
 });
@@ -207,7 +216,6 @@ test('reads only package.json from the same key-derived pilot ref and returns a 
       owner: MAKE_GITHUB_REPOSITORY.owner,
       repo: MAKE_GITHUB_REPOSITORY.repo,
       path: 'package.json',
-      ref: branch,
     },
     idempotency_key: KEY,
   };
@@ -217,6 +225,7 @@ test('reads only package.json from the same key-derived pilot ref and returns a 
   assert.equal(result.outcome, 'read');
   assert.equal(result.executed, true);
   assert.equal(result.text, '{"name":"otchealth-mcp-server"}');
+  assert.equal(result.ref, branch);
   assert.equal(result.idempotency_key_sha256, makeGitHubBrokerKeyHash(KEY));
   assert.equal(result.correlation_id, CORRELATION_ID);
   assert.deepEqual(fake.calls.fileReads, [{ path: 'package.json', ref: branch }]);
