@@ -266,6 +266,33 @@ test('reads only package.json from the same key-derived pilot ref and returns a 
   assert.deepEqual(fake.calls.fileReads, [{ path: 'package.json', ref: branch }]);
 });
 
+test('dry-run file read returns a plan without making any GitHub request', async () => {
+  const fake = makeFakeDependencies();
+  const request = {
+    tool_name: 'github_get_file_contents',
+    arguments: {
+      owner: MAKE_GITHUB_REPOSITORY.owner,
+      repo: MAKE_GITHUB_REPOSITORY.repo,
+      path: 'package.json',
+    },
+    idempotency_key: KEY,
+  };
+
+  const result = await executeMakeGitHubBroker(request, CORRELATION_ID, fake.dependencies, true);
+
+  assert.equal(result.outcome, 'planned');
+  assert.equal(result.executed, false);
+  assert.equal(result.dry_run, true);
+  assert.equal(result.tool_name, 'github_get_file_contents');
+  assert.equal(result.path, 'package.json');
+  assert.equal(result.ref, makeGitHubBrokerBranch(KEY));
+  assert.equal(result.sha, undefined);
+  assert.equal(result.text, undefined);
+  assert.deepEqual(fake.calls.fileReads, []);
+  assert.deepEqual(fake.calls.branchReads, []);
+  assert.deepEqual(fake.calls.creates, []);
+});
+
 test('parser fails closed for a tool name that is not in the pilot list', () => {
   assert.throws(
     () => parseMakeGitHubBrokerCall({

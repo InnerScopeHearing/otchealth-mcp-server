@@ -211,6 +211,18 @@ export async function executeMakeGitHubBroker(
   const call = parseMakeGitHubBrokerCall(value);
   const base = baseReceipt(call, correlationId);
 
+  if (dryRun) {
+    return {
+      ...base,
+      outcome: 'planned',
+      executed: false,
+      dry_run: true,
+      ...(call.toolName === 'github_create_branch'
+        ? { branch: call.branch }
+        : { path: call.args.path, ref: call.ref }),
+    };
+  }
+
   if (call.toolName === 'github_get_file_contents') {
     const file = await dependencies.getFileContents(call.args.path, call.ref);
     return {
@@ -222,16 +234,6 @@ export async function executeMakeGitHubBroker(
       ref: call.ref,
       sha: file.sha,
       text: file.text,
-    };
-  }
-
-  if (dryRun) {
-    return {
-      ...base,
-      outcome: 'planned',
-      executed: false,
-      dry_run: true,
-      branch: call.branch,
     };
   }
 

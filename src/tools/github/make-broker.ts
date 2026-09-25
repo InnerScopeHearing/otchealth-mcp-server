@@ -47,7 +47,7 @@ export function registerGitHubMakeBroker(server: McpServer, callerHash: CallerHa
     annotations: {
       title: 'GitHub: Make pilot broker',
       description:
-        'Inactive Make pilot for InnerScopeHearing/otchealth-mcp-server only. Allows github_create_branch on a server-derived claude/make-pilot-* ref only when caller from_sha exactly matches verified current main, plus github_get_file_contents for package.json on that same key-derived ref. Existing refs replay only when their SHA matches from_sha; a different SHA is rejected. The key provides branch-name deduplication only while the ref exists, not a durable idempotency ledger, so deleting the ref removes the deduplication evidence. All nested arguments are strict. Returns correlation and receipt hashes. CTO-only; honors dry_run and gateway write gates.',
+        'Inactive Make pilot for InnerScopeHearing/otchealth-mcp-server only. Allows github_create_branch on a server-derived claude/make-pilot-* ref only when caller from_sha exactly matches verified current main, plus github_get_file_contents for package.json on that same key-derived ref. dry_run=true is network-free for both operations and returns a plan; set dry_run=false to perform the read or write. Existing refs replay only when their SHA matches from_sha; a different SHA is rejected. The key provides branch-name deduplication only while the ref exists, not a durable idempotency ledger, so deleting the ref removes the deduplication evidence. All nested arguments are strict. Returns correlation and receipt hashes. CTO-only; honors dry_run and gateway write gates.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
