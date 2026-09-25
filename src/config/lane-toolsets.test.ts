@@ -69,6 +69,13 @@ test('isToolInLaneAllowlist: cto (2026-08-02 onward) is an explicit curated list
   assert.equal(isToolInLaneAllowlist('cto', 'cloudflare_anything_else_entirely'), false);
 });
 
+test('the Make pilot broker is advertised only on the curated CTO lane', () => {
+  assert.equal(isToolInLaneAllowlist('cto', 'github_make_broker'), true);
+  assert.equal(isToolInLaneAllowlist('developer', 'github_make_broker'), false);
+  assert.equal(isToolInLaneAllowlist('exec', 'github_make_broker'), false);
+  assert.equal(isToolInLaneAllowlist('coo', 'github_make_broker'), false);
+});
+
 test('isToolInLaneAllowlist: developer_wake_lite is reachable for the developer lane (2026-08-02 fix -- was silently excluded, invisible to catalog_probe\'s full-catalog-only check)', () => {
   assert.equal(isToolInLaneAllowlist('developer', 'developer_wake_lite'), true);
 });

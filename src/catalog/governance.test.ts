@@ -47,6 +47,15 @@ test('github_pr_update specifically allows cto and developer only (write_simple 
   assert.ok(!roleAllows(gov?.role ?? '', 'cfo'));
 });
 
+test('github_make_broker is CTO-only even though ordinary GitHub branch writes allow developer', () => {
+  const gov = requiredRoleFor('github_make_broker');
+  assert.ok(gov, 'the Make pilot broker must have an explicit governance rule');
+  assert.ok(roleAllows(gov!.role, 'cto'));
+  for (const other of ['developer', 'exec', 'coo', 'cfo', 'clo', 'cro', '']) {
+    assert.ok(!roleAllows(gov!.role, other), `the Make pilot broker must refuse lane "${other}"`);
+  }
+});
+
 test('workflow-run readers are intentionally ungated (reads are not an escalation)', () => {
   for (const name of CONNECTOR_READ_TOOLS) {
     assert.equal(requiredRoleFor(name), null, `${name} is a read; it should carry no role gate`);

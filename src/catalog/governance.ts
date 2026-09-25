@@ -138,6 +138,7 @@ export const GOVERNANCE: GovRule[] = [
   // ===== FULL READ+WRITE WAVE: write-tool role gates (CTO = the operator connector identity) =====
   // GitHub writes (single-initiator, mirrors existing push/PR/merge rules) -- widened alongside them.
   { pattern: 'github_create_branch', requiredRole: ['cto', 'developer'], reason: 'Branch creation: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  { pattern: 'github_make_broker', requiredRole: 'cto', reason: 'The Make pilot broker is CTO-only and hard-scoped to one repository and claude/make-pilot refs.' },
   { pattern: 'github_create_or_update_file', requiredRole: ['cto', 'developer'], reason: 'Direct file commits: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   { pattern: 'github_edit_file', requiredRole: ['cto', 'developer'], reason: 'Surgical in-place file edits (old_str/new_str) are a direct code write, same risk class as github_create_or_update_file. It is category write_simple, so the write_orchestrated default CTO gate does NOT cover it; this explicit rule is required. Widened 2026-07-26 per Matt/CEO directive to cto/developer.' },
   { pattern: 'github_create_issue', requiredRole: ['cto', 'developer'], reason: 'Gateway issue creation: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },

@@ -872,6 +872,7 @@ import { registerDepotTriggerBuild } from './depot/trigger-build.js';
 import { registerGitHubAddLabels } from './github/add-labels.js';
 import { registerGitHubCommentOnIssue } from './github/comment-on-issue.js';
 import { registerGitHubCreateBranch } from './github/create-branch.js';
+import { registerGitHubMakeBroker } from './github/make-broker.js';
 import { registerGitHubCreateIssue } from './github/create-issue.js';
 import { registerGitHubCreateOrUpdateFile } from './github/create-or-update-file.js';
 import { registerGitHubEditFile } from './github/edit-file.js';
@@ -1150,6 +1151,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubAddLabels(server, callerHash);
   registerGitHubCommentOnIssue(server, callerHash);
   registerGitHubCreateBranch(server, callerHash);
+  registerGitHubMakeBroker(server, callerHash);
   registerGitHubCreateIssue(server, callerHash);
   registerGitHubCreateOrUpdateFile(server, callerHash);
   registerGitHubEditFile(server, callerHash); // surgical old_str/new_str edit (no full-content requirement)
