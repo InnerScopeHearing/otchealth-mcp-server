@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { memoryRememberSharedWriteRefusal, registerMemoryRemember } from './remember.js';
+import { chatSharedMemoryWriteScope, memoryRememberSharedWriteRefusal, registerMemoryRemember } from './remember.js';
 import { requestContext } from '../../server/request-context.js';
 
 type RegisteredHandler = (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -15,6 +15,9 @@ const syntheticEnvironment: Record<string, string> = {
   READ_ONLY_MODE: 'false',
   ENABLE_WRITE_TOOLS: 'true',
   DRY_RUN_DEFAULT: 'true',
+  CONNECTOR_TOOLSET: 'memory_remember',
+  AZURE_COMMONS_STORAGE_ACCOUNT: 'synthetic-account',
+  AZURE_COMMONS_STORAGE_KEY: 'synthetic-key',
 };
 const priorEnvironment = Object.fromEntries(Object.keys(syntheticEnvironment).map((key) => [key, process.env[key]]));
 
@@ -52,10 +55,40 @@ async function callRemember(callerAgent: string, targetAgent?: string) {
   );
 }
 
+function connectorInputSchema(callerAgent: string): Record<string, unknown> {
+  let inputSchema: Record<string, unknown> | undefined;
+  const server = {
+    registerTool(_name: string, config: { inputSchema: Record<string, unknown> }) {
+      inputSchema = config.inputSchema;
+      return { remove() {} };
+    },
+  };
+  requestContext.run(
+    {
+      callerHash: 'synthetic-caller-hash',
+      correlationId: 'synthetic-correlation',
+      callerAgent,
+      connectorSurface: true,
+      m365StaticAuth: false,
+    },
+    () => registerMemoryRemember(server as never, () => 'synthetic-caller-hash'),
+  );
+  assert.ok(inputSchema);
+  return inputSchema;
+}
+
 test('ordinary company self and cross-lane writes clear the shared-feed fence', () => {
   assert.equal(memoryRememberSharedWriteRefusal('cto'), null);
   assert.equal(memoryRememberSharedWriteRefusal('cto', 'developer'), null);
   assert.equal(memoryRememberSharedWriteRefusal('developer', 'cto'), null);
+});
+
+test('chat_shared write scope defaults to commons, accepts commons, and rejects every other feed', () => {
+  assert.deepEqual(chatSharedMemoryWriteScope('chat_shared'), { targetAgent: 'commons' });
+  assert.deepEqual(chatSharedMemoryWriteScope('chat_shared', 'COMMONS'), { targetAgent: 'commons' });
+  assert.match(chatSharedMemoryWriteScope('chat_shared', 'cto')?.refusal ?? '', /only to the commons feed/);
+  assert.match(chatSharedMemoryWriteScope('chat_shared', '../invalid')?.refusal ?? '', /invalid targets are refused/);
+  assert.equal(chatSharedMemoryWriteScope('cto', 'developer'), null, 'other internal caller scopes remain unchanged');
 });
 
 test('registered handler preserves an ordinary attributed cross-lane dry-run preview', async () => {
@@ -66,6 +99,31 @@ test('registered handler preserves an ordinary attributed cross-lane dry-run pre
   assert.equal(entry.agent, 'developer');
   assert.equal(entry.by, 'cto');
   assert.match(String(result.note), /dry_run/);
+});
+
+test('chat_shared dry-run uses authenticated attribution and the fixed commons target', async () => {
+  const response = await callRemember('chat_shared');
+  const result = (response.structuredContent as Record<string, unknown>).result as Record<string, unknown>;
+  assert.equal(result.written, false);
+  const entry = result.entry as Record<string, unknown>;
+  assert.equal(entry.agent, 'commons');
+  assert.equal(entry.by, 'chat_shared');
+  assert.match(String(result.note), /dry_run/);
+});
+
+test('chat_shared handler refuses a non-commons target before storage', async () => {
+  const response = await callRemember('chat_shared', 'cto');
+  const result = (response.structuredContent as Record<string, unknown>).result as Record<string, unknown>;
+  assert.equal(result.written, false);
+  assert.equal(result.entry, null);
+  assert.match(String(result.note), /only to the commons feed/);
+});
+
+test('chat_shared connector schema does not expose an agent target selector', () => {
+  const sharedSchema = connectorInputSchema('chat_shared');
+  const ctoSchema = connectorInputSchema('cto');
+  assert.equal(Object.hasOwn(sharedSchema, 'agent'), false);
+  assert.equal(Object.hasOwn(ctoSchema, 'agent'), true, 'internal company callers retain their target selector');
 });
 
 test('personal-lane authenticated writers are refused for self and company targets', () => {

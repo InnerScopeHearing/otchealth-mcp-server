@@ -92,11 +92,12 @@ function fakeDeps(overrides: Partial<SetupCodeDeps> = {}): FakeDeps {
 // Role allowlist: clo-personal is permanently unmintable; nothing outside ELEVATION_ROLES mints.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-test('ELEVATION_ROLES includes the isolated Make pilot principal and dedicated WeFunder principal, and excludes clo-personal', () => {
+test('ELEVATION_ROLES includes the restricted Make and shared-Chat principals and dedicated WeFunder principal, and excludes clo-personal', () => {
   assert.deepEqual(
     [...ELEVATION_ROLES].sort(),
-    ['cfo', 'clo', 'coo', 'cro', 'cto', 'cto-make-github-pilot', 'developer', 'wefunder-campaign-director'].sort(),
+    ['cfo', 'chat_shared', 'clo', 'coo', 'cro', 'cto', 'cto-make-github-pilot', 'developer', 'wefunder-campaign-director'].sort(),
   );
+  assert.equal(isElevationRole('chat_shared'), true);
   assert.equal(isElevationRole('cto-make-github-pilot'), true);
   assert.equal((ELEVATION_ROLES as readonly string[]).includes('clo-personal'), false);
 });

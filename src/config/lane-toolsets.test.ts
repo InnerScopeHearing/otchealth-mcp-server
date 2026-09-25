@@ -1,16 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  CHAT_SHARED_LANE,
+  CHAT_SHARED_MEMORY_TARGET,
+  CHAT_SHARED_TOOLSET,
   KNOWN_INTERNAL_LANES,
   LANE_TOOLSETS,
   isKnownInternalLane,
   isToolInLaneAllowlist,
 } from './lane-toolsets.js';
 
-test('KNOWN_INTERNAL_LANES lists exactly the 10 documented internal client_credentials lanes', () => {
+test('KNOWN_INTERNAL_LANES lists the documented internal and special OAuth lanes', () => {
   assert.deepEqual(
     [...KNOWN_INTERNAL_LANES].sort(),
-    ['cco', 'cfo', 'clo', 'clo-personal', 'coo', 'cpo', 'cro', 'cto', 'developer', 'exec'].sort(),
+    ['cco', 'cfo', 'chat_shared', 'clo', 'clo-personal', 'coo', 'cpo', 'cro', 'cto', 'developer', 'exec'].sort(),
   );
 });
 
@@ -37,6 +40,28 @@ test('isToolInLaneAllowlist: exact-name match', () => {
     assert.equal(isToolInLaneAllowlist(lane, 'brain_graph_search'), true, lane);
   }
   assert.equal(isToolInLaneAllowlist('cto', 'wake'), true);
+});
+
+test('chat_shared has the exact fixed commons Brain toolset', () => {
+  assert.equal(CHAT_SHARED_LANE, 'chat_shared');
+  assert.equal(CHAT_SHARED_MEMORY_TARGET, 'commons');
+  assert.deepEqual([...LANE_TOOLSETS[CHAT_SHARED_LANE]], [...CHAT_SHARED_TOOLSET]);
+  assert.deepEqual([...CHAT_SHARED_TOOLSET].sort(), [
+    'brain_search',
+    'catalog_probe',
+    'gateway_fetch_result',
+    'memory_recall',
+    'memory_remember',
+  ]);
+  for (const allowed of CHAT_SHARED_TOOLSET) {
+    assert.equal(isToolInLaneAllowlist(CHAT_SHARED_LANE, allowed), true, allowed);
+  }
+  for (const forbidden of [
+    'brain_graph_search', 'memory_search', 'memory_write', 'memory_team', 'memory_inbound',
+    'kb_search_privileged', 'legal_blob_get', 'github_push_files', 'connector_setup_code_create',
+  ]) {
+    assert.equal(isToolInLaneAllowlist(CHAT_SHARED_LANE, forbidden), false, forbidden);
+  }
 });
 
 test('isToolInLaneAllowlist: prefix* match', () => {

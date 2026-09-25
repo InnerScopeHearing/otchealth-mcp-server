@@ -8,6 +8,7 @@ import {
   SetupCodeError,
   type ElevationRole,
 } from '../../auth/setup-codes.js';
+import { CHAT_SHARED_LANE } from '../../config/lane-toolsets.js';
 
 const CALLER_ALLOWLIST = ['cto', 'exec'] as const;
 
@@ -43,7 +44,7 @@ export function registerConnectorSetupCodeCreate(
       annotations: {
         title: 'Mint an owner connector setup code (cto/exec only)',
         description:
-          'Creates a single-use, short-lived setup code for the OAuth consent interstitial to elevate a URL-only ChatGPT/Claude connector to ONE named role (cto/cfo/clo/coo/cro/developer/wefunder-campaign-director/cto-make-github-pilot -- never clo-personal). The cto-make-github-pilot role is restricted to github_make_broker and catalog_probe. The dedicated WeFunder role is a separate principal and does not inherit CRO access. ' +
+          `Creates a single-use, short-lived setup code for the OAuth consent interstitial to elevate a URL-only ChatGPT/Claude connector to ONE named role (cto/cfo/clo/coo/cro/developer/${CHAT_SHARED_LANE}/wefunder-campaign-director/cto-make-github-pilot -- never clo-personal). The ${CHAT_SHARED_LANE} role is fixed to the non-sensitive company-commons Brain search/recall/write tools and identity diagnostics. The cto-make-github-pilot role is restricted to github_make_broker and catalog_probe. The dedicated WeFunder role is a separate principal and does not inherit CRO access. ` +
           'SECURITY: the tool RESULT contains a short-lived plaintext owner secret (the code itself). It is shown exactly once and is never recoverable afterward. Deliver it to the owner PRIVATELY (do not paste it into a shared channel, ticket, or log) -- whoever holds the code can redeem it for the granted role at the consent page.',
         readOnlyHint: false,
         destructiveHint: false,
@@ -51,7 +52,7 @@ export function registerConnectorSetupCodeCreate(
         openWorldHint: false,
       },
       inputShape: {
-        role: z.enum(ELEVATION_ROLES).describe('The single role this code will elevate to on redemption. Use cto-make-github-pilot for the isolated Make GitHub broker pilot, which exposes only github_make_broker and catalog_probe. Use wefunder-campaign-director for the separate WeFunder principal. clo-personal is not a valid value -- it has no connector-elevation path.'),
+        role: z.enum(ELEVATION_ROLES).describe(`The single role this code will elevate to on redemption. Use ${CHAT_SHARED_LANE} for the fixed ordinary-Chat company-commons Brain toolset. Use cto-make-github-pilot for the isolated Make GitHub broker pilot, which exposes only github_make_broker and catalog_probe. Use wefunder-campaign-director for the separate WeFunder principal. clo-personal is not a valid value -- it has no connector-elevation path.`),
         label: z
           .string()
           .trim()

@@ -6,9 +6,35 @@ import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { embed } from '../../azure/foundry.js';
 import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
+import { CHAT_SHARED_LANE, CHAT_SHARED_MEMORY_TARGET } from '../../config/lane-toolsets.js';
 
 const TYPES = ['fact', 'decision', 'correction', 'pitfall', 'status'] as const;
 const PERSONAL_SHARED_MEMORY_LANE = 'clo-personal';
+
+const MEMORY_REMEMBER_INPUT_SHAPE = {
+  agent: z
+    .string()
+    .optional()
+    .describe('For internal callers, the optional target feed; omitted defaults to the authenticated token identity. The chat_shared connector does not expose this field and is fixed to commons.'),
+  type: z
+    .union([z.enum(TYPES), z.literal('finding')])
+    .transform((v) => (v === 'finding' ? 'fact' : v))
+    .describe('Entry kind: fact, decision, correction, pitfall, or status. "finding" is accepted as an alias for "fact".'),
+  text: z.string().min(1).describe('The fact/decision/correction/pitfall/status text. Keep it atomic and non-sensitive.'),
+  tags: z.array(z.string()).optional().describe('Optional tags for recall, e.g. ["ebay","pricing"].'),
+  source: z.string().optional().describe('Optional attribution, e.g. "Matt 2026-06-20".'),
+  supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES (e.g. "20260713-015"). Set it ONLY when this entry makes the older one FALSE, not merely related -- readers (wake, memory_pack) DROP the superseded entry so a retracted belief cannot resurface as a live truth. Use it whenever you correct a previously-stated fact.'),
+  idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional().describe('Stable caller-generated retry key. Reuse it only for the same intent. It is scoped to the authenticated lane and target lane; the raw key is never stored.'),
+};
+
+const CHAT_SHARED_MEMORY_REMEMBER_INPUT_SHAPE = {
+  type: MEMORY_REMEMBER_INPUT_SHAPE.type,
+  text: MEMORY_REMEMBER_INPUT_SHAPE.text,
+  tags: MEMORY_REMEMBER_INPUT_SHAPE.tags,
+  source: MEMORY_REMEMBER_INPUT_SHAPE.source,
+  supersedes: MEMORY_REMEMBER_INPUT_SHAPE.supersedes,
+  idempotency_key: MEMORY_REMEMBER_INPUT_SHAPE.idempotency_key,
+};
 
 /**
  * The commons feed and its write-through search index are visible to company lanes. The dedicated
@@ -27,6 +53,26 @@ export function memoryRememberSharedWriteRefusal(callerAgent: string, requestedA
     return 'the privilege-walled personal-legal lane may not write to, or be targeted by, memory_remember because its destination is the company shared-memory feed; use the separate private storage tooling for that lane';
   }
   return null;
+}
+
+/** A shared-Chat token is not an agent seat. Its writes always land in commons and cannot target
+ * another lane's feed, even when a caller supplies an `agent` argument. */
+export function chatSharedMemoryWriteScope(
+  callerAgent: string | undefined | null,
+  requestedAgent?: string,
+): { targetAgent?: string; refusal?: string } | null {
+  const caller = (callerAgent || '').trim().toLowerCase();
+  if (caller !== CHAT_SHARED_LANE) return null;
+  if (requestedAgent) {
+    let requested = '';
+    try { requested = normalizeAgent(requestedAgent); } catch {
+      return { refusal: `${CHAT_SHARED_LANE} may write only to the ${CHAT_SHARED_MEMORY_TARGET} feed; invalid targets are refused.` };
+    }
+    if (requested !== CHAT_SHARED_MEMORY_TARGET) {
+      return { refusal: `${CHAT_SHARED_LANE} may write only to the ${CHAT_SHARED_MEMORY_TARGET} feed.` };
+    }
+  }
+  return { targetAgent: CHAT_SHARED_MEMORY_TARGET };
 }
 
 export function registerMemoryRemember(server: McpServer, callerHash: CallerHashProvider): void {
@@ -48,21 +94,10 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
       // server-side refusal stays enforced. Ordinary Chat receives a concise task description so
       // the connector host does not mistake policy explanation for an instruction to its classifier.
       connectorDescription:
-        'Append one short non-sensitive company note to the shared memory feed. Set dry_run=false to persist.',
-      inputShape: {
-        agent: z
-          .string()
-          .optional()
-          .describe('The agent lane to publish under; defaults to your token identity (lowercase id, e.g. "cto", "commerce").'),
-        type: z
-          .union([z.enum(TYPES), z.literal('finding')])
-          .transform((v) => (v === 'finding' ? 'fact' : v))
-          .describe('Entry kind: fact, decision, correction, pitfall, or status. "finding" is accepted as an alias for "fact".'),
-        text: z.string().min(1).describe('The fact/decision/correction/pitfall/status text. Keep it atomic and non-sensitive.'),
-        tags: z.array(z.string()).optional().describe('Optional tags for recall, e.g. ["ebay","pricing"].'),
-        source: z.string().optional().describe('Optional attribution, e.g. "Matt 2026-06-20".'),
-        supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES (e.g. "20260713-015"). Set it ONLY when this entry makes the older one FALSE, not merely related -- readers (wake, memory_pack) DROP the superseded entry so a retracted belief cannot resurface as a live truth. Use it whenever you correct a previously-stated fact.'),
-        idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional().describe('Stable caller-generated retry key. Reuse it only for the same intent. It is scoped to the authenticated lane and target lane; the raw key is never stored.'),
+        'Append one short non-sensitive company note to shared memory. A chat_shared token is fixed to the commons feed. Set dry_run=false to persist.',
+      inputShape: MEMORY_REMEMBER_INPUT_SHAPE,
+      connectorInputShapeByLane: {
+        [CHAT_SHARED_LANE]: CHAT_SHARED_MEMORY_REMEMBER_INPUT_SHAPE,
       },
       outputShape: {
         written: z.boolean(),
@@ -70,9 +105,22 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         note: z.string().optional(),
         durability: z.enum(['STORED', 'UNKNOWN']).optional(),
         retry_with_same_key: z.boolean().optional(),
+        index_name: z.literal('memory-exec').optional(),
+        index_backend: z.enum(['azure', 'opensearch']).optional(),
+        secondary_index_backend: z.enum(['azure', 'opensearch']).optional(),
+        secondary_indexed: z.boolean().optional(),
+        index_error: z.string().optional(),
       },
       handler: async (input, ctx) => {
-        const sharedWriteRefusal = memoryRememberSharedWriteRefusal(ctx.callerAgent, input.agent);
+        const chatSharedScope = chatSharedMemoryWriteScope(ctx.callerAgent, input.agent);
+        if (chatSharedScope?.refusal) {
+          return {
+            data: { written: false, entry: null, note: chatSharedScope.refusal },
+            summary: `Refused: ${chatSharedScope.refusal}`,
+          };
+        }
+        const requestedAgent = chatSharedScope?.targetAgent ?? input.agent;
+        const sharedWriteRefusal = memoryRememberSharedWriteRefusal(ctx.callerAgent, requestedAgent);
         if (sharedWriteRefusal) {
           return {
             data: { written: false, entry: null, note: sharedWriteRefusal },
@@ -82,7 +130,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         // MNPI DETERMINISTIC PRE-SHARE GATE (Wave 3 item 3.5, safety/mnpi-gate.ts). Runs BEFORE any
         // store write. The commons feed is, by construction, always broadly shared/non-privileged:
         // a match is a HARD BLOCK for every caller, including an EXEC_RING lane writing its own feed.
-        const mnpiGate = evaluateBroadcastMnpiGate({ text: input.text, tags: (input.tags ?? []).join(' '), source: input.source, agent: input.agent });
+        const mnpiGate = evaluateBroadcastMnpiGate({ text: input.text, tags: (input.tags ?? []).join(' '), source: input.source, agent: requestedAgent });
         if (mnpiGate.blocked) {
           return {
             data: { written: false, entry: null, note: mnpiGate.reason },
@@ -102,7 +150,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         if (input.idempotency_key && !by) {
           throw new Error('memory_remember keyed write requires a valid authenticated caller identity');
         }
-        const agent = normalizeAgent(input.agent || by);
+        const agent = normalizeAgent(requestedAgent || by);
         const cross = Boolean(by && by !== agent);
         if (ctx.dryRun) {
           const preview: Omit<MemoryEntry, 'id' | 'ts'> = {
@@ -153,6 +201,9 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
         // next runs. Fail-open -- the entry is already durable in blob, and the 6-hourly reindex is
         // the backstop, so an index outage must never fail the write. We report the outcome rather
         // than swallowing it: a silent indexing failure is exactly how we lost 12 days of recall.
+        // The canonical record remains in the shared-feed JSONL store at
+        // _MEMORY/_exec/<agent>.jsonl; this write-through projection goes to memory-exec, not the
+        // separate commons-company-journal Brain room.
         const idx = await indexMemoryNow({
           agent,
           id: entry.id,
@@ -160,6 +211,7 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
           ts: entry.ts,
           tags: entry.tags,
           text: entry.text,
+          index: 'memory-exec',
           vector,
         });
         const supNote =
@@ -173,6 +225,14 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
             written: true,
             entry,
             indexed: idx.indexed,
+            index_name: 'memory-exec' as const,
+            index_backend: idx.primary,
+            ...(idx.secondary
+              ? {
+                  secondary_index_backend: idx.secondary.backend,
+                  secondary_indexed: idx.secondary.indexed,
+                }
+              : {}),
             ...(idx.reason ? { index_error: idx.reason } : {}),
             ...(sup.action !== 'none' ? { supersede: sup } : {}),
           },
