@@ -10,15 +10,42 @@ const COO_INTERCOM_TOOL_NAMES = [
   'intercom_team_list',
   'intercom_ticket_type_get',
   'intercom_ticket_type_list',
+  'intercom_ticket_type_create',
   'intercom_ticket_type_update',
+  'intercom_tag_create',
+  'intercom_tag_update',
+  'intercom_data_attribute_create',
+  'intercom_data_attribute_update',
+  'intercom_contact_get',
+  'intercom_contact_update',
+] as const;
+
+const COO_INTERCOM_WRITE_TOOL_NAMES = [
+  'intercom_admin_set_away',
+  'intercom_ticket_type_create',
+  'intercom_ticket_type_update',
+  'intercom_tag_create',
+  'intercom_tag_update',
+  'intercom_data_attribute_create',
+  'intercom_data_attribute_update',
+  'intercom_contact_update',
 ] as const;
 
 const COO_INTERCOM_DENIED_TOOL_NAMES = [
+  'intercom_contact_list',
   'intercom_contact_search',
+  'intercom_contact_list_companies',
+  'intercom_contact_list_tags',
+  'intercom_contact_archive',
+  'intercom_contact_unarchive',
   'intercom_conversation_search',
+  'intercom_conversation_get',
   'intercom_ticket_search',
+  'intercom_ticket_get',
   'intercom_event_list',
   'intercom_note_list',
+  'intercom_company_list_contacts',
+  'intercom_list_articles',
   'intercom_reply_conversation',
   'intercom_article_delete',
   'intercom_collection_delete',
@@ -84,9 +111,23 @@ async function bootConnector(lane: string, connectorSurface = true, intercomOnly
     const callerHash = () => context.callerHash;
     if (intercomOnly) {
       const { registerIntercomAdminSetAway } = await import('./intercom/admin-set-away.js');
+      const { registerIntercomTicketTypeCreate } = await import('./intercom/ticket-type-create.js');
       const { registerIntercomTicketTypeUpdate } = await import('./intercom/ticket-type-update.js');
+      const { registerIntercomTagCreate } = await import('./intercom/tag-create.js');
+      const { registerIntercomTagUpdate } = await import('./intercom/tag-update.js');
+      const { registerIntercomDataAttributeCreate } = await import('./intercom/data-attribute-create.js');
+      const { registerIntercomDataAttributeUpdate } = await import('./intercom/data-attribute-update.js');
+      const { registerIntercomContactGet } = await import('./intercom/contact-get.js');
+      const { registerIntercomContactUpdate } = await import('./intercom/contact-update.js');
       registerIntercomAdminSetAway(server, callerHash);
+      registerIntercomTicketTypeCreate(server, callerHash);
       registerIntercomTicketTypeUpdate(server, callerHash);
+      registerIntercomTagCreate(server, callerHash);
+      registerIntercomTagUpdate(server, callerHash);
+      registerIntercomDataAttributeCreate(server, callerHash);
+      registerIntercomDataAttributeUpdate(server, callerHash);
+      registerIntercomContactGet(server, callerHash);
+      registerIntercomContactUpdate(server, callerHash);
     } else {
       const { registerAllTools } = await import('./index.js');
       registerAllTools(server, callerHash);
@@ -149,13 +190,11 @@ test('COO Intercom writes retain the MCP write-approval annotation and default t
   try {
     const tools = await connector.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
-    for (const name of ['intercom_admin_set_away', 'intercom_ticket_type_update']) {
-      assert.deepEqual(byName.get(name)?.annotations, {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      });
+    for (const name of COO_INTERCOM_WRITE_TOOL_NAMES) {
+      const annotations = byName.get(name)?.annotations;
+      assert.equal(annotations?.readOnlyHint, false, `${name} must be annotated as a write`);
+      assert.equal(annotations?.destructiveHint, false, `${name} remains a bounded configuration write`);
+      assert.equal(annotations?.openWorldHint, true, `${name} targets the Intercom service`);
     }
 
     const result = await connector.callTool('intercom_admin_set_away', {
@@ -233,13 +272,217 @@ test('COO connector omits auto-reassignment and ticket-type description while in
   }
 });
 
+test('COO may manage Intercom ticket types, tags, and data-attribute definitions without customer records', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ method: string; path: string; body: unknown }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : null;
+    requests.push({ method: init?.method ?? 'GET', path: url.pathname, body });
+    const record = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+    return new Response(JSON.stringify({
+      id: url.pathname === '/data_attributes' ? 792 : 'synthetic-config-id',
+      name: record.name ?? 'Synthetic Intercom Config',
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  let connector: ConnectorHarness | undefined;
+  try {
+    connector = await bootConnector('coo', true, true);
+    const createTicketType = {
+      name: 'Synthetic COO Ticket Type',
+      description: 'Synthetic integration test metadata',
+      icon: '🎟',
+      is_internal: true,
+    };
+    const createTag = { name: 'synthetic-coo-ops-test' };
+    const updateTag = { tag_id: 'synthetic-tag-id', name: 'synthetic-coo-ops-renamed' };
+    const createAttribute = {
+      name: 'synthetic_coo_test_attribute',
+      model: 'contact',
+      data_type: 'string',
+      description: 'Synthetic integration test metadata',
+      options: [{ value: 'synthetic-value' }],
+    };
+    const updateAttribute = {
+      attribute_id: 792,
+      description: 'Synthetic integration test metadata updated',
+      options: [{ value: 'synthetic-updated-value' }],
+      archived: false,
+    };
+    const operations: Array<[string, Record<string, unknown>]> = [
+      ['intercom_ticket_type_create', createTicketType],
+      ['intercom_tag_create', createTag],
+      ['intercom_tag_update', updateTag],
+      ['intercom_data_attribute_create', createAttribute],
+      ['intercom_data_attribute_update', updateAttribute],
+    ];
+
+    for (const [name, args] of operations) {
+      const result = await connector.callTool(name, args);
+      assert.equal(result.isError, undefined, `${name}: ${JSON.stringify(result)}`);
+      const structured = result.structuredContent as {
+        dry_run?: boolean;
+        result?: { executed?: boolean; dry_run?: boolean };
+      } | undefined;
+      assert.equal(structured?.dry_run, true, `${name} must default to dry_run`);
+      assert.equal(structured?.result?.dry_run, true, `${name} must report the preview`);
+      assert.equal(structured?.result?.executed, false, `${name} preview must not execute`);
+    }
+    assert.deepEqual(requests, [], 'default dry runs must not reach Intercom');
+
+    for (const [name, args] of operations) {
+      const result = await connector.callTool(name, { ...args, dry_run: false });
+      assert.equal(result.isError, undefined, `${name}: ${JSON.stringify(result)}`);
+      const structured = result.structuredContent as {
+        dry_run?: boolean;
+        result?: { executed?: boolean; dry_run?: boolean };
+      } | undefined;
+      assert.equal(structured?.dry_run, false, `${name} must execute only when explicitly requested`);
+      assert.equal(structured?.result?.dry_run, false);
+      assert.equal(structured?.result?.executed, true);
+    }
+
+    assert.deepEqual(requests, [
+      {
+        method: 'POST',
+        path: '/ticket_types',
+        body: createTicketType,
+      },
+      {
+        method: 'POST',
+        path: '/tags',
+        body: createTag,
+      },
+      {
+        method: 'POST',
+        path: '/tags',
+        body: { id: updateTag.tag_id, name: updateTag.name },
+      },
+      {
+        method: 'POST',
+        path: '/data_attributes',
+        body: createAttribute,
+      },
+      {
+        method: 'PUT',
+        path: '/data_attributes/792',
+        body: {
+          description: updateAttribute.description,
+          options: updateAttribute.options,
+          archived: false,
+        },
+      },
+    ]);
+  } finally {
+    if (connector) await connector.close();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('COO synthetic contact tools expose only the fixed test scope and redact contact fields', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ method: string; path: string; body: unknown }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : null;
+    requests.push({ method: init?.method ?? 'GET', path: url.pathname, body });
+    return new Response(JSON.stringify({
+      id: '6ab5f0e0843a84e15468a558',
+      name: 'Synthetic Intercom Contact Verification',
+      email: 'hidden@example.invalid',
+      phone: '+10000000000',
+      custom_attributes: { internal_note: 'hidden' },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  let connector: ConnectorHarness | undefined;
+  try {
+    connector = await bootConnector('coo', true, true);
+    const tools = new Map((await connector.listTools()).map((tool) => [tool.name, tool]));
+    const contactGetProperties = tools.get('intercom_contact_get')?.inputSchema?.properties ?? {};
+    const contactUpdateProperties = tools.get('intercom_contact_update')?.inputSchema?.properties ?? {};
+    assert.deepEqual(Object.keys(contactGetProperties).sort(), ['acknowledge_warning', 'contact_id', 'dry_run']);
+    assert.deepEqual(Object.keys(contactUpdateProperties).sort(), ['acknowledge_warning', 'contact_id', 'dry_run', 'name']);
+    for (const forbidden of ['email', 'phone', 'external_id', 'avatar', 'unsubscribed_from_emails', 'custom_attributes']) {
+      assert.equal(Object.hasOwn(contactUpdateProperties, forbidden), false, `COO Chat must not accept ${forbidden}`);
+    }
+
+    const otherContact = await connector.callTool('intercom_contact_get', { contact_id: 'another-contact' });
+    assert.equal(otherContact.isError, true);
+    const wrongName = await connector.callTool('intercom_contact_update', {
+      contact_id: '6ab5f0e0843a84e15468a558',
+      name: 'Unverified contact name',
+      dry_run: false,
+    });
+    assert.equal(wrongName.isError, true);
+    const extraField = await connector.callTool('intercom_contact_update', {
+      contact_id: '6ab5f0e0843a84e15468a558',
+      name: 'Synthetic Intercom Contact Verification',
+      email: 'hidden@example.invalid',
+      dry_run: true,
+    });
+    assert.equal(extraField.isError, undefined, JSON.stringify(extraField));
+    const extraFieldResult = extraField.structuredContent as {
+      result?: { executed?: boolean; dry_run?: boolean };
+    } | undefined;
+    assert.deepEqual(extraFieldResult?.result, { executed: false, dry_run: true, contact_id: '6ab5f0e0843a84e15468a558' });
+    assert.deepEqual(requests, [], 'rejected or dry-run contact calls must not reach Intercom');
+
+    const update = await connector.callTool('intercom_contact_update', {
+      contact_id: '6ab5f0e0843a84e15468a558',
+      name: 'Synthetic Intercom Contact Verification',
+      dry_run: false,
+    });
+    assert.equal(update.isError, undefined, JSON.stringify(update));
+    const updateResult = update.structuredContent as {
+      result?: { executed?: boolean; dry_run?: boolean; contact_id?: string };
+    } | undefined;
+    assert.deepEqual(updateResult?.result, {
+      executed: true,
+      dry_run: false,
+      contact_id: '6ab5f0e0843a84e15468a558',
+    });
+
+    const read = await connector.callTool('intercom_contact_get', {
+      contact_id: '6ab5f0e0843a84e15468a558',
+    });
+    assert.equal(read.isError, undefined, JSON.stringify(read));
+    const readResult = read.structuredContent as {
+      result?: { contact?: Record<string, unknown> };
+    } | undefined;
+    assert.deepEqual(readResult?.result?.contact, {
+      id: '6ab5f0e0843a84e15468a558',
+      name: 'Synthetic Intercom Contact Verification',
+    });
+    assert.equal(JSON.stringify(read).includes('hidden@example.invalid'), false);
+    assert.equal(JSON.stringify(read).includes('custom_attributes'), false);
+    assert.deepEqual(requests, [
+      {
+        method: 'PUT',
+        path: '/contacts/6ab5f0e0843a84e15468a558',
+        body: { name: 'Synthetic Intercom Contact Verification' },
+      },
+      {
+        method: 'GET',
+        path: '/contacts/6ab5f0e0843a84e15468a558',
+        body: null,
+      },
+    ]);
+  } finally {
+    if (connector) await connector.close();
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('COO Intercom additions do not widen CRO or external connector lanes', async () => {
   const cro = await bootConnector('cro');
   try {
     const names = new Set((await cro.listTools()).map((tool) => tool.name));
     assert.equal(names.has('intercom_conversation_search'), true, 'CRO keeps its existing Intercom surface');
-    assert.equal(names.has('intercom_admin_set_away'), false);
-    assert.equal(names.has('intercom_ticket_type_update'), false);
+    for (const name of COO_INTERCOM_WRITE_TOOL_NAMES) {
+      assert.equal(names.has(name), false, `COO-specific tool ${name} must not leak to CRO`);
+    }
   } finally {
     await cro.close();
   }
