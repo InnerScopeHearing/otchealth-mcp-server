@@ -42,13 +42,14 @@ function project(job: ChatActionJob): Record<string, unknown> {
 }
 
 export const MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS = 128;
+export const CHAT_ACTION_STATUS_READ_CAPACITY = Symbol('chat_action_status_read_capacity');
 
 export interface ChatActionJobStatus {
   job_id: string;
   status: ChatActionJob['status'];
 }
 
-type ChatActionJobStatusReader = (jobId: string, callerHash: string) => Promise<ChatActionJobStatus | null>;
+type ChatActionJobStatusReader = (jobId: string, callerHash: string) => Promise<ChatActionJobStatus | null | typeof CHAT_ACTION_STATUS_READ_CAPACITY>;
 
 /** Coalesce only concurrent, caller-bound status reads. Completed results are never retained. */
 export function createChatActionJobStatusReader(read: typeof readDoc = readDoc): ChatActionJobStatusReader {
@@ -69,8 +70,8 @@ export function createChatActionJobStatusReader(read: typeof readDoc = readDoc):
     const existing = inFlight.get(key);
     if (existing) return existing;
 
-    // At capacity, read without joining the table so distinct pending keys can never grow it.
-    if (inFlight.size >= MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS) return loadStatus(jobId, callerHash);
+    // Existing keys still join above, but a new key cannot start backend work at capacity.
+    if (inFlight.size >= MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS) return Promise.resolve(CHAT_ACTION_STATUS_READ_CAPACITY);
 
     let pending!: Promise<ChatActionJobStatus | null>;
     pending = loadStatus(jobId, callerHash).finally(() => {
@@ -114,6 +115,7 @@ export function registerChatActionJobRoutes(app: FastifyInstance): void {
     const parsed = Read.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ success: false, error: 'invalid_chat_action_read' });
     if (mode === 'status') {
       const status = await readStatus(parsed.data.job_id, parsed.data.caller_hash);
+      if (status === CHAT_ACTION_STATUS_READ_CAPACITY) return reply.header('Retry-After', '1').code(503).send({ success: false, error: 'chat_action_status_capacity', retryable: true });
       if (!status) return reply.code(404).send({ success: false, error: 'chat_action_job_not_found' });
       return reply.send({ success: true, result: status });
     }

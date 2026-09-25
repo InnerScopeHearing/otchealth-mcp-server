@@ -73,8 +73,8 @@ test('chat action status read failures clear the in-flight entry so a later call
   assert.equal(readCalls, 2, 'the rejected entry was removed before the retry');
 });
 
-test('chat action status coalescer never stores more than its fixed in-flight bound', async () => {
-  const { createChatActionJobStatusReader, MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS } = await import('./chat-action-jobs.js');
+test('chat action status reads enforce the in-flight bound, join duplicates at capacity, and allow retry after cleanup', async () => {
+  const { createChatActionJobStatusReader, MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS, CHAT_ACTION_STATUS_READ_CAPACITY } = await import('./chat-action-jobs.js');
   let readCalls = 0;
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -90,11 +90,16 @@ test('chat action status coalescer never stores more than its fixed in-flight bo
   assert.equal(readCalls, MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS);
 
   const overflowJobId = `caj_${MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS.toString(16).padStart(64, '0')}`;
-  const overflowOne = readStatus(overflowJobId, 'caller-a-123456');
-  const overflowTwo = readStatus(overflowJobId, 'caller-a-123456');
+  const overflow = readStatus(overflowJobId, 'caller-a-123456');
+  const duplicateAtCapacity = readStatus(`caj_${'0'.repeat(64)}`, 'caller-a-123456');
+  assert.strictEqual(duplicateAtCapacity, pending[0], 'a same-caller duplicate joins its existing read at capacity');
+  assert.equal(await overflow, CHAT_ACTION_STATUS_READ_CAPACITY, 'a new key receives the retryable capacity result');
   await Promise.resolve();
-  assert.equal(readCalls, MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS + 2, 'overflow reads bypass the map instead of growing it');
+  assert.equal(readCalls, MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS, 'overflow causes no backend read');
 
   release();
-  await Promise.all([...pending, overflowOne, overflowTwo]);
+  await Promise.all(pending);
+
+  assert.deepEqual(await readStatus(overflowJobId, 'caller-a-123456'), { job_id: overflowJobId, status: 'queued' });
+  assert.equal(readCalls, MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS + 1, 'a retry starts once a slot has been freed');
 });
