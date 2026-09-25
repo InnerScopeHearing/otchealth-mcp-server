@@ -13,7 +13,7 @@ const RUN_ID = 35170671551;
 const ARTIFACT_ID = 10476469182;
 const ARTIFACT_NAME = 'graphrag-fifth-source-provider-observation-35170671551';
 const HEAD_SHA = '854766e709aefcf2826cc0b5dc75c028b9b566dc';
-const WORKFLOW_PATH = '.github/workflows/observe-managed-graphrag-company-fifth-source.yml@main';
+const WORKFLOW_PATH = '.github/workflows/observe-managed-graphrag-company-fifth-source.yml';
 const WORKFLOW_BLOB_SHA = '3e2f2554443fee7cb113f4f6435262cd2ec0c273';
 const PRODUCER_BLOB_SHA = '37e4a762a50b0d239c610158ca02bc7a2f29dde8';
 const SOURCE_ID = 'LVEV3LT7LB';
@@ -454,6 +454,44 @@ test('pinned observation read verifies provenance, returns only sanitized struct
   assert.equal(signedDownloadRequest.authorization, null, 'the GitHub installation token must not cross the redirect boundary');
   assert.ok(requests.some((request) => request.url.includes(`/contents/.github/workflows/observe-managed-graphrag-company-fifth-source.yml?ref=${HEAD_SHA}`)));
   assert.ok(requests.some((request) => request.url.includes(`/contents/scripts/observe_managed_graphrag_company_fifth_source.py?ref=${HEAD_SHA}`)));
+});
+
+test('pinned observation read matches GitHub run path metadata and rejects a different workflow path', async (t) => {
+  await t.test('accepts the GitHub REST path without a ref suffix', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
+    const digest = createHash('sha256').update(archive).digest('hex');
+    const artifact = makeArtifact({ digest: `sha256:${digest}`, size_in_bytes: archive.length });
+    const result = await withStubbedFetch(
+      githubStub(requests, {
+        archive,
+        artifact,
+        run: makeRun({ path: '.github/workflows/observe-managed-graphrag-company-fifth-source.yml' }),
+      }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+    assert.equal(result.structuredContent?.result?.workflow_provenance_verified, true);
+  });
+
+  await t.test('rejects an altered workflow path before artifact access', async () => {
+    const requests: CapturedRequest[] = [];
+    const result = await withStubbedFetch(
+      githubStub(requests, {
+        run: makeRun({ path: '.github/workflows/observe-managed-graphrag-company-other-source.yml' }),
+      }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    const diagnostic = result.structuredContent?.error?.internal_diagnostic;
+    assert.equal(diagnostic?.type, 'github_observation_receipt');
+    assert.equal(diagnostic?.stage, 'workflow_run_metadata');
+    assert.equal(typeof diagnostic?.correlation_id, 'string');
+    assert.equal(diagnostic?.correlation_id, result.structuredContent?.correlation_id);
+    assert.equal(requests.some((request) => request.url.includes(`/actions/artifacts/${ARTIFACT_ID}`)), false);
+  });
 });
 
 test('pinned observation read explicitly records when GitHub does not provide an archive digest', async () => {

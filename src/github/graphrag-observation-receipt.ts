@@ -9,7 +9,7 @@ export const PINNED_GRAPHRAG_OBSERVATION = Object.freeze({
   artifactId: 10476469182,
   artifactName: 'graphrag-fifth-source-provider-observation-35170671551',
   headSha: '854766e709aefcf2826cc0b5dc75c028b9b566dc',
-  workflowPath: '.github/workflows/observe-managed-graphrag-company-fifth-source.yml@main',
+  workflowPath: '.github/workflows/observe-managed-graphrag-company-fifth-source.yml',
   workflowName: 'Observe sealed company GraphRAG fifth-source ingestion',
   workflowBlobSha: '3e2f2554443fee7cb113f4f6435262cd2ec0c273',
   producerPath: 'scripts/observe_managed_graphrag_company_fifth_source.py',
