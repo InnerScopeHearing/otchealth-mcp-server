@@ -26,6 +26,38 @@ export function makeGitHubBrokerKeyHash(idempotencyKey: string): string {
   return sha256(idempotencyKey);
 }
 
+const LOGGABLE_ARGUMENT_FIELDS: Record<string, readonly string[]> = {
+  github_create_branch: ['owner', 'repo', 'from_sha'],
+  github_get_file_contents: ['owner', 'repo', 'path'],
+};
+
+/**
+ * Project the untrusted envelope into safe audit metadata before the handler validates it.
+ * Never copy argument values or unexpected fields into the log projection.
+ */
+export function redactMakeGitHubBrokerInputForLog(input: Record<string, unknown>): Record<string, unknown> {
+  const requestedToolName = input.tool_name;
+  const toolName = typeof requestedToolName === 'string' &&
+    (MAKE_GITHUB_BROKER_TOOLS as readonly string[]).includes(requestedToolName)
+    ? requestedToolName
+    : 'unlisted';
+  const rawArguments = input.arguments;
+  const args = rawArguments !== null && typeof rawArguments === 'object' && !Array.isArray(rawArguments)
+    ? rawArguments as Record<string, unknown>
+    : {};
+  const argumentFields = (LOGGABLE_ARGUMENT_FIELDS[toolName] ?? [])
+    .filter((field) => Object.prototype.hasOwnProperty.call(args, field));
+  const idempotencyKey = input.idempotency_key;
+
+  return {
+    tool_name: toolName,
+    argument_fields: argumentFields,
+    ...(typeof idempotencyKey === 'string' && IDEMPOTENCY_KEY_RE.test(idempotencyKey)
+      ? { idempotency_key_sha256: sha256(idempotencyKey) }
+      : {}),
+  };
+}
+
 export class MakeGitHubBrokerPolicyError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -42,6 +74,7 @@ const envelopeSchema = z.object({
 const createBranchArgumentsSchema = z.object({
   owner: z.literal(MAKE_GITHUB_REPOSITORY.owner),
   repo: z.literal(MAKE_GITHUB_REPOSITORY.repo),
+  from_sha: z.string().regex(COMMIT_SHA_RE),
 }).strict();
 
 const getFileContentsArgumentsSchema = z.object({
@@ -110,7 +143,7 @@ export function parseMakeGitHubBrokerCall(value: unknown): ParsedBrokerCall {
       branch: expectedBranch,
       idempotencyKeySha256,
       requestSha256: stableSha256([
-        'github_create_branch', args.owner, args.repo, expectedBranch,
+        'github_create_branch', args.owner, args.repo, expectedBranch, args.from_sha,
       ]),
     };
   }
@@ -204,6 +237,12 @@ export async function executeMakeGitHubBroker(
 
   const existingSha = await dependencies.getBranchSha(call.branch);
   if (existingSha !== null) {
+    if (existingSha !== call.args.from_sha) {
+      throw new MakeGitHubBrokerPolicyError(
+        'idempotency_conflict',
+        'The key-derived branch already exists at a different commit and cannot be replayed.',
+      );
+    }
     return {
       ...base,
       outcome: 'replayed',
@@ -211,6 +250,7 @@ export async function executeMakeGitHubBroker(
       dry_run: false,
       branch: call.branch,
       sha: existingSha,
+      from_sha: call.args.from_sha,
     };
   }
 
@@ -221,21 +261,16 @@ export async function executeMakeGitHubBroker(
   if (!COMMIT_SHA_RE.test(mainSha)) {
     throw new MakeGitHubBrokerPolicyError('main_ref_invalid', 'The target repository main branch returned an invalid commit SHA.');
   }
+  if (mainSha !== call.args.from_sha) {
+    throw new MakeGitHubBrokerPolicyError(
+      'main_ref_mismatch',
+      'The requested source commit does not match the verified current main branch.',
+    );
+  }
 
+  let created: { sha: string };
   try {
-    const created = await dependencies.createBranch(call.branch, mainSha);
-    if (created.sha !== mainSha) {
-      throw new MakeGitHubBrokerPolicyError('create_result_mismatch', 'GitHub returned an unexpected branch commit.');
-    }
-    return {
-      ...base,
-      outcome: 'created',
-      executed: true,
-      dry_run: false,
-      branch: call.branch,
-      sha: created.sha,
-      from_sha: mainSha,
-    };
+    created = await dependencies.createBranch(call.branch, call.args.from_sha);
   } catch (createError) {
     // Reconcile a duplicate-create race or an unknown write acknowledgement by exact readback.
     let observedSha: string | null;
@@ -245,6 +280,12 @@ export async function executeMakeGitHubBroker(
       throw createError;
     }
     if (observedSha !== null) {
+      if (observedSha !== call.args.from_sha) {
+        throw new MakeGitHubBrokerPolicyError(
+          'idempotency_conflict',
+          'The key-derived branch exists at a different commit after an uncertain create.',
+        );
+      }
       return {
         ...base,
         outcome: 'replayed',
@@ -252,8 +293,33 @@ export async function executeMakeGitHubBroker(
         dry_run: false,
         branch: call.branch,
         sha: observedSha,
+        from_sha: call.args.from_sha,
       };
     }
     throw createError;
   }
+
+  if (created.sha !== call.args.from_sha) {
+    throw new MakeGitHubBrokerPolicyError('create_result_mismatch', 'GitHub returned an unexpected branch commit.');
+  }
+
+  // Do not trust the create response as the terminal receipt. Independently read the exact
+  // server-derived ref and bind the returned SHA to the validated request source.
+  const readbackSha = await dependencies.getBranchSha(call.branch);
+  if (readbackSha === null) {
+    throw new MakeGitHubBrokerPolicyError('branch_readback_missing', 'The created branch was not visible on independent readback.');
+  }
+  if (readbackSha !== created.sha || readbackSha !== call.args.from_sha) {
+    throw new MakeGitHubBrokerPolicyError('branch_readback_mismatch', 'Independent branch readback did not match the requested source commit.');
+  }
+
+  return {
+    ...base,
+    outcome: 'created',
+    executed: true,
+    dry_run: false,
+    branch: call.branch,
+    sha: readbackSha,
+    from_sha: call.args.from_sha,
+  };
 }
