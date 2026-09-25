@@ -246,7 +246,7 @@ export async function executeMakeGitHubBroker(
       executed: false,
       dry_run: true,
       ...(call.toolName === 'github_create_branch'
-        ? { branch: call.branch }
+        ? { branch: call.branch, from_sha: call.args.from_sha }
         : call.toolName === 'github_get_file_contents'
           ? { path: call.args.path, ref: call.ref }
           : { ref: call.ref }),
