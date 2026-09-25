@@ -148,6 +148,11 @@ test('rejects unknown tools, out-of-scope resources, bad refs and extra nested f
       },
       idempotency_key: KEY,
     },
+    {
+      tool_name: 'github_get_main_sha',
+      arguments: { ref: 'develop' },
+      idempotency_key: KEY,
+    },
   ];
 
   for (const request of invalidRequests) {
@@ -183,6 +188,26 @@ test('rejects a stale or mismatching caller source SHA before branch creation', 
   );
   assert.equal(fake.calls.creates.length, 0);
   assert.deepEqual(fake.calls.branchReads, [makeGitHubBrokerBranch(KEY), 'main']);
+});
+
+test('branch creation rechecks main after Make reads its SHA and rejects that SHA if main has moved', async () => {
+  const fake = makeFakeDependencies({ mainSha: SOURCE_SHA });
+  const mainRequest = {
+    tool_name: 'github_get_main_sha',
+    arguments: {},
+    idempotency_key: KEY,
+  };
+
+  const discovery = await executeMakeGitHubBroker(mainRequest, CORRELATION_ID, fake.dependencies, false);
+  assert.equal(discovery.sha, SOURCE_SHA);
+
+  fake.branches.set('main', FILE_SHA);
+  await assert.rejects(
+    executeMakeGitHubBroker(createBranchRequest(KEY, discovery.sha!), CORRELATION_ID, fake.dependencies, false),
+    isPolicyError('main_ref_mismatch'),
+  );
+  assert.equal(fake.calls.creates.length, 0);
+  assert.deepEqual(fake.calls.branchReads, ['main', makeGitHubBrokerBranch(KEY), 'main']);
 });
 
 test('rejects a missing or malformed main SHA before creating a branch', async () => {
@@ -266,6 +291,46 @@ test('reads only package.json from the same key-derived pilot ref and returns a 
   assert.deepEqual(fake.calls.fileReads, [{ path: 'package.json', ref: branch }]);
 });
 
+test('reads only the fixed main ref and returns a compact SHA receipt', async () => {
+  const fake = makeFakeDependencies({ mainSha: FILE_SHA });
+  const request = {
+    tool_name: 'github_get_main_sha',
+    arguments: {},
+    idempotency_key: KEY,
+  };
+
+  const result = await executeMakeGitHubBroker(request, CORRELATION_ID, fake.dependencies, false);
+
+  assert.equal(result.outcome, 'read');
+  assert.equal(result.executed, true);
+  assert.equal(result.dry_run, false);
+  assert.equal(result.tool_name, 'github_get_main_sha');
+  assert.equal(result.ref, 'main');
+  assert.equal(result.sha, FILE_SHA);
+  assert.equal(result.text, undefined);
+  assert.equal(result.path, undefined);
+  assert.deepEqual(fake.calls.branchReads, ['main']);
+  assert.deepEqual(fake.calls.fileReads, []);
+  assert.deepEqual(fake.calls.creates, []);
+});
+
+test('fixed main SHA read fails closed when main is missing or malformed', async () => {
+  for (const [mainSha, errorCode] of [[null, 'main_ref_missing'], ['not-a-sha', 'main_ref_invalid']] as const) {
+    const fake = makeFakeDependencies({ mainSha });
+    await assert.rejects(
+      executeMakeGitHubBroker({
+        tool_name: 'github_get_main_sha',
+        arguments: {},
+        idempotency_key: KEY,
+      }, CORRELATION_ID, fake.dependencies, false),
+      isPolicyError(errorCode),
+    );
+    assert.deepEqual(fake.calls.branchReads, ['main']);
+    assert.deepEqual(fake.calls.fileReads, []);
+    assert.deepEqual(fake.calls.creates, []);
+  }
+});
+
 test('dry-run file read returns a plan without making any GitHub request', async () => {
   const fake = makeFakeDependencies();
   const request = {
@@ -290,6 +355,25 @@ test('dry-run file read returns a plan without making any GitHub request', async
   assert.equal(result.text, undefined);
   assert.deepEqual(fake.calls.fileReads, []);
   assert.deepEqual(fake.calls.branchReads, []);
+  assert.deepEqual(fake.calls.creates, []);
+});
+
+test('dry-run main SHA read returns a plan without making any GitHub request', async () => {
+  const fake = makeFakeDependencies();
+  const result = await executeMakeGitHubBroker({
+    tool_name: 'github_get_main_sha',
+    arguments: {},
+    idempotency_key: KEY,
+  }, CORRELATION_ID, fake.dependencies, true);
+
+  assert.equal(result.outcome, 'planned');
+  assert.equal(result.executed, false);
+  assert.equal(result.dry_run, true);
+  assert.equal(result.tool_name, 'github_get_main_sha');
+  assert.equal(result.ref, 'main');
+  assert.equal(result.sha, undefined);
+  assert.deepEqual(fake.calls.branchReads, []);
+  assert.deepEqual(fake.calls.fileReads, []);
   assert.deepEqual(fake.calls.creates, []);
 });
 
@@ -337,4 +421,18 @@ test('log projection does not echo an unlisted tool name or its sensitive-lookin
 
   assert.deepEqual(projected, { tool_name: 'unlisted', argument_fields: [] });
   assert.equal(JSON.stringify(projected).includes(sensitiveSentinel), false);
+});
+
+test('main SHA log projection records no caller-controlled argument fields', () => {
+  const projected = redactMakeGitHubBrokerInputForLog({
+    tool_name: 'github_get_main_sha',
+    arguments: { ref: 'attacker-controlled-ref', owner: 'OtherOrg' },
+    idempotency_key: KEY,
+  });
+
+  assert.deepEqual(projected, {
+    tool_name: 'github_get_main_sha',
+    argument_fields: [],
+    idempotency_key_sha256: makeGitHubBrokerKeyHash(KEY),
+  });
 });

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 export const MAKE_GITHUB_BROKER_TOOL = 'github_make_broker' as const;
-export const MAKE_GITHUB_BROKER_TOOLS = ['github_create_branch', 'github_get_file_contents'] as const;
+export const MAKE_GITHUB_BROKER_TOOLS = ['github_create_branch', 'github_get_file_contents', 'github_get_main_sha'] as const;
 export const MAKE_GITHUB_REPOSITORY = {
   owner: 'InnerScopeHearing',
   repo: 'otchealth-mcp-server',
@@ -29,6 +29,7 @@ export function makeGitHubBrokerKeyHash(idempotencyKey: string): string {
 const LOGGABLE_ARGUMENT_FIELDS: Record<string, readonly string[]> = {
   github_create_branch: ['owner', 'repo', 'from_sha'],
   github_get_file_contents: ['owner', 'repo', 'path'],
+  github_get_main_sha: [],
 };
 
 /**
@@ -83,8 +84,11 @@ const getFileContentsArgumentsSchema = z.object({
   path: z.literal(PILOT_READ_PATH),
 }).strict();
 
+const getMainShaArgumentsSchema = z.object({}).strict();
+
 type CreateBranchArguments = z.infer<typeof createBranchArgumentsSchema>;
 type GetFileContentsArguments = z.infer<typeof getFileContentsArgumentsSchema>;
+type GetMainShaArguments = z.infer<typeof getMainShaArgumentsSchema>;
 
 type ParsedBrokerCall =
   | {
@@ -98,6 +102,13 @@ type ParsedBrokerCall =
       toolName: 'github_get_file_contents';
       args: GetFileContentsArguments;
       ref: string;
+      idempotencyKeySha256: string;
+      requestSha256: string;
+    }
+  | {
+      toolName: 'github_get_main_sha';
+      args: GetMainShaArguments;
+      ref: 'main';
       idempotencyKeySha256: string;
       requestSha256: string;
     };
@@ -116,7 +127,7 @@ function stableSha256(value: unknown): string {
 }
 
 /**
- * Parse the dynamic Make envelope into one of two exact GitHub requests. This function is the
+ * Parse the dynamic Make envelope into one of three exact GitHub requests. This function is the
  * broker's authorization boundary: nested argument objects are strict, the resource is fixed,
  * and branch/ref names are derived here rather than accepted from the caller.
  */
@@ -127,8 +138,25 @@ export function parseMakeGitHubBrokerCall(value: unknown): ParsedBrokerCall {
     throw new MakeGitHubBrokerPolicyError('tool_not_allowed', 'The requested GitHub tool is not in the Make pilot allowlist.');
   }
 
-  const expectedBranch = makeGitHubBrokerBranch(envelope.idempotency_key);
   const idempotencyKeySha256 = sha256(envelope.idempotency_key);
+
+  if (envelope.tool_name === 'github_get_main_sha') {
+    const args = parseWithSchema(
+      getMainShaArgumentsSchema,
+      envelope.arguments,
+      'invalid_github_arguments',
+      'github_get_main_sha arguments',
+    );
+    return {
+      toolName: 'github_get_main_sha',
+      args,
+      ref: 'main',
+      idempotencyKeySha256,
+      requestSha256: stableSha256(['github_get_main_sha', MAKE_GITHUB_REPOSITORY.owner, MAKE_GITHUB_REPOSITORY.repo, 'main']),
+    };
+  }
+
+  const expectedBranch = makeGitHubBrokerBranch(envelope.idempotency_key);
 
   if (envelope.tool_name === 'github_create_branch') {
     const args = parseWithSchema(
@@ -219,7 +247,27 @@ export async function executeMakeGitHubBroker(
       dry_run: true,
       ...(call.toolName === 'github_create_branch'
         ? { branch: call.branch }
-        : { path: call.args.path, ref: call.ref }),
+        : call.toolName === 'github_get_file_contents'
+          ? { path: call.args.path, ref: call.ref }
+          : { ref: call.ref }),
+    };
+  }
+
+  if (call.toolName === 'github_get_main_sha') {
+    const sha = await dependencies.getBranchSha(call.ref);
+    if (sha === null) {
+      throw new MakeGitHubBrokerPolicyError('main_ref_missing', 'The target repository main branch could not be verified.');
+    }
+    if (!COMMIT_SHA_RE.test(sha)) {
+      throw new MakeGitHubBrokerPolicyError('main_ref_invalid', 'The target repository main branch returned an invalid commit SHA.');
+    }
+    return {
+      ...base,
+      outcome: 'read',
+      executed: true,
+      dry_run: false,
+      ref: call.ref,
+      sha,
     };
   }
 

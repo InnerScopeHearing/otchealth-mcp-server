@@ -35,6 +35,14 @@
  * more than invisible to that lane; the in-handler ring/role checks are the real gate either way).
  */
 
+/** A dedicated setup-code principal for the inactive Make GitHub broker pilot. It is intentionally
+ * not a general internal lane and is not part of KNOWN_INTERNAL_LANES, EXEC_RING, or any ship set.
+ * registry.ts applies this exact two-tool set on every authentication path, regardless of the
+ * shared connector override.
+ */
+export const CTO_MAKE_GITHUB_PILOT_LANE = 'cto-make-github-pilot' as const;
+export const CTO_MAKE_GITHUB_PILOT_TOOLSET = ['github_make_broker', 'catalog_probe'] as const;
+
 /**
  * Internal client_credentials lanes this feature has an opinion about. Any OTHER caller identity (an
  * app-lead/product agent like 'iheartest', an empty/unknown caller, a Claude Chat connector lane,
