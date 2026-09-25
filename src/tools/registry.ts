@@ -419,14 +419,21 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  * the ledger coordination verbs. No commerce, no legal, no engineering, no privileged RAG.
  */
 /**
- * The COO ordinary-Chat Intercom surface is limited to support-team metadata, ticket-type metadata,
- * and two reversible settings writes. Customer/contact/conversation/ticket contents, public help
- * content, bulk actions, and irreversible mutations stay outside this connector allowlist.
+ * The COO ordinary-Chat Intercom surface includes support-team metadata, ticket types, tags, and
+ * custom data-attribute definitions, plus fixed-target synthetic contact verification. The contact
+ * handlers constrain this connector lane to the approved synthetic record, restrict updates to one
+ * fixed verification label, and redact every other contact field from reads. Customer/contact/
+ * conversation/ticket contents, public help content, bulk actions, and hard-delete operations stay
+ * outside this connector allowlist.
  */
 export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
   'intercom_admin_set_away',
   'intercom_team_get', 'intercom_team_list',
-  'intercom_ticket_type_get', 'intercom_ticket_type_list', 'intercom_ticket_type_update',
+  'intercom_ticket_type_get', 'intercom_ticket_type_list',
+  'intercom_ticket_type_create', 'intercom_ticket_type_update',
+  'intercom_tag_create', 'intercom_tag_update',
+  'intercom_data_attribute_create', 'intercom_data_attribute_update',
+  'intercom_contact_get', 'intercom_contact_update',
 ] as const;
 
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
