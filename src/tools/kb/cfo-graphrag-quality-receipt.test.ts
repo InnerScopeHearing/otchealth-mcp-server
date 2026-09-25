@@ -108,6 +108,11 @@ test('fails closed on incomplete source coverage and missing, stale, duplicate, 
   const partial = input();
   partial.coverage = { ...coverage, coverageStatus: 'partial' };
   assert.equal(projectCfoGraphQualityReceipt(partial).status, 'rejected');
+  for (const expected of [0, 3]) {
+    const insufficient = input();
+    insufficient.coverage = { ...coverage, counts: { expected, processed: expected, accepted: expected, rejected: 0 } };
+    assert.equal(projectCfoGraphQualityReceipt(insufficient).status, 'rejected');
+  }
   for (const mutate of [
     (value: ReturnType<typeof input>) => { value.bindings.pop(); },
     (value: ReturnType<typeof input>) => { value.bindings.push(value.bindings[0]); },

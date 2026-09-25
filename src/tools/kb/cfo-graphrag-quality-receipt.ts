@@ -154,7 +154,8 @@ export function projectCfoGraphQualityReceipt(value: unknown): CfoGraphQualityRe
   if (!parsed.success || parsed.data.caller_agent !== 'cfo') return reject();
   const input: Input = parsed.data;
   const expectedCoverageCount = input.coverage.counts.expected;
-  if (input.coverage.coverageStatus !== 'complete' || input.coverage.expectedScope !== 'finance' || expectedCoverageCount === null) return reject();
+  if (input.coverage.coverageStatus !== 'complete' || input.coverage.expectedScope !== 'finance' ||
+      expectedCoverageCount === null || expectedCoverageCount < SLOTS.length) return reject();
   const contractBody = {
     schema: input.contract.schema,
     scope: input.contract.scope,
