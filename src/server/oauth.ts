@@ -79,6 +79,10 @@ const CLAUDE_CALLBACKS = new Set<string>([
   'https://claude.com/api/mcp/auth_callback',
 ]);
 
+// Make MCP Client's documented OAuth callback. Exact-string matching keeps the authorization code
+// confined to Make's callback endpoint; it does not alter the public DCR client's external-read lane.
+const MAKE_MCP_CALLBACK = 'https://www.make.com/oauth/cb/mcp';
+
 interface ResolvedAnyClient { secret: string; agent: string; isPublic: boolean; redirectUris?: string[]; }
 /** Resolve confidential (static/OAUTH_CLIENTS) clients OR stateless-DCR PUBLIC clients (dcr_...). */
 function resolveAnyClient(clientId: string): ResolvedAnyClient | null {
@@ -181,6 +185,7 @@ export function isChatgptDynamicCallback(uri: string): boolean {
 
 function allowedRedirect(uri: string): boolean {
   if (CLAUDE_CALLBACKS.has(uri)) return true;
+  if (uri === MAKE_MCP_CALLBACK) return true;
   // RFC 8252 loopback: any ephemeral port, checked before the exact-match list because the port
   // cannot be known in advance and so can never be enumerated in configuration.
   if (isLoopbackRedirect(uri)) return true;
@@ -274,9 +279,10 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
   });
 
   // ── RFC 7591: Dynamic Client Registration (PUBLIC, PKCE-only, external-read ONLY) ───
-  // Lets a Claude.ai custom connector self-register with no pre-shared secret. The issued client_id is
-  // a stateless HMAC-signed blob bound to the non-privileged 'external-read' lane (see below) and the
-  // Claude callback. No storage; survives cutovers. Redirect_uris are restricted to the Claude callback.
+  // Lets supported OAuth clients self-register with no pre-shared secret. The issued client_id is a
+  // stateless HMAC-signed blob bound to the non-privileged 'external-read' lane (see below). No
+  // storage; survives cutovers. Redirect_uris must match an exact callback, loopback rule, or
+  // configured URI.
   app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     if (!oauthConfigured()) return reply.status(404).send({ error: 'not_found' });
     const body = (typeof req.body === 'string' ? {} : (req.body ?? {})) as Record<string, unknown>;
@@ -289,13 +295,13 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         { type: 'oauth_register_rejected', reason: 'invalid_redirect_uri', redirect_uris: uris.slice(0, 5), application_type: body.application_type ?? null, client_name: typeof body.client_name === 'string' ? body.client_name.slice(0, 80) : null },
         'rejected DCR registration: redirect_uri not allowed',
       );
-      return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be an allow-listed callback (Claude, ChatGPT, or an RFC 8252 loopback)' });
+      return reply.status(400).send({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must match a supported callback or configured allow-list entry' });
     }
     // OAuth for MCP hygiene (2026-07-28 authorization-spec revision): a registering client declares
     // application_type ('web' or 'native', RFC 7591 SS2 / RFC 8252) so the server knows which redirect
     // and PKCE posture the client expects. This gateway does not yet BRANCH behavior on it -- every
-    // DCR client gets the identical PKCE-S256 requirement and the same fixed Claude-callback
-    // allow-list regardless of application_type -- but it MUST still validate and echo the value per
+    // DCR client gets the identical PKCE-S256 requirement and the same callback/loopback/configured-
+    // URI rules regardless of application_type -- but it MUST still validate and echo the value per
     // RFC 7591 SS3.2.1/3.2.2: an unrecognized value is a registration-metadata error
     // (invalid_client_metadata), never a silently-accepted or silently-ignored one. Absent ->
     // RFC 7591's own documented default, 'web'. This check is purely metadata hygiene: it can never
@@ -693,3 +699,4 @@ export function issuedAgent(token: string): string | null {
   if (!claims || claims.typ !== 'access') return null;
   return claims.agent || '';
 }
+

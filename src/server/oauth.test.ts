@@ -36,9 +36,13 @@ before(() => {
     // exported isPrivilegedDefaultAgent() helper below.
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+  // Keep redirect behavior deterministic and exercise exact allow-list matching rather than the
+  // empty-list HTTPS fallback. This test-only URI is intentionally unrelated to Make.
+  process.env.OAUTH_REDIRECT_URIS = 'https://hyperagent.com/api/mcp-servers/callback';
 });
 
 const CLAUDE_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
+const MAKE_CALLBACK = 'https://www.make.com/oauth/cb/mcp';
 
 // The client_name values a real caller might choose -- from plain-English business phrases that used
 // to collide into a privileged lane, through explicit lane codes, to the empty name. EVERY one must
@@ -103,6 +107,53 @@ test('Part 6: /register still validates redirect_uris (missing/empty -> 400, unc
   });
   assert.equal(res.statusCode, 400, 'empty redirect_uris must be rejected');
   assert.equal(res.json().error, 'invalid_redirect_uri');
+
+  await app.close();
+});
+
+test('Make MCP Client accepts only its exact callback and its public DCR client remains external-read', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes } = await import('./oauth.js');
+  const { parseStatelessClient } = await import('../auth/oauth-tokens.js');
+
+  const configured = (process.env.OAUTH_REDIRECT_URIS || '').split(',').map((uri) => uri.trim()).filter(Boolean);
+  assert.ok(configured.length > 0, 'the test must use a non-empty exact allow-list, not the HTTPS fallback');
+  assert.equal(configured.includes(MAKE_CALLBACK), false, 'Make callback acceptance must come from the explicit fixed callback rule');
+
+  const app = Fastify();
+  registerOAuthRoutes(app);
+
+  const accepted = await app.inject({
+    method: 'POST',
+    url: '/register',
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ redirect_uris: [MAKE_CALLBACK], client_name: 'Make MCP Client' }),
+  });
+  assert.equal(accepted.statusCode, 201, `the exact Make callback must register: ${accepted.body}`);
+  assert.deepEqual(accepted.json().redirect_uris, [MAKE_CALLBACK]);
+  const client = parseStatelessClient(accepted.json().client_id as string, SIGNING_SECRET);
+  assert.equal(client?.agent, 'external-read', 'adding a Make callback must not grant COO or any privileged lane');
+
+  const lookalikes = [
+    'https://www.make.com/oauth/cb/mcp/',
+    'https://www.make.com/oauth/cb/mcp?next=https://attacker.example',
+    'https://www.make.com/oauth/cb/mcp#fragment',
+    'http://www.make.com/oauth/cb/mcp',
+    'https://www.make.com:443/oauth/cb/mcp',
+    'https://make.com/oauth/cb/mcp',
+    'https://www.make.com.attacker.example/oauth/cb/mcp',
+    'https://user@www.make.com/oauth/cb/mcp',
+  ];
+  for (const uri of lookalikes) {
+    const rejected = await app.inject({
+      method: 'POST',
+      url: '/register',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ redirect_uris: [uri], client_name: 'Make MCP Client' }),
+    });
+    assert.equal(rejected.statusCode, 400, `Make look-alike must be rejected: ${uri}`);
+    assert.equal(rejected.json().error, 'invalid_redirect_uri');
+  }
 
   await app.close();
 });
@@ -305,12 +356,15 @@ function addFormUrlEncodedParser(app: import('fastify').FastifyInstance): void {
   });
 }
 
-async function registerDcrClient(app: import('fastify').FastifyInstance): Promise<string> {
+async function registerDcrClient(
+  app: import('fastify').FastifyInstance,
+  redirectUri = CLAUDE_CALLBACK,
+): Promise<string> {
   const res = await app.inject({
     method: 'POST',
     url: '/register',
     headers: { 'content-type': 'application/json' },
-    payload: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK], client_name: 'Test URL-Only Connector' }),
+    payload: JSON.stringify({ redirect_uris: [redirectUri], client_name: 'Test URL-Only Connector' }),
   });
   assert.equal(res.statusCode, 201);
   return res.json().client_id as string;
@@ -492,6 +546,68 @@ test('E2E: a DCR client redeeming a genuine cfo setup code reaches the token end
   });
   assert.equal(refresh2.statusCode, 200);
   assert.equal(issuedAgent(refresh2.json().access_token), 'cfo');
+
+  await app.close();
+});
+
+test('E2E: Make callback DCR stays external-read unless the owner supplies a COO setup code, then refresh stays COO', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes, issuedAgent } = await import('./oauth.js');
+  const { parseStatelessClient } = await import('../auth/oauth-tokens.js');
+  const { mintSetupCode } = await import('../auth/setup-codes.js');
+
+  const app = Fastify();
+  addFormUrlEncodedParser(app);
+  const { consent, setupCode } = fakeConsentStack();
+  registerOAuthRoutes(app, { consent, setupCode });
+
+  const minted = await mintSetupCode({ role: 'coo', createdBy: 'cto' }, setupCode);
+  const clientId = await registerDcrClient(app, MAKE_CALLBACK);
+  const registered = parseStatelessClient(clientId, SIGNING_SECRET);
+  assert.equal(registered?.agent, 'external-read', 'the Make redirect itself must not grant COO');
+
+  const { verifier, challenge } = pkcePair();
+  const authRes = await app.inject({
+    method: 'GET',
+    url:
+      `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(MAKE_CALLBACK)}` +
+      `&response_type=code&state=make-coo-test&code_challenge=${challenge}&code_challenge_method=S256`,
+  });
+  assert.equal(authRes.statusCode, 200, 'a public Make client must reach the owner consent interstitial');
+  const pendingId = authRes.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)?.[1];
+  assert.ok(pendingId, 'the consent form must hold a server-side pending authorization');
+
+  const consentRes = await app.inject({
+    method: 'POST',
+    url: '/oauth/authorize/consent',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    payload: `pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
+  });
+  assert.equal(consentRes.statusCode, 302, String(consentRes.payload));
+  const callback = new URL(String(consentRes.headers.location));
+  assert.equal(`${callback.origin}${callback.pathname}`, MAKE_CALLBACK);
+  assert.equal(callback.searchParams.get('state'), 'make-coo-test');
+  const code = callback.searchParams.get('code');
+  assert.ok(code, 'the Make redirect must receive an authorization code only after owner consent');
+
+  const tokenRes = await app.inject({
+    method: 'POST',
+    url: '/oauth/token',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    payload: `grant_type=authorization_code&code=${code}&client_id=${encodeURIComponent(clientId)}&code_verifier=${verifier}`,
+  });
+  assert.equal(tokenRes.statusCode, 200, JSON.stringify(tokenRes.json()));
+  const body = tokenRes.json();
+  assert.equal(issuedAgent(body.access_token), 'coo', 'only the consumed owner setup code may elevate Make to COO');
+
+  const refreshRes = await app.inject({
+    method: 'POST',
+    url: '/oauth/token',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    payload: `grant_type=refresh_token&refresh_token=${body.refresh_token}`,
+  });
+  assert.equal(refreshRes.statusCode, 200);
+  assert.equal(issuedAgent(refreshRes.json().access_token), 'coo', 'refresh must preserve the owner-authorized COO role');
 
   await app.close();
 });
@@ -686,3 +802,4 @@ test('clo-personal can never be redeemed via the consent flow, even if somehow m
 
   await app.close();
 });
+
