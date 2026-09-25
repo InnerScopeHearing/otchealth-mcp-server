@@ -36,14 +36,25 @@ const contractFields = {
 };
 const contract = { ...contractFields, contract_sha256: sha(canonical(contractFields)) };
 const citation = (slot: keyof typeof ids) => ({ canonical_id: ids[slot], source_version: versions[slot] });
-const control = (kind: 'reverse' | 'missing_bridge' | 'near_match' | 'personal_ring') => ({
-  scope: kind === 'personal_ring' ? 'personal' : 'finance',
-  direction: kind === 'reverse' ? 'y_to_x' : kind === 'missing_bridge' ? 'x_to_z' : 'x_to_y',
-  bridge_present: kind !== 'missing_bridge', exact_identity: kind !== 'near_match',
-  kind, query_sha256: sha(`query-${kind}`), result_count: 0,
-  result_status: kind === 'personal_ring' ? 'forbidden_ring' : 'unsupported',
-  ...(kind === 'personal_ring' ? {} : { scan_complete: true }), evidence_sha256: sha(`negative-evidence-${kind}`),
-});
+const control = (kind: 'reverse' | 'missing_bridge' | 'near_match' | 'personal_ring') => {
+  const scope = kind === 'personal_ring' ? 'personal' as const : 'finance' as const;
+  const direction = kind === 'reverse' ? 'z_to_x' as const : 'x_to_z' as const;
+  const bridge_present = kind !== 'missing_bridge';
+  const exact_identity = kind !== 'near_match';
+  const anchors = { x: citation('x'), y: citation('y'), z: citation('z'), negative: citation('negative') };
+  const query = kind === 'reverse'
+    ? { from: 'z' as const, bridge: 'negative' as const, to: 'x' as const }
+    : kind === 'missing_bridge'
+      ? { from: 'x' as const, bridge: null, to: 'z' as const }
+      : { from: 'x' as const, bridge: 'negative' as const, to: 'z' as const };
+  const queryDescriptor = { schema: 'cfo-graphrag-negative-query-v1', kind, scope, direction, bridge_present, exact_identity, anchors, query };
+  return {
+    scope, direction, bridge_present, exact_identity, anchors, query,
+    kind, query_sha256: sha(canonical(queryDescriptor)), result_count: 0,
+    result_status: kind === 'personal_ring' ? 'forbidden_ring' as const : 'unsupported' as const,
+    ...(kind === 'personal_ring' ? {} : { scan_complete: true }), evidence_sha256: sha(`negative-evidence-${kind}`),
+  };
+};
 function input() {
   return {
     caller_agent: 'cfo', contract, coverage,
@@ -69,6 +80,11 @@ test('projects a CFO finance contract without claiming owner approval or quality
   assert.equal(result.provenance_verified, false);
   assert.deepEqual(result.blockers, ['owner_approval_provenance_unavailable', 'source_owner_signed_metadata_export_unavailable', 'citation_bound_aggregate_graph_receipt_unavailable']);
   assert.deepEqual(result.coverage_counts, { expected: 4, processed: 4, accepted: 4, rejected: 0 });
+  assert.equal(result.declared_citation_count, 4);
+  assert.equal(result.declared_binding_count, 4);
+  assert.equal(result.declared_edge_count, 2);
+  assert.equal(result.declared_negative_control_count, 4);
+  assert.equal('negative_controls' in result, false);
 });
 
 test('receipt identity is stable when order-independent evidence arrays are reordered', () => {
@@ -137,6 +153,15 @@ test('requires all four negative controls and forbids any negative match', () =>
   assert.equal(projectCfoGraphQualityReceipt(personal).status, 'rejected');
   const falseReverse = input(); falseReverse.negative_controls[0] = { ...falseReverse.negative_controls[0], direction: 'x_to_y' };
   assert.equal(projectCfoGraphQualityReceipt(falseReverse).status, 'rejected');
+  const wrongAnchor = input();
+  wrongAnchor.negative_controls[0] = { ...wrongAnchor.negative_controls[0], anchors: { ...wrongAnchor.negative_controls[0].anchors, negative: citation('x') } };
+  assert.equal(projectCfoGraphQualityReceipt(wrongAnchor).status, 'rejected');
+  const wrongQueryRoute = input();
+  wrongQueryRoute.negative_controls[1] = { ...wrongQueryRoute.negative_controls[1], query: { from: 'x', bridge: 'negative', to: 'z' } };
+  assert.equal(projectCfoGraphQualityReceipt(wrongQueryRoute).status, 'rejected');
+  const mismatchedQueryDigest = input();
+  mismatchedQueryDigest.negative_controls[2] = { ...mismatchedQueryDigest.negative_controls[2], query_sha256: sha('different-query') };
+  assert.equal(projectCfoGraphQualityReceipt(mismatchedQueryDigest).status, 'rejected');
 });
 
 test('strict metadata contract rejects source text and paths instead of echoing them', () => {

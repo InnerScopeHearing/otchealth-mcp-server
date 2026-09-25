@@ -19,14 +19,16 @@ const HASH = /^[a-f0-9]{64}$/;
 const VERSION = /^sha256:[a-f0-9]{64}$/;
 const SLOTS = ['x', 'y', 'z', 'negative'] as const;
 const NEGATIVE_KINDS = ['reverse', 'missing_bridge', 'near_match', 'personal_ring'] as const;
+const ANCHOR_QUERY_SCHEMA = 'cfo-graphrag-negative-query-v1';
 
 const hashSchema = z.string().regex(HASH);
 const versionSchema = z.string().regex(VERSION);
 const anchorSchema = z.object({ canonical_id: hashSchema, source_version: versionSchema }).strict();
+const anchorSetSchema = z.object({ x: anchorSchema, y: anchorSchema, z: anchorSchema, negative: anchorSchema }).strict();
 const contractSchema = z.object({
   schema: z.literal('cfo-graphrag-quality-anchor-contract-v1'),
   scope: z.literal('finance'),
-  anchors: z.object({ x: anchorSchema, y: anchorSchema, z: anchorSchema, negative: anchorSchema }).strict(),
+  anchors: anchorSetSchema,
   negative_control_kinds: z.array(z.enum(NEGATIVE_KINDS)).length(4),
   contract_sha256: hashSchema,
 }).strict();
@@ -70,9 +72,15 @@ const traversalSchema = z.object({
 const controlSchema = z.object({
   kind: z.enum(NEGATIVE_KINDS),
   scope: z.enum(['finance', 'personal']),
-  direction: z.enum(['x_to_y', 'x_to_z', 'y_to_x']),
+  direction: z.enum(['x_to_z', 'z_to_x']),
   bridge_present: z.boolean(),
   exact_identity: z.boolean(),
+  anchors: anchorSetSchema,
+  query: z.object({
+    from: z.enum(['x', 'z']),
+    bridge: z.union([z.literal('negative'), z.null()]),
+    to: z.enum(['x', 'z']),
+  }).strict(),
   query_sha256: hashSchema,
   result_count: z.literal(0),
   result_status: z.enum(['unsupported', 'forbidden_ring']),
@@ -109,10 +117,10 @@ export type CfoGraphQualityReceipt = Readonly<{
   inputs_sha256: string;
   contract_sha256: string;
   coverage_counts: Readonly<{ expected: number; processed: number; accepted: number; rejected: number }>;
-  citation_count: number;
-  current_binding_count: number;
-  qualified_directed_edge_count: number;
-  negative_controls: Readonly<Record<(typeof NEGATIVE_KINDS)[number], 'no_match' | 'ring_denied'>>;
+  declared_citation_count: number;
+  declared_binding_count: number;
+  declared_edge_count: number;
+  declared_negative_control_count: number;
   blockers: readonly ['owner_approval_provenance_unavailable', 'source_owner_signed_metadata_export_unavailable', 'citation_bound_aggregate_graph_receipt_unavailable'];
 }>;
 
@@ -189,13 +197,28 @@ export function projectCfoGraphQualityReceipt(value: unknown): CfoGraphQualityRe
   if (new Set(controls.map(control => control.kind)).size !== NEGATIVE_KINDS.length ||
       NEGATIVE_KINDS.some(kind => !controls.some(control => control.kind === kind)) ||
       controls.some(control => {
-        if (control.kind === 'personal_ring') return control.scope !== 'personal' || control.result_status !== 'forbidden_ring';
         const expected = control.kind === 'reverse'
-          ? { scope: 'finance', direction: 'y_to_x', bridge_present: true, exact_identity: true }
+          ? { scope: 'finance', direction: 'z_to_x', bridge_present: true, exact_identity: true, query: { from: 'z', bridge: 'negative', to: 'x' } }
           : control.kind === 'missing_bridge'
-            ? { scope: 'finance', direction: 'x_to_z', bridge_present: false, exact_identity: true }
-            : { scope: 'finance', direction: 'x_to_y', bridge_present: true, exact_identity: false };
-        return control.result_status !== 'unsupported' || control.scan_complete !== true ||
+            ? { scope: 'finance', direction: 'x_to_z', bridge_present: false, exact_identity: true, query: { from: 'x', bridge: null, to: 'z' } }
+            : control.kind === 'near_match'
+              ? { scope: 'finance', direction: 'x_to_z', bridge_present: true, exact_identity: false, query: { from: 'x', bridge: 'negative', to: 'z' } }
+              : { scope: 'personal', direction: 'x_to_z', bridge_present: true, exact_identity: true, query: { from: 'x', bridge: 'negative', to: 'z' } };
+        const queryDescriptor = {
+          schema: ANCHOR_QUERY_SCHEMA,
+          kind: control.kind,
+          scope: control.scope,
+          direction: control.direction,
+          bridge_present: control.bridge_present,
+          exact_identity: control.exact_identity,
+          anchors: control.anchors,
+          query: control.query,
+        };
+        return canonical(control.anchors) !== canonical(input.contract.anchors) ||
+          control.query_sha256 !== hash(canonical(queryDescriptor)) ||
+          canonical(control.query) !== canonical(expected.query) ||
+          control.result_status !== (control.kind === 'personal_ring' ? 'forbidden_ring' : 'unsupported') ||
+          (control.kind !== 'personal_ring' && control.scan_complete !== true) ||
           control.scope !== expected.scope || control.direction !== expected.direction ||
           control.bridge_present !== expected.bridge_present || control.exact_identity !== expected.exact_identity;
       })) return reject();
@@ -222,11 +245,10 @@ export function projectCfoGraphQualityReceipt(value: unknown): CfoGraphQualityRe
     inputs_sha256: inputsSha,
     contract_sha256: input.contract.contract_sha256,
     coverage_counts: Object.freeze({ ...input.coverage.counts, expected: expectedCoverageCount }),
-    citation_count: citations.length,
-    current_binding_count: input.bindings.length,
-    qualified_directed_edge_count: edges.length,
-    negative_controls: Object.freeze(Object.fromEntries([...NEGATIVE_KINDS].sort().map(kind => [kind,
-      kind === 'personal_ring' ? 'ring_denied' : 'no_match'])) as CfoGraphQualityReceipt['negative_controls']),
+    declared_citation_count: citations.length,
+    declared_binding_count: input.bindings.length,
+    declared_edge_count: edges.length,
+    declared_negative_control_count: controls.length,
     blockers: Object.freeze(blockers),
   };
   const receiptId = `cfo-gqr_${hash(canonical(payload))}`;
