@@ -111,6 +111,12 @@ test('fails closed on unresolved, stale, or duplicated citation mappings', () =>
   assert.equal(projectCfoGraphQualityReceipt(stale).status, 'rejected');
   const duplicate = input(); duplicate.citation_mappings[3] = duplicate.citation_mappings[0];
   assert.equal(projectCfoGraphQualityReceipt(duplicate).status, 'rejected');
+  const malformed = input(); malformed.citation_mappings[0] = { canonical_id: ids.x };
+  assert.equal(projectCfoGraphQualityReceipt(malformed).status, 'rejected');
+  const textBearing = input(); textBearing.citation_mappings[0] = { ...textBearing.citation_mappings[0], source_text: 'never accept or echo' };
+  const rejectedText = projectCfoGraphQualityReceipt(textBearing);
+  assert.equal(rejectedText.status, 'rejected');
+  assert.equal(JSON.stringify(rejectedText).includes('never accept or echo'), false);
 });
 
 test('requires a complete directed X to Y to Z traversal with current evidence references', () => {

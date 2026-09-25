@@ -44,6 +44,14 @@ const bindingSchema = z.object({
   identity_current_receipt_sha256: hashSchema,
 }).strict();
 const citationSchema = anchorSchema;
+const citationMappingSchema = z.object({
+  canonical_id: hashSchema,
+  source_version: versionSchema,
+  source_group: z.literal('company'),
+  source_sha256: hashSchema,
+  source_locator_sha256: hashSchema,
+  provenance_receipt_sha256: hashSchema,
+}).strict();
 const edgeSchema = z.object({
   from: z.enum(['x', 'y', 'z']),
   to: z.enum(['x', 'y', 'z']),
@@ -75,7 +83,7 @@ const inputSchema = z.object({
   caller_agent: z.string(),
   contract: contractSchema,
   coverage: sourceCoverageSchema,
-  citation_mappings: z.array(z.unknown()).min(4).max(4),
+  citation_mappings: z.array(citationMappingSchema).length(4),
   bindings: z.array(bindingSchema).length(4),
   citations: z.array(citationSchema).length(4),
   traversal: traversalSchema,
@@ -155,12 +163,18 @@ export function projectCfoGraphQualityReceipt(value: unknown): CfoGraphQualityRe
   const anchorByKey = new Set(anchorKeys);
 
   const mappings = input.citation_mappings;
-  const resolveCitation = createGraphCitationReceiptResolver(mappings);
-  const citations = input.citations.map(citation => {
-    if (!anchorByKey.has(pairKey(citation))) return null;
-    const resolved = resolveCitation({ caller_agent: 'cfo', canonical_id: citation.canonical_id, source_version: citation.source_version });
-    return resolved.status === 'resolved' ? resolved.receipt.receipt_id : null;
-  });
+  if (mappings.some(mapping => mapping.source_version !== `sha256:${mapping.source_sha256}`)) return reject();
+  let citations: (string | null)[];
+  try {
+    const resolveCitation = createGraphCitationReceiptResolver(mappings);
+    citations = input.citations.map(citation => {
+      if (!anchorByKey.has(pairKey(citation))) return null;
+      const resolved = resolveCitation({ caller_agent: 'cfo', canonical_id: citation.canonical_id, source_version: citation.source_version });
+      return resolved.status === 'resolved' ? resolved.receipt.receipt_id : null;
+    });
+  } catch {
+    return reject();
+  }
   if (citations.length !== SLOTS.length || citations.some(receipt => receipt === null) ||
       new Set(input.citations.map(pairKey)).size !== SLOTS.length) return reject();
 
@@ -198,7 +212,7 @@ export function projectCfoGraphQualityReceipt(value: unknown): CfoGraphQualityRe
   };
   const inputsSha = hash(canonical(normalizedInputs));
   const blockers = ['owner_approval_provenance_unavailable', 'source_owner_signed_metadata_export_unavailable', 'citation_bound_aggregate_graph_receipt_unavailable'] as const;
-  const payload = {
+  const payload: Omit<CfoGraphQualityReceipt, 'receipt_id'> = {
     schema: 'cfo-graphrag-quality-projection-receipt-v1' as const,
     status: 'contract_validated' as const,
     quality_state: 'unproven' as const,
@@ -207,15 +221,15 @@ export function projectCfoGraphQualityReceipt(value: unknown): CfoGraphQualityRe
     provenance_verified: false as const,
     inputs_sha256: inputsSha,
     contract_sha256: input.contract.contract_sha256,
-    coverage_counts: { ...input.coverage.counts, expected: expectedCoverageCount },
+    coverage_counts: Object.freeze({ ...input.coverage.counts, expected: expectedCoverageCount }),
     citation_count: citations.length,
     current_binding_count: input.bindings.length,
     qualified_directed_edge_count: edges.length,
-    negative_controls: Object.fromEntries([...NEGATIVE_KINDS].sort().map(kind => [kind,
-      kind === 'personal_ring' ? 'ring_denied' : 'no_match'])) as CfoGraphQualityReceipt['negative_controls'],
-    blockers,
+    negative_controls: Object.freeze(Object.fromEntries([...NEGATIVE_KINDS].sort().map(kind => [kind,
+      kind === 'personal_ring' ? 'ring_denied' : 'no_match'])) as CfoGraphQualityReceipt['negative_controls']),
+    blockers: Object.freeze(blockers),
   };
   const receiptId = `cfo-gqr_${hash(canonical(payload))}`;
-  return Object.freeze({ ...payload, receipt_id: receiptId, coverage_counts: Object.freeze({ ...payload.coverage_counts }),
-    negative_controls: Object.freeze({ ...payload.negative_controls }), blockers: Object.freeze([...blockers]) });
+  const receipt: CfoGraphQualityReceipt = { ...payload, receipt_id: receiptId };
+  return Object.freeze(receipt);
 }
