@@ -2,18 +2,18 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerConnectorSetupCodeCreate } from './setup-code-create.js';
+import { DEFAULT_TTL_MINUTES, SetupCodeError } from '../../auth/setup-codes.js';
+
+type SetupCodeMinter = typeof import('../../auth/setup-codes.js').mintSetupCode;
 
 // GOVERNANCE (src/catalog/governance.ts's 'connector_setup_code_create' rule) runs INSIDE
 // registerTool's real wrapper, so these tests exercise the REAL registration path (not a stub),
 // mirroring registry.lane-curation.test.ts's convention for the same reason: only that proves what
 // actually gets enforced, not just what a pure helper computes in isolation.
 //
-// Minting itself needs the shared agent-state plane (agentstate/store.ts), which is unconfigured in
-// this hermetic test process (no PG_HOST) -- exactly like every other durable-store-backed route in
-// this repo's test suite (see oauth.test.ts's header, semantic-cache.test.ts's header). The role
-// allowlist (Zod z.enum) and the caller allowlist (governance.ts + the in-handler check) are both
-// enforced BEFORE mintSetupCode is ever called, so they are fully testable here regardless; the
-// mint/consume logic itself is exhaustively covered directly in auth/setup-codes.test.ts.
+// Tests default every call to dry_run=true and explicitly inject a fake minter into the one
+// dry_run=false regression. This keeps the suite hermetic even if a developer has a configured
+// shared agent-state store in their environment.
 
 before(() => {
   const required: Record<string, string> = {
@@ -25,6 +25,10 @@ before(() => {
     N8N_WEBHOOK_SECRET: 'c'.repeat(32),
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+  // Exercise the registered write tool while ensuring calls without an explicit dry_run are safe.
+  process.env.READ_ONLY_MODE = 'false';
+  process.env.ENABLE_WRITE_TOOLS = 'true';
+  process.env.DRY_RUN_DEFAULT = 'true';
 });
 
 interface McpToolResult {
@@ -32,6 +36,7 @@ interface McpToolResult {
   content: Array<{ type: string; text: string }>;
   structuredContent: {
     result: unknown;
+    dry_run?: boolean;
     error?: { code: string; message: string };
   };
 }
@@ -51,15 +56,20 @@ function fakeServer(): { server: McpServer; handlers: Record<string, (args: unkn
  *  of that callback (and whatever it awaits synchronously within it), so calling the captured
  *  handler AFTER run() has already returned would silently see an empty caller_agent instead of the
  *  one this test intends. Mirrors registry.lane-curation.test.ts's exact pattern. */
-async function callAsAgent(callerAgent: string, input: Record<string, unknown>): Promise<McpToolResult> {
+async function callAsAgent(
+  callerAgent: string,
+  input: Record<string, unknown>,
+  minter?: SetupCodeMinter,
+): Promise<McpToolResult> {
   const { requestContext, currentCallerHash } = await import('../../server/request-context.js');
   const { server, handlers } = fakeServer();
   let result: McpToolResult | undefined;
   await requestContext.run(
     { callerHash: 'test-hash', correlationId: 'test-corr', callerAgent, connectorSurface: false, m365StaticAuth: false },
     async () => {
-      registerConnectorSetupCodeCreate(server, currentCallerHash);
-      result = await handlers.connector_setup_code_create!(input);
+      registerConnectorSetupCodeCreate(server, currentCallerHash, minter);
+      // An omitted dry_run is also forced into preview mode, independent of environment defaults.
+      result = await handlers.connector_setup_code_create!({ dry_run: true, ...input });
     },
   );
   return result!;
@@ -91,13 +101,9 @@ for (const bad of ['coo', 'cro', 'clo', 'cfo', 'clo-personal', '', 'random-lane'
 }
 
 for (const allowed of ['cto', 'exec']) {
-  test(`caller_agent="${allowed}" PASSES the caller-allowlist gate (reaches the mint attempt, not a forbidden_role refusal)`, async () => {
+  test(`caller_agent="${allowed}" PASSES the caller-allowlist gate (reaches the dry-run plan, not a forbidden_role refusal)`, async () => {
     const result = await callAsAgent(allowed, { role: 'cfo' });
-    // The shared agent-state plane is unconfigured in this hermetic process, so the actual mint
-    // fails with setup_code_store_unavailable -- but critically NOT with forbidden_role. That
-    // distinction is exactly what proves the caller-allowlist gate was passed and the request
-    // reached mintSetupCode (see auth/setup-codes.test.ts for the exhaustive mint/consume coverage
-    // against an injected, working fake store).
+    assert.equal(result.structuredContent.dry_run, true);
     assert.notEqual(result.structuredContent.error?.code, 'forbidden_role', `caller "${allowed}" must not be refused by the caller allowlist`);
   });
 }
@@ -146,6 +152,51 @@ test('ttl_minutes out of the documented [1, 1440] range is rejected at input val
   assert.equal(tooBig.structuredContent.error?.code, 'invalid_input');
   const tooSmall = await callAsAgent('cto', { role: 'cfo', ttl_minutes: 0 });
   assert.equal(tooSmall.structuredContent.error?.code, 'invalid_input');
+});
+
+test('dry_run=true returns only a nonsecret setup-code plan and does not mint', async () => {
+  let mintCalls = 0;
+  const minter: SetupCodeMinter = async () => {
+    mintCalls += 1;
+    throw new SetupCodeError('setup_code_store_unavailable', 'Synthetic test store unavailable.');
+  };
+  const response = await callAsAgent('cto', { role: 'cfo', dry_run: true }, minter);
+
+  assert.equal(mintCalls, 0, 'dry_run=true must return before the minter is invoked');
+  assert.equal(response.structuredContent.dry_run, true);
+  const plan = response.structuredContent.result as Record<string, unknown>;
+  assert.deepEqual(plan, {
+    planned: true,
+    minted: false,
+    role: 'cfo',
+    ttl_minutes: DEFAULT_TTL_MINUTES,
+  });
+  assert.equal(plan.code, undefined);
+  assert.match(response.content.map((item) => item.text).join('\n'), /DRY RUN/i);
+  assert.doesNotMatch(JSON.stringify(response), /\bundefined\b/);
+});
+
+test('dry_run=false reaches only the injected fake minter and never touches a live store', async () => {
+  const mintInputs: Parameters<SetupCodeMinter>[0][] = [];
+  const minter: SetupCodeMinter = async (input) => {
+    mintInputs.push(input);
+    throw new SetupCodeError('setup_code_store_unavailable', 'Synthetic test store unavailable.');
+  };
+  const response = await callAsAgent('cto', { role: 'cfo', dry_run: false }, minter);
+
+  assert.equal(mintInputs.length, 1);
+  assert.deepEqual(mintInputs[0], {
+    role: 'cfo',
+    createdBy: 'cto',
+    label: undefined,
+    ttlMinutes: undefined,
+  });
+  assert.equal(response.structuredContent.dry_run, false);
+  const result = response.structuredContent.result as Record<string, unknown>;
+  assert.equal(result.planned, undefined);
+  assert.equal(result.minted, false);
+  assert.equal(result.error, 'setup_code_store_unavailable');
+  assert.equal(result.code, undefined);
 });
 
 test('the tool description warns that the result contains a one-time owner secret', async () => {

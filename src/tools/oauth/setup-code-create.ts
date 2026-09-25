@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext } from '../registry.js';
 import {
+  DEFAULT_TTL_MINUTES,
   ELEVATION_ROLES,
   mintSetupCode,
   SetupCodeError,
@@ -29,7 +30,11 @@ const CALLER_ALLOWLIST = ['cto', 'exec'] as const;
  * layer (assertMintableRole), so a caller that somehow bypassed both layers above would still be
  * refused there -- three layers deep for the one thing this tool must never do.
  */
-export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: CallerHashProvider): void {
+export function registerConnectorSetupCodeCreate(
+  server: McpServer,
+  callerHash: CallerHashProvider,
+  mintSetupCodeImpl: typeof mintSetupCode = mintSetupCode,
+): void {
   registerTool(
     server,
     {
@@ -63,6 +68,7 @@ export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: 
           .describe('Minutes until the code expires if unredeemed. Default 30, maximum 1440 (24h).'),
       },
       outputShape: {
+        planned: z.boolean().optional(),
         minted: z.boolean().optional(),
         code: z.string().optional(),
         role: z.string().optional(),
@@ -87,8 +93,22 @@ export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: 
         }
 
         const role = input.role as ElevationRole;
+        if (ctx.dryRun) {
+          const ttlMinutes = input.ttl_minutes ?? DEFAULT_TTL_MINUTES;
+          return {
+            data: {
+              planned: true,
+              minted: false,
+              role,
+              ttl_minutes: ttlMinutes,
+            },
+            summary:
+              `DRY RUN: No setup code was generated. This would mint a single-use connector setup code for role "${role}" with a ${ttlMinutes}-minute TTL.`,
+          };
+        }
+
         try {
-          const minted = await mintSetupCode({
+          const minted = await mintSetupCodeImpl({
             role,
             createdBy: ctx.callerAgent || 'unknown',
             label: input.label,
