@@ -332,15 +332,20 @@ for (const [lane, upperBound, mustInclude] of [
   });
 }
 
-test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Developer despite github_*', async () => {
+test('curate-m365-only exposes CTO-only GitHub controls to CTO but excludes them from Developer despite github_*', async () => {
   process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
   const receiptTool = 'github_graphrag_observation_receipt_get';
   const receiptAlias = 'graphrag_observation_receipt_get';
+  const markReadyTool = 'github_pr_mark_ready';
+  const markReadyAlias = 'pr_mark_ready';
   const ctoNames = await registeredToolNames('cto', true);
   const developerNames = await registeredToolNames('developer', true);
 
   assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
+  assert.ok(ctoNames.includes(markReadyTool) || ctoNames.includes(markReadyAlias), 'CTO M365 must retain visibility of the CTO-only mark-ready action');
   assert.equal(developerNames.includes(receiptTool), false, 'Developer M365 must exclude the canonical reader despite github_*');
   assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
+  assert.equal(developerNames.includes(markReadyTool), false, 'Developer M365 must exclude the CTO-only mark-ready action despite github_*');
+  assert.equal(developerNames.includes(markReadyAlias), false, 'the generated M365 alias must not bypass the mark-ready exclusion');
   assert.ok(developerNames.length <= 200, `Developer M365 catalog must stay at or under 200 tools, got ${developerNames.length}`);
 });
