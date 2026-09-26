@@ -190,7 +190,7 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // governance.ts's execution-time gating remains a second, independent layer under it.
   // write + branch
   'github_create_branch', 'github_create_or_update_file', 'github_edit_file', 'github_push_files', 'github_create_pull_request',
-  'github_pr_update', 'github_pr_update_branch', 'github_ref_delete',
+  'github_pr_update', 'github_pr_mark_ready', 'github_pr_update_branch', 'github_ref_delete',
   // LAND IT: merge is the tool whose absence forced the browser fallback
   'github_merge_pull_request', 'github_pr_create_review', 'github_comment_on_issue',
   // trigger + observe CI directly (no browser, no human in the loop)
