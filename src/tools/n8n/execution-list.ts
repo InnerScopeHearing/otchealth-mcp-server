@@ -50,8 +50,8 @@ export function summarizeExecutionPage(raw: unknown, limit: number): ExecutionCo
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return invalidResponse();
   const response = raw as { data?: unknown; nextCursor?: unknown };
   if (!Array.isArray(response.data) || response.data.length > limit) return invalidResponse();
+  if (!Object.prototype.hasOwnProperty.call(response, 'nextCursor')) return invalidResponse();
   if (
-    response.nextCursor !== undefined &&
     response.nextCursor !== null &&
     typeof response.nextCursor !== 'string'
   ) {
@@ -74,7 +74,7 @@ export function summarizeExecutionPage(raw: unknown, limit: number): ExecutionCo
   return {
     observed_count: response.data.length,
     counts_by_status: counts,
-    truncated: typeof response.nextCursor === 'string' && response.nextCursor.length > 0,
+    truncated: typeof response.nextCursor === 'string',
   };
 }
 

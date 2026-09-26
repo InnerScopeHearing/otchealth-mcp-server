@@ -151,6 +151,8 @@ test('malformed pages fail closed without returning IDs, names, payloads, or pro
   const malformedPages: unknown[] = [
     null,
     { nextCursor: null },
+    { data: [{ status: 'success' }] },
+    { data: [], nextCursor: undefined },
     { data: [{ id: 'SYNTHETIC_ID', workflowName: 'SYNTHETIC_NAME' }] },
     { data: [{ status: 17, data: { prompt: 'SYNTHETIC_PROMPT' } }] },
     { data: [], nextCursor: { value: 'SYNTHETIC_CURSOR' } },
@@ -165,4 +167,13 @@ test('malformed pages fail closed without returning IDs, names, payloads, or pro
     () => summarizeExecutionPage({ data: [{ status: 'success' }, { status: 'error' }] }, 1),
     { message: 'n8n_execution_list_invalid_response' },
   );
+});
+
+test('a string cursor, including an empty string, marks the page as truncated without exposing it', () => {
+  for (const nextCursor of ['SYNTHETIC_CURSOR_TOKEN', '']) {
+    const result = summarizeExecutionPage({ data: [{ status: 'success' }], nextCursor }, 1);
+    assert.equal(result.truncated, true);
+    assert.equal(JSON.stringify(result).includes(nextCursor || 'SYNTHETIC_CURSOR_TOKEN'), false);
+  }
+  assert.equal(summarizeExecutionPage({ data: [], nextCursor: null }, 1).truncated, false);
 });
