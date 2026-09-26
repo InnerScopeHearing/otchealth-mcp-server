@@ -129,7 +129,7 @@ for (const bad of ['exec', 'cpo', 'cco', 'admin', 'ADMIN', 'cto ']) {
   });
 }
 
-for (const role of ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director', 'cto-make-github-pilot']) {
+for (const role of ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'chat_shared', 'wefunder-campaign-director', 'cto-make-github-pilot']) {
   test(`role="${role}" passes input validation for an allowed caller (reaches the mint attempt)`, async () => {
     const result = await callAsAgent('cto', { role });
     assert.notEqual(result.structuredContent.error?.code, 'invalid_input', `role "${role}" must be a valid input`);

@@ -11,7 +11,12 @@
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
-import { CTO_MAKE_GITHUB_PILOT_LANE, CTO_MAKE_GITHUB_PILOT_TOOLSET } from '../config/lane-toolsets.js';
+import {
+  CHAT_SHARED_LANE,
+  CHAT_SHARED_TOOLSET,
+  CTO_MAKE_GITHUB_PILOT_LANE,
+  CTO_MAKE_GITHUB_PILOT_TOOLSET,
+} from '../config/lane-toolsets.js';
 import {
   logToolEnd,
   logToolStart,
@@ -66,6 +71,8 @@ import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostic
 //                               any lane not in the ship set.
 //   CTO_MAKE_GITHUB_PILOT_TOOLSET exactly {github_make_broker, catalog_probe}, for the dedicated
 //                               setup-code principal only; never the CTO ship set.
+//   CHAT_SHARED_TOOLSET         fixed non-sensitive company-commons Brain read/write tools for
+//                               ordinary Chat; never a seat identity or general company toolset.
 //
 // SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15): before this split there was ONE
 // global toolset for every connector, and oauth.ts's laneFromClientName() defaulted an UNRECOGNIZED
@@ -476,6 +483,10 @@ export function isShipLane(lane: string): boolean {
  * runs inside requestContext.run() (see server/mcp.ts), so this is always live, never stale.
  */
 export function connectorToolset(env: Env, lane: string): Set<string> {
+  // The shared-Chat principal has an exact Brain-only projection on every auth path. Never let
+  // connector overrides or the broad default catalog turn it into a seat or operations lane.
+  if (lane === CHAT_SHARED_LANE) return new Set(CHAT_SHARED_TOOLSET);
+
   // Unlike ordinary connector lanes, this code-only Make pilot identity is always fixed to two
   // tools, even if a global CONNECTOR_TOOLSET override names broader capabilities. This applies
   // before authentication-path routing below; registerTool enforces it on DCR/occ,
@@ -643,9 +654,10 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   connectorInputShape?: Shape;
   /**
    * Optional lane-specific connector schemas. A lane projection may omit fields only when the
-   * handler safely defaults or ignores them; internal clients always receive inputShape unchanged.
+   * handler safely defaults or ignores them, and may narrow a field when the handler accepts that
+   * narrower value. Internal clients always receive inputShape unchanged.
    */
-  connectorInputShapeByLane?: Readonly<Record<string, Partial<Shape>>>;
+  connectorInputShapeByLane?: Readonly<Record<string, ZodRawShape>>;
   outputShape: Output;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
@@ -909,6 +921,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const laneForThisTool = currentCallerAgent();
   const connectorSurfaceForThisTool = isConnectorSurface()
     || laneForThisTool === WEFUNDER_CAMPAIGN_DIRECTOR_LANE
+    || laneForThisTool === CHAT_SHARED_LANE
     || laneForThisTool === CTO_MAKE_GITHUB_PILOT_LANE;
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
@@ -1538,7 +1551,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     // This lane's exact two-tool contract includes catalog_probe by its full name. The M365 alias
     // shim removes a primary when its alias is accepted; aliases such as `probe` are intentionally
     // outside the pilot set, so do not collect alias candidates for this lane.
-    if (isM365StaticAuth() && currentCallerAgent() !== CTO_MAKE_GITHUB_PILOT_LANE) {
+    if (isM365StaticAuth()
+      && currentCallerAgent() !== CTO_MAKE_GITHUB_PILOT_LANE
+      && currentCallerAgent() !== CHAT_SHARED_LANE) {
       const stripped = /^[^_]+_(.+)$/.exec(def.name);
       if (stripped) {
         const aliasName = stripped[1];

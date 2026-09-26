@@ -8,12 +8,19 @@ import { agenticRecall } from '../../memory/agentic.js';
 import type { ToolContext, ToolResultPayload } from '../registry.js';
 import { filterPersonalSharedMemory, sharedMemoryAgentAllowed } from './shared-memory-access.js';
 import { filterRetractedByAgent, retractedIdsByAgent } from '../../memory/retractions.js';
+import { CHAT_SHARED_LANE, CHAT_SHARED_MEMORY_TARGET } from '../../config/lane-toolsets.js';
 
 const RECALL_INPUT_SHAPE = {
   query: z.string().min(1).describe('Keywords to match against entry text, tags, type, and agent (case-insensitive; all terms must match).'),
   agent: z.string().optional().describe('Optional: restrict to one agent lane (e.g. "cto").'),
   limit: z.number().int().min(1).max(100).optional().describe('Max results (default 25).'),
   include_superseded: z.boolean().optional().describe('Audit-history mode. Include entries explicitly superseded by a newer record. Defaults to false so ordinary recall returns current truth only.'),
+};
+
+const CHAT_SHARED_RECALL_INPUT_SHAPE = {
+  query: RECALL_INPUT_SHAPE.query,
+  limit: RECALL_INPUT_SHAPE.limit,
+  include_superseded: RECALL_INPUT_SHAPE.include_superseded,
 };
 
 const RECALL_OUTPUT_SHAPE = {
@@ -37,6 +44,65 @@ export function filterCurrentRecallHits<T extends { id?: unknown; agent?: unknow
   return includeSuperseded ? hits : filterRetractedByAgent(hits, retractedByAgent).kept;
 }
 
+export interface MemoryRecallScope {
+  agentFilter: string | null;
+  directSharedFeed: boolean;
+  refusal?: string;
+  refusalMode?: string;
+}
+
+/** Restrict the shared-Chat principal to the commons feed for every recall mode. Other company
+ * callers retain the existing optional cross-agent behavior and personal-legal ring refusal. */
+export function resolveMemoryRecallScope(
+  callerAgent: string | undefined | null,
+  requestedAgent?: string,
+): MemoryRecallScope {
+  const caller = (callerAgent || '').trim().toLowerCase();
+  if (caller === CHAT_SHARED_LANE) {
+    let agentFilter: string | null = null;
+    try { agentFilter = requestedAgent ? normalizeAgent(requestedAgent) : null; } catch {
+      return {
+        agentFilter: CHAT_SHARED_MEMORY_TARGET,
+        directSharedFeed: true,
+        refusal: `${CHAT_SHARED_LANE} memory recall is restricted to the ${CHAT_SHARED_MEMORY_TARGET} feed; invalid targets are refused.`,
+        refusalMode: 'fixed-scope-forbidden',
+      };
+    }
+    if (agentFilter && agentFilter !== CHAT_SHARED_MEMORY_TARGET) {
+      return {
+        agentFilter: CHAT_SHARED_MEMORY_TARGET,
+        directSharedFeed: true,
+        refusal: `${CHAT_SHARED_LANE} memory recall is restricted to the ${CHAT_SHARED_MEMORY_TARGET} feed.`,
+        refusalMode: 'fixed-scope-forbidden',
+      };
+    }
+    return { agentFilter: CHAT_SHARED_MEMORY_TARGET, directSharedFeed: true };
+  }
+  const agentFilter = requestedAgent ? normalizeAgent(requestedAgent) : null;
+  if (!sharedMemoryAgentAllowed(callerAgent, agentFilter)) {
+    return {
+      agentFilter,
+      directSharedFeed: false,
+      refusal: 'Personal-legal shared-memory rows are not available to this caller.',
+      refusalMode: 'ring-forbidden',
+    };
+  }
+  return { agentFilter, directSharedFeed: false };
+}
+
+/** Enforce the shared principal's feed boundary at the response edge, even when a search backend
+ * returns rows outside the requested filter. Other callers keep their established backend results. */
+export function filterRecallAgentScope<T extends { agent?: unknown }>(
+  hits: readonly T[],
+  scope: MemoryRecallScope,
+): T[] {
+  if (!scope.directSharedFeed || !scope.agentFilter) return [...hits];
+  return hits.filter((hit) =>
+    typeof hit.agent === 'string'
+    && hit.agent.trim().toLowerCase() === scope.agentFilter,
+  );
+}
+
 async function currentRecallHits<T extends { id?: unknown; agent?: unknown }>(
   hits: T[],
   includeSuperseded: boolean,
@@ -58,9 +124,33 @@ export async function recallHandler(
   // Filter retractions BEFORE applying the caller's limit. Fetch enough candidates that
   // several retired entries cannot crowd the current answer out of the result window.
   const candidateLimit = Math.min(100, Math.max(limit, limit * 4, 20));
-  const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
-  if (!sharedMemoryAgentAllowed(ctx.callerAgent, agentFilter)) {
-    return { data: { matches: [], count: 0, mode: 'ring-forbidden' }, summary: 'Refused: personal-legal shared-memory rows are not available to this caller.' };
+  const scope = resolveMemoryRecallScope(ctx.callerAgent, input.agent);
+  const agentFilter = scope.agentFilter;
+  if (scope.refusal) {
+    return { data: { matches: [], count: 0, mode: scope.refusalMode ?? 'forbidden' }, summary: `Refused: ${scope.refusal}` };
+  }
+  const callerVisibleHits = <T extends { agent?: unknown }>(hits: readonly T[]): T[] =>
+    filterPersonalSharedMemory(filterRecallAgentScope(hits, scope), ctx.callerAgent);
+  const terms = input.query.toLowerCase().split(/\s+/).filter(Boolean);
+
+  // The shared principal's acceptance path must prove a durable shared-feed write can be read
+  // directly from that same store. Do not let a successful vector/OpenSearch result stand in for
+  // readback from the append-only commons feed.
+  if (scope.directSharedFeed) {
+    if (!isConfigured()) {
+      return { data: { matches: [], count: 0, mode: 'none' }, summary: 'Shared brain not configured; no results.' };
+    }
+    const all = await readSharedAll();
+    const matches = callerVisibleHits(all).filter((entry) => {
+      const hay = `${entry.type} ${entry.text} ${(entry.tags || []).join(' ')} ${entry.agent} ${entry.source || ''}`.toLowerCase();
+      return terms.every((term) => hay.includes(term));
+    });
+    const current = await currentRecallHits(matches, includeSuperseded);
+    const returned = current.slice(0, limit);
+    return {
+      data: { matches: returned, count: returned.length, mode: 'shared-feed' },
+      summary: `${returned.length} ${includeSuperseded ? 'audit-history' : 'current'} direct shared-feed match(es) for "${input.query}" in commons.`,
+    };
   }
 
   // Prefer AGENTIC HYBRID recall (Azure AI Search memory-exec): decomposes the query into
@@ -82,13 +172,13 @@ export async function recallHandler(
     });
     if ((ar.mode === 'agentic-hybrid' || ar.mode === 'cache-hit') && ar.results.length > 0) {
       let cacheNote = ar.cacheHit ? ' [cache hit]' : '';
-      let visible = await currentRecallHits(filterPersonalSharedMemory(ar.results, ctx.callerAgent), includeSuperseded);
+      let visible = await currentRecallHits(callerVisibleHits(ar.results), includeSuperseded);
       // A cache entry can predate a retraction. On an all-retired cache hit, bypass it once
       // so a current record below the cached window still has a chance to surface.
       if (visible.length === 0 && ar.cacheHit && !includeSuperseded) {
         ar = { ...(await agenticRecall(input.query, { agent: agentFilter ?? undefined, top: candidateLimit })), cacheHit: false };
         cacheNote = '';
-        visible = await currentRecallHits(filterPersonalSharedMemory(ar.results, ctx.callerAgent), includeSuperseded);
+        visible = await currentRecallHits(callerVisibleHits(ar.results), includeSuperseded);
       }
       if (visible.length > 0) {
         const matches = visible.slice(0, limit);
@@ -108,7 +198,7 @@ export async function recallHandler(
     try {
       const hits = await semanticSearch(input.query, agentFilter, candidateLimit);
       if (hits) {
-        const visible = await currentRecallHits(filterPersonalSharedMemory(hits, ctx.callerAgent), includeSuperseded);
+        const visible = await currentRecallHits(callerVisibleHits(hits), includeSuperseded);
         if (visible.length > 0) {
           const matches = visible.slice(0, limit);
           return {
@@ -125,9 +215,8 @@ export async function recallHandler(
   if (!isConfigured()) {
     return { data: { matches: [], count: 0, mode: 'none' }, summary: 'Shared brain not configured; no results.' };
   }
-  const terms = input.query.toLowerCase().split(/\s+/).filter(Boolean);
   const all = await readSharedAll();
-  const matches = filterPersonalSharedMemory(all, ctx.callerAgent)
+  const matches = callerVisibleHits(all)
     .filter((r) => !agentFilter || r.agent === agentFilter)
     .filter((r) => {
       const hay = `${r.type} ${r.text} ${(r.tags || []).join(' ')} ${r.agent} ${r.source || ''}`.toLowerCase();
@@ -157,6 +246,11 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
         openWorldHint: false,
       },
       inputShape: RECALL_INPUT_SHAPE,
+      connectorDescription:
+        'Search shared company memory for current entries. A chat_shared token is fixed to the commons feed.',
+      connectorInputShapeByLane: {
+        [CHAT_SHARED_LANE]: CHAT_SHARED_RECALL_INPUT_SHAPE,
+      },
       outputShape: RECALL_OUTPUT_SHAPE,
       handler: recallHandler,
     },

@@ -43,8 +43,20 @@
 export const CTO_MAKE_GITHUB_PILOT_LANE = 'cto-make-github-pilot' as const;
 export const CTO_MAKE_GITHUB_PILOT_TOOLSET = ['github_make_broker', 'catalog_probe'] as const;
 
+/** Owner-elevated principal for ordinary Chat/Make access to non-sensitive company commons. The
+ * fixed toolset is mirrored in connectorToolset() so a shared override cannot widen its scope. */
+export const CHAT_SHARED_LANE = 'chat_shared' as const;
+export const CHAT_SHARED_MEMORY_TARGET = 'commons' as const;
+export const CHAT_SHARED_TOOLSET = [
+  'brain_search',
+  'memory_recall',
+  'memory_remember',
+  'catalog_probe',
+  'gateway_fetch_result',
+] as const;
+
 /**
- * Internal client_credentials lanes this feature has an opinion about. Any OTHER caller identity (an
+ * Internal and special OAuth lanes this feature has an opinion about. Any OTHER caller identity (an
  * app-lead/product agent like 'iheartest', an empty/unknown caller, a Claude Chat connector lane,
  * etc.) is always left UNCURATED and unlogged by this feature -- see the fail-open branch in
  * safety/tool-catalog-curation.ts's evaluateCatalogCuration().
@@ -60,6 +72,7 @@ export const KNOWN_INTERNAL_LANES = [
   'cco',
   'developer',
   'exec',
+  CHAT_SHARED_LANE,
 ] as const;
 
 export type KnownInternalLane = (typeof KNOWN_INTERNAL_LANES)[number];
@@ -207,6 +220,9 @@ const CRO_M365_CURATED = [
 ] as const;
 
 export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
+  // The owner-elevated ordinary-Chat principal is intentionally limited to the company commons
+  // Brain, exact shared-feed recall/write, identity diagnostics, and JIT result retrieval.
+  [CHAT_SHARED_LANE]: CHAT_SHARED_TOOLSET,
   // The mastermind seat: infra, builds, releases, the full ship cycle, and every read surface it uses
   // to decide whether landing something is safe. NOT an EXEC_RING member (search-privileged.ts), so
   // kb_search_privileged / legal_blob_* / xero_* still ring-gate in-handler even though they are

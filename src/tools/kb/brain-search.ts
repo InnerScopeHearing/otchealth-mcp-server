@@ -69,6 +69,7 @@ import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieva
 import { lookupEntity, type EntityHit } from '../../memory/entity-lookup.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 import { opaqueIdentifierQuery } from '../../search/identifier-match.js';
+import { CHAT_SHARED_LANE } from '../../config/lane-toolsets.js';
 
 // Re-exported so the pre-existing `import { rrfFuse, ... } from './brain-search.js'` in
 // brain-search.test.ts keeps working unchanged -- the implementation moved to memory/rrf.ts (see
@@ -208,6 +209,17 @@ export const brainSearchInputShape = {
     ),
 } satisfies ZodRawShape;
 
+/** The shared Chat connector reads only the write-through memory index. The durable commons feed
+ * itself is read separately by memory_recall, which bypasses search for this principal. */
+export const CHAT_SHARED_BRAIN_SEARCH_INPUT_SHAPE = {
+  query: brainSearchInputShape.query,
+  top: brainSearchInputShape.top,
+  domain: z.literal('exec').default('exec').describe('Fixed to exec, the shared memory-exec search index.'),
+  include_ops: brainSearchInputShape.include_ops,
+  mode: brainSearchInputShape.mode,
+  continuation: brainSearchInputShape.continuation,
+} satisfies ZodRawShape;
+
 export type BrainSearchInput = z.infer<z.ZodObject<typeof brainSearchInputShape>>;
 
 /**
@@ -225,11 +237,14 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
       summary: 'AI Search not configured.',
     };
   }
-  const rooms = roomsFor(ctx.callerAgent, input.domain);
+  const domain = (ctx.callerAgent || '').trim().toLowerCase() === CHAT_SHARED_LANE
+    ? 'exec'
+    : input.domain;
+  const rooms = roomsFor(ctx.callerAgent, domain);
   if (rooms.length === 0) {
     return {
       data: { matches: [], count: 0, mode: 'no-rooms', rooms_searched: [], include_ops: includeOps },
-      summary: `No readable rooms for domain "${input.domain}".`,
+      summary: `No readable rooms for domain "${domain}".`,
     };
   }
 
@@ -407,6 +422,9 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         openWorldHint: false,
       },
       inputShape: brainSearchInputShape,
+      connectorInputShapeByLane: {
+        [CHAT_SHARED_LANE]: CHAT_SHARED_BRAIN_SEARCH_INPUT_SHAPE,
+      },
       outputShape: {
         matches: z.array(z.unknown()),
         count: z.number(),

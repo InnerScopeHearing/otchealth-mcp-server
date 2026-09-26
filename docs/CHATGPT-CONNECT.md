@@ -9,8 +9,8 @@ connector's self-chosen name used to be trusted to pick a lane (see `oauth.ts`'s
 
 This document covers the piece on top of that default: an **interstitial consent page**, shown by
 the gateway itself mid-flow, that lets the owner (Matt) type in a short-lived setup code and connect
-a URL-only connector as a privileged role instead — `cto`, `cfo`, `clo`, `coo`, `cro`, or
-`developer`, or the dedicated `wefunder-campaign-director` principal. The WeFunder principal has
+a URL-only connector as a privileged role instead: `cto`, `cfo`, `clo`, `coo`, `cro`, `developer`,
+the dedicated `wefunder-campaign-director` principal, or the restricted `chat_shared` principal. The WeFunder principal has
 its own fixed scope and does not inherit CRO access. The pattern mirrors what Sentry (`mcp.sentry.dev`), Cloudflare, and Linear all do for
 the same problem: the auth server, not the connecting client, decides what a connection is allowed
 to become, and it decides that from something only the owner holds.
@@ -52,9 +52,12 @@ asked for was valid.
 }
 ```
 
-- `role` — one of `cto`, `cfo`, `clo`, `coo`, `cro`, `developer`, `wefunder-campaign-director`.
+- `role` — one of `cto`, `cfo`, `clo`, `coo`, `cro`, `developer`, `wefunder-campaign-director`,
+  `chat_shared`, or `cto-make-github-pilot`.
   Use `wefunder-campaign-director` for an ordinary Chat connection to the dedicated WeFunder
-  source lane. **`clo-personal` is not a valid
+  source lane. Use `chat_shared` for ordinary Chat or Make access to the fixed company commons
+  Brain toolset. `chat_shared` is one shared principal, not a per-seat identity, so feed entries
+  identify the authenticated writer as `chat_shared`. **`clo-personal` is not a valid
   value and never will be** — there is no connector-elevation path to the attorney-privileged
   personal-legal ring, full stop (see `src/auth/setup-codes.ts`'s header for why).
 - `label` — optional, for your own tracking (never shown to the connecting owner, never logged with
@@ -70,6 +73,36 @@ that outlives the one conversation it belongs in.
 A code is single-use: the moment it is redeemed, it is permanently spent, whether the redemption
 succeeds or (if somehow re-submitted afterward) fails. Minting a second code for the same person/role
 is always safe and does not affect the first one.
+
+## The `chat_shared` Brain boundary
+
+The `chat_shared` connector exposes exactly `brain_search`, `memory_recall`, `memory_remember`,
+`catalog_probe`, and `gateway_fetch_result`. The gateway fixes shared-feed writes and recall to the
+`commons` agent feed. The connector schemas do not expose a feed selector, and the handlers refuse
+any non-commons target. This role cannot call `memory_search`, `memory_write`, `memory_team`, or
+privileged finance, legal, GitHub, or operations tools.
+For `chat_shared`, the `brain_search` connector schema defaults to and enforces `domain: "exec"`,
+which maps to the shared `memory-exec` index. The handler also fixes that domain server-side.
+
+The durable record is the `commons` JSONL feed at
+`otchealth-brain-dr-55c84f6b/otchealthcommons/company-journal/_MEMORY/_exec/commons.jsonl` in S3.
+For this role, `memory_recall` reads that shared-feed store directly and reports
+`mode: "shared-feed"`; this is the same-store persistence acceptance check. `memory_remember` also
+requests a write-through search projection into the `memory-exec` index and reports the index name,
+selected backend, and indexing result. On the current AWS deployment the selected backend should
+be OpenSearch. That projection is separate from the OpenSearch `commons-company-journal` room. A
+shared-feed readback does not by itself prove either OpenSearch room is current, and a `brain_search`
+result is not the source-of-truth acceptance check for the shared feed.
+
+For Make acceptance, first use `catalog_probe` to confirm `caller_agent: "chat_shared"`. Write one
+unique synthetic marker with `memory_remember`, `dry_run: false`, and no `agent` field. Require
+`written: true`, `entry.agent: "commons"`, `entry.by: "chat_shared"`, and capture the returned entry
+ID and index result. Then call `memory_recall` with the marker and require the same entry ID in a
+`mode: "shared-feed"` response. Do not use `memory_search` for this check because it reads the
+separate agent-state memory store. Then call `brain_search` with the marker and require an exact hit
+from `rooms_searched: ["memory-exec"]` with `agent: "commons"`. The `memory_recall` result must
+retain `by: "chat_shared"`; the OpenSearch projection is not the author-of-record. The
+`commons-company-journal` room is a separate index and is not the destination of this write.
 
 ## What the code is (and isn't)
 

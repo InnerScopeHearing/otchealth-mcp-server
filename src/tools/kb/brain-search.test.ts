@@ -61,6 +61,14 @@ test('a non-ring caller (cto) gets ONLY the open rooms — no finance, no legal'
   for (const r of RING_ROOMS) assert.ok(!rooms.includes(r), `cto must not reach ${r}`);
 });
 
+test('chat_shared is limited to open Brain rooms and cannot request finance or legal rooms', () => {
+  assert.deepEqual(roomsFor('chat_shared'), [...OPEN_ROOMS]);
+  assert.deepEqual(roomsFor('chat_shared', 'exec'), ['memory-exec']);
+  assert.deepEqual(roomsFor('chat_shared', 'commons'), ['commons-company-journal']);
+  assert.deepEqual(roomsFor('chat_shared', 'finance'), []);
+  assert.deepEqual(roomsFor('chat_shared', 'legal'), []);
+});
+
 test('direct exact hit survives top=1 fusion across many rooms, then remains retractable', () => {
   const perRoom = Array.from({ length: 8 }, (_, i) => ({
     room: `room-${i}`,
