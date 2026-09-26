@@ -46,7 +46,7 @@ afterEach(() => {
 
 async function registeredToolNames(
   authenticatedSeat: string,
-  taskClass: TaskClass,
+  taskClass: TaskClass | undefined,
   connectorSurface: boolean,
 ): Promise<string[]> {
   const { registerAllTools } = await import('./index.js');
@@ -70,20 +70,32 @@ async function registeredToolNames(
   return Object.keys((mcp as unknown as { _registeredTools: Record<string, unknown> })._registeredTools);
 }
 
-test('authenticated tools/list is the read-only baseline when the header is missing or unknown', async () => {
+test('explicit read_only tools/list selects the seat-filtered read-only baseline', async () => {
   const seatAllowlist = new Set(EXTERNAL_READONLY_TOOLSET);
+  const taskClass = parseTaskClassHeader('read_only');
+  assert.equal(taskClass, 'read_only');
+  const actual = await registeredToolNames('cto', taskClass, true);
+  const expected = selectTaskScopedToolPack({
+    taskClass,
+    authenticatedSeat: 'cto',
+    authenticatedSeatAllowlist: seatAllowlist,
+    readOnlyBaseline: EXTERNAL_READONLY_TOOLSET,
+  });
+  assert.deepEqual(actual.sort(), [...expected].sort());
+  assert.ok(!actual.includes('github_create_branch'));
+  assert.ok(!actual.includes('kb_search_privileged'));
+});
+
+test('missing or unknown task-class headers preserve the existing lane-curated catalog', async () => {
+  const { loadEnv } = await import('../config/env.js');
+  const seatAllowlist = connectorToolset(loadEnv(), 'cto');
   for (const raw of [undefined, 'future-class']) {
     const taskClass = parseTaskClassHeader(raw);
+    assert.equal(taskClass, undefined);
     const actual = await registeredToolNames('cto', taskClass, true);
-    const expected = selectTaskScopedToolPack({
-      taskClass,
-      authenticatedSeat: 'cto',
-      authenticatedSeatAllowlist: seatAllowlist,
-      readOnlyBaseline: EXTERNAL_READONLY_TOOLSET,
-    });
-    assert.deepEqual(actual.sort(), [...expected].sort());
-    assert.ok(!actual.includes('github_create_branch'));
-    assert.ok(!actual.includes('kb_search_privileged'));
+    assert.ok(actual.includes('github_pr_get'));
+    assert.ok(actual.includes('github_list_workflow_runs'));
+    assert.ok(actual.every((name) => seatAllowlist.has(name)));
   }
 });
 

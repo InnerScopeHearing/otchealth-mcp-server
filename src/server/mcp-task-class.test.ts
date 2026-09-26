@@ -32,7 +32,15 @@ test('MCP request context keeps token identity separate from the task-class head
     assert.equal(currentTaskClass(), 'engineering');
   });
 
-  const invalidContext = requestContextForMcpRequest(authenticated, 'corr-2', 'unknown');
+  const missingContext = requestContextForMcpRequest(authenticated, 'corr-2', undefined);
+  assert.equal(missingContext.callerAgent, 'coo');
+  assert.equal(missingContext.taskClass, undefined);
+
+  const invalidContext = requestContextForMcpRequest(authenticated, 'corr-3', 'unknown');
   assert.equal(invalidContext.callerAgent, 'coo');
-  assert.equal(invalidContext.taskClass, 'read_only');
+  assert.equal(invalidContext.taskClass, undefined);
+
+  const readOnlyContext = requestContextForMcpRequest(authenticated, 'corr-4', 'read_only');
+  assert.equal(readOnlyContext.callerAgent, 'coo');
+  assert.equal(readOnlyContext.taskClass, 'read_only');
 });

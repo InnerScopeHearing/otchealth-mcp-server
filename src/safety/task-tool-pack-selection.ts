@@ -2,9 +2,9 @@
  * Request-scoped MCP tool discovery. The class is a caller-controlled presentation selector only:
  * the authenticated caller identity and every handler authorization check remain independent.
  *
- * The gateway is stateless, so clients must send this header on every /mcp POST, including
- * tools/list and tools/call. Missing, repeated, malformed, and unrecognized values select the
- * read-only baseline.
+ * The gateway is stateless, so clients must send an explicit recognized header on every /mcp
+ * POST, including tools/list and tools/call, to opt into narrowing. Missing, repeated, malformed,
+ * and unrecognized values preserve the existing authenticated caller catalog for compatibility.
  */
 export const TASK_CLASS_HEADER = 'x-otc-task-class';
 
@@ -35,10 +35,12 @@ const ENGINEERING_TOOLS = new Set([
   'github_commit_compare',
 ]);
 
-export function parseTaskClassHeader(value: unknown): TaskClass {
-  if (typeof value !== 'string') return 'read_only';
+export function parseTaskClassHeader(value: unknown): TaskClass | undefined {
+  if (typeof value !== 'string') return undefined;
   const normalized = value.trim().toLowerCase();
-  return normalized === 'engineering' ? 'engineering' : 'read_only';
+  if (normalized === 'engineering') return 'engineering';
+  if (normalized === 'read_only') return 'read_only';
+  return undefined;
 }
 
 function candidateToolNames(

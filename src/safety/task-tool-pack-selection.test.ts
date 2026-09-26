@@ -29,9 +29,9 @@ function select(taskClass: unknown, authenticatedSeat: string, seatAllowlist: Re
   });
 }
 
-test('missing, repeated, malformed, and unknown headers resolve to the read-only class', () => {
+test('only an explicit recognized header selects a task class', () => {
   for (const raw of [undefined, null, 17, ['engineering'], '', '   ', 'privileged', 'engineering,read_only']) {
-    assert.equal(parseTaskClassHeader(raw), 'read_only');
+    assert.equal(parseTaskClassHeader(raw), undefined);
   }
   assert.equal(parseTaskClassHeader(' read_only '), 'read_only');
   assert.equal(parseTaskClassHeader('Engineering'), 'engineering');

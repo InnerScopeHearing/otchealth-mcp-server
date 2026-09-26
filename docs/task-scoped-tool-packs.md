@@ -1,16 +1,18 @@
 # Task-scoped MCP tool packs
 
-Authenticated clients can select a smaller advertised tool set with the
-**x-otc-task-class** HTTP header on **/mcp** requests.
+Authenticated clients can opt into a smaller advertised tool set with an
+explicit **x-otc-task-class** HTTP header on **/mcp** requests.
 
 | Header value | Advertised pack |
 | --- | --- |
-| read_only, missing, repeated, malformed, or unknown | The 13-tool read-only baseline, intersected with the caller's existing registration filters |
+| Missing, repeated, malformed, or unknown | The existing authenticated caller catalog is unchanged |
+| read_only | The 13-tool read-only baseline, intersected with the caller's existing registration filters |
 | engineering | The read-only baseline plus the bounded GitHub engineering pack for authenticated cto and developer seats, intersected with the caller's existing registration filters |
 
-The gateway is stateless. Send the header on every /mcp POST, including
-initialize, tools/list, and tools/call. If a request omits it or sends an
-unrecognized value, that request receives the read-only pack.
+The gateway is stateless. Send a recognized header on every /mcp POST,
+including initialize, tools/list, and tools/call, to apply a task pack. An
+omitted or unrecognized value preserves the existing caller catalog so older
+clients do not silently lose their lane-specific tools.
 
 The header only selects tool visibility. The bearer token is authenticated
 first, and caller_agent remains derived from that token. Connector and lane
