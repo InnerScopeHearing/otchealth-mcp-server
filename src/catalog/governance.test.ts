@@ -47,6 +47,12 @@ test('github_pr_update specifically allows cto and developer only (write_simple 
   assert.ok(!roleAllows(gov?.role ?? '', 'cfo'));
 });
 
+test('github_pr_mark_ready is CTO-only release control', () => {
+  const gov = requiredRoleFor('github_pr_mark_ready');
+  assert.equal(gov?.role, 'cto');
+  assert.ok(!roleAllows(gov?.role ?? '', 'developer'));
+});
+
 test('github_make_broker is limited to CTO and the restricted Make pilot principal', () => {
   const gov = requiredRoleFor('github_make_broker');
   assert.ok(gov, 'the Make pilot broker must have an explicit governance rule');
