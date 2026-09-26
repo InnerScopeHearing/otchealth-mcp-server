@@ -19,6 +19,10 @@ process.env.GITHUB_APP_PRIVATE_KEY ??= privateKey;
 
 const { markPullRequestReadyForReview } = await import('./api-client.js');
 
+const expectedNumber = 712;
+const expectedHeadSha = 'a'.repeat(40);
+const expectedRepositoryFullName = 'InnerScopeHearing/otchealth-cto';
+
 test('GraphQL failure is sanitized and the mutation is sent exactly once without retry', async () => {
   const original = globalThis.fetch;
   const secret = 'ghs_this_must_not_escape';
@@ -42,7 +46,7 @@ test('GraphQL failure is sanitized and the mutation is sent exactly once without
   }) as typeof fetch;
   try {
     await assert.rejects(
-      () => markPullRequestReadyForReview('PR_kwDOExample'),
+      () => markPullRequestReadyForReview('PR_kwDOExample', expectedNumber, expectedHeadSha, expectedRepositoryFullName),
       (error: unknown) => {
         const e = error as { code?: string; message?: string };
         return e.code === 'github_pr_ready_mutation_failed' && !String(e.message).includes(secret);
@@ -51,8 +55,89 @@ test('GraphQL failure is sanitized and the mutation is sent exactly once without
     assert.equal(mutationCalls, 1, 'a GraphQL failure must not cause a retry of the state mutation');
     assert.match(mutationBody, /markPullRequestReadyForReview/);
     assert.match(mutationBody, /PR_kwDOExample/);
-    assert.match(mutationBody, /\bmerged\b/);
-    assert.doesNotMatch(mutationBody, /isMerged/);
+    assert.match(mutationBody, /headRefOid/);
+    assert.match(mutationBody, /nameWithOwner/);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('requires a mutation response for the same open ready PR, repository, and full head SHA', async () => {
+  const original = globalThis.fetch;
+  let mutationCalls = 0;
+  let mutationBody = '';
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith('/graphql')) {
+      mutationCalls++;
+      mutationBody = String(init?.body ?? '');
+      return new Response(JSON.stringify({
+        data: {
+          markPullRequestReadyForReview: {
+            pullRequest: {
+              number: expectedNumber,
+              state: 'OPEN',
+              isDraft: false,
+              merged: false,
+              headRefOid: expectedHeadSha,
+              repository: { nameWithOwner: expectedRepositoryFullName },
+              url: `https://github.com/${expectedRepositoryFullName}/pull/${expectedNumber}`,
+            },
+          },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  try {
+    const result = await markPullRequestReadyForReview('PR_kwDOExample', expectedNumber, expectedHeadSha, expectedRepositoryFullName);
+    assert.equal(mutationCalls, 1);
+    assert.match(mutationBody, /headRefOid/);
+    assert.match(mutationBody, /repository \{ nameWithOwner \}/);
+    assert.deepEqual(result, {
+      number: expectedNumber,
+      state: 'open',
+      draft: false,
+      merged: false,
+      headSha: expectedHeadSha,
+      url: `https://github.com/${expectedRepositoryFullName}/pull/${expectedNumber}`,
+    });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('rejects a mutation response with head SHA drift without retrying', async () => {
+  const original = globalThis.fetch;
+  let mutationCalls = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/graphql')) {
+      mutationCalls++;
+      return new Response(JSON.stringify({
+        data: {
+          markPullRequestReadyForReview: {
+            pullRequest: {
+              number: expectedNumber,
+              state: 'OPEN',
+              isDraft: false,
+              merged: false,
+              headRefOid: 'b'.repeat(40),
+              repository: { nameWithOwner: expectedRepositoryFullName },
+              url: `https://github.com/${expectedRepositoryFullName}/pull/${expectedNumber}`,
+            },
+          },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => markPullRequestReadyForReview('PR_kwDOExample', expectedNumber, expectedHeadSha, expectedRepositoryFullName),
+      (error: unknown) => (error as { code?: string }).code === 'github_pr_ready_mutation_failed',
+    );
+    assert.equal(mutationCalls, 1);
   } finally {
     globalThis.fetch = original;
   }

@@ -11,6 +11,7 @@ function snapshot(raw: any): PullRequestSnapshot {
     draft: raw?.draft === true,
     merged: raw?.merged === true,
     nodeId: typeof raw?.node_id === 'string' ? raw.node_id : '',
+    headSha: typeof raw?.head?.sha === 'string' ? raw.head.sha : '',
     url: typeof raw?.html_url === 'string' ? raw.html_url : undefined,
   };
 }
@@ -21,7 +22,7 @@ export function registerGitHubPrMarkReady(server: McpServer, callerHash: CallerH
     category: 'write_simple',
     annotations: {
       title: 'GitHub: mark draft PR ready for review',
-      description: 'CTO-only. Marks one open draft pull request ready for review through GitHub’s fixed GraphQL mutation. Defaults to dry run.',
+      description: 'CTO-only. Limited to InnerScopeHearing/otchealth-cto PR #712 and requires its full current head SHA. Defaults to dry run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -30,7 +31,8 @@ export function registerGitHubPrMarkReady(server: McpServer, callerHash: CallerH
     inputShape: {
       owner: z.string().describe('Repository owner.'),
       repo: z.string().describe('Repository name.'),
-      pull_number: z.number().int().describe('Open draft pull request number.'),
+      pull_number: z.number().int().describe('The allowed reviewed cost and usage pull request number.'),
+      expected_head_sha: z.string().regex(/^[0-9a-f]{40}$/i).describe('Full 40-character expected head SHA.'),
     },
     outputShape: {
       executed: z.boolean(),
@@ -38,6 +40,7 @@ export function registerGitHubPrMarkReady(server: McpServer, callerHash: CallerH
       number: z.number(),
       state: z.string(),
       draft: z.boolean(),
+      head_sha: z.string(),
       url: z.string().optional(),
     },
     handler: async (input, ctx) => {
@@ -46,17 +49,19 @@ export function registerGitHubPrMarkReady(server: McpServer, callerHash: CallerH
         owner: input.owner,
         repo: input.repo,
         pullNumber: input.pull_number,
+        expectedHeadSha: input.expected_head_sha,
         dryRun: ctx.dryRun,
       }, {
         read: async () => snapshot(await getPullRequest(input.owner, input.repo, input.pull_number)),
-        mutate: async (nodeId) => markPullRequestReadyForReview(nodeId),
+        mutate: async (nodeId, expectedNumber, expectedHeadSha, expectedRepositoryFullName) =>
+          markPullRequestReadyForReview(nodeId, expectedNumber, expectedHeadSha, expectedRepositoryFullName),
       });
       return {
         data: result,
         audit: { before: null, after: result },
         summary: result.executed
-          ? `Marked PR #${result.number} ready for review in ${input.owner}/${input.repo}.`
-          : `DRY RUN: PR #${result.number} passed ready-for-review admission in ${input.owner}/${input.repo}. Pass dry_run=false to apply.`,
+          ? `Marked PR #${result.number} ready for review in ${input.owner}/${input.repo} at ${result.head_sha}.`
+          : `DRY RUN: PR #${result.number} passed ready-for-review admission in ${input.owner}/${input.repo} at ${result.head_sha}. Pass dry_run=false to apply.`,
       };
     },
   }, callerHash);
