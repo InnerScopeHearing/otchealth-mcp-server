@@ -44,12 +44,12 @@ export function parseTaskClassHeader(value: unknown): TaskClass | undefined {
 }
 
 function candidateToolNames(
-  taskClass: unknown,
+  taskClass: TaskClass,
   authenticatedSeat: string,
   readOnlyBaseline: readonly string[],
 ): Set<string> {
   const candidates = new Set(readOnlyBaseline);
-  if (parseTaskClassHeader(taskClass) === 'engineering' && ENGINEERING_SEATS.has(authenticatedSeat)) {
+  if (taskClass === 'engineering' && ENGINEERING_SEATS.has(authenticatedSeat)) {
     for (const name of ENGINEERING_TOOLS) candidates.add(name);
   }
   return candidates;
@@ -66,8 +66,12 @@ export function selectTaskScopedToolPack(options: {
   authenticatedSeatAllowlist: ReadonlySet<string>;
   readOnlyBaseline: readonly string[];
 }): readonly string[] {
+  const selectedClass = parseTaskClassHeader(options.taskClass);
+  if (selectedClass === undefined) {
+    return [...options.authenticatedSeatAllowlist].sort();
+  }
   const candidates = candidateToolNames(
-    options.taskClass,
+    selectedClass,
     options.authenticatedSeat,
     options.readOnlyBaseline,
   );

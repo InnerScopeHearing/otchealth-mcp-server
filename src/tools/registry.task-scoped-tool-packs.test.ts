@@ -86,16 +86,16 @@ test('explicit read_only tools/list selects the seat-filtered read-only baseline
   assert.ok(!actual.includes('kb_search_privileged'));
 });
 
-test('missing or unknown task-class headers preserve the existing lane-curated catalog', async () => {
-  const { loadEnv } = await import('../config/env.js');
-  const seatAllowlist = connectorToolset(loadEnv(), 'cto');
+test('missing or unknown task-class headers preserve the complete existing lane-curated catalog', async () => {
+  const baseline = await registeredToolNames('cto', undefined, true);
+  assert.ok(baseline.includes('github_pr_get'));
+  assert.ok(baseline.includes('github_list_workflow_runs'));
+
   for (const raw of [undefined, 'future-class']) {
     const taskClass = parseTaskClassHeader(raw);
     assert.equal(taskClass, undefined);
     const actual = await registeredToolNames('cto', taskClass, true);
-    assert.ok(actual.includes('github_pr_get'));
-    assert.ok(actual.includes('github_list_workflow_runs'));
-    assert.ok(actual.every((name) => seatAllowlist.has(name)));
+    assert.deepEqual(actual.sort(), [...baseline].sort());
   }
 });
 

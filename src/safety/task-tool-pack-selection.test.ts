@@ -37,10 +37,15 @@ test('only an explicit recognized header selects a task class', () => {
   assert.equal(parseTaskClassHeader('Engineering'), 'engineering');
 });
 
-test('unknown and invalid classes expose only the seat-filtered read-only baseline', () => {
+test('explicit read_only selection uses the authenticated allowlist intersection', () => {
+  const seatAllowlist = new Set([...BASELINE, 'github_create_branch']);
+  assert.deepEqual(select('read_only', 'cto', seatAllowlist), [...BASELINE].sort());
+});
+
+test('missing and invalid classes preserve the authenticated seat allowlist', () => {
   const seatAllowlist = new Set([...BASELINE, 'github_create_branch']);
   for (const taskClass of [undefined, null, 17, '', 'unknown', 'privileged']) {
-    assert.deepEqual(select(taskClass, 'cto', seatAllowlist), [...BASELINE].sort());
+    assert.deepEqual(select(taskClass, 'cto', seatAllowlist), [...seatAllowlist].sort());
   }
 });
 
