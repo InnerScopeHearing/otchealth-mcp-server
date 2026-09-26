@@ -87,6 +87,7 @@ import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostic
 // be widened by either shared override.
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+const CTO_ONLY_GITHUB_MARK_READY_TOOL = 'github_pr_mark_ready';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 
@@ -191,7 +192,7 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // governance.ts's execution-time gating remains a second, independent layer under it.
   // write + branch
   'github_create_branch', 'github_create_or_update_file', 'github_edit_file', 'github_push_files', 'github_create_pull_request',
-  'github_pr_update', 'github_pr_mark_ready', 'github_pr_update_branch', 'github_ref_delete',
+  'github_pr_update', 'github_pr_update_branch', 'github_ref_delete',
   // LAND IT: merge is the tool whose absence forced the browser fallback
   'github_merge_pull_request', 'github_pr_create_review', 'github_comment_on_issue',
   // trigger + observe CI directly (no browser, no human in the loop)
@@ -492,17 +493,19 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
-  // Keep these restricted GitHub surfaces out of the shared ship set. CTO retains its existing
-  // override semantics; ordinary non-CTO lanes must not inherit them from a shared override. The
+  // Keep the observation receipt, Make broker, and PR ready action out of the shared ship set.
+  // CTO retains its existing override semantics; ordinary non-CTO lanes must not inherit them from a shared override. The
   // dedicated Make pilot returned above with its independent exact allowlist.
   if (lane === 'cto') {
     if (!env.CONNECTOR_TOOLSET) {
       tools.add(CTO_ONLY_GITHUB_RECEIPT_TOOL);
       tools.add(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
+      tools.add(CTO_ONLY_GITHUB_MARK_READY_TOOL);
     }
   } else {
     tools.delete(CTO_ONLY_GITHUB_RECEIPT_TOOL);
     tools.delete(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
+    tools.delete(CTO_ONLY_GITHUB_MARK_READY_TOOL);
   }
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
   // owns the migration bridge, while not advertising it to other ship lanes.

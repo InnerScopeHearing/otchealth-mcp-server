@@ -340,6 +340,7 @@ test('curate-m365-only exposes CTO-only GitHub controls to CTO but excludes them
   const markReadyAlias = 'pr_mark_ready';
   const ctoNames = await registeredToolNames('cto', true);
   const developerNames = await registeredToolNames('developer', true);
+  const execNames = await registeredToolNames('exec', true);
 
   assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
   assert.ok(ctoNames.includes(markReadyTool) || ctoNames.includes(markReadyAlias), 'CTO M365 must retain visibility of the CTO-only mark-ready action');
@@ -347,5 +348,7 @@ test('curate-m365-only exposes CTO-only GitHub controls to CTO but excludes them
   assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
   assert.equal(developerNames.includes(markReadyTool), false, 'Developer M365 must exclude the CTO-only mark-ready action despite github_*');
   assert.equal(developerNames.includes(markReadyAlias), false, 'the generated M365 alias must not bypass the mark-ready exclusion');
+  assert.equal(execNames.includes(markReadyTool), false, 'Executive M365 must exclude the CTO-only mark-ready action despite github_*');
+  assert.equal(execNames.includes(markReadyAlias), false, 'the generated M365 alias must not bypass the executive mark-ready exclusion');
   assert.ok(developerNames.length <= 200, `Developer M365 catalog must stay at or under 200 tools, got ${developerNames.length}`);
 });

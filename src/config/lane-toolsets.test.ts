@@ -52,9 +52,12 @@ test('isToolInLaneAllowlist: prefix* match', () => {
 
 test('exact exclusions take precedence over broad family matches without narrowing neighboring tools', () => {
   assert.equal(isToolInLaneAllowlist('cto', 'github_graphrag_observation_receipt_get'), true);
+  assert.equal(isToolInLaneAllowlist('cto', 'github_pr_mark_ready'), true);
   assert.equal(isToolInLaneAllowlist('developer', 'github_create_branch'), true);
   assert.equal(isToolInLaneAllowlist('developer', 'github_graphrag_observation_receipt_get'), false);
+  assert.equal(isToolInLaneAllowlist('developer', 'github_pr_mark_ready'), false);
   assert.equal(isToolInLaneAllowlist('exec', 'github_graphrag_observation_receipt_get'), false);
+  assert.equal(isToolInLaneAllowlist('exec', 'github_pr_mark_ready'), false);
 });
 
 test('isToolInLaneAllowlist: cto (2026-08-02 onward) is an explicit curated list, not a wildcard -- a literal seed member matches, an arbitrary same-service name does not', () => {
