@@ -33,6 +33,7 @@ const CLOUD_BROWSER_TOOLS = ['browser_cloud_profile_discover', 'browser_cloud_se
   'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get'];
 const CTO_CLOUD_BROWSER_PROVISIONING_TOOL = 'browser_cloud_profile_provision_public_trial';
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 function testEnv(): Env {
   return loadEnv();
@@ -50,12 +51,13 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
   assert.ok(set.has('brain_graph_search'), 'CTO connector must expose company-scoped GraphRAG');
   assert.ok(set.has(CTO_ONLY_GITHUB_RECEIPT_TOOL), 'CTO connector must expose the fixed observation receipt reader');
+  assert.ok(set.has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), 'CTO connector must expose bounded execution counts');
   assert.ok(set.has(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), 'CTO connector must expose the fixed GitHub Make pilot broker');
   // Regression guard (Task G-3, 2026-09-03): web_research/web_extract were added in the SAME
   // change that registers them, so they can't repeat the exact omission class every other guard on
@@ -130,6 +132,15 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   ]) {
     assert.ok(set.has(heygenTool), `ship lane must expose ${heygenTool}`);
   }
+});
+
+test('bounded n8n execution counts are advertised only to the CTO connector lane', () => {
+  assert.equal(connectorToolset(testEnv(), 'cto').has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), true);
+  for (const lane of ['developer', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'external-read']) {
+    assert.equal(connectorToolset(testEnv(), lane).has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), false, lane);
+  }
+  const overridden = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search' } as Env;
+  assert.equal(connectorToolset(overridden, 'cto').has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), false);
 });
 
 test('the fixed observation receipt is CTO-only; the Make broker is CTO/pilot-only, not shared ship lanes', () => {

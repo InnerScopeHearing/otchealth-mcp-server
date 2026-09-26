@@ -87,6 +87,7 @@ import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostic
 // be widened by either shared override.
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
@@ -506,6 +507,9 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
   // owns the migration bridge, while not advertising it to other ship lanes.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('hyperagent_discover_capabilities');
+  // This execution list returns bounded aggregate counts only. Keep its connector binding on the
+  // CTO lane; the read handler also enforces the caller identity before making an upstream request.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_N8N_EXECUTION_LIST_TOOL);
   // Provisioning is deliberately discoverable only to the CTO Chat lane. Its handler and
   // write_orchestrated governance independently re-check that same identity at execution time.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('browser_cloud_profile_provision_public_trial');

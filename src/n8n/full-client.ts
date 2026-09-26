@@ -244,25 +244,54 @@ export async function transferWorkflow(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export interface ListExecutionsArgs {
-  workflowId?: string;
-  status?: 'error' | 'success' | 'waiting' | 'running';
-  limit?: number;
-  cursor?: string;
-  includeData?: boolean;
+  startedAfter: string;
+  startedBefore: string;
+  limit: number;
   correlationId?: string;
+}
+
+export const N8N_EXECUTION_LIST_MAX_LIMIT = 100;
+export const N8N_EXECUTION_LIST_MAX_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
+
+function isIsoDateTime(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value));
+}
+
+export function validateListExecutionsArgs(args: ListExecutionsArgs): void {
+  const after = isIsoDateTime(args.startedAfter) ? Date.parse(args.startedAfter) : NaN;
+  const before = isIsoDateTime(args.startedBefore) ? Date.parse(args.startedBefore) : NaN;
+  if (
+    !Number.isFinite(after) ||
+    !Number.isFinite(before) ||
+    after >= before ||
+    before - after > N8N_EXECUTION_LIST_MAX_WINDOW_MS ||
+    !Number.isInteger(args.limit) ||
+    args.limit < 1 ||
+    args.limit > N8N_EXECUTION_LIST_MAX_LIMIT
+  ) {
+    throw new Error('n8n_execution_list_invalid_input');
+  }
+}
+
+export function buildListExecutionsQuery(
+  args: ListExecutionsArgs,
+): Record<string, string | number | boolean> {
+  validateListExecutionsArgs(args);
+  return {
+    startedAfter: args.startedAfter,
+    startedBefore: args.startedBefore,
+    limit: args.limit,
+    includeData: false,
+  };
 }
 
 /**
  * GET /api/v1/executions
- * List executions with optional workflow/status/pagination filters.
+ * List only a date-bounded page of execution metadata. Payload data is always excluded.
  */
 export async function listExecutions(args: ListExecutionsArgs): Promise<any> {
-  const query: Record<string, string | number | boolean | undefined> = {};
-  if (args.workflowId) query.workflowId = args.workflowId;
-  if (args.status) query.status = args.status;
-  if (args.limit !== undefined) query.limit = args.limit;
-  if (args.cursor) query.cursor = args.cursor;
-  if (args.includeData !== undefined) query.includeData = args.includeData;
+  const query = buildListExecutionsQuery(args);
   return n8nRequest('GET', '/executions', { query, correlationId: args.correlationId });
 }
 
