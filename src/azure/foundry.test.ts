@@ -140,7 +140,7 @@ test('retired Foundry: chat with serviceTier fails before provider I/O', async (
       calls++;
       throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
-    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { serviceTier: 'flex' }), /Foundry not configured/),
+    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { serviceTier: 'flex' }), /Foundry provider is retired and disabled; no Azure request was made\./),
   );
   assert.equal(calls, 0);
 });
@@ -152,7 +152,7 @@ test('retired Foundry: chat with promptCacheKey fails before provider I/O', asyn
       calls++;
       throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
-    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { promptCacheKey: 'llm:cto:summarize:standard' }), /Foundry not configured/),
+    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { promptCacheKey: 'llm:cto:summarize:standard' }), /Foundry provider is retired and disabled; no Azure request was made\./),
   );
   assert.equal(calls, 0);
 });
@@ -164,7 +164,7 @@ test('retired Foundry: router-tier chat fails before provider I/O', async () => 
       calls++;
       throw new Error('retired provider must not be contacted');
     }) as typeof fetch,
-    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { tier: 'router' }), /Foundry not configured/),
+    () => assert.rejects(() => chat([{ role: 'user', content: 'x' }], { tier: 'router' }), /Foundry provider is retired and disabled; no Azure request was made\./),
   );
   assert.equal(calls, 0);
 });

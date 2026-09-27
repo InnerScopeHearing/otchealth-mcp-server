@@ -83,6 +83,13 @@ export function backgroundChatOpts(
   return opts;
 }
 
+/** Truthful, provider-neutral summaries for model-free fast paths. */
+export function noModelCallSummary(source: 'faq' | 'semantic-cache'): string {
+  return source === 'faq'
+    ? 'No model call was made; the FAQ deflection layer answered the request.'
+    : 'No fresh model call was made; the semantic cache served the answer.';
+}
+
 export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -149,7 +156,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         // questions, check the curated FAQ store BEFORE touching the model at all. Mode-gated +
         // fail-open, mirrors LLM_CACHE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any failure (Cosmos
         // down, embed() throws) silently falls through to the normal chat() call below. See
-        // faq-deflect.ts for the store choice + why this over Azure AI Language CLU/CQA.
+        // faq-deflect.ts for the store choice and its model-free match contract.
         const faqHit = await checkFaqDeflect(input.input, input.task);
         if (faqHit.hit && faqHit.answer) {
           captureGatewayEvent('gateway_faq_deflect_hit', {
@@ -163,7 +170,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             summary:
               `llm_azure ${input.task} answered by the FAQ deflection layer ` +
               `(faq_id ${faqHit.faqId}, similarity ${faqHit.similarity?.toFixed(4)}). ` +
-              `No model call made — Claude AND Azure tokens saved.`,
+              noModelCallSummary('faq'),
           };
         }
         // Best-effort self-heal of the curated store; cheap no-op once entries already exist with
@@ -229,7 +236,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             summary:
               `llm_azure ${input.task} served from the semantic response cache ` +
               `(similarity ${cacheLookup.similarity?.toFixed(4)}, model ${cacheLookup.entry.model}). ` +
-              `No fresh model call made — Claude AND Azure tokens saved.`,
+              noModelCallSummary('semantic-cache'),
           };
         }
 
@@ -272,7 +279,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             }),
           });
           // Same cost/cache signal to Datadog custom metrics (otc.gateway.llm.*), so the Fleet
-          // cost dashboard can chart cache-hit rate alongside the Azure token metrics. Inert unless
+          // cost dashboard can chart cache-hit rate alongside the LLM token metrics. Inert unless
           // DD_API_KEY is set; fire-and-forget, never affects the response.
           emitLlmMetrics(res.model, input.task, usageSummary);
 
@@ -286,7 +293,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
 
           return {
             data: { task: input.task, tier, output: res.text, model: res.model, usage: res.usage, cache_hit: false },
-            summary: `llm_azure ${input.task} on ${res.model} (tier=${tier}, ${res.text.length} chars). Claude tokens saved.`,
+            summary: `llm_azure ${input.task} on ${res.model} (tier=${tier}, ${res.text.length} chars). OpenAI-direct gateway LLM call completed.`,
           };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);

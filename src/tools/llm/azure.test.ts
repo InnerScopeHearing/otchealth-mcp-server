@@ -12,7 +12,7 @@ process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 
-const { flexBackgroundEnabled, backgroundChatOpts, registerLlmAzure } = await import('./azure.js');
+const { flexBackgroundEnabled, backgroundChatOpts, noModelCallSummary, registerLlmAzure } = await import('./azure.js');
 
 // ---- flexBackgroundEnabled() -- the OPENAI_FLEX_BACKGROUND kill-switch, read fresh per call ----
 
@@ -135,4 +135,14 @@ test('llm_azure registration advertises OpenAI-direct tiers under the legacy too
     registeredConfig.inputSchema?.tier.description,
     'Default OpenAI-direct models: standard=gpt-5.6-terra, high=gpt-5.6-sol, router=gpt-5.6-luna. Gateway model settings may override them.',
   );
+});
+
+
+test('noModelCallSummary: FAQ and semantic-cache exits state what happened without claiming cross-provider savings', () => {
+  const summaries = [noModelCallSummary('faq'), noModelCallSummary('semantic-cache')];
+  assert.deepEqual(summaries, [
+    'No model call was made; the FAQ deflection layer answered the request.',
+    'No fresh model call was made; the semantic cache served the answer.',
+  ]);
+  assert.doesNotMatch(summaries.join(' '), /Claude|Azure|tokens saved/i);
 });
