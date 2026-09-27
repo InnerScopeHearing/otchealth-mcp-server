@@ -1,16 +1,7 @@
 /**
- * llm_azure — the FLEET COST PROTOCOL escape hatch. Routes COMMODITY + mid-tier LLM work
- * (summarize, classify, extract, synthesize, complete) onto a credit-funded/lower-cost provider
- * (Azure Foundry by default, or OpenAI-direct when LLM_PROVIDER=openai), instead of burning
- * metered Claude tokens. Available to every agent on every platform via one gateway call.
- *
- * QUALITY TIERS (Matt directive 2026-06-26: gpt-4.1-mini is bad — never default to it):
- *   tier 'standard' (default) -> the well-rounded deployment (FOUNDRY_CHAT_DEPLOYMENT / OPENAI_CHAT_MODEL)
- *   tier 'high'               -> the strongest deployed model (FOUNDRY_HIGH_DEPLOYMENT / OPENAI_HIGH_MODEL)
- * Reserve Claude (this agent) for the hardest reasoning; use this for everything commodity.
- *
- * Env: LLM_PROVIDER (foundry default | openai) selects the backend; see src/azure/foundry.ts's
- * chatTarget() for the full var list per provider and the tier -> model mapping.
+ * llm_azure is a legacy tool name retained for client compatibility.
+ * When configured, the tool uses the approved OpenAI-direct provider and the
+ * gateway's model tier settings. Azure Foundry is retired and never contacted.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
