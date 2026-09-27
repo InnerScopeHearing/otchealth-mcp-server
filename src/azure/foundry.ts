@@ -1,21 +1,8 @@
 /**
- * Azure AI Foundry (otchealth-foundry, kind AIServices) client — originally the credit-funded
- * OpenAI-family endpoint, now ONE of two interchangeable providers behind two independent switches:
- *   - embed(text)/embedBatch(texts): text-embedding-3-large -> query vector(s) for HYBRID AI Search.
- *     Provider chosen by EMBEDDINGS_PROVIDER; see embeddingsTarget()'s header for why the model is
- *     pinned identical across providers (a 492,557-doc index depends on it).
- *   - chat(...): summarize/classify/extract/synthesize/complete -- the FLEET COST PROTOCOL escape
- *     hatch (route commodity LLM work off metered Claude tokens). Provider chosen by LLM_PROVIDER;
- *     see chatTarget()'s header for the tier -> model mapping and its open judgement calls.
- *
- * Env (read via loadEnv; inert when unset):
- *   FOUNDRY_OPENAI_ENDPOINT  e.g. https://otchealth-foundry.openai.azure.com  (or .cognitiveservices.azure.com)
- *   FOUNDRY_KEY              data-plane key
- *   FOUNDRY_CHAT_DEPLOYMENT  default 'gpt-5.1'
- *   FOUNDRY_HIGH_DEPLOYMENT  default 'gpt-5.4'
- *   FOUNDRY_EMBED_DEPLOYMENT default 'text-embedding-3-large'
- *   LLM_PROVIDER             foundry (default) | openai -- see chatTarget() below
- *   EMBEDDINGS_PROVIDER      foundry (default) | openai -- see embeddingsTarget() below
+ * OpenAI-direct provider adapter with a retained Foundry compatibility name.
+ * Azure Foundry is retired. Its configuration is inert and no Foundry request is sent.
+ * OpenAI-direct chat and embeddings require their respective provider setting and
+ * OPENAI_API_KEY. Historical repair embeddings use a separate scoped configuration.
  */
 import { createHash } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
