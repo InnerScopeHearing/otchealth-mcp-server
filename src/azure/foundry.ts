@@ -496,7 +496,7 @@ export async function chat(
       0,
       e.LLM_PROVIDER === 'openai'
         ? 'Chat unconfigured (LLM_PROVIDER=openai but OPENAI_API_KEY unset)'
-        : 'Foundry not configured (FOUNDRY_OPENAI_ENDPOINT/FOUNDRY_KEY unset)',
+        : 'The Foundry provider is retired and disabled; no Azure request was made.',
     );
   }
   // gpt-5 / o-series reasoning models require max_completion_tokens (not max_tokens) and reject a
