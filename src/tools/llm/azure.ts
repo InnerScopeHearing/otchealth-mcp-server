@@ -136,15 +136,12 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
               tier,
               output: '',
               model: '',
-              // Kept as 'foundry_unconfigured' on the default provider for byte-identical
-              // backward-compat with anything keyed on this exact string; the openai case gets its
-              // own accurate code rather than a misleading Foundry-flavoured one.
-              error: provider === 'openai' ? 'openai_unconfigured' : 'foundry_unconfigured',
+              error: provider === 'openai' ? 'openai_unconfigured' : 'provider_retired',
             },
             summary:
               provider === 'openai'
                 ? 'llm_azure unavailable: LLM_PROVIDER=openai but OPENAI_API_KEY not configured on the gateway.'
-                : 'llm_azure unavailable: Foundry endpoint/key not configured on the gateway.',
+                : 'llm_azure unavailable: Foundry is retired and disabled; no Azure request was made.',
           };
         }
 
