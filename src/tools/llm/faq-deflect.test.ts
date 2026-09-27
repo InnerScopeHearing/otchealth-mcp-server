@@ -13,7 +13,7 @@ import {
 } from './faq-deflect.js';
 import type { VectorMatch } from '../../agentstate/store.js';
 
-// Pure, no-network: every Cosmos/Foundry call is faked via the injectable deps bag, mirroring
+// Pure, no-network: every Cosmos storage and embedding calls is faked via the injectable deps bag, mirroring
 // semantic-cache.test.ts / memory/hot-cache.test.ts (this repo's ESM build does not allow
 // node:test's mock.method() to override another module's live named export).
 
@@ -200,7 +200,7 @@ test('checkFaqDeflect: FAIL-OPEN — an embed() throw is swallowed and reported 
     process.env.FAQ_DEFLECT_MODE = 'on';
     const deps = makeDeps({
       embed: async () => {
-        throw new Error('Foundry outage');
+        throw new Error('embedding provider outage');
       },
     });
     const out = await checkFaqDeflect('anything', 'complete', { deps });
