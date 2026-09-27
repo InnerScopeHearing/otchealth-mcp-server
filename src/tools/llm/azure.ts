@@ -99,9 +99,9 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
       name: 'llm_azure',
       category: 'read',
       annotations: {
-        title: 'Credit-funded Azure LLM (gpt-4.1, tiered)',
+        title: 'OpenAI-direct LLM (legacy tool name: llm_azure)',
         description:
-          'Run summarize / classify / extract / synthesize / complete on credit-funded Azure OpenAI (Foundry) instead of metered Claude tokens (FLEET COST PROTOCOL). Default tier "standard" = gpt-4.1 (good quality); tier "high" = the strongest deployed model for hard reasoning / quality-critical synthesis. Do NOT use for the very hardest reasoning — keep that on Claude. Read/compute; mutates nothing.',
+          'Run summarize, classify, extract, synthesize, and complete tasks. The legacy tool name llm_azure is retained for client compatibility. With the default OpenAI-direct provider, model tiers default to standard gpt-5.6-terra, high gpt-5.6-sol, and router gpt-5.6-luna; gateway model settings may override them. OpenAI API access must be configured on the gateway.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: false,
@@ -110,7 +110,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
       inputShape: {
         task: z.enum(['summarize', 'classify', 'extract', 'synthesize', 'complete']).describe('The task type.'),
         input: z.string().min(1).describe('The content to operate on.'),
-        tier: z.enum(['standard', 'high', 'router']).optional().describe('standard=gpt-5.1 (default), high=gpt-5.4 (quality-critical), router=Azure Model Router auto-picks the cheapest-sufficient model.'),
+        tier: z.enum(['standard', 'high', 'router']).optional().describe('Default OpenAI-direct models: standard=gpt-5.6-terra, high=gpt-5.6-sol, router=gpt-5.6-luna. Gateway model settings may override them.'),
         instructions: z.string().optional().describe('Optional extra guidance (fields to extract, summary length, focus).'),
         labels: z.array(z.string()).optional().describe('For task=classify: the candidate labels.'),
         jsonMode: z.boolean().optional().describe('Force strict JSON output (recommended for extract/classify pipelines).'),
