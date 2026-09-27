@@ -83,11 +83,11 @@ export function backgroundChatOpts(
   return opts;
 }
 
-/** Truthful, provider-neutral summaries for model-free fast paths. */
+/** Truthful, provider-neutral summaries for paths that skip chat completion. */
 export function noModelCallSummary(source: 'faq' | 'semantic-cache'): string {
   return source === 'faq'
-    ? 'No model call was made; the FAQ deflection layer answered the request.'
-    : 'No fresh model call was made; the semantic cache served the answer.';
+    ? 'No chat completion was made; the FAQ lookup handled the request.'
+    : 'No chat completion was made; the semantic cache served the answer.';
 }
 
 export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvider): void {
@@ -153,7 +153,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         }
 
         // DETERMINISTIC FAQ/INTENT DEFLECTION (FAQ_DEFLECT_MODE=on): for task='complete' inbound
-        // questions, check the curated FAQ store BEFORE touching the model at all. Mode-gated +
+        // questions, check the curated FAQ store BEFORE making a chat-completion call. Mode-gated +
         // fail-open, mirrors LLM_CACHE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any failure (Cosmos
         // down, embed() throws) silently falls through to the normal chat() call below. See
         // faq-deflect.ts for the store choice and its model-free match contract.
@@ -198,7 +198,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
           input.input,
         ].join('\n---\n');
 
-        // SEMANTIC RESPONSE CACHE (LLM_CACHE_MODE=on): cache-check BEFORE the model call.
+        // SEMANTIC RESPONSE CACHE (LLM_CACHE_MODE=on): cache-check BEFORE the chat-completion call.
         // Mode-gated + fail-open, mirroring COMPLIANCE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any
         // cache failure (Cosmos down, embed() throws) silently falls through to a normal chat()
         // call below. See semantic-cache.ts for the store choice + why.

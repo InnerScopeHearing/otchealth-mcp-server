@@ -141,8 +141,8 @@ test('llm_azure registration advertises OpenAI-direct tiers under the legacy too
 test('noModelCallSummary: FAQ and semantic-cache exits state what happened without claiming cross-provider savings', () => {
   const summaries = [noModelCallSummary('faq'), noModelCallSummary('semantic-cache')];
   assert.deepEqual(summaries, [
-    'No model call was made; the FAQ deflection layer answered the request.',
-    'No fresh model call was made; the semantic cache served the answer.',
+    'No chat completion was made; the FAQ lookup handled the request.',
+    'No chat completion was made; the semantic cache served the answer.',
   ]);
   assert.doesNotMatch(summaries.join(' '), /Claude|Azure|tokens saved/i);
 });
