@@ -35,6 +35,14 @@
  * more than invisible to that lane; the in-handler ring/role checks are the real gate either way).
  */
 
+/** A dedicated setup-code principal for the inactive Make GitHub broker pilot. It is intentionally
+ * not a general internal lane and is not part of KNOWN_INTERNAL_LANES, EXEC_RING, or any ship set.
+ * registry.ts applies this exact two-tool set on every authentication path, regardless of the
+ * shared connector override.
+ */
+export const CTO_MAKE_GITHUB_PILOT_LANE = 'cto-make-github-pilot' as const;
+export const CTO_MAKE_GITHUB_PILOT_TOOLSET = ['github_make_broker', 'catalog_probe'] as const;
+
 /**
  * Internal client_credentials lanes this feature has an opinion about. Any OTHER caller identity (an
  * app-lead/product agent like 'iheartest', an empty/unknown caller, a Claude Chat connector lane,
@@ -84,7 +92,7 @@ const HEYGEN = ['heygen_*'] as const;
 // dead wildcard in a seed allowlist is harmless (it simply matches nothing), but a live one that
 // used to advertise real tools reads as a stale claim about this lane's actual capability.
 const CTO_INFRA = [
-  'github_*', '!github_graphrag_observation_receipt_get', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
+  'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
   'posthog_*', 'sentry_*', 'gumroad_*', 'docintel_*', 'graph_*', 'cio_*', 'stripe_*', 'twilio_*',
   'elevenlabs_*', 'xero_*', 'legal_blob_*', 'shopify_*', 'intercom_*', 'revenuecat_*',
   ...HEYGEN,
@@ -163,7 +171,7 @@ const CTO_M365_CURATED = [
   'depot_token_create', 'depot_token_delete', 'depot_token_list', 'depot_token_update', 'depot_trigger_build',
   'depot_usage_get', 'depot_usage_list', 'depot_usage_org_get', 'depot_workflow_cancel', 'depot_workflow_get',
   'depot_workflow_list', 'depot_workflow_rerun', 'fetch', 'gateway_fetch_result', 'github_add_labels',
-  'github_branch_get', 'github_graphrag_observation_receipt_get',
+  'github_branch_get', 'github_graphrag_observation_receipt_get', 'github_make_broker',
 ] as const;
 const CRO_M365_CURATED = [
   'brain_search', 'catalog_list_tools', 'checkpoint', 'cio_admin_read_*', 'cio_admin_write_*',
@@ -217,7 +225,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // developer's (see kb/search-privileged.ts's ring model).
   developer: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
-    'github_*', '!github_graphrag_observation_receipt_get', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
+    'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
     ...HEYGEN,
     // 2026-08-02: developer_wake_lite (diagnostics/developer-wake-lite.ts) was never covered by
     // any pattern above -- not catalog_* (CATALOG's wildcard), not github_*/depot_*, no exact

@@ -11,6 +11,7 @@
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
+import { CTO_MAKE_GITHUB_PILOT_LANE, CTO_MAKE_GITHUB_PILOT_TOOLSET } from '../config/lane-toolsets.js';
 import {
   logToolEnd,
   logToolStart,
@@ -46,6 +47,7 @@ import {
   recordLaneToolUsage,
 } from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
+import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -62,6 +64,8 @@ import { EXEC_RING } from './kb/search-privileged.js';
 //   EXTERNAL_READONLY_TOOLSET   a minimal, non-privileged read set. Handed to EVERY OTHER connector
 //                               lane: an unrecognized/self-named connector, an empty caller lane, or
 //                               any lane not in the ship set.
+//   CTO_MAKE_GITHUB_PILOT_TOOLSET exactly {github_make_broker, catalog_probe}, for the dedicated
+//                               setup-code principal only; never the CTO ship set.
 //
 // SECURITY-CRITICAL (Phase 5/6 connector-ring closure, 2026-07-15): before this split there was ONE
 // global toolset for every connector, and oauth.ts's laneFromClientName() defaulted an UNRECOGNIZED
@@ -77,12 +81,14 @@ import { EXEC_RING } from './kb/search-privileged.js';
 //
 // Overridable via env for BOTH lists: CONNECTOR_TOOLSET (csv) overrides the ship set (back-compat
 // with the pre-split var name); EXTERNAL_READONLY_TOOLSET (csv) overrides the external set.
-// Empty/unset means "use the built-in default" for that set. Only DCR/occ_ connector requests are
-// curated at all -- every other caller (the startup catalog warm, client_credentials fleet lanes,
-// the static connector token) sees the full ~850-tool catalog unchanged (see isConnectorSurface() in
-// server/request-context.ts).
+// Empty/unset means "use the built-in default" for that set. DCR/occ_ connector requests are
+// curated; all other callers normally see the full catalog, with one deliberate exception:
+// cto-make-github-pilot is always fixed to its exact two-tool allowlist on every auth path and cannot
+// be widened by either shared override.
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
+const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
+const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'brain_graph_search', 'web_search', 'kb_search', 'kb_search_privileged',
@@ -414,14 +420,21 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  * the ledger coordination verbs. No commerce, no legal, no engineering, no privileged RAG.
  */
 /**
- * The COO ordinary-Chat Intercom surface is limited to support-team metadata, ticket-type metadata,
- * and two reversible settings writes. Customer/contact/conversation/ticket contents, public help
- * content, bulk actions, and irreversible mutations stay outside this connector allowlist.
+ * The COO ordinary-Chat Intercom surface includes support-team metadata, ticket types, tags, and
+ * custom data-attribute definitions, plus fixed-target synthetic contact verification. The contact
+ * handlers constrain this connector lane to the approved synthetic record, restrict updates to one
+ * fixed verification label, and redact every other contact field from reads. Customer/contact/
+ * conversation/ticket contents, public help content, bulk actions, and hard-delete operations stay
+ * outside this connector allowlist.
  */
 export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
   'intercom_admin_set_away',
   'intercom_team_get', 'intercom_team_list',
-  'intercom_ticket_type_get', 'intercom_ticket_type_list', 'intercom_ticket_type_update',
+  'intercom_ticket_type_get', 'intercom_ticket_type_list',
+  'intercom_ticket_type_create', 'intercom_ticket_type_update',
+  'intercom_tag_create', 'intercom_tag_update',
+  'intercom_data_attribute_create', 'intercom_data_attribute_update',
+  'intercom_contact_get', 'intercom_contact_update',
 ] as const;
 
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
@@ -463,6 +476,12 @@ export function isShipLane(lane: string): boolean {
  * runs inside requestContext.run() (see server/mcp.ts), so this is always live, never stale.
  */
 export function connectorToolset(env: Env, lane: string): Set<string> {
+  // Unlike ordinary connector lanes, this code-only Make pilot identity is always fixed to two
+  // tools, even if a global CONNECTOR_TOOLSET override names broader capabilities. This applies
+  // before authentication-path routing below; registerTool enforces it on DCR/occ,
+  // client_credentials, Codex static, and M365 static requests.
+  if (lane === CTO_MAKE_GITHUB_PILOT_LANE) return new Set(CTO_MAKE_GITHUB_PILOT_TOOLSET);
+
   const csv = isShipLane(lane)
     ? env.CONNECTOR_TOOLSET || CTO_SHIP_LANE_TOOLSET.join(',')
     : lane === 'cro'
@@ -473,17 +492,24 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
-  // The pinned observation receipt is CTO-only, so it must not inherit the shared ship set. Keep
-  // the environment override semantics for CTO, but remove the tool from every non-CTO connector
-  // even if a shared CONNECTOR_TOOLSET override accidentally names it.
+  // Keep these restricted GitHub surfaces out of the shared ship set. CTO retains its existing
+  // override semantics; ordinary non-CTO lanes must not inherit them from a shared override. The
+  // dedicated Make pilot returned above with its independent exact allowlist.
   if (lane === 'cto') {
-    if (!env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+    if (!env.CONNECTOR_TOOLSET) {
+      tools.add(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+      tools.add(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
+    }
   } else {
     tools.delete(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+    tools.delete(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
   }
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
   // owns the migration bridge, while not advertising it to other ship lanes.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('hyperagent_discover_capabilities');
+  // This execution list returns bounded aggregate counts only. Keep its connector binding on the
+  // CTO lane; the read handler also enforces the caller identity before making an upstream request.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_N8N_EXECUTION_LIST_TOOL);
   // Provisioning is deliberately discoverable only to the CTO Chat lane. Its handler and
   // write_orchestrated governance independently re-check that same identity at execution time.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('browser_cloud_profile_provision_public_trial');
@@ -644,12 +670,15 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   canonicalName?: string;
 }
 
-function parseUpstreamToolError(err: unknown): { code: string; nextStep: string; status?: number } | null {
+function parseUpstreamToolError(err: unknown, canonicalName: string): { code: string; nextStep: string; status?: number } | null {
   if (!err || typeof err !== 'object') return null;
   const candidate = err as Record<string, unknown>;
   if (typeof candidate.code !== 'string') return null;
   if (typeof candidate.nextStep !== 'string') return null;
-  if (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError')) {
+  const isPinnedObservationError = canonicalName === 'github_graphrag_observation_receipt_get' &&
+    candidate.name === 'PinnedObservationReaderError' &&
+    candidate.code === 'github_observation_receipt_unverified';
+  if (!isPinnedObservationError && (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError'))) {
     return null;
   }
   return {
@@ -877,7 +906,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const canonicalName = def.canonicalName ?? def.name;
   // Apply this specialist's fixed allowlist to every authentication path, including a legacy
   // confidential OAuth client whose ID does not use the connector prefix.
-  const connectorSurfaceForThisTool = isConnectorSurface() || currentCallerAgent() === WEFUNDER_CAMPAIGN_DIRECTOR_LANE;
+  const laneForThisTool = currentCallerAgent();
+  const connectorSurfaceForThisTool = isConnectorSurface()
+    || laneForThisTool === WEFUNDER_CAMPAIGN_DIRECTOR_LANE
+    || laneForThisTool === CTO_MAKE_GITHUB_PILOT_LANE;
   if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
   // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
   // client_credentials lanes (cto/cfo/clo/clo-personal/coo/cro/cpo/cco/developer/exec), which today
@@ -892,7 +924,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // path just above (EXTERNAL_READONLY_TOOLSET), never from this mode at all.
   const catalogCurationMode = parseToolCatalogCurationMode(process.env.TOOL_CATALOG_CURATION_MODE);
   const curateLaneOverrides = parseCurateLaneOverrides(process.env.TOOL_CATALOG_CURATE_LANES);
-  const laneForThisTool = currentCallerAgent();
   const catalogCuration = connectorSurfaceForThisTool
     ? null
     : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth(), curateLaneOverrides);
@@ -1426,7 +1457,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         let errorCode = 'tool_error';
         let nextStep = 'Check server logs for the correlation_id.';
         let upstreamStatus: number | undefined;
-        const upstreamErr = parseUpstreamToolError(err);
+        const upstreamErr = parseUpstreamToolError(err, canonicalName);
         if (upstreamErr) {
           errorCode = upstreamErr.code;
           nextStep = upstreamErr.nextStep;
@@ -1438,6 +1469,8 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           next_step: nextStep,
         };
         if (upstreamStatus !== undefined) errPayload.upstream_status = upstreamStatus;
+        const internalDiagnostic = projectPinnedObservationDiagnostic(err, canonicalName, callerAgent, correlationId);
+        if (internalDiagnostic) errPayload.internal_diagnostic = internalDiagnostic;
         logToolEnd({
           correlation_id: correlationId,
           tool: def.name,
@@ -1502,7 +1535,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // lookup key / what the caller actually invokes.
   if (!isAlias) {
     primaryNamesFor(server).add(def.name);
-    if (isM365StaticAuth()) {
+    // This lane's exact two-tool contract includes catalog_probe by its full name. The M365 alias
+    // shim removes a primary when its alias is accepted; aliases such as `probe` are intentionally
+    // outside the pilot set, so do not collect alias candidates for this lane.
+    if (isM365StaticAuth() && currentCallerAgent() !== CTO_MAKE_GITHUB_PILOT_LANE) {
       const stripped = /^[^_]+_(.+)$/.exec(def.name);
       if (stripped) {
         const aliasName = stripped[1];

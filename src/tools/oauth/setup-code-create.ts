@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext } from '../registry.js';
 import {
+  DEFAULT_TTL_MINUTES,
   ELEVATION_ROLES,
   mintSetupCode,
   SetupCodeError,
@@ -29,7 +30,11 @@ const CALLER_ALLOWLIST = ['cto', 'exec'] as const;
  * layer (assertMintableRole), so a caller that somehow bypassed both layers above would still be
  * refused there -- three layers deep for the one thing this tool must never do.
  */
-export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: CallerHashProvider): void {
+export function registerConnectorSetupCodeCreate(
+  server: McpServer,
+  callerHash: CallerHashProvider,
+  mintSetupCodeImpl: typeof mintSetupCode = mintSetupCode,
+): void {
   registerTool(
     server,
     {
@@ -38,7 +43,7 @@ export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: 
       annotations: {
         title: 'Mint an owner connector setup code (cto/exec only)',
         description:
-          'Creates a single-use, short-lived setup code for the OAuth consent interstitial to elevate a URL-only ChatGPT/Claude connector to ONE named privileged role (cto/cfo/clo/coo/cro/developer/wefunder-campaign-director -- never clo-personal). The dedicated WeFunder role is a separate principal and does not inherit CRO access. ' +
+          'Creates a single-use, short-lived setup code for the OAuth consent interstitial to elevate a URL-only ChatGPT/Claude connector to ONE named role (cto/cfo/clo/coo/cro/developer/wefunder-campaign-director/cto-make-github-pilot -- never clo-personal). The cto-make-github-pilot role is restricted to github_make_broker and catalog_probe. The dedicated WeFunder role is a separate principal and does not inherit CRO access. ' +
           'SECURITY: the tool RESULT contains a short-lived plaintext owner secret (the code itself). It is shown exactly once and is never recoverable afterward. Deliver it to the owner PRIVATELY (do not paste it into a shared channel, ticket, or log) -- whoever holds the code can redeem it for the granted role at the consent page.',
         readOnlyHint: false,
         destructiveHint: false,
@@ -46,7 +51,7 @@ export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: 
         openWorldHint: false,
       },
       inputShape: {
-        role: z.enum(ELEVATION_ROLES).describe('The single role this code will elevate to on redemption. Use wefunder-campaign-director for the dedicated WeFunder principal. clo-personal is not a valid value -- it has no connector-elevation path.'),
+        role: z.enum(ELEVATION_ROLES).describe('The single role this code will elevate to on redemption. Use cto-make-github-pilot for the isolated Make GitHub broker pilot, which exposes only github_make_broker and catalog_probe. Use wefunder-campaign-director for the separate WeFunder principal. clo-personal is not a valid value -- it has no connector-elevation path.'),
         label: z
           .string()
           .trim()
@@ -63,6 +68,7 @@ export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: 
           .describe('Minutes until the code expires if unredeemed. Default 30, maximum 1440 (24h).'),
       },
       outputShape: {
+        planned: z.boolean().optional(),
         minted: z.boolean().optional(),
         code: z.string().optional(),
         role: z.string().optional(),
@@ -87,8 +93,22 @@ export function registerConnectorSetupCodeCreate(server: McpServer, callerHash: 
         }
 
         const role = input.role as ElevationRole;
+        if (ctx.dryRun) {
+          const ttlMinutes = input.ttl_minutes ?? DEFAULT_TTL_MINUTES;
+          return {
+            data: {
+              planned: true,
+              minted: false,
+              role,
+              ttl_minutes: ttlMinutes,
+            },
+            summary:
+              `DRY RUN: No setup code was generated. This would mint a single-use connector setup code for role "${role}" with a ${ttlMinutes}-minute TTL.`,
+          };
+        }
+
         try {
-          const minted = await mintSetupCode({
+          const minted = await mintSetupCodeImpl({
             role,
             createdBy: ctx.callerAgent || 'unknown',
             label: input.label,

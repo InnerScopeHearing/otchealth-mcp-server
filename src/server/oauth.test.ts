@@ -547,6 +547,60 @@ test('E2E: a DCR client redeeming a WeFunder setup code reaches only the dedicat
   await app.close();
 });
 
+test('E2E: the isolated Make pilot setup code issues a pilot-only token and preserves that identity on refresh', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes, issuedAgent } = await import('./oauth.js');
+  const { mintSetupCode } = await import('../auth/setup-codes.js');
+  const { validateBearer } = await import('../auth/bearer.js');
+
+  const app = Fastify();
+  addFormUrlEncodedParser(app);
+  const { consent, setupCode } = fakeConsentStack();
+  registerOAuthRoutes(app, { consent, setupCode });
+
+  const minted = await mintSetupCode({ role: 'cto-make-github-pilot', createdBy: 'cto' }, setupCode);
+  const clientId = await registerDcrClient(app);
+  const { verifier, challenge } = pkcePair();
+  const authRes = await app.inject({
+    method: 'GET',
+    url: `/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(CLAUDE_CALLBACK)}` +
+      `&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`,
+  });
+  const pendingId = authRes.payload.match(/name="pending_id" value="([a-f0-9]{32})"/)![1];
+  const consentRes = await app.inject({
+    method: 'POST',
+    url: '/oauth/authorize/consent',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    payload: `pending_id=${pendingId}&action=elevate&code=${encodeURIComponent(minted.code)}`,
+  });
+  assert.equal(consentRes.statusCode, 302, JSON.stringify(consentRes.payload));
+  const code = new URL(String(consentRes.headers.location)).searchParams.get('code');
+  assert.ok(code);
+
+  const tokenRes = await app.inject({
+    method: 'POST',
+    url: '/oauth/token',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    payload: `grant_type=authorization_code&code=${code}&client_id=${encodeURIComponent(clientId)}&code_verifier=${verifier}`,
+  });
+  assert.equal(tokenRes.statusCode, 200, JSON.stringify(tokenRes.json()));
+  const body = tokenRes.json();
+  assert.equal(issuedAgent(body.access_token), 'cto-make-github-pilot');
+  const bearerContext = await validateBearer(`Bearer ${body.access_token}`);
+  assert.equal(bearerContext?.caller_agent, 'cto-make-github-pilot');
+  assert.equal(bearerContext?.connector_surface, true, 'an elevated DCR token must retain connector-surface curation');
+
+  const refreshRes = await app.inject({
+    method: 'POST',
+    url: '/oauth/token',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    payload: `grant_type=refresh_token&refresh_token=${body.refresh_token}`,
+  });
+  assert.equal(refreshRes.statusCode, 200);
+  assert.equal(issuedAgent(refreshRes.json().access_token), 'cto-make-github-pilot');
+  await app.close();
+});
+
 test('A wrong code never elevates: the connector still ends up external-read after choosing "connect read-only" instead', async () => {
   // Defends against a specific confused-outcome bug: a caller who fails a code guess must be able
   // to fall back to the EXPLICIT read-only button and still succeed as external-read, not be

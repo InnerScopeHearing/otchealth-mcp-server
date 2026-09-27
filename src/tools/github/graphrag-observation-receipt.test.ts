@@ -13,7 +13,7 @@ const RUN_ID = 35170671551;
 const ARTIFACT_ID = 10476469182;
 const ARTIFACT_NAME = 'graphrag-fifth-source-provider-observation-35170671551';
 const HEAD_SHA = '854766e709aefcf2826cc0b5dc75c028b9b566dc';
-const WORKFLOW_PATH = '.github/workflows/observe-managed-graphrag-company-fifth-source.yml@main';
+const WORKFLOW_PATH = '.github/workflows/observe-managed-graphrag-company-fifth-source.yml';
 const WORKFLOW_BLOB_SHA = '3e2f2554443fee7cb113f4f6435262cd2ec0c273';
 const PRODUCER_BLOB_SHA = '37e4a762a50b0d239c610158ca02bc7a2f29dde8';
 const SOURCE_ID = 'LVEV3LT7LB';
@@ -456,6 +456,44 @@ test('pinned observation read verifies provenance, returns only sanitized struct
   assert.ok(requests.some((request) => request.url.includes(`/contents/scripts/observe_managed_graphrag_company_fifth_source.py?ref=${HEAD_SHA}`)));
 });
 
+test('pinned observation read matches GitHub run path metadata and rejects a different workflow path', async (t) => {
+  await t.test('accepts the GitHub REST path without a ref suffix', async () => {
+    const requests: CapturedRequest[] = [];
+    const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
+    const digest = createHash('sha256').update(archive).digest('hex');
+    const artifact = makeArtifact({ digest: `sha256:${digest}`, size_in_bytes: archive.length });
+    const result = await withStubbedFetch(
+      githubStub(requests, {
+        archive,
+        artifact,
+        run: makeRun({ path: '.github/workflows/observe-managed-graphrag-company-fifth-source.yml' }),
+      }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.ok(!result.isError, `expected success, got ${JSON.stringify(result)}`);
+    assert.equal(result.structuredContent?.result?.workflow_provenance_verified, true);
+  });
+
+  await t.test('rejects an altered workflow path before artifact access', async () => {
+    const requests: CapturedRequest[] = [];
+    const result = await withStubbedFetch(
+      githubStub(requests, {
+        run: makeRun({ path: '.github/workflows/observe-managed-graphrag-company-other-source.yml' }),
+      }),
+      () => callThroughRealMcpServer(),
+    );
+
+    assert.equal(result.isError, true);
+    const diagnostic = result.structuredContent?.error?.internal_diagnostic;
+    assert.equal(diagnostic?.type, 'github_observation_receipt');
+    assert.equal(diagnostic?.stage, 'workflow_run_metadata');
+    assert.equal(typeof diagnostic?.correlation_id, 'string');
+    assert.equal(diagnostic?.correlation_id, result.structuredContent?.correlation_id);
+    assert.equal(requests.some((request) => request.url.includes(`/actions/artifacts/${ARTIFACT_ID}`)), false);
+  });
+});
+
 test('pinned observation read explicitly records when GitHub does not provide an archive digest', async () => {
   const requests: CapturedRequest[] = [];
   const result = await withStubbedFetch(githubStub(requests, { artifact: makeArtifact({ digest: null }) }), () => callThroughRealMcpServer());
@@ -552,6 +590,7 @@ test('pinned observation read refuses expired artifacts and mismatching GitHub a
     const expired = makeArtifact({ expired: true, expires_at: '2020-01-01T00:00:00Z' });
     const result = await withStubbedFetch(githubStub(requests, { artifact: expired }), () => callThroughRealMcpServer());
     assert.equal(result.isError, true);
+    assert.equal(result.structuredContent?.error?.internal_diagnostic?.stage, 'artifact_metadata');
     assert.equal(requests.some((request) => request.url.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)), false);
   });
 
@@ -732,4 +771,53 @@ test('pinned observation reader is CTO-only', async () => {
   const result = await withStubbedFetch(githubStub(requests), () => callThroughRealMcpServer({}, 'developer'));
   assert.equal(result.isError, true);
   assert.equal(requests.length, 0, 'role refusal must happen before GitHub API access');
+});
+
+test('pinned observation failure exposes only an allowlisted stage to CTO', async () => {
+  const requests: CapturedRequest[] = [];
+  const archive = zipStore([{ name: 'receipt.json', data: Buffer.from(makeReceipt(), 'utf8') }]);
+  const artifact = makeArtifact({
+    digest: `sha256:${'0'.repeat(64)}`,
+    size_in_bytes: archive.length,
+    provider_metadata_sentinel: 'synthetic-provider-metadata-must-not-leak',
+  });
+  const result = await withStubbedFetch(
+    githubStub(requests, { archive, artifact }),
+    () => callThroughRealMcpServer(),
+  );
+
+  assert.equal(result.isError, true);
+  const correlationId = result.structuredContent?.correlation_id;
+  assert.equal(typeof correlationId, 'string');
+  assert.equal(result.structuredContent?.error?.code, 'github_observation_receipt_unverified');
+  assert.equal(result.structuredContent?.error?.message, 'The pinned GraphRAG observation receipt could not be verified.');
+  assert.deepEqual(result.structuredContent?.error?.internal_diagnostic, {
+    type: 'github_observation_receipt',
+    stage: 'archive_digest',
+    correlation_id: correlationId,
+  });
+  assert.equal(result.content[0]?.text?.includes('archive_digest'), false, 'user-facing text must remain generic');
+  assert.equal(JSON.stringify(result).includes('synthetic-provider-metadata-must-not-leak'), false);
+  assert.equal(JSON.stringify(result).includes('mock-sensitive-url'), false);
+  assert.equal(JSON.stringify(result).includes('ghs_test_token'), false);
+  assert.ok(requests.some((request) => request.url === DOWNLOAD_URL), 'the validated receipt ZIP must be downloaded before digest failure');
+});
+
+test('non-CTO failure responses never include pinned observation diagnostics', async () => {
+  const requests: CapturedRequest[] = [];
+  const artifact = makeArtifact({
+    name: 'synthetic-provider-metadata-must-not-leak',
+    provider_metadata_sentinel: 'synthetic-provider-metadata-must-not-leak',
+  });
+  const result = await withStubbedFetch(
+    githubStub(requests, { artifact }),
+    () => callThroughRealMcpServer({}, 'developer'),
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(typeof result.structuredContent?.correlation_id, 'string');
+  assert.equal(result.structuredContent?.error?.internal_diagnostic, undefined);
+  assert.equal(JSON.stringify(result).includes('archive_digest'), false);
+  assert.equal(JSON.stringify(result).includes('synthetic-provider-metadata-must-not-leak'), false);
+  assert.equal(requests.length, 0, 'non-CTO role refusal must happen before GitHub API access');
 });

@@ -47,6 +47,28 @@ test('github_pr_update specifically allows cto and developer only (write_simple 
   assert.ok(!roleAllows(gov?.role ?? '', 'cfo'));
 });
 
+test('github_make_broker is limited to CTO and the restricted Make pilot principal', () => {
+  const gov = requiredRoleFor('github_make_broker');
+  assert.ok(gov, 'the Make pilot broker must have an explicit governance rule');
+  assert.ok(roleAllows(gov!.role, 'cto'));
+  assert.ok(roleAllows(gov!.role, 'cto-make-github-pilot'));
+  for (const other of ['developer', 'exec', 'coo', 'cfo', 'clo', 'cro', 'cco', 'cpo', 'clo-personal', 'external-read', '']) {
+    assert.ok(!roleAllows(gov!.role, other), `the Make pilot broker must refuse lane "${other}"`);
+  }
+});
+
+test('the Make pilot principal is denied direct GitHub writes and result fetching', () => {
+  for (const name of [
+    'github_create_branch', 'github_create_or_update_file', 'github_edit_file', 'github_push_files',
+    'github_create_pull_request', 'github_pr_update', 'github_merge_pull_request', 'github_create_issue',
+    'github_comment_on_issue', 'github_add_labels', 'github_create_release', 'github_dispatch_workflow',
+    'gateway_fetch_result',
+  ]) {
+    const gov = requiredRoleFor(name);
+    if (gov) assert.equal(roleAllows(gov.role, 'cto-make-github-pilot'), false, `${name} must deny the pilot role`);
+  }
+});
+
 test('workflow-run readers are intentionally ungated (reads are not an escalation)', () => {
   for (const name of CONNECTOR_READ_TOOLS) {
     assert.equal(requiredRoleFor(name), null, `${name} is a read; it should carry no role gate`);

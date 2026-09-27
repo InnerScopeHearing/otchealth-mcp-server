@@ -80,9 +80,17 @@ export function collectRetractedByAgent(entries: Array<{ agent?: unknown; supers
     const agent = typeof e?.agent === 'string' ? e.agent : '';
     const s = e?.supersedes;
     if (!agent || typeof s !== 'string' || !s.trim()) continue;
+    // Search hits carry their owner in the doc id; strip only this row's own prefix so a
+    // mismatched owner pointer cannot suppress a different lane's same-suffix entry.
+    const supersededId = s.trim();
+    const ownDocIdPrefix = `${agent}__`;
+    const normalizedSupersededId = supersededId.startsWith(ownDocIdPrefix)
+      && supersededId.length > ownDocIdPrefix.length
+      ? supersededId.slice(ownDocIdPrefix.length)
+      : supersededId;
     let set = byAgent.get(agent);
     if (!set) byAgent.set(agent, (set = new Set()));
-    set.add(s.trim());
+    set.add(normalizedSupersededId);
   }
   return byAgent;
 }

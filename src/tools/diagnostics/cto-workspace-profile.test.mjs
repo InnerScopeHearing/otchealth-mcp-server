@@ -13,11 +13,14 @@ if (existsSync(moduleUrl)) {
       assert.equal(ctoWorkspaceForRequest(false, lane, []), undefined);
     }
   });
-  for (const lane of ['', 'external-read', 'exec', 'developer', 'cfo', 'clo', 'coo', 'cro', 'CTO', 'cto-admin']) {
+  for (const lane of ['', 'external-read', 'exec', 'developer', 'cfo', 'clo', 'coo', 'cro', 'cto-make-github-pilot', 'CTO', 'cto-admin']) {
     test(`bootstrap rejects non-CTO caller ${JSON.stringify(lane)}`, () => {
       assert.throws(() => ctoWorkspaceForRequest(true, lane, []), /forbidden_role/);
     });
   }
+  test('Make pilot cannot request the CTO workspace bootstrap', () => {
+    assert.throws(() => ctoWorkspaceForRequest(true, 'cto-make-github-pilot', ['catalog_probe']), /forbidden_role/);
+  });
   test('CTO gets versioned operating instructions, not a privilege grant', () => {
     const p = ctoWorkspaceForRequest(true, 'cto', []);
     assert.equal(p.version, '1.0.0');
