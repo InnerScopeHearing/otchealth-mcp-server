@@ -84,7 +84,7 @@ export function backgroundChatOpts(
 }
 
 /** Truthful, provider-neutral summaries for paths that skip chat completion. */
-export function noModelCallSummary(source: 'faq' | 'semantic-cache'): string {
+export function noChatCompletionSummary(source: 'faq' | 'semantic-cache'): string {
   return source === 'faq'
     ? 'No chat completion was made; the FAQ lookup handled the request.'
     : 'No chat completion was made; the semantic cache served the answer.';
@@ -156,7 +156,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         // questions, check the curated FAQ store BEFORE making a chat-completion call. Mode-gated +
         // fail-open, mirrors LLM_CACHE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any failure (Cosmos
         // down, embed() throws) silently falls through to the normal chat() call below. See
-        // faq-deflect.ts for the store choice and its model-free match contract.
+        // faq-deflect.ts for the store choice and its embedding-backed similarity match contract.
         const faqHit = await checkFaqDeflect(input.input, input.task);
         if (faqHit.hit && faqHit.answer) {
           captureGatewayEvent('gateway_faq_deflect_hit', {
@@ -170,7 +170,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             summary:
               `llm_azure ${input.task} answered by the FAQ deflection layer ` +
               `(faq_id ${faqHit.faqId}, similarity ${faqHit.similarity?.toFixed(4)}). ` +
-              noModelCallSummary('faq'),
+              noChatCompletionSummary('faq'),
           };
         }
         // Best-effort self-heal of the curated store; cheap no-op once entries already exist with
@@ -236,7 +236,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             summary:
               `llm_azure ${input.task} served from the semantic response cache ` +
               `(similarity ${cacheLookup.similarity?.toFixed(4)}, model ${cacheLookup.entry.model}). ` +
-              noModelCallSummary('semantic-cache'),
+              noChatCompletionSummary('semantic-cache'),
           };
         }
 

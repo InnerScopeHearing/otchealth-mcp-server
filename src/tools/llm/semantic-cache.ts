@@ -1,26 +1,12 @@
 /**
- * Semantic response cache for llm_azure — a cache-check BEFORE the Foundry chat completion call.
- * Pattern = Azure AI App Template #35 (Redis semantic caching for LLM gateways), adapted
- * cost-neutrally: cost-neutral means using infra the fleet ALREADY pays for, so this reuses
- * the Cosmos DB `cache` container (agent-state, DiskANN vector policy, cosine, 3072 dims) that
- * memory/hot-cache.ts already established for memory_recall, instead of standing up a new
- * Azure Cache for Redis Enterprise instance (a new cash line) or a new Azure AI Search index.
+ * Embedding-backed response cache for llm_azure. Each eligible lookup sends an embedding
+ * request and a Cosmos vector query before chat completion. A cache hit avoids the
+ * chat-completion request, not the embedding request or storage/RU use. Prove net savings
+ * with measured hit rate, provider charges, and Cosmos usage before claiming a benefit.
  *
- * STORE CHOICE: Cosmos DB (not Redis Enterprise, not a new AI Search index). Why:
- *  - Redis Enterprise / Azure Managed Redis (the App Template #35 default) needs the RediSearch/
- *    vector module, which only ships on Enterprise-tier SKUs — a NEW metered resource. Cost-neutral
- *    rules this out; we are not adding a cash line to save Claude tokens.
- *  - Azure AI Search is credit-funded and was the requested first choice, but the gateway only
- *    holds a READ-ONLY query key for it (AZURE_SEARCH_QUERY_KEY) — writes to memory-exec happen
- *    through an external indexer pipeline the gateway does not own. Standing up cache writes there
- *    means minting a new admin key + a new index + index-schema management: new surface area, not
- *    reuse. It is not "clean" by the bar this task set.
- *  - Cosmos DB (agent-state) is ALREADY credit-funded, ALREADY holds an admin key on this gateway,
- *    ALREADY has a purpose-built `cache` container (7-day TTL, DiskANN vector index on 3072-dim
- *    embeddings) proven in production by memory/hot-cache.ts. Reusing it for the LLM response
- *    cache is the only option here that adds zero new infrastructure and zero new secrets.
- * A future Redis-backed cache remains an option if Cosmos RU costs become the binding constraint,
- * but that is a call for the CTO to make once there is real hit-rate/RU telemetry to look at.
+ * STORE CHOICE: reuse the existing Cosmos DB `cache` container (agent-state DB, DiskANN
+ * vector policy, cosine, 3072 dimensions) rather than provisioning another cache service.
+ * Reusing infrastructure avoids adding a new service, but does not make these lookups free.
  *
  * PARTITION: cache entries are scoped ("llm:<callerAgent>:<task>:<tier>") so a CFO invoice
  * classification never serves a CLO clause-lookup's cached answer, and gpt-5.1 output never
@@ -31,9 +17,9 @@
  * MODE-GATED + FAIL-OPEN (same shape as COMPLIANCE_MODE / SHIELD_MODE / GROUNDEDNESS_MODE):
  *   LLM_CACHE_MODE: off (default) | on
  *     off -> never touched; llm_azure behaves exactly as before this module existed.
- *     on  -> cache-check before every eligible llm_azure call; on any cache failure (Cosmos down,
- *            embed() throws, malformed doc, etc.) this degrades silently to a normal LLM call.
- *            A cache dependency must never take a real model call down.
+ *     on  -> make an embedding-backed cache check before each eligible llm_azure chat call; on
+ *            failure (Cosmos down, embedding error, malformed doc) fall through to chat completion.
+ *            A cache dependency must never take a real completion down.
  *   LLM_CACHE_SIMILARITY_THRESHOLD: cosine similarity floor for a hit (default 0.95; slightly
  *     looser than memory-recall's 0.97 because near-duplicate INVOICE/CLAUSE/COPY prompts vary
  *     more in exact wording than repeat recall queries, but still conservative — a false hit
@@ -43,7 +29,7 @@
  */
 
 import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../../agentstate/store.js';
-import { embed as foundryEmbed } from '../../azure/foundry.js';
+import { embed as gatewayEmbed } from '../../azure/foundry.js';
 
 const CACHE_CONTAINER = 'cache';
 const VECTOR_FIELD = 'queryVector';
@@ -83,7 +69,7 @@ export interface LlmCacheDeps {
 
 const defaultDeps: LlmCacheDeps = {
   isCosmosConfigured: isConfigured,
-  embed: foundryEmbed,
+  embed: gatewayEmbed,
   vectorSearch: vectorSearchDocs,
   upsert: upsertDoc,
 };
@@ -152,7 +138,7 @@ export async function checkLlmCache(
     if (!doc || !doc.entry || typeof doc.entry.output !== 'string') return { hit: false };
     return { hit: true, entry: doc.entry, similarity: top.similarity };
   } catch {
-    return { hit: false }; // fail-open: any Cosmos/Foundry error just means "no cache hit"
+    return { hit: false }; // fail-open: any embedding or storage error just means "no cache hit"
   }
 }
 

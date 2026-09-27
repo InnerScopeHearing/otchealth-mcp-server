@@ -1,36 +1,15 @@
 /**
- * FAQ / intent deflection — a deterministic pre-step in front of llm_azure that answers known,
- * repeated questions WITHOUT a fresh model call at all (no Claude tokens, no Azure tokens).
- * Pattern = Azure AI App Template #41 (Language CLU/CQA conversational-agent accelerator:
- * intent recognition + curated question-answering pairs served ahead of the LLM), adapted
- * cost-neutrally for this gateway.
+ * FAQ / intent deflection is an embedding-backed pre-step in front of llm_azure. When enabled,
+ * it embeds eligible questions and compares them with curated Q&A entries. A hit returns the
+ * reviewed answer without a chat-completion call; the embedding request and vector lookup still
+ * consume provider and storage resources.
  *
- * WHY NOT AZURE AI LANGUAGE (CLU + CQA), THE TEMPLATE'S OWN STACK:
- *  - Both CLU (Conversational Language Understanding) and CQA (Custom Question Answering) are
- *    separate Azure AI Language PROJECTS that live behind their own authoring + deployment
- *    lifecycle (train -> deploy -> query endpoint), on top of an Azure AI Language resource this
- *    fleet does not currently provision. Even though Azure AI Language is credit-eligible, this
- *    is a NEW resource + a NEW authoring surface (a web/REST project you populate and redeploy
- *    every time you add an FAQ) that the gateway would need to integrate a second HTTP client
- *    for, on top of the Foundry client it already has. That is new operational surface area, not
- *    reuse — the opposite of "clean."
- *  - CQA's confidence scoring and CLU's intent scoring are both black boxes tuned by Microsoft;
- *    our own text-embedding-3-large cosine-similarity threshold is exactly as deterministic
- *    (same score every time for the same inputs) and it is a metric the fleet already
- *    calibrates for the semantic cache and hot-cache (see semantic-cache.ts / hot-cache.ts).
+ * STORE CHOICE: reuse the existing Cosmos DB `cache` container and gateway embedding adapter
+ * under a separate `faq:` partition. This avoids adding a new service or credential, but it is
+ * not cost-free: each eligible FAQ check may incur embedding/API and database charges.
  *
- * STORE CHOICE: a curated in-repo seed list (FAQ_SEED below) + the SAME Cosmos `cache` container
- * (agent-state DB, DiskANN vector index, cosine, 3072 dims) already used by hot-cache.ts and
- * semantic-cache.ts, under a distinct partition prefix ("faq:") so it never collides with either.
- * Why this over a new Azure AI Search index:
- *  - Zero new services, zero new secrets, zero new admin keys. Cosmos DB and Foundry embed() are
- *    both already credit-funded and already wired into this gateway.
- *  - The FAQ set is small and low-churn (fleet facts, not a huge knowledge base), so a vector
- *    container query is more than sufficient; a dedicated Search index would be overkill for
- *    "a few hundred canonical Q&A pairs."
- *  - Curated answers are TEMPLATED/static (canned text, e.g. "our build is on Node 22 / the
- *    gateway repo is X"), never model-generated, so there is no groundedness risk in returning
- *    them without an LLM call — the text was authored/reviewed up front, not synthesized live.
+ * Curated answers are static, reviewed text rather than model-generated content. A high threshold
+ * limits false matches, and failures fall through to the normal chat-completion path.
  *
  * SEEDING: seedFaqStore() upserts FAQ_SEED (a short, intentionally generic set of real fleet
  * facts — build/release info and common cross-functional questions) into the cache container on
@@ -41,21 +20,21 @@
  * MODE-GATED + FAIL-OPEN (same shape as LLM_CACHE_MODE / SHIELD_MODE / GROUNDEDNESS_MODE):
  *   FAQ_DEFLECT_MODE: off (default) | on
  *     off -> never touched; llm_azure behaves exactly as before this module existed.
- *     on  -> before the semantic response cache AND before any model call, check the FAQ store
- *            for a high-confidence match on task='complete' inputs (the "ask a question" shape;
+ *     on  -> before the semantic cache and chat-completion call, check the FAQ store for
+ *            high-confidence matches on task='complete' inputs (the "ask a question" shape;
  *            summarize/classify/extract/synthesize are not FAQ-shaped and are never deflected).
- *            On ANY failure (Cosmos down, embed() throws, malformed doc) this degrades silently
- *            to the normal llm_azure path (cache-check, then model call). A deflection dependency
- *            must never take a real answer down.
+ *            The lookup may call the embedding model. On ANY failure (Cosmos down, embedding
+ *            error, malformed doc) it falls through to the normal cache/chat-completion path.
+ *            A deflection dependency must never take a real answer down.
  *   FAQ_DEFLECT_SIMILARITY_THRESHOLD: cosine similarity floor for a deflection hit (default 0.93;
  *     intentionally looser than the semantic cache's near-duplicate bar (0.95) because FAQ intents
  *     are matched by MEANING ("how do I request PTO" ~= "who do I ask for time off"), not
  *     near-identical prior prompts, but still conservative enough that unrelated questions fall
- *     through to a real model call rather than getting the wrong canned answer.
+ *     through to the normal completion path rather than getting the wrong canned answer.
  */
 
 import { isConfigured, upsertDoc, vectorSearchDocs, newId, type VectorMatch } from '../../agentstate/store.js';
-import { embed as foundryEmbed } from '../../azure/foundry.js';
+import { embed as gatewayEmbed } from '../../azure/foundry.js';
 
 const FAQ_CONTAINER = 'cache';
 const VECTOR_FIELD = 'queryVector';
@@ -105,7 +84,7 @@ export const FAQ_SEED: FaqEntry[] = [
   {
     id: 'faq-model-router',
     question: 'How does the gateway pick which LLM model to use?',
-    answer: 'llm_azure exposes tier=standard (gpt-5.1, default), tier=high (gpt-5.4, quality-critical), and tier=router (Azure Model Router auto-picks the cheapest sufficient model). Reserve Claude for the hardest reasoning; route commodity summarize/classify/extract/synthesize/complete work here under the FLEET COST PROTOCOL.',
+    answer: 'llm_azure is a legacy tool name and uses OpenAI-direct when configured. Default tiers are standard=gpt-5.6-terra, high=gpt-5.6-sol, and router=gpt-5.6-luna; gateway settings may override them. The router is not Azure Model Router. Keep model selection tied to the approved quality and cost checks.',
   },
   {
     id: 'faq-read-only-mode',
@@ -115,7 +94,7 @@ export const FAQ_SEED: FaqEntry[] = [
   {
     id: 'faq-pii-phi-policy',
     question: 'Can I send PHI or medical review content through the gateway LLM tools?',
-    answer: 'No. PHI and MedReview content must never be sent through llm_azure or any Foundry-backed gateway tool. Keep that data out of prompts entirely; it is outside this gateway’s compliance boundary.',
+    answer: 'No. PHI and MedReview content must never be sent through llm_azure or other consumer gateway LLM tools. Keep it inside the authorized BAA-covered environment and out of prompts, embeddings, and caches in this gateway.',
   },
   {
     id: 'faq-deploy-policy',
@@ -139,7 +118,7 @@ export interface FaqDeflectDeps {
 
 const defaultDeps: FaqDeflectDeps = {
   isCosmosConfigured: isConfigured,
-  embed: foundryEmbed,
+  embed: gatewayEmbed,
   vectorSearch: vectorSearchDocs,
   upsert: upsertDoc,
 };
@@ -175,9 +154,9 @@ export interface FaqDeflectResult {
 }
 
 /**
- * Check the curated FAQ store BEFORE the semantic response cache and BEFORE any model call.
- * Returns hit:false on ANY failure (fail-open) so the caller always falls through to the
- * existing llm_azure path unchanged. Never throws.
+ * Check the curated FAQ store before the semantic response cache and chat-completion call.
+ * The lookup may call embeddings. Returns hit:false on any failure (fail-open) so the caller
+ * falls through to the existing llm_azure path. Never throws.
  */
 export async function checkFaqDeflect(
   question: string,
@@ -197,7 +176,7 @@ export async function checkFaqDeflect(
     if (!doc || typeof doc.answer !== 'string' || !doc.answer) return { hit: false };
     return { hit: true, answer: doc.answer, faqId: doc.faqId, similarity: top.similarity };
   } catch {
-    return { hit: false }; // fail-open: any Cosmos/Foundry error just means "no FAQ hit"
+    return { hit: false }; // fail-open: any embedding or storage error just means "no FAQ hit"
   }
 }
 

@@ -12,7 +12,7 @@ process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
 
-const { flexBackgroundEnabled, backgroundChatOpts, noModelCallSummary, registerLlmAzure } = await import('./azure.js');
+const { flexBackgroundEnabled, backgroundChatOpts, noChatCompletionSummary, registerLlmAzure } = await import('./azure.js');
 
 // ---- flexBackgroundEnabled() -- the OPENAI_FLEX_BACKGROUND kill-switch, read fresh per call ----
 
@@ -138,8 +138,8 @@ test('llm_azure registration advertises OpenAI-direct tiers under the legacy too
 });
 
 
-test('noModelCallSummary: FAQ and semantic-cache exits state what happened without claiming cross-provider savings', () => {
-  const summaries = [noModelCallSummary('faq'), noModelCallSummary('semantic-cache')];
+test('noChatCompletionSummary: FAQ and semantic-cache exits state what happened without claiming cross-provider savings', () => {
+  const summaries = [noChatCompletionSummary('faq'), noChatCompletionSummary('semantic-cache')];
   assert.deepEqual(summaries, [
     'No chat completion was made; the FAQ lookup handled the request.',
     'No chat completion was made; the semantic cache served the answer.',
