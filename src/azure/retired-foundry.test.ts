@@ -47,7 +47,7 @@ test('retired Foundry configuration makes no provider network call', async () =>
     assert.equal(await embed('synthetic query'), null);
     await assert.rejects(
       () => chat([{ role: 'user', content: 'synthetic' }]),
-      /Foundry not configured/,
+      /Foundry provider is retired and disabled; no Azure request was made\./,
     );
     assert.equal(calls, 0);
   } finally {
