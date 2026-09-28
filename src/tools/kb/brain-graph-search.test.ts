@@ -224,6 +224,16 @@ test('GraphRAG citations carry only a canonical source-resolution receipt when a
   assert.equal(JSON.stringify(result.data.matches[0].citation_resolution).includes('test.txt'), false);
 });
 
+test('does not describe passages as source-cited when their canonical citation mappings are unresolved', async () => {
+  const h = harness();
+  h.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [] });
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic' }, ctx('cfo'), h.deps);
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.matches[0].citation_resolution.status, 'source_mapping_not_found');
+  assert.match(result.summary, /1 GraphRAG passages returned; 0 have resolved source receipts, 1 lack a verified citation mapping/);
+  assert.doesNotMatch(result.summary, /source-cited/i);
+});
+
 test('source-ID narrowing preserves personal scope rules and cannot admit a forbidden caller', async () => {
   const ids = ['a'.repeat(64), 'c'.repeat(64)];
   const h = harness();
