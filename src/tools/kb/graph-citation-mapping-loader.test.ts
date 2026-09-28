@@ -62,5 +62,7 @@ test('rejects duplicate identities and object versions that are not immutable', 
   const duplicateConfig = { ...config, sha256: digest(duplicates) };
   assert.deepEqual(await loadGraphCitationMappings(duplicateConfig, credentials, (async () => response(duplicates)) as typeof fetch, signer as any), []);
   assert.deepEqual(await loadGraphCitationMappings({ ...config, versionId: 'null' }, credentials, (async () => response()) as typeof fetch, signer as any), []);
+  assert.deepEqual(await loadGraphCitationMappings({ ...config, key: 'approved/v1/name with spaces.json' }, credentials, (async () => response()) as typeof fetch, signer as any), []);
+  assert.deepEqual(await loadGraphCitationMappings({ ...config, key: 'approved/v1/name!part.json' }, credentials, (async () => response()) as typeof fetch, signer as any), []);
   clearGraphCitationMappingCacheForTests();
 });

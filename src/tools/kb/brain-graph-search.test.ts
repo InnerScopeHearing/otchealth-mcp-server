@@ -251,6 +251,34 @@ test('GraphRAG loads the version-pinned citation artifact when the legacy test o
   assert.equal(JSON.stringify(result.data.matches[0].citation_resolution).includes('citation-mappings-test'), false);
 });
 
+test('CTO resolves company_shared citations only, while company mappings stay forbidden', async () => {
+  const source = 'c'.repeat(64);
+  const companySharedRow = row('company_shared', root + 'company_shared/projection.txt');
+  const mapping = (source_group: 'company' | 'company_shared') => ({
+    canonical_id: 'a'.repeat(64), source_version: `sha256:${source}`, source_group, source_sha256: source,
+    source_locator_sha256: 'd'.repeat(64), provenance_receipt_sha256: 'e'.repeat(64),
+  });
+
+  const allowed = harness(() => Response.json({ retrievalResults: [companySharedRow] }));
+  allowed.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [mapping('company_shared')] });
+  const resolved: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), allowed.deps);
+  assert.equal(resolved.data.count, 1);
+  assert.equal(resolved.data.matches[0].citation_resolution.status, 'resolved');
+  assert.equal(resolved.data.matches[0].citation_resolution.receipt.source_group, 'company_shared');
+
+  const denied = harness(() => Response.json({ retrievalResults: [companySharedRow] }));
+  denied.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [mapping('company')] });
+  const forbidden: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), denied.deps);
+  assert.equal(forbidden.data.count, 1);
+  assert.equal(forbidden.data.matches[0].citation_resolution.status, 'forbidden_ring');
+
+  const fifthSourceCompanyRow = row('company', `${fifthSourceRoot}${'f'.repeat(64)}/records-0001.csv`);
+  const companySource = harness(() => Response.json({ retrievalResults: [fifthSourceCompanyRow] }));
+  const wrongScope: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company' }, ctx('cto'), companySource.deps);
+  assert.equal(wrongScope.data.error, 'forbidden_ring');
+  assert.equal(companySource.calls.length, 0);
+});
+
 test('does not describe passages as source-cited when their canonical citation mappings are unresolved', async () => {
   const h = harness();
   h.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [] });

@@ -25,7 +25,7 @@ let verifiedCache: CachedArtifact | undefined;
 function validConfig(config: CitationMappingArtifactConfig): boolean {
   return /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(config.bucket) &&
     config.key.length > 0 && config.key.length <= 1024 && !config.key.startsWith('/') &&
-    !config.key.split('/').some((segment) => !segment || segment === '.' || segment === '..') &&
+    config.key.split('/').every((segment) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(segment) && segment !== '.' && segment !== '..') &&
     OBJECT_VERSION.test(config.versionId) && config.versionId !== 'null' && HASH.test(config.sha256);
 }
 
