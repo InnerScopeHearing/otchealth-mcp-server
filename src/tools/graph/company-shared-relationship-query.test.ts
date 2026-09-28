@@ -87,3 +87,26 @@ test('a revoked synthetic source version cannot produce a qualified path', async
   assert.deepEqual(answer.citations, []);
 });
 
+test('the deterministic two-hop query rejects the reverse Z-to-X direction', async () => {
+  const query = createCompanySharedSyntheticRelationshipQuery();
+  const answer: any = await query({ subject_id: 'Z', object_id: 'X' });
+  assert.equal(answer.status, 'unsupported');
+  assert.equal(answer.reason, 'no_accepted_dependency_path');
+  assert.equal(answer.conclusion, null);
+  assert.deepEqual(answer.citations, []);
+});
+
+test('an edge with the wrong typed predicate cannot complete the dependency path', () => {
+  const fixture = createCompanySharedSyntheticRelationshipFixture({ predicates: ['owns', 'depends_on'] });
+  const answer: any = queryCompanySharedSyntheticHistories({
+    entries: [fixture.entry],
+    query: { subject_id: fixture.entityIds.X, object_id: fixture.entityIds.Z },
+    isCurrentCitation: () => true,
+  });
+  assert.equal(answer.status, 'unsupported');
+  assert.equal(answer.reason, 'no_accepted_dependency_path');
+  assert.equal(answer.conclusion, null);
+  assert.ok(answer.evidence.some((edge: any) => edge.candidate.predicate === 'owns'));
+  assert.ok(answer.citations.length > 0);
+});
+
