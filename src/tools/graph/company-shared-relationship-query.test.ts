@@ -4,7 +4,8 @@ import test from 'node:test';
 for (const [key,value] of Object.entries({CIO_SITE_ID:'synthetic',CIO_TRACK_KEY:'synthetic',CIO_APP_API_BEARER:'synthetic',PERPLEXITY_CONNECTOR_TOKEN:'synthetic-placeholder-value-000000000',ADMIN_REVOKE_TOKEN:'synthetic-placeholder-value-000000000',N8N_WEBHOOK_SECRET:'synthetic-placeholder-value-000000000'})) process.env[key]??=value;
 const { requestContext } = await import('../../server/request-context.js');
 const { createCompanySharedSyntheticRelationshipFixture, createCompanySharedSyntheticRelationshipQuery } = await import('../../server/company-shared-synthetic-relationship.mjs');
-const { queryCompanySharedSyntheticHistories } = await import('../../server/relationship-query/durable-query.mjs');
+const { queryCompanySharedSyntheticHistories, queryDurableHistories } = await import('../../server/relationship-query/durable-query.mjs');
+const { createResolver, verificationRequestHash } = await import('../../server/relationship-query/resolver.mjs');
 const { registerCompanySharedSyntheticRelationshipQuery } = await import('./company-shared-relationship-query.js');
 type Handler = (args: Record<string, unknown>) => Promise<any>;
 const callerHash = 'a'.repeat(64);
@@ -55,6 +56,27 @@ test('synthetic immutable replay rejects a wrong partition or citation bound to 
   const badCitation = structuredClone(fixture.entry);
   badCitation.citation_receipts[0].source_version = `sha256:${'0'.repeat(64)}`;
   assert.throws(() => queryCompanySharedSyntheticHistories({ entries: [badCitation], query, isCurrentCitation: () => true }), /shared_synthetic_citation_invalid/);
+});
+
+test('the existing CFO/CLO resolver and replay contract cannot accept the synthetic shared profile', () => {
+  const fixture = createCompanySharedSyntheticRelationshipFixture();
+  const proof = (request: any) => ({ verified: true, request_sha256: verificationRequestHash(request), verifier_id: 'synthetic-guard', verifier_version: '1', basis: 'synthetic-only' });
+  for (const lane of ['cfo', 'clo']) {
+    const resolver = createResolver({
+      callerLane: lane,
+      authorizeSource: () => ({ allowed: true, provenance: { decision_source: 'authenticated_gateway', policy_version: 'synthetic-guard', allowed_roles: [lane] } }),
+      isCurrentSource: () => true, verifyPreparedSource: proof, verifyIdentity: proof, verifyRelationship: proof,
+      recordedAt: () => '2026-09-28T00:00:00.000Z',
+    });
+    assert.throws(() => resolver.registerSource(fixture.entry.inputs[0]), /source_scope_denied/);
+  }
+  assert.throws(() => queryDurableHistories({ entries: [fixture.entry], query: { subject_id: fixture.entityIds.X, object_id: fixture.entityIds.Z } }), /durable_query_invalid/);
+  for (const lane of ['cfo', 'clo']) {
+    const relabeled = structuredClone(fixture.entry);
+    relabeled.history.caller_seat = lane;
+    relabeled.authorization.provenance.allowed_roles = [lane];
+    assert.throws(() => queryDurableHistories({ entries: [relabeled], query: { subject_id: fixture.entityIds.X, object_id: fixture.entityIds.Z } }), /source_scope_denied/);
+  }
 });
 
 test('a revoked synthetic source version cannot produce a qualified path', async () => {

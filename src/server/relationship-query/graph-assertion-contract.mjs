@@ -233,6 +233,9 @@ export function createTypedSemanticAssertion(input, sourceBytes, serviceDeps) {
   if (!textOk(input.document_version_id)) fail("document_eligibility_unbound");
   const doc = validateDocument(services.lookupDocumentVersion(input.document_version_id));
   if (doc.document_version_id !== input.document_version_id) fail("document_eligibility_unbound");
+  // company_shared remains a synthetic CTO contract until a separate source-owner publication
+  // authority exists. The CFO/CLO publication path must never admit this profile.
+  if (doc.authority.source_room === "company_shared" && services.callerLane !== "cto") fail("caller_room_denied");
   const permission = permissionFromDecision(services.authorizeDocument(services.callerLane, doc), services.callerLane);
   if (!Buffer.isBuffer(sourceBytes) || sha256(sourceBytes) !== doc.source_version) fail("typed_source_version_mismatch");
   if (!TYPED_PREDICATES.has(input.predicate)) fail("typed_predicate");
