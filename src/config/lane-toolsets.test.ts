@@ -39,6 +39,17 @@ test('isToolInLaneAllowlist: exact-name match', () => {
   assert.equal(isToolInLaneAllowlist('cto', 'wake'), true);
 });
 
+test('bounded AWS tools are seeded on the CTO lane and are not exposed to other functional seats', () => {
+  for (const name of ['aws_api_query', 'aws_api_operation']) {
+    assert.equal(isToolInLaneAllowlist('cto', name), true);
+    for (const lane of ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'developer']) {
+      assert.equal(isToolInLaneAllowlist(lane, name), false, `${name} must not be seeded on ${lane}`);
+    }
+    // `exec` is the CTO's union surface, but execution still fails the explicit cto-only governance rule.
+    assert.equal(isToolInLaneAllowlist('exec', name), true);
+  }
+});
+
 test('isToolInLaneAllowlist: prefix* match', () => {
   assert.equal(isToolInLaneAllowlist('developer', 'github_create_branch'), true);
   // exec still carries the broad CTO_INFRA wildcards (unaffected by the 2026-08-02 M365 curation
