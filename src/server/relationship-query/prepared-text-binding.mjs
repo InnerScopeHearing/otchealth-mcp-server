@@ -4,6 +4,8 @@ export const PREPARED_TEXT_BINDING_SCHEMA = "cfo-prepared-chunk-binding-v1";
 export const PREPARED_TEXT_SOURCE_SCHEMA = "cfo-prepared-chunk-source-v1";
 export const COMPANY_PREPARED_TEXT_BINDING_SCHEMA = "company-prepared-chunk-binding-v1";
 export const COMPANY_PREPARED_TEXT_SOURCE_SCHEMA = "company-prepared-chunk-source-v1";
+export const COMPANY_SHARED_SYNTHETIC_BINDING_SCHEMA = "company-shared-synthetic-chunk-binding-v1";
+export const COMPANY_SHARED_SYNTHETIC_SOURCE_SCHEMA = "company-shared-synthetic-chunk-source-v1";
 
 const HASH_RE = /^[a-f0-9]{64}$/;
 const RUN_ID_RE = /^run_[a-f0-9]{64}$/;
@@ -27,7 +29,8 @@ const BINDING_KEYS = Object.freeze([
 ].sort());
 const PROFILES = Object.freeze({
   [PREPARED_TEXT_BINDING_SCHEMA]: Object.freeze({ room: "finance", sourceIndex: "finance-cfo-source-docs", sourceSchema: PREPARED_TEXT_SOURCE_SCHEMA, sourceId: "cfotext" }),
-  [COMPANY_PREPARED_TEXT_BINDING_SCHEMA]: Object.freeze({ room: "legal_company", sourceIndex: "legal-company", sourceSchema: COMPANY_PREPARED_TEXT_SOURCE_SCHEMA, sourceId: "companytext" })
+  [COMPANY_PREPARED_TEXT_BINDING_SCHEMA]: Object.freeze({ room: "legal_company", sourceIndex: "legal-company", sourceSchema: COMPANY_PREPARED_TEXT_SOURCE_SCHEMA, sourceId: "companytext" }),
+  [COMPANY_SHARED_SYNTHETIC_BINDING_SCHEMA]: Object.freeze({ room: "company_shared", sourceIndex: "company-shared-synthetic", sourceSchema: COMPANY_SHARED_SYNTHETIC_SOURCE_SCHEMA, sourceId: "companysharedsynthetic" }),
 });
 
 function fail() {

@@ -51,7 +51,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query'].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
@@ -298,6 +298,14 @@ test('cfo connector keeps its bounded relationship query through ship-set curati
   const set = connectorToolset(testEnv(), 'cfo');
   assert.ok(set.has('graph_relationship_query'));
   assert.equal(connectorToolset(testEnv(), 'external-read').has('graph_relationship_query'), false);
+});
+
+test('synthetic company_shared typed query is advertised only to the CTO connector', () => {
+  assert.equal(connectorToolset(testEnv(), 'cto').has('graph_company_shared_relationship_query'), true);
+  for (const lane of ['cfo', 'clo', 'clo-personal', 'developer', 'external-read']) {
+    assert.equal(connectorToolset(testEnv(), lane).has('graph_company_shared_relationship_query'), false, lane);
+  }
+  assert.equal(connectorToolset(testEnv(), 'cfo').has('graph_relationship_query'), true);
 });
 
 // ── 2026-08-29: role-elevated connector seat curation (COO + CRO), found by LIVE tools/list probe ──

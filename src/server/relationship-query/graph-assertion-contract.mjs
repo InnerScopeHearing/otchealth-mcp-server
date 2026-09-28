@@ -4,6 +4,8 @@ export const CONTRACT_VERSION = "graph-assertion-v2";
 export const ROOM_POLICY = Object.freeze({
   finance: Object.freeze({ source_index: "finance-cfo-source-docs", policy_ref: "gateway:isLaneAllowed" }),
   legal_company: Object.freeze({ source_index: "legal-company", policy_ref: "gateway:isLaneAllowed" }),
+  // Synthetic contract fixtures only. No production company_shared source reader uses this index.
+  company_shared: Object.freeze({ source_index: "company-shared-synthetic", policy_ref: "gateway:synthetic-contract" }),
 });
 const INTERNAL = new Set(["_text", "_catalog", "_review", "_memory", "_state", "_archive"]);
 const MENTION_FIELDS = Object.freeze({ entity: "entity", entities: "entity", named_entities_orgs: "organization", named_entities_people: "person", signatories: "person", counterparty: "organization_or_person" });

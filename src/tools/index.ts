@@ -49,6 +49,7 @@ import { registerCloudflareCreateDnsRecord } from './cloudflare/create-dns-recor
 import { registerGraphSendEmail } from './graph/send-email.js';
 import { registerGraphListMessages } from './graph/list-messages.js';
 import { registerCfoRelationshipQuery } from './graph/relationship-query.js';
+import { registerCompanySharedSyntheticRelationshipQuery } from './graph/company-shared-relationship-query.js';
 
 // Phase 3 — Stripe (read-only: CFO scoreboard + CRO visibility)
 import { registerStripeGetBalance } from './stripe/get-balance.js';
@@ -1021,6 +1022,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGraphSendEmail(server, callerHash);
   registerGraphListMessages(server, callerHash);
   registerCfoRelationshipQuery(server, callerHash);
+  registerCompanySharedSyntheticRelationshipQuery(server, callerHash);
 
   // ===== Phase 3: Stripe (read-only scoreboard) =====
   registerStripeGetBalance(server, callerHash);
