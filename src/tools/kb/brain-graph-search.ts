@@ -20,6 +20,8 @@ const SOURCE_PREFIXES: Record<SourceGroup, readonly string[]> = {
   company_shared: [`${SOURCE_ROOT}company_shared/`],
   personal: [`${SOURCE_ROOT}personal/`],
 };
+const FIFTH_SOURCE_CSV_PREFIX = 's3://otchealth-finance-legal-dr-55c84f6b/graphrag/company/fifth-source/';
+const FIFTH_SOURCE_CSV_KEY = /^[a-f0-9]{64}\/records-\d{4}\.csv$/;
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
@@ -115,6 +117,9 @@ function outcome(mode: string, error?: string, requireDocumentaryBridge = false)
 }
 
 function isAllowedSourceUri(group: SourceGroup, uri: string): boolean {
+  if (group === 'company' && uri.startsWith(FIFTH_SOURCE_CSV_PREFIX)) {
+    return FIFTH_SOURCE_CSV_KEY.test(uri.slice(FIFTH_SOURCE_CSV_PREFIX.length));
+  }
   return SOURCE_PREFIXES[group].some((prefix) => uri.startsWith(prefix)) && /\.txt$/.test(uri);
 }
 

@@ -5,6 +5,7 @@ import { mayOffloadToolResult } from '../result-store.js';
 
 const ctx = (callerAgent: string) => ({ callerAgent, callerHash: 'synthetic', correlationId: 'synthetic', dryRun: false, acknowledgeWarning: false });
 const root = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
+const fifthSourceRoot = 's3://otchealth-finance-legal-dr-55c84f6b/graphrag/company/fifth-source/';
 const matter = 'personal-civil-cv0057318';
 const row = (group = 'company', uri = root + group + '/test.txt') => ({ content: { text: 'Synthetic Organization X signed contract Y.' }, location: { type: 'S3', s3Location: { uri } }, metadata: { source_group: group, ...(group === 'personal' ? { matter_id: matter } : {}), source_id: 'a'.repeat(64), text_sha256: 'b'.repeat(64), source_sha256: 'c'.repeat(64), source_version: 'sha256:' + 'c'.repeat(64), private_extra: 'must not be copied' }, score: 0.8 });
 function harness(response: () => Response = () => Response.json({ retrievalResults: [row()] })) {
@@ -133,6 +134,43 @@ test('company retrieval admits existing, priority and capacity prefixes with mat
   assert.equal(result.data.duplicate_withheld_count, 2);
   assert.equal(result.data.withheld_count, 4);
   assert.deepEqual(result.data.matches.map((match: any) => match.source_uri), [root + 'company/test.txt']);
+});
+
+test('company scope admits an exact fifth-source CSV record and preserves citation guards', async () => {
+  const uri = `${fifthSourceRoot}${'d'.repeat(64)}/records-0001.csv`;
+  const h = harness(() => Response.json({ retrievalResults: [row('company', uri)] }));
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic', top: 8 }, ctx('cfo'), h.deps);
+
+  assert.equal(result.data.scope, 'company');
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.matches[0].source_group, 'company');
+  assert.equal(result.data.matches[0].source_uri, uri);
+  assert.equal(result.data.matches[0].citation, 'graph:1');
+  assert.equal(result.data.matches[0].citation_resolution.status, 'source_mapping_not_found');
+  assert.deepEqual(
+    JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
+    { equals: { key: 'source_group', value: 'company' } },
+  );
+  assert.equal(JSON.stringify(result).includes('must not be copied'), false);
+});
+
+test('fifth-source CSV rejects traversal, wrong roots, labels, and key shapes', async () => {
+  const hash = 'd'.repeat(64);
+  const h = harness(() => Response.json({ retrievalResults: [
+    row('company', `${fifthSourceRoot}${hash}/../records-0001.csv`),
+    row('company', `${fifthSourceRoot}${hash}/nested/records-0001.csv`),
+    row('company', `s3://another-bucket/graph-trial/20260913/managed-graphrag/company/fifth-source/${hash}/records-0001.csv`),
+    row('company', `${fifthSourceRoot}${hash}/records-0001.txt`),
+    row('company', `${fifthSourceRoot}${hash}/records-0001.json`),
+    row('company', `${fifthSourceRoot}${hash}/records-1.csv`),
+    row('company_shared', `${fifthSourceRoot}${hash}/records-0001.csv`),
+    row('personal', `${fifthSourceRoot}${hash}/records-0001.csv`),
+  ] }));
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic', top: 8 }, ctx('cfo'), h.deps);
+
+  assert.equal(result.data.count, 0);
+  assert.equal(result.data.withheld_count, 8);
+  assert.equal(result.data.matches.length, 0);
 });
 
 test('disabled or invalid deployment configuration cannot spend on retrieval', async () => {
