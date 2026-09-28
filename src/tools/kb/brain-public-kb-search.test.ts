@@ -4,7 +4,8 @@ import { handleBrainPublicKbSearch } from './brain-public-kb-search.js';
 
 const ctx = (callerAgent: string) => ({ callerAgent, callerHash: 'synthetic', correlationId: 'synthetic', dryRun: false, acknowledgeWarning: false });
 const prefix = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/company_shared/';
-const sourceId = 'a'.repeat(64);
+const sourceId = '1ab094b6006bcc487b3e2e78f655ebc0c6628e20ce331a21372cc3c9486b9064';
+const secondarySourceId = 'cf198fd8021dfc909fb53778019cf5aaf22b764b4d493ff9993065fdb13b83d6';
 const validRow = (overrides: Record<string, unknown> = {}) => ({
   content: { text: 'Public synthetic source text.' },
   location: { type: 'S3', s3Location: { uri: `${prefix}${sourceId}.txt` } },
@@ -53,6 +54,8 @@ test('fixed KB request returns source ids and citations without copying arbitrar
   assert.equal(result.data.matches[0].source_id, sourceId);
   assert.equal(result.data.matches[0].citation, `public-kb:${sourceId}`);
   assert.equal(result.data.matches[0].source_uri, `${prefix}${sourceId}.txt`);
+  assert.equal(result.data.matches[0].source_url, 'https://otchealthmart.com/pages/about-us');
+  assert.equal(result.data.evidence_status, 'candidate_excerpts_only');
   assert.equal(JSON.stringify(result).includes('must not escape'), false);
 });
 
@@ -71,12 +74,33 @@ test('any unexpected URI or missing citation withholds the complete response', a
   const nonHashName = harness(() => Response.json({ retrievalResults: [validRow({ location: { type: 'S3', s3Location: { uri: `${prefix}ordinary-name.txt` } } })] }));
   const invalidName: any = await handleBrainPublicKbSearch({ query: 'synthetic' }, ctx('cto'), nonHashName.deps);
   assert.equal(invalidName.data.error, 'invalid_or_uncited_source');
+  const unknownId = 'f'.repeat(64);
+  const unknownHash = harness(() => Response.json({ retrievalResults: [validRow({
+    location: { type: 'S3', s3Location: { uri: `${prefix}${unknownId}.txt` } },
+  })] }));
+  const unknown: any = await handleBrainPublicKbSearch({ query: 'synthetic' }, ctx('cto'), unknownHash.deps);
+  assert.equal(unknown.data.error, 'invalid_or_uncited_source');
 });
 
-test('empty retrieval results are a valid empty cited response', async () => {
+test('out-of-scope control remains explicitly a candidate excerpt, with pinned public source mapping', async () => {
+  const h = harness(() => Response.json({ retrievalResults: [validRow({
+    location: { type: 'S3', s3Location: { uri: `${prefix}${secondarySourceId}.txt` } },
+    content: { text: 'TReO public excerpt.' },
+    score: 0.3646,
+  })] }));
+  const result: any = await handleBrainPublicKbSearch({ query: 'no match' }, ctx('developer'), h.deps);
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.matches[0].source_id, secondarySourceId);
+  assert.equal(result.data.matches[0].source_url, 'https://otchealthmart.com/collections/treo-by-ihear');
+  assert.equal(result.data.matches[0].retrieval_score, 0.3646);
+  assert.equal(result.data.evidence_status, 'candidate_excerpts_only');
+  assert.match(result.summary, /do not establish relevance/);
+  assert.equal(result.data.scope, 'company_shared');
+});
+
+test('empty retrieval results are a valid empty response', async () => {
   const h = harness(() => Response.json({ retrievalResults: [] }));
   const result: any = await handleBrainPublicKbSearch({ query: 'no match' }, ctx('developer'), h.deps);
   assert.equal(result.data.count, 0);
   assert.deepEqual(result.data.matches, []);
-  assert.equal(result.data.scope, 'company_shared');
 });

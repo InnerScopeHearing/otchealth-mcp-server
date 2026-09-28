@@ -114,12 +114,18 @@ resource "aws_iam_role_policy" "task_runtime_access" {
       },
       {
         # The gateway sends Retrieve only to the one approved managed GraphRAG
-        # knowledge base. Application code still intersects every personal
-        # request with the caller ring and its mandatory matter_id.
+        # knowledge base and the fixed public-only company_shared knowledge base.
+        # Application code additionally allowlists the public source IDs and checks
+        # every returned S3 URI. After authorized policy publication, read back with
+        # `aws iam get-role-policy --role-name otchealthTaskRole --policy-name runtime-access`
+        # and verify only these exact knowledge-base ARNs are present for Retrieve.
         Sid      = "RetrieveManagedGraphRag"
         Effect   = "Allow"
         Action   = ["bedrock:Retrieve"]
-        Resource = "arn:aws:bedrock:${var.aws_region}:${var.aws_account_id}:knowledge-base/XNMHPUKGDT"
+        Resource = [
+          "arn:aws:bedrock:${var.aws_region}:${var.aws_account_id}:knowledge-base/XNMHPUKGDT",
+          "arn:aws:bedrock:${var.aws_region}:${var.aws_account_id}:knowledge-base/ZAYEKIX0RX",
+        ]
       },
       {
         # The application still applies the stricter caller ring plus a mandatory

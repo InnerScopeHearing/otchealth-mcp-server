@@ -7,6 +7,10 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 const REGION = 'us-east-1';
 const ALLOWED_KB_ID = 'ZAYEKIX0RX';
 const SOURCE_PREFIX = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/company_shared/';
+const APPROVED_SOURCES = new Map([
+  ['1ab094b6006bcc487b3e2e78f655ebc0c6628e20ce331a21372cc3c9486b9064', 'https://otchealthmart.com/pages/about-us'],
+  ['cf198fd8021dfc909fb53778019cf5aaf22b764b4d493ff9993065fdb13b83d6', 'https://otchealthmart.com/collections/treo-by-ihear'],
+]);
 const MAX_BYTES = 512 * 1024;
 const MAX_TEXT_CHARS = 3000;
 const COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
@@ -51,7 +55,7 @@ async function readBounded(response: Response): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-function safeCitationRow(row: any): { citation: string; source_id: string; source_uri: string; text: string; truncated: boolean; retrieval_score?: number } | null {
+function safeCitationRow(row: any): { citation: string; source_id: string; source_uri: string; source_url: string; text: string; truncated: boolean; retrieval_score?: number } | null {
   const uri = row?.location?.type === 'S3' ? row?.location?.s3Location?.uri : undefined;
   if (typeof uri !== 'string' || uri.length > 1200 || !uri.startsWith(SOURCE_PREFIX)) return null;
   const relative = uri.slice(SOURCE_PREFIX.length);
@@ -59,12 +63,15 @@ function safeCitationRow(row: any): { citation: string; source_id: string; sourc
   if (!match) return null;
   // The approved corpus has no custom metadata sidecars. Derive identity only from its content hash filename.
   const sourceId = match[1];
+  const sourceUrl = APPROVED_SOURCES.get(sourceId!);
+  if (!sourceUrl) return null;
   const text = row?.content?.text;
   if (typeof sourceId !== 'string' || !sourceId || sourceId.length > 256 || typeof text !== 'string' || !text.trim()) return null;
   return {
     citation: `public-kb:${sourceId}`,
     source_id: sourceId,
     source_uri: uri,
+    source_url: sourceUrl,
     text: text.slice(0, MAX_TEXT_CHARS),
     truncated: text.length > MAX_TEXT_CHARS,
     ...(typeof row?.score === 'number' && Number.isFinite(row.score) ? { retrieval_score: row.score } : {}),
