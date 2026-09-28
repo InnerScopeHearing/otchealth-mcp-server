@@ -20,7 +20,8 @@ The gateway task role must be provisioned separately with only the service actio
 - STS `GetCallerIdentity`.
 - S3 `ListBucket` and `ListBucketVersions` on the fixed bucket, constrained to the fixed prefix; `GetObject` and `GetObjectVersion` for the two fixed document keys; `PutObject` for those same keys only if create-only source publication is enabled.
 - Bedrock `GetKnowledgeBase`, `ListDataSources`, `GetDataSource`, `ListIngestionJobs`, `GetIngestionJob`, `UpdateDataSource`, and `StartIngestionJob`, restricted to the fixed knowledge base and data source.
-- IAM `GetRole`, `GetRolePolicy`, `SimulatePrincipalPolicy`, and, only when the policy merge operation is enabled, `PutRolePolicy` on the one fixed managed-KB execution role.
+- IAM `GetRole`, `GetRolePolicy`, and, only when the policy merge operation is enabled, `PutRolePolicy` target the exact managed-KB execution role ARN `arn:aws:iam::900915535335:role/otchealth-company-shared-managed-kb-20260928`.
+- IAM `SimulatePrincipalPolicy` uses only two exact simulated principal ARNs: `arn:aws:iam::900915535335:role/otchealth-company-shared-managed-kb-20260928` for fixed S3 access checks, and `arn:aws:iam::900915535335:role/otchealthTaskRole` for Bedrock, IAM, and ECS checks.
 - ECS `DescribeServices`, `DescribeTaskDefinition`, and, only when the explicitly confirmed restart operation is enabled, `UpdateService` on the fixed gateway service.
 
 This admin router does not call `Retrieve`. Its simulator checks the gateway task role for `bedrock:Retrieve` on the fixed public knowledge base. If the separate public-only retrieval tool uses this same gateway task role, grant `bedrock:Retrieve` there as a distinct exact-resource permission and validate its live results independently.
