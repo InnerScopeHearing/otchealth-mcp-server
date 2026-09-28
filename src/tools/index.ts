@@ -126,6 +126,7 @@ import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js'
 import { registerKbSearch } from './kb/search.js';
 import { registerBrainSearch } from './kb/brain-search.js';
 import { registerBrainGraphSearch } from './kb/brain-graph-search.js';
+import { registerAwsAdminTools } from './aws-admin/tools.js';
 import { registerPersonalGraphQuery } from './kb/personal-graph-query.js';
 import { registerWebSearch } from './web/web-search.js';
 // Task G-3 (2026-09-03): Tavily-only parity tools alongside web_search -- see each file's header.
