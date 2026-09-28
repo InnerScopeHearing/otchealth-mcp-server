@@ -91,7 +91,7 @@ export async function handleBrainPublicKbSearch(input: Input, ctx: ToolContext, 
   const path = `/knowledgebases/${ALLOWED_KB_ID}/retrieve`;
   const body = JSON.stringify({
     retrievalQuery: { text: parsed.data.query },
-    retrievalConfiguration: { vectorSearchConfiguration: { numberOfResults: parsed.data.top ?? 5 } },
+    retrievalConfiguration: { managedSearchConfiguration: { numberOfResults: parsed.data.top ?? 5 } },
   });
   const signed = signRequest({ method: 'POST', host, path, body, region: REGION, service: 'bedrock', credentials });
   try {

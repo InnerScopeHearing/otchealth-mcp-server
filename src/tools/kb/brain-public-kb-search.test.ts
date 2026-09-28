@@ -48,7 +48,9 @@ test('fixed KB request returns source ids and citations without copying arbitrar
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0]?.url, 'https://bedrock-agent-runtime.us-east-1.amazonaws.com/knowledgebases/ZAYEKIX0RX/retrieve');
   assert.equal(h.calls[0]?.init?.redirect, 'error');
-  assert.equal(JSON.parse(String(h.calls[0]?.init?.body)).retrievalConfiguration.vectorSearchConfiguration.numberOfResults, 2);
+  const requestBody = JSON.parse(String(h.calls[0]?.init?.body));
+  assert.deepEqual(requestBody.retrievalConfiguration, { managedSearchConfiguration: { numberOfResults: 2 } });
+  assert.equal('vectorSearchConfiguration' in requestBody.retrievalConfiguration, false);
   assert.match(String((h.calls[0]?.init?.headers as any).Authorization), /us-east-1\/bedrock\/aws4_request/);
   assert.equal(result.data.mode, 'aws-bedrock-public-company-shared');
   assert.equal(result.data.matches[0].source_id, sourceId);
