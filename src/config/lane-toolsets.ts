@@ -92,6 +92,7 @@ const HEYGEN = ['heygen_*'] as const;
 // dead wildcard in a seed allowlist is harmless (it simply matches nothing), but a live one that
 // used to advertise real tools reads as a stale claim about this lane's actual capability.
 const CTO_INFRA = [
+  'aws_api_query', 'aws_api_operation',
   'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', 'depot_*', 'build_*', 'release_*', 'cloudflare_*', 'netlify_*', 'n8n_*',
   'posthog_*', 'sentry_*', 'gumroad_*', 'docintel_*', 'graph_*', 'cio_*', 'stripe_*', 'twilio_*',
   'elevenlabs_*', 'xero_*', 'legal_blob_*', 'shopify_*', 'intercom_*', 'revenuecat_*',
