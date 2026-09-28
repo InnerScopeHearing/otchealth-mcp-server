@@ -12,13 +12,11 @@
  * "hearing aid" or "medical device". OTC hearing-aid claims are a separate, gated
  * (Matt + clinical) regime and are out of scope here.
  *
- * Judgment runs on a credit-funded/lower-cost chat provider (FLEET COST PROTOCOL: Azure Foundry
- * by default, or OpenAI-direct when LLM_PROVIDER=openai) — high tier for a quality-critical
- * compliance call — and returns a structured, logged verdict.
+ * Judgment runs on the configured OpenAI-direct chat provider at the high tier for a quality-critical
+ * compliance call and returns a structured, logged verdict. Retired Foundry configuration is inert.
  *
- * Env: LLM_PROVIDER (foundry default | openai); see src/azure/foundry.ts's chatTarget() for the
- * full var list per provider. Read-only; mutates nothing. Advisory gate — callers (and humans)
- * must honor a 'block'/'revise'.
+ * Env: LLM_PROVIDER=openai enables the OpenAI-direct path. Foundry is retired and disabled.
+ * Read-only; mutates nothing. Advisory gate: callers and humans must honor a 'block' or 'revise'.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -63,7 +61,7 @@ export function registerClaimsCheck(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Claims-compliance gate (PSAP / FTC-FDA)',
         description:
-          'Screens customer-facing copy (ad, advertorial, web, email, SMS, or CS script) against the OTCHealth PSAP/FTC-FDA claims ruleset before it ships. Returns verdict pass/revise/block, a risk score, the exact violating phrases with fixes, and a compliant rewrite. Ads + advertorials are screened hardest (the Medvi failure point). Read-only; mutates nothing. Runs on credit-funded Azure Foundry.',
+          'Screens customer-facing copy (ad, advertorial, web, email, SMS, or CS script) against the OTCHealth PSAP/FTC-FDA claims ruleset before it ships. Returns verdict pass/revise/block, a risk score, the exact violating phrases with fixes, and a compliant rewrite. Ads + advertorials are screened hardest (the Medvi failure point). Read-only; mutates nothing. Runs on the configured OpenAI-direct model; retired Foundry is disabled.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: false,
@@ -100,14 +98,12 @@ export function registerClaimsCheck(server: McpServer, callerHash: CallerHashPro
           return {
             data: {
               verdict: 'error', risk: 100, violations: [], compliant_rewrite: '', notes: '', channel, productClass, model: '',
-              // Kept as 'foundry_unconfigured' on the default provider for byte-identical
-              // backward-compat with anything keyed on this exact string.
-              error: provider === 'openai' ? 'openai_unconfigured' : 'foundry_unconfigured',
+              error: provider === 'openai' ? 'openai_unconfigured' : 'provider_retired',
             },
             summary:
               provider === 'openai'
                 ? 'claims_check unavailable: LLM_PROVIDER=openai but OPENAI_API_KEY not configured on the gateway.'
-                : 'claims_check unavailable: Foundry endpoint/key not configured on the gateway.',
+                : 'claims_check unavailable: Foundry is retired and disabled; no Azure request was made.',
           };
         }
         if (productClass === 'OTC_hearing_aid') {

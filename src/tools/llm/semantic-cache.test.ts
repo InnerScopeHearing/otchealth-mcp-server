@@ -14,7 +14,7 @@ import {
 } from './semantic-cache.js';
 import type { VectorMatch } from '../../agentstate/store.js';
 
-// Pure, no-network: every Cosmos/Foundry call is faked via the injectable deps bag, mirroring
+// Pure, no-network: every Cosmos storage and embedding calls is faked via the injectable deps bag, mirroring
 // memory/hot-cache.test.ts (this repo's ESM build does not allow node:test's mock.method() to
 // override another module's live named export).
 
@@ -172,7 +172,7 @@ test('checkLlmCache: FAIL-OPEN — an embed() throw is swallowed and reported as
     process.env.LLM_CACHE_MODE = 'on';
     const deps = makeDeps({
       embed: async () => {
-        throw new Error('Foundry outage');
+        throw new Error('embedding provider outage');
       },
     });
     const out = await checkLlmCache('anything', 'cfo', 'classify', 'standard', { deps });

@@ -3,29 +3,23 @@ import assert from 'node:assert/strict';
 import { buildExhaustFilterClause } from '../memory/room-hygiene.js';
 import { buildTypeInFilterClause, INCIDENT_TYPES } from '../safety/incident-match.js';
 
-// Required-var preamble (mirrors azure/search.test.ts / dispatch-opensearch.test.ts). BOTH Azure
-// and OpenSearch are left configured here (unlike dispatch-opensearch.test.ts, which deletes the
-// Azure vars to prove routing isolation) -- this file's "result-shape parity" test deliberately
-// runs BOTH clients directly (never through the dispatcher) side by side against equivalent stub
-// responses, so both need to be configured in the same process.
+// Required-var preamble. The result-shape parity test deliberately runs both search clients
+// directly against equivalent stub responses, so both search backends are configured in this
+// process. Embeddings use the supported OpenAI path with a synthetic key and local fetch stubs.
 process.env.CIO_SITE_ID ||= 'test';
 process.env.CIO_TRACK_KEY ||= 'test';
 process.env.CIO_APP_API_BEARER ||= 'test';
 process.env.PERPLEXITY_CONNECTOR_TOKEN ||= 'x'.repeat(32);
 process.env.ADMIN_REVOKE_TOKEN ||= 'x'.repeat(32);
 process.env.N8N_WEBHOOK_SECRET ||= 'x'.repeat(32);
-// Pin the pre-2026-08-28 backend defaults (env.ts's SEARCH_BACKEND/EMBEDDINGS_PROVIDER/
-// LLM_PROVIDER/WEB_SEARCH_PROVIDER/BLOB_BACKEND/STATE_BACKEND now default to their AWS-native
-// replacements) so this file keeps exercising exactly the Azure/Foundry/Cosmos code path it was
-// written for -- those paths stay inert-but-present and still need this coverage.
+// Keep both direct search clients configured for their local result-shape parity checks.
 process.env.STATE_BACKEND ||= 'cosmos';
 process.env.BLOB_BACKEND ||= 'azure';
 process.env.SEARCH_BACKEND ||= 'azure';
-process.env.LLM_PROVIDER ||= 'foundry';
-process.env.EMBEDDINGS_PROVIDER ||= 'foundry';
+process.env.LLM_PROVIDER = 'openai';
+process.env.EMBEDDINGS_PROVIDER = 'openai';
+process.env.OPENAI_API_KEY = 'synthetic-test-key';
 process.env.WEB_SEARCH_PROVIDER ||= 'azure';
-process.env.FOUNDRY_OPENAI_ENDPOINT ||= 'https://otchealth-foundry.example.invalid';
-process.env.FOUNDRY_KEY ||= 'test-foundry-key';
 process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example.invalid';
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 process.env.OPENSEARCH_ENDPOINT ||= 'search-otchealth-brain-uqmq2jw23cv4yjnnxblxzb7nny.us-east-1.es.amazonaws.com';
@@ -50,7 +44,7 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
 }
 
 function isEmbeddingsUrl(url: string): boolean {
-  return url.includes('/openai/deployments/') && url.includes('/embeddings');
+  return url.includes('/v1/embeddings') || (url.includes('/openai/deployments/') && url.includes('/embeddings'));
 }
 
 function embeddingsOk(): Response {

@@ -37,9 +37,9 @@ test('chatConfigured() is false in the same scenario', () => {
   assert.equal(chatConfigured(), false);
 });
 
-test('embeddingsTarget() is UNAFFECTED: EMBEDDINGS_PROVIDER defaults to foundry independently of LLM_PROVIDER', () => {
+test('embeddingsTarget() also fails closed when the retired Foundry provider is selected', () => {
   const t = embeddingsTarget();
-  assert.equal(t?.headers['api-key'], 'test-foundry-key');
+  assert.equal(t, null);
 });
 
 test('chat() throws an OpenAI-specific, non-misleading error (not the Foundry-flavoured message)', async () => {
