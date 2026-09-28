@@ -62,7 +62,6 @@ test('CTO can retrieve only the separate company_shared projection', async () =>
     JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
     { andAll: [
       { equals: { key: 'source_group', value: 'company_shared' } },
-      { startsWith: { key: 'source_uri', value: root + 'company_shared/' } },
       { in: { key: 'source_version', value: [`sha256:${sharedSource}`] } },
       { in: { key: 'source_id', value: [sharedId] } },
     ] },
@@ -317,6 +316,21 @@ test('company_shared requires approved mappings before retrieval and rejects any
     assert.equal(result.data.error, 'shared_citation_validation_failed');
     assert.equal(JSON.stringify(result).includes('Synthetic Organization X'), false);
   }
+
+  const prefixCase = harness(() => Response.json({ retrievalResults: [
+    { ...good, location: { type: 'S3', s3Location: { uri: root + 'company/foreign.txt' } } },
+  ] }));
+  prefixCase.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [sharedMapping] });
+  const rejectedPrefix: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), prefixCase.deps);
+  const sentFilter = JSON.parse(String(prefixCase.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter;
+  assert.deepEqual(sentFilter, { andAll: [
+    { equals: { key: 'source_group', value: 'company_shared' } },
+    { in: { key: 'source_version', value: [`sha256:${sharedSource}`] } },
+    { in: { key: 'source_id', value: [sharedId] } },
+  ] });
+  assert.equal(JSON.stringify(sentFilter).includes('startsWith'), false);
+  assert.equal(rejectedPrefix.data.error, 'shared_citation_validation_failed');
+  assert.equal(rejectedPrefix.data.count, 0);
 });
 
 test('does not describe passages as source-cited when their canonical citation mappings are unresolved', async () => {

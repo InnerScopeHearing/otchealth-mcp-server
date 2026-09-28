@@ -220,16 +220,13 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
     : requestedSources ? [...requestedSources] : undefined;
   const sourceFilter = sourceIdsForFilter ? { in: { key: 'source_id', value: sourceIdsForFilter } } : undefined;
   const groupFilter = { equals: { key: 'source_group', value: scope } };
-  const sharedPrefixFilter = scope === 'company_shared'
-    ? { startsWith: { key: 'source_uri', value: SOURCE_PREFIXES.company_shared[0] } }
-    : undefined;
   const sharedVersionFilter = scope === 'company_shared'
     ? { in: { key: 'source_version', value: sharedAllowedVersions } }
     : undefined;
   const matterFilter = parsed.data.matter_id ? { equals: { key: 'matter_id', value: parsed.data.matter_id } } : undefined;
   // Source narrowing is intersected with the authenticated scope, never substituted
   // for it. Repeat the source-ID check on returned rows if upstream ignores a filter.
-  const filters = [groupFilter, sharedPrefixFilter, sharedVersionFilter, matterFilter, sourceFilter].filter((value) => value !== undefined);
+  const filters = [groupFilter, sharedVersionFilter, matterFilter, sourceFilter].filter((value) => value !== undefined);
   const filter = filters.length === 1 ? filters[0] : { andAll: filters };
   const host = `bedrock-agent-runtime.${REGION}.amazonaws.com`;
   const path = `/knowledgebases/${config.kbId}/retrieve`;
