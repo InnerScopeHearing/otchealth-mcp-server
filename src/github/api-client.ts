@@ -129,6 +129,7 @@ async function githubApiFetch(urlPath: string, init: RequestInit, retries: numbe
 // Installation token cache
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
+let cachedInstallationPermissions: Record<string, string> | null = null;
 
 async function getInstallationToken(): Promise<string> {
   const now = Date.now();
@@ -153,6 +154,9 @@ async function getInstallationToken(): Promise<string> {
   if (statusCode >= 400) throw new GitHubApiError({ code: `github_${statusCode}`, status: statusCode, message: data?.message || `HTTP ${statusCode}`, nextStep: 'Verify GitHub App credentials and installation ID.' });
 
   cachedToken = data.token as string;
+  cachedInstallationPermissions = data.permissions && typeof data.permissions === 'object'
+    ? Object.fromEntries(Object.entries(data.permissions).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : null;
   // GitHub installation tokens expire after 1 hour; default to 55 min from now if no expires_at
   const expiresAt: string | undefined = data.expires_at;
   tokenExpiresAt = expiresAt ? new Date(expiresAt).getTime() : now + 55 * 60 * 1000;
@@ -288,6 +292,80 @@ export async function getCommit(owner: string, repo: string, sha: string): Promi
 export async function getPullRequest(owner: string, repo: string, number: unknown): Promise<any> {
   const pullRequestNumber = githubPullRequestPathNumber(number);
   return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${pullRequestNumber}`);
+}
+
+/**
+ * Mark precisely one already-read draft PR ready for review. This deliberately is
+ * not a generic GraphQL transport: its mutation, input shape, and returned fields
+ * are all fixed here. The installation-token response is checked first so the
+ * action cannot run unless the existing App grant explicitly includes the needed
+ * pull-requests write permission.
+ */
+export async function markPullRequestReadyForReview(
+  pullRequestNodeId: string,
+  expectedNumber: number,
+  expectedHeadSha: string,
+  expectedRepositoryFullName: string,
+): Promise<{
+  number: number;
+  state: string;
+  draft: boolean;
+  merged: boolean;
+  headSha: string;
+  url?: string;
+}> {
+  if (typeof pullRequestNodeId !== 'string' || pullRequestNodeId.length < 1 || pullRequestNodeId.length > 512) {
+    throw new GitHubApiError({ code: 'github_invalid_pull_request_node', status: 0, message: 'Refusing an invalid GitHub pull request identity.', nextStep: 'Read the pull request again before retrying.' });
+  }
+  if (!Number.isSafeInteger(expectedNumber) || expectedNumber <= 0) {
+    throw new GitHubApiError({ code: 'github_invalid_pull_request_number', status: 0, message: 'Refusing an invalid expected pull request number.', nextStep: 'Read the pull request again before retrying.' });
+  }
+  if (typeof expectedHeadSha !== 'string' || !/^[0-9a-f]{40}$/i.test(expectedHeadSha)) {
+    throw new GitHubApiError({ code: 'github_invalid_expected_head_sha', status: 0, message: 'Refusing an invalid expected pull request head SHA.', nextStep: 'Read the pull request again before retrying.' });
+  }
+  if (typeof expectedRepositoryFullName !== 'string' || expectedRepositoryFullName.split('/').length !== 2) {
+    throw new GitHubApiError({ code: 'github_invalid_repository', status: 0, message: 'Refusing an invalid expected repository identity.', nextStep: 'Read the pull request again before retrying.' });
+  }
+
+  const token = await getInstallationToken();
+  if (cachedInstallationPermissions?.pull_requests !== 'write') {
+    throw new GitHubApiError({ code: 'github_pr_ready_permission_denied', status: 0, message: 'The installed GitHub App does not grant pull request write permission for this action.', nextStep: 'Use an installation that already has pull request write permission. Do not widen permissions for this operation.' });
+  }
+
+  const res = await githubApiFetch('/graphql', {
+    method: 'POST',
+    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: 'mutation MarkPullRequestReadyForReview($pullRequestId: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) { pullRequest { number state isDraft merged url headRefOid repository { nameWithOwner } } } }',
+      variables: { pullRequestId: pullRequestNodeId },
+    }),
+  }, 0);
+  const statusCode = res.status;
+  const text = await res.text();
+  let data: any;
+  try { data = JSON.parse(text); } catch { data = null; }
+  const pr = data?.data?.markPullRequestReadyForReview?.pullRequest;
+  const headSha = typeof pr?.headRefOid === 'string' ? pr.headRefOid : '';
+  const repositoryFullName = typeof pr?.repository?.nameWithOwner === 'string' ? pr.repository.nameWithOwner : '';
+  const responseIsValid = pr
+    && Number(pr.number) === expectedNumber
+    && String(pr.state ?? '').toLowerCase() === 'open'
+    && pr.isDraft === false
+    && pr.merged === false
+    && /^[0-9a-f]{40}$/i.test(headSha)
+    && headSha.toLowerCase() === expectedHeadSha.toLowerCase()
+    && repositoryFullName.toLowerCase() === expectedRepositoryFullName.toLowerCase();
+  if (statusCode >= 400 || !responseIsValid || (Array.isArray(data?.errors) && data.errors.length > 0)) {
+    throw new GitHubApiError({ code: 'github_pr_ready_mutation_failed', status: statusCode, message: 'GitHub could not confirm the same pull request and head SHA became ready for review.', nextStep: 'Read the target pull request again. Do not retry this mutation.' });
+  }
+  return {
+    number: Number(pr.number),
+    state: String(pr.state ?? '').toLowerCase(),
+    draft: pr.isDraft === true,
+    merged: pr.merged === true,
+    headSha,
+    url: typeof pr.url === 'string' ? pr.url : undefined,
+  };
 }
 
 export async function createIssueComment(owner: string, repo: string, number: number, body: string): Promise<void> {
