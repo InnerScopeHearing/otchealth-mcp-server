@@ -14,7 +14,7 @@ import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../s
 import {
   AWS_ADMIN_ACCOUNT_ID, AWS_ADMIN_BUCKET, AWS_ADMIN_ECS_CLUSTER, AWS_ADMIN_ECS_SERVICE,
   AWS_ADMIN_KB_POLICY_NAME, AWS_ADMIN_KB_ROLE_NAME, AWS_ADMIN_PUBLIC_DATA_SOURCE_ID, AWS_ADMIN_PUBLIC_KB_ID,
-  AWS_ADMIN_PUBLIC_PREFIX, AWS_ADMIN_PUBLIC_SOURCES, AWS_ADMIN_PUBLIC_SOURCE_VERSIONS,
+  AWS_ADMIN_PUBLIC_PREFIX, AWS_ADMIN_PUBLIC_SOURCES, AWS_ADMIN_PUBLIC_SOURCE_VERSIONS, AWS_ADMIN_TASK_ROLE_NAME,
   AWS_ADMIN_REGION, MAX_PUBLIC_DOCUMENT_BYTES, canUpdatePublicDataSource,
   expectedPublicSourceHash, isDedicatedPublicKb, isPublicSourceId,
   isSafePublicSourceSet, mergePublicReadStatement, parsePublicDataSourceScope,
@@ -345,7 +345,12 @@ function unwrapAndValidateTrust(xml: string): unknown {
   const allow = statements.filter((statement: any) => statement?.Effect !== 'Deny');
   if (!allow.length) throw new AwsAdminError('kb_role_trust_not_bedrock_only');
   for (const statement of allow) {
-    const services = statement?.Principal?.Service;
+    const principal = statement?.Principal;
+    if (!principal || typeof principal !== 'object' || Array.isArray(principal) ||
+        Object.keys(principal).some((key) => key !== 'Service')) {
+      throw new AwsAdminError('kb_role_trust_not_bedrock_only');
+    }
+    const services = principal.Service;
     const values = Array.isArray(services) ? services : [services];
     if (values.length !== 1 || values[0] !== 'bedrock.amazonaws.com') throw new AwsAdminError('kb_role_trust_not_bedrock_only');
     const actions = Array.isArray(statement?.Action) ? statement.Action : [statement?.Action];
@@ -446,6 +451,11 @@ async function runRead(input: ReadInput, deps: AwsAdminDependencies, credentials
     }
     case 'iam_simulate_kb_public_read': {
       if (!input.iam_action) throw new AwsAdminError('iam_action_required');
+      // The KB execution role owns S3 data-source access. Gateway Bedrock, IAM, and ECS calls
+      // are made by otchealthTaskRole, including the fixed public KB Retrieve permission.
+      const policySourceArn = input.iam_action.startsWith('s3:')
+        ? `arn:aws:iam::${AWS_ADMIN_ACCOUNT_ID}:role/${AWS_ADMIN_KB_ROLE_NAME}`
+        : `arn:aws:iam::${AWS_ADMIN_ACCOUNT_ID}:role/${AWS_ADMIN_TASK_ROLE_NAME}`;
       const resources = input.iam_action === 's3:ListBucket' || input.iam_action === 's3:ListBucketVersions'
         ? [`arn:aws:s3:::${AWS_ADMIN_BUCKET}`]
         : input.iam_action.startsWith('s3:')
@@ -457,7 +467,7 @@ async function runRead(input: ReadInput, deps: AwsAdminDependencies, credentials
               : [`arn:aws:iam::${AWS_ADMIN_ACCOUNT_ID}:role/${AWS_ADMIN_KB_ROLE_NAME}`];
       const params: Record<string, string> = {
         Action: 'SimulatePrincipalPolicy',
-        PolicySourceArn: `arn:aws:iam::${AWS_ADMIN_ACCOUNT_ID}:role/${AWS_ADMIN_KB_ROLE_NAME}`,
+        PolicySourceArn: policySourceArn,
         'ActionNames.member.1': input.iam_action,
       };
       resources.forEach((resource, index) => { params[`ResourceArns.member.${index + 1}`] = resource; });
@@ -468,7 +478,7 @@ async function runRead(input: ReadInput, deps: AwsAdminDependencies, credentials
         decision: xmlText(block, 'EvalDecision'),
         missing_context_values: xmlBlocks(block, 'MissingContextValues').flatMap((item) => xmlBlocks(item, 'member').map(decodeXml)),
       }));
-      return { role_arn: `arn:aws:iam::${AWS_ADMIN_ACCOUNT_ID}:role/${AWS_ADMIN_KB_ROLE_NAME}`, evaluations: results };
+      return { role_arn: policySourceArn, evaluations: results };
     }
     case 'ecs_describe_gateway_service': {
       const body = JSON.stringify({ cluster: AWS_ADMIN_ECS_CLUSTER, services: [AWS_ADMIN_ECS_SERVICE] });
@@ -632,7 +642,7 @@ async function runWrite(input: WriteInput, deps: AwsAdminDependencies, credentia
       const raw = await responseJson(response) as any;
       const service = raw?.service;
       if (service?.serviceName !== AWS_ADMIN_ECS_SERVICE) throw new AwsAdminError('ecs_service_identity_mismatch');
-      return { service_name: service.serviceName, status: service.status, force_new_deployment: true, deployment_count: Array.isArray(service.deployments) ? service.deployments.length : 0 };
+      return { service_name: service.serviceName, status: 'restart requested', service_status: service.status, deployment_count: Array.isArray(service.deployments) ? service.deployments.length : 0 };
     }
   }
 }
@@ -684,7 +694,7 @@ export function registerAwsAdminTools(
   registerTool(server, {
     name: 'aws_api_operation',
     category: 'write_orchestrated',
-    annotations: { title: 'AWS: bounded CTO operation', description: 'CTO-only fixed AWS write registry. Every call verifies the server AWS identity, keeps S3 writes to two exact public documents and hashes, Bedrock updates/ingestion to a separately configured company_shared-only KB/data source, IAM policy addition to the Bedrock-only execution role and one S3 prefix, or ECS force-new deployment of the existing gateway service. Dry-run, global high-risk gates, AWS_ADMIN_ENABLE_WRITES, and explicit confirmation apply. No arbitrary AWS API calls or resources.', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    annotations: { title: 'AWS: bounded CTO operation', description: 'CTO-only fixed AWS write registry. Every call verifies the server AWS identity, keeps S3 writes to two exact public documents and hashes, Bedrock updates/ingestion to a separately configured company_shared-only KB/data source, IAM policy addition to the Bedrock-only execution role and one S3 prefix, or ECS force-new deployment of the existing gateway service. Writes require non-dry-run, global write/high-risk gates, and AWS_ADMIN_ENABLE_WRITES; only ECS force-new deployment requires explicit confirm_live. No arbitrary AWS API calls or resources.', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     inputShape: writeInputShape,
     outputShape: { operation: z.string(), executed: z.boolean(), result: z.unknown().optional(), error: z.string().optional() },
     redactInputForLog: operationInputForLog,
