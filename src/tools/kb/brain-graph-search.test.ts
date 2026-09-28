@@ -14,6 +14,17 @@ function harness(response: () => Response = () => Response.json({ retrievalResul
   const deps = { config: () => ({ enabled: true, kbId: 'ABCDEFGHIJ' }), credentials: async () => ({ accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }), fetch: (async (url: any, init?: RequestInit) => { calls.push({ url: String(url), init }); return response(); }) as typeof fetch };
   return { deps, calls };
 }
+const sharedUri = root + 'company_shared/projection.txt';
+const sharedSource = 'c'.repeat(64);
+const sharedId = 'a'.repeat(64);
+const sharedMapping = {
+  canonical_id: sharedId, source_version: `sha256:${sharedSource}`, source_group: 'company_shared' as const, source_sha256: sharedSource,
+  source_locator_sha256: createHash('sha256').update(sharedUri).digest('hex'), provenance_receipt_sha256: 'e'.repeat(64),
+};
+function sharedRow(overrides: Record<string, unknown> = {}) {
+  const base = row('company_shared', sharedUri);
+  return { ...base, metadata: { ...base.metadata, source_id: sharedId, source_sha256: sharedSource, source_version: `sha256:${sharedSource}`, ...overrides } };
+}
 
 test('coarse company graph access requires the executive ring, while personal graph access remains protected', async () => {
   for (const caller of ['cfo', 'clo', 'cpo', 'cco']) {
@@ -41,18 +52,20 @@ test('coarse company graph access requires the executive ring, while personal gr
 });
 
 test('CTO can retrieve only the separate company_shared projection', async () => {
-  const h = harness(() => Response.json({ retrievalResults: [
-    row('company_shared', root + 'company_shared/projection.txt'),
-    row('company', root + 'company/test.txt'),
-    row('company_shared', root + 'company/projection.txt'),
-  ] }));
+  const h = harness(() => Response.json({ retrievalResults: [sharedRow()] }));
+  h.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [sharedMapping] });
   const allowed: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), h.deps);
   assert.equal(allowed.data.scope, 'company_shared');
   assert.equal(allowed.data.count, 1);
   assert.deepEqual(allowed.data.matches.map((match: any) => match.source_uri), [root + 'company_shared/projection.txt']);
   assert.deepEqual(
     JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
-    { equals: { key: 'source_group', value: 'company_shared' } },
+    { andAll: [
+      { equals: { key: 'source_group', value: 'company_shared' } },
+      { startsWith: { key: 'source_uri', value: root + 'company_shared/' } },
+      { in: { key: 'source_version', value: [`sha256:${sharedSource}`] } },
+      { in: { key: 'source_id', value: [sharedId] } },
+    ] },
   );
 
   const denied = harness();
@@ -252,11 +265,11 @@ test('GraphRAG loads the version-pinned citation artifact when the legacy test o
 });
 
 test('CTO resolves company_shared citations only, while company mappings stay forbidden', async () => {
-  const source = 'c'.repeat(64);
-  const companySharedRow = row('company_shared', root + 'company_shared/projection.txt');
+  const source = sharedSource;
+  const companySharedRow = sharedRow();
   const mapping = (source_group: 'company' | 'company_shared') => ({
     canonical_id: 'a'.repeat(64), source_version: `sha256:${source}`, source_group, source_sha256: source,
-    source_locator_sha256: 'd'.repeat(64), provenance_receipt_sha256: 'e'.repeat(64),
+    source_locator_sha256: createHash('sha256').update(sharedUri).digest('hex'), provenance_receipt_sha256: 'e'.repeat(64),
   });
 
   const allowed = harness(() => Response.json({ retrievalResults: [companySharedRow] }));
@@ -269,14 +282,41 @@ test('CTO resolves company_shared citations only, while company mappings stay fo
   const denied = harness(() => Response.json({ retrievalResults: [companySharedRow] }));
   denied.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [mapping('company')] });
   const forbidden: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), denied.deps);
-  assert.equal(forbidden.data.count, 1);
-  assert.equal(forbidden.data.matches[0].citation_resolution.status, 'forbidden_ring');
+  assert.equal(forbidden.data.count, 0);
+  assert.equal(forbidden.data.error, 'shared_provenance_unconfigured');
+  assert.equal(denied.calls.length, 0);
 
   const fifthSourceCompanyRow = row('company', `${fifthSourceRoot}${'f'.repeat(64)}/records-0001.csv`);
   const companySource = harness(() => Response.json({ retrievalResults: [fifthSourceCompanyRow] }));
   const wrongScope: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company' }, ctx('cto'), companySource.deps);
   assert.equal(wrongScope.data.error, 'forbidden_ring');
   assert.equal(companySource.calls.length, 0);
+});
+
+test('company_shared requires approved mappings before retrieval and rejects any unverified returned row as a whole', async () => {
+  const absent = harness();
+  absent.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [] });
+  const noMap: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), absent.deps);
+  assert.equal(noMap.data.error, 'shared_provenance_unconfigured');
+  assert.equal(absent.calls.length, 0);
+
+  const good = sharedRow();
+  const badCases = [
+    { ...good, metadata: { ...good.metadata, source_group: 'company' } },
+    { ...good, location: { type: 'S3', s3Location: { uri: root + 'company/secret.txt' } } },
+    { ...good, metadata: { ...good.metadata, source_id: 'f'.repeat(64) } },
+    { ...good, metadata: { ...good.metadata, source_version: `sha256:${'f'.repeat(64)}` } },
+    { ...good, location: { type: 'S3', s3Location: { uri: sharedUri + '?wrong=1' } } },
+    { ...good, metadata: { ...good.metadata, source_id: undefined } },
+  ];
+  for (const bad of badCases) {
+    const h = harness(() => Response.json({ retrievalResults: [good, bad] }));
+    h.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [sharedMapping] });
+    const result: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), h.deps);
+    assert.equal(result.data.count, 0);
+    assert.equal(result.data.error, 'shared_citation_validation_failed');
+    assert.equal(JSON.stringify(result).includes('Synthetic Organization X'), false);
+  }
 });
 
 test('does not describe passages as source-cited when their canonical citation mappings are unresolved', async () => {
