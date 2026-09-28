@@ -1103,6 +1103,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerKbSearch(server, callerHash);
   registerBrainSearch(server, callerHash);
   registerBrainGraphSearch(server, callerHash);
+  registerAwsAdminTools(server, callerHash);
   registerPersonalGraphQuery(server, callerHash);
   registerRetrievalFeedback(server, callerHash); // write_simple: opt-in feedback on a brain_search/kb_search hit (Wave 7 item 7.1)
   registerWebSearch(server, callerHash);
