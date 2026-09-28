@@ -261,11 +261,13 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       const citation_resolution = resolveCitation({ caller_agent: ctx.callerAgent, canonical_id: canonicalId, source_version: sourceVersion });
       return { citation: `graph:${index + 1}`, ...match, citation_resolution };
     });
+    const resolvedCitationCount = returnedMatches.filter((match) => match.citation_resolution.status === 'resolved').length;
+    const unresolvedCitationCount = returnedMatches.length - resolvedCitationCount;
     return {
       // This describes only the bounded provider page. It does not establish index
       // absence, graph traversal, or a relationship among the requested sources.
       data: { mode: 'aws-managed-graphrag', scope, matches: returnedMatches, count: returnedMatches.length, withheld_count: withheld, quality_withheld_count: qualityWithheld, relevance_withheld_count: relevanceWithheld, duplicate_withheld_count: duplicateWithheld, answer_generated: false, ...(bridge ? { documentary_bridge: bridge } : {}), ...(parsed.data.matter_id ? { matter_id: parsed.data.matter_id, matter_filter_applied: true } : {}), ...(requestedSources ? { source_filter_applied: true, requested_source_count: requestedSources.size, bounded_returned_source_count: boundedReturnedSources.size, bounded_source_coverage_complete: boundedReturnedSources.size === requestedSources.size } : {}), ...(raw.nextToken ? { more_results_available: true } : {}) },
-      summary: `${returnedMatches.length} source-cited GraphRAG passages. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,
+      summary: `${returnedMatches.length} GraphRAG passages returned; ${resolvedCitationCount} have resolved source receipts, ${unresolvedCitationCount} lack a verified citation mapping. The shared graph can contain inferred relationships; a retrieval score does not prove a fact or causation.`,
     };
   } catch { return outcome('unavailable', 'bedrock_retrieval_failed'); }
 }

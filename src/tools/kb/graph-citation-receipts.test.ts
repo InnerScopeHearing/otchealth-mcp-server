@@ -30,3 +30,16 @@ test('does not resolve an absent canonical source mapping', () => {
   const result = createGraphCitationReceiptResolver([mapping])({ caller_agent: 'cfo', canonical_id: 'e'.repeat(64), source_version: mapping.source_version });
   assert.deepEqual(result, { status: 'source_mapping_not_found' });
 });
+
+test('keeps immutable mapping validation strict for opaque source versions and inconsistent hashes', () => {
+  const rawVersion = { ...mapping, source_version: 's3-version-v1' };
+  const rawResult = createGraphCitationReceiptResolver([rawVersion])({ caller_agent: 'cfo', canonical_id: id, source_version: mapping.source_version });
+  assert.deepEqual(rawResult, { status: 'source_mapping_not_found' });
+  const wrongHash = { ...mapping, source_sha256: 'f'.repeat(64) };
+  const hashResult = createGraphCitationReceiptResolver([wrongHash])({ caller_agent: 'cfo', canonical_id: id, source_version: mapping.source_version });
+  assert.deepEqual(hashResult, { status: 'source_mapping_not_found' });
+  const extraField = { ...mapping, source_text: 'never accept source text' };
+  const extraResult = createGraphCitationReceiptResolver([extraField])({ caller_agent: 'cfo', canonical_id: id, source_version: mapping.source_version });
+  assert.deepEqual(extraResult, { status: 'source_mapping_not_found' });
+  assert.equal(JSON.stringify(extraResult).includes('never accept source text'), false);
+});
