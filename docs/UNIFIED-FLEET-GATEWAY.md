@@ -49,9 +49,10 @@ NOT YET BUILT (claimed elsewhere, absent here - this is the real backlog):
   `DRY_RUN_DEFAULT`). Reads are always live; writes are gated + dry-run by default.
 - **PHI ring is carved OUT.** No MedReview PHI data tools here, ever (BAA-absolute).
   Non-PHI infra config only.
-- Credentials are server-side env only (`src/config/env.ts`, Zod-validated), never in
-  agent context. New service creds are `z.string().optional().default('')` so the server
-  boots without them and the tool fails closed with a clear `*_not_configured` error.
+- Credentials are server-side only (`src/config/env.ts`, Zod-validated, or the exact
+  verified AWS task-role identity), never caller supplied or placed in agent context. New
+  service creds are `z.string().optional().default('')` so the server boots without them
+  and the tool fails closed with a clear `*_not_configured` error.
 - Ingress should be locked to Cloudflare-only at the Azure container (Matt gate).
 
 ## Deploy state (Matt gates)
