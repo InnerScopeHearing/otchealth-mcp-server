@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isLaneAllowed } from './search-privileged.js';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
-import { companySharedCanonicalIds, companySharedSourceVersions, createGraphCitationReceiptResolver } from './graph-citation-receipts.js';
+import { companySharedCanonicalIds, companySharedSourceVersions, createGraphCitationReceiptResolver, isCompanySharedReader } from './graph-citation-receipts.js';
 import { loadGraphCitationMappings, type CitationMappingArtifactConfig } from './graph-citation-mapping-loader.js';
 
 const REGION = 'us-east-1';
@@ -72,7 +72,7 @@ const DEFAULTS: Deps = {
 };
 const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
-  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. CTO may request only the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
+  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company and authenticated company seats may request the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
   top: z.number().int().min(1).max(8).optional(),
   source_ids: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(5)
     .refine((ids) => new Set(ids).size === ids.length, 'Source IDs must be unique')
@@ -85,15 +85,16 @@ const inputShape = {
 const inputSchema = z.object(inputShape).strict();
 
 export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
-  // The CTO is intentionally not in either privileged company ring. Its only
-  // GraphRAG route is the separate, ingestion-owned shared projection; omitted
+  // The owner-approved company_shared projection has its own authenticated
+  // company-seat allowlist and never widens the mixed company or personal scope.
+  if (requested === 'company_shared') return isCompanySharedReader(caller) ? 'company_shared' : null;
+  // The CTO remains outside both mixed company and personal scopes. Omitted
   // scope deliberately remains a refusal so clients cannot gain access by
   // relying on a default.
-  if (caller === 'cto') return requested === 'company_shared' ? 'company_shared' : null;
+  if (caller === 'cto') return null;
   const personalAllowed = isLaneAllowed('legal-personal', caller);
   const scope = requested ?? (personalAllowed ? 'personal' : 'company');
   if (scope === 'all') return null;
-  if (scope === 'company_shared') return null;
   if (scope === 'personal') return personalAllowed ? scope : null;
   // The managed `company` label currently combines finance and company-legal material.
   // Until ingestion publishes a narrower, authenticated lane label, require the caller to
@@ -142,6 +143,12 @@ function isAllowedSourceUri(group: SourceGroup, uri: string): boolean {
     return FIFTH_SOURCE_CSV_KEY.test(uri.slice(FIFTH_SOURCE_CSV_PREFIX.length));
   }
   return SOURCE_PREFIXES[group].some((prefix) => uri.startsWith(prefix)) && /\.txt$/.test(uri);
+}
+
+function companySharedRelativeLocator(uri: string): string | null {
+  if (!uri.startsWith(SOURCE_ROOT)) return null;
+  const relative = uri.slice(SOURCE_ROOT.length);
+  return /^company_shared\/[a-f0-9]{64}\.txt$/.test(relative) ? relative : null;
 }
 
 const STOP_WORDS = new Set(['about', 'after', 'again', 'also', 'and', 'are', 'between', 'did', 'does', 'for', 'from', 'has', 'have', 'how', 'into', 'its', 'not', 'only', 'that', 'the', 'their', 'then', 'this', 'through', 'was', 'were', 'what', 'when', 'where', 'which', 'who', 'with']);
@@ -256,7 +263,9 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
         const sourceId = metadata?.source_id;
         const sourceVersion = metadata?.source_version;
         const text = row?.content?.text;
-        if (metadata?.source_group !== 'company_shared' || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri('company_shared', uri) ||
+        const relativeLocator = typeof uri === 'string' ? companySharedRelativeLocator(uri) : null;
+        if (metadata?.source_group !== 'company_shared' || metadata?.source_scope !== 'company_shared' || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri('company_shared', uri) ||
+            relativeLocator === null || relativeLocator !== `company_shared/${sourceId}.txt` || metadata?.source_uri !== relativeLocator ||
             typeof sourceId !== 'string' || !sharedAllowedIds.includes(sourceId) || typeof sourceVersion !== 'string' ||
             typeof text !== 'string' || !isCleanRetrievedText(text) || !hasMeaningfulOverlap(parsed.data.query, text)) {
           return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
@@ -264,7 +273,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
         const resolution = resolveCitation({ caller_agent: ctx.callerAgent, canonical_id: sourceId, source_version: sourceVersion });
         if (resolution.status !== 'resolved' || resolution.receipt.source_group !== 'company_shared' ||
             resolution.receipt.canonical_id !== sourceId || resolution.receipt.source_version !== sourceVersion ||
-            sha256(uri) !== resolution.receipt.source_locator_sha256) {
+            sha256(relativeLocator) !== resolution.receipt.source_locator_sha256) {
           return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
         }
         const sourceHash = metadata?.source_sha256;

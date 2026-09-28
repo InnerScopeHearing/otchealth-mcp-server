@@ -14,16 +14,17 @@ function harness(response: () => Response = () => Response.json({ retrievalResul
   const deps = { config: () => ({ enabled: true, kbId: 'ABCDEFGHIJ' }), credentials: async () => ({ accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }), fetch: (async (url: any, init?: RequestInit) => { calls.push({ url: String(url), init }); return response(); }) as typeof fetch };
   return { deps, calls };
 }
-const sharedUri = root + 'company_shared/projection.txt';
 const sharedSource = 'c'.repeat(64);
 const sharedId = 'a'.repeat(64);
+const sharedLocator = `company_shared/${sharedId}.txt`;
+const sharedUri = root + sharedLocator;
 const sharedMapping = {
   canonical_id: sharedId, source_version: `sha256:${sharedSource}`, source_group: 'company_shared' as const, source_sha256: sharedSource,
-  source_locator_sha256: createHash('sha256').update(sharedUri).digest('hex'), provenance_receipt_sha256: 'e'.repeat(64),
+  source_locator_sha256: createHash('sha256').update(sharedLocator).digest('hex'), provenance_receipt_sha256: 'e'.repeat(64),
 };
 function sharedRow(overrides: Record<string, unknown> = {}) {
   const base = row('company_shared', sharedUri);
-  return { ...base, metadata: { ...base.metadata, source_id: sharedId, source_sha256: sharedSource, source_version: `sha256:${sharedSource}`, ...overrides } };
+  return { ...base, metadata: { ...base.metadata, source_id: sharedId, source_scope: 'company_shared', source_uri: sharedLocator, source_sha256: sharedSource, source_version: `sha256:${sharedSource}`, ...overrides } };
 }
 
 test('coarse company graph access requires the executive ring, while personal graph access remains protected', async () => {
@@ -41,6 +42,12 @@ test('coarse company graph access requires the executive ring, while personal gr
   }
   assert.equal(graphScopeFor('cto'), null);
   assert.equal(graphScopeFor('cto', 'company_shared'), 'company_shared');
+  for (const caller of ['cto', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec']) {
+    assert.equal(graphScopeFor(caller, 'company_shared'), 'company_shared', caller);
+  }
+  for (const caller of ['clo-personal', 'external', '']) {
+    assert.equal(graphScopeFor(caller, 'company_shared'), null, caller);
+  }
   for (const scope of ['company', 'personal', 'all'] as const) {
     assert.equal(graphScopeFor('cto', scope), null, `cto/${scope}`);
   }
@@ -57,7 +64,7 @@ test('CTO can retrieve only the separate company_shared projection', async () =>
   const allowed: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx('cto'), h.deps);
   assert.equal(allowed.data.scope, 'company_shared');
   assert.equal(allowed.data.count, 1);
-  assert.deepEqual(allowed.data.matches.map((match: any) => match.source_uri), [root + 'company_shared/projection.txt']);
+  assert.deepEqual(allowed.data.matches.map((match: any) => match.source_uri), [sharedUri]);
   assert.deepEqual(
     JSON.parse(String(h.calls[0]!.init?.body)).retrievalConfiguration.vectorSearchConfiguration.filter,
     { andAll: [
@@ -76,6 +83,25 @@ test('CTO can retrieve only the separate company_shared projection', async () =>
   }
   assert.equal(denied.calls.length, 0);
   assert.equal(credentialCalls, 0);
+});
+
+test('authenticated company seats can read only the shared projection with canonical relative locators', async () => {
+  for (const caller of ['cto', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec']) {
+    const h = harness(() => Response.json({ retrievalResults: [sharedRow()] }));
+    h.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappings: [sharedMapping] });
+    const result: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx(caller), h.deps);
+    assert.equal(result.data.count, 1, caller);
+    assert.equal(result.data.matches[0].citation_resolution.status, 'resolved', caller);
+    assert.equal(graphScopeFor(caller, 'all'), null, `${caller}/all`);
+    assert.equal(graphScopeFor(caller, 'company'), ['cfo', 'clo', 'cpo', 'cco', 'exec'].includes(caller) ? 'company' : null, `${caller}/company`);
+    assert.equal(graphScopeFor(caller, 'personal'), caller === 'exec' ? 'personal' : null, `${caller}/personal`);
+  }
+  for (const caller of ['clo-personal', 'external', '']) {
+    const h = harness();
+    const result: any = await handleBrainGraphSearch({ query: 'synthetic', scope: 'company_shared' }, ctx(caller), h.deps);
+    assert.equal(result.data.error, 'forbidden_ring', caller);
+    assert.equal(h.calls.length, 0, caller);
+  }
 });
 
 test('every executive company graph seat reaches only the company-labelled corpus', async () => {
@@ -268,7 +294,7 @@ test('CTO resolves company_shared citations only, while company mappings stay fo
   const companySharedRow = sharedRow();
   const mapping = (source_group: 'company' | 'company_shared') => ({
     canonical_id: 'a'.repeat(64), source_version: `sha256:${source}`, source_group, source_sha256: source,
-    source_locator_sha256: createHash('sha256').update(sharedUri).digest('hex'), provenance_receipt_sha256: 'e'.repeat(64),
+    source_locator_sha256: createHash('sha256').update(sharedLocator).digest('hex'), provenance_receipt_sha256: 'e'.repeat(64),
   });
 
   const allowed = harness(() => Response.json({ retrievalResults: [companySharedRow] }));
@@ -302,11 +328,13 @@ test('company_shared requires approved mappings before retrieval and rejects any
   const good = sharedRow();
   const badCases = [
     { ...good, metadata: { ...good.metadata, source_group: 'company' } },
+    { ...good, metadata: { ...good.metadata, source_scope: 'company' } },
     { ...good, location: { type: 'S3', s3Location: { uri: root + 'company/secret.txt' } } },
     { ...good, metadata: { ...good.metadata, source_id: 'f'.repeat(64) } },
     { ...good, metadata: { ...good.metadata, source_version: `sha256:${'f'.repeat(64)}` } },
     { ...good, location: { type: 'S3', s3Location: { uri: sharedUri + '?wrong=1' } } },
     { ...good, metadata: { ...good.metadata, source_id: undefined } },
+    { ...good, metadata: { ...good.metadata, source_uri: 'company_shared/' + 'f'.repeat(64) + '.txt' } },
   ];
   for (const bad of badCases) {
     const h = harness(() => Response.json({ retrievalResults: [good, bad] }));

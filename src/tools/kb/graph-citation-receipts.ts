@@ -12,6 +12,10 @@ import { isLaneAllowed } from './search-privileged.js';
 const HASH = /^[a-f0-9]{64}$/;
 const VERSION = /^sha256:[a-f0-9]{64}$/;
 const GROUPS = new Set(['company', 'company_shared']);
+// Corporate identities may read the separately approved public projection.
+// The clo-personal credential remains outside the company seat allowlist.
+const COMPANY_SHARED_READERS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec']);
+export function isCompanySharedReader(caller: string): boolean { return COMPANY_SHARED_READERS.has(caller); }
 export type CitationSourceGroup = 'company' | 'company_shared';
 
 export type GraphCitationMapping = Readonly<{
@@ -61,9 +65,7 @@ function validMapping(value: unknown): value is GraphCitationMapping {
 }
 
 function allowed(caller: string, group: CitationSourceGroup): boolean {
-  // Keep the same coarse-company gate as GraphRAG retrieval. The CTO is
-  // intentionally limited to the separately materialized shared projection.
-  if (group === 'company_shared') return caller === 'cto';
+  if (group === 'company_shared') return isCompanySharedReader(caller);
   return isLaneAllowed('finance-cfo-source-docs', caller) && isLaneAllowed('legal-company', caller);
 }
 
