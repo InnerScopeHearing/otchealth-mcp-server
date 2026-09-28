@@ -23,10 +23,14 @@ type CachedArtifact = { cacheKey: string; expiresAt: number; mappings: readonly 
 let verifiedCache: CachedArtifact | undefined;
 
 function validConfig(config: CitationMappingArtifactConfig): boolean {
-  return /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(config.bucket) &&
+  return /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(config.bucket) &&
     config.key.length > 0 && config.key.length <= 1024 && !config.key.startsWith('/') &&
     config.key.split('/').every((segment) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(segment) && segment !== '.' && segment !== '..') &&
     OBJECT_VERSION.test(config.versionId) && config.versionId !== 'null' && HASH.test(config.sha256);
+}
+
+function rfc3986Encode(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
 function validMapping(value: unknown): value is Record<string, unknown> {
@@ -84,7 +88,7 @@ export async function loadGraphCitationMappings(
   try {
     const host = `${config.bucket}.s3.us-east-1.amazonaws.com`;
     const path = `/${config.key.split('/').map(encodeURIComponent).join('/')}`;
-    const query = `versionId=${encodeURIComponent(config.versionId)}`;
+    const query = `versionId=${rfc3986Encode(config.versionId)}`;
     const signed = sign({ method: 'GET', host, path, query, region: 'us-east-1', service: 's3', credentials });
     const response = await fetchImpl(`https://${host}${path}?${query}`, {
       method: 'GET', headers: signed.headers, redirect: 'error', signal: AbortSignal.timeout(10_000),

@@ -14,7 +14,7 @@ const mapping = {
 };
 const artifactText = JSON.stringify([mapping]);
 const config: CitationMappingArtifactConfig = {
-  bucket: 'citation-mappings-test', key: 'approved/v1/mappings.json', versionId: 'version-123', sha256: digest(artifactText),
+  bucket: 'citation-mappings-test', key: 'approved/v1/mappings.json', versionId: 'version/123+v1!', sha256: digest(artifactText),
 };
 const credentials = { accessKeyId: 'synthetic', secretAccessKey: 'synthetic' };
 const signer = (opts: { host: string; path: string; query: string }) => ({ headers: { host: opts.host, 'x-test-signed': `${opts.path}?${opts.query}` } });
@@ -32,7 +32,7 @@ test('loads only a pinned, SHA-verified, six-field mapping and caches the verifi
   assert.deepEqual(first, [mapping]);
   assert.equal(first, second);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.url, 'https://citation-mappings-test.s3.us-east-1.amazonaws.com/approved/v1/mappings.json?versionId=version-123');
+  assert.equal(calls[0]?.url, 'https://citation-mappings-test.s3.us-east-1.amazonaws.com/approved/v1/mappings.json?versionId=version%2F123%2Bv1%21');
   assert.equal(calls[0]?.init?.method, 'GET');
   assert.equal(calls[0]?.init?.redirect, 'error');
 });
@@ -64,5 +64,6 @@ test('rejects duplicate identities and object versions that are not immutable', 
   assert.deepEqual(await loadGraphCitationMappings({ ...config, versionId: 'null' }, credentials, (async () => response()) as typeof fetch, signer as any), []);
   assert.deepEqual(await loadGraphCitationMappings({ ...config, key: 'approved/v1/name with spaces.json' }, credentials, (async () => response()) as typeof fetch, signer as any), []);
   assert.deepEqual(await loadGraphCitationMappings({ ...config, key: 'approved/v1/name!part.json' }, credentials, (async () => response()) as typeof fetch, signer as any), []);
+  assert.deepEqual(await loadGraphCitationMappings({ ...config, bucket: 'citation.bucket.test' }, credentials, (async () => response()) as typeof fetch, signer as any), []);
   clearGraphCitationMappingCacheForTests();
 });
