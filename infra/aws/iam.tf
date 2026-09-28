@@ -113,19 +113,11 @@ resource "aws_iam_role_policy" "task_runtime_access" {
         Resource = "*"
       },
       {
-        # The gateway sends Retrieve only to the one approved managed GraphRAG
-        # knowledge base and the fixed public-only company_shared knowledge base.
-        # Application code additionally allowlists the public source IDs and checks
-        # every returned S3 URI. After authorized policy publication, read back with
-        # `aws iam get-role-policy --role-name otchealthTaskRole --policy-name runtime-access`
-        # and verify only these exact knowledge-base ARNs are present for Retrieve.
+        # The existing managed GraphRAG knowledge base grant remains in runtime-access.
         Sid      = "RetrieveManagedGraphRag"
         Effect   = "Allow"
         Action   = ["bedrock:Retrieve"]
-        Resource = [
-          "arn:aws:bedrock:${var.aws_region}:${var.aws_account_id}:knowledge-base/XNMHPUKGDT",
-          "arn:aws:bedrock:${var.aws_region}:${var.aws_account_id}:knowledge-base/ZAYEKIX0RX",
-        ]
+        Resource = "arn:aws:bedrock:${var.aws_region}:${var.aws_account_id}:knowledge-base/XNMHPUKGDT"
       },
       {
         # The application still applies the stricter caller ring plus a mandatory
@@ -214,6 +206,26 @@ resource "aws_iam_role" "ecs_execution" {
 resource "aws_iam_role_policy_attachment" "ecs_execution_managed" {
   role       = aws_iam_role.ecs_execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# Captured from the separately approved live inline policy on 2026-09-28.
+# This repository has no imported Terraform state for that policy. Do not apply it
+# from Terraform. For verification, read the named inline policy with
+# `aws iam get-role-policy --role-name otchealthTaskRole --policy-name PublicCompanySharedManagedKBRetrieve20260928`.
+# Then run `aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::900915535335:role/otchealthTaskRole --action-names bedrock:Retrieve --resource-arns arn:aws:bedrock:us-east-1:900915535335:knowledge-base/ZAYEKIX0RX arn:aws:bedrock:us-east-1:900915535335:knowledge-base/XNMHPUKGDT`.
+# Expected decisions are allowed for ZAYEKIX0RX and implicitDeny for XNMHPUKGDT.
+resource "aws_iam_role_policy" "public_company_shared_managed_kb_retrieve" {
+  name = "PublicCompanySharedManagedKBRetrieve20260928"
+  role = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["bedrock:Retrieve"]
+      Resource = "arn:aws:bedrock:us-east-1:900915535335:knowledge-base/ZAYEKIX0RX"
+    }]
+  })
 }
 
 resource "aws_iam_role_policy" "ecs_execution_read_job_env_files" {
