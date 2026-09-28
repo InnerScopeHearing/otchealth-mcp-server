@@ -265,6 +265,23 @@ test('negative synthetic identifiers produce a true no-match result', async () =
   assert.equal(isCleanRetrievedText('\u0000broken'), false);
 });
 
+test('Neptune distance scores keep low-distance matches and still require query-term overlap', async () => {
+  const close = { ...row(), score: 0.05 };
+  const distantButUnrelated = {
+    ...row(),
+    content: { text: 'Completely unrelated words.' },
+    metadata: { ...row().metadata, source_id: 'f'.repeat(64), text_sha256: 'f'.repeat(64) },
+    score: 2.1,
+  };
+  const h = harness(() => Response.json({ retrievalResults: [close, distantButUnrelated] }));
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic organization contract', top: 8 }, ctx('cfo'), h.deps);
+
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.matches[0].retrieval_score, 0.05);
+  assert.equal(result.data.relevance_withheld_count, 1);
+  assert.equal(result.data.matches[0].source_group, 'company');
+});
+
 test('empty, repeated, malformed, and oversized source-ID lists never call AWS', async () => {
   const h = harness(); h.deps.credentials = async () => { throw new Error('must not resolve'); };
   for (const source_ids of [[], ['a'.repeat(64), 'a'.repeat(64)], ['A'.repeat(64)], ['../source'], Array.from({ length: 6 }, (_, i) => String(i).repeat(64))]) {

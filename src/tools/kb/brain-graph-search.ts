@@ -24,7 +24,6 @@ const FIFTH_SOURCE_CSV_PREFIX = 's3://otchealth-finance-legal-dr-55c84f6b/graphr
 const FIFTH_SOURCE_CSV_KEY = /^[a-f0-9]{64}\/records-\d{4}\.csv$/;
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
-const MIN_RETRIEVAL_SCORE = 0.2;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
 type Scope = SourceGroup | 'all';
 type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string; require_documentary_bridge?: boolean };
@@ -232,7 +231,10 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       if (scope === 'personal' && matterId !== parsed.data.matter_id) { withheld++; continue; }
       if (!isCleanRetrievedText(text)) { qualityWithheld++; continue; }
       const score = typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : undefined;
-      if (!requestedSources && (score === undefined || score < MIN_RETRIEVAL_SCORE || !hasMeaningfulOverlap(parsed.data.query, text))) { relevanceWithheld++; continue; }
+      // Neptune GraphRAG exposes score as a distance (lower is better), and may
+      // omit it. Keep it as returned telemetry; relevance gating uses the
+      // content-overlap check rather than assuming a provider-neutral direction.
+      if (!requestedSources && !hasMeaningfulOverlap(parsed.data.query, text)) { relevanceWithheld++; continue; }
       candidates.push({
         source_group: group, source_uri: uri,
         ...(typeof sourceId === 'string' && SHA256.test(sourceId) ? { source_id: sourceId } : {}),
