@@ -24,7 +24,7 @@ const sharedMapping = {
 };
 function sharedRow(overrides: Record<string, unknown> = {}) {
   const base = row('company_shared', sharedUri);
-  return { ...base, metadata: { ...base.metadata, source_id: sharedId, source_uri: sharedLocator, source_sha256: sharedSource, source_version: `sha256:${sharedSource}`, ...overrides } };
+  return { ...base, metadata: { ...base.metadata, source_id: sharedId, source_scope: 'company_shared', source_uri: sharedLocator, source_sha256: sharedSource, source_version: `sha256:${sharedSource}`, ...overrides } };
 }
 
 test('coarse company graph access requires the executive ring, while personal graph access remains protected', async () => {
@@ -328,6 +328,7 @@ test('company_shared requires approved mappings before retrieval and rejects any
   const good = sharedRow();
   const badCases = [
     { ...good, metadata: { ...good.metadata, source_group: 'company' } },
+    { ...good, metadata: { ...good.metadata, source_scope: 'company' } },
     { ...good, location: { type: 'S3', s3Location: { uri: root + 'company/secret.txt' } } },
     { ...good, metadata: { ...good.metadata, source_id: 'f'.repeat(64) } },
     { ...good, metadata: { ...good.metadata, source_version: `sha256:${'f'.repeat(64)}` } },

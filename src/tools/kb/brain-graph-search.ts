@@ -72,7 +72,7 @@ const DEFAULTS: Deps = {
 };
 const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
-  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. CTO may request only the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
+  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company and authenticated company seats may request the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
   top: z.number().int().min(1).max(8).optional(),
   source_ids: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(5)
     .refine((ids) => new Set(ids).size === ids.length, 'Source IDs must be unique')
@@ -264,7 +264,7 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
         const sourceVersion = metadata?.source_version;
         const text = row?.content?.text;
         const relativeLocator = typeof uri === 'string' ? companySharedRelativeLocator(uri) : null;
-        if (metadata?.source_group !== 'company_shared' || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri('company_shared', uri) ||
+        if (metadata?.source_group !== 'company_shared' || metadata?.source_scope !== 'company_shared' || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri('company_shared', uri) ||
             relativeLocator === null || relativeLocator !== `company_shared/${sourceId}.txt` || metadata?.source_uri !== relativeLocator ||
             typeof sourceId !== 'string' || !sharedAllowedIds.includes(sourceId) || typeof sourceVersion !== 'string' ||
             typeof text !== 'string' || !isCleanRetrievedText(text) || !hasMeaningfulOverlap(parsed.data.query, text)) {
