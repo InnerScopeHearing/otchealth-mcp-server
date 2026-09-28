@@ -84,6 +84,12 @@ export interface ServiceInfo {
  * surface not yet exposed. Keep in sync with docs/UNIFIED-FLEET-GATEWAY.md.
  */
 export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
+  aws: {
+    description: 'CTO-only fixed AWS operation registry for the approved public company_shared pilot and the gateway ECS service.',
+    ring: 'non-phi', auth: 'ECS task-role credentials, verified with STS GetCallerIdentity', status: 'wired',
+    available: [],
+    rule: 'aws_api_query and aws_api_operation are CTO-only in governance and re-check caller identity in-handler. Writes additionally require global write/high-risk gates, AWS_ADMIN_ENABLE_WRITES=true, and operation-specific safeguards. No task-role escalation, arbitrary role, resource, endpoint, policy document, task definition, or credentials are accepted.',
+  },
   cio: {
     description: 'Customer.io lifecycle CRM plus a bounded administrative control plane for health, limits, Goals, subscriptions, consent, audit, and Design Studio readiness.',
     ring: 'non-phi', auth: 'CIO_SITE_ID / CIO_TRACK_KEY / CIO_APP_API_BEARER / CIO_FLY_SERVICE_ACCOUNT_TOKEN', status: 'wired',
