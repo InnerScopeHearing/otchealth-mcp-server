@@ -4,11 +4,12 @@
  * distinguish company and personal material; labels are not separate graph storage.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isLaneAllowed } from './search-privileged.js';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
-import { createGraphCitationReceiptResolver } from './graph-citation-receipts.js';
+import { companySharedCanonicalIds, companySharedSourceVersions, createGraphCitationReceiptResolver } from './graph-citation-receipts.js';
 import { loadGraphCitationMappings, type CitationMappingArtifactConfig } from './graph-citation-mapping-loader.js';
 
 const REGION = 'us-east-1';
@@ -26,6 +27,7 @@ const FIFTH_SOURCE_CSV_KEY = /^[a-f0-9]{64}\/records-\d{4}\.csv$/;
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
+const MAX_SHARED_ALLOWLIST_IDS = 500;
 type Scope = SourceGroup | 'all';
 type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string; require_documentary_bridge?: boolean };
 type Config = { enabled: boolean; kbId: string; citationMappings?: readonly unknown[]; citationMappingArtifact?: CitationMappingArtifactConfig };
@@ -133,6 +135,8 @@ function outcome(mode: string, error?: string, requireDocumentaryBridge = false)
   return { data: { mode, matches: [], count: 0, ...(error ? { error } : {}), ...(requireDocumentaryBridge ? { documentary_bridge: { status: 'unproven' } } : {}) }, summary: `Managed GraphRAG retrieval: ${mode}.` };
 }
 
+function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+
 function isAllowedSourceUri(group: SourceGroup, uri: string): boolean {
   if (group === 'company' && uri.startsWith(FIFTH_SOURCE_CSV_PREFIX)) {
     return FIFTH_SOURCE_CSV_KEY.test(uri.slice(FIFTH_SOURCE_CSV_PREFIX.length));
@@ -203,12 +207,26 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   const top = parsed.data.top ?? 5;
   const resolveCitation = createGraphCitationReceiptResolver(citationMappings);
   const requestedSources = parsed.data.source_ids ? new Set(parsed.data.source_ids) : undefined;
-  const sourceFilter = requestedSources ? { in: { key: 'source_id', value: [...requestedSources] } } : undefined;
+  const sharedAllowedIds = scope === 'company_shared' ? companySharedCanonicalIds(citationMappings) : [];
+  const sharedAllowedVersions = scope === 'company_shared' ? companySharedSourceVersions(citationMappings) : [];
+  if (scope === 'company_shared' && (sharedAllowedIds.length === 0 || sharedAllowedVersions.length === 0 || sharedAllowedIds.length > MAX_SHARED_ALLOWLIST_IDS || sharedAllowedVersions.length > MAX_SHARED_ALLOWLIST_IDS)) {
+    return outcome('unavailable', 'shared_provenance_unconfigured', requireDocumentaryBridge);
+  }
+  if (scope === 'company_shared' && requestedSources && [...requestedSources].some((id) => !sharedAllowedIds.includes(id))) {
+    return outcome('withheld', 'shared_source_not_allowlisted', requireDocumentaryBridge);
+  }
+  const sourceIdsForFilter = scope === 'company_shared'
+    ? (requestedSources ? [...requestedSources] : sharedAllowedIds)
+    : requestedSources ? [...requestedSources] : undefined;
+  const sourceFilter = sourceIdsForFilter ? { in: { key: 'source_id', value: sourceIdsForFilter } } : undefined;
   const groupFilter = { equals: { key: 'source_group', value: scope } };
+  const sharedVersionFilter = scope === 'company_shared'
+    ? { in: { key: 'source_version', value: sharedAllowedVersions } }
+    : undefined;
   const matterFilter = parsed.data.matter_id ? { equals: { key: 'matter_id', value: parsed.data.matter_id } } : undefined;
   // Source narrowing is intersected with the authenticated scope, never substituted
   // for it. Repeat the source-ID check on returned rows if upstream ignores a filter.
-  const filters = [groupFilter, matterFilter, sourceFilter].filter((value) => value !== undefined);
+  const filters = [groupFilter, sharedVersionFilter, matterFilter, sourceFilter].filter((value) => value !== undefined);
   const filter = filters.length === 1 ? filters[0] : { andAll: filters };
   const host = `bedrock-agent-runtime.${REGION}.amazonaws.com`;
   const path = `/knowledgebases/${config.kbId}/retrieve`;
@@ -229,6 +247,51 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
     const raw: any = await readBounded(response);
     if (raw?.guardrailAction === 'INTERVENED') return outcome('withheld', 'retrieval_intervened');
     if (!Array.isArray(raw?.retrievalResults) || raw.retrievalResults.length > 100) return outcome('unavailable', 'invalid_bedrock_response');
+    if (scope === 'company_shared') {
+      const rows = raw.retrievalResults;
+      const validated: Candidate[] = [];
+      for (const row of rows) {
+        const uri = row?.location?.type === 'S3' ? row?.location?.s3Location?.uri : undefined;
+        const metadata = row?.metadata;
+        const sourceId = metadata?.source_id;
+        const sourceVersion = metadata?.source_version;
+        const text = row?.content?.text;
+        if (metadata?.source_group !== 'company_shared' || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri('company_shared', uri) ||
+            typeof sourceId !== 'string' || !sharedAllowedIds.includes(sourceId) || typeof sourceVersion !== 'string' ||
+            typeof text !== 'string' || !isCleanRetrievedText(text) || !hasMeaningfulOverlap(parsed.data.query, text)) {
+          return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
+        }
+        const resolution = resolveCitation({ caller_agent: ctx.callerAgent, canonical_id: sourceId, source_version: sourceVersion });
+        if (resolution.status !== 'resolved' || resolution.receipt.source_group !== 'company_shared' ||
+            resolution.receipt.canonical_id !== sourceId || resolution.receipt.source_version !== sourceVersion ||
+            sha256(uri) !== resolution.receipt.source_locator_sha256) {
+          return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
+        }
+        const sourceHash = metadata?.source_sha256;
+        if (typeof sourceHash !== 'string' || !SHA256.test(sourceHash) || sourceVersion !== `sha256:${sourceHash}` || resolution.receipt.source_sha256 !== sourceHash) {
+          return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
+        }
+        const score = typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : undefined;
+        validated.push({
+          source_group: 'company_shared', source_uri: uri, source_id: sourceId, source_version: sourceVersion,
+          source_sha256: sourceHash,
+          text: text.slice(0, MAX_HIT_CHARS), truncated: text.length > MAX_HIT_CHARS,
+          ...(typeof metadata?.text_sha256 === 'string' && SHA256.test(metadata.text_sha256) ? { text_sha256: metadata.text_sha256 } : {}),
+          ...(score !== undefined ? { retrieval_score: score } : {}),
+        });
+      }
+      const matches = validated.slice(0, top).map((match, index) => ({
+        citation: `graph:${index + 1}`,
+        ...match,
+        citation_resolution: resolveCitation({ caller_agent: ctx.callerAgent, canonical_id: String(match.source_id), source_version: String(match.source_version) }),
+      }));
+      return {
+        data: { mode: 'aws-managed-graphrag', scope, matches, count: matches.length, answer_generated: false, ...(raw.nextToken ? { more_results_available: true } : {}) },
+        summary: matches.length
+          ? `${matches.length} company_shared GraphRAG passages returned with validated canonical source receipts. No answer was generated.`
+          : 'No cited company_shared source passages were returned. No answer was generated.',
+      };
+    }
     const candidates: Candidate[] = [];
     let withheld = 0;
     let qualityWithheld = 0;

@@ -96,3 +96,30 @@ export function createGraphCitationReceiptResolver(mappings: readonly unknown[])
     return { status: 'resolved', receipt: Object.freeze({ schema: 'graph-citation-source-resolution-receipt-v1', receipt_id: 'gcr_' + hash(canonical(source)), ...source }) };
   };
 }
+
+/** Return only canonical IDs backed by a completely valid, unambiguous mapping. */
+export function companySharedCanonicalIds(mappings: readonly unknown[]): string[] {
+  if (!Array.isArray(mappings) || mappings.length > 100_000 || !mappings.every(validMapping)) return [];
+  const seen = new Set<string>();
+  const ids = new Set<string>();
+  for (const item of mappings as readonly GraphCitationMapping[]) {
+    const key = `${item.canonical_id}\0${item.source_version}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    if (item.source_group === 'company_shared') ids.add(item.canonical_id);
+  }
+  return [...ids].sort();
+}
+
+export function companySharedSourceVersions(mappings: readonly unknown[]): string[] {
+  if (!Array.isArray(mappings) || mappings.length > 100_000 || !mappings.every(validMapping)) return [];
+  const seen = new Set<string>();
+  const versions = new Set<string>();
+  for (const item of mappings as readonly GraphCitationMapping[]) {
+    const key = `${item.canonical_id}\0${item.source_version}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    if (item.source_group === 'company_shared') versions.add(item.source_version);
+  }
+  return [...versions].sort();
+}
