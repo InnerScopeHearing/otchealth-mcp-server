@@ -1,4 +1,4 @@
-import { canonical } from "./aws-http.mjs";
+import { canonical, sha256 } from "./aws-http.mjs";
 import { createResolver, LIMITS } from "./resolver.mjs";
 
 const CALLBACKS = ["authorizeSource", "isCurrentSource", "verifyPreparedSource", "verifyIdentity", "verifyRelationship", "verifySupersession", "recordedAt"];
@@ -14,13 +14,13 @@ const utc = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2
  * and the policy authorization are supplied fresh by the gateway on every call.
  * @param {{entries: any[], query: any, now?: () => number, identityCurrentness?: Map<string, boolean> | null}} input
  */
-export function queryDurableHistories({ entries, query, now = Date.now, identityCurrentness = null }) {
+function queryDurableHistoriesForSeats({ entries, query, now = Date.now, identityCurrentness = null }, allowedSeats) {
   if (!Array.isArray(entries) || !entries.length || entries.length > 64) fail("durable_query_invalid");
   const sourcesByRef = new Map(); let totalSources = 0, totalEvents = 0, callerLane = null;
   for (const entry of entries) {
     const { history, inputs, authorization, sourceCurrent } = entry ?? {};
     if (!exact(history, ["schema", "run", "caller_seat", "sources", "events", "queries"]) || history.schema !== "resolution-history-v1" ||
-        !["cfo", "clo"].includes(history.caller_seat) || (callerLane !== null && history.caller_seat !== callerLane) || !Array.isArray(inputs) || !inputs.length ||
+        !allowedSeats.includes(history.caller_seat) || (callerLane !== null && history.caller_seat !== callerLane) || !Array.isArray(inputs) || !inputs.length ||
         !Array.isArray(history.events) || !authorization || authorization.allowed !== true || authorization.provenance?.decision_source !== "authenticated_gateway" ||
         !Array.isArray(authorization.provenance.allowed_roles) || !authorization.provenance.allowed_roles.includes(history.caller_seat) ||
         !utc(authorization.expires_at) || Date.parse(authorization.expires_at) <= now() || typeof sourceCurrent !== "boolean") fail("durable_query_invalid");
@@ -73,6 +73,61 @@ export function queryDurableHistories({ entries, query, now = Date.now, identity
   replaying = false;
   const answer = clone(query?.kind === "candidate_links" ? resolver.candidateLinks(clone(query)) : resolver.explain(clone(query)));
   Object.defineProperty(answer, "identityProofs", { value: identityProofs, enumerable: false }); return answer;
+}
+
+/** Existing finance and company-legal route. Keep its caller contract closed. */
+export function queryDurableHistories(input) {
+  return queryDurableHistoriesForSeats(input, ["cfo", "clo"]);
+}
+
+const HASH = /^[a-f0-9]{64}$/;
+const SHARED_SYNTHETIC_BINDING = "company-shared-synthetic-chunk-binding-v1";
+const SHARED_SYNTHETIC_INDEX = "company-shared-synthetic";
+const citationKey = receipt => {
+  const { citation_id: _citationId, ...identity } = receipt;
+  return `cite_${sha256(canonical(identity))}`;
+};
+
+/**
+ * Replays only the fixed-shape CTO company_shared synthetic contract. This adapter is not used by
+ * the CFO/CLO publication service and accepts no client supplied history or store locator.
+ * Currentness is checked around replay against the pinned citation receipt set.
+ */
+export function queryCompanySharedSyntheticHistories({ entries, query, now = Date.now, isCurrentCitation }) {
+  if (!Array.isArray(entries) || !entries.length || entries.length > 4 || typeof isCurrentCitation !== "function") fail("shared_synthetic_query_invalid");
+  const receipts = [];
+  for (const entry of entries) {
+    if (!exact(entry, ["history", "inputs", "authorization", "sourceCurrent", "citation_receipts"]) ||
+        entry.history?.caller_seat !== "cto" || entry.history?.run?.scope !== "company_shared" ||
+        !Array.isArray(entry.inputs) || !entry.inputs.length || !Array.isArray(entry.citation_receipts) ||
+        entry.citation_receipts.length !== entry.inputs.length) fail("shared_synthetic_partition_invalid");
+    for (let i = 0; i < entry.inputs.length; i++) {
+      const input = entry.inputs[i], binding = input?.binding, receipt = entry.citation_receipts[i];
+      if (binding?.schema !== SHARED_SYNTHETIC_BINDING || binding.room !== "company_shared" || binding.source_index !== SHARED_SYNTHETIC_INDEX ||
+          !exact(receipt, ["schema", "source_group", "source_id", "source_version", "provenance_receipt_sha256", "citation_id"]) ||
+          receipt.schema !== "company-shared-citation-receipt-v1" || receipt.source_group !== "company_shared" ||
+          !HASH.test(receipt.source_id ?? "") || !HASH.test(receipt.provenance_receipt_sha256 ?? "") ||
+          receipt.source_version !== `sha256:${binding.chunk_sha256}` || !HASH.test(binding.chunk_sha256 ?? "") ||
+          receipt.citation_id !== citationKey(receipt)) fail("shared_synthetic_citation_invalid");
+      receipts.push(receipt);
+    }
+  }
+  const readCurrent = receipt => {
+    try { return isCurrentCitation(structuredClone(receipt)) === true; }
+    catch { return false; }
+  };
+  const before = receipts.map(readCurrent);
+  const replayEntries = entries.map((entry, index) => ({ ...entry, sourceCurrent: before.slice(index * entry.inputs.length, (index + 1) * entry.inputs.length).every(Boolean) }));
+  const answer = queryDurableHistoriesForSeats({ entries: replayEntries, query, now }, ["cto"]);
+  const after = receipts.map(readCurrent);
+  if (before.some((value, index) => value !== after[index])) fail("shared_synthetic_currentness_changed");
+  const byVersion = new Map(receipts.filter((_, index) => before[index]).map(receipt => [receipt.source_version, receipt]));
+  const citations = (answer.evidence ?? []).map(record => {
+    const version = `sha256:${record.evidence?.source_binding?.chunk_sha256 ?? ""}`;
+    const receipt = byVersion.get(version);
+    return receipt ? { source_id: receipt.source_id, source_version: receipt.source_version, citation_id: receipt.citation_id, provenance_receipt_sha256: receipt.provenance_receipt_sha256 } : null;
+  }).filter(Boolean);
+  return { ...answer, query_scope: "company_shared", synthetic_only: true, citations };
 }
 
 export function queryDurableHistory(input) { return queryDurableHistories({entries:[input],query:input.query,now:input.now}); }
