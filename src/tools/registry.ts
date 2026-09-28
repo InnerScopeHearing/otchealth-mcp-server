@@ -142,6 +142,8 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // which deliberately excludes every write tool by design; the ship lane is where this is needed.
   'retrieval_feedback',
   'llm_azure', 'catalog_list_tools', 'catalog_master', 'gateway_fetch_result',
+  // AWS control-plane operations are CTO-only and hard-scoped in aws-admin/tools.ts.
+  'aws_api_query', 'aws_api_operation',
   // AgentCore Browser broker: read-only inspection tools. The broker independently resolves
   // the enrolled caller/profile and permits only public_read; visibility here does not grant
   // authentication, persistence, draft, committed-write, or any campaign capability.
