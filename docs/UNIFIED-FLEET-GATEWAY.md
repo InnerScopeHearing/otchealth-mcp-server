@@ -15,6 +15,7 @@ logging. ADR-001 Option C (Node + n8n hybrid). Public endpoint (when deployed):
 The live capability catalog is authoritative; this human mirror records material milestones.
 
 WIRED (registered in `src/tools/index.ts`):
+- **AWS control plane**: `aws_api_query` and `aws_api_operation` are CTO-only fixed operations for two exact public `company_shared` S3 documents, one dedicated managed Bedrock knowledge base/data source, its Bedrock-only execution role, and the existing gateway ECS service. This is not an arbitrary AWS API proxy. Live AWS write execution remains disabled until the task-role permissions and `AWS_ADMIN_ENABLE_WRITES` gate are verified. See `AWS-ADMIN-OPERATIONS.md`.
 - **Customer.io**: 70 existing App/Track tools plus 42 bounded, service-account-gated `cio_admin_*` wrappers (20 reads; 22 dry-run/high-risk configuration writes). No generic Fly API proxy. See `CUSTOMERIO-GOVERNED-CONTROL.md`.
 - **Shopify** (Phase 2): list/get products, get order, list abandoned checkouts.
 - **Intercom** (Phase 2): list/get articles.
