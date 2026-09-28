@@ -295,6 +295,13 @@ test('CONNECTOR_TOOLSET env override still overrides the ship set (back-compat)'
   assert.deepEqual([...set].sort(), ['brain_search', 'web_search']);
 });
 
+test('CONNECTOR_TOOLSET override cannot expose public KB retrieval to denied ship lanes', () => {
+  const env = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_public_kb_search' } as Env;
+  assert.equal(connectorToolset(env, 'cto').has('brain_public_kb_search'), true);
+  assert.equal(connectorToolset(env, 'clo-personal').has('brain_public_kb_search'), false);
+  assert.equal(connectorToolset(env, 'exec').has('brain_public_kb_search'), false);
+});
+
 test('EXTERNAL_READONLY_TOOLSET env override overrides the external set', () => {
   const env = { ...testEnv(), EXTERNAL_READONLY_TOOLSET: 'brain_search' } as Env;
   const set = connectorToolset(env, 'external-read');
