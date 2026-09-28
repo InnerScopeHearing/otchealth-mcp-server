@@ -9,6 +9,7 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 import { isLaneAllowed } from './search-privileged.js';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
 import { createGraphCitationReceiptResolver } from './graph-citation-receipts.js';
+import { loadGraphCitationMappings, type CitationMappingArtifactConfig } from './graph-citation-mapping-loader.js';
 
 const REGION = 'us-east-1';
 const SOURCE_ROOT = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
@@ -27,7 +28,7 @@ const MAX_HIT_CHARS = 3000;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
 type Scope = SourceGroup | 'all';
 type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string; require_documentary_bridge?: boolean };
-type Config = { enabled: boolean; kbId: string; citationMappings?: readonly unknown[] };
+type Config = { enabled: boolean; kbId: string; citationMappings?: readonly unknown[]; citationMappingArtifact?: CitationMappingArtifactConfig };
 type Deps = { config(): Config; credentials(): Promise<AwsCredentials | null>; fetch: typeof fetch };
 const SHA256 = /^[a-f0-9]{64}$/;
 type BridgeSource = {
@@ -41,12 +42,28 @@ type BridgeSource = {
 type Candidate = Record<string, unknown> & { bridge_source?: BridgeSource };
 const DEFAULTS: Deps = {
   config: () => {
-    let citationMappings: readonly unknown[] = [];
-    try {
-      const parsed: unknown = JSON.parse(process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_JSON ?? '[]');
-      if (Array.isArray(parsed)) citationMappings = parsed;
-    } catch { /* Invalid operator configuration must resolve no citations. */ }
-    return { enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '', citationMappings };
+    // The legacy JSON override remains available to isolated tests and explicit compatibility
+    // deployments. Production may instead pin the approved S3 object's version and raw SHA-256.
+    const legacyMappings = process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_JSON;
+    if (legacyMappings !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(legacyMappings);
+        return { enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '', citationMappings: Array.isArray(parsed) ? parsed : [] };
+      } catch {
+        /* Invalid operator configuration must resolve no citations and must not fall through. */
+        return { enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '', citationMappings: [] };
+      }
+    }
+    return {
+      enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true',
+      kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '',
+      citationMappingArtifact: {
+        bucket: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_BUCKET ?? '',
+        key: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_KEY ?? '',
+        versionId: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_VERSION_ID ?? '',
+        sha256: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_SHA256 ?? '',
+      },
+    };
   },
   credentials: resolveAwsCredentials,
   fetch: (...args) => fetch(...args),
@@ -179,8 +196,12 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   if (!/^[A-Za-z0-9]{10}$/.test(config.kbId)) return outcome('unconfigured', 'invalid_knowledge_base_configuration', requireDocumentaryBridge);
   const credentials = await deps.credentials();
   if (!credentials) return outcome('unavailable', 'credentials_unavailable', requireDocumentaryBridge);
+  const citationMappings = config.citationMappings ?? await loadGraphCitationMappings(
+    config.citationMappingArtifact, credentials, deps.fetch,
+    (opts) => signRequest({ ...opts, body: '' }),
+  );
   const top = parsed.data.top ?? 5;
-  const resolveCitation = createGraphCitationReceiptResolver(config.citationMappings ?? []);
+  const resolveCitation = createGraphCitationReceiptResolver(citationMappings);
   const requestedSources = parsed.data.source_ids ? new Set(parsed.data.source_ids) : undefined;
   const sourceFilter = requestedSources ? { in: { key: 'source_id', value: [...requestedSources] } } : undefined;
   const groupFilter = { equals: { key: 'source_group', value: scope } };

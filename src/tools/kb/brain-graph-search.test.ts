@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { graphScopeFor, handleBrainGraphSearch, hasMeaningfulOverlap, isCleanRetrievedText } from './brain-graph-search.js';
 import { mayOffloadToolResult } from '../result-store.js';
 
@@ -222,6 +223,32 @@ test('GraphRAG citations carry only a canonical source-resolution receipt when a
   assert.equal(result.data.matches[0].citation_resolution.status, 'resolved');
   assert.deepEqual(Object.keys(result.data.matches[0].citation_resolution.receipt).sort(), ['canonical_id', 'provenance_receipt_sha256', 'receipt_id', 'schema', 'source_group', 'source_locator_sha256', 'source_sha256', 'source_version']);
   assert.equal(JSON.stringify(result.data.matches[0].citation_resolution).includes('test.txt'), false);
+});
+
+test('GraphRAG loads the version-pinned citation artifact when the legacy test override is absent', async () => {
+  const h = harness();
+  const source = 'c'.repeat(64);
+  const artifact = JSON.stringify([{
+    canonical_id: 'a'.repeat(64), source_version: `sha256:${source}`, source_group: 'company', source_sha256: source,
+    source_locator_sha256: 'd'.repeat(64), provenance_receipt_sha256: 'e'.repeat(64),
+  }]);
+  h.deps.config = () => ({ enabled: true, kbId: 'ABCDEFGHIJ', citationMappingArtifact: {
+    bucket: 'citation-mappings-test', key: 'approved/v1/mappings.json', versionId: 'pinned-v1',
+    sha256: createHash('sha256').update(artifact).digest('hex'),
+  } });
+  h.deps.fetch = (async (url: any, init?: RequestInit) => {
+    h.calls.push({ url: String(url), init });
+    if (String(url).includes('.s3.us-east-1.amazonaws.com/')) return new Response(artifact, { headers: {
+      'content-length': String(Buffer.byteLength(artifact)), 'x-amz-version-id': 'pinned-v1',
+    } });
+    return Response.json({ retrievalResults: [row()] });
+  }) as typeof fetch;
+
+  const result: any = await handleBrainGraphSearch({ query: 'synthetic' }, ctx('cfo'), h.deps);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[0]?.url, 'https://citation-mappings-test.s3.us-east-1.amazonaws.com/approved/v1/mappings.json?versionId=pinned-v1');
+  assert.equal(result.data.matches[0].citation_resolution.status, 'resolved');
+  assert.equal(JSON.stringify(result.data.matches[0].citation_resolution).includes('citation-mappings-test'), false);
 });
 
 test('does not describe passages as source-cited when their canonical citation mappings are unresolved', async () => {
