@@ -4,6 +4,8 @@ export const CONTRACT_VERSION = "graph-assertion-v2";
 export const ROOM_POLICY = Object.freeze({
   finance: Object.freeze({ source_index: "finance-cfo-source-docs", policy_ref: "gateway:isLaneAllowed" }),
   legal_company: Object.freeze({ source_index: "legal-company", policy_ref: "gateway:isLaneAllowed" }),
+  // Synthetic contract fixtures only. No production company_shared source reader uses this index.
+  company_shared: Object.freeze({ source_index: "company-shared-synthetic", policy_ref: "gateway:synthetic-contract" }),
 });
 const INTERNAL = new Set(["_text", "_catalog", "_review", "_memory", "_state", "_archive"]);
 const MENTION_FIELDS = Object.freeze({ entity: "entity", entities: "entity", named_entities_orgs: "organization", named_entities_people: "person", signatories: "person", counterparty: "organization_or_person" });
@@ -231,6 +233,9 @@ export function createTypedSemanticAssertion(input, sourceBytes, serviceDeps) {
   if (!textOk(input.document_version_id)) fail("document_eligibility_unbound");
   const doc = validateDocument(services.lookupDocumentVersion(input.document_version_id));
   if (doc.document_version_id !== input.document_version_id) fail("document_eligibility_unbound");
+  // company_shared remains a synthetic CTO contract until a separate source-owner publication
+  // authority exists. The CFO/CLO publication path must never admit this profile.
+  if (doc.authority.source_room === "company_shared" && services.callerLane !== "cto") fail("caller_room_denied");
   const permission = permissionFromDecision(services.authorizeDocument(services.callerLane, doc), services.callerLane);
   if (!Buffer.isBuffer(sourceBytes) || sha256(sourceBytes) !== doc.source_version) fail("typed_source_version_mismatch");
   if (!TYPED_PREDICATES.has(input.predicate)) fail("typed_predicate");

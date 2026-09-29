@@ -89,9 +89,10 @@ import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostic
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
+const PUBLIC_KB_COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
 
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
-  'brain_search', 'brain_graph_search', 'web_search', 'kb_search', 'kb_search_privileged',
+  'brain_search', 'brain_graph_search', 'brain_public_kb_search', 'web_search', 'kb_search', 'kb_search_privileged',
   // n8n control-plane visibility is required for the CTO and Developer ship lanes to
   // import and operate the bounded ordinary-Chat action bridge.  The handlers retain
   // their own role and write governance checks.  Other company seats use the bounded
@@ -350,7 +351,7 @@ export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   // its own caller and registry binding when its catalog looks stale or incomplete.
   'catalog_probe',
   // Read-only GraphRAG handler separately constrains this lane to source_group=company.
-  'brain_graph_search',
+  'brain_graph_search', 'brain_public_kb_search',
   ...CONNECTOR_SEAT_MEMORY_BASELINE,
   // Existing broker handlers enforce source assignment, owner identity, ring, and write budget.
   'hyperagent_list_agents', 'hyperagent_list_threads', 'hyperagent_get_thread',
@@ -444,7 +445,7 @@ export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   // This diagnostic is intentionally safe on the constrained coordination surface.
   'catalog_probe',
   // Read-only GraphRAG handler separately constrains this lane to source_group=company.
-  'brain_graph_search',
+  'brain_graph_search', 'brain_public_kb_search',
   // A credential-type schema is static metadata, not a credential instance or value. Expose
   // precisely this read so ordinary COO Chat can verify the n8n control-plane boundary without
   // gaining workflow, credential, project, tag, variable, or execution access.
@@ -492,6 +493,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // This handler intentionally accepts only the six authenticated company seats. The shared
+  // executive ship set also serves cpo/cco/exec and clo-personal, so keep its public-KB visibility
+  // aligned with the handler's exact lane contract instead of exposing it to those seats.
+  if (!PUBLIC_KB_COMPANY_SEATS.has(lane)) tools.delete('brain_public_kb_search');
   // Keep these restricted GitHub surfaces out of the shared ship set. CTO retains its existing
   // override semantics; ordinary non-CTO lanes must not inherit them from a shared override. The
   // dedicated Make pilot returned above with its independent exact allowlist.
@@ -513,6 +518,8 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // Provisioning is deliberately discoverable only to the CTO Chat lane. Its handler and
   // write_orchestrated governance independently re-check that same identity at execution time.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('browser_cloud_profile_provision_public_trial');
+  // Synthetic-only typed GraphRAG acceptance stays discoverable on the CTO connector only.
+  if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('graph_company_shared_relationship_query');
   // Visibility is not enrollment: cloud handlers still require an owned, provisioned profile.
   if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane) && !(isShipLane(lane) && env.CONNECTOR_TOOLSET)) {
     for (const name of ['browser_cloud_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',

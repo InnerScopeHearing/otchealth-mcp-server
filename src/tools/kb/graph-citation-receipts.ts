@@ -12,6 +12,10 @@ import { isLaneAllowed } from './search-privileged.js';
 const HASH = /^[a-f0-9]{64}$/;
 const VERSION = /^sha256:[a-f0-9]{64}$/;
 const GROUPS = new Set(['company', 'company_shared']);
+// Corporate identities may read the separately approved public projection.
+// The clo-personal credential remains outside the company seat allowlist.
+const COMPANY_SHARED_READERS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec']);
+export function isCompanySharedReader(caller: string): boolean { return COMPANY_SHARED_READERS.has(caller); }
 export type CitationSourceGroup = 'company' | 'company_shared';
 
 export type GraphCitationMapping = Readonly<{
@@ -61,9 +65,7 @@ function validMapping(value: unknown): value is GraphCitationMapping {
 }
 
 function allowed(caller: string, group: CitationSourceGroup): boolean {
-  // Keep the same coarse-company gate as GraphRAG retrieval. The CTO is
-  // intentionally limited to the separately materialized shared projection.
-  if (group === 'company_shared') return caller === 'cto';
+  if (group === 'company_shared') return isCompanySharedReader(caller);
   return isLaneAllowed('finance-cfo-source-docs', caller) && isLaneAllowed('legal-company', caller);
 }
 
@@ -95,4 +97,31 @@ export function createGraphCitationReceiptResolver(mappings: readonly unknown[])
     };
     return { status: 'resolved', receipt: Object.freeze({ schema: 'graph-citation-source-resolution-receipt-v1', receipt_id: 'gcr_' + hash(canonical(source)), ...source }) };
   };
+}
+
+/** Return only canonical IDs backed by a completely valid, unambiguous mapping. */
+export function companySharedCanonicalIds(mappings: readonly unknown[]): string[] {
+  if (!Array.isArray(mappings) || mappings.length > 100_000 || !mappings.every(validMapping)) return [];
+  const seen = new Set<string>();
+  const ids = new Set<string>();
+  for (const item of mappings as readonly GraphCitationMapping[]) {
+    const key = `${item.canonical_id}\0${item.source_version}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    if (item.source_group === 'company_shared') ids.add(item.canonical_id);
+  }
+  return [...ids].sort();
+}
+
+export function companySharedSourceVersions(mappings: readonly unknown[]): string[] {
+  if (!Array.isArray(mappings) || mappings.length > 100_000 || !mappings.every(validMapping)) return [];
+  const seen = new Set<string>();
+  const versions = new Set<string>();
+  for (const item of mappings as readonly GraphCitationMapping[]) {
+    const key = `${item.canonical_id}\0${item.source_version}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    if (item.source_group === 'company_shared') versions.add(item.source_version);
+  }
+  return [...versions].sort();
 }

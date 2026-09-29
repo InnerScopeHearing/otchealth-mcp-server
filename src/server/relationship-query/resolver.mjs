@@ -174,6 +174,9 @@ export function createResolver(services) {
   return Object.freeze({
     registerSource(input) {
       const candidateSource = bindPreparedSource(input);
+      // company_shared is currently a fixed synthetic CTO contract only. Do not let the
+      // generic finance/company-legal resolver bind that profile with an injected adapter.
+      if (candidateSource.binding.room === "company_shared" && services.callerLane !== "cto") fail("source_scope_denied");
       permission(candidateSource);
       // Trusted adapter must compare this exact request with active run, manifest, snapshot and chunk receipts.
       const request = copy({ caller_lane: services.callerLane, source: candidateSource });

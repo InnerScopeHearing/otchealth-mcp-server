@@ -4,11 +4,13 @@
  * distinguish company and personal material; labels are not separate graph storage.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { isLaneAllowed } from './search-privileged.js';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
-import { createGraphCitationReceiptResolver } from './graph-citation-receipts.js';
+import { companySharedCanonicalIds, companySharedSourceVersions, createGraphCitationReceiptResolver, isCompanySharedReader } from './graph-citation-receipts.js';
+import { loadGraphCitationMappings, type CitationMappingArtifactConfig } from './graph-citation-mapping-loader.js';
 
 const REGION = 'us-east-1';
 const SOURCE_ROOT = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/';
@@ -20,13 +22,15 @@ const SOURCE_PREFIXES: Record<SourceGroup, readonly string[]> = {
   company_shared: [`${SOURCE_ROOT}company_shared/`],
   personal: [`${SOURCE_ROOT}personal/`],
 };
+const FIFTH_SOURCE_CSV_PREFIX = 's3://otchealth-finance-legal-dr-55c84f6b/graphrag/company/fifth-source/';
+const FIFTH_SOURCE_CSV_KEY = /^[a-f0-9]{64}\/records-\d{4}\.csv$/;
 const MAX_BYTES = 512 * 1024;
 const MAX_HIT_CHARS = 3000;
-const MIN_RETRIEVAL_SCORE = 0.2;
 const MAX_SUSPICIOUS_TEXT_RATIO = 0.005;
+const MAX_SHARED_ALLOWLIST_IDS = 500;
 type Scope = SourceGroup | 'all';
 type Input = { query: string; scope?: Scope; top?: number; source_ids?: string[]; matter_id?: string; require_documentary_bridge?: boolean };
-type Config = { enabled: boolean; kbId: string; citationMappings?: readonly unknown[] };
+type Config = { enabled: boolean; kbId: string; citationMappings?: readonly unknown[]; citationMappingArtifact?: CitationMappingArtifactConfig };
 type Deps = { config(): Config; credentials(): Promise<AwsCredentials | null>; fetch: typeof fetch };
 const SHA256 = /^[a-f0-9]{64}$/;
 type BridgeSource = {
@@ -40,19 +44,35 @@ type BridgeSource = {
 type Candidate = Record<string, unknown> & { bridge_source?: BridgeSource };
 const DEFAULTS: Deps = {
   config: () => {
-    let citationMappings: readonly unknown[] = [];
-    try {
-      const parsed: unknown = JSON.parse(process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_JSON ?? '[]');
-      if (Array.isArray(parsed)) citationMappings = parsed;
-    } catch { /* Invalid operator configuration must resolve no citations. */ }
-    return { enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '', citationMappings };
+    // The legacy JSON override remains available to isolated tests and explicit compatibility
+    // deployments. Production may instead pin the approved S3 object's version and raw SHA-256.
+    const legacyMappings = process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_JSON;
+    if (legacyMappings !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(legacyMappings);
+        return { enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '', citationMappings: Array.isArray(parsed) ? parsed : [] };
+      } catch {
+        /* Invalid operator configuration must resolve no citations and must not fall through. */
+        return { enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true', kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '', citationMappings: [] };
+      }
+    }
+    return {
+      enabled: process.env.BEDROCK_GRAPH_RETRIEVAL_ENABLED === 'true',
+      kbId: process.env.BEDROCK_SHARED_GRAPH_KB_ID ?? '',
+      citationMappingArtifact: {
+        bucket: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_BUCKET ?? '',
+        key: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_KEY ?? '',
+        versionId: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_VERSION_ID ?? '',
+        sha256: process.env.BEDROCK_GRAPH_CITATION_RECEIPTS_S3_SHA256 ?? '',
+      },
+    };
   },
   credentials: resolveAwsCredentials,
   fetch: (...args) => fetch(...args),
 };
 const inputShape = {
   query: z.string().trim().min(1).max(2000).describe('Question about relationships between documents, people, organizations or events. Cite the returned sources.'),
-  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company. CTO may request only the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
+  scope: z.enum(['company', 'company_shared', 'personal', 'all']).optional().describe('Source label filter. Company seats default to company and authenticated company seats may request the separately materialized company_shared projection. The personal legal seat defaults to one mandatory matter-filtered personal query. Cross-group all-scope retrieval is refused.'),
   top: z.number().int().min(1).max(8).optional(),
   source_ids: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(5)
     .refine((ids) => new Set(ids).size === ids.length, 'Source IDs must be unique')
@@ -65,15 +85,16 @@ const inputShape = {
 const inputSchema = z.object(inputShape).strict();
 
 export function graphScopeFor(caller: string, requested?: Scope): Scope | null {
-  // The CTO is intentionally not in either privileged company ring. Its only
-  // GraphRAG route is the separate, ingestion-owned shared projection; omitted
+  // The owner-approved company_shared projection has its own authenticated
+  // company-seat allowlist and never widens the mixed company or personal scope.
+  if (requested === 'company_shared') return isCompanySharedReader(caller) ? 'company_shared' : null;
+  // The CTO remains outside both mixed company and personal scopes. Omitted
   // scope deliberately remains a refusal so clients cannot gain access by
   // relying on a default.
-  if (caller === 'cto') return requested === 'company_shared' ? 'company_shared' : null;
+  if (caller === 'cto') return null;
   const personalAllowed = isLaneAllowed('legal-personal', caller);
   const scope = requested ?? (personalAllowed ? 'personal' : 'company');
   if (scope === 'all') return null;
-  if (scope === 'company_shared') return null;
   if (scope === 'personal') return personalAllowed ? scope : null;
   // The managed `company` label currently combines finance and company-legal material.
   // Until ingestion publishes a narrower, authenticated lane label, require the caller to
@@ -115,8 +136,19 @@ function outcome(mode: string, error?: string, requireDocumentaryBridge = false)
   return { data: { mode, matches: [], count: 0, ...(error ? { error } : {}), ...(requireDocumentaryBridge ? { documentary_bridge: { status: 'unproven' } } : {}) }, summary: `Managed GraphRAG retrieval: ${mode}.` };
 }
 
+function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+
 function isAllowedSourceUri(group: SourceGroup, uri: string): boolean {
+  if (group === 'company' && uri.startsWith(FIFTH_SOURCE_CSV_PREFIX)) {
+    return FIFTH_SOURCE_CSV_KEY.test(uri.slice(FIFTH_SOURCE_CSV_PREFIX.length));
+  }
   return SOURCE_PREFIXES[group].some((prefix) => uri.startsWith(prefix)) && /\.txt$/.test(uri);
+}
+
+function companySharedRelativeLocator(uri: string): string | null {
+  if (!uri.startsWith(SOURCE_ROOT)) return null;
+  const relative = uri.slice(SOURCE_ROOT.length);
+  return /^company_shared\/[a-f0-9]{64}\.txt$/.test(relative) ? relative : null;
 }
 
 const STOP_WORDS = new Set(['about', 'after', 'again', 'also', 'and', 'are', 'between', 'did', 'does', 'for', 'from', 'has', 'have', 'how', 'into', 'its', 'not', 'only', 'that', 'the', 'their', 'then', 'this', 'through', 'was', 'were', 'what', 'when', 'where', 'which', 'who', 'with']);
@@ -175,15 +207,33 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
   if (!/^[A-Za-z0-9]{10}$/.test(config.kbId)) return outcome('unconfigured', 'invalid_knowledge_base_configuration', requireDocumentaryBridge);
   const credentials = await deps.credentials();
   if (!credentials) return outcome('unavailable', 'credentials_unavailable', requireDocumentaryBridge);
+  const citationMappings = config.citationMappings ?? await loadGraphCitationMappings(
+    config.citationMappingArtifact, credentials, deps.fetch,
+    (opts) => signRequest({ ...opts, body: '' }),
+  );
   const top = parsed.data.top ?? 5;
-  const resolveCitation = createGraphCitationReceiptResolver(config.citationMappings ?? []);
+  const resolveCitation = createGraphCitationReceiptResolver(citationMappings);
   const requestedSources = parsed.data.source_ids ? new Set(parsed.data.source_ids) : undefined;
-  const sourceFilter = requestedSources ? { in: { key: 'source_id', value: [...requestedSources] } } : undefined;
+  const sharedAllowedIds = scope === 'company_shared' ? companySharedCanonicalIds(citationMappings) : [];
+  const sharedAllowedVersions = scope === 'company_shared' ? companySharedSourceVersions(citationMappings) : [];
+  if (scope === 'company_shared' && (sharedAllowedIds.length === 0 || sharedAllowedVersions.length === 0 || sharedAllowedIds.length > MAX_SHARED_ALLOWLIST_IDS || sharedAllowedVersions.length > MAX_SHARED_ALLOWLIST_IDS)) {
+    return outcome('unavailable', 'shared_provenance_unconfigured', requireDocumentaryBridge);
+  }
+  if (scope === 'company_shared' && requestedSources && [...requestedSources].some((id) => !sharedAllowedIds.includes(id))) {
+    return outcome('withheld', 'shared_source_not_allowlisted', requireDocumentaryBridge);
+  }
+  const sourceIdsForFilter = scope === 'company_shared'
+    ? (requestedSources ? [...requestedSources] : sharedAllowedIds)
+    : requestedSources ? [...requestedSources] : undefined;
+  const sourceFilter = sourceIdsForFilter ? { in: { key: 'source_id', value: sourceIdsForFilter } } : undefined;
   const groupFilter = { equals: { key: 'source_group', value: scope } };
+  const sharedVersionFilter = scope === 'company_shared'
+    ? { in: { key: 'source_version', value: sharedAllowedVersions } }
+    : undefined;
   const matterFilter = parsed.data.matter_id ? { equals: { key: 'matter_id', value: parsed.data.matter_id } } : undefined;
   // Source narrowing is intersected with the authenticated scope, never substituted
   // for it. Repeat the source-ID check on returned rows if upstream ignores a filter.
-  const filters = [groupFilter, matterFilter, sourceFilter].filter((value) => value !== undefined);
+  const filters = [groupFilter, sharedVersionFilter, matterFilter, sourceFilter].filter((value) => value !== undefined);
   const filter = filters.length === 1 ? filters[0] : { andAll: filters };
   const host = `bedrock-agent-runtime.${REGION}.amazonaws.com`;
   const path = `/knowledgebases/${config.kbId}/retrieve`;
@@ -204,6 +254,53 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
     const raw: any = await readBounded(response);
     if (raw?.guardrailAction === 'INTERVENED') return outcome('withheld', 'retrieval_intervened');
     if (!Array.isArray(raw?.retrievalResults) || raw.retrievalResults.length > 100) return outcome('unavailable', 'invalid_bedrock_response');
+    if (scope === 'company_shared') {
+      const rows = raw.retrievalResults;
+      const validated: Candidate[] = [];
+      for (const row of rows) {
+        const uri = row?.location?.type === 'S3' ? row?.location?.s3Location?.uri : undefined;
+        const metadata = row?.metadata;
+        const sourceId = metadata?.source_id;
+        const sourceVersion = metadata?.source_version;
+        const text = row?.content?.text;
+        const relativeLocator = typeof uri === 'string' ? companySharedRelativeLocator(uri) : null;
+        if (metadata?.source_group !== 'company_shared' || metadata?.source_scope !== 'company_shared' || typeof uri !== 'string' || uri.length > 1200 || !isAllowedSourceUri('company_shared', uri) ||
+            relativeLocator === null || relativeLocator !== `company_shared/${sourceId}.txt` || metadata?.source_uri !== relativeLocator ||
+            typeof sourceId !== 'string' || !sharedAllowedIds.includes(sourceId) || typeof sourceVersion !== 'string' ||
+            typeof text !== 'string' || !isCleanRetrievedText(text) || !hasMeaningfulOverlap(parsed.data.query, text)) {
+          return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
+        }
+        const resolution = resolveCitation({ caller_agent: ctx.callerAgent, canonical_id: sourceId, source_version: sourceVersion });
+        if (resolution.status !== 'resolved' || resolution.receipt.source_group !== 'company_shared' ||
+            resolution.receipt.canonical_id !== sourceId || resolution.receipt.source_version !== sourceVersion ||
+            sha256(relativeLocator) !== resolution.receipt.source_locator_sha256) {
+          return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
+        }
+        const sourceHash = metadata?.source_sha256;
+        if (typeof sourceHash !== 'string' || !SHA256.test(sourceHash) || sourceVersion !== `sha256:${sourceHash}` || resolution.receipt.source_sha256 !== sourceHash) {
+          return outcome('withheld', 'shared_citation_validation_failed', requireDocumentaryBridge);
+        }
+        const score = typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : undefined;
+        validated.push({
+          source_group: 'company_shared', source_uri: uri, source_id: sourceId, source_version: sourceVersion,
+          source_sha256: sourceHash,
+          text: text.slice(0, MAX_HIT_CHARS), truncated: text.length > MAX_HIT_CHARS,
+          ...(typeof metadata?.text_sha256 === 'string' && SHA256.test(metadata.text_sha256) ? { text_sha256: metadata.text_sha256 } : {}),
+          ...(score !== undefined ? { retrieval_score: score } : {}),
+        });
+      }
+      const matches = validated.slice(0, top).map((match, index) => ({
+        citation: `graph:${index + 1}`,
+        ...match,
+        citation_resolution: resolveCitation({ caller_agent: ctx.callerAgent, canonical_id: String(match.source_id), source_version: String(match.source_version) }),
+      }));
+      return {
+        data: { mode: 'aws-managed-graphrag', scope, matches, count: matches.length, answer_generated: false, ...(raw.nextToken ? { more_results_available: true } : {}) },
+        summary: matches.length
+          ? `${matches.length} company_shared GraphRAG passages returned with validated canonical source receipts. No answer was generated.`
+          : 'No cited company_shared source passages were returned. No answer was generated.',
+      };
+    }
     const candidates: Candidate[] = [];
     let withheld = 0;
     let qualityWithheld = 0;
@@ -227,7 +324,10 @@ export async function handleBrainGraphSearch(input: Input, ctx: ToolContext, dep
       if (scope === 'personal' && matterId !== parsed.data.matter_id) { withheld++; continue; }
       if (!isCleanRetrievedText(text)) { qualityWithheld++; continue; }
       const score = typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : undefined;
-      if (!requestedSources && (score === undefined || score < MIN_RETRIEVAL_SCORE || !hasMeaningfulOverlap(parsed.data.query, text))) { relevanceWithheld++; continue; }
+      // Neptune GraphRAG exposes score as a distance (lower is better), and may
+      // omit it. Keep it as returned telemetry; relevance gating uses the
+      // content-overlap check rather than assuming a provider-neutral direction.
+      if (!requestedSources && !hasMeaningfulOverlap(parsed.data.query, text)) { relevanceWithheld++; continue; }
       candidates.push({
         source_group: group, source_uri: uri,
         ...(typeof sourceId === 'string' && SHA256.test(sourceId) ? { source_id: sourceId } : {}),

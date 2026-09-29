@@ -51,11 +51,12 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query'].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
   assert.ok(set.has('brain_graph_search'), 'CTO connector must expose company-scoped GraphRAG');
+  assert.ok(set.has('brain_public_kb_search'), 'CTO connector must expose fixed public-only KB retrieval');
   assert.ok(set.has(CTO_ONLY_GITHUB_RECEIPT_TOOL), 'CTO connector must expose the fixed observation receipt reader');
   assert.ok(set.has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), 'CTO connector must expose bounded execution counts');
   assert.ok(set.has(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), 'CTO connector must expose the fixed GitHub Make pilot broker');
@@ -178,20 +179,25 @@ test('(b) developer lane gets the full ship-lane set', () => {
   assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.equal(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), false);
   assert.ok(set.has('brain_graph_search'));
+  assert.ok(set.has('brain_public_kb_search'));
 });
 
-test('(c) every EXEC_RING lane gets the full ship-lane set', () => {
+test('(c) EXEC_RING lanes get only public-KB visibility authorized for their company identity', () => {
   const env = testEnv();
   for (const lane of EXEC_RING) {
     const set = connectorToolset(env, lane);
-    assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...(['cfo', 'clo'].includes(lane) ? CLOUD_BROWSER_TOOLS : [])].sort(), `${lane} should get the ship set`);
+    const expected = new Set([...CTO_SHIP_LANE_TOOLSET, ...(['cfo', 'clo'].includes(lane) ? CLOUD_BROWSER_TOOLS : [])]);
+    if (!['cfo', 'clo'].includes(lane)) expected.delete('brain_public_kb_search');
+    assert.deepEqual([...set].sort(), [...expected].sort(), `${lane} should get its authorized ship set`);
     assert.ok(set.has('brain_graph_search'), `${lane} should expose GraphRAG`);
+    assert.equal(set.has('brain_public_kb_search'), ['cfo', 'clo'].includes(lane), `${lane} exposure must match the handler's company-seat allowlist`);
   }
 });
 
 test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus external reads', () => {
   const set = connectorToolset(testEnv(), 'cro');
   assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
+  assert.ok(set.has('brain_public_kb_search'), 'cro connector must expose fixed public-only KB retrieval');
   for (const required of [
     'heygen_account_get', 'heygen_avatar_groups_list', 'heygen_avatar_look_get',
     'heygen_avatar_video_create', 'heygen_owner_approval_status_get',
@@ -239,6 +245,7 @@ test("(f) 'external-read' lane set is EXACTLY the 13 read tools (incl. Phase 6 s
   assert.ok(set.has('fetch'), 'external-read must see the OpenAI connector fetch tool');
   assert.ok(set.has('web_research'), 'external-read must see web_research (same exposure as web_search)');
   assert.ok(set.has('web_extract'), 'external-read must see web_extract (same exposure as web_search)');
+  assert.equal(set.has('brain_public_kb_search'), false, 'external-read must not see the company-seat-only public KB tool');
   for (const forbidden of [
     'kb_search_privileged', 'kb_get_document',
     'legal_blob_list', 'legal_blob_get', 'legal_blob_put',
@@ -288,6 +295,13 @@ test('CONNECTOR_TOOLSET env override still overrides the ship set (back-compat)'
   assert.deepEqual([...set].sort(), ['brain_search', 'web_search']);
 });
 
+test('CONNECTOR_TOOLSET override cannot expose public KB retrieval to denied ship lanes', () => {
+  const env = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_public_kb_search' } as Env;
+  assert.equal(connectorToolset(env, 'cto').has('brain_public_kb_search'), true);
+  assert.equal(connectorToolset(env, 'clo-personal').has('brain_public_kb_search'), false);
+  assert.equal(connectorToolset(env, 'exec').has('brain_public_kb_search'), false);
+});
+
 test('EXTERNAL_READONLY_TOOLSET env override overrides the external set', () => {
   const env = { ...testEnv(), EXTERNAL_READONLY_TOOLSET: 'brain_search' } as Env;
   const set = connectorToolset(env, 'external-read');
@@ -300,6 +314,14 @@ test('cfo connector keeps its bounded relationship query through ship-set curati
   assert.equal(connectorToolset(testEnv(), 'external-read').has('graph_relationship_query'), false);
 });
 
+test('synthetic company_shared typed query is advertised only to the CTO connector', () => {
+  assert.equal(connectorToolset(testEnv(), 'cto').has('graph_company_shared_relationship_query'), true);
+  for (const lane of ['cfo', 'clo', 'clo-personal', 'developer', 'external-read']) {
+    assert.equal(connectorToolset(testEnv(), lane).has('graph_company_shared_relationship_query'), false, lane);
+  }
+  assert.equal(connectorToolset(testEnv(), 'cfo').has('graph_relationship_query'), true);
+});
+
 // ── 2026-08-29: role-elevated connector seat curation (COO + CRO), found by LIVE tools/list probe ──
 // After the URL-only owner-code elevation shipped, a live probe showed an elevated coo connector
 // advertising only the 11-tool external read set -- its instruction block's own verbs (memory_team,
@@ -309,6 +331,7 @@ test('cfo connector keeps its bounded relationship query through ship-set curati
 test('coo lane: seat-memory + ledger coordination, and nothing privileged', () => {
   const set = connectorToolset(testEnv(), 'coo');
   assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
+  assert.ok(set.has('brain_public_kb_search'), 'coo connector must expose fixed public-only KB retrieval');
   for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
@@ -333,7 +356,7 @@ test('the seat additions never leak into the plain external/unknown lane', () =>
   assert.deepEqual([...set].sort(), [...EXTERNAL_READONLY_TOOLSET].sort());
   for (const seatOnly of [
     'memory_team', 'memory_remember', 'checkpoint', 'task_create', 'task_claim', 'task_heartbeat', 'task_complete', 'shopify_list_products',
-    'shopify_location_list', 'cio_track_event', 'cio_admin_read_workspace_health', 'hyperagent_list_agents', 'hyperagent_create_thread',
+    'shopify_location_list', 'cio_track_event', 'cio_admin_read_workspace_health', 'hyperagent_list_agents', 'hyperagent_create_thread', 'brain_public_kb_search',
   ]) {
     assert.equal(set.has(seatOnly), false, `external lane must NOT gain ${seatOnly}`);
   }
