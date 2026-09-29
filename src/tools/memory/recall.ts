@@ -60,6 +60,11 @@ export async function resolveExactSharedId<T extends { id?: unknown; agent?: unk
   return { handled: true, matches: filterExactSharedIdHits(rows, exactId.id, sourceAgent) };
 }
 
+export interface RecallHandlerDependencies {
+  readSharedAgent?: typeof readSharedAgent;
+  readSharedAll?: typeof readSharedAll;
+}
+
 /**
  * `memory_recall` defaults to current truth; its explicit `include_superseded` mode
  * retains the append-only shared-feed history for audit. Apply the same agent-scoped
@@ -90,6 +95,7 @@ async function currentRecallHits<T extends { id?: unknown; agent?: unknown }>(
 export async function recallHandler(
   input: { query: string; agent?: string; limit?: number; include_superseded?: boolean },
   ctx: ToolContext,
+  dependencies: RecallHandlerDependencies = {},
 ): Promise<ToolResultPayload> {
   const limit = input.limit ?? 25;
   const includeSuperseded = input.include_superseded === true;
@@ -106,11 +112,16 @@ export async function recallHandler(
   // bare IDs with an explicit agent filter use the same single-feed read.
   const exactId = parseExactSharedIdQuery(input.query);
   if (exactId) {
+    if (exactId.agent && !sharedMemoryAgentAllowed(ctx.callerAgent, exactId.agent)) {
+      return { data: { matches: [], count: 0, mode: 'ring-forbidden' }, summary: 'Refused: personal-legal shared-memory rows are not available to this caller.' };
+    }
     if (!isConfigured()) {
       return { data: { matches: [], count: 0, mode: 'none' }, summary: 'Shared brain not configured; no results.' };
     }
     const lookup = await resolveExactSharedId(exactId, agentFilter, (agent) =>
-      agent ? readSharedAgent(agent) : readSharedAll());
+      agent
+        ? (dependencies.readSharedAgent ?? readSharedAgent)(agent)
+        : (dependencies.readSharedAll ?? readSharedAll)());
     const visible = await currentRecallHits(filterPersonalSharedMemory(lookup.matches, ctx.callerAgent), includeSuperseded);
     const matches = visible.slice(0, limit);
     return {

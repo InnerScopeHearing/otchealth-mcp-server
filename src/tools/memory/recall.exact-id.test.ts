@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseExactSharedIdQuery, resolveExactSharedId } from './recall.js';
+import { parseExactSharedIdQuery, recallHandler, resolveExactSharedId } from './recall.js';
 
 test('recognizes the observed ID plus one unique marker token', () => {
   assert.deepEqual(parseExactSharedIdQuery('20260929-b7db22bc47ea COO-CHAT-20260929-01'), {
@@ -63,4 +63,24 @@ test('an exact miss is handled as empty and does not request fallback candidates
   });
   assert.equal(reads, 1);
   assert.deepEqual(result, { handled: true, matches: [] });
+});
+
+test('recall handler rejects an embedded restricted agent before reading its feed', async () => {
+  let feedReads = 0;
+  const result = await recallHandler(
+    { query: 'clo-personal__20260925-4c3357980000 CTO-CHAT-20260929-01' },
+    { correlationId: 'test', callerHash: 'test', dryRun: false, acknowledgeWarning: false, callerAgent: 'cto' },
+    {
+      readSharedAgent: async () => {
+        feedReads++;
+        return [];
+      },
+      readSharedAll: async () => {
+        feedReads++;
+        return [];
+      },
+    },
+  );
+  assert.equal((result.data as { mode: string }).mode, 'ring-forbidden');
+  assert.equal(feedReads, 0);
 });
