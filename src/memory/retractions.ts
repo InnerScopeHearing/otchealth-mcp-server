@@ -80,20 +80,37 @@ export function collectRetractedByAgent(entries: Array<{ agent?: unknown; supers
     const agent = typeof e?.agent === 'string' ? e.agent : '';
     const s = e?.supersedes;
     if (!agent || typeof s !== 'string' || !s.trim()) continue;
-    // Search hits carry their owner in the doc id; strip only this row's own prefix so a
-    // mismatched owner pointer cannot suppress a different lane's same-suffix entry.
-    const supersededId = s.trim();
-    const ownDocIdPrefix = `${agent}__`;
-    const normalizedSupersededId = supersededId.startsWith(ownDocIdPrefix)
-      && supersededId.length > ownDocIdPrefix.length
-      ? supersededId.slice(ownDocIdPrefix.length)
-      : supersededId;
+    const normalizedSupersededId = normalizeSupersedesId(s, agent);
     let set = byAgent.get(agent);
     if (!set) byAgent.set(agent, (set = new Set()));
     set.add(normalizedSupersededId);
   }
   return byAgent;
 }
+
+/**
+ * Normalize a `supersedes` value to the BARE entry id, for comparison against a hit's entry id.
+ *
+ * Index docs in memory-exec are keyed `<agent>__<entryId>` (memoryDocId) but the ledger stores and
+ * an author naturally types the RAW id, and some callers copy the prefixed doc id instead. Both
+ * forms must retract the same belief. Only the SUPERSEDING entry's OWN lane prefix is stripped: a
+ * `supersedes` naming ANOTHER lane's prefix stays as written, so it can never silently retract a
+ * different lane's entry (entry ids collide across lanes for the legacy `YYYYMMDD-NNN` shape).
+ * Pure.
+ */
+export function normalizeSupersedesId(supersedes: string, agent: string): string {
+  const id = supersedes.trim();
+  const own = `${agent.trim().toLowerCase()}__`;
+  return id.toLowerCase().startsWith(own) && id.length > own.length ? id.slice(own.length) : id;
+}
+
+/**
+ * Entry ids that are globally unique by construction: shared-feed `YYYYMMDD-<12 hex>` (newSharedId)
+ * and Cosmos/Postgres `m_<base36>_<8 hex>` (newId). Unlike the legacy per-lane counter ids
+ * (`20260730-001`), these cannot collide across lanes, so an owner-less hit carrying one can be
+ * matched safely against any lane's retraction set.
+ */
+const GLOBALLY_UNIQUE_ID = /^(?:\d{8}-[0-9a-f]{12}|m_[0-9a-z]+_[0-9a-f]{8})$/;
 
 /** Drop hits whose underlying entry has been retracted. Returns what survived + what was dropped. Pure. */
 export function filterRetracted<T extends { id?: unknown }>(
@@ -111,8 +128,14 @@ export function filterRetracted<T extends { id?: unknown }>(
   return { kept, dropped };
 }
 
+function anyLaneRetracted(byAgent: Map<string, Set<string>>, entryId: string): boolean {
+  for (const set of byAgent.values()) if (set.has(entryId)) return true;
+  return false;
+}
+
 /** Collision-safe filtering for federated search. Composite document IDs are canonical and their
- * prefix wins if source metadata disagrees. A legacy bare ID uses hit.agent. Unknown owners stay. */
+ * prefix wins if source metadata disagrees. A legacy bare ID uses hit.agent. Unknown owners stay,
+ * EXCEPT a globally-unique-shaped id (see GLOBALLY_UNIQUE_ID), which cannot collide across lanes. */
 export function filterRetractedByAgent<T extends { id?: unknown; agent?: unknown }>(
   hits: T[],
   byAgent: Map<string, Set<string>>,
@@ -128,6 +151,7 @@ export function filterRetractedByAgent<T extends { id?: unknown; agent?: unknown
       : typeof hit.agent === 'string' ? hit.agent.trim().toLowerCase() : '';
     const entryId = entryIdFromDocId(rawId);
     if (owner && entryId && byAgent.get(owner)?.has(entryId)) dropped.push(`${owner}__${entryId}`);
+    else if (!owner && GLOBALLY_UNIQUE_ID.test(entryId) && anyLaneRetracted(byAgent, entryId)) dropped.push(entryId);
     else kept.push(hit);
   }
   return { kept, dropped };
@@ -233,6 +257,26 @@ async function refreshCache(): Promise<void> {
     merge(cache.byAgent);
   }
   cache = { at: now, ids, byAgent, degraded };
+}
+
+/**
+ * Record a retraction the moment it is WRITTEN, so this replica's cache serves it immediately
+ * instead of only after the TTL (up to 120s) lapses -- the window in which an agent that corrects a
+ * belief and then searches straight away still gets the retracted belief back. A no-op when the
+ * cache is cold: the next refresh reads the stores, where the write is already durable. Other
+ * replicas still catch up within their own TTL. Never throws.
+ */
+export function noteRetraction(agent: unknown, supersedes: unknown): void {
+  try {
+    if (!cache || typeof agent !== 'string' || !agent.trim() || typeof supersedes !== 'string' || !supersedes.trim()) return;
+    const a = agent.trim().toLowerCase();
+    cache.ids.add(supersedes.trim());
+    let set = cache.byAgent.get(a);
+    if (!set) cache.byAgent.set(a, (set = new Set()));
+    set.add(normalizeSupersedesId(supersedes, a));
+  } catch {
+    /* fail-open: the TTL refresh remains the backstop */
+  }
 }
 
 /** Test seam: drop the cache so one test never sees another test's retractions. */
