@@ -84,6 +84,52 @@ test('any unexpected URI or missing citation withholds the complete response', a
   assert.equal(unknown.data.error, 'invalid_or_uncited_source');
 });
 
+test('normalizes the exact approved AWS virtual-hosted S3 metadata URI', async () => {
+  const httpsUri = `https://otchealth-finance-legal-dr-55c84f6b.s3.amazonaws.com/graph-trial/20260913/managed-graphrag/company_shared/${sourceId}.txt`;
+  const h = harness(() => Response.json({ retrievalResults: [validRow({
+    location: undefined,
+    metadata: { _source_uri: httpsUri, _data_source_type: 'S3', _document_title: `${sourceId}.txt` },
+  })] }));
+  const result: any = await handleBrainPublicKbSearch({ query: 'synthetic' }, ctx('cto'), h.deps);
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.matches[0].source_id, sourceId);
+  assert.equal(result.data.matches[0].source_uri, `${prefix}${sourceId}.txt`);
+  assert.equal(result.data.matches[0].source_url, 'https://otchealthmart.com/pages/about-us');
+});
+
+test('rejects unapproved HTTPS hosts, URL decorations, paths, datasource types, and URI conflicts', async () => {
+  const httpsPrefix = 'https://otchealth-finance-legal-dr-55c84f6b.s3.amazonaws.com/graph-trial/20260913/managed-graphrag/company_shared/';
+  const rejectedUris = [
+    `https://attacker.example/${sourceId}.txt`,
+    `${httpsPrefix}${sourceId}.txt?download=1`,
+    `${httpsPrefix}${sourceId}.txt#fragment`,
+    `${httpsPrefix}%2e%2e/${sourceId}.txt`,
+    `https://otchealth-finance-legal-dr-55c84f6b.s3.amazonaws.com.evil.example/graph-trial/20260913/managed-graphrag/company_shared/${sourceId}.txt`,
+    `${httpsPrefix}${'f'.repeat(64)}.txt`,
+  ];
+  for (const uri of rejectedUris) {
+    const h = harness(() => Response.json({ retrievalResults: [validRow({
+      location: undefined,
+      metadata: { _source_uri: uri, _data_source_type: 'S3' },
+    })] }));
+    const result: any = await handleBrainPublicKbSearch({ query: 'synthetic' }, ctx('cto'), h.deps);
+    assert.equal(result.data.error, 'invalid_or_uncited_source', uri);
+  }
+
+  const wrongType = harness(() => Response.json({ retrievalResults: [validRow({
+    location: undefined,
+    metadata: { _source_uri: `${httpsPrefix}${sourceId}.txt`, _data_source_type: 'WEB' },
+  })] }));
+  const wrongTypeResult: any = await handleBrainPublicKbSearch({ query: 'synthetic' }, ctx('cto'), wrongType.deps);
+  assert.equal(wrongTypeResult.data.error, 'invalid_or_uncited_source');
+
+  const mismatch = harness(() => Response.json({ retrievalResults: [validRow({
+    metadata: { _source_uri: `${httpsPrefix}${secondarySourceId}.txt`, _data_source_type: 'S3' },
+  })] }));
+  const mismatchResult: any = await handleBrainPublicKbSearch({ query: 'synthetic' }, ctx('cto'), mismatch.deps);
+  assert.equal(mismatchResult.data.error, 'invalid_or_uncited_source');
+});
+
 test('out-of-scope control remains explicitly a candidate excerpt, with pinned public source mapping', async () => {
   const h = harness(() => Response.json({ retrievalResults: [validRow({
     location: { type: 'S3', s3Location: { uri: `${prefix}${secondarySourceId}.txt` } },
@@ -106,3 +152,4 @@ test('empty retrieval results are a valid empty response', async () => {
   assert.equal(result.data.count, 0);
   assert.deepEqual(result.data.matches, []);
 });
+

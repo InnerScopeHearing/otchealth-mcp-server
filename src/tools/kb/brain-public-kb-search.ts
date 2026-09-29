@@ -6,7 +6,10 @@ import { registerTool, type CallerHashProvider, type ToolContext, type ToolResul
 
 const REGION = 'us-east-1';
 const ALLOWED_KB_ID = 'ZAYEKIX0RX';
-const SOURCE_PREFIX = 's3://otchealth-finance-legal-dr-55c84f6b/graph-trial/20260913/managed-graphrag/company_shared/';
+const SOURCE_BUCKET = 'otchealth-finance-legal-dr-55c84f6b';
+const SOURCE_KEY_PREFIX = 'graph-trial/20260913/managed-graphrag/company_shared/';
+const SOURCE_PREFIX = `s3://${SOURCE_BUCKET}/${SOURCE_KEY_PREFIX}`;
+const HTTPS_SOURCE_PREFIX = `https://${SOURCE_BUCKET}.s3.amazonaws.com/${SOURCE_KEY_PREFIX}`;
 const APPROVED_SOURCES = new Map([
   ['1ab094b6006bcc487b3e2e78f655ebc0c6628e20ce331a21372cc3c9486b9064', 'https://otchealthmart.com/pages/about-us'],
   ['cf198fd8021dfc909fb53778019cf5aaf22b764b4d493ff9993065fdb13b83d6', 'https://otchealthmart.com/collections/treo-by-ihear'],
@@ -33,6 +36,15 @@ function outcome(mode: string, error?: string): ToolResultPayload {
   return { data: { mode, matches: [], count: 0, ...(error ? { error } : {}) }, summary: `Public knowledge base retrieval: ${mode}.` };
 }
 
+function normalizeCitationUri(uri: unknown): string | null {
+  if (typeof uri !== 'string' || uri.length > 1200) return null;
+  const prefix = uri.startsWith(SOURCE_PREFIX) ? SOURCE_PREFIX : uri.startsWith(HTTPS_SOURCE_PREFIX) ? HTTPS_SOURCE_PREFIX : null;
+  if (!prefix) return null;
+  const match = /^([a-f0-9]{64})\.txt$/.exec(uri.slice(prefix.length));
+  if (!match || !APPROVED_SOURCES.has(match[1]!)) return null;
+  return `${SOURCE_PREFIX}${match[1]}.txt`;
+}
+
 export function isCompanySeat(caller: string | undefined | null): boolean {
   return typeof caller === 'string' && COMPANY_SEATS.has(caller);
 }
@@ -56,10 +68,22 @@ async function readBounded(response: Response): Promise<unknown> {
 }
 
 function safeCitationRow(row: any): { citation: string; source_id: string; source_uri: string; source_url: string; text: string; truncated: boolean; retrieval_score?: number } | null {
-  const uri = row?.location?.type === 'S3' ? row?.location?.s3Location?.uri : undefined;
-  if (typeof uri !== 'string' || uri.length > 1200 || !uri.startsWith(SOURCE_PREFIX)) return null;
-  const relative = uri.slice(SOURCE_PREFIX.length);
-  const match = /^([a-f0-9]{64})\.txt$/.exec(relative);
+  const location = row?.location;
+  const metadata = row?.metadata;
+  const candidates: string[] = [];
+  if (location !== undefined && location !== null) {
+    if (location.type !== 'S3' || typeof location?.s3Location?.uri !== 'string') return null;
+    candidates.push(location.s3Location.uri);
+  }
+  if (metadata?._source_uri !== undefined) {
+    if (metadata?._data_source_type !== 'S3' || typeof metadata._source_uri !== 'string') return null;
+    candidates.push(metadata._source_uri);
+  }
+  if (candidates.length === 0) return null;
+  const normalized = candidates.map(normalizeCitationUri);
+  const uri = normalized[0];
+  if (uri === null || normalized.some((candidate) => candidate !== uri)) return null;
+  const match = /^([a-f0-9]{64})\.txt$/.exec(uri.slice(SOURCE_PREFIX.length));
   if (!match) return null;
   // The approved corpus has no custom metadata sidecars. Derive identity only from its content hash filename.
   const sourceId = match[1];
@@ -127,3 +151,4 @@ export function registerBrainPublicKbSearch(server: McpServer, callerHash: Calle
     handler: (input, ctx) => handleBrainPublicKbSearch(input, ctx),
   }, callerHash);
 }
+
