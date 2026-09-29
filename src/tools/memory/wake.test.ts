@@ -205,3 +205,10 @@ test('buildDoctrinePitfalls: caps each pitfall text length and flags truncation 
 test('buildDoctrinePitfalls: empty inputs yield an empty list (no pitfalls is a valid, safe doctrine)', () => {
   assert.deepEqual(buildDoctrinePitfalls([], []), []);
 });
+
+test('STANDING_DIRECTIVES leads with Rule #1 (the 20% stop-and-report rule, Matt 2026-09-29)', () => {
+  const first = STANDING_DIRECTIVES[0] ?? '';
+  assert.match(first, /RULE #1/);
+  assert.match(first, /20% better/);
+  assert.match(first, /Rule #1 is in effect/);
+});

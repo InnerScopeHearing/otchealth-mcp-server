@@ -78,6 +78,7 @@ export const DEFINITION_OF_DONE =
 
 /** Non-negotiable standing directives, restated on every wake so they cannot be forgotten mid-session. */
 export const STANDING_DIRECTIVES: readonly string[] = [
+  'RULE #1 (Matt, top priority): before and during any build or improvement, judge whether it will make the item at least 20% better within reasonable budget and usage. If not, or if repeated attempts stop making significant progress, stop work in that area, leave it at its best working state, and tell Matt: "Rule #1 is in effect", what stopped, and why 20% is not achievable. Never overrides legal walls, security, or data-loss/outage fixes.',
   'Ground-first: retrieve from the brain and ledger before asserting any fact. Never answer from general knowledge, and never a generic disclaimer.',
   'Write-through every fact, decision, and correction the instant it happens. The ledger is the source of truth, not chat memory.',
   'Never commit a secret VALUE into any repo, response, or log. Names are fine, values never.',
