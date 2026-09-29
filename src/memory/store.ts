@@ -531,6 +531,12 @@ export async function readInbound(agent: string, marker: string): Promise<Memory
     .sort((x, y) => (x.ts || '').localeCompare(y.ts || ''));
 }
 
+/** Read one shared feed by its exact agent-keyed blob name. */
+export async function readSharedAgent(agent: string): Promise<MemoryEntry[]> {
+  const a = normalizeAgent(agent);
+  return parseSharedRows(await getText(sharedKey(a)), a);
+}
+
 /** Read the whole shared exec feed (every agent), newest first. */
 export async function readSharedAll(): Promise<MemoryEntry[]> {
   const blobs = await listShared();
