@@ -97,6 +97,18 @@ test('normalizes the exact approved AWS virtual-hosted S3 metadata URI', async (
   assert.equal(result.data.matches[0].source_url, 'https://otchealthmart.com/pages/about-us');
 });
 
+test('normalizes an AWS virtual-hosted URI in the S3 location and drops arbitrary metadata', async () => {
+  const httpsUri = `https://otchealth-finance-legal-dr-55c84f6b.s3.amazonaws.com/graph-trial/20260913/managed-graphrag/company_shared/${sourceId}.txt`;
+  const h = harness(() => Response.json({ retrievalResults: [validRow({
+    location: { type: 'S3', s3Location: { uri: httpsUri } },
+    metadata: { _data_source_type: 'S3', private_or_unrecognized_metadata: 'must not escape' },
+  })] }));
+  const result: any = await handleBrainPublicKbSearch({ query: 'synthetic' }, ctx('cto'), h.deps);
+  assert.equal(result.data.count, 1);
+  assert.equal(result.data.matches[0].source_uri, `${prefix}${sourceId}.txt`);
+  assert.equal(JSON.stringify(result).includes('must not escape'), false);
+});
+
 test('rejects unapproved HTTPS hosts, URL decorations, paths, datasource types, and URI conflicts', async () => {
   const httpsPrefix = 'https://otchealth-finance-legal-dr-55c84f6b.s3.amazonaws.com/graph-trial/20260913/managed-graphrag/company_shared/';
   const rejectedUris = [
