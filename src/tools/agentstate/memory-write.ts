@@ -10,6 +10,7 @@ import { embed } from '../../azure/foundry.js';
 import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { currentCallerAgent, isConnectorSurface } from '../../server/request-context.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
+import { noteRetraction } from '../../memory/retractions.js';
 
 /**
  * RING GATE (defense-in-depth; layer 3 of the Phase 5/6 connector-ring closure, 2026-07-15).
@@ -178,6 +179,8 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
       summary: `Recovered committed memory ${record.id} after concurrent or uncertain creation; projection remains owned by its original writer or reconciler.`,
     };
   }
+  // Make this replica honour the retraction immediately (its cache otherwise lags up to 120s).
+  noteRetraction(record.agent, record.supersedes ?? undefined);
   // WRITE-THROUGH: the Cosmos memory-of-record was previously indexed by NOTHING -- semantic.mjs
   // indexes only the shared blob feed, so every memory_write was durable but UNFINDABLE by
   // brain_search/kb_search. This makes the system-of-record actually recallable. Fail-open:
