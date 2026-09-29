@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured, normalizeAgent, readSharedAll } from '../../memory/store.js';
+import { isConfigured, normalizeAgent, readSharedAgent, readSharedAll } from '../../memory/store.js';
 import { semanticConfigured, semanticSearch } from '../../memory/semantic.js';
 import { cachedAgenticRecall } from '../../memory/hot-cache.js';
 import { agenticRecall } from '../../memory/agentic.js';
@@ -21,6 +21,27 @@ const RECALL_OUTPUT_SHAPE = {
   count: z.number(),
   mode: z.string(),
 };
+
+const EXACT_SHARED_ID = /^(?:([a-z0-9][a-z0-9_-]{0,40})__)?(\d{8}-[a-f0-9]{12})$/i;
+
+/** Recognize only a whole query that is a stored shared-feed ID, optionally agent-qualified. */
+export function parseExactSharedIdQuery(query: string): { agent: string | null; id: string } | null {
+  const match = EXACT_SHARED_ID.exec(query.trim());
+  if (!match) return null;
+  try {
+    return { agent: match[1] ? normalizeAgent(match[1]) : null, id: match[2]!.toLowerCase() };
+  } catch {
+    return null;
+  }
+}
+
+export function filterExactSharedIdHits<T extends { id?: unknown; agent?: unknown }>(
+  rows: T[],
+  id: string,
+  agent: string | null,
+): T[] {
+  return rows.filter((row) => row.id === id && (!agent || row.agent === agent));
+}
 
 /**
  * `memory_recall` defaults to current truth; its explicit `include_superseded` mode
@@ -61,6 +82,29 @@ export async function recallHandler(
   const agentFilter = input.agent ? normalizeAgent(input.agent) : null;
   if (!sharedMemoryAgentAllowed(ctx.callerAgent, agentFilter)) {
     return { data: { matches: [], count: 0, mode: 'ring-forbidden' }, summary: 'Refused: personal-legal shared-memory rows are not available to this caller.' };
+  }
+
+  // Exact shared-feed identifiers must not be sent through semantic ranking: hybrid search can
+  // return a related row with a different ID. Agent-qualified IDs address the exact feed blob;
+  // bare IDs retain an exact equality check across feeds.
+  const exactId = parseExactSharedIdQuery(input.query);
+  if (exactId) {
+    if (!isConfigured()) {
+      return { data: { matches: [], count: 0, mode: 'none' }, summary: 'Shared brain not configured; no results.' };
+    }
+    if (exactId.agent && agentFilter && exactId.agent !== agentFilter) {
+      return { data: { matches: [], count: 0, mode: 'exact-id' }, summary: '0 exact shared-memory ID matches.' };
+    }
+    const rows = exactId.agent
+      ? await readSharedAgent(exactId.agent)
+      : await readSharedAll();
+    const exact = filterExactSharedIdHits(rows, exactId.id, exactId.agent ?? agentFilter);
+    const visible = await currentRecallHits(filterPersonalSharedMemory(exact, ctx.callerAgent), includeSuperseded);
+    const matches = visible.slice(0, limit);
+    return {
+      data: { matches, count: matches.length, mode: 'exact-id' },
+      summary: `${matches.length} exact shared-memory ID match(es) for "${input.query}"${agentFilter ? ` in ${agentFilter}` : ''}.`,
+    };
   }
 
   // Prefer AGENTIC HYBRID recall (Azure AI Search memory-exec): decomposes the query into
@@ -165,3 +209,4 @@ export function registerMemoryRecall(server: McpServer, callerHash: CallerHashPr
 }
 
 export { RECALL_INPUT_SHAPE, RECALL_OUTPUT_SHAPE };
+
