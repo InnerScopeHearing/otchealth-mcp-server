@@ -22,6 +22,7 @@
 import { loadEnv } from '../config/env.js';
 import { TwilioApiError } from './api-client.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { ELEVEN_DEFAULT_MODEL, assertElevenTextWithinLimit } from './elevenlabs-models.js';
 import { incomingPhoneNumberParams, messagingServiceParams, type IncomingPhoneNumberUpdateArgs, type MessagingServiceUpdateArgs } from './params.js';
 export { incomingPhoneNumberParams, messagingServiceParams } from './params.js';
 export type { IncomingPhoneNumberUpdateArgs, MessagingServiceUpdateArgs } from './params.js';
@@ -734,9 +735,10 @@ export async function elevenTextToSpeech(args: ElevenTtsArgs): Promise<{
   audio_base64: string;
   content_type: string;
 }> {
+  assertElevenTextWithinLimit(args.text, args.model_id);
   const body: Record<string, unknown> = {
     text: args.text,
-    model_id: args.model_id ?? 'eleven_monolingual_v1',
+    model_id: args.model_id ?? ELEVEN_DEFAULT_MODEL,
     voice_settings: {
       stability: args.stability ?? 0.5,
       similarity_boost: args.similarity_boost ?? 0.75,
