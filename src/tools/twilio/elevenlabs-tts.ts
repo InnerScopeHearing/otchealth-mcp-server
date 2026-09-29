@@ -22,8 +22,8 @@ export function registerElevenLabsTts(server: McpServer, callerHash: CallerHashP
       model_id: z.string().optional().describe('ElevenLabs model ID (default: eleven_v4). Other current options: eleven_v4_turbo (half cost), eleven_v3, eleven_multilingual_v2, eleven_flash_v2_5. Use elevenlabs_list_models for available IDs.'),
       stability: z.number().min(0).max(1).optional().describe('Voice stability 0.0–1.0 (default 0.5). Higher = more consistent.'),
       similarity_boost: z.number().min(0).max(1).optional().describe('Voice similarity boost 0.0–1.0 (default 0.75).'),
-      style: z.number().min(0).max(1).optional().describe('Speaking style exaggeration 0.0–1.0 (default 0, off).'),
-      use_speaker_boost: z.boolean().optional().describe('Boost speaker likeness (default true). Adds latency.'),
+      style: z.number().min(0).max(1).optional().describe('Speaking style exaggeration 0.0–1.0 (default 0, off). Ignored on eleven_v4 and eleven_v4_turbo, which support only stability and similarity_boost.'),
+      use_speaker_boost: z.boolean().optional().describe('Boost speaker likeness (default true). Adds latency. Ignored on eleven_v4 and eleven_v4_turbo, which support only stability and similarity_boost.'),
     },
     outputShape: {
       executed: z.boolean(),

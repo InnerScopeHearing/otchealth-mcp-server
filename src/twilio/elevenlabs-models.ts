@@ -36,3 +36,31 @@ export function assertElevenTextWithinLimit(text: string, modelId: string | unde
     );
   }
 }
+
+/** Eleven v4 and v4 Turbo support only stability and similarity_boost. */
+export function elevenModelIsV4(modelId: string): boolean {
+  return modelId === 'eleven_v4' || modelId.startsWith('eleven_v4_');
+}
+
+export interface ElevenVoiceSettingsInput {
+  stability?: number;
+  similarity_boost?: number;
+  style?: number;
+  use_speaker_boost?: boolean;
+}
+
+/**
+ * v4 family: send ONLY stability + similarity_boost (style / use_speaker_boost are omitted even
+ * if the caller passed them). Every other model keeps the full settings set.
+ */
+export function buildElevenVoiceSettings(modelId: string, a: ElevenVoiceSettingsInput): Record<string, number | boolean> {
+  const settings: Record<string, number | boolean> = {
+    stability: a.stability ?? 0.5,
+    similarity_boost: a.similarity_boost ?? 0.75,
+  };
+  if (!elevenModelIsV4(modelId)) {
+    settings.style = a.style ?? 0;
+    settings.use_speaker_boost = a.use_speaker_boost ?? true;
+  }
+  return settings;
+}
