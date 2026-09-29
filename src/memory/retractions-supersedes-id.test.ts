@@ -61,18 +61,12 @@ test('a supersedes naming ANOTHER lane prefix does not retract that lane (no cro
   assert.equal(kept.length, 1);
 });
 
-test('owner-less hit with a globally-unique id shape is retracted; a legacy counter id is not', () => {
+test('an owner-less hit is never dropped on any lane retraction (retraction stays lane-scoped)', () => {
   const by = collectRetractedByAgent([
     { agent: 'developer', supersedes: OLD },
     { agent: 'cto', supersedes: '20260730-001' },
   ]);
-  const { kept, dropped } = filterRetractedByAgent(
-    [
-      { id: OLD }, // no prefix, no agent: unique hash id -> safe to match
-      { id: '20260730-001' }, // legacy per-lane counter: ambiguous owner -> must stay (collision-safe)
-    ],
-    by,
-  );
-  assert.deepEqual(kept.map((h) => h.id), ['20260730-001']);
-  assert.deepEqual(dropped, [OLD]);
+  const { kept, dropped } = filterRetractedByAgent([{ id: OLD }, { id: '20260730-001' }], by);
+  assert.deepEqual(kept.map((h) => h.id), [OLD, '20260730-001']);
+  assert.deepEqual(dropped, []);
 });

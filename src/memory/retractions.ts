@@ -104,14 +104,6 @@ export function normalizeSupersedesId(supersedes: string, agent: string): string
   return id.toLowerCase().startsWith(own) && id.length > own.length ? id.slice(own.length) : id;
 }
 
-/**
- * Entry ids that are globally unique by construction: shared-feed `YYYYMMDD-<12 hex>` (newSharedId)
- * and Cosmos/Postgres `m_<base36>_<8 hex>` (newId). Unlike the legacy per-lane counter ids
- * (`20260730-001`), these cannot collide across lanes, so an owner-less hit carrying one can be
- * matched safely against any lane's retraction set.
- */
-const GLOBALLY_UNIQUE_ID = /^(?:\d{8}-[0-9a-f]{12}|m_[0-9a-z]+_[0-9a-f]{8})$/;
-
 /** Drop hits whose underlying entry has been retracted. Returns what survived + what was dropped. Pure. */
 export function filterRetracted<T extends { id?: unknown }>(
   hits: T[],
@@ -128,14 +120,9 @@ export function filterRetracted<T extends { id?: unknown }>(
   return { kept, dropped };
 }
 
-function anyLaneRetracted(byAgent: Map<string, Set<string>>, entryId: string): boolean {
-  for (const set of byAgent.values()) if (set.has(entryId)) return true;
-  return false;
-}
-
 /** Collision-safe filtering for federated search. Composite document IDs are canonical and their
- * prefix wins if source metadata disagrees. A legacy bare ID uses hit.agent. Unknown owners stay,
- * EXCEPT a globally-unique-shaped id (see GLOBALLY_UNIQUE_ID), which cannot collide across lanes. */
+ * prefix wins if source metadata disagrees. A legacy bare ID uses hit.agent. Unknown owners stay:
+ * a retraction is lane-scoped, so a hit with no owner is never dropped on another lane's say-so. */
 export function filterRetractedByAgent<T extends { id?: unknown; agent?: unknown }>(
   hits: T[],
   byAgent: Map<string, Set<string>>,
@@ -151,7 +138,6 @@ export function filterRetractedByAgent<T extends { id?: unknown; agent?: unknown
       : typeof hit.agent === 'string' ? hit.agent.trim().toLowerCase() : '';
     const entryId = entryIdFromDocId(rawId);
     if (owner && entryId && byAgent.get(owner)?.has(entryId)) dropped.push(`${owner}__${entryId}`);
-    else if (!owner && GLOBALLY_UNIQUE_ID.test(entryId) && anyLaneRetracted(byAgent, entryId)) dropped.push(entryId);
     else kept.push(hit);
   }
   return { kept, dropped };
