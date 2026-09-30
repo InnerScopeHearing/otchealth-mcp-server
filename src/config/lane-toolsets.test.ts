@@ -90,8 +90,10 @@ test('isToolInLaneAllowlist: a tool outside the lane list is rejected', () => {
 
 test('personal graph traversal is exposed only to the clo-personal lane', () => {
   assert.equal(isToolInLaneAllowlist('clo-personal', 'personal_graph_query'), true);
+  assert.equal(isToolInLaneAllowlist('clo-personal', 'personal_bedrock_retrieve'), true);
   for (const lane of ['cto', 'cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', 'developer', 'exec']) {
     assert.equal(isToolInLaneAllowlist(lane, 'personal_graph_query'), false, lane);
+    assert.equal(isToolInLaneAllowlist(lane, 'personal_bedrock_retrieve'), false, lane);
   }
 });
 

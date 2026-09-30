@@ -127,6 +127,7 @@ import { registerKbSearch } from './kb/search.js';
 import { registerBrainSearch } from './kb/brain-search.js';
 import { registerBrainGraphSearch } from './kb/brain-graph-search.js';
 import { registerPersonalGraphQuery } from './kb/personal-graph-query.js';
+import { registerPersonalBedrockRetrieve } from './kb/personal-bedrock-retrieve.js';
 import { registerBrainPublicKbSearch } from './kb/brain-public-kb-search.js';
 import { registerWebSearch } from './web/web-search.js';
 // Task G-3 (2026-09-03): Tavily-only parity tools alongside web_search -- see each file's header.
@@ -1104,6 +1105,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerBrainSearch(server, callerHash);
   registerBrainGraphSearch(server, callerHash);
   registerPersonalGraphQuery(server, callerHash);
+  registerPersonalBedrockRetrieve(server, callerHash);
   registerBrainPublicKbSearch(server, callerHash);
   registerRetrievalFeedback(server, callerHash); // write_simple: opt-in feedback on a brain_search/kb_search hit (Wave 7 item 7.1)
   registerWebSearch(server, callerHash);
