@@ -48,6 +48,7 @@ import {
 } from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
+import { COO_FULL_INTERCOM_TOOLSET, cooCustomerOperationsEnabled, cooIntercomOperationAllowed } from './intercom/coo-operations-access.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
