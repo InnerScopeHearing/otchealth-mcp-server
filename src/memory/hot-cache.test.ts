@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cachedAgenticRecall,
+  CACHE_TTL_SECONDS,
   DEFAULT_SIMILARITY_THRESHOLD,
   NEVER_CACHE_LANE,
   type HotCacheDeps,
@@ -9,10 +10,10 @@ import {
 import type { AgenticRecallResult } from './agentic.js';
 import type { VectorMatch } from '../agentstate/store.js';
 
-// Pure, no-network: every Cosmos/Foundry/agentic call is faked via cachedAgenticRecall's injectable
+// Pure, no-network: every store/embedding/agentic call is faked via cachedAgenticRecall's injectable
 // deps bag. This repo's ESM build does not allow node:test's mock.method() to override another
 // module's live named export (TypeError: Cannot redefine property), so dependency injection is the
-// only viable seam for testing this read-through path without hitting live Azure.
+// only viable seam for testing this read-through path without calling a live provider.
 
 const LIVE_RESULT: AgenticRecallResult = {
   mode: 'agentic-hybrid',
@@ -29,7 +30,8 @@ function makeDeps(overrides: Partial<HotCacheDeps> & { recallCalls?: string[]; u
   let recallCalls = 0;
   let upsertCalls = 0;
   const deps: HotCacheDeps = {
-    isCosmosConfigured: () => true,
+    isStoreConfigured: () => true,
+    nowMs: () => Date.parse('2026-10-01T00:00:00.000Z'),
     embed: async () => [0.1, 0.2, 0.3],
     vectorSearch: async () => [],
     upsert: async () => {
@@ -61,10 +63,10 @@ test('cachedAgenticRecall: a HIT returns the cached result WITHOUT calling agent
   const deps = makeDeps({
     vectorSearch: async (_coll, pk, _field, _vec, top) => {
       vectorSearchCalls++;
-      assert.equal(pk, 'agent:cto', 'vector search must be scoped to the caller lane partition');
+      assert.match(pk, /^agent:cto:recall:[a-f0-9]{64}$/, 'vector search must include caller and recall dimensions');
       assert.equal(top, 1);
       const match: VectorMatch = {
-        doc: { id: 'cache_1', cacheScope: pk, query: 'hello', queryVector: [0.1, 0.2, 0.3], result: cachedResult, ts: '2026-06-30T00:00:00Z', ttl: 604800 },
+        doc: { id: 'cache_1', cacheScope: pk, query: 'hello', queryVector: [0.1, 0.2, 0.3], result: cachedResult, ts: '2026-09-30T00:00:00.000Z', ttl: 604800 },
         similarity: 0.99,
       };
       return [match];
@@ -81,6 +83,63 @@ test('cachedAgenticRecall: a HIT returns the cached result WITHOUT calling agent
   assert.equal(deps.upsertCallCount(), 0, 'a cache HIT must never re-write the cache');
 });
 
+test('cachedAgenticRecall: caller, content filter, and effective result limit isolate hits without result leakage', async () => {
+  const stored = new Map<string, Record<string, unknown>>();
+  const recallOptions: Array<{ agent?: string; top?: number }> = [];
+  const deps = makeDeps({
+    vectorSearch: async (_coll, pk) => {
+      const doc = stored.get(pk);
+      return doc ? [{ doc, similarity: 0.99 } as VectorMatch] : [];
+    },
+    upsert: async (_coll, pk, doc) => {
+      stored.set(pk, doc);
+    },
+    recall: async (_query, opts) => {
+      recallOptions.push(opts ?? {});
+      const agent = opts?.agent ?? 'all';
+      const top = opts?.top ?? 5;
+      return {
+        mode: 'agentic-hybrid',
+        subQueries: ['synthetic'],
+        results: [
+          { id: `${agent}:${top}`, ts: '2026-09-30T00:00:00Z', type: 'fact', text: `${agent}:${top}`, tags: [], agent, score: 1, sourceSubQuery: 'synthetic' },
+        ],
+      };
+    },
+  });
+
+  const commerce20 = await cachedAgenticRecall('same synthetic query', { scope: 'cto', agent: 'commerce', top: 20, deps });
+  const commerce20Canonical = await cachedAgenticRecall('same synthetic query', { scope: 'cto', agent: 'commerce', top: 20, deps });
+  const support20 = await cachedAgenticRecall('same synthetic query', { scope: 'cto', agent: 'support', top: 20, deps });
+  const support40 = await cachedAgenticRecall('same synthetic query', { scope: 'cto', agent: 'support', top: 40, deps });
+  const support40OtherCaller = await cachedAgenticRecall('same synthetic query', { scope: 'developer', agent: 'support', top: 40, deps });
+  const allDefault = await cachedAgenticRecall('default synthetic query', { scope: 'cto', deps });
+  const allExplicitDefault = await cachedAgenticRecall('default synthetic query', { scope: 'cto', agent: '', top: 5, deps });
+
+  assert.equal(commerce20.cacheHit, false);
+  assert.equal(commerce20.results[0]?.text, 'commerce:20');
+  assert.equal(commerce20Canonical.cacheHit, true, 'same dimensions and caller should reuse the partition');
+  assert.equal(commerce20Canonical.results[0]?.text, 'commerce:20');
+  assert.equal(support20.cacheHit, false, 'a different content filter must not serve commerce results');
+  assert.equal(support20.results[0]?.text, 'support:20');
+  assert.equal(support40.cacheHit, false, 'a different result limit must not serve a top-20 result set');
+  assert.equal(support40.results[0]?.text, 'support:40');
+  assert.equal(support40OtherCaller.cacheHit, false, 'a different caller lane must remain isolated');
+  assert.equal(support40OtherCaller.results[0]?.text, 'support:40');
+  assert.equal(allDefault.cacheHit, false);
+  assert.equal(allExplicitDefault.cacheHit, true, 'blank filter and omitted/default limit have equivalent behavior');
+  assert.equal(allExplicitDefault.results[0]?.text, 'all:5');
+  assert.deepEqual(recallOptions, [
+    { agent: 'commerce', top: 20 },
+    { agent: 'support', top: 20 },
+    { agent: 'support', top: 40 },
+    { agent: 'support', top: 40 },
+    { agent: undefined, top: undefined },
+  ]);
+  assert.equal(CACHE_TTL_SECONDS, 604800);
+  for (const doc of stored.values()) assert.equal(doc.ttl, CACHE_TTL_SECONDS);
+});
+
 test('cachedAgenticRecall: a similarity below the threshold is treated as a MISS, not a hit', async () => {
   const deps = makeDeps({
     vectorSearch: async (_coll, pk) => [
@@ -92,6 +151,40 @@ test('cachedAgenticRecall: a similarity below the threshold is treated as a MISS
 
   assert.equal(out.cacheHit, false);
   assert.equal(deps.recallCallCount(), 1, 'below-threshold similarity must fall through to a live recall');
+});
+
+test('cachedAgenticRecall: expired or invalid cache timestamps and TTLs fall through to live recall', async () => {
+  const nowMs = 2_000_000_000_000;
+  const invalidMetadata = [
+    { ts: new Date(nowMs - 2_000).toISOString(), ttl: 1, name: 'expired' },
+    { ts: new Date(nowMs - 1_000).toISOString(), ttl: 1, name: 'expired at boundary' },
+    { ts: 'not-a-timestamp', ttl: 60, name: 'malformed timestamp' },
+    { ts: new Date(nowMs + 1_000).toISOString(), ttl: 60, name: 'future timestamp' },
+    { ts: new Date(nowMs - 1_000).toISOString(), ttl: 0, name: 'zero TTL' },
+    { ts: new Date(nowMs - 1_000).toISOString(), ttl: 604801, name: 'TTL above configured maximum' },
+  ];
+
+  for (const metadata of invalidMetadata) {
+    const deps = makeDeps({
+      nowMs: () => nowMs,
+      vectorSearch: async (_coll, pk) => [
+        {
+          doc: {
+            id: 'synthetic-cache-row', cacheScope: pk, query: 'synthetic query', queryVector: [0.1],
+            result: { ...LIVE_RESULT, results: [{ ...LIVE_RESULT.results[0]!, text: `must-not-return-${metadata.name}` }] },
+            ts: metadata.ts, ttl: metadata.ttl,
+          },
+          similarity: 0.99,
+        } as VectorMatch,
+      ],
+    });
+
+    const out = await cachedAgenticRecall('synthetic query', { scope: 'cto', deps });
+
+    assert.equal(out.cacheHit, false, `${metadata.name} must not be served as a cache hit`);
+    assert.equal(out.results[0]?.text, LIVE_RESULT.results[0]?.text, `${metadata.name} must fall through to fresh recall`);
+    assert.equal(deps.recallCallCount(), 1, `${metadata.name} must invoke live recall`);
+  }
 });
 
 test('cachedAgenticRecall: a MISS calls agenticRecall, then writes the result to the cache', async () => {
@@ -127,9 +220,9 @@ test('cachedAgenticRecall: a MISS calls agenticRecall, then writes the result to
   assert.equal(upsertCalls, 1, 'a MISS must write the fresh result back to the cache exactly once');
   assert.ok(upsertArgs, 'upsert should have been invoked');
   assert.equal(upsertArgs!.coll, 'cache');
-  assert.equal(upsertArgs!.pk, 'agent:cto', 'the write must be partitioned under the caller lane scope');
+  assert.match(upsertArgs!.pk, /^agent:cto:recall:[a-f0-9]{64}$/, 'the write must include caller and recall dimensions');
   assert.equal(upsertArgs!.doc['query'], 'what is the deploy status');
-  assert.equal(upsertArgs!.doc['cacheScope'], 'agent:cto');
+  assert.equal(upsertArgs!.doc['cacheScope'], upsertArgs!.pk);
   assert.deepEqual(upsertArgs!.doc['result'], LIVE_RESULT);
   assert.ok(Array.isArray(upsertArgs!.doc['queryVector']) && (upsertArgs!.doc['queryVector'] as number[]).length > 0);
   assert.ok(embedCalls >= 1, 'embed should run to produce the query vector for lookup and/or the cache write');
@@ -139,7 +232,7 @@ test('cachedAgenticRecall: a cache-write failure is swallowed and never surfaces
   const deps = makeDeps({
     vectorSearch: async () => [],
     upsert: async () => {
-      throw new Error('simulated Cosmos outage');
+      throw new Error('simulated store outage');
     },
   });
 
@@ -174,11 +267,11 @@ test('cachedAgenticRecall: the clo-personal bypass is case-insensitive and trims
   }
 });
 
-test('cachedAgenticRecall: an unconfigured Cosmos store is a clean no-op passthrough (identical to calling agenticRecall directly)', async () => {
+test('cachedAgenticRecall: an unconfigured selected store is a clean no-op passthrough (identical to calling agenticRecall directly)', async () => {
   let vectorSearchCalls = 0;
   let upsertCalls = 0;
   const deps = makeDeps({
-    isCosmosConfigured: () => false,
+    isStoreConfigured: () => false,
     vectorSearch: async () => {
       vectorSearchCalls++;
       return [];
@@ -194,8 +287,8 @@ test('cachedAgenticRecall: an unconfigured Cosmos store is a clean no-op passthr
   assert.equal(out.cacheHit, false);
   assert.equal(out.mode, 'agentic-hybrid');
   assert.deepEqual(out.results, LIVE_RESULT.results);
-  assert.equal(vectorSearchCalls, 0, 'unconfigured Cosmos must never attempt a vector search');
-  assert.equal(upsertCalls, 0, 'unconfigured Cosmos must never attempt a cache write');
+  assert.equal(vectorSearchCalls, 0, 'an unconfigured selected store must never attempt a vector search');
+  assert.equal(upsertCalls, 0, 'an unconfigured selected store must never attempt a cache write');
   assert.equal(deps.recallCallCount(), 1, 'the caller should get exactly the live agenticRecall behavior');
 });
 
