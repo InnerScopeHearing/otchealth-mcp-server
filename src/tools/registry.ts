@@ -48,6 +48,7 @@ import {
 } from '../safety/tool-catalog-curation.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
+import { COO_FULL_INTERCOM_TOOLSET, cooCustomerOperationsEnabled, cooIntercomOperationAllowed } from './intercom/coo-operations-access.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -493,6 +494,11 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // Owner-delegated customer operations, not a ship/exec role elevation.
+  // No global override or unknown connector can inherit this exact-name grant.
+  if (cooCustomerOperationsEnabled(lane)) {
+    for (const name of COO_FULL_INTERCOM_TOOLSET) tools.add(name);
+  }
   // This handler intentionally accepts only the six authenticated company seats. The shared
   // executive ship set also serves cpo/cco/exec and clo-personal, so keep its public-KB visibility
   // aligned with the handler's exact lane contract instead of exposing it to those seats.
@@ -951,7 +957,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // takes precedence over the neutral projection; strict validation uses the selected public schema,
   // while handler authorization and the internal Work/Codex input shape remain unchanged.
   const connectorInputProjection = connectorSurfaceForThisTool
-    ? def.connectorInputShapeByLane?.[laneForThisTool] ?? def.connectorInputShape
+    ? cooIntercomOperationAllowed(laneForThisTool, canonicalName)
+      ? def.connectorInputShape
+      : def.connectorInputShapeByLane?.[laneForThisTool] ?? def.connectorInputShape
     : undefined;
   const useConnectorInputProjection = Boolean(connectorInputProjection);
   const inputShape: ZodRawShape = {
@@ -1106,7 +1114,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
       // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
       if (!gov && def.category === 'write_orchestrated') {
-        gov = { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
+        gov = cooIntercomOperationAllowed(callerAgent, canonicalName)
+          ? { role: ['cto', 'coo'], reason: 'Owner-delegated Intercom operation; existing high-risk, dry-run and approval gates still apply.' }
+          : { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
       }
       if (gov && !roleAllows(gov.role, callerAgent)) {
         const roleLabel = Array.isArray(gov.role) ? gov.role.join('/') : gov.role;
