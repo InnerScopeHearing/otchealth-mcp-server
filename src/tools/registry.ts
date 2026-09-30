@@ -1050,7 +1050,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           outcome: 'error',
           latency_ms: Date.now() - started,
           error_code: 'invalid_input',
-          error_message: errorMsg,
         });
         return {
           isError: true,
@@ -1120,7 +1119,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           outcome: 'rejected',
           latency_ms: Date.now() - started,
           error_code: 'forbidden_role',
-          error_message: gmsg,
         });
         return {
           isError: true,
@@ -1145,7 +1143,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           outcome: 'rejected',
           latency_ms: Date.now() - started,
           error_code: 'write_disabled',
-          error_message: gate.reason,
         });
         return {
           isError: true,
@@ -1176,7 +1173,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           outcome: 'rejected',
           latency_ms: Date.now() - started,
           error_code: 'cold_start_enforced',
-          error_message: cmsg,
         });
         return {
           isError: true,
@@ -1232,7 +1228,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           outcome: 'rejected',
           latency_ms: Date.now() - started,
           error_code: 'prompt_injection_blocked',
-          error_message: smsg,
         });
         return {
           isError: true,
@@ -1279,7 +1274,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
             outcome: 'rejected',
             latency_ms: Date.now() - started,
             error_code: 'ungrounded_blocked',
-            error_message: gmsg,
           });
           return {
             isError: true,
@@ -1302,8 +1296,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           outcome: 'success',
           latency_ms: Date.now() - started,
         };
-        if (payload.audit?.before !== undefined) endLog.before = payload.audit.before;
-        if (payload.audit?.after !== undefined) endLog.after = payload.audit.after;
+        const count = result && typeof result === 'object'
+          ? (result as Record<string, unknown>).count
+          : undefined;
+        if (typeof count === 'number' && Number.isInteger(count) && count >= 0) endLog.result_count = count;
         logToolEnd(endLog);
 
         // CAPTURE PLANE (Phase 2): a successful MUTATING, non-dry-run call -- the SAME gate the
@@ -1485,7 +1481,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           outcome: 'error',
           latency_ms: Date.now() - started,
           error_code: errorCode,
-          error_message: e.message,
+          ...(upstreamStatus !== undefined ? { status_code: upstreamStatus } : {}),
         });
         return {
           isError: true,
@@ -1567,3 +1563,4 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 }
 
 export type CallerHashProvider = () => string;
+

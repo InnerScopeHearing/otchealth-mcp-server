@@ -112,28 +112,39 @@ export interface ToolCallLogEnd {
   caller_hash: string;
   outcome: 'success' | 'error' | 'rejected';
   latency_ms: number;
-  before?: unknown;
-  after?: unknown;
+  /** Explicit non-negative result count only; arbitrary result payloads are never logged. */
+  result_count?: number;
+  status_code?: number;
   error_code?: string;
+  /** @deprecated Accepted for caller compatibility; never serialized by the logger. */
+  before?: unknown;
+  /** @deprecated Accepted for caller compatibility; never serialized by the logger. */
+  after?: unknown;
+  /** @deprecated Accepted for caller compatibility; never serialized by the logger. */
   error_message?: string;
 }
 
-export function logToolStart(entry: ToolCallLogStart): void {
-  logger.info(
-    {
-      type: 'tool_call_start',
-      correlation_id: entry.correlation_id,
-      tool: entry.tool,
-      caller_hash: entry.caller_hash,
-      dry_run: entry.dry_run ?? false,
-      read_only_mode: entry.read_only_mode,
-      input: maskPii(entry.input),
-    },
-    `tool_start ${entry.tool}`,
-  );
+function inputFieldCount(input: unknown): number {
+  if (Array.isArray(input)) return input.length;
+  if (input && typeof input === 'object') return Object.keys(input).length;
+  return 0;
 }
 
-export function logToolEnd(entry: ToolCallLogEnd): void {
+/** Content-minimized structured start fields, exported for synthetic privacy tests. */
+export function toolCallStartLogFields(entry: ToolCallLogStart): Record<string, unknown> {
+  return {
+    type: 'tool_call_start',
+    correlation_id: entry.correlation_id,
+    tool: entry.tool,
+    caller_hash: entry.caller_hash,
+    input_field_count: inputFieldCount(entry.input),
+    dry_run: entry.dry_run ?? false,
+    read_only_mode: entry.read_only_mode,
+  };
+}
+
+/** Content-minimized structured end fields, exported for synthetic privacy tests. */
+export function toolCallEndLogFields(entry: ToolCallLogEnd): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     type: 'tool_call_end',
     correlation_id: entry.correlation_id,
@@ -142,9 +153,17 @@ export function logToolEnd(entry: ToolCallLogEnd): void {
     outcome: entry.outcome,
     latency_ms: entry.latency_ms,
   };
-  if (entry.before !== undefined) payload.before = maskPii(entry.before);
-  if (entry.after !== undefined) payload.after = maskPii(entry.after);
+  if (Number.isInteger(entry.result_count) && entry.result_count! >= 0) payload.result_count = entry.result_count;
+  if (Number.isInteger(entry.status_code) && entry.status_code! >= 100 && entry.status_code! <= 599) payload.status_code = entry.status_code;
   if (entry.error_code) payload.error_code = entry.error_code;
-  if (entry.error_message) payload.error_message = entry.error_message;
-  logger.info(payload, `tool_end ${entry.tool} ${entry.outcome}`);
+  return payload;
 }
+
+export function logToolStart(entry: ToolCallLogStart): void {
+  logger.info(toolCallStartLogFields(entry), `tool_start ${entry.tool}`);
+}
+
+export function logToolEnd(entry: ToolCallLogEnd): void {
+  logger.info(toolCallEndLogFields(entry), `tool_end ${entry.tool} ${entry.outcome}`);
+}
+
