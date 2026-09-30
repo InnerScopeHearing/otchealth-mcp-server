@@ -44,6 +44,7 @@ async function inspect(lane: string) {
 }
 
 test('COO customer-operations connector exposes the complete existing Intercom family', async () => {
+  process.env.COO_CUSTOMER_OPERATIONS_ENABLED = 'true';
   const tools = await inspect('coo');
   const names = new Set(tools.map(tool => tool.name));
   const required = [
