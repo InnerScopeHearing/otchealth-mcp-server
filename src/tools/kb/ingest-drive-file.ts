@@ -110,6 +110,7 @@ export const kbIngestDriveFileOutputShape = {
   dry_run: z.boolean(),
   note: z.string().optional(),
   error: z.string().optional(),
+  configuration_component: z.enum(['graph_drive', 'finance_storage']).optional(),
 };
 
 export type KbIngestDriveFileInput = z.infer<z.ZodObject<typeof kbIngestDriveFileInputShape>>;
@@ -182,7 +183,7 @@ export async function handleKbIngestDriveFile(
   }
 
   if (!deps.driveConfigured()) {
-    return { data: { ...empty, error: 'unconfigured' }, summary: 'Graph Drive not configured (GRAPH_* / GRAPH_DRIVE_USER unset) — cannot read the source drop.' };
+    return { data: { ...empty, error: 'unconfigured', configuration_component: 'graph_drive' }, summary: 'Graph Drive not configured (GRAPH_* / GRAPH_DRIVE_USER unset) — cannot read the source drop.' };
   }
   const env = deps.env();
   // The migrated finance dataroom is writable through the existing S3 backend. An Azure SharedKey
@@ -190,7 +191,7 @@ export async function handleKbIngestDriveFile(
   const needsAzureKey = env.BLOB_BACKEND !== 's3';
   if (!env.AZURE_CFO_STORAGE_ACCOUNT || (needsAzureKey && !env.AZURE_CFO_STORAGE_KEY)) {
     return {
-      data: { ...empty, error: 'unconfigured' },
+      data: { ...empty, error: 'unconfigured', configuration_component: 'finance_storage' },
       summary:
         needsAzureKey
           ? 'The finance dataroom is not configured for Azure writes (AZURE_CFO_STORAGE_ACCOUNT / AZURE_CFO_STORAGE_KEY unset).'
