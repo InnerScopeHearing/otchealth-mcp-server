@@ -43,7 +43,7 @@ import { agentFromDocId } from './auto-supersede-runtime.js';
 
 const INDEX = 'memory-exec';
 const RRF_K = 60;
-const DEFAULT_TOP = 5;
+export const DEFAULT_TOP = 5;
 const FUSION_TOP = 8;
 
 // ── Types ────────────────────────────────────────────────────────────────────
