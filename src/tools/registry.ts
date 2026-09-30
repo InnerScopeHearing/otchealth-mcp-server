@@ -957,7 +957,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // takes precedence over the neutral projection; strict validation uses the selected public schema,
   // while handler authorization and the internal Work/Codex input shape remain unchanged.
   const connectorInputProjection = connectorSurfaceForThisTool
-    ? def.connectorInputShapeByLane?.[laneForThisTool] ?? def.connectorInputShape
+    ? cooIntercomOperationAllowed(laneForThisTool, canonicalName)
+      ? def.connectorInputShape
+      : def.connectorInputShapeByLane?.[laneForThisTool] ?? def.connectorInputShape
     : undefined;
   const useConnectorInputProjection = Boolean(connectorInputProjection);
   const inputShape: ZodRawShape = {
