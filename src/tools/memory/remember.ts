@@ -6,6 +6,7 @@ import { indexMemory as indexMemoryNow } from '../../search/index.js';
 import { embed } from '../../azure/foundry.js';
 import { detectSupersession } from '../../memory/auto-supersede-runtime.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
+import { noteRetraction } from '../../memory/retractions.js';
 
 const TYPES = ['fact', 'decision', 'correction', 'pitfall', 'status'] as const;
 const PERSONAL_SHARED_MEMORY_LANE = 'clo-personal';
@@ -149,6 +150,8 @@ export function registerMemoryRemember(server: McpServer, callerHash: CallerHash
               : 'Shared-memory durability is UNKNOWN. No retry key was supplied, so safe cross-process replay is unavailable.',
           };
         }
+        // Make this replica honour the retraction immediately (its cache otherwise lags up to 120s).
+        noteRetraction(agent, supersedes);
         // WRITE-THROUGH: make it semantically searchable NOW, not in up to 6 hours when brain-reindex
         // next runs. Fail-open -- the entry is already durable in blob, and the 6-hourly reindex is
         // the backstop, so an index outage must never fail the write. We report the outcome rather

@@ -41,6 +41,47 @@ function project(job: ChatActionJob): Record<string, unknown> {
   return { job_id: job.id, status: job.status, ...(job.result !== undefined ? { result: job.result } : {}), ...(job.error ? { error: job.error } : {}) };
 }
 
+export const MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS = 128;
+export const CHAT_ACTION_STATUS_READ_CAPACITY = Symbol('chat_action_status_read_capacity');
+
+export interface ChatActionJobStatus {
+  job_id: string;
+  status: ChatActionJob['status'];
+}
+
+type ChatActionJobStatusReader = (jobId: string, callerHash: string) => Promise<ChatActionJobStatus | null | typeof CHAT_ACTION_STATUS_READ_CAPACITY>;
+
+/** Coalesce only concurrent, caller-bound status reads. Completed results are never retained. */
+export function createChatActionJobStatusReader(read: typeof readDoc = readDoc): ChatActionJobStatusReader {
+  const inFlight = new Map<string, Promise<ChatActionJobStatus | null>>();
+
+  const loadStatus = (jobId: string, callerHash: string): Promise<ChatActionJobStatus | null> =>
+    Promise.resolve()
+      .then(() => read(JOBS, jobId, jobId))
+      .then((value) => {
+        const job = value as ChatActionJob | null;
+        if (!job || job.type !== 'chat_action_job' || job.caller_hash !== callerHash) return null;
+        return { job_id: job.id, status: job.status };
+      });
+
+  return (jobId, callerHash) => {
+    // The caller hash is part of the key and is checked against the stored job before projection.
+    const key = JSON.stringify([callerHash, jobId]);
+    const existing = inFlight.get(key);
+    if (existing) return existing;
+
+    // Existing keys still join above, but a new key cannot start backend work at capacity.
+    if (inFlight.size >= MAX_IN_FLIGHT_CHAT_ACTION_STATUS_READS) return Promise.resolve(CHAT_ACTION_STATUS_READ_CAPACITY);
+
+    let pending!: Promise<ChatActionJobStatus | null>;
+    pending = loadStatus(jobId, callerHash).finally(() => {
+      if (inFlight.get(key) === pending) inFlight.delete(key);
+    });
+    inFlight.set(key, pending);
+    return pending;
+  };
+}
+
 export async function createChatActionJob(input: z.infer<typeof Submit>, deps = { createDoc, readDoc, configured: isConfigured }): Promise<{ job: ChatActionJob; replayed: boolean }> {
   const refusal = rejectPersonalLegalInput(input.request);
   if (refusal) throw new Error(refusal);
@@ -63,6 +104,7 @@ export async function createChatActionJob(input: z.infer<typeof Submit>, deps = 
 }
 
 export function registerChatActionJobRoutes(app: FastifyInstance): void {
+  const readStatus = createChatActionJobStatusReader();
   const route = async (request: any, reply: any, mode: 'submit' | 'status' | 'result') => {
     if (!serviceAuthorized(request.headers as Record<string, unknown>)) return reply.code(401).send({ success: false, error: 'chat_action_service_unauthorized' });
     if (!isConfigured()) return reply.code(503).send({ success: false, error: 'chat_action_state_unavailable' });
@@ -71,9 +113,15 @@ export function registerChatActionJobRoutes(app: FastifyInstance): void {
       try { const out = await createChatActionJob(parsed.data); return reply.code(out.replayed ? 200 : 201).send({ success: true, result: { job_id: out.job.id, status: out.job.status } }); } catch (error) { return reply.code(409).send({ success: false, error: (error as Error).message }); }
     }
     const parsed = Read.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ success: false, error: 'invalid_chat_action_read' });
+    if (mode === 'status') {
+      const status = await readStatus(parsed.data.job_id, parsed.data.caller_hash);
+      if (status === CHAT_ACTION_STATUS_READ_CAPACITY) return reply.header('Retry-After', '1').code(503).send({ success: false, error: 'chat_action_status_capacity', retryable: true });
+      if (!status) return reply.code(404).send({ success: false, error: 'chat_action_job_not_found' });
+      return reply.send({ success: true, result: status });
+    }
     const job = await readDoc(JOBS, parsed.data.job_id, parsed.data.job_id) as ChatActionJob | null;
     if (!job || job.type !== 'chat_action_job' || job.caller_hash !== parsed.data.caller_hash) return reply.code(404).send({ success: false, error: 'chat_action_job_not_found' });
-    return reply.send({ success: true, result: mode === 'status' ? { job_id: job.id, status: job.status } : project(job) });
+    return reply.send({ success: true, result: project(job) });
   };
   app.post('/internal/chat-actions/jobs', (req, rep) => route(req, rep, 'submit'));
   app.post('/internal/chat-actions/jobs/status', (req, rep) => route(req, rep, 'status'));
