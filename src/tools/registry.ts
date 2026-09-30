@@ -678,23 +678,6 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   canonicalName?: string;
 }
 
-function parseUpstreamToolError(err: unknown, canonicalName: string): { code: string; nextStep: string; status?: number } | null {
-  if (!err || typeof err !== 'object') return null;
-  const candidate = err as Record<string, unknown>;
-  if (typeof candidate.code !== 'string') return null;
-  if (typeof candidate.nextStep !== 'string') return null;
-  const isPinnedObservationError = canonicalName === 'github_graphrag_observation_receipt_get' &&
-    candidate.name === 'PinnedObservationReaderError' &&
-    candidate.code === 'github_observation_receipt_unverified';
-  if (!isPinnedObservationError && (!candidate.name || (candidate.name !== 'CustomerIoApiError' && candidate.name !== 'N8nWebhookError'))) {
-    return null;
-  }
-  return {
-    code: candidate.code,
-    nextStep: candidate.nextStep,
-    status: typeof candidate.status === 'number' ? candidate.status : undefined,
-  };
-}
 
 const COMMON_INPUT: ZodRawShape = {
   dry_run: z
