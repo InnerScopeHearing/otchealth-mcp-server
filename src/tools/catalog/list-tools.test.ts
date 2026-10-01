@@ -1,10 +1,22 @@
-import { test } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   COO_INTERCOM_CONNECTOR_TOOLSET,
   connectorToolset,
 } from '../registry.js';
 import { loadEnv } from '../../config/env.js';
+
+before(() => {
+  const required: Record<string, string> = {
+    CIO_SITE_ID: 'test',
+    CIO_TRACK_KEY: 'test',
+    CIO_APP_API_BEARER: 'test',
+    PERPLEXITY_CONNECTOR_TOKEN: 'a'.repeat(32),
+    ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
+    N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+  };
+  for (const [key, value] of Object.entries(required)) process.env[key] ??= value;
+});
 import { projectCallerSurfaceTools } from './list-tools.js';
 
 const service = (names: string[]) => [{ service: 'intercom', tools: names.map((name) => ({ name })) }];
@@ -28,6 +40,14 @@ test('COO projection reports 13 callable Intercom tools without changing the 72-
   assert.equal(result.tools.length, 13);
   assert.deepEqual(result.tools, [...COO_INTERCOM_CONNECTOR_TOOLSET]);
   assert.deepEqual(services, before);
+});
+
+test('connector projection fails closed when the caller allowlist is unavailable', () => {
+  const services = service(['brain_search', 'intercom_team_list']);
+  const result = projectCallerSurfaceTools(services, true);
+
+  assert.equal(result.mode, 'connector_allowlist');
+  assert.deepEqual(result.tools, []);
 });
 
 test('external and unknown connector lanes expose only their allowlist intersection', () => {
