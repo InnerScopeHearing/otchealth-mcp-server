@@ -6,6 +6,19 @@ import { catalogVersion } from '../../catalog/catalog.js';
 import { loadEnv } from '../../config/env.js';
 import { currentCallerAgent, isConnectorSurface } from '../../server/request-context.js';
 
+export type CatalogServiceTools = ReadonlyArray<{ tools: ReadonlyArray<{ name: string }> }>;
+
+/** Projects the already-listed global catalog into the caller's advertised surface. */
+export function projectCallerSurfaceTools(
+  services: CatalogServiceTools,
+  connectorSurface: boolean,
+  callerSurfaceSet?: ReadonlySet<string>,
+): { mode: 'connector_allowlist' | 'full'; tools: string[] } {
+  const tools = services.flatMap((service) => service.tools.map((tool) => tool.name));
+  const mode = connectorSurface ? 'connector_allowlist' : 'full';
+  return { mode, tools: connectorSurface && callerSurfaceSet ? tools.filter((name) => callerSurfaceSet.has(name)) : tools };
+}
+
 export function registerCatalogListTools(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
     name: 'catalog_list_tools',
@@ -45,10 +58,9 @@ export function registerCatalogListTools(server: McpServer, callerHash: CallerHa
       const callerAgent = currentCallerAgent();
       const connectorSurface = isConnectorSurface();
       const callerSurfaceSet = connectorSurface ? connectorToolset(loadEnv(), callerAgent) : undefined;
-      const callerSurfaceTools = services
-        .flatMap((service) => service.tools.map((tool) => tool.name))
-        .filter((name) => !callerSurfaceSet || callerSurfaceSet.has(name));
-      const callerSurfaceMode = connectorSurface ? 'connector_allowlist' : 'full';
+      const callerSurface = projectCallerSurfaceTools(services, connectorSurface, callerSurfaceSet);
+      const callerSurfaceTools = callerSurface.tools;
+      const callerSurfaceMode = callerSurface.mode;
       return {
         data: {
           services,
