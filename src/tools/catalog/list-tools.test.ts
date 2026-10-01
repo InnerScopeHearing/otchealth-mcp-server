@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {
   COO_INTERCOM_CONNECTOR_TOOLSET,
   connectorToolset,
-  loadEnv,
 } from '../registry.js';
+import { loadEnv } from '../../config/env.js';
 import { projectCallerSurfaceTools } from './list-tools.js';
 
 const service = (names: string[]) => [{ service: 'intercom', tools: names.map((name) => ({ name })) }];
