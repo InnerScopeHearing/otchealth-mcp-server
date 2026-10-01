@@ -439,8 +439,19 @@ export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
   'intercom_contact_get', 'intercom_contact_update',
 ] as const;
 
+// Narrow Twilio configuration visibility for COO coordination. These are read-only metadata
+// endpoints only. SMS, MMS, calls, recordings, number purchase/release, and routing updates remain
+// absent. Execution governance and provider credentials are unchanged.
+export const COO_TWILIO_READ_CONNECTOR_TOOLSET: readonly string[] = [
+  'twilio_messaging_service_list',
+  'twilio_messaging_service_get',
+  'twilio_number_list',
+  'twilio_number_get',
+] as const;
+
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  ...COO_TWILIO_READ_CONNECTOR_TOOLSET,
   ...COO_INTERCOM_CONNECTOR_TOOLSET,
   'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // This diagnostic is intentionally safe on the constrained coordination surface.
