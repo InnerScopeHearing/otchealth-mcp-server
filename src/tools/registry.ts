@@ -1094,7 +1094,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
       // High-risk default: any write_orchestrated tool (money / SMS / voice / DNS / build /
       // deploy / irreversible delete) is CTO-only unless an explicit rule already covers it.
       if (!gov && def.category === 'write_orchestrated') {
-        gov = { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
+        gov = cooIntercomOperationAllowed(callerAgent, canonicalName)
+          ? { role: ['cto', 'coo'], reason: 'Owner-delegated Intercom operation; existing high-risk, dry-run and approval gates still apply.' }
+          : { role: 'cto', reason: 'High-risk (write_orchestrated) action — CTO-only by default.' };
       }
       if (gov && !roleAllows(gov.role, callerAgent)) {
         const roleLabel = Array.isArray(gov.role) ? gov.role.join('/') : gov.role;
