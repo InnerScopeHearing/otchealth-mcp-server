@@ -431,8 +431,7 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  * outside this connector allowlist.
  */
 export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
-  'intercom_admin_set_away',
-  'intercom_team_get', 'intercom_team_list',
+  'intercom_admin_set_away', 'intercom_team_get', 'intercom_team_list',
   'intercom_ticket_type_get', 'intercom_ticket_type_list',
   'intercom_ticket_type_create', 'intercom_ticket_type_update',
   'intercom_tag_create', 'intercom_tag_update',
