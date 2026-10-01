@@ -373,3 +373,20 @@ test('ship lanes advertise connector_setup_code_create (execution stays cto/exec
     assert.equal(connectorToolset(testEnv(), lane).has('connector_setup_code_create'), false, `${lane} must not advertise setup-code minting`);
   }
 });
+
+test('coo connector exposes only bounded Twilio config reads, with update writes kept out for synthetic-gate review', () => {
+  const set = connectorToolset(testEnv(), 'coo');
+  assert.deepEqual(
+    [...COO_TWILIO_READ_CONNECTOR_TOOLSET].sort(),
+    ['twilio_messaging_service_get', 'twilio_messaging_service_list', 'twilio_number_get', 'twilio_number_list'].sort(),
+  );
+  for (const name of COO_TWILIO_READ_CONNECTOR_TOOLSET) assert.equal(set.has(name), true, name);
+  // The safe synthetic write/readback gate is intentionally not exposed here: no isolated Twilio
+  // service or number target exists in this change, so no live configuration write is authorized.
+  for (const forbidden of [
+    'twilio_messaging_service_update', 'twilio_number_update', 'twilio_send_sms', 'twilio_send_mms',
+    'twilio_make_call', 'twilio_number_buy', 'twilio_number_release', 'twilio_call_update',
+  ]) assert.equal(set.has(forbidden), false, `coo connector must not advertise ${forbidden}`);
+  const external = connectorToolset(testEnv(), 'external-read');
+  for (const name of COO_TWILIO_READ_CONNECTOR_TOOLSET) assert.equal(external.has(name), false, name);
+});
