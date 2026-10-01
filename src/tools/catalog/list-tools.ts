@@ -16,7 +16,7 @@ export function projectCallerSurfaceTools(
 ): { mode: 'connector_allowlist' | 'full'; tools: string[] } {
   const tools = services.flatMap((service) => service.tools.map((tool) => tool.name));
   const mode = connectorSurface ? 'connector_allowlist' : 'full';
-  return { mode, tools: connectorSurface && callerSurfaceSet ? tools.filter((name) => callerSurfaceSet.has(name)) : tools };
+  return { mode, tools: connectorSurface ? (callerSurfaceSet ? tools.filter((name) => callerSurfaceSet.has(name)) : []) : tools };
 }
 
 export function registerCatalogListTools(server: McpServer, callerHash: CallerHashProvider): void {
