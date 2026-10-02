@@ -24,6 +24,7 @@ import { TwilioApiError } from './api-client.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { ELEVEN_DEFAULT_MODEL, assertElevenTextWithinLimit, buildElevenVoiceSettings } from './elevenlabs-models.js';
 import { incomingPhoneNumberParams, messagingServiceParams, type IncomingPhoneNumberUpdateArgs, type MessagingServiceUpdateArgs } from './params.js';
+import { requireTwilioCollection } from './twilio-list-contract.js';
 export { incomingPhoneNumberParams, messagingServiceParams } from './params.js';
 export type { IncomingPhoneNumberUpdateArgs, MessagingServiceUpdateArgs } from './params.js';
 
@@ -420,10 +421,10 @@ export async function listIncomingPhoneNumbers(args: {
   if (args.phone_number) qs.set('PhoneNumber', args.phone_number);
   if (args.friendly_name) qs.set('FriendlyName', args.friendly_name);
   qs.set('PageSize', String(args.page_size ?? 20));
-  const data = await twilioGet<{ incoming_phone_numbers: any[] }>(
+  const data = await twilioGet<unknown>(
     `/Accounts/${creds.sid}/IncomingPhoneNumbers.json?${qs.toString()}`,
   );
-  return data.incoming_phone_numbers ?? [];
+  return requireTwilioCollection(data, 'incoming_phone_numbers');
 }
 
 export async function getIncomingPhoneNumber(phoneSid: string): Promise<any> {
@@ -483,11 +484,11 @@ export async function buyPhoneNumber(args: {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function listMessagingServices(page_size = 20): Promise<any[]> {
-  const creds = requireTwilioCreds();
-  const data = await twilioGet<{ services: any[] }>(
-    `/Accounts/${creds.sid}/Services.json?PageSize=${page_size}`,
+  const data = await twilioGet<unknown>(
+    `/Services?PageSize=${page_size}`,
+    MESSAGING_BASE,
   );
-  return data.services ?? [];
+  return requireTwilioCollection(data, 'services');
 }
 
 export async function getMessagingService(serviceSid: string): Promise<any> {
