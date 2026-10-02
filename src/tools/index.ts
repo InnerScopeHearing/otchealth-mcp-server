@@ -844,6 +844,7 @@ import { registerTwilioMessageRedact } from './twilio/message-redact.js';
 import { registerTwilioMessagingServiceGet } from './twilio/messaging-service-get.js';
 import { registerTwilioMessagingServiceUpdate } from './twilio/messaging-service-update.js';
 import { registerTwilioMessagingServiceList } from './twilio/messaging-service-list.js';
+import { registerTwilioCooResourceCounts } from './twilio/coo-resource-counts.js';
 import { registerTwilioNumberBuy } from './twilio/number-buy.js';
 import { registerTwilioNumberGet } from './twilio/number-get.js';
 import { registerTwilioNumberListAvailable } from './twilio/number-list-available.js';
@@ -1905,6 +1906,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerTwilioMessagingServiceGet(server, callerHash);
   registerTwilioMessagingServiceUpdate(server, callerHash);
   registerTwilioMessagingServiceList(server, callerHash);
+  registerTwilioCooResourceCounts(server, callerHash);
   registerTwilioNumberBuy(server, callerHash);
   registerTwilioNumberGet(server, callerHash);
   registerTwilioNumberListAvailable(server, callerHash);

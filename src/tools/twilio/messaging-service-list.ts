@@ -9,7 +9,7 @@ export function registerTwilioMessagingServiceList(server: McpServer, callerHash
     category: 'read',
     annotations: {
       title: 'List Twilio Messaging Services',
-      description: 'Lists all Messaging Services on the account via GET /Accounts/{SID}/Services.json. Read-only.',
+      description: 'Lists one bounded page of Messaging Services via GET https://messaging.twilio.com/v1/Services. Read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
