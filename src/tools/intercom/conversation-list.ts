@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { fcListConversations } from '../../intercom/full-client.js';
+import { projectIntercomConversationsForCooChat } from './coo-conversation-projection.js';
 
 export function registerIntercomConversationList(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
@@ -9,7 +10,7 @@ export function registerIntercomConversationList(server: McpServer, callerHash: 
     category: 'read',
     annotations: {
       title: 'List Intercom conversations',
-      description: 'Paginated list of conversations in the Intercom workspace. Filter by state (open/closed/snoozed) and assignee.',
+      description: 'Paginated list of conversations in the Intercom workspace. Filter by state (open/closed/snoozed) and assignee. Ordinary COO Chat receives metadata-only queue state; customer identity and message content are removed.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -35,10 +36,11 @@ export function registerIntercomConversationList(server: McpServer, callerHash: 
         assignee_id: input.assignee_id,
       });
       const conversations = resp.conversations ?? resp.data ?? [];
+      const projected = projectIntercomConversationsForCooChat(conversations);
       return {
         data: {
-          conversations,
-          count: conversations.length,
+          conversations: projected,
+          count: projected.length,
           total_count: resp.total_count ?? null,
           next_cursor: resp.pages?.next?.starting_after ?? null,
         },
