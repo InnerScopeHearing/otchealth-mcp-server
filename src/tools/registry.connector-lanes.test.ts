@@ -373,3 +373,11 @@ test('ship lanes advertise connector_setup_code_create (execution stays cto/exec
     assert.equal(connectorToolset(testEnv(), lane).has('connector_setup_code_create'), false, `${lane} must not advertise setup-code minting`);
   }
 });
+
+
+test('bounded Twilio counts are visible only on the COO connector lane', () => {
+  assert.equal(connectorToolset(testEnv(), 'coo').has('twilio_coo_resource_counts'), true);
+  for (const lane of ['cro', 'external-read', 'unknown']) {
+    assert.equal(connectorToolset(testEnv(), lane).has('twilio_coo_resource_counts'), false, lane);
+  }
+});
