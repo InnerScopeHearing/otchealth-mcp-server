@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { fcGetConversation } from '../../intercom/full-client.js';
+import { projectIntercomConversationForCooChat } from './coo-conversation-projection.js';
 
 export function registerIntercomConversationGet(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
@@ -9,7 +10,7 @@ export function registerIntercomConversationGet(server: McpServer, callerHash: C
     category: 'read',
     annotations: {
       title: 'Get an Intercom conversation by ID',
-      description: 'Retrieve full details of a single Intercom conversation including parts (messages), tags, and assignee.',
+      description: 'Retrieve a single Intercom conversation. Ordinary COO Chat receives metadata-only operational state; customer identity, subjects, message bodies, attachments, and conversation parts are removed.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -22,7 +23,7 @@ export function registerIntercomConversationGet(server: McpServer, callerHash: C
       conversation: z.unknown(),
     },
     handler: async (input, _ctx) => {
-      const conversation = await fcGetConversation(input.conversation_id);
+      const conversation = projectIntercomConversationForCooChat(await fcGetConversation(input.conversation_id));
       return {
         data: { conversation },
         summary: `Conversation ${input.conversation_id} retrieved.`,

@@ -426,8 +426,10 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  * custom data-attribute definitions, plus fixed-target synthetic contact verification. The contact
  * handlers constrain this connector lane to the approved synthetic record, restrict updates to one
  * fixed verification label, and redact every other contact field from reads. Customer/contact/
- * conversation/ticket contents, public help content, bulk actions, and hard-delete operations stay
- * outside this connector allowlist.
+ * raw customer identity/message bodies, public help content, bulk actions, and hard-delete operations
+ * stay outside this connector surface. The three conversation READS below are projected server-side
+ * to operational metadata only for ordinary COO Chat; raw message/contact payloads never leave the
+ * gateway on that lane.
  */
 export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
   'intercom_admin_set_away',
@@ -437,6 +439,7 @@ export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
   'intercom_tag_create', 'intercom_tag_update',
   'intercom_data_attribute_create', 'intercom_data_attribute_update',
   'intercom_contact_get', 'intercom_contact_update',
+  'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get',
 ] as const;
 
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [

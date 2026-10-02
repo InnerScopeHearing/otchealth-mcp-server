@@ -18,6 +18,9 @@ const COO_INTERCOM_TOOL_NAMES = [
   'intercom_data_attribute_update',
   'intercom_contact_get',
   'intercom_contact_update',
+  'intercom_conversation_get',
+  'intercom_conversation_list',
+  'intercom_conversation_search',
 ] as const;
 
 const COO_INTERCOM_WRITE_TOOL_NAMES = [
@@ -38,8 +41,6 @@ const COO_INTERCOM_DENIED_TOOL_NAMES = [
   'intercom_contact_list_tags',
   'intercom_contact_archive',
   'intercom_contact_unarchive',
-  'intercom_conversation_search',
-  'intercom_conversation_get',
   'intercom_ticket_search',
   'intercom_ticket_get',
   'intercom_event_list',

@@ -2,6 +2,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { fcSearchConversations } from '../../intercom/full-client.js';
+import {
+  assertCooChatConversationSearchInput,
+  projectIntercomConversationsForCooChat,
+} from './coo-conversation-projection.js';
 
 export function registerIntercomConversationSearch(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
@@ -9,7 +13,7 @@ export function registerIntercomConversationSearch(server: McpServer, callerHash
     category: 'read',
     annotations: {
       title: 'Search Intercom conversations',
-      description: 'Search conversations using Intercom\'s query DSL via POST /conversations/search. Supports field/operator/value queries with AND/OR combinators.',
+      description: 'Search conversations using Intercom\'s query DSL via POST /conversations/search. Ordinary COO Chat is restricted to operational metadata fields and receives no customer identity or message content.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: false,
@@ -35,6 +39,7 @@ export function registerIntercomConversationSearch(server: McpServer, callerHash
       next_cursor: z.string().nullable(),
     },
     handler: async (input, _ctx) => {
+      assertCooChatConversationSearchInput(input);
       let query: any;
       if (input.combine_operator && input.conditions) {
         query = { operator: input.combine_operator, value: input.conditions };
@@ -47,10 +52,11 @@ export function registerIntercomConversationSearch(server: McpServer, callerHash
         starting_after: input.starting_after,
       });
       const conversations = resp.data ?? resp.conversations ?? [];
+      const projected = projectIntercomConversationsForCooChat(conversations);
       return {
         data: {
-          conversations,
-          count: conversations.length,
+          conversations: projected,
+          count: projected.length,
           total_count: resp.total_count ?? null,
           next_cursor: resp.pages?.next?.starting_after ?? null,
         },

@@ -332,10 +332,10 @@ test('coo lane: seat-memory + ledger coordination, and nothing privileged', () =
   const set = connectorToolset(testEnv(), 'coo');
   assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.ok(set.has('brain_public_kb_search'), 'coo connector must expose fixed public-only KB retrieval');
-  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch']) {
+  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch', 'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email']) {
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
     assert.equal(set.has(excluded), false, `coo connector must NOT advertise ${excluded}`);
   }
 });
