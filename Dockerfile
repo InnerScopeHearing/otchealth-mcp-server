@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1: build
 # ============================================================
-FROM node:22 AS build
+FROM node:22-trixie AS build
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ RUN npm run build && npm prune --omit=dev
 # glibc base (Debian slim), NOT alpine/musl: Datadog serverless-init's /datadog-init is a
 # glibc-linked binary and cannot exec on musl. Build stage is full node:22 (glibc) so native
 # node_modules match the runtime ABI.
-FROM node:22-slim AS runtime
+FROM node:22-trixie-slim AS runtime
 
 ENV NODE_ENV=production
 ENV PORT=8080
