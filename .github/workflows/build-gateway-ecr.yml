@@ -37,6 +37,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -88,6 +89,20 @@ jobs:
       - name: Verify pointer-refresh source packaging contract
         run: node --test tools/identity-registry-pointer-refresh-task.test.mjs
 
+      - name: Record pinned public base manifest indexes and platform digests
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-acceptance
+          docker buildx imagetools inspect --raw docker.io/library/node:22-trixie@sha256:072889700aecef94c5cee46c6e60107cc2aaad9aa9e418ce05abaa1e85752ee3 > runtime-acceptance/node22-trixie.json
+          docker buildx imagetools inspect --raw docker.io/library/node:22-trixie-slim@sha256:b26b04c123d9ff8ab646ceb18b9d75a1173acf64b9a401094b906d27b29338d4 > runtime-acceptance/node22-trixie-slim.json
+          for base in node22-trixie node22-trixie-slim; do
+            echo "Resolved ${base}:"
+            jq -e '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | .platform.architecture] | sort == ["amd64","arm64"]' "runtime-acceptance/${base}.json"
+            jq -r '.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | [.platform.architecture,.digest] | @tsv' "runtime-acceptance/${base}.json"
+          done
+          # These are the immutable indexes pinned in Dockerfile, recovered from the first build.
+          # Capture their child manifests, rather than re-resolving a mutable tag after building.
+
       - name: Build and push (linux/amd64 + linux/arm64) with Buildx
         run: |
           set -euo pipefail
@@ -126,6 +141,29 @@ jobs:
               || { echo "MISSING platform $want under tag $TAG -- multi-arch push did not complete as expected"; exit 1; }
           done
           echo "Confirmed: both linux/amd64 and linux/arm64 are present under otchealth-mcp-gateway:$TAG"
+
+      - name: Execute offline runtime acceptance by immutable child digest
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-acceptance
+          INDEX=$(aws ecr describe-images --repository-name otchealth-mcp-gateway \
+            --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          [[ "$INDEX" =~ ^sha256:[a-f0-9]{64}$ ]]
+          aws ecr batch-get-image --repository-name otchealth-mcp-gateway \
+            --image-ids imageDigest="$INDEX" --query 'images[0].imageManifest' --output text \
+            > runtime-acceptance/ecr-index.json
+          AMD64=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | if length == 1 then .[0].digest else error("Expected one amd64 child") end' runtime-acceptance/ecr-index.json)
+          ARM64=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else error("Expected one arm64 child") end' runtime-acceptance/ecr-index.json)
+          [[ "$AMD64" =~ ^sha256:[a-f0-9]{64}$ && "$ARM64" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf '{"source_sha":"%s","tag":"%s","index":"%s","amd64":"%s","arm64":"%s"}\n' \
+            "$GITHUB_SHA" "$TAG" "$INDEX" "$AMD64" "$ARM64" > runtime-acceptance/ecr-digests.json
+          bash tools/accept-image.sh "$REGISTRY/otchealth-mcp-gateway@$AMD64" linux/amd64 \
+            | tee runtime-acceptance/amd64.log
+          bash tools/accept-image.sh "$REGISTRY/otchealth-mcp-gateway@$ARM64" linux/arm64 \
+            | tee runtime-acceptance/arm64.log
 
       - name: Verify evaluator bytes in immutable ARM64 image without execution
         env:
@@ -168,6 +206,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: eval-image-hashes
-          path: eval-image-hashes.json
+          path: |
+            eval-image-hashes.json
+            runtime-acceptance/**
           if-no-files-found: error
           retention-days: 30

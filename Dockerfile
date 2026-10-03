@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1: build
 # ============================================================
-FROM node:22-trixie AS build
+FROM node:22-trixie@sha256:072889700aecef94c5cee46c6e60107cc2aaad9aa9e418ce05abaa1e85752ee3 AS build
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ RUN npm run build && npm prune --omit=dev
 # glibc base (Debian slim), NOT alpine/musl: Datadog serverless-init's /datadog-init is a
 # glibc-linked binary and cannot exec on musl. Build stage is full node:22 (glibc) so native
 # node_modules match the runtime ABI.
-FROM node:22-trixie-slim AS runtime
+FROM node:22-trixie-slim@sha256:b26b04c123d9ff8ab646ceb18b9d75a1173acf64b9a401094b906d27b29338d4 AS runtime
 
 ENV NODE_ENV=production
 ENV PORT=8080
@@ -87,7 +87,7 @@ COPY --from=build --chown=app:app /app/src/eval ./eval
 # INERT unless DD_API_KEY is provided to the environment, so this image is safe to ship
 # everywhere; telemetry only flows where DD_API_KEY is set (the per-env gate). No
 # DD_API_KEY is baked in here, by design (the gateway is keys-to-the-kingdom).
-COPY --from=datadog/serverless-init:1.9.16 --chown=app:app /datadog-init /app/datadog-init
+COPY --from=datadog/serverless-init:1.9.16@sha256:2f498f4b1165ac3551c34129b4f0c0c7bd99d82c55c4e95cf494b55dad8d05d0 --chown=app:app /datadog-init /app/datadog-init
 ENV DD_SITE=us3.datadoghq.com
 ENV DD_SERVICE=gateway-mcp
 ENV DD_APM_ENABLED=true
