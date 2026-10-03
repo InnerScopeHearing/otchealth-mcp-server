@@ -126,6 +126,7 @@ import { registerDocintelAnalyzeContract } from './docintel/analyze-contract.js'
 import { registerKbSearch } from './kb/search.js';
 import { registerBrainSearch } from './kb/brain-search.js';
 import { registerBrainGraphSearch } from './kb/brain-graph-search.js';
+import { registerAwsAdminTools } from './aws-admin/tools.js';
 import { registerPersonalGraphQuery } from './kb/personal-graph-query.js';
 import { registerPersonalBedrockRetrieve } from './kb/personal-bedrock-retrieve.js';
 import { registerBrainPublicKbSearch } from './kb/brain-public-kb-search.js';
@@ -1105,6 +1106,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerKbSearch(server, callerHash);
   registerBrainSearch(server, callerHash);
   registerBrainGraphSearch(server, callerHash);
+  registerAwsAdminTools(server, callerHash);
   registerPersonalGraphQuery(server, callerHash);
   registerPersonalBedrockRetrieve(server, callerHash);
   registerBrainPublicKbSearch(server, callerHash);

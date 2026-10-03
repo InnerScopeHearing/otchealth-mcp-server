@@ -84,6 +84,17 @@ test('pinned GraphRAG observation receipt reader is CTO-only', () => {
   }
 });
 
+test('bounded AWS control-plane tools are CTO-only in governance and deny every other lane', () => {
+  for (const name of ['aws_api_query', 'aws_api_operation']) {
+    const gov = requiredRoleFor(name);
+    assert.ok(gov, `${name} must have an explicit governance rule`);
+    assert.ok(roleAllows(gov!.role, 'cto'), `${name} must allow cto`);
+    for (const other of [...OTHER_LANES, 'developer', 'exec', 'external-read', 'clo-personal']) {
+      assert.ok(!roleAllows(gov!.role, other), `${name} must refuse lane \"${other}\"`);
+    }
+  }
+});
+
 test('depot_* is role-gated to cto/developer only (2026-07-26 widen -- full Depot read+write for developer)', () => {
   const gov = requiredRoleFor('depot_trigger_build');
   assert.ok(gov, 'depot_trigger_build must have a governance rule');
