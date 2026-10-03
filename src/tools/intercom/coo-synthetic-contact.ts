@@ -1,14 +1,18 @@
 import { currentCallerAgent, isConnectorSurface } from '../../server/request-context.js';
 import type { UpdateContactOpts } from '../../intercom/full-client.js';
+import { cooCustomerOperationsEnabled } from './coo-operations-access.js';
 
-/** The one owner-approved synthetic contact available to ordinary COO Chat. */
+/** The approved synthetic record remains available for non-customer acceptance tests. */
 export const COO_CHAT_SYNTHETIC_INTERCOM_CONTACT_ID = '6ab5f0e0843a84e15468a558';
 
 /** Fixed non-personal marker used for harmless write/readback verification. */
 export const COO_CHAT_SYNTHETIC_INTERCOM_CONTACT_NAME = 'Synthetic Intercom Contact Verification';
 
 function isCooChatConnector(): boolean {
-  return currentCallerAgent() === 'coo' && isConnectorSurface();
+  // Preserve the legacy restricted mode and its rollback behavior. A deployment-owned
+  // explicit grant enables normal contact operations for the authenticated COO only.
+  return currentCallerAgent() === 'coo' && isConnectorSurface()
+    && !cooCustomerOperationsEnabled(currentCallerAgent());
 }
 
 export function assertCooChatIntercomContactTarget(contactId: string): void {
