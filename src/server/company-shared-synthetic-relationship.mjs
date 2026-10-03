@@ -15,8 +15,8 @@ const citationId = receipt => {
   return `cite_${sha256(canonical(identity))}`;
 };
 
-function source(index, subject, object) {
-  const text = `Synthetic contract evidence: ${subject.toUpperCase()} depends_on ${object.toUpperCase()}.`;
+function source(index, subject, object, predicate = "depends_on") {
+  const text = `Synthetic contract evidence: ${subject.toUpperCase()} ${predicate} ${object.toUpperCase()}.`;
   const row = { path: `synthetic/company-shared/edge-${index}.txt`, sha256: sha256(`binary:company-shared:${index}`), sidecar: true, enriched: true, enriched_sha256: sha256(`binary:company-shared:${index}`) };
   const document = documentVersion(row, "company_shared");
   const runId = `run_${sha256(`company-shared-synthetic-run:${index}`)}`;
@@ -30,7 +30,7 @@ function source(index, subject, object) {
   const input = { binding, catalog_row: row, prepared_text: text, chunk_start_utf16: 0, chunk_end_utf16: text.length, purpose: PURPOSE };
   const prepared = preparedTextIdentity({ source_binding: binding, purpose: PURPOSE });
   const candidate = {
-    subject: `${subject.toUpperCase()}`, predicate: "depends_on", object: `${object.toUpperCase()}`, quote: text,
+    subject: `${subject.toUpperCase()}`, predicate, object: `${object.toUpperCase()}`, quote: text,
     state: "candidate", semantic_verified: false, document_version_id: prepared.source_version,
     source_sha256: binding.chunk_sha256, evidence_start_utf16: 0, evidence_end_utf16: text.length,
   };
@@ -43,8 +43,12 @@ function source(index, subject, object) {
   return { input, candidate, receipt: { ...receiptBase, citation_id: citationId(receiptBase) } };
 }
 
-export function createCompanySharedSyntheticRelationshipFixture() {
-  const edges = [source(1, "x", "y"), source(2, "y", "z")];
+export function createCompanySharedSyntheticRelationshipFixture({ predicates = ["depends_on", "depends_on"] } = {}) {
+  const allowedPredicates = new Set(["party_to", "signatory_of", "owns", "controls", "obligated_to", "amends", "supersedes", "depends_on"]);
+  if (!Array.isArray(predicates) || predicates.length !== 2 || predicates.some(predicate => !allowedPredicates.has(predicate))) {
+    throw Object.assign(Error("shared_synthetic_predicates_invalid"), { code: "shared_synthetic_predicates_invalid" });
+  }
+  const edges = [source(1, "x", "y", predicates[0]), source(2, "y", "z", predicates[1])];
   const calls = [];
   const capture = (method, fn) => (...args) => {
     const result = fn(...args);
@@ -83,8 +87,8 @@ export function createCompanySharedSyntheticRelationshipFixture() {
 }
 
 /** Fixed synthetic acceptance fixture. It does not discover or read company source publications. */
-export function createCompanySharedSyntheticRelationshipQuery({ isCurrentCitation } = {}) {
-  const fixture = createCompanySharedSyntheticRelationshipFixture();
+export function createCompanySharedSyntheticRelationshipQuery({ isCurrentCitation, predicates } = {}) {
+  const fixture = createCompanySharedSyntheticRelationshipFixture(predicates ? { predicates } : undefined);
   const pinned = new Map(fixture.entry.citation_receipts.map(receipt => [receipt.citation_id, canonical(receipt)]));
   const current = isCurrentCitation ?? (receipt => pinned.get(receipt.citation_id) === canonical(receipt));
   return async ({ subject_id, object_id }) => {
