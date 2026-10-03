@@ -1,10 +1,10 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleTaskHeartbeat, type TaskHeartbeatInput } from './task-heartbeat.js';
+import { handleTaskHeartbeat, type TaskHeartbeatDependencies, type TaskHeartbeatInput } from './task-heartbeat.js';
 import type { ToolContext } from '../registry.js';
 
-// Handler-level tests through the ACTUAL registered entry point. See task-create.test.ts's header
-// comment for why these are dry_run-only and why that is still sufficient to prove the fix.
+// Handler-level tests through the actual exported entry point. The attribution regressions below
+// use dry_run previews; the injected-ledger regression exercises lease fencing without live I/O.
 before(() => {
   const required: Record<string, string> = {
     CIO_SITE_ID: 'test',
@@ -38,4 +38,31 @@ test('SAFETY-CRITICAL: a connector-lane token (coo) cannot extend a lease AS "ct
   const data = result.data as { preview: { agent: string }; claimed_actor?: string };
   assert.equal(data.preview.agent, 'coo', 'the identity actually checked/extended must be the token-bound lane');
   assert.equal(data.claimed_actor, 'cto');
+});
+
+test('a stale lease returned by the ledger is surfaced as fenced and forwards the expected version', async () => {
+  const taskId = 't_synthetic_heartbeat_fence';
+  const expectedVersion = 1;
+  const ledgerReason = 'synthetic stale lease_version';
+  const calls: Parameters<TaskHeartbeatDependencies['heartbeatTask']>[] = [];
+  const deps: TaskHeartbeatDependencies = {
+    isConfigured: () => true,
+    taskVisibleToCaller: () => true,
+    heartbeatTask: async (...args) => {
+      calls.push(args);
+      return { fenced: true, reason: ledgerReason };
+    },
+  };
+
+  const result = await handleTaskHeartbeat(
+    baseInput({ task_id: taskId, agent: 'cto', expected_lease_version: expectedVersion }),
+    fakeCtx('cto', false),
+    deps,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], taskId);
+  assert.equal(calls[0][1], 'cto');
+  assert.equal(calls[0][3], expectedVersion);
+  assert.deepEqual(result.data, { extended: false, fenced: true, reason: ledgerReason });
 });
