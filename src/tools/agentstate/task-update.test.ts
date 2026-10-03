@@ -1,10 +1,10 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleTaskUpdate, type TaskUpdateInput } from './task-update.js';
+import { handleTaskUpdate, type TaskUpdateDependencies, type TaskUpdateInput } from './task-update.js';
 import type { ToolContext } from '../registry.js';
 
-// Handler-level tests through the ACTUAL registered entry point. See task-create.test.ts's header
-// comment for why these are dry_run-only and why that is still sufficient to prove the fix.
+// Handler-level tests through the actual exported entry point. The attribution regressions below
+// use dry_run previews; the injected-ledger regression exercises lease fencing without live I/O.
 before(() => {
   const required: Record<string, string> = {
     CIO_SITE_ID: 'test',
@@ -51,4 +51,31 @@ test('setting status="done" is rejected before any attribution logic runs (use t
   const data = result.data as { updated: boolean; reason?: string };
   assert.equal(data.updated, false);
   assert.match(data.reason ?? '', /task_complete/);
+});
+
+test('a stale lease returned by the ledger is surfaced as fenced and forwards the expected version', async () => {
+  const taskId = 't_synthetic_update_fence';
+  const expectedVersion = 1;
+  const ledgerReason = 'synthetic stale lease_version';
+  const calls: Parameters<TaskUpdateDependencies['updateTask']>[] = [];
+  const deps: TaskUpdateDependencies = {
+    isConfigured: () => true,
+    taskVisibleToCaller: () => true,
+    updateTask: async (...args) => {
+      calls.push(args);
+      return { fenced: true, reason: ledgerReason };
+    },
+  };
+
+  const result = await handleTaskUpdate(
+    baseInput({ task_id: taskId, actor: 'cto', expected_lease_version: expectedVersion }),
+    fakeCtx('cto', false),
+    deps,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], taskId);
+  assert.equal(calls[0][2], 'cto');
+  assert.equal(calls[0][4], expectedVersion);
+  assert.deepEqual(result.data, { updated: false, fenced: true, reason: ledgerReason });
 });
