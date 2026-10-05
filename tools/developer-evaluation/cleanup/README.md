@@ -11,7 +11,7 @@ This small local Git-backed toolset provides a reproducible way to evaluate a De
 | State and logs | CTO owns cleanup evidence; Developer may inspect | State is in `state/<run-id>.json`, mode 0600. Logs are under `artifacts/<run-id>/run-NNNN/` outside the source worktree, retained after cleanup. No cleanup command deletes state or artifacts. |
 | Remote branches, credentials, source permissions | No writer in this workflow | None are created, copied, changed, or deleted. The flow needs no remote probe branch. |
 
-The only ignored paths accepted for cleanup are common generated outputs in the disposable checkout: `node_modules`, `.turbo`, `dist`, `coverage`, `playwright-report`, and `test-results`. A `.env`, arbitrary ignored file, untracked fixture, source diff, changed pin, lock, or unexpected target is preserved and requires owner review. Do not add `--force`, `rm -rf`, `git clean`, or broader path patterns.
+Cleanup accepts Git-reported ignored directories whose final component exactly matches `node_modules`, `.turbo`, `dist`, `coverage`, `playwright-report`, or `test-results`, including nested package outputs. Git reports these directories as units; their contents are disposable. Keep user files and secrets outside generated directories. Unknown ignored paths, `.env` files, arbitrary ignored files, untracked fixtures, source diffs, changed pins, locks and unexpected targets are preserved for owner review. Do not add `--force`, `rm -rf`, `git clean`, or broader patterns.
 
 ## Usage
 
@@ -47,3 +47,10 @@ python3 -m unittest discover -s tests -v
 ```
 
 Tests build tiny synthetic local Git repositories. They cover path containment, dirty source prestate refusal/preservation, full-pin checks, dirty target and unexpected ignored-data refusal/preservation, retained logs, exact worktree removal, and source `HEAD`/status restoration. They do not install app dependencies, test an app, use a network, or exercise a vendor service.
+
+
+## Windows removal and coverage
+
+Registration readback compares complete normalized paths from NUL-delimited Git porcelain. If Git partially deregisters a worktree and returns an error, cleanup records `completed: false`, exact target and registration state, source before/after hashes, logs and the error. It preserves residual files for owner reconciliation; it never recursively deletes an unregistered orphan. The Windows residual-removal cause still needs its actual Git error log and a fresh platform regression before an automated recovery can be accepted.
+
+Symlink fixture tests skip only Windows privilege error 1314 and report that coverage gap. Other errors remain failures; supported Linux and Windows environments must exercise the symlink tests before full platform acceptance.
