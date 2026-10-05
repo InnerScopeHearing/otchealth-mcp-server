@@ -69,6 +69,7 @@ if (existsSync(moduleUrl)) {
     assert.match(policy, /Record the approval, scope, applicable limits, and supporting conversation once/);
     assert.match(policy, /Do not request approval already provided or require a separate production confirmation solely because authorized work reaches deployment/);
     assert.match(policy, /user approval does not satisfy a distinct gate held by another authority/);
+    assert.match(policy, /a destructive operation not already specifically authorized/);
     assert.match(policy, /complete the authorized independent preparation and present the concrete action with the exact missing authorization and its source/);
     assert.match(policy, /verify the intended live revision and health, and establish rollback readiness/);
   });
