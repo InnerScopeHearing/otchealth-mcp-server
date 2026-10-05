@@ -149,13 +149,20 @@ export const JIT_DOCTRINE_BINDINGS: JitDoctrineBinding[] = [
  * fully deterministic and unit-testable. Empty array when nothing matches. Never throws (a missing
  * or empty toolName just yields no matches).
  */
-export function jitDoctrineFor(toolName: string): string[] {
+export function jitDoctrineFor(toolName: string, input?: { supersedes?: unknown }): string[] {
   if (!toolName) return [];
   const pitfalls: string[] = [];
   for (const binding of JIT_DOCTRINE_BINDINGS) {
     const hit =
       binding.kind === 'exact' ? toolName === binding.match : toolName.startsWith(binding.match);
-    if (hit) pitfalls.push(...binding.pitfalls);
+    if (hit) {
+      const alreadySupersedes =
+        (toolName === 'memory_write' || toolName === 'memory_remember') &&
+        typeof input?.supersedes === 'string' && input.supersedes.trim().length > 0;
+      pitfalls.push(...binding.pitfalls.filter((pitfall) =>
+        !(alreadySupersedes && pitfall.startsWith('Set supersedes ')),
+      ));
+    }
   }
   return pitfalls;
 }
@@ -214,11 +221,11 @@ export function shouldSurfaceDoctrine(callerHash: string, toolName: string): boo
  * EVERY tool category (read and write) -- see the module doc comment for why this deliberately
  * does NOT mirror cold-start/capture-pressure's `def.category !== 'read'` gate.
  */
-export function evaluateJitDoctrine(callerHash: string, toolName: string): JitDoctrineOutcome {
+export function evaluateJitDoctrine(callerHash: string, toolName: string, input?: { supersedes?: unknown }): JitDoctrineOutcome {
   const mode = parseJitDoctrineMode(process.env.JIT_DOCTRINE_MODE);
   try {
     if (mode === 'off') return { pitfalls: [], mode };
-    const pitfalls = jitDoctrineFor(toolName);
+    const pitfalls = jitDoctrineFor(toolName, input);
     if (!pitfalls.length) return { pitfalls: [], mode };
     if (!shouldSurfaceDoctrine(callerHash, toolName)) return { pitfalls: [], mode };
     return { pitfalls, mode };
