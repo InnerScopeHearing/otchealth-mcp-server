@@ -182,6 +182,19 @@ test('(b) developer lane gets the full ship-lane set', () => {
   assert.ok(set.has('brain_public_kb_search'));
 });
 
+test('AWARE claims review is discoverable only on the default CTO and Developer connector lanes', () => {
+  const env = testEnv();
+  for (const lane of ['cto', 'developer']) {
+    assert.equal(connectorToolset(env, lane).has('claims_check'), true, lane);
+    assert.equal(connectorToolset({ ...env, CONNECTOR_TOOLSET: 'brain_search' } as Env, lane).has('claims_check'), false, `${lane} explicit override stays authoritative`);
+  }
+  for (const lane of ['external-read', 'unknown', '', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'wefunder-campaign-director', 'cto-make-github-pilot']) {
+    assert.equal(connectorToolset(env, lane).has('claims_check'), false, lane);
+  }
+  assert.equal(EXTERNAL_READONLY_TOOLSET.includes('claims_check'), false);
+  assert.equal(EXTERNAL_READONLY_TOOLSET.length, 13);
+});
+
 test('(c) EXEC_RING lanes get only public-KB visibility authorized for their company identity', () => {
   const env = testEnv();
   for (const lane of EXEC_RING) {
