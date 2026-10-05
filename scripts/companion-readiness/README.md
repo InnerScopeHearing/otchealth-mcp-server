@@ -90,3 +90,44 @@ Tests inject command results and use temporary synthetic repositories. They
 cover successful exact command sequencing, wrong source SHA, wrong pnpm
 version, dirty prestate, missing admission, and a failing focused command with
 numeric exit preservation and full-suite suppression.
+
+
+## Portable Windows launcher and candidate pins
+
+The default remains the original exact Companion pin. An explicit
+`--pin <40-character-SHA>` selects a reviewed candidate only when the cleanup
+state, admission commit and actual Git HEAD all match that same full SHA.
+
+On Windows the admission also binds the existing approved pnpm installation:
+
+```json
+{
+  "toolchain": {
+    "node_path": "C:\\approved\\node.exe",
+    "pnpm_package_root": "C:\\approved\\node_modules\\pnpm",
+    "pnpm_cli_path": "C:\\approved\\node_modules\\pnpm\\bin\\pnpm.cjs",
+    "pnpm_cli_sha256": "<SHA-256 computed from the admitted existing CLI bytes>"
+  }
+}
+```
+
+Replace example paths with the current verified executor's actual paths.
+The runner validates real paths, Node identity, pnpm package/version/bin and CLI
+hash, then invokes Node with the CLI as its first argument. It uses no shell or
+.cmd shim and does not bootstrap a toolchain. POSIX keeps the existing pnpm path.
+The receipt records the actual executable and arguments.
+
+To use the published cleanup helper in place, without copying a Local adapter,
+pass `--cleanup-root <absolute tools/developer-evaluation/cleanup path>`.
+Bind that same canonical root in admission field `cleanup_root`; state, worktree
+and artifact paths must remain contained in it. Omit this option to keep the
+original canonical repair2/cleanup workspace layout.
+
+The twenty-minute runner deadline starts on entry and is capped by admission
+expiry. The conductor owns five-minute progress checks; the script checkpoints
+after each command and does not install a background watchdog or automatically
+retry. Preserve every failed attempt and its logs.
+
+These source changes require fresh Node synthetic tests and actual Windows
+candidate tests before claiming execution acceptance. Symlink and cleanup
+coverage are independently reported by the cleanup helper's test suite.
