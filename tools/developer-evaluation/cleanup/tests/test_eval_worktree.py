@@ -358,11 +358,38 @@ class EvalWorktreeTests(unittest.TestCase):
         ew.write_json(manifest_path, data)
         with (
             patch.object(ew, "remove_windows_deregistered_residual") as recover,
-            self.assertRaisesRegex(ew.ContractError, "unknown file"),
+            self.assertRaisesRegex(ew.ContractError, "untracked or ignored file"),
         ):
             ew.cmd_cleanup(Namespace(run_id="windows-injected"))
         recover.assert_not_called()
         self.assertEqual(injected.read_text(encoding="utf-8"), "must survive\n")
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only recorded residual recovery")
+    def test_recorded_residual_retry_refuses_ignored_source_match(self) -> None:
+        target = self.prepare("windows-ignored-match")
+        manifest_path = ew.state_path("windows-ignored-match")
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        Path(data["logs_dir"]).mkdir(parents=True)
+        ignored_source = self.source / ".env"
+        ignored_source.write_text("must survive\n", encoding="utf-8")
+        ew.git(self.source, "worktree", "remove", str(target))
+        target.mkdir(parents=True)
+        ignored_residual = target / ".env"
+        ignored_residual.write_bytes(ignored_source.read_bytes())
+        data["cleanup"] = {
+            "completed": False, "target": str(target), "target_present": True,
+            "target_registered_after": False, "worktree_list_absent": True,
+            "source_checkout_unchanged": True, "logs_preserved": True,
+            "force_used": False, "git_remove_error": "git failed (255)",
+        }
+        ew.write_json(manifest_path, data)
+        with (
+            patch.object(ew, "remove_windows_deregistered_residual") as recover,
+            self.assertRaisesRegex(ew.ContractError, "untracked or ignored file"),
+        ):
+            ew.cmd_cleanup(Namespace(run_id="windows-ignored-match"))
+        recover.assert_not_called()
+        self.assertEqual(ignored_residual.read_text(encoding="utf-8"), "must survive\n")
 
     def test_ignored_matching_name_requires_an_exact_generated_directory(self) -> None:
         rejected = (b"!! packages/app/node_modules-user/\0", b"!! packages/app/.env\0",
