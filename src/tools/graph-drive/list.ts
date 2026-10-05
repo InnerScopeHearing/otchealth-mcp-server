@@ -20,7 +20,9 @@ export function registerGraphDriveList(server: McpServer, callerHash: CallerHash
         openWorldHint: false,
       },
       inputShape: {
-        folder: z.string().min(1).describe('Folder path relative to the OneDrive root, starting with the role token, e.g. "CLO Outgoing" or "CTO Processed/2026".'),
+        folder: z.string().min(1).describe('Folder path relative to the OneDrive root, starting with the caller role token, e.g. "CLO Outgoing" or "CTO Processed/2026".'),
+        page_size: z.number().int().min(1).max(200).optional().describe('Optional paged mode: return up to 200 items and a cursor for the next page. Omit with cursor to reuse the cursor page size.'),
+        cursor: z.string().max(8192).optional().describe('Opaque continuation cursor returned by a prior paged call for this same folder.'),
       },
       outputShape: {
         folder: z.string(),
@@ -32,9 +34,11 @@ export function registerGraphDriveList(server: McpServer, callerHash: CallerHash
             lastModified: z.string().nullable(),
             isFolder: z.boolean(),
             contentType: z.string().nullable(),
+            quickXorHash: z.string().nullable(),
           }),
         ),
         count: z.number(),
+        next_cursor: z.string().nullable(),
         error: z.string().optional(),
       },
       handler: async (input, ctx) => {
@@ -48,10 +52,14 @@ export function registerGraphDriveList(server: McpServer, callerHash: CallerHash
         if (!driveConfigured()) {
           return { data: { folder: input.folder, files: [], count: 0, error: 'unconfigured' }, summary: 'Graph Drive not configured (GRAPH_* / GRAPH_DRIVE_USER unset).' };
         }
-        const files = await listFolder(input.folder);
+        const paged = input.page_size !== undefined || input.cursor !== undefined;
+        const result = paged
+          ? await listFolder(input.folder, { pageSize: input.page_size, cursor: input.cursor })
+          : { files: await listFolder(input.folder), nextCursor: null };
+        const files = result.files;
         return {
-          data: { folder: input.folder, files, count: files.length },
-          summary: `${files.length} item(s) in "${input.folder}" (lane=${caller}).`,
+          data: { folder: input.folder, files, count: files.length, next_cursor: result.nextCursor },
+          summary: `${files.length} item(s) in "${input.folder}" (lane=${caller})${result.nextCursor ? ' (more pages available)' : ''}.`,
         };
       },
     },

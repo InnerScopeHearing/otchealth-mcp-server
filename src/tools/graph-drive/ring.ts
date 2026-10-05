@@ -51,9 +51,14 @@ export function rolesForLane(caller: string | undefined | null): string[] {
  * folder only when the folder's leading role token is one of the caller's owned roles.
  */
 export function isDriveFolderAllowed(caller: string | undefined | null, folderPath: string): boolean {
+  const clean = folderPath.replace(/^\/+|\/+$/g, '');
+  const segments = clean.split('/');
+  if (!clean || segments.some((segment) => !segment || segment === '.' || segment === '..' || segment.includes('\\') || /[\u0000-\u001f]/.test(segment))) {
+    return false;
+  }
   const roles = rolesForLane(caller);
   if (!roles.length) return false;
-  const folderRole = roleOfFolder(folderPath);
+  const folderRole = roleOfFolder(clean);
   if (!folderRole) return false;
   return roles.includes(folderRole);
 }

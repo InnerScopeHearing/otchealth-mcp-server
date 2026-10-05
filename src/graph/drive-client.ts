@@ -21,7 +21,7 @@
  * can be pointed at. Inert without Graph creds — the tools surface a clear "not configured" result.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { getAccessToken } from './api-client.js';
@@ -97,18 +97,126 @@ export interface DriveItem {
   lastModified: string | null;
   isFolder: boolean;
   contentType: string | null;
+  quickXorHash: string | null;
+}
+
+export interface DriveListPage {
+  files: DriveItem[];
+  nextCursor: string | null;
+}
+
+export type GraphDriveFetch = (method: string, path: string, opts?: { body?: Buffer | string; headers?: Record<string, string>; timeoutMs?: number }) => Promise<Response>;
+
+type DriveListCursor = {
+  v: 1;
+  owner: string;
+  folder: string;
+  pageSize: number;
+  issuedAt: number;
+  nextLink: string;
+  driveId: string | null;
+  itemId: string | null;
+};
+
+const MAX_DRIVE_PAGE_SIZE = 200;
+const MAX_CURSOR_LENGTH = 8192;
+
+function normalizeDriveFolder(folderPath: string): string {
+  const clean = folderPath.replace(/^\/+|\/+$/g, '');
+  const segments = clean.split('/');
+  if (!clean || segments.some((segment) => !segment || segment === '.' || segment === '..' || segment.includes('\\') || /[\u0000-\u001f]/.test(segment))) {
+    throw new GraphDriveError({ code: 'graph_drive_invalid_folder', status: 400, message: 'folder must be a canonical relative OneDrive path.', nextStep: 'Pass a non-empty relative path without dot segments, backslashes, or control characters.' });
+  }
+  return clean;
+}
+
+function encodeDriveCursor(cursor: DriveListCursor): string {
+  const payload = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+  const key = loadEnv().GRAPH_CLIENT_SECRET;
+  if (!key) throw new GraphDriveError({ code: 'graph_drive_not_configured', status: 0, message: 'Graph Drive cursor signing is not configured.', nextStep: 'Configure the existing Graph app credentials before using paged listing.' });
+  const signature = createHmac('sha256', key).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function expectedChildrenPath(owner: string, folderPath: string): string {
+  return `/v1.0${itemRef(owner, folderPath)}/children`;
+}
+
+function validateDriveNextLink(nextLink: string, owner: string, folderPath: string, driveId: string | null, itemId: string | null): void {
+  let url: URL;
+  try {
+    url = new URL(nextLink);
+  } catch {
+    throw new GraphDriveError({ code: 'graph_drive_invalid_next_link', status: 502, message: 'Graph returned an invalid pagination link.', nextStep: 'Retry the read later; do not submit an untrusted pagination link.' });
+  }
+  const allowedQuery = new Set(['$select', '$top', '$skiptoken']);
+  const queryNames = [...url.searchParams.keys()];
+  const byPath = url.pathname === expectedChildrenPath(owner, folderPath);
+  const byUserItem = Boolean(itemId) && url.pathname === `/v1.0/users/${encodeURIComponent(owner)}/drive/items/${encodeURIComponent(itemId!)}/children`;
+  const byDriveItem = Boolean(driveId && itemId) && url.pathname === `/v1.0/drives/${encodeURIComponent(driveId!)}/items/${encodeURIComponent(itemId!)}/children`;
+  const valid = url.protocol === 'https:' && url.hostname === 'graph.microsoft.com' && !url.port && !url.username && !url.password && !url.hash
+    && (byPath || byUserItem || byDriveItem)
+    && url.searchParams.has('$skiptoken')
+    && [...new Set(queryNames)].length === queryNames.length
+    && queryNames.every((name) => allowedQuery.has(name))
+    && Boolean(url.searchParams.get('$skiptoken'));
+  if (!valid) {
+    throw new GraphDriveError({ code: 'graph_drive_invalid_next_link', status: 502, message: 'Graph returned a pagination link outside the requested drive folder.', nextStep: 'Retry the read later; do not submit an untrusted pagination link.' });
+  }
+}
+
+function decodeDriveCursor(value: string, owner: string, folderPath: string, pageSize?: number): DriveListCursor {
+  if (!value || value.length > MAX_CURSOR_LENGTH || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) {
+    throw new GraphDriveError({ code: 'graph_drive_invalid_cursor', status: 400, message: 'Invalid Graph Drive cursor.', nextStep: 'Use the exact next_cursor returned for the same folder.' });
+  }
+  let cursor: DriveListCursor;
+  try {
+    const [payload, signature] = value.split('.');
+    const key = loadEnv().GRAPH_CLIENT_SECRET;
+    if (!key) throw new Error('missing signing key');
+    const actual = Buffer.from(signature, 'base64url');
+    const expected = createHmac('sha256', key).update(payload).digest();
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('invalid signature');
+    cursor = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as DriveListCursor;
+  } catch {
+    throw new GraphDriveError({ code: 'graph_drive_invalid_cursor', status: 400, message: 'Invalid Graph Drive cursor.', nextStep: 'Use the exact next_cursor returned for the same folder.' });
+  }
+  if (cursor?.v !== 1 || cursor.owner !== owner || cursor.folder !== folderPath || !Number.isInteger(cursor.pageSize) || cursor.pageSize < 1 || cursor.pageSize > MAX_DRIVE_PAGE_SIZE || (pageSize !== undefined && pageSize !== cursor.pageSize) || !Number.isInteger(cursor.issuedAt) || Date.now() - cursor.issuedAt > 15 * 60 * 1000 || cursor.issuedAt > Date.now() || typeof cursor.nextLink !== 'string' || !(cursor.driveId === null || typeof cursor.driveId === 'string') || !(cursor.itemId === null || typeof cursor.itemId === 'string')) {
+    throw new GraphDriveError({ code: 'graph_drive_invalid_cursor', status: 400, message: 'Cursor does not match this drive owner, folder, or page size.', nextStep: 'Use the exact next_cursor returned for the same folder and page size.' });
+  }
+  validateDriveNextLink(cursor.nextLink, owner, folderPath, cursor.driveId, cursor.itemId);
+  return cursor;
+}
+
+function mapDriveItem(k: any): DriveItem {
+  return {
+    name: k.name ?? '',
+    id: k.id ?? '',
+    size: typeof k.size === 'number' ? k.size : null,
+    lastModified: k.lastModifiedDateTime ?? null,
+    isFolder: Boolean(k.folder),
+    contentType: k.file?.mimeType ?? null,
+    quickXorHash: typeof k.file?.hashes?.quickXorHash === 'string' ? k.file.hashes.quickXorHash : null,
+  };
 }
 
 /**
  * List the children of a folder path (relative to the drive root). Read-only.
  * Mirrors listChildren() in the source skill (…/children with paging via @odata.nextLink).
  */
-export async function listFolder(folderPath: string): Promise<DriveItem[]> {
+export async function listFolder(folderPath: string): Promise<DriveItem[]>;
+export async function listFolder(folderPath: string, options: { pageSize?: number; cursor?: string }): Promise<DriveListPage>;
+export async function listFolder(folderPath: string, options?: { pageSize?: number; cursor?: string }): Promise<DriveItem[] | DriveListPage> {
   const owner = driveOwner();
-  const clean = folderPath.replace(/^\/+|\/+$/g, '');
-  let url = clean
-    ? `${itemRef(owner, clean)}/children?$select=name,id,size,lastModifiedDateTime,folder,file&$top=200`
-    : `/users/${encodeURIComponent(owner)}/drive/root/children?$select=name,id,size,lastModifiedDateTime,folder,file&$top=200`;
+  const clean = normalizeDriveFolder(folderPath);
+  if (options?.pageSize !== undefined || options?.cursor !== undefined) {
+    const pageSize = options.pageSize ?? (options.cursor ? decodeDriveCursor(options.cursor, owner, clean).pageSize : MAX_DRIVE_PAGE_SIZE);
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_DRIVE_PAGE_SIZE) {
+      throw new GraphDriveError({ code: 'graph_drive_invalid_page_size', status: 400, message: `page_size must be an integer from 1 to ${MAX_DRIVE_PAGE_SIZE}.`, nextStep: 'Set page_size to a value from 1 through 200.' });
+    }
+    return listFolderPageForOwner(clean, owner, pageSize, options.cursor, graphFetch);
+  }
+  let url = `${itemRef(owner, clean)}/children?$select=name,id,size,lastModifiedDateTime,folder,file&$top=${MAX_DRIVE_PAGE_SIZE}`;
   const out: DriveItem[] = [];
   while (url) {
     const r = await graphFetch('GET', url);
@@ -116,18 +224,47 @@ export async function listFolder(folderPath: string): Promise<DriveItem[]> {
     if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `list "${folderPath}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the folder path and that the app holds Files.Read.All on the drive owner.' });
     const j = (await r.json()) as { value?: any[]; '@odata.nextLink'?: string };
     for (const k of j.value || []) {
-      out.push({
-        name: k.name ?? '',
-        id: k.id ?? '',
-        size: typeof k.size === 'number' ? k.size : null,
-        lastModified: k.lastModifiedDateTime ?? null,
-        isFolder: Boolean(k.folder),
-        contentType: k.file?.mimeType ?? null,
-      });
+      out.push(mapDriveItem(k));
     }
     url = j['@odata.nextLink'] || '';
   }
   return out;
+}
+
+/** One bounded Graph page. Exported for deterministic synthetic tests; production callers use listFolder. */
+export async function listFolderPageForOwner(
+  folderPath: string,
+  owner: string,
+  pageSize: number,
+  cursor?: string,
+  fetchPage: GraphDriveFetch = graphFetch,
+): Promise<DriveListPage> {
+  const clean = normalizeDriveFolder(folderPath);
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_DRIVE_PAGE_SIZE) {
+    throw new GraphDriveError({ code: 'graph_drive_invalid_page_size', status: 400, message: `page_size must be an integer from 1 to ${MAX_DRIVE_PAGE_SIZE}.`, nextStep: 'Set page_size to a value from 1 through 200.' });
+  }
+  const current = cursor ? decodeDriveCursor(cursor, owner, clean, pageSize) : null;
+  const url = current?.nextLink ?? `${itemRef(owner, clean)}/children?$select=name,id,size,lastModifiedDateTime,folder,file,parentReference&$top=${pageSize}`;
+  const r = await fetchPage('GET', url);
+  if (r.status === 404 && !current) return { files: [], nextCursor: null };
+  if (r.status === 404) throw new GraphDriveError({ code: 'graph_drive_cursor_not_found', status: 404, message: 'The continuation page was not found or is no longer valid.', nextStep: 'Restart listing from the first page; do not treat this page as an empty result.' });
+  if (!r.ok) throw new GraphDriveError({ code: `graph_drive_${r.status}`, status: r.status, message: `list "${folderPath}" ${r.status}: ${(await r.text()).slice(0, 160)}`, nextStep: 'Verify the folder path and that the app holds Files.Read.All on the drive owner.' });
+  const j = (await r.json()) as { value?: any[]; '@odata.nextLink'?: string };
+  const nextLink = j['@odata.nextLink'] || null;
+  let driveId = current?.driveId ?? null;
+  let itemId = current?.itemId ?? null;
+  if (nextLink) {
+    const parents = (j.value || []).map((item) => item.parentReference).filter((ref) => ref && typeof ref.driveId === 'string' && typeof ref.id === 'string');
+    if (parents.length && parents.every((ref) => ref.driveId === parents[0].driveId && ref.id === parents[0].id)) {
+      driveId = parents[0].driveId;
+      itemId = parents[0].id;
+    }
+    validateDriveNextLink(nextLink, owner, clean, driveId, itemId);
+  }
+  return {
+    files: (j.value || []).map(mapDriveItem),
+    nextCursor: nextLink ? encodeDriveCursor({ v: 1, owner, folder: clean, pageSize, issuedAt: Date.now(), nextLink, driveId, itemId }) : null,
+  };
 }
 
 /** Does a file already exist at folder/filename? Used for the fail-closed overwrite check on upload. */

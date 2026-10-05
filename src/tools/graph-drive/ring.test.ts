@@ -53,3 +53,10 @@ test('a caller with no lane identity is refused everywhere', () => {
 test('an unknown/blank folder is refused even for a valid lane', () => {
   assert.equal(isDriveFolderAllowed('clo', ''), false);
 });
+
+test('role gate denies media roots and unsafe path segments for every role', () => {
+  assert.equal(isDriveFolderAllowed('cto', '5-Media/App Screenshots and Videos'), false);
+  assert.equal(isDriveFolderAllowed('cto', 'CTO Incoming/../CLO Outgoing'), false);
+  assert.equal(isDriveFolderAllowed('cto', 'CTO Incoming\\..\\CLO Outgoing'), false);
+  assert.equal(isDriveFolderAllowed('cto', 'CTO Incoming//subfolder'), false);
+});
