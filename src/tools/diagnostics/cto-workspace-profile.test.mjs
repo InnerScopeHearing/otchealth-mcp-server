@@ -23,7 +23,7 @@ if (existsSync(moduleUrl)) {
   });
   test('CTO gets versioned operating instructions, not a privilege grant', () => {
     const p = ctoWorkspaceForRequest(true, 'cto', []);
-    assert.equal(p.version, '1.0.0');
+    assert.equal(p.version, '1.1.0');
     assert.equal(p.authority.blanket_authorization_bypass, false);
     assert.equal(p.authority.other_agents_inherit_cto, false);
     assert.equal(p.authority.role, 'cto');
@@ -59,6 +59,19 @@ if (existsSync(moduleUrl)) {
     assert.equal(p.memory.persist_scratch_reasoning, false);
     assert.equal(p.memory.require_provenance, true);
     assert.equal(p.memory.verify_ambiguous_writes, true);
+  });
+  test('served operating policy reuses explicit scoped approval and preserves separate gates', () => {
+    const p = ctoWorkspaceForRequest(true, 'cto', []);
+    const policy = p.project_instructions;
+    assert.match(policy, /Treat Matthew's explicit authorization .* as continuing approval/s);
+    assert.match(policy, /production deployment/);
+    assert.match(policy, /research, planning, or review alone does not authorize it/);
+    assert.match(policy, /Record the approval, scope, applicable limits, and supporting conversation once/);
+    assert.match(policy, /Do not request approval already provided or require a separate production confirmation solely because authorized work reaches deployment/);
+    assert.match(policy, /user approval does not satisfy a distinct gate held by another authority/);
+    assert.match(policy, /a destructive operation not already specifically authorized/);
+    assert.match(policy, /complete the authorized independent preparation and present the concrete action with the exact missing authorization and its source/);
+    assert.match(policy, /verify the intended live revision and health, and establish rollback readiness/);
   });
   test('returned profiles do not share mutable state across callers', () => {
     const first = ctoWorkspaceForRequest(true, 'cto', []);

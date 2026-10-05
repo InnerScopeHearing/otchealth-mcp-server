@@ -84,7 +84,7 @@ export function registerCatalogProbe(server: McpServer, callerHash: CallerHashPr
         };
         return {
           data,
-          summary: `catalog_probe: build=${BUILD_TAG}, registry=${registered.length} tools, caller_agent=${data.request_context.caller_agent || '(none)'}, m365StaticAuth=${data.request_context.is_m365_static_auth}, connectorSurface=${data.request_context.is_connector_surface}${workspace ? ', CTO workspace profile=1.0.0 (activation unverified)' : ''}`,
+          summary: `catalog_probe: build=${BUILD_TAG}, registry=${registered.length} tools, caller_agent=${data.request_context.caller_agent || '(none)'}, m365StaticAuth=${data.request_context.is_m365_static_auth}, connectorSurface=${data.request_context.is_connector_surface}${workspace ? `, CTO workspace profile=${workspace.version} (activation unverified)` : ''}`,
         };
       },
     },

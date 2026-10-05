@@ -2,6 +2,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerCatalogProbe } from './catalog-probe.js';
+import { requestContext } from '../../server/request-context.js';
 
 // Pins the 2026-07-26 diagnostic tool built to resolve the M365 Developer agent's live ambiguity:
 // is the M365 app not ingesting the new manifest, or is the auth-detection branch broken, or is
@@ -39,9 +40,13 @@ test('catalog_probe registers under the exact name "catalog_probe"', () => {
 test('catalog_probe response is always well under 1KB serialized', async () => {
   const { server, handlers } = fakeServer();
   registerCatalogProbe(server, () => 'caller-hash');
-  const result = (await handlers.catalog_probe!({})) as { structuredContent: { result: unknown } };
+  const result = (await handlers.catalog_probe!({})) as {
+    content: Array<{ text?: string }>;
+    structuredContent: { result: unknown };
+  };
   const size = Buffer.byteLength(JSON.stringify(result.structuredContent.result), 'utf8');
   assert.ok(size < 1024, `expected under 1KB, got ${size} bytes`);
+  assert.doesNotMatch(result.content[0].text ?? '', /CTO workspace profile=/);
 });
 
 test('catalog_probe surfaces the current request context (caller_agent / m365 / connector flags)', async () => {
@@ -59,4 +64,19 @@ test('catalog_probe reports itself as present in the known_tools_present probe l
   registerCatalogProbe(server, () => 'caller-hash');
   const result = (await handlers.catalog_probe!({})) as { structuredContent: { result: { known_tools_present: Record<string, boolean> } } };
   assert.equal(result.structuredContent.result.known_tools_present['catalog_probe'], true);
+});
+
+test('CTO workspace summary version matches the structured profile returned by the registered handler', async () => {
+  const { server, handlers } = fakeServer();
+  registerCatalogProbe(server, () => 'caller-hash');
+  const result = await requestContext.run(
+    { callerHash: 'caller-hash', correlationId: 'test-correlation', callerAgent: 'cto' },
+    () => handlers.catalog_probe!({ include_cto_workspace: true }),
+  ) as {
+    content: Array<{ type: string; text?: string }>;
+    structuredContent: { result: { cto_workspace: { version: string } } };
+  };
+  const version = result.structuredContent.result.cto_workspace.version;
+  assert.equal(version, '1.1.0');
+  assert.ok(result.content[0].text?.includes(`CTO workspace profile=${version} (activation unverified)`));
 });
