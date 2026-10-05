@@ -37,12 +37,14 @@ const {
   buildSynthesisMessages,
   sanitizeContinuation,
   resolveDeepBudgetMs,
+  INJECTION_DETECTED_ANSWER,
   CONFIDENCE_THRESHOLD,
   NO_CONTEXT_ANSWER,
   SYNTH_UNAVAILABLE_ANSWER,
   PARTIAL_BUDGET_ANSWER,
   DEFAULT_DEEP_BUDGET_MS,
 } = await import('./deep-retrieval.js');
+import { __resetRetractionCache, noteRetraction, retractedIdsByAgent } from './retractions.js';
 type FusedHit = import('./rrf.js').FusedHit;
 
 // Pure network mocking via globalThis.fetch — the same seam src/memory/agentic.test.ts and
@@ -68,6 +70,13 @@ function isSearchUrl(url: string): boolean {
 }
 function isShieldUrl(url: string): boolean {
   return url.includes('contentsafety/text:shieldPrompt');
+}
+async function seedSyntheticRetraction(id: string): Promise<void> {
+  __resetRetractionCache();
+  await withStubbedFetch((async () => new Response('unavailable', { status: 503 })) as typeof fetch, async () => {
+    await retractedIdsByAgent();
+  });
+  noteRetraction('synthetic-agent', id);
 }
 function embeddingsOk(): Response {
   return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }), { status: 200 });
@@ -827,6 +836,176 @@ test('deepRetrieve BUDGET: a thin round 1 with the budget already exhausted skip
       assert.equal(res.partial, true, 'the same exhausted deadline that skipped refine also gates the shield+synth tail');
       assert.equal(res.rounds_used, 1, 'a skipped refine never counts as a spent round');
       assert.equal(res.hits.length, 1);
+    },
+  );
+});
+
+test('deepRetrieve BUDGET: refinement expiring the budget skips round 2 and preserves authorized citation mapping', async () => {
+  let clock = 0;
+  let expired = false;
+  let callsAfterExpiry = 0;
+  let searchCalls = 0;
+  let embeddingCalls = 0;
+  let refineCalls = 0;
+  let synthCalls = 0;
+  const now = () => clock;
+  await withStubbedFetch(
+      (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (expired && (isEmbeddingsUrl(u) || isChatUrl(u) || isSearchUrl(u))) callsAfterExpiry++;
+        if (isEmbeddingsUrl(u)) {
+          embeddingCalls++;
+          return embeddingsOk();
+        }
+        if (isChatUrl(u)) {
+          const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+          const sys = body.messages[0]?.content ?? '';
+          if (sys.includes('refining')) {
+            refineCalls++;
+            clock = 2_000; // the refinement response arrives after the 1-second deadline
+            expired = true;
+            return chatJson({ sub_queries: ['second query'] });
+          }
+          if (sys.includes('retrieval query planner')) return chatJson({ sub_queries: ['first query'], rooms: ['memory-exec'] });
+          synthCalls++;
+          return chatText('must not synthesize after expiry');
+        }
+        if (isSearchUrl(u)) {
+          searchCalls++;
+          return new Response(JSON.stringify({ value: [
+            { id: 'synthetic-agent__live-id', text: 'current synthetic source', '@search.rerankerScore': 1 },
+          ] }), { status: 200 });
+        }
+        if (isShieldUrl(u)) throw new Error('retired shield provider must not be called');
+        throw new Error(`unexpected fetch to ${u}`);
+      }) as typeof fetch,
+      async () => {
+        const res = await deepRetrieve('synthetic question', { rooms: ['memory-exec'], now, budgetMs: 1_000 });
+        assert.equal(res.partial, true);
+        assert.deepEqual(res.budget_skipped, ['round-2-retrieval']);
+        assert.equal(refineCalls, 1);
+        assert.equal(searchCalls, 1, 'round 2 must not start after the refinement response expires the budget');
+        assert.equal(embeddingCalls, 1, 'no round-2 embedding/provider call may start after expiry');
+        assert.equal(synthCalls, 0);
+        assert.equal(callsAfterExpiry, 0, 'no paid provider request may start after expiry');
+        assert.deepEqual(res.rooms_searched, ['memory-exec']);
+        assert.deepEqual(res.continuation?.rooms, ['memory-exec']);
+        assert.deepEqual(res.continuation?.sub_queries, ['first query', 'second query']);
+        assert.deepEqual(res.hits.map((h) => h.id), ['synthetic-agent__live-id']);
+        assert.deepEqual(res.citations, [{ n: 1, source: 'memory-exec', id: 'synthetic-agent__live-id' }]);
+      },
+    );
+});
+
+test('deepRetrieve BUDGET: expiry after shield skips synthesis but preserves retraction-filtered hits and citations', async () => {
+  let expired = false;
+  let callsAfterExpiry = 0;
+  let searchCalls = 0;
+  let embeddingCalls = 0;
+  let synthCalls = 0;
+  const now = () => expired ? 1_001 : 0;
+  await seedSyntheticRetraction('stale-id');
+
+  try {
+    await withStubbedFetch(
+      (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (expired && (isEmbeddingsUrl(u) || isChatUrl(u) || isSearchUrl(u))) callsAfterExpiry++;
+        if (isEmbeddingsUrl(u)) {
+          embeddingCalls++;
+          return embeddingsOk();
+        }
+        if (isChatUrl(u)) {
+          const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+          if ((body.messages[0]?.content ?? '').includes('One Brain')) synthCalls++;
+          return chatJson({ sub_queries: ['single query'], rooms: ['memory-exec'] });
+        }
+        if (isSearchUrl(u)) {
+          searchCalls++;
+          return new Response(JSON.stringify({ value: [
+            { id: 'synthetic-agent__stale-id', text: 'retracted synthetic source', '@search.rerankerScore': 4 },
+            { id: 'synthetic-agent__live-1', text: 'current synthetic source one', '@search.rerankerScore': 3 },
+            { id: 'synthetic-agent__live-2', text: 'current synthetic source two', '@search.rerankerScore': 2 },
+            { id: 'synthetic-agent__live-3', text: 'current synthetic source three', '@search.rerankerScore': 1 },
+          ] }), { status: 200 });
+        }
+        if (isShieldUrl(u)) throw new Error('real shield provider must not be called in this injected-shield test');
+        throw new Error(`unexpected fetch to ${u}`);
+      }) as typeof fetch,
+      async () => {
+        const res = await deepRetrieve(
+          'synthetic question',
+          { rooms: ['memory-exec'], now, budgetMs: 1_000 },
+          { retrievalShield: async () => {
+            expired = true; // delay the shield result past the deadline without sleeping/provider I/O
+            return { ran: true, attackDetected: false, blocked: false, mode: 'report', scannedCount: 1 };
+          } },
+        );
+        assert.equal(res.partial, true);
+        assert.deepEqual(res.budget_skipped, ['synthesis']);
+        assert.equal(searchCalls, 1);
+        assert.equal(embeddingCalls, 1);
+        assert.equal(synthCalls, 0);
+        assert.equal(callsAfterExpiry, 0, 'synthesis/provider work must not start after shield expiry');
+        assert.deepEqual(res.hits.map((h) => h.id), [
+          'synthetic-agent__live-1',
+          'synthetic-agent__live-2',
+          'synthetic-agent__live-3',
+        ]);
+        assert.deepEqual(res.citations, res.hits.map((h, i) => ({ n: i + 1, source: 'memory-exec', id: h.id })));
+        assert.deepEqual(res.retracted_dropped, ['synthetic-agent__stale-id']);
+        assert.deepEqual(res.injection_screen, { attackDetected: false, mode: 'report' }, 'shield evidence survives the partial result');
+      },
+    );
+  } finally {
+    __resetRetractionCache();
+  }
+});
+
+test('deepRetrieve BUDGET: a blocked shield result wins over expiry and keeps its evidence', async () => {
+  let expired = false;
+  let synthCalls = 0;
+  let searchCalls = 0;
+  const now = () => expired ? 1_001 : 0;
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isChatUrl(u)) {
+        const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+        const sys = body.messages[0]?.content ?? '';
+        if (sys.includes('One Brain')) {
+          synthCalls++;
+          return chatText('must not synthesize a blocked result');
+        }
+        return chatJson({ sub_queries: ['single query'], rooms: ['memory-exec'] });
+      }
+      if (isSearchUrl(u)) {
+        searchCalls++;
+        return new Response(JSON.stringify({ value: [
+          { id: 'blocked-doc-1', text: 'synthetic source one', '@search.rerankerScore': 3 },
+          { id: 'blocked-doc-2', text: 'synthetic source two', '@search.rerankerScore': 2 },
+          { id: 'blocked-doc-3', text: 'synthetic source three', '@search.rerankerScore': 1 },
+        ] }), { status: 200 });
+      }
+      if (isShieldUrl(u)) throw new Error('real shield provider must not be called in this injected-shield test');
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await deepRetrieve(
+        'synthetic blocked question',
+        { rooms: ['memory-exec'], now, budgetMs: 1_000 },
+        { retrievalShield: async () => {
+          expired = true;
+          return { ran: true, attackDetected: true, blocked: true, mode: 'enforce', scannedCount: 1 };
+        } },
+      );
+      assert.equal(searchCalls, 1);
+      assert.equal(synthCalls, 0);
+      assert.equal(res.answer, INJECTION_DETECTED_ANSWER);
+      assert.equal(res.partial, undefined, 'a blocked shield is already the final safe response');
+      assert.deepEqual(res.injection_screen, { attackDetected: true, mode: 'enforce' });
+      assert.deepEqual(res.citations, res.hits.map((h, i) => ({ n: i + 1, source: 'memory-exec', id: h.id })));
     },
   );
 });
