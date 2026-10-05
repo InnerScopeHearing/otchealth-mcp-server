@@ -30,8 +30,8 @@ function redact(text) {
   return String(text)
     .replace(/https?:\/\/[^/\s@]+@/g, 'https://[REDACTED]@')
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '[REDACTED_GITHUB_TOKEN]')
-    .replace(/(?i:authorization:\s*bearer\s+)\S+/g, 'Authorization: Bearer [REDACTED]')
-    .replace(/(?i:_authToken=)\S+/g, '_authToken=[REDACTED]');
+    .replace(/authorization:\s*bearer\s+\S+/gi, 'Authorization: Bearer [REDACTED]')
+    .replace(/_authToken=\S+/gi, '_authToken=[REDACTED]');
 }
 
 function safeEnv(source = process.env) {
@@ -199,7 +199,37 @@ async function validateSource(execute, receipt, repo, pin, logDir) {
   return { path, before, lock };
 }
 
+export async function pnpmInvocation(admission, {
+  platform = process.platform,
+  nodePath = process.execPath,
+} = {}) {
+  if (platform !== 'win32') return { executable: 'pnpm', prefixArgs: [] };
+  const binding = admission?.toolchain;
+  assert(binding && typeof binding === 'object', 'Windows admission requires an exact toolchain binding');
+  for (const key of ['node_path', 'pnpm_package_root', 'pnpm_cli_path']) {
+    assert(typeof binding[key] === 'string' && isAbsolute(binding[key]), 'admitted ' + key + ' must be absolute');
+  }
+  assert(typeof nodePath === 'string' && isAbsolute(nodePath), 'running Node path must be absolute');
+  assert(typeof binding.pnpm_cli_sha256 === 'string' && /^[0-9a-f]{64}$/.test(binding.pnpm_cli_sha256), 'admitted pnpm CLI SHA-256 is invalid');
+  const [admittedNode, runningNode, packageRoot, cli] = await Promise.all([
+    realpath(binding.node_path), realpath(nodePath),
+    realpath(binding.pnpm_package_root), realpath(binding.pnpm_cli_path),
+  ]);
+  const samePath = (left, right) => left.toLowerCase() === right.toLowerCase();
+  assert(samePath(admittedNode, runningNode), 'running Node does not match the admitted Node path');
+  assert(inside(packageRoot, cli) && !samePath(packageRoot, cli), 'pnpm CLI must be inside its admitted package root');
+  const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
+  assert(manifest.name === 'pnpm' && manifest.version === EXPECTED_PACKAGE_MANAGER.slice('pnpm@'.length),
+    'pnpm package must be ' + EXPECTED_PACKAGE_MANAGER);
+  assert(manifest.bin?.pnpm === 'bin/pnpm.cjs', 'pnpm package must declare bin/pnpm.cjs');
+  const declaredCli = await realpath(resolve(packageRoot, manifest.bin.pnpm));
+  assert(samePath(declaredCli, cli), 'admitted pnpm CLI does not match package.bin.pnpm');
+  assert(await sha256(cli) === binding.pnpm_cli_sha256, 'admitted pnpm CLI SHA-256 mismatch');
+  return { executable: runningNode, prefixArgs: [cli] };
+}
+
 export async function runCompanionReadiness(options, deps = {}) {
+  const startedAt = new Date().toISOString();
   const execute = deps.execute ?? (async (file, args, opts) => {
     try {
       return await execFileDefault(file, args, opts);
@@ -210,18 +240,19 @@ export async function runCompanionReadiness(options, deps = {}) {
   const env = deps.env ?? process.env;
   const repository = options.repository ?? DEFAULT_REPOSITORY;
   const workspaceRoot = resolve(deps.workspaceRoot ?? '/workspace/scratch/5dbf17436df9');
+  assert(options.cleanupRoot === undefined || (typeof options.cleanupRoot === 'string' && isAbsolute(options.cleanupRoot)), 'cleanup root must be absolute');
+  const cleanupRoot = options.cleanupRoot ? resolve(options.cleanupRoot) : join(workspaceRoot, 'repair2', 'cleanup');
   let state;
   let sourceValue = options.repo;
   let artifactValue = options.artifacts;
   let pin = options.pin ?? DEFAULT_PIN;
   if (options.state) {
     const statePath = resolve(options.state);
-    assert(inside(join(workspaceRoot, 'repair2', 'cleanup', 'state'), statePath), 'state file must be under repair2/cleanup/state');
+    assert(inside(join(cleanupRoot, 'state'), statePath), 'state file must be under repair2/cleanup/state');
     state = JSON.parse(await readFile(statePath, 'utf8'));
     sourceValue = state.target;
     artifactValue = state.logs_dir;
-    pin = state.pin;
-    assert(pin === DEFAULT_PIN, 'cleanup state pin does not match the runner exact Companion pin');
+    assert(parseSha(state.pin) && state.pin === pin, 'cleanup state pin does not match requested exact pin');
     assert(typeof state.run_id === 'string' && /^[A-Za-z0-9._-]+$/.test(state.run_id), 'cleanup state must contain a safe run_id');
   } else {
     assert(deps.allowDirectTarget === true, 'CLI requires cleanup state from eval_worktree.py prepare');
@@ -234,8 +265,8 @@ export async function runCompanionReadiness(options, deps = {}) {
   assert(parseSha(pin), 'pin must be a full 40-character lowercase commit SHA');
   assert(repository === DEFAULT_REPOSITORY, 'runner is scoped to the Companion repository');
   assert(state?.repository === undefined || state.repository === repository, 'cleanup state repository mismatch');
-  assert(inside(join(workspaceRoot, 'repair2', 'cleanup', 'worktrees'), source), 'repo must be a prepared cleanup-owned worktree');
-  assert(inside(join(workspaceRoot, 'repair2', 'cleanup', 'artifacts'), artifactDir), 'artifacts must be under the cleanup artifacts root');
+  assert(inside(join(cleanupRoot, 'worktrees'), source), 'repo must be a prepared cleanup-owned worktree');
+  assert(inside(join(cleanupRoot, 'artifacts'), artifactDir), 'artifacts must be under the cleanup artifacts root');
   assert(!inside(source, artifactDir), 'artifacts must be outside the source worktree');
   await mkdir(artifactDir, { recursive: true, mode: 0o700 });
   const existing = await readdir(artifactDir);
@@ -245,10 +276,11 @@ export async function runCompanionReadiness(options, deps = {}) {
     schema_version: RUNNER_VERSION,
     task_id: 't_idem_2bde337b',
     runner: 'companion-readiness',
-    started_at_utc: new Date().toISOString(),
+    started_at_utc: startedAt,
     host: { os: `${os.platform()} ${os.arch()}`, hostname: os.hostname(), cwd: process.cwd(), session_id: sessionId ?? null, thread_id: env.CODEX_THREAD_ID ?? null, environment_id: environmentId ?? null },
     source: { repository, path: source, expected_sha: pin },
     cleanup_run_id: state?.run_id ?? null,
+    cleanup_root: cleanupRoot,
     commands: [],
     receipt_path: receiptPath,
     admission: { verified: false },
@@ -267,15 +299,33 @@ export async function runCompanionReadiness(options, deps = {}) {
   assert(!inside(source, admissionFile), 'admission file must be outside the source worktree');
   const admission = JSON.parse(await readFile(admissionFile, 'utf8'));
   assertAdmission(admission, { repository, pin, sessionId, environmentId });
-  receipt.deadline_ms = Math.min(Date.now() + MAX_RUN_MS, Date.parse(admission.expires_at_utc));
+  if (options.cleanupRoot) {
+    assert(typeof admission.cleanup_root === 'string' && isAbsolute(admission.cleanup_root), 'explicit cleanup root must be bound in admission');
+    const [admittedRoot, actualRoot] = await Promise.all([realpath(admission.cleanup_root), realpath(cleanupRoot)]);
+    assert(inside(admittedRoot, actualRoot) && inside(actualRoot, admittedRoot), 'admission cleanup root mismatch');
+  }
+  receipt.deadline_ms = Math.min(Date.parse(startedAt) + MAX_RUN_MS, Date.parse(admission.expires_at_utc));
+  assert(receipt.deadline_ms > Date.now(), 'admission/stage time budget expired');
   receipt.admission = { verified: true, file: admissionFile, expires_at_utc: admission.expires_at_utc };
   await writeReceipt(receipt);
+  const platform = deps.platform ?? process.platform;
+  let pnpmCommand;
+  try {
+    pnpmCommand = await pnpmInvocation(admission, { platform, nodePath: deps.nodePath ?? process.execPath });
+  } catch (error) {
+    receipt.blocked_reason = redact(error.message);
+    receipt.finished_at_utc = new Date().toISOString();
+    await writeReceipt(receipt);
+    throw error;
+  }
+  receipt.toolchain = { pnpm_executable: pnpmCommand.executable, pnpm_prefix_args: pnpmCommand.prefixArgs };
+  await writeReceipt(receipt);
   const checked = await validateSource(execute, receipt, source, pin, artifactDir);
-  const node = await runOne(execute, receipt, { executable: 'node', args: ['--version'], cwd: source, label: 'node-version', env: safeEnv(env), logDir: artifactDir });
+  const node = await runOne(execute, receipt, { executable: platform === 'win32' ? pnpmCommand.executable : 'node', args: ['--version'], cwd: source, label: 'node-version', env: safeEnv(env), logDir: artifactDir });
   assert(node.exit_code === 0, `node --version failed with exit ${node.exit_code}`);
   const major = Number(node.stdout.trim().replace(/^v/, '').split('.')[0]);
   assert(Number.isInteger(major) && major >= 22, `Node >=22 required; got ${node.stdout.trim()}`);
-  const pnpm = await runOne(execute, receipt, { executable: 'pnpm', args: ['--version'], cwd: source, label: 'pnpm-version', env: safeEnv(env), logDir: artifactDir });
+  const pnpm = await runOne(execute, receipt, { executable: pnpmCommand.executable, args: [...pnpmCommand.prefixArgs, '--version'], cwd: source, label: 'pnpm-version', env: safeEnv(env), logDir: artifactDir });
   assert(pnpm.exit_code === 0, `pnpm --version failed with exit ${pnpm.exit_code}`);
   assert(pnpm.stdout.trim() === '9.0.0', `pnpm 9.0.0 required; got ${pnpm.stdout.trim()}`);
   const runEnv = safeEnv(env);
@@ -286,7 +336,7 @@ export async function runCompanionReadiness(options, deps = {}) {
   ];
   let failed = null;
   for (const [label, args] of commands) {
-    const result = await runOne(execute, receipt, { executable: 'pnpm', args, cwd: source, label, env: runEnv, logDir: artifactDir });
+    const result = await runOne(execute, receipt, { executable: pnpmCommand.executable, args: [...pnpmCommand.prefixArgs, ...args], cwd: source, label, env: runEnv, logDir: artifactDir });
     if (result.exit_code !== 0) { failed = result; break; }
   }
   const poststate = await git(execute, receipt, source, artifactDir, 'poststate', ['status', '--porcelain', '--untracked-files=all']);
@@ -319,8 +369,8 @@ function parseArgs(argv) {
     assert(i + 1 < argv.length, `missing value for --${key}`);
     values[key] = argv[++i];
   }
-  for (const key of Object.keys(values)) assert(['state', 'admission'].includes(key), `unsupported argument --${key}`);
-  return values;
+  for (const key of Object.keys(values)) assert(['state', 'admission', 'pin', 'cleanup-root'].includes(key), `unsupported argument --${key}`);
+  return { ...values, cleanupRoot: values['cleanup-root'] };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
