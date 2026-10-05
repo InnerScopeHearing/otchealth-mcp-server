@@ -209,6 +209,45 @@ test('evaluateJitDoctrine: the throttle is scoped per (caller, tool) -- a differ
   assert.equal(b1.pitfalls.length, 1, 'a different caller is unaffected by caller-evalF-1 having been throttled');
 });
 
+test('evaluateJitDoctrine: an existing nonblank supersedes value suppresses only its memory reminder', () => {
+  for (const tool of ['memory_write', 'memory_remember']) {
+    __resetJitDoctrineState();
+    const out = evaluateJitDoctrine(`caller-supersedes-${tool}`, tool, { supersedes: 'prior-id' });
+    assert.deepEqual(out.pitfalls, []);
+    assert.equal(out.mode, 'warn');
+  }
+  // The same input field does not suppress an unrelated tool's doctrine.
+  __resetJitDoctrineState();
+  assert.equal(evaluateJitDoctrine('caller-supersedes-other', 'shopify_create_product', { supersedes: 'prior-id' }).pitfalls.length, 1);
+});
+
+test('evaluateJitDoctrine: missing, blank, and malformed supersedes values retain the reminder', () => {
+  const cases: Array<Record<string, unknown> | undefined> = [
+    undefined,
+    {},
+    { supersedes: '' },
+    { supersedes: '   ' },
+    { supersedes: null },
+    { supersedes: 42 },
+    { supersedes: ['prior-id'] },
+  ];
+  for (const tool of ['memory_write', 'memory_remember']) {
+    for (const [index, input] of cases.entries()) {
+      __resetJitDoctrineState();
+      const out = evaluateJitDoctrine(`caller-retain-${tool}-${index}`, tool, input);
+      assert.equal(out.pitfalls.length, 1, `${tool} must retain the reminder for input ${JSON.stringify(input)}`);
+      assert.match(out.pitfalls[0], /Set supersedes when/);
+    }
+  }
+});
+
+test('evaluateJitDoctrine: suppressed reminder does not consume once-per-caller throttling', () => {
+  __resetJitDoctrineState();
+  assert.deepEqual(evaluateJitDoctrine('caller-supersedes-throttle', 'memory_write', { supersedes: 'prior-id' }).pitfalls, []);
+  assert.equal(evaluateJitDoctrine('caller-supersedes-throttle', 'memory_write').pitfalls.length, 1);
+  assert.deepEqual(evaluateJitDoctrine('caller-supersedes-throttle', 'memory_write').pitfalls, []);
+});
+
 test('FAIL-OPEN: evaluateJitDoctrine never throws on empty callerHash or toolName', () => {
   __resetJitDoctrineState();
   assert.doesNotThrow(() => evaluateJitDoctrine('', ''));

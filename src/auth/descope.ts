@@ -71,6 +71,16 @@ export interface DescopeClaims {
 }
 
 const JWKS_TTL_MS = 60 * 60 * 1000; // 1 hour -- Descope signing keys rotate infrequently.
+const JWKS_FETCH_TIMEOUT_MS = 5_000;
+
+class DescopeJwksTimeoutError extends Error {
+  readonly code = 'descope_jwks_timeout';
+
+  constructor() {
+    super('Descope JWKS request timed out');
+    this.name = 'DescopeJwksTimeoutError';
+  }
+}
 
 // Built-in fallback for the 3 real Inbound App Clients provisioned 2026-07-08. Overridable
 // (widenable or replaceable) via DESCOPE_SCOPE_LANE_MAP without a redeploy -- a JSON object
@@ -100,9 +110,16 @@ function jwksUrl(projectId: string): string {
 
 /** Fetches and parses a Descope project's JWKS into a Map<kid, KeyObject>. Network call. */
 export async function fetchJwks(projectId: string): Promise<Map<string, KeyObject>> {
-  const res = await fetch(jwksUrl(projectId));
-  if (!res.ok) throw new Error(`descope jwks fetch failed: HTTP ${res.status}`);
-  const body = (await res.json()) as { keys?: Jwk[] };
+  const signal = AbortSignal.timeout(JWKS_FETCH_TIMEOUT_MS);
+  let body: { keys?: Jwk[] };
+  try {
+    const res = await fetch(jwksUrl(projectId), { signal });
+    if (!res.ok) throw new Error(`descope jwks fetch failed: HTTP ${res.status}`);
+    body = (await res.json()) as { keys?: Jwk[] };
+  } catch (err) {
+    if (signal.aborted) throw new DescopeJwksTimeoutError();
+    throw err;
+  }
   const map = new Map<string, KeyObject>();
   for (const jwk of body.keys ?? []) {
     if (jwk.kty !== 'RSA' || !jwk.kid) continue;
@@ -145,7 +162,8 @@ async function getKey(projectId: string, kid: string): Promise<{ key: KeyObject 
       const keys = await fetchJwks(projectId);
       jwksCache = { keys, fetchedAt: now, projectId };
     } catch (err) {
-      logger.warn({ type: 'descope_jwks_fetch_failed', err: String(err) }, 'Descope JWKS refresh failed');
+      const errorCode = err instanceof DescopeJwksTimeoutError ? err.code : 'descope_jwks_fetch_failed';
+      logger.warn({ type: 'descope_jwks_fetch_failed', error_code: errorCode }, 'Descope JWKS refresh failed');
       refetchFailed = true;
       if (!jwksCache || jwksCache.projectId !== projectId) {
         return { key: null, infraFailure: true }; // no fetch succeeded, ever, for this project -- a real infra failure

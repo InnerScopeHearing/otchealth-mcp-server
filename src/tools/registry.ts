@@ -659,6 +659,8 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
    */
   connectorInputShapeByLane?: Readonly<Record<string, Partial<Shape>>>;
   outputShape: Output;
+  /** Maximum UTF-8 bytes for the complete inline MCP response, including text and structured content. */
+  maxResponseBytes?: number;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
   redactInputForLog?: (input: Record<string, unknown>) => unknown;
@@ -1357,7 +1359,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // per process so the same pitfall does not nag on every subsequent call.
         // canonicalName, not def.name -- a pitfall bound to e.g. "posthog_" or "azure_containerapp_set_env"
         // should still fire when reached via an M365 alias, not silently go dark under the stripped name.
-        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName);
+        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName, handlerInput);
         if (jitDoctrine.pitfalls.length) {
           structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
           // PHASE 2 SLO TELEMETRY (observe-only): feeds the doctrine-coverage SLO -- how often a
@@ -1399,6 +1401,21 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           warning,
           capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
         );
+
+        // Check the complete inline envelope before JIT handling. A constrained tool must fail
+        // closed instead of persisting an oversized response and returning an offload reference.
+        if (def.maxResponseBytes !== undefined) {
+          const serializedResponse = JSON.stringify({
+            content: [{ type: 'text', text }],
+            structuredContent: structured,
+          });
+          if (serializedResponse === undefined) {
+            throw new Error(`Tool ${def.name} response could not be sized safely.`);
+          }
+          if (Buffer.byteLength(serializedResponse, 'utf8') > def.maxResponseBytes) {
+            throw new Error(`Tool ${def.name} response exceeded its configured size limit.`);
+          }
+        }
 
         // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
         // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
@@ -1551,4 +1568,3 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 }
 
 export type CallerHashProvider = () => string;
-
