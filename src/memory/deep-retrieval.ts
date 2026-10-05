@@ -173,6 +173,11 @@ export interface DeepRetrieveOptions {
   continuation?: DeepContinuation;
 }
 
+/** Test-only dependency seam. Production callers leave this unset. */
+export interface DeepRetrieveTestDeps {
+  retrievalShield?: typeof retrievalShield;
+}
+
 export interface Citation {
   n: number;
   source: string;
@@ -343,6 +348,18 @@ export function fusedConfidence(hits: FusedHit[]): number {
 export function needsRefine(hits: FusedHit[], roundsUsed: number, maxRounds: number): boolean {
   if (roundsUsed >= maxRounds) return false;
   return fusedConfidence(hits) < CONFIDENCE_THRESHOLD;
+}
+
+/** A content shield's block is final even when its call consumed the remaining budget. */
+export function postShieldAction(blocked: boolean, budgetExpired: boolean): 'blocked' | 'partial' | 'synthesize' {
+  if (blocked) return 'blocked';
+  return budgetExpired ? 'partial' : 'synthesize';
+}
+
+/** Keep only the public, content-free shield receipt on a Brain result. */
+export function injectionScreenEvidence(outcome: { ran: boolean; attackDetected: boolean; mode: GuardMode }):
+  DeepRetrieveResult['injection_screen'] | undefined {
+  return outcome.ran ? { attackDetected: outcome.attackDetected, mode: outcome.mode } : undefined;
 }
 
 /** Drop duplicate hits that share the same underlying document id (keeps the first / highest-scored
@@ -565,6 +582,7 @@ async function runDeepFlow(
   includeOps: boolean,
   budget: { deadline: number; now: () => number },
   continuation?: DeepContinuation,
+  shield: typeof retrievalShield = retrievalShield,
 ): Promise<DeepRetrieveResult> {
   const { deadline, now } = budget;
   const overBudget = (): boolean => now() >= deadline;
@@ -610,13 +628,19 @@ async function runDeepFlow(
       } else {
         const refined = await refineSubQueries(query, subQueries, fusedPreview.length);
         if (refined.length) {
-          const round2 = await runRetrievalRound(refined, targetRooms, top, includeOps);
-          rounds = 2;
           subQueries = [...subQueries, ...refined];
-          pool = [...pool, ...round2.perRoom];
-          for (const r of round2.searched) searched.add(r);
-          // failed entries are "room: reason" — compare on the room name, not the whole string.
-          for (const r of round2.failed) if (!searched.has(r.split(':')[0]!)) failed.add(r);
+          // Refinement is sequential with retrieval. If it consumed the remaining budget, do not
+          // start another embedding/search fan-out; the continuation can run the planned queries.
+          if (overBudget()) {
+            budgetSkipped.push('round-2-retrieval');
+          } else {
+            const round2 = await runRetrievalRound(refined, targetRooms, top, includeOps);
+            rounds = 2;
+            pool = [...pool, ...round2.perRoom];
+            for (const r of round2.searched) searched.add(r);
+            // failed entries are "room: reason" — compare on the room name, not the whole string.
+            for (const r of round2.failed) if (!searched.has(r.split(':')[0]!)) failed.add(r);
+          }
         }
       }
     }
@@ -657,8 +681,33 @@ async function runDeepFlow(
   // synthesizeAnswer normally, just annotates the result; enforce withholds ONLY the synthesized
   // narrative when a passage is flagged, never the raw hits themselves (returned below regardless).
   const synthHits = hits.slice(0, MAX_SYNTH_HITS);
-  const injectionScreen = await retrievalShield(query, synthHits.map((h) => h.text));
-  const answer = injectionScreen.blocked ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits);
+  const injectionScreen = await shield(query, synthHits.map((h) => h.text));
+  // A blocked shield result is already the final safe response and must survive an expired
+  // deadline. Otherwise, do not start the paid synthesis call after the shield consumed the rest
+  // of the budget. This remains a soft checkpoint: it does not cancel an in-flight shield call.
+  const postShield = postShieldAction(injectionScreen.blocked, overBudget());
+  if (postShield === 'partial') {
+    budgetSkipped.push('synthesis');
+    const result: DeepRetrieveResult = {
+      mode: 'deep-agentic',
+      answer: PARTIAL_BUDGET_ANSWER,
+      citations: buildCitations(hits),
+      sub_queries: subQueries,
+      rounds_used: rounds,
+      hits,
+      rooms_searched: [...searched],
+      partial: true,
+      continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds },
+    };
+    if (resumed) result.resumed = true;
+    if (failed.size) result.rooms_failed = [...failed];
+    if (dropped.length) result.retracted_dropped = dropped;
+    const evidence = injectionScreenEvidence(injectionScreen);
+    if (evidence) result.injection_screen = evidence;
+    result.budget_skipped = budgetSkipped;
+    return result;
+  }
+  const answer = postShield === 'blocked' ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits);
 
   const result: DeepRetrieveResult = {
     mode: 'deep-agentic',
@@ -672,9 +721,8 @@ async function runDeepFlow(
   if (resumed) result.resumed = true;
   if (failed.size) result.rooms_failed = [...failed];
   if (dropped.length) result.retracted_dropped = dropped;
-  if (injectionScreen.ran) {
-    result.injection_screen = { attackDetected: injectionScreen.attackDetected, mode: injectionScreen.mode };
-  }
+  const evidence = injectionScreenEvidence(injectionScreen);
+  if (evidence) result.injection_screen = evidence;
   if (budgetSkipped.length) result.budget_skipped = budgetSkipped;
   return result;
 }
@@ -745,7 +793,11 @@ export async function fallbackFastSearch(query: string, rooms: string[], top: nu
  * passes its own roomsFor() result) — this function only ever narrows that set, never expands it.
  * FAIL-OPEN by construction: this can never throw. See the file header for the full fallback chain.
  */
-export async function deepRetrieve(query: string, opts: DeepRetrieveOptions): Promise<DeepRetrieveResult> {
+export async function deepRetrieve(
+  query: string,
+  opts: DeepRetrieveOptions,
+  testDeps: DeepRetrieveTestDeps = {},
+): Promise<DeepRetrieveResult> {
   const rooms = opts.rooms ?? [];
   const top = opts.top ?? DEFAULT_TOP;
   const includeOps = opts.includeOps ?? false;
@@ -760,7 +812,15 @@ export async function deepRetrieve(query: string, opts: DeepRetrieveOptions): Pr
   }
 
   try {
-    return await runDeepFlow(query, rooms, top, includeOps, { deadline: now() + budgetMs, now }, opts.continuation);
+    return await runDeepFlow(
+      query,
+      rooms,
+      top,
+      includeOps,
+      { deadline: now() + budgetMs, now },
+      opts.continuation,
+      testDeps.retrievalShield,
+    );
   } catch {
     // FAIL-OPEN: any unexpected error anywhere in the agentic flow degrades to a single plain
     // search pass across the same rooms — deep mode can never throw, and can never be WORSE than
