@@ -37,6 +37,7 @@ IGNORED_OUTPUT_ROOTS = (
     "playwright-report",
     "test-results",
 )
+IGNORED_OUTPUT_FILE_SUFFIXES = (".tsbuildinfo",)
 
 # This is provenance from the earlier root-verified review session, not the
 # identity of a future invocation. Every new manifest records its own runtime
@@ -337,6 +338,8 @@ def check_cleanup_status(target: Path) -> None:
             output_dir = path.rstrip("/").rsplit("/", 1)[-1]
             if path.endswith("/") and output_dir in IGNORED_OUTPUT_ROOTS:
                 continue
+            if not path.endswith("/") and path.rsplit("/", 1)[-1].endswith(IGNORED_OUTPUT_FILE_SUFFIXES):
+                continue
             refusals.append(f"ignored non-output path: {path}")
         else:
             refusals.append(f"changed or untracked path: {path} ({code})")
@@ -344,11 +347,86 @@ def check_cleanup_status(target: Path) -> None:
         raise ContractError("worktree has user/source state; preserved without cleanup: " + "; ".join(refusals[:10]))
 
 
+def remove_windows_deregistered_residual(target: Path) -> dict:
+    """Remove one already-deregistered exact residual through native PowerShell."""
+    recovery_env = os.environ.copy()
+    recovery_env["OTCHEALTH_CLEANUP_TARGET"] = str(target)
+    command = [
+        "pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "Remove-Item -LiteralPath $env:OTCHEALTH_CLEANUP_TARGET -Recurse -ErrorAction Stop",
+    ]
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        check=False, env=recovery_env,
+    )
+    return {
+        "attempted": True,
+        "method": "PowerShell Remove-Item -LiteralPath -Recurse without Force",
+        "target": str(target),
+        "exit_code": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "force_used": False,
+        "completed": result.returncode == 0 and not (target.exists() or target.is_symlink()),
+    }
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     data, manifest = load_state(args.run_id)
     target = expected_target(args.run_id)
     if not target.exists():
         raise ContractError("target already absent; reconcile exact Git readback before another cleanup attempt")
+    prior_cleanup = data.get("cleanup")
+    if isinstance(prior_cleanup, dict) and prior_cleanup.get("completed") is False:
+        repo = Path(data["source_repo"])
+        source_head = head_sha(repo)
+        source_status = hashlib.sha256(status_bytes(repo)).hexdigest()
+        recorded_partial = (
+            prior_cleanup.get("target") == str(target)
+            and prior_cleanup.get("target_present") is True
+            and prior_cleanup.get("target_registered_after") is False
+            and prior_cleanup.get("worktree_list_absent") is True
+            and prior_cleanup.get("source_checkout_unchanged") is True
+            and prior_cleanup.get("force_used") is False
+            and isinstance(prior_cleanup.get("git_remove_error"), str)
+            and bool(prior_cleanup["git_remove_error"])
+        )
+        source_still_exact = (
+            source_head == data["source_head_before"]
+            and source_status == data["source_status_sha256_before"]
+        )
+        if recorded_partial and source_still_exact and not worktree_is_registered(repo, target) and os.name == "nt":
+            recovery = remove_windows_deregistered_residual(target)
+            prior_cleanup["residual_recovery"] = recovery
+            prior_cleanup["recovery_completed_utc"] = utc_now()
+            prior_cleanup["target_present"] = target.exists() or target.is_symlink()
+            prior_cleanup["target_absent"] = not prior_cleanup["target_present"]
+            prior_cleanup["target_registered_after"] = worktree_is_registered(repo, target)
+            prior_cleanup["worktree_list_absent"] = not prior_cleanup["target_registered_after"]
+            prior_cleanup["source_head_after"] = head_sha(repo)
+            prior_cleanup["source_status_sha256_after"] = hashlib.sha256(status_bytes(repo)).hexdigest()
+            prior_cleanup["source_checkout_unchanged"] = (
+                prior_cleanup["source_head_after"] == data["source_head_before"]
+                and prior_cleanup["source_status_sha256_after"] == data["source_status_sha256_before"]
+            )
+            prior_cleanup["logs_preserved"] = Path(data["logs_dir"]).exists()
+            prior_cleanup["completed"] = (
+                recovery["completed"]
+                and prior_cleanup["target_absent"]
+                and prior_cleanup["worktree_list_absent"]
+                and prior_cleanup["source_checkout_unchanged"]
+                and prior_cleanup["logs_preserved"]
+            )
+            prior_cleanup["readback"] = (
+                "recorded deregistered Windows residual removed by exact non-force PowerShell recovery"
+                if prior_cleanup["completed"]
+                else "recorded residual recovery incomplete; exact state preserved for owner review"
+            )
+            write_json(manifest, data)
+            print(json.dumps(prior_cleanup, indent=2))
+            if not prior_cleanup["completed"]:
+                raise ContractError("recorded Windows residual recovery did not satisfy exact readback")
+            return 0
     verify_target(data, target)
     check_cleanup_status(target)
     repo = Path(data["source_repo"])
@@ -376,7 +454,22 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         source_head_after == data["source_head_before"]
         and source_status_after == data["source_status_sha256_before"]
     )
-    completed = removal_error is None and not target_present and not target_registered and source_unchanged
+    residual_recovery = {"attempted": False, "completed": False, "force_used": False}
+    if (
+        removal_error is not None
+        and os.name == "nt"
+        and target_present
+        and not target_registered
+        and source_unchanged
+    ):
+        residual_recovery = remove_windows_deregistered_residual(target)
+        target_present = target.exists() or target.is_symlink()
+    completed = (
+        (removal_error is None or residual_recovery["completed"])
+        and not target_present
+        and not target_registered
+        and source_unchanged
+    )
     data["cleanup"] = {
         "completed_utc": utc_now(),
         "completed": completed,
@@ -394,6 +487,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         "logs_preserved": Path(data["logs_dir"]).exists(),
         "force_used": False,
         "git_remove_error": removal_error,
+        "residual_recovery": residual_recovery,
         "readback": (
             "exact target absent and absent from NUL-delimited git worktree list"
             if completed else "cleanup incomplete; exact state recorded and any residual preserved for owner review"
@@ -401,7 +495,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     }
     write_json(manifest, data)
     print(json.dumps(data["cleanup"], indent=2))
-    if removal_error is not None:
+    if removal_error is not None and not residual_recovery["completed"]:
         raise ContractError("Git worktree removal failed; residual preserved for owner review: " + removal_error)
     if target_present:
         raise ContractError("Git reported success but the exact target still exists")
