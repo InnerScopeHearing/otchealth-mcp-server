@@ -317,13 +317,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def worktree_is_registered(repo: Path, target: Path) -> bool:
+    """Compare complete native paths in NUL-delimited porcelain output."""
+    raw = git(repo, "worktree", "list", "--porcelain", "-z", text=False).stdout
+    target_key = os.path.normcase(os.path.abspath(os.fspath(target)))
+    for record in raw.split(b"\0"):
+        if record.startswith(b"worktree "):
+            listed = os.fsdecode(record[len(b"worktree ") :])
+            if os.path.normcase(os.path.abspath(listed)) == target_key:
+                return True
+    return False
+
+
 def check_cleanup_status(target: Path) -> None:
     raw = git(target, "status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z", text=False).stdout
     refusals: list[str] = []
     for code, path in parse_status_paths(raw):
         if code == "!!":
-            top = path.rstrip("/").split("/", 1)[0]
-            if top in IGNORED_OUTPUT_ROOTS:
+            output_dir = path.rstrip("/").rsplit("/", 1)[-1]
+            if path.endswith("/") and output_dir in IGNORED_OUTPUT_ROOTS:
                 continue
             refusals.append(f"ignored non-output path: {path}")
         else:
@@ -340,27 +352,61 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     verify_target(data, target)
     check_cleanup_status(target)
     repo = Path(data["source_repo"])
-    if head_sha(repo) != data["source_head_before"] or hashlib.sha256(status_bytes(repo)).hexdigest() != data["source_status_sha256_before"]:
+    source_head_before = head_sha(repo)
+    source_status_before = hashlib.sha256(status_bytes(repo)).hexdigest()
+    if (
+        source_head_before != data["source_head_before"]
+        or source_status_before != data["source_status_sha256_before"]
+    ):
         raise ContractError("source repository prestate changed; preserve target and source for owner review")
+    if not worktree_is_registered(repo, target):
+        raise ContractError("exact target is not registered as a Git worktree; preserve for owner review")
     # Git refuses dirty/locked linked worktrees without --force. Never add --force.
-    git(repo, "worktree", "remove", str(target))
-    if target.exists() or target.is_symlink():
-        raise ContractError("Git reported success but the exact target still exists")
-    linked = git(repo, "worktree", "list", "--porcelain").stdout
-    if str(target) in linked:
-        raise ContractError("Git worktree readback still lists the removed target")
-    source_unchanged = head_sha(repo) == data["source_head_before"] and hashlib.sha256(status_bytes(repo)).hexdigest() == data["source_status_sha256_before"]
+    removal_error = None
+    try:
+        git(repo, "worktree", "remove", str(target))
+    except ContractError as exc:
+        removal_error = str(exc)
+
+    target_present = target.exists() or target.is_symlink()
+    target_registered = worktree_is_registered(repo, target)
+    source_head_after = head_sha(repo)
+    source_status_after = hashlib.sha256(status_bytes(repo)).hexdigest()
+    source_unchanged = (
+        source_head_after == data["source_head_before"]
+        and source_status_after == data["source_status_sha256_before"]
+    )
+    completed = removal_error is None and not target_present and not target_registered and source_unchanged
     data["cleanup"] = {
         "completed_utc": utc_now(),
-        "target_absent": True,
-        "worktree_list_absent": True,
+        "completed": completed,
+        "target": str(target),
+        "target_present": target_present,
+        "target_absent": not target_present,
+        "target_registered_before": True,
+        "target_registered_after": target_registered,
+        "worktree_list_absent": not target_registered,
+        "source_head_before": data["source_head_before"],
+        "source_head_after": source_head_after,
+        "source_status_sha256_before": data["source_status_sha256_before"],
+        "source_status_sha256_after": source_status_after,
         "source_checkout_unchanged": source_unchanged,
         "logs_preserved": Path(data["logs_dir"]).exists(),
         "force_used": False,
-        "readback": "exact target path absent and absent from git worktree list",
+        "git_remove_error": removal_error,
+        "readback": (
+            "exact target absent and absent from NUL-delimited git worktree list"
+            if completed else "cleanup incomplete; exact state recorded and any residual preserved for owner review"
+        ),
     }
     write_json(manifest, data)
     print(json.dumps(data["cleanup"], indent=2))
+    if removal_error is not None:
+        raise ContractError("Git worktree removal failed; residual preserved for owner review: " + removal_error)
+    if target_present:
+        raise ContractError("Git reported success but the exact target still exists")
+    if target_registered:
+        raise ContractError("Git worktree readback still lists the exact removed target")
     if not source_unchanged:
         raise ContractError("source checkout changed during cleanup; preserve remaining state")
     return 0
