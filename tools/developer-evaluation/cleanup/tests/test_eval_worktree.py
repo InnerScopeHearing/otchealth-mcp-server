@@ -268,7 +268,7 @@ class EvalWorktreeTests(unittest.TestCase):
         original_git(self.source, "worktree", "remove", str(target))
 
     @unittest.skipUnless(os.name == "nt", "Windows-only residual recovery")
-    def test_windows_deregistered_residual_uses_exact_nonforce_recovery(self) -> None:
+    def test_windows_git_failure_records_before_any_residual_recovery(self) -> None:
         target = self.prepare("windows-residual")
         original_git = ew.git
         attempted = False
@@ -282,32 +282,19 @@ class EvalWorktreeTests(unittest.TestCase):
                 raise ew.ContractError("git remove failed (255): synthetic residual")
             return original_git(repo, *args, check=check, text=text)
 
-        def recover(exact_target: Path) -> dict:
-            self.assertEqual(exact_target, target)
-            import shutil
-            shutil.rmtree(exact_target)
-            return {
-                "attempted": True,
-                "method": "synthetic exact PowerShell recovery",
-                "target": str(exact_target),
-                "exit_code": 0,
-                "stdout": "",
-                "stderr": "",
-                "force_used": False,
-                "completed": True,
-            }
-
         with (
             patch.object(ew, "git", side_effect=partial_remove),
-            patch.object(ew, "remove_windows_deregistered_residual", side_effect=recover),
-            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(ew, "remove_windows_deregistered_residual") as recover,
+            self.assertRaisesRegex(ew.ContractError, "residual preserved for owner review"),
         ):
             ew.cmd_cleanup(Namespace(run_id="windows-residual"))
         receipt = json.loads(ew.state_path("windows-residual").read_text(encoding="utf-8"))["cleanup"]
-        self.assertTrue(receipt["completed"])
-        self.assertTrue(receipt["residual_recovery"]["completed"])
-        self.assertFalse(receipt["residual_recovery"]["force_used"])
-        self.assertFalse(target.exists())
+        self.assertFalse(receipt["completed"])
+        self.assertTrue(receipt["target_present"])
+        self.assertTrue(receipt["worktree_list_absent"])
+        recover.assert_not_called()
+        self.assertTrue(target.exists())
+        original_git(self.source, "worktree", "remove", str(target))
 
     @unittest.skipUnless(os.name == "nt", "Windows-only recorded residual recovery")
     def test_recorded_deregistered_residual_can_be_recovered_on_retry(self) -> None:
@@ -318,7 +305,7 @@ class EvalWorktreeTests(unittest.TestCase):
         original_git = ew.git
         original_git(self.source, "worktree", "remove", str(target))
         target.mkdir(parents=True)
-        (target / "residual.txt").write_text("generated residual\n", encoding="utf-8")
+        (target / "sample.txt").write_bytes((self.source / "sample.txt").read_bytes())
         data["cleanup"] = {
             "completed": False,
             "target": str(target),
@@ -349,7 +336,33 @@ class EvalWorktreeTests(unittest.TestCase):
             ew.cmd_cleanup(Namespace(run_id="windows-retry"))
         receipt = json.loads(manifest_path.read_text(encoding="utf-8"))["cleanup"]
         self.assertTrue(receipt["completed"])
+        self.assertTrue(receipt["residual_validation"]["validated"])
         self.assertFalse(target.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only recorded residual recovery")
+    def test_recorded_residual_retry_refuses_new_unknown_content(self) -> None:
+        target = self.prepare("windows-injected")
+        manifest_path = ew.state_path("windows-injected")
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        Path(data["logs_dir"]).mkdir(parents=True)
+        ew.git(self.source, "worktree", "remove", str(target))
+        target.mkdir(parents=True)
+        injected = target / "injected.txt"
+        injected.write_text("must survive\n", encoding="utf-8")
+        data["cleanup"] = {
+            "completed": False, "target": str(target), "target_present": True,
+            "target_registered_after": False, "worktree_list_absent": True,
+            "source_checkout_unchanged": True, "logs_preserved": True,
+            "force_used": False, "git_remove_error": "git failed (255)",
+        }
+        ew.write_json(manifest_path, data)
+        with (
+            patch.object(ew, "remove_windows_deregistered_residual") as recover,
+            self.assertRaisesRegex(ew.ContractError, "unknown file"),
+        ):
+            ew.cmd_cleanup(Namespace(run_id="windows-injected"))
+        recover.assert_not_called()
+        self.assertEqual(injected.read_text(encoding="utf-8"), "must survive\n")
 
     def test_ignored_matching_name_requires_an_exact_generated_directory(self) -> None:
         rejected = (b"!! packages/app/node_modules-user/\0", b"!! packages/app/.env\0",
