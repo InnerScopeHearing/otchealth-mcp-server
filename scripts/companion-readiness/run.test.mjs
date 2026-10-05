@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCompanionReadiness, DEFAULT_PIN, FOCUSED_ARGS, MOBILE_SUITE_ARGS } from './run.mjs';
+import { createHash } from 'node:crypto';
+import { runCompanionReadiness, DEFAULT_PIN, FOCUSED_ARGS, MOBILE_SUITE_ARGS, pnpmInvocation } from './run.mjs';
 
 const SESSION = 'test-session';
 const ENVIRONMENT = 'test-environment';
@@ -84,9 +85,9 @@ const env = {
   AWS_ACCESS_KEY_ID: 'must-not-be-forwarded',
 };
 
-async function run(f, fake) {
-  return runCompanionReadiness({ state: f.state, admission: f.admissionPath }, {
-    execute: fake.execute, env, workspaceRoot: f.workspaceRoot,
+async function run(f, fake, options = {}, overrides = {}) {
+  return runCompanionReadiness({ state: f.state, admission: f.admissionPath, ...options }, {
+    execute: fake.execute, env, workspaceRoot: f.workspaceRoot, platform: 'linux', ...overrides,
   });
 }
 
@@ -192,4 +193,143 @@ test('a command timeout records exit 124 and stops the run', async (t) => {
   assert.equal(command.exit_code, 124);
   assert.equal(command.timed_out, true);
   assert.equal(receipt.result, 'tests_failed');
+});
+
+async function pnpmFixture(t, version = '9.0.0') {
+  const root = await mkdtemp(join(tmpdir(), 'pnpm-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cli = join(root, 'bin/pnpm.cjs');
+  await mkdir(join(root, 'bin'), { recursive: true });
+  await writeFile(cli, '/* synthetic pnpm CLI */\n');
+  await writeFile(join(root, 'package.json'), JSON.stringify({
+    name: 'pnpm', version, bin: { pnpm: 'bin/pnpm.cjs' },
+  }));
+  return { cli, admission: { toolchain: {
+    node_path: process.execPath, pnpm_package_root: root, pnpm_cli_path: cli,
+    pnpm_cli_sha256: createHash('sha256').update(await readFile(cli)).digest('hex'),
+  } } };
+}
+
+test('pnpm invocation keeps POSIX resolution unchanged', async () => {
+  assert.deepEqual(await pnpmInvocation({}, { platform: 'linux' }), { executable: 'pnpm', prefixArgs: [] });
+});
+
+test('Windows pnpm invocation binds Node and the admitted CLI without a shell', async (t) => {
+  const f = await pnpmFixture(t);
+  const invocation = await pnpmInvocation(f.admission, { platform: 'win32' });
+  assert.equal(invocation.executable, await realpath(process.execPath));
+  assert.deepEqual(invocation.prefixArgs, [await realpath(f.cli)]);
+  assert.ok(!invocation.executable.toLowerCase().endsWith('.cmd'));
+});
+
+test('Windows pnpm invocation rejects missing, wrong-version, wrong-digest and wrong-bin bindings', async (t) => {
+  await assert.rejects(pnpmInvocation({}, { platform: 'win32' }), /exact toolchain binding/);
+  const wrongVersion = await pnpmFixture(t, '10.0.0');
+  await assert.rejects(pnpmInvocation(wrongVersion.admission, { platform: 'win32' }), /pnpm package must be/);
+  const wrongDigest = await pnpmFixture(t);
+  wrongDigest.admission.toolchain.pnpm_cli_sha256 = '0'.repeat(64);
+  await assert.rejects(pnpmInvocation(wrongDigest.admission, { platform: 'win32' }), /SHA-256 mismatch/);
+  const wrongBin = await pnpmFixture(t);
+  const root = wrongBin.admission.toolchain.pnpm_package_root;
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'pnpm', version: '9.0.0', bin: { pnpm: 'bin/other.cjs' } }));
+  await assert.rejects(pnpmInvocation(wrongBin.admission, { platform: 'win32' }), /declare bin\/pnpm.cjs/);
+});
+
+test('Windows runner records the actual admitted Node and pnpm CLI for every pnpm stage', async (t) => {
+  const f = await fixture(t);
+  const binding = await pnpmFixture(t);
+  const admission = JSON.parse(await readFile(f.admissionPath, 'utf8'));
+  admission.toolchain = binding.admission.toolchain;
+  await writeFile(f.admissionPath, JSON.stringify(admission));
+  const fake = fakeCommands({});
+  const actual = [];
+  const cli = await realpath(binding.cli);
+  const node = await realpath(process.execPath);
+  const execute = async (file, args, options) => {
+    actual.push({ file, args: [...args] });
+    if (file === node && args[0] === cli) return fake.execute('pnpm', args.slice(1), options);
+    if (file === node && args[0] === '--version') return fake.execute('node', args, options);
+    return fake.execute(file, args, options);
+  };
+  const result = await run(f, { execute }, {}, { platform: 'win32' });
+  for (const label of ['pnpm-version', 'frozen-install', 'focused-tests', 'mobile-suite']) {
+    const command = result.commands.find((entry) => entry.label === label);
+    assert.equal(command.executable, node);
+    assert.equal(command.args[0], cli);
+  }
+  assert.ok(actual.every((call) => call.file !== 'cmd.exe' && !call.file.toLowerCase().endsWith('.cmd')));
+});
+
+const CANDIDATE_PIN = 'a'.repeat(40);
+
+test('explicit candidate pin requires state, admission and HEAD to agree', async (t) => {
+  const f = await fixture(t);
+  const state = JSON.parse(await readFile(f.state, 'utf8'));
+  state.pin = CANDIDATE_PIN;
+  await writeFile(f.state, JSON.stringify(state));
+  const admission = JSON.parse(await readFile(f.admissionPath, 'utf8'));
+  admission.commit = CANDIDATE_PIN;
+  await writeFile(f.admissionPath, JSON.stringify(admission));
+  const result = await run(f, fakeCommands({ pin: CANDIDATE_PIN }), { pin: CANDIDATE_PIN });
+  assert.equal(result.source.sha, CANDIDATE_PIN);
+  assert.equal(result.result, 'passed');
+});
+
+test('explicit candidate pin rejects state and admission mismatches before commands', async (t) => {
+  const stateMismatch = await fixture(t);
+  const stateFake = fakeCommands({});
+  await assert.rejects(run(stateMismatch, stateFake, { pin: CANDIDATE_PIN }), /cleanup state pin does not match/);
+  assert.equal(stateFake.calls.length, 0);
+  const admissionMismatch = await fixture(t);
+  const state = JSON.parse(await readFile(admissionMismatch.state, 'utf8'));
+  state.pin = CANDIDATE_PIN;
+  await writeFile(admissionMismatch.state, JSON.stringify(state));
+  const admissionFake = fakeCommands({ pin: CANDIDATE_PIN });
+  await assert.rejects(run(admissionMismatch, admissionFake, { pin: CANDIDATE_PIN }), /admission commit mismatch/);
+  assert.equal(admissionFake.calls.length, 0);
+});
+
+test('validation time never restarts the twenty-minute budget', async (t) => {
+  const f = await fixture(t);
+  const admission = JSON.parse(await readFile(f.admissionPath, 'utf8'));
+  admission.expires_at_utc = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  await writeFile(f.admissionPath, JSON.stringify(admission));
+  const clock = Date.now();
+  t.mock.method(Date, 'now', () => clock + 5_000);
+  const receipt = await run(f, fakeCommands({}));
+  assert.equal(receipt.deadline_ms, Date.parse(receipt.started_at_utc) + 20 * 60 * 1000);
+});
+
+test('explicit portable cleanup root must be bound to the same canonical root in admission', async (t) => {
+  const f = await fixture(t);
+  const cleanupRoot = join(f.workspaceRoot, 'repair2/cleanup');
+  const admission = JSON.parse(await readFile(f.admissionPath, 'utf8'));
+  admission.cleanup_root = cleanupRoot;
+  await writeFile(f.admissionPath, JSON.stringify(admission));
+  const result = await run(f, fakeCommands({}), { cleanupRoot });
+  assert.equal(result.cleanup_root, cleanupRoot);
+  assert.equal(result.result, 'passed');
+});
+
+test('explicit portable cleanup root rejects missing admission binding before source commands', async (t) => {
+  const f = await fixture(t);
+  const fake = fakeCommands({});
+  await assert.rejects(run(f, fake, { cleanupRoot: join(f.workspaceRoot, 'repair2/cleanup') }), /bound in admission/);
+  assert.equal(fake.calls.length, 0);
+});
+
+test('redaction preserves case-insensitive token coverage on the supported Node engines', async (t) => {
+  const f = await fixture(t);
+  const fake = fakeCommands({});
+  const execute = async (file, args, options) => {
+    if (file === 'pnpm' && args[0] === 'install') {
+      return { stdout: 'AUTHORIZATION: BeArEr synthetic-secret\n_AUTHTOKEN=synthetic-secret\n', stderr: '' };
+    }
+    return fake.execute(file, args, options);
+  };
+  const receipt = await run(f, { execute });
+  const log = await readFile(receipt.commands.find((c) => c.label === 'frozen-install').log_path, 'utf8');
+  assert.ok(!log.includes('synthetic-secret'));
+  assert.match(log, /Authorization: Bearer \[REDACTED\]/);
+  assert.match(log, /_authToken=\[REDACTED\]/);
 });
