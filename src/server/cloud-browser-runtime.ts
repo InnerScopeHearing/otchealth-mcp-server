@@ -2,6 +2,7 @@ import { CloudBrowserService, DynamoCloudBrowserSessionStore, AgentCoreCloudBrow
 import { CloudBrowserJobs } from '../tools/browser-cloud-jobs/contracts.js';
 import { createDynamoBrowserJobStore, createS3BrowserArtifactStore, createSqsBrowserQueue } from '../tools/browser-cloud-jobs/aws-adapters.js';
 import { cloudBrowserRuntimeStatus, startCloudBrowserWorker, type CloudBrowserGatewayRuntime } from '../tools/browser-cloud-gateway/index.js';
+import { readExistingCtoBrowserProfileBinding } from '../tools/browser-cloud/service.js';
 
 let instance: CloudBrowserGatewayRuntime | undefined;
 function configured(): CloudBrowserGatewayRuntime {
@@ -11,7 +12,7 @@ function configured(): CloudBrowserGatewayRuntime {
       bucket: process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, queueUrl: process.env.CLOUD_BROWSER_QUEUE_URL };
     const queue = createSqsBrowserQueue(config);
     const artifacts = createS3BrowserArtifactStore(config);
-    instance = { browser: new CloudBrowserService(new DynamoCloudBrowserSessionStore(config.table, config.region), new AgentCoreCloudBrowserTransport(config.region)),
+    instance = { browser: new CloudBrowserService(new DynamoCloudBrowserSessionStore(config.table, config.region), new AgentCoreCloudBrowserTransport(config.region), Date.now, readExistingCtoBrowserProfileBinding()),
       jobs: new CloudBrowserJobs(createDynamoBrowserJobStore(config), queue, artifacts), queue, artifacts };
   }
   return instance!;

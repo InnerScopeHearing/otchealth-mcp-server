@@ -49,6 +49,7 @@ import {
 import { EXEC_RING } from './kb/search-privileged.js';
 import { projectPinnedObservationDiagnostic } from '../audit/internal-diagnostics.js';
 import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
+import { addCtoExistingProfileTools } from './browser-cloud/visibility.js';
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Per-lane curated connector toolsets, advertised to Claude Chat (DCR) / occ_ connector requests so
@@ -523,6 +524,9 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // Provisioning is deliberately discoverable only to the CTO Chat lane. Its handler and
   // write_orchestrated governance independently re-check that same identity at execution time.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('browser_cloud_profile_provision_public_trial');
+  // Existing persistent-profile discovery and explicit binding are CTO-only. Runtime handlers
+  // also reject every non-CTO caller; listing a tool does not activate deployment configuration.
+  addCtoExistingProfileTools(tools, lane, env.CONNECTOR_TOOLSET);
   // Synthetic-only typed GraphRAG acceptance stays discoverable on the CTO connector only.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('graph_company_shared_relationship_query');
   // Visibility is not enrollment: cloud handlers still require an owned, provisioned profile.
@@ -1551,4 +1555,3 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 }
 
 export type CallerHashProvider = () => string;
-

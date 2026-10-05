@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   CLOUD_BROWSER_DAILY_SESSION_LIMIT, CLOUD_BROWSER_MAX_ACTIONS, CLOUD_BROWSER_MAX_ACTION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS,
   type CloudBrowserAction, type CloudBrowserObservation, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore,
-  type CloudBrowserTransport, CloudBrowserError,
+  type CloudBrowserProviderProfile, type CloudBrowserTransport, CloudBrowserError,
 } from './contract.js';
 
 function validHost(host: string): boolean { return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host); }
@@ -16,6 +16,59 @@ export const CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS = [
 ] as const;
 
 export type CloudBrowserPublicTrialOwner = (typeof CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS)[number];
+
+export interface ExistingCtoBrowserProfileBinding {
+  profileId: string;
+  name: string;
+  accountId: string;
+  region: string;
+  browserIdentifier: 'aws.browser.v1';
+  allowedHosts: readonly string[];
+}
+
+export interface ExistingCtoBrowserProfileMetadata {
+  profileId: string;
+  name: string;
+  accountId: string;
+  region: string;
+  browserIdentifier: 'aws.browser.v1';
+  status: 'READY';
+  lastSavedAt: string;
+  persistent: true;
+}
+
+const ACCOUNT_ID = /^\d{12}$/;
+const PROFILE_ID = /^[A-Za-z0-9_-]{1,48}-[A-Za-z0-9]{10}$/;
+const PROFILE_NAME = /^[A-Za-z0-9_-]{1,48}$/;
+const AWS_REGION = /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/;
+
+/** Read trusted deployment configuration. No caller-controlled provider IDs are accepted. */
+export function readExistingCtoBrowserProfileBinding(env: NodeJS.ProcessEnv = process.env): ExistingCtoBrowserProfileBinding | null {
+  if (env.CLOUD_BROWSER_CTO_PROFILE_ENABLED !== 'true') return null;
+  const profileId = env.CLOUD_BROWSER_CTO_PROFILE_ID?.trim() ?? '';
+  const name = env.CLOUD_BROWSER_CTO_PROFILE_NAME?.trim() ?? '';
+  const accountId = env.CLOUD_BROWSER_CTO_PROFILE_ACCOUNT_ID?.trim() ?? '';
+  const region = env.CLOUD_BROWSER_CTO_PROFILE_REGION?.trim() ?? '';
+  const browserIdentifier = env.CLOUD_BROWSER_CTO_PROFILE_BROWSER_ID?.trim() ?? '';
+  const allowedHosts = (env.CLOUD_BROWSER_CTO_PROFILE_ALLOWED_HOSTS ?? '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean);
+  if (!PROFILE_ID.test(profileId) || !PROFILE_NAME.test(name) || !ACCOUNT_ID.test(accountId) || !AWS_REGION.test(region) ||
+      browserIdentifier !== 'aws.browser.v1' || env.AWS_ACCOUNT_ID !== accountId || env.AWS_REGION !== region ||
+      allowedHosts.length === 0 || allowedHosts.length > 24 || new Set(allowedHosts).size !== allowedHosts.length || allowedHosts.some((host) => !validHost(host))) {
+    throw new CloudBrowserError('profile_binding_config_invalid', 'The configured CTO browser profile binding is incomplete or invalid.');
+  }
+  return { profileId, name, accountId, region, browserIdentifier, allowedHosts };
+}
+
+function verifyExistingCtoProfile(value: CloudBrowserProviderProfile, binding: ExistingCtoBrowserProfileBinding): ExistingCtoBrowserProfileMetadata {
+  const arn = new RegExp(`^arn:aws(?:-[a-z0-9-]+)?:bedrock-agentcore:${binding.region}:${binding.accountId}:browser-profile/${binding.profileId}$`);
+  const savedAt = value.lastSavedAt;
+  if (value.profileId !== binding.profileId || value.name !== binding.name || value.status !== 'READY' ||
+      value.lastSavedBrowserId !== binding.browserIdentifier || !savedAt || !Number.isFinite(Date.parse(savedAt)) || !arn.test(value.profileArn)) {
+    throw new CloudBrowserError('profile_binding_verification_failed', 'The provider profile did not match the trusted CTO binding or was not ready.');
+  }
+  return { profileId: binding.profileId, name: binding.name, accountId: binding.accountId, region: binding.region,
+    browserIdentifier: binding.browserIdentifier, status: 'READY', lastSavedAt: savedAt, persistent: true };
+}
 
 export function publicTrialProfileId(owner: CloudBrowserPublicTrialOwner): string {
   return `${owner}-public-trial`;
@@ -52,7 +105,8 @@ function assertObservationHost(observation: CloudBrowserObservation | null, host
 
 /** Durable session orchestration. Caller binding is checked before every store or provider action. */
 export class CloudBrowserService {
-  constructor(private readonly store: CloudBrowserStore, private readonly transport: CloudBrowserTransport, private readonly now: () => number = Date.now) {}
+  constructor(private readonly store: CloudBrowserStore, private readonly transport: CloudBrowserTransport, private readonly now: () => number = Date.now,
+    private readonly existingCtoBinding?: ExistingCtoBrowserProfileBinding | null) {}
 
   async saveProfile(caller: string, profile: CloudBrowserProfile): Promise<void> {
     assertProfile(profile);
@@ -74,6 +128,44 @@ export class CloudBrowserService {
     if (!isPublicTrialOwner(caller)) throw new CloudBrowserError('profile_not_enrolled', 'This caller has no cloud-browser public trial profile.');
     const profile = await this.loadProfile(caller, publicTrialProfileId(caller));
     return { profileId: profile.profileId, allowedHosts: profile.allowedHosts, persistent: profile.persistent };
+  }
+
+  /** Discover only the fixed CTO profile; caller and configuration checks precede provider access. */
+  async discoverExistingCtoProfile(caller: string): Promise<ExistingCtoBrowserProfileMetadata> {
+    if (caller !== 'cto') throw new CloudBrowserError('owner_forbidden', 'The existing persistent profile is available only to the CTO lane.');
+    const binding = this.existingCtoBinding;
+    if (!binding) throw new CloudBrowserError('profile_binding_not_configured', 'The existing CTO browser profile binding is not configured.');
+    const stored = await this.store.loadProfile(binding.profileId);
+    if (stored && (stored.owner !== 'cto' || stored.providerProfileId !== binding.profileId || stored.persistent !== true ||
+        stored.allowedHosts.join(',') !== binding.allowedHosts.join(','))) {
+      throw new CloudBrowserError('profile_binding_conflict', 'The configured profile conflicts with an existing browser profile binding.');
+    }
+    if (!this.transport.getBrowserProfile) throw new CloudBrowserError('profile_verification_unavailable', 'The provider profile verifier is unavailable.');
+    const metadata = verifyExistingCtoProfile(await this.transport.getBrowserProfile(binding.profileId), binding);
+    return metadata;
+  }
+
+  /** Explicitly persist the verified binding. Existing profile records are never overwritten. */
+  async bindExistingCtoProfile(caller: string): Promise<ExistingCtoBrowserProfileMetadata> {
+    const metadata = await this.discoverExistingCtoProfile(caller);
+    const binding = this.existingCtoBinding!;
+    const stored = await this.store.loadProfile(binding.profileId);
+    if (stored && (stored.owner !== 'cto' || stored.providerProfileId !== binding.profileId || stored.persistent !== true ||
+        stored.allowedHosts.join(',') !== binding.allowedHosts.join(','))) {
+      throw new CloudBrowserError('profile_binding_conflict', 'The configured profile conflicts with an existing browser profile binding.');
+    }
+    if (!stored) {
+      const saveIfAbsent = this.store.saveProfileIfAbsent;
+      if (!saveIfAbsent) throw new CloudBrowserError('profile_binding_storage_unavailable', 'Atomic profile binding storage is unavailable.');
+      if (!await saveIfAbsent.call(this.store, { profileId: binding.profileId, providerProfileId: binding.profileId, owner: 'cto',
+        allowedHosts: [...binding.allowedHosts], persistent: true })) {
+        const current = await this.store.loadProfile(binding.profileId);
+        if (!current || current.owner !== 'cto' || current.providerProfileId !== binding.profileId || current.persistent !== true || current.allowedHosts.join(',') !== binding.allowedHosts.join(',')) {
+          throw new CloudBrowserError('profile_binding_conflict', 'The configured profile conflicts with an existing browser profile binding.');
+        }
+      }
+    }
+    return metadata;
   }
 
   /**
