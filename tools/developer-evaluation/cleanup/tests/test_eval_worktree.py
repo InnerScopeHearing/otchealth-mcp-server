@@ -25,6 +25,15 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def symlink_or_skip(test: unittest.TestCase, link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            test.skipTest("Windows symlink privilege unavailable (winerror 1314); coverage skipped")
+        raise
+
+
 class EvalWorktreeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="eval-worktree-test-")
@@ -71,7 +80,7 @@ class EvalWorktreeTests(unittest.TestCase):
             sentinel = outside / "keep.txt"
             sentinel.write_text("preserve\n", encoding="utf-8")
             link = self.control / name
-            link.symlink_to(outside, target_is_directory=True)
+            symlink_or_skip(self, link, outside)
             with self.subTest(root=name), self.assertRaisesRegex(ew.ContractError, "symlink"):
                 ew.cmd_prepare(Namespace(repo=str(self.source), pin=self.pin, run_id=f"symlink-{name}", app="synthetic"))
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
@@ -82,7 +91,7 @@ class EvalWorktreeTests(unittest.TestCase):
         outside_control.mkdir()
         (outside_control / "sentinel").write_text("preserve\n", encoding="utf-8")
         link_control = self.root / "control-link"
-        link_control.symlink_to(outside_control, target_is_directory=True)
+        symlink_or_skip(self, link_control, outside_control)
         with (
             patch.object(ew, "CONTROL_ROOT", link_control),
             patch.object(ew, "WORKTREE_ROOT", link_control / "worktrees"),
@@ -102,7 +111,7 @@ class EvalWorktreeTests(unittest.TestCase):
         sentinel = outside / "keep.txt"
         sentinel.write_text("preserve\n", encoding="utf-8")
         ew.WORKTREE_ROOT.rename(moved_root)
-        ew.WORKTREE_ROOT.symlink_to(outside, target_is_directory=True)
+        symlink_or_skip(self, ew.WORKTREE_ROOT, outside)
         try:
             with self.assertRaisesRegex(ew.ContractError, "symlink"):
                 ew.cmd_cleanup(Namespace(run_id="bound-run"))
@@ -200,8 +209,9 @@ class EvalWorktreeTests(unittest.TestCase):
         (logs / "stdout.log").write_text("synthetic fixture pass\n", encoding="utf-8")
         (logs / "stderr.log").write_text("", encoding="utf-8")
 
-        (target / "node_modules").mkdir()
-        (target / "node_modules" / "synthetic-cache.txt").write_text("generated\n", encoding="utf-8")
+        nested_modules = target / "packages" / "app" / "node_modules"
+        nested_modules.mkdir(parents=True)
+        (nested_modules / "synthetic-cache.txt").write_text("generated\n", encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
             ew.cmd_cleanup(Namespace(run_id="clean-removal"))
         self.assertFalse(target.exists())
@@ -216,6 +226,61 @@ class EvalWorktreeTests(unittest.TestCase):
         self.assertTrue(readback["worktree_list_absent"])
         self.assertTrue(readback["source_checkout_unchanged"])
         self.assertFalse(readback["force_used"])
+
+
+    def test_remove_failure_receipt_preserves_partial_deregister_residual(self) -> None:
+        target = self.prepare("partial-remove")
+        logs = ew.ARTIFACT_ROOT / "partial-remove"
+        logs.mkdir(parents=True)
+        sentinel = logs / "stdout.log"
+        sentinel.write_text("preserve\n", encoding="utf-8")
+        original_git = ew.git
+        attempted = False
+
+        def partial_remove(repo: Path, *args: str, check: bool = True, text: bool = True):
+            nonlocal attempted
+            if args[:2] == ("worktree", "list") and attempted:
+                return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
+            if args[:2] == ("worktree", "remove"):
+                attempted = True
+                raise ew.ContractError("git remove failed (255): synthetic residual")
+            return original_git(repo, *args, check=check, text=text)
+
+        with patch.object(ew, "git", side_effect=partial_remove):
+            with self.assertRaisesRegex(ew.ContractError, "residual preserved for owner review"):
+                ew.cmd_cleanup(Namespace(run_id="partial-remove"))
+        receipt = json.loads(ew.state_path("partial-remove").read_text(encoding="utf-8"))["cleanup"]
+        self.assertFalse(receipt["completed"])
+        self.assertTrue(receipt["target_present"])
+        self.assertFalse(receipt["target_registered_after"])
+        self.assertTrue(receipt["worktree_list_absent"])
+        self.assertTrue(receipt["source_checkout_unchanged"])
+        self.assertTrue(receipt["logs_preserved"])
+        self.assertFalse(receipt["force_used"])
+        self.assertIn("synthetic residual", receipt["git_remove_error"])
+        self.assertTrue(target.is_dir())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
+        original_git(self.source, "worktree", "remove", str(target))
+
+    def test_ignored_matching_name_requires_an_exact_generated_directory(self) -> None:
+        rejected = (b"!! packages/app/node_modules-user/\0", b"!! packages/app/.env\0",
+                    b"!! packages/app/dist/private.txt\0", b" M packages/app/source.ts\0")
+        for raw in rejected:
+            with self.subTest(raw=raw), patch.object(ew, "git", return_value=subprocess.CompletedProcess([], 0, stdout=raw)):
+                with self.assertRaises(ew.ContractError):
+                    ew.check_cleanup_status(self.root)
+        for raw in (b"!! packages/app/node_modules/\0", b"!! packages/app/.turbo/\0"):
+            with self.subTest(raw=raw), patch.object(ew, "git", return_value=subprocess.CompletedProcess([], 0, stdout=raw)):
+                ew.check_cleanup_status(self.root)
+
+    def test_worktree_registration_matches_complete_paths_not_substrings(self) -> None:
+        target = self.root / "target"
+        raw = os.fsencode("worktree " + str(target) + "-other") + b"\0HEAD fixture\0\0"
+        with patch.object(ew, "git", return_value=subprocess.CompletedProcess([], 0, stdout=raw)):
+            self.assertFalse(ew.worktree_is_registered(self.source, target))
+        raw = os.fsencode("worktree " + str(target)) + b"\0HEAD fixture\0\0"
+        with patch.object(ew, "git", return_value=subprocess.CompletedProcess([], 0, stdout=raw)):
+            self.assertTrue(ew.worktree_is_registered(self.source, target))
 
 
 if __name__ == "__main__":
