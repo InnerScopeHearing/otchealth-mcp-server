@@ -285,16 +285,19 @@ export async function handleBrainSearch(
     const entity = canUseEntityLookup(rooms)
       ? await resolveEntity(input.query, process.env.ENTITY_LOOKUP_MODE, entityRetractions)
       : null;
+    const candidatePromotion = entity ? buildEntityPromotion(entity) : null;
     const enforceShield = (process.env.RETRIEVAL_SHIELD_MODE || 'report').trim().toLowerCase() === 'enforce';
     // deepRetrieve screens the first 12 synthesis hits; later hits provide no screening proof.
-    const entityWasScreened = Boolean(entity && deep.hits.slice(0, 12).some((hit) => isEntityDuplicate(hit, entity)));
+    const entityWasScreened = Boolean(entity && candidatePromotion && deep.hits.slice(0, 12).some((hit) =>
+      isEntityDuplicate(hit, entity) && hit.text === candidatePromotion.match['text'],
+    ));
     const shieldWithheld = Boolean(enforceShield && (
       !deep.injection_screen ||
       deep.injection_screen.mode !== 'enforce' ||
       deep.injection_screen.attackDetected ||
       !entityWasScreened
     ));
-    const promotion = entity && !shieldWithheld && !deep.partial ? buildEntityPromotion(entity) : null;
+    const promotion = entity && !shieldWithheld && !deep.partial ? candidatePromotion : null;
     const authoritative = promotion
       ? ({ ...promotion.match, source: 'memory-exec' } as unknown as FusedHit)
       : null;

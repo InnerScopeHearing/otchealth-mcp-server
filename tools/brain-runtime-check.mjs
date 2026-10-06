@@ -96,6 +96,8 @@ process.env.RETRIEVAL_SHIELD_MODE='enforce';
 const unscreenedHits=[...Array.from({length:12},(_,i)=>({id:'synthetic-other-'+i,source:'memory-exec',agent:'cto',score:1,text:'synthetic'})),...deepFixture.hits];
 const withheld=await handleBrainSearch({query:'synthetic',mode:'deep'},ctx,{lookupEntity:async()=>entity,deepRetrieve:async()=>({...deepFixture,hits:unscreenedHits,injection_screen:{mode:'enforce',attackDetected:false}})});
 assert.equal('entity_answer' in withheld.data,false);assert.equal(withheld.data.answer,deepFixture.answer);
+const mismatch=await handleBrainSearch({query:'synthetic',mode:'deep'},ctx,{lookupEntity:async()=>entity,deepRetrieve:async()=>({...deepFixture,injection_screen:{mode:'enforce',attackDetected:false}})});
+assert.equal('entity_answer' in mismatch.data,false,'the promoted payload itself must have been screened');
 process.env.RETRIEVAL_SHIELD_MODE='off';
 __resetRetractionCache();
 let inflight=0,maxInflight=0;
