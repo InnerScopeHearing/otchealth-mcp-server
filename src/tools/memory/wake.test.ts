@@ -225,7 +225,7 @@ test('STANDING_DIRECTIVES leads with Rule #1 (the 20% stop-and-report rule, Matt
 });
 
 
-test('full wake unions cross-store and beyond-slice same-agent retractions while preserving a colliding other-agent ID', () => {
+test('full wake unions cross-store and beyond-slice same-agent retractions while preserving a colliding other-agent ID', async () => {
   const full: any = {
     agent: 'cfo',
     pack: { configured: true, status: null, corrections: [{ id: 'collision', type: 'fact', agent: 'cfo' }], decisions: [], recent: [{ id: 'collision', type: 'fact', agent: 'cto' }], count: 2 },

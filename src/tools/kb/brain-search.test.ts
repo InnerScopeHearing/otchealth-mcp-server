@@ -396,7 +396,7 @@ test('deep mode promotes the current typed entity, removes its semantic duplicat
     assert.equal(entityAnswer.id, currentId);
     assert.equal(entityAnswer.source, 'verified record');
     assert.equal(entityAnswer.owner, 'cto');
-    assert.equal(entityAnswer.matched_by, 'current-question');
+    assert.equal(entityAnswer.matched_by, 'containment');
     assert.match(String(data.answer), /Current value: otchealth_primary_cloud = AWS \[1\]\./);
     assert.equal(matches[0]?.id, currentId);
     assert.equal(matches[0]?.authoritative, true);
