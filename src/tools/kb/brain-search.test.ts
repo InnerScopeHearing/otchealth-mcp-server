@@ -327,34 +327,43 @@ test('handleBrainSearch: input.continuation reaches deepRetrieve and its rooms/s
 });
 
 test('handleBrainSearch: exceeding the wall-clock budget surfaces partial:true + a continuation on the tool response (not just inside deepRetrieve)', async () => {
+  const originalNow = Date.now;
+  let clock = originalNow();
+  let searchCalls = 0;
   const stub = (async (url: string | URL) => {
     const u = String(url);
     if (isSearchUrl(u)) {
-      // A real (if tiny) sleep -- combined with DEEP_RETRIEVAL_BUDGET_MS=1 below, this
-      // deterministically guarantees the shared deadline has passed by the time deepRetrieve
-      // reaches its budget check, without depending on microsecond-scale scheduling luck.
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      return new Response(JSON.stringify({ value: [{ id: 'doc1', text: 'a hit', '@search.rerankerScore': 1 }] }), { status: 200 });
+      searchCalls++;
+      const response = new Response(JSON.stringify({ value: [{ id: 'doc1', text: 'a hit', '@search.rerankerScore': 1 }] }), { status: 200 });
+      const readJson = response.json.bind(response);
+      response.json = async () => {
+        const body = await readJson();
+        // Move the clock only after the synthetic response body has been read. This proves
+        // retention of an already-retrieved hit, independently of CI scheduling; a 1ms real
+        // budget could correctly expire before retrieval starts under the stricter deadline.
+        clock += 30_001;
+        return body;
+      };
+      return response;
     }
     throw new Error(`unexpected fetch to ${u} (Foundry is unconfigured in this file -- no chat/embeddings call should ever be attempted)`);
   }) as typeof fetch;
 
   await withStubbedFetch(stub, async () => {
-    // budgetMs is not a wire-level input field -- this proves the shape end to end using the
-    // DEEP_RETRIEVAL_BUDGET_MS env override, the same "read fresh from process.env" convention
-    // deepRetrieve itself documents. 1ms (not 0) deliberately -- resolveDeepBudgetMs treats
-    // 0/negative as "unset" and falls back to the real default.
     const prior = process.env.DEEP_RETRIEVAL_BUDGET_MS;
-    process.env.DEEP_RETRIEVAL_BUDGET_MS = '1';
+    process.env.DEEP_RETRIEVAL_BUDGET_MS = '30000';
+    Date.now = () => clock;
     try {
       const result = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'));
       const data = result.data as Record<string, unknown>;
+      assert.ok(searchCalls > 0, 'the fixture must actually retrieve before its clock expires');
       assert.equal(data.partial, true);
       assert.ok(data.continuation, 'the tool response must surface deepRetrieve\'s continuation, not just deepRetrieve\'s own return value');
       assert.equal(typeof data.answer, 'string');
       assert.ok((data.answer as string).length > 0);
       assert.ok(Array.isArray(data.matches) && (data.matches as unknown[]).length > 0, 'the already-retrieved hit is still returned in full');
     } finally {
+      Date.now = originalNow;
       if (prior === undefined) delete process.env.DEEP_RETRIEVAL_BUDGET_MS;
       else process.env.DEEP_RETRIEVAL_BUDGET_MS = prior;
     }
