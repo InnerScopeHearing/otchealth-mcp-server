@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { chat, chatConfigured, type ChatMessage } from '../../azure/foundry.js';
 import { loadEnv } from '../../config/env.js';
+import { completionDiagnostics, InvalidClaimsCompletionError, parseClaimsCompletion } from './claims-completion.js';
 
 const PSAP_RULESET = `
 OTCHealth claims-compliance ruleset (PSAP / general-wellness marketing).
@@ -52,7 +53,11 @@ CHANNEL STRICTNESS: ads and advertorials get the HARDEST screening (the Medvi fa
 point). cs scripts must also avoid clinical/diagnostic statements (handoff instead).
 `.trim();
 
-export function registerClaimsCheck(server: McpServer, callerHash: CallerHashProvider): void {
+export function registerClaimsCheck(
+  server: McpServer,
+  callerHash: CallerHashProvider,
+  dependencies: { isChatConfigured?: () => boolean; complete?: typeof chat } = {},
+): void {
   registerTool(
     server,
     {
@@ -89,11 +94,15 @@ export function registerClaimsCheck(server: McpServer, callerHash: CallerHashPro
         productClass: z.string(),
         model: z.string(),
         error: z.string().optional(),
+        finishReason: z.string().optional(),
+        promptTokens: z.number().optional(),
+        completionTokens: z.number().optional(),
+        refusal: z.boolean().optional(),
       },
       handler: async (input) => {
         const channel = input.channel ?? 'other';
         const productClass = input.productClass ?? 'PSAP';
-        if (!chatConfigured()) {
+        if (!(dependencies.isChatConfigured ?? chatConfigured)()) {
           const provider = loadEnv().LLM_PROVIDER;
           return {
             data: {
@@ -123,23 +132,35 @@ export function registerClaimsCheck(server: McpServer, callerHash: CallerHashPro
           { role: 'user', content: user },
         ];
         try {
-          const res = await chat(messages, { maxTokens: 1800, jsonMode: true, tier: 'high' });
-          let parsed: any = {};
-          try { parsed = JSON.parse(res.text); } catch { parsed = { verdict: 'revise', risk: 50, violations: [], compliant_rewrite: '', notes: 'parser_fallback: model did not return clean JSON', raw: res.text?.slice(0, 600) }; }
-          const verdict = String(parsed.verdict || 'revise');
-          const risk = typeof parsed.risk === 'number' ? parsed.risk : (verdict === 'block' ? 90 : verdict === 'pass' ? 5 : 50);
-          const vcount = Array.isArray(parsed.violations) ? parsed.violations.length : 0;
+          // max_completion_tokens includes hidden reasoning; 6000 leaves room for a complete rewrite
+          // of the current ~3.5 KB claims packets while keeping the completion strictly bounded.
+          const res = await (dependencies.complete ?? chat)(messages, { maxTokens: 6000, jsonMode: true, tier: 'high' });
+          const parsed = parseClaimsCompletion(res);
+          const { finishReason, promptTokens, completionTokens, refusal } = completionDiagnostics(res);
+          const { verdict, risk, violations } = parsed;
           return {
             data: {
               verdict, risk,
-              violations: parsed.violations ?? [],
-              compliant_rewrite: parsed.compliant_rewrite ?? '',
-              notes: parsed.notes ?? '',
+              violations,
+              compliant_rewrite: parsed.compliant_rewrite,
+              notes: parsed.notes,
               channel, productClass, model: res.model,
+              finishReason, promptTokens, completionTokens, refusal,
             },
-            summary: `claims_check [${channel}/${productClass}] -> ${verdict.toUpperCase()} (risk ${risk}, ${vcount} violation${vcount === 1 ? '' : 's'}) on ${res.model}.`,
+            summary: `claims_check [${channel}/${productClass}] -> ${verdict.toUpperCase()} (risk ${risk}, ${violations.length} violation${violations.length === 1 ? '' : 's'}) on ${res.model}.`,
           };
         } catch (e) {
+          if (e instanceof InvalidClaimsCompletionError) {
+            const { finishReason, promptTokens, completionTokens, refusal } = e.diagnostics;
+            return {
+              data: {
+                verdict: 'error', risk: 100, violations: [], compliant_rewrite: '', notes: `Claims review unavailable (${e.code}).`,
+                channel, productClass, model: e.diagnostics.model, error: e.message,
+                finishReason, promptTokens, completionTokens, refusal,
+              },
+              summary: `claims_check failed: ${e.code}; no verdict was issued.`,
+            };
+          }
           const msg = e instanceof Error ? e.message : String(e);
           return { data: { verdict: 'error', risk: 100, violations: [], compliant_rewrite: '', notes: '', channel, productClass, model: '', error: msg }, summary: `claims_check failed: ${msg}` };
         }
