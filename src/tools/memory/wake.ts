@@ -575,18 +575,26 @@ export async function readWakeTasks(
     })),
   );
   // Defense against legacy/malformed adapters. Hidden rows cannot affect counts or previews.
-  const visible = statusRows.flatMap(({ status, rows }) =>
+  const visibleRows = statusRows.flatMap(({ status, rows }) =>
     rows.filter((task) =>
       task.status === status &&
       task.owner_agent === agent &&
       taskVisibleToCaller(task, callerAgent),
     ),
   );
+  // A status transition can be observed by two queries. Keep one receipt, preferring its newest
+  // update time; missing legacy timestamps must not make the whole wake section fail.
+  const byId = new Map<string, (typeof visibleRows)[number]>();
+  for (const row of visibleRows) {
+    const prior = byId.get(row.id);
+    if (!prior || String(row.updated_at ?? row.created_at ?? '') >= String(prior.updated_at ?? prior.created_at ?? '')) byId.set(row.id, row);
+  }
+  const visible = [...byId.values()];
   const counts: Record<string, number> = {};
   for (const task of visible) counts[task.status] = (counts[task.status] ?? 0) + 1;
   const active = visible
     .filter((task) => (ACTIVE_STATUSES as string[]).includes(String(task.status)))
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
     .slice(0, taskLimit)
     .map((task) => capText(task as unknown as Record<string, unknown>, 600));
   return { configured: true, active, counts, counts_scope: 'bounded_active_status_samples' };

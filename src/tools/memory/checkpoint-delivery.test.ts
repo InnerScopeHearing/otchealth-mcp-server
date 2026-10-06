@@ -1,5 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+
+test('dependent serial deliveries preserve order and continue after an unknown acknowledgement', async () => {
+  const { deliverCheckpointBatch } = await import('./checkpoint-delivery.js');
+  const called: number[] = [];
+  const result = await deliverCheckpointBatch([0, 1, 2], async index => {
+    called.push(index);
+    if (index === 1) throw new Error('synthetic lost acknowledgement');
+    return {id:String(index),stored:true,indexed:true};
+  }, 4, true);
+  assert.deepEqual(called, [0, 1, 2]);
+  assert.deepEqual(result.map(item => item.id), ['0', null, '2']);
+  assert.equal(result[1]?.stored, false);
+});
 import { deliverCheckpointMemory, deliverCheckpointBatch, checkpointDeliveryStatus } from './checkpoint-delivery.js';
 
 test('accepted storage survives thrown or returned indexing failure without rewriting memory', async () => {

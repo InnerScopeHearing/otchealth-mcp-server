@@ -10,6 +10,18 @@ const task = (id: string, status: string, created_at: string, owner_agent = 'cto
   created_by: owner_agent,
 });
 
+test('a status transition is deduplicated and missing legacy timestamps do not blank wake', async () => {
+  const result = await readWakeTasks('cto', 'cto', 5, async (filter: any) => {
+    if (filter.status === 'open') return [{...task('changing','open',''),updated_at:'2026-01-01'}, {...task('legacy','open',''),created_at:undefined}] as any;
+    if (filter.status === 'claimed') return [{...task('changing','claimed',''),updated_at:'2026-01-02'}] as any;
+    return [] as any;
+  });
+  assert.equal(result.active.filter(row => row.id === 'changing').length, 1);
+  assert.equal(result.active.find(row => row.id === 'changing')?.['status'], 'claimed');
+  assert.deepEqual(result.counts, {claimed:1,open:1});
+  assert.equal(result.active.some(row => row.id === 'legacy'), true);
+});
+
 test('an active task survives more than 50 newer terminal rows with storage filters before the limit', async () => {
   const calls: Record<string, unknown>[] = [];
   const terminal = Array.from({ length: 75 }, (_, i) =>

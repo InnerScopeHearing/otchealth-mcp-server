@@ -276,9 +276,22 @@ export async function handleBrainSearch(
   // called, so 'fast' (the default, and every existing caller that never passes `mode` at all)
   // stays the EXACT prior code path, byte-identical output shape.
   if (input.mode === 'deep' && parseDeepRetrievalMode(process.env.DEEP_RETRIEVAL_MODE) === 'on') {
-    const deep = await retrieveDeep(input.query, { rooms, top, includeOps, continuation: input.continuation });
+    const retrieved = await retrieveDeep(input.query, { rooms, top, includeOps, continuation: input.continuation });
     // Capture after retrieval so local writes during synthesis cannot re-promote a stale entity.
     const retractionSnapshot = await readSnapshot();
+    const boundary = filterRetractedByAgent(retrieved.hits, retractionSnapshot.byAgent);
+    const retractionChanged = boundary.dropped.length > 0;
+    // A late retraction invalidates the generated answer. Preserve live evidence and a resume
+    // contract instead of returning stale synthesis or making an unbudgeted second provider call.
+    const deep = retractionChanged ? {
+      ...retrieved,
+      hits: boundary.kept,
+      citations: buildCitations(boundary.kept),
+      answer: 'A supporting memory was retracted during retrieval. Resume to synthesize from current evidence.',
+      partial: true,
+      continuation: retrieved.continuation ?? { rooms: retrieved.rooms_searched, sub_queries: retrieved.sub_queries, rounds_used: retrieved.rounds_used },
+      retracted_dropped: [...new Set([...(retrieved.retracted_dropped ?? []), ...boundary.dropped])],
+    } : retrieved;
     // Keep the existing typed-entity path's exact room gate and full lane-scoped retraction map.
     // Deep retrieval has already completed its normal shield path before we promote anything.
     const entityRetractions = retractionSnapshot.byAgent;
@@ -329,6 +342,7 @@ export async function handleBrainSearch(
       retraction_verification: retractionSnapshot.verified ? 'complete' : 'incomplete',
     };
     if (promotion) data.entity_answer = promotion.answer;
+    if (retractionChanged) data.retraction_changed = true;
     if (deep.rooms_failed?.length) data.rooms_failed = deep.rooms_failed;
     if (deep.retracted_dropped?.length) data.retracted_dropped = deep.retracted_dropped;
     // Only present when the content-level injection screen actually ran (RETRIEVAL_SHIELD_MODE != off
@@ -352,6 +366,7 @@ export async function handleBrainSearch(
         `deep (${deep.rounds_used} ${roundWord}, ${deep.sub_queries.length} ${sqWord}): ${citedHitCount} cited ` +
         `passage(s) for "${input.query}" across ${deep.rooms_searched.length} room(s): ${deep.rooms_searched.join(', ')}.` +
         (promotion ? ` Current value: ${entity!.ekey} = ${entity!.evalue}.` : '') +
+        (retractionChanged ? ' Retraction state changed; resume before relying on synthesis.' : '') +
         (deep.rooms_failed?.length ? ` ${deep.rooms_failed.length} room(s) unreachable: ${deep.rooms_failed.join(', ')}.` : '') +
         (deep.retracted_dropped?.length ? ` Dropped ${deep.retracted_dropped.length} RETRACTED belief(s).` : '') +
         (!retractionSnapshot.verified ? ' Retraction verification incomplete; one or more sources were unavailable.' : '') +
@@ -499,6 +514,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         rooms_failed: z.array(z.string()).optional(),
         retracted_dropped: z.array(z.string()).optional(),
         retraction_verification: z.enum(['complete', 'incomplete']).optional(),
+        retraction_changed: z.boolean().optional(),
         include_ops: z.boolean(),
         // W1-3: the deterministic current-value answer when the query resolved to a typed-entity key.
         entity_answer: z.unknown().optional(),

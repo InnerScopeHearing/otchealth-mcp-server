@@ -12,7 +12,10 @@ export async function deliverCheckpointBatch<T>(
   const limit = Number.isFinite(concurrency) ? Math.max(1, Math.floor(concurrency)) : 1;
   if (hasDependencies || entries.length < 2 || limit <= 1) {
     const serial: Delivery[] = [];
-    for (const entry of entries) serial.push(await deliver(entry));
+    for (const entry of entries) {
+      try { serial.push(await deliver(entry)); }
+      catch { serial.push({ id: null, stored: false, indexed: false }); }
+    }
     return serial;
   }
 

@@ -45,7 +45,7 @@ try {
 
 const { filterSupersededWakeData, buildBriefWake, buildM365LiteWake, readWakeTasks } = await import('../dist/tools/memory/wake.js');
 const { filterSupersededPackData, buildBriefPack } = await import('../dist/tools/memory/pack.js');
-const { getRetractionSnapshot, __setRetractionReadersForTests, __resetRetractionCache } = await import('../dist/memory/retractions.js');
+const { getRetractionSnapshot, noteRetraction, __setRetractionReadersForTests, __resetRetractionCache } = await import('../dist/memory/retractions.js');
 const { deliverCheckpointBatch } = await import('../dist/tools/memory/checkpoint-delivery.js');
 const { handleBrainSearch } = await import('../dist/tools/kb/brain-search.js');
 const old = { id: 'synthetic-old', agent: 'cto', type: 'fact', text: 'synthetic retired value' };
@@ -89,11 +89,14 @@ const partial=await handleBrainSearch({query:'synthetic',mode:'deep'},ctx,{looku
 assert.equal(partial.data.answer,deepFixture.answer); assert.deepEqual(partial.data.citations,deepFixture.citations);
 assert.equal(partial.data.matches[0].id,deepFixture.hits[0].id);
 let retractedDuringDeep=false;
-await handleBrainSearch({query:'synthetic',mode:'deep'},ctx,{
+const lateRetraction=await handleBrainSearch({query:'synthetic',mode:'deep'},ctx,{
   deepRetrieve:async()=>{retractedDuringDeep=true;return deepFixture},
   retractedIdsByAgent:async()=>{assert.equal(retractedDuringDeep,true);return new Map([['cto',new Set([entity.id])]])},
   lookupEntity:async(_query,_mode,byAgent)=>{assert.equal(byAgent.get('cto').has(entity.id),true);return null},
 });
+assert.equal(lateRetraction.data.retraction_changed,true);assert.equal(lateRetraction.data.partial,true);
+assert.deepEqual(lateRetraction.data.matches,[]);assert.deepEqual(lateRetraction.data.citations,[]);
+assert.equal(String(lateRetraction.data.answer).includes(deepFixture.answer),false);
 process.env.RETRIEVAL_SHIELD_MODE='enforce';
 const unscreenedHits=[...Array.from({length:12},(_,i)=>({id:'synthetic-other-'+i,source:'memory-exec',agent:'cto',score:1,text:'synthetic'})),...deepFixture.hits];
 const withheld=await handleBrainSearch({query:'synthetic',mode:'deep'},ctx,{lookupEntity:async()=>entity,deepRetrieve:async()=>({...deepFixture,hits:unscreenedHits,injection_screen:{mode:'enforce',attackDetected:false}})});
@@ -102,6 +105,11 @@ const mismatch=await handleBrainSearch({query:'synthetic',mode:'deep'},ctx,{look
 assert.equal('entity_answer' in mismatch.data,false,'the promoted payload itself must have been screened');
 process.env.RETRIEVAL_SHIELD_MODE='off';
 __resetRetractionCache();
+let releaseCold;
+const coldSource=new Promise(resolve=>{releaseCold=resolve});
+__setRetractionReadersForTests({shared:async()=>coldSource,memory:async()=>[]});
+const coldPending=getRetractionSnapshot();noteRetraction('cto','cto__cold-proof');releaseCold([]);
+assert.equal((await coldPending).byAgent.get('cto').has('cold-proof'),true);__resetRetractionCache();
 let inflight=0,maxInflight=0;
 const deliveries=await deliverCheckpointBatch([0,1,2,3,4,5],async index=>{
   inflight++;maxInflight=Math.max(maxInflight,inflight);await new Promise(resolve=>setTimeout(resolve,2));inflight--;
@@ -109,5 +117,7 @@ const deliveries=await deliverCheckpointBatch([0,1,2,3,4,5],async index=>{
   return {id:'synthetic-'+index,stored:true,indexed:index!==3};
 });
 assert.equal(maxInflight,4); assert.deepEqual(deliveries.map(d=>d.id),['synthetic-0','synthetic-1',null,'synthetic-3','synthetic-4','synthetic-5']);assert.equal(deliveries[3].indexed,false);
+const serial=await deliverCheckpointBatch([0,1,2],async i=>{if(i===1)throw new Error('synthetic');return{id:String(i),stored:true,indexed:true}},4,true);
+assert.deepEqual(serial.map(d=>d.id),['0',null,'2']);
 
 console.log(JSON.stringify({ status: 'pass', checks: 8, source_sha: process.env.GIT_SHA, provider_calls: 0, source_bodies: 0 }));

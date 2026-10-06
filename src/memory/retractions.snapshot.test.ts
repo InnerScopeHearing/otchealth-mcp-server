@@ -85,3 +85,17 @@ test('concurrent snapshot readers observe matching map and verification state; r
     __resetRetractionCache();
   }
 });
+
+test('a local proof survives a refresh that began with a cold cache', async () => {
+  let release!: (rows: Array<{ agent?: unknown; supersedes?: unknown }>) => void;
+  const blocked = new Promise<Array<{ agent?: unknown; supersedes?: unknown }>>(resolve => { release = resolve; });
+  __setRetractionReadersForTests({ shared: async () => blocked, memory: async () => [] });
+  try {
+    const pending = getRetractionSnapshot();
+    noteRetraction('cto', 'cto__cold-proof');
+    release([]);
+    const snapshot = await pending;
+    assert.equal(snapshot.verified, true);
+    assert.equal(snapshot.byAgent.get('cto')?.has('cold-proof'), true);
+  } finally { __resetRetractionCache(); }
+});

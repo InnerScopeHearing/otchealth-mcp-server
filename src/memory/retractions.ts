@@ -285,13 +285,15 @@ async function loadRetractionCache(now: number): Promise<void> {
 /**
  * Record a retraction the moment it is WRITTEN, so this replica's cache serves it immediately
  * instead of only after the TTL (up to 120s) lapses -- the window in which an agent that corrects a
- * belief and then searches straight away still gets the retracted belief back. A no-op when the
- * cache is cold: the next refresh reads the stores, where the write is already durable. Other
+ * belief and then searches straight away still gets the retracted belief back. When the cache is
+ * cold, a proof-only expired cache retains that write
+ * through an in-flight refresh, even if the readers began before it was durable. Other
  * replicas still catch up within their own TTL. Never throws.
  */
 export function noteRetraction(agent: unknown, supersedes: unknown): void {
   try {
-    if (!cache || typeof agent !== 'string' || !agent.trim() || typeof supersedes !== 'string' || !supersedes.trim()) return;
+    if (typeof agent !== 'string' || !agent.trim() || typeof supersedes !== 'string' || !supersedes.trim()) return;
+    if (!cache) cache = { at: 0, ids: new Set(), byAgent: new Map(), degraded: true };
     const a = agent.trim().toLowerCase();
     cache.ids.add(supersedes.trim());
     let set = cache.byAgent.get(a);
