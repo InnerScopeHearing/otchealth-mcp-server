@@ -1,5 +1,5 @@
 /**
- * brain_search — the One Brain, FEDERATED over the LIVE room indexes.
+ * brain_search - the One Brain, FEDERATED over the LIVE room indexes.
  *
  * ============================ WHY THIS WAS REWRITTEN (2026-07-13) ============================
  * This tool previously queried a single CONSOLIDATED index, `otchealth-brain` (67,645 docs, on a
@@ -63,9 +63,9 @@ import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../search/index.js';
 import { isLaneAllowed } from './search-privileged.js';
-import { retractedIdsByAgent, filterRetractedByAgent } from '../../memory/retractions.js';
+import { getRetractionSnapshot, filterRetractedByAgent, type retractedIdsByAgent } from '../../memory/retractions.js';
 import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
-import { deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
+import { buildCitations, deepRetrieve, parseDeepRetrievalMode } from '../../memory/deep-retrieval.js';
 import { lookupEntity, type EntityHit } from '../../memory/entity-lookup.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 import { opaqueIdentifierQuery } from '../../search/identifier-match.js';
@@ -141,10 +141,26 @@ export function buildEntityPromotion(entity: EntityHit): {
   };
 }
 
+/** Entity feed IDs may be bare ledger IDs while search hits use `{agent}__{id}` doc IDs. */
+function isEntityDuplicate(hit: FusedHit, entity: EntityHit): boolean {
+  const hitId = String(hit.id ?? '');
+  if (!hitId || !entity.id) return false;
+  const owner = (entity.owner || '').trim().toLowerCase();
+  const separator = hitId.indexOf('__');
+  const hitOwner = separator > 0
+    ? hitId.slice(0, separator).toLowerCase()
+    : (typeof hit.agent === 'string' ? hit.agent.trim().toLowerCase() : '');
+  if (owner && hitOwner && owner !== hitOwner) return false;
+  const hitEntryId = separator > 0 ? hitId.slice(separator + 2) : hitId;
+  const entitySeparator = entity.id.indexOf('__');
+  const entityEntryId = entitySeparator > 0 ? entity.id.slice(entitySeparator + 2) : entity.id;
+  return hitEntryId === entityEntryId;
+}
+
 /** Rooms every agent may read (non-PHI / non-MNPI / non-privileged). */
 export const OPEN_ROOMS = ['memory-exec', 'commons-company-journal'] as const;
 
-/** Rooms behind the executive ring. Gated via isLaneAllowed — never re-implemented here. */
+/** Rooms behind the executive ring. Gated via isLaneAllowed - never re-implemented here. */
 export const RING_ROOMS = [
   'finance-cfo-source-docs',
   'finance-otchealth-cfo-source-docs',
@@ -217,9 +233,27 @@ export type BrainSearchInput = z.infer<z.ZodObject<typeof brainSearchInputShape>
  * mirrors how memory/agentic.ts's exported functions are tested. registerBrainSearch below wires
  * this in unchanged; nothing about registration or the MCP surface changes.
  */
-export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContext): Promise<ToolResultPayload> {
+export interface BrainSearchDependencies {
+  /** Provider-free handler seam; production uses the existing current-entity lookup. */
+  lookupEntity?: typeof lookupEntity;
+  /** Provider-free handler seam; production uses the existing lane-scoped retraction reader. */
+  retractedIdsByAgent?: typeof retractedIdsByAgent;
+  /** Provider-free handler seam for exercising deep response and shield outcomes. */
+  deepRetrieve?: typeof deepRetrieve;
+}
+
+export async function handleBrainSearch(
+  input: BrainSearchInput,
+  ctx: ToolContext,
+  dependencies: BrainSearchDependencies = {},
+): Promise<ToolResultPayload> {
   const top = input.top ?? 8;
   const includeOps = input.include_ops ?? false;
+  const resolveEntity = dependencies.lookupEntity ?? lookupEntity;
+  const readSnapshot = dependencies.retractedIdsByAgent
+    ? async () => ({ byAgent: await dependencies.retractedIdsByAgent!(), verified: true })
+    : getRetractionSnapshot;
+  const retrieveDeep = dependencies.deepRetrieve ?? deepRetrieve;
   if (!searchConfigured()) {
     return {
       data: { matches: [], count: 0, mode: 'unconfigured', rooms_searched: [], include_ops: includeOps },
@@ -242,21 +276,73 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   // called, so 'fast' (the default, and every existing caller that never passes `mode` at all)
   // stays the EXACT prior code path, byte-identical output shape.
   if (input.mode === 'deep' && parseDeepRetrievalMode(process.env.DEEP_RETRIEVAL_MODE) === 'on') {
-    const deep = await deepRetrieve(input.query, { rooms, top, includeOps, continuation: input.continuation });
+    const retrieved = await retrieveDeep(input.query, { rooms, top, includeOps, continuation: input.continuation });
+    // Capture after retrieval so local writes during synthesis cannot re-promote a stale entity.
+    const retractionSnapshot = await readSnapshot();
+    const boundary = filterRetractedByAgent(retrieved.hits, retractionSnapshot.byAgent);
+    const retractionChanged = boundary.dropped.length > 0;
+    // A late retraction invalidates the generated answer. Preserve live evidence and a resume
+    // contract instead of returning stale synthesis or making an unbudgeted second provider call.
+    const deep = retractionChanged ? {
+      ...retrieved,
+      hits: boundary.kept,
+      citations: buildCitations(boundary.kept),
+      answer: 'A supporting memory was retracted during retrieval. Resume to synthesize from current evidence.',
+      partial: true,
+      continuation: retrieved.continuation ?? { rooms: retrieved.rooms_searched, sub_queries: retrieved.sub_queries, rounds_used: retrieved.rounds_used },
+      retracted_dropped: [...new Set([...(retrieved.retracted_dropped ?? []), ...boundary.dropped])],
+    } : retrieved;
+    // Keep the existing typed-entity path's exact room gate and full lane-scoped retraction map.
+    // Deep retrieval has already completed its normal shield path before we promote anything.
+    const entityRetractions = retractionSnapshot.byAgent;
+    const entity = canUseEntityLookup(rooms)
+      ? await resolveEntity(input.query, process.env.ENTITY_LOOKUP_MODE, entityRetractions)
+      : null;
+    const candidatePromotion = entity ? buildEntityPromotion(entity) : null;
+    const enforceShield = (process.env.RETRIEVAL_SHIELD_MODE || 'report').trim().toLowerCase() === 'enforce';
+    // deepRetrieve screens the first 12 synthesis hits; later hits provide no screening proof.
+    const entityWasScreened = Boolean(entity && candidatePromotion && deep.hits.slice(0, 12).some((hit) =>
+      isEntityDuplicate(hit, entity) && hit.text === candidatePromotion.match['text'],
+    ));
+    const shieldWithheld = Boolean(enforceShield && (
+      !deep.injection_screen ||
+      deep.injection_screen.mode !== 'enforce' ||
+      deep.injection_screen.attackDetected ||
+      !entityWasScreened
+    ));
+    const promotion = entity && !shieldWithheld && !deep.partial ? candidatePromotion : null;
+    const authoritative = promotion
+      ? ({ ...promotion.match, source: 'memory-exec' } as unknown as FusedHit)
+      : null;
+    const entityId = entity?.id ?? '';
+    const deepHits = promotion && authoritative
+      ? [authoritative, ...deep.hits.filter((hit) => !entityId || !isEntityDuplicate(hit, entity!))]
+      : deep.hits;
+    const deepAnswer = promotion && !deep.partial
+      ? `Current value: ${entity!.ekey} = ${entity!.evalue} [1].`
+      : deep.answer;
+    const citations = promotion && !deep.partial && authoritative
+      ? buildCitations([authoritative])
+      : promotion && deep.partial
+        ? buildCitations(deepHits)
+        : deep.citations;
     // Tag each hit with a feedback_ref (pure/synchronous, see memory/retrieval-feedback.ts) so a
     // later retrieval_feedback call can report whether it was useful without re-sending content.
-    const taggedHits = tagWithFeedbackRefs(deep.hits, { tool: 'brain_search', query: input.query, defaultRoom: 'federated' });
+    const taggedHits = tagWithFeedbackRefs(deepHits, { tool: 'brain_search', query: input.query, defaultRoom: 'federated' });
     const data: Record<string, unknown> = {
       matches: taggedHits,
       count: taggedHits.length,
       mode: deep.mode,
       rooms_searched: deep.rooms_searched,
       include_ops: includeOps,
-      answer: deep.answer,
-      citations: deep.citations,
+      answer: deepAnswer,
+      citations,
       sub_queries: deep.sub_queries,
       rounds_used: deep.rounds_used,
+      retraction_verification: retractionSnapshot.verified ? 'complete' : 'incomplete',
     };
+    if (promotion) data.entity_answer = promotion.answer;
+    if (retractionChanged) data.retraction_changed = true;
     if (deep.rooms_failed?.length) data.rooms_failed = deep.rooms_failed;
     if (deep.retracted_dropped?.length) data.retracted_dropped = deep.retracted_dropped;
     // Only present when the content-level injection screen actually ran (RETRIEVAL_SHIELD_MODE != off
@@ -273,17 +359,21 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
 
     const roundWord = deep.rounds_used === 1 ? 'round' : 'rounds';
     const sqWord = deep.sub_queries.length === 1 ? 'sub-query' : 'sub-queries';
+    const citedHitCount = promotion && !deep.partial ? 1 : deepHits.length;
     return {
       data,
       summary:
-        `deep (${deep.rounds_used} ${roundWord}, ${deep.sub_queries.length} ${sqWord}): ${deep.hits.length} cited ` +
+        `deep (${deep.rounds_used} ${roundWord}, ${deep.sub_queries.length} ${sqWord}): ${citedHitCount} cited ` +
         `passage(s) for "${input.query}" across ${deep.rooms_searched.length} room(s): ${deep.rooms_searched.join(', ')}.` +
+        (promotion ? ` Current value: ${entity!.ekey} = ${entity!.evalue}.` : '') +
+        (retractionChanged ? ' Retraction state changed; resume before relying on synthesis.' : '') +
         (deep.rooms_failed?.length ? ` ${deep.rooms_failed.length} room(s) unreachable: ${deep.rooms_failed.join(', ')}.` : '') +
         (deep.retracted_dropped?.length ? ` Dropped ${deep.retracted_dropped.length} RETRACTED belief(s).` : '') +
+        (!retractionSnapshot.verified ? ' Retraction verification incomplete; one or more sources were unavailable.' : '') +
         (deep.injection_screen?.attackDetected
           ? ` INJECTION SCREEN flagged a retrieved passage (mode=${deep.injection_screen.mode}).`
           : '') +
-        (deep.partial
+        (deep.partial && !retractionChanged
           ? ' BUDGET: the wall-clock budget ran out before synthesis; pass back `continuation` to resume.'
           : '') +
         (deep.budget_skipped?.length ? ` Skipped for time: ${deep.budget_skipped.join(', ')}.` : ''),
@@ -327,7 +417,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
         identifierCandidate = exactIdentifierCandidate(input.query, s.value.room, s.value.res.matches);
       }
     } else {
-      // One dead room must never blank the brain. Degrade, disclose, continue — WITH the reason,
+      // One dead room must never blank the brain. Degrade, disclose, continue - WITH the reason,
       // so an agent (or the canary) can tell quota/semantic from auth from index-missing without
       // a human tailing gateway logs (the 2026-07-20 402 incident was undiagnosable client-side).
       const why = s.status === 'rejected' ? String((s.reason as Error)?.message ?? s.reason).slice(0, 80) : 'empty result';
@@ -339,7 +429,8 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   // removing a retracted hit would leave a hole instead of promoting a real result into its place.
   const preferredCandidate = directCandidate ?? identifierCandidate;
   const pool = fuseWithDirectCandidate(perRoom, top, preferredCandidate);
-  const retracted = await retractedIdsByAgent();
+  const retractionSnapshot = await readSnapshot();
+  const retracted = retractionSnapshot.byAgent;
   const { kept, dropped } = filterRetractedByAgent(pool, retracted);
   const directSurvived = Boolean(directCandidate && kept.some((hit) =>
     hit.source === directCandidate?.source && String(hit.id ?? '') === String(directCandidate?.id ?? '') &&
@@ -354,7 +445,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   // value, instead of whatever the reranker floated up. Ring-safe: the source is the commons feed and
   // entity rows are already in memory-exec (an OPEN_ROOM), so this changes RANKING, not exposure.
   const entity = canUseEntityLookup(rooms)
-    ? await lookupEntity(input.query, process.env.ENTITY_LOOKUP_MODE, retracted)
+    ? await resolveEntity(input.query, process.env.ENTITY_LOOKUP_MODE, retracted)
     : null;
   const promotion = entity ? buildEntityPromotion(entity) : null;
   let matches: unknown[] = kept.slice(0, top);
@@ -379,6 +470,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     mode: directSurvived ? 'direct-id' : identifierSurvived ? 'identifier-match' : 'federated-rrf',
     rooms_searched: searched,
     include_ops: includeOps,
+    retraction_verification: retractionSnapshot.verified ? 'complete' : 'incomplete',
   };
   if (promotion) data.entity_answer = promotion.answer;
   if (failed.length) data.rooms_failed = failed;
@@ -390,9 +482,10 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     data,
     summary:
       (entity ? `Current value: ${entity.ekey} = ${entity.evalue}. ` : '') +
-      `${matches.length} match(es) for "${input.query}" — federated live across ${searched.length} room(s): ${searched.join(', ')}.` +
+      `${matches.length} match(es) for "${input.query}" - federated live across ${searched.length} room(s): ${searched.join(', ')}.` +
       (includeOps ? ' Operational chatter (status/episode/heartbeat/digest) INCLUDED.' : '') +
       (dropped.length ? ` Dropped ${dropped.length} RETRACTED belief(s): ${dropped.join(', ')}.` : '') +
+      (!retractionSnapshot.verified ? ' Retraction verification incomplete; one or more sources were unavailable.' : '') +
       (failed.length ? ` ${failed.length} room(s) unreachable: ${failed.join(', ')}.` : ''),
   };
 }
@@ -406,7 +499,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'Search the OTCHealth One Brain (federated, always-fresh)',
         description:
-          'Hybrid semantic search across the LIVE company brain, federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field); deep mode also screens the retrieved passages for embedded prompt-injection attempts before synthesizing (see injection_screen). Each returned match carries a `feedback_ref` token; optionally report back with the retrieval_feedback tool (useful/not_useful/cited) once you know whether a hit actually helped, no content re-send needed -- this feeds future recall-quality work.',
+          'Hybrid semantic search across the LIVE company brain, federated in parallel over every knowledge room you are permitted to read (memory-exec, commons-company-journal, plus the ring-gated finance/legal rooms for executive lanes) and fused by rank. Always current: it queries the live indexes directly rather than a consolidated copy that can go stale. Beliefs the fleet has retracted (via supersedes) are dropped, so a known-false answer cannot resurface as truth; each result reports whether retraction verification completed. Operational exhaust (status/episode/heartbeat/digest-style chatter) is deprioritized by default, not removed: it ranks after genuine results and only fills a slot when nothing better is available. Pass include_ops=true to see it at full relevance rank. Read-only. Ground answers here and cite. Optional domain filter: exec|commons|ops|finance|legal. Optional mode:\'deep\' for LLM-planned multi-round retrieval plus a synthesized cited answer (see the mode field); deep mode also screens the retrieved passages for embedded prompt-injection attempts before synthesizing (see injection_screen). Each returned match carries a `feedback_ref` token; optionally report back with the retrieval_feedback tool (useful/not_useful/cited) once you know whether a hit actually helped, no content re-send needed -- this feeds future recall-quality work.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -420,6 +513,8 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         rooms_searched: z.array(z.string()),
         rooms_failed: z.array(z.string()).optional(),
         retracted_dropped: z.array(z.string()).optional(),
+        retraction_verification: z.enum(['complete', 'incomplete']).optional(),
+        retraction_changed: z.boolean().optional(),
         include_ops: z.boolean(),
         // W1-3: the deterministic current-value answer when the query resolved to a typed-entity key.
         entity_answer: z.unknown().optional(),

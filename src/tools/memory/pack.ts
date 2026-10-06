@@ -3,11 +3,11 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { isConfigured, readSharedAll } from '../../memory/store.js';
 import { computeRetractedIds, boundRecord } from './wake.js';
-import { retractedIdsForAgent } from '../../memory/retractions.js';
+import { retractedIdsForAgent, normalizeSupersedesId } from '../../memory/retractions.js';
 import { resolveAgentReadScope } from './agent-scope.js';
 
 /**
- * memory_pack — one-call working-set loader for ANY client/platform. Given an agent lane, returns
+ * memory_pack - one-call working-set loader for ANY client/platform. Given an agent lane, returns
  * the durable context that agent should boot with: its latest status, its corrections (current
  * truths that override older belief), recent decisions, and recent facts/pitfalls. This is the
  * cross-platform replacement for Claude Code's per-prompt memory injection (which Hyperagent /
@@ -60,8 +60,16 @@ export interface PackFullData {
 }
 
 /** Apply the documented current-truth contract to both full and brief pack responses. */
-export function filterSupersededPackData(full: PackFullData, correctionRecords: Record<string, unknown>[] = full.corrections): PackFullData {
-  const supersededIds = computeRetractedIds(correctionRecords.filter((record) => record['type'] === 'correction' || record['kind'] === 'correction'));
+export function filterSupersededPackData(
+  full: PackFullData,
+  localRetractionEntries: Record<string, unknown>[] = full.corrections,
+  externalRetractedIds?: Set<string>,
+): PackFullData {
+  const supersededIds = computeRetractedIds(localRetractionEntries.map((record) => ({
+    ...record,
+    supersedes: typeof record['supersedes'] === 'string' ? normalizeSupersedesId(record['supersedes'], full.agent) : record['supersedes'],
+  })));
+  if (externalRetractedIds) for (const id of externalRetractedIds) supersededIds.add(id);
   if (!supersededIds.size) return full;
   const current = (record: Record<string, unknown>) => {
     const id = record['id'];
@@ -255,6 +263,12 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
         const recent = mine.slice(0, recentLimit);
 
         const brief = input.brief ?? false;
+        let externalRetractedIds: Set<string> | undefined;
+        try {
+          externalRetractedIds = await retractedIdsForAgent(agent);
+        } catch {
+          /* Fail open to locally proven same-agent supersedes edges in the complete shared feed. */
+        }
         const fullData = filterSupersededPackData({
           agent,
           status: status as unknown as Record<string, unknown> | null,
@@ -262,7 +276,7 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
           decisions: decisions as unknown as Record<string, unknown>[],
           recent: recent as unknown as Record<string, unknown>[],
           count: mine.length,
-        }, mine.filter((record) => record.type === 'correction') as unknown as Record<string, unknown>[]);
+        }, mine as unknown as Record<string, unknown>[], externalRetractedIds);
         // The canonical, AGENT-SCOPED retraction set (memory/retractions.ts's retractedIdsForAgent,
         // NOT the bare fleet-wide retractedIds() -- review finding, 2026-07-30: shared-feed ids are
         // per-agent day+counter values, so two different agents' entries can share a bare id; the
@@ -274,19 +288,11 @@ export function registerMemoryPack(server: McpServer, callerHash: CallerHashProv
         // store view could never see. Fail-open internally (never throws) but still guarded
         // defensively since it is a live-store call. UNIONED (never substituted) with
         // buildBriefPack's own local set -- see that function's header for why.
-        let externalRetractedIds: Set<string> | undefined;
-        if (brief) {
-          try {
-            externalRetractedIds = await retractedIdsForAgent(agent);
-          } catch {
-            /* fail-open: buildBriefPack falls back to computeRetractedIds over the shared feed alone */
-          }
-        }
         const data = brief ? buildBriefPack(fullData, mine as unknown as Record<string, unknown>[], externalRetractedIds, recentLimit) : fullData;
 
         return {
           data,
-          summary: `pack(${agent})${brief ? ' [brief]' : ''}: ${mine.length} entries — ${corrections.length} corrections, ${decisions.length} decisions${status ? ', status present' : ''}.`,
+          summary: `pack(${agent})${brief ? ' [brief]' : ''}: ${mine.length} entries - ${corrections.length} corrections, ${decisions.length} decisions${status ? ', status present' : ''}.`,
         };
       },
     },

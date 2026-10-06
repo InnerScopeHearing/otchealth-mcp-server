@@ -14,7 +14,13 @@ import { buildEpisodeText } from '../../safety/journal.js';
 import { recordCheckpoint } from '../../safety/capture-pressure.js';
 import { captureGatewayEvent } from '../../telemetry/gateway-ops.js';
 import { evaluateBroadcastMnpiGate } from '../../safety/mnpi-gate.js';
-import { deliverCheckpointMemory, checkpointDeliveryStatus, type Delivery } from './checkpoint-delivery.js';
+import {
+  deliverCheckpointMemory,
+  deliverCheckpointBatch,
+  CHECKPOINT_DELIVERY_CONCURRENCY,
+  checkpointDeliveryStatus,
+  type Delivery,
+} from './checkpoint-delivery.js';
 
 const DISTILL_KINDS = ['fact', 'decision', 'correction', 'pitfall'] as const;
 type DistillKind = (typeof DISTILL_KINDS)[number];
@@ -222,10 +228,15 @@ export function registerCheckpoint(server: McpServer, callerHash: CallerHashProv
         let distilled = 0;
         let distillationComplete = !input.summary?.trim() || chatConfigured();
 
-        // (a) explicit memories, verbatim -- one failure never blocks the rest.
-        for (const m of memoriesIn) {
-          deliveries.push(await deps.deliver(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }));
-        }
+        // (a) explicit memories, verbatim -- independent records use bounded fan-out. If any
+        // caller-specified supersession exists, preserve the original serial order for the batch.
+        const explicitDeliveries = await deliverCheckpointBatch(
+          memoriesIn,
+          m => deps.deliver(input.agent, m.kind, m.text, { tags: m.tags, supersedes: m.supersedes }),
+          CHECKPOINT_DELIVERY_CONCURRENCY,
+          memoriesIn.some(m => Boolean(m.supersedes)),
+        );
+        deliveries.push(...explicitDeliveries);
 
         // (b) server-side distillation of the summary, best-effort. A distillation failure (LLM
         // down, malformed reply, the chat provider unconfigured) must never fail the checkpoint --
