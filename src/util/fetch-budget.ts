@@ -29,10 +29,25 @@ export interface FetchBudgetOptions {
   timeoutMs?: number;
   /** How many additional attempts after the first. Default 1 (i.e. up to 2 attempts total). */
   retries?: number;
+  /** Optional absolute wall-clock deadline shared by every attempt and the response body read. */
+  deadlineAtMs?: number;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('fetch aborted'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      signal?.removeEventListener('abort', aborted);
+      resolve();
+    }
+    function aborted() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', aborted);
+      reject(signal?.reason ?? new Error('fetch aborted'));
+    }
+    signal?.addEventListener('abort', aborted, { once: true });
+  });
 }
 
 /** True for a response status this helper considers retryable (rate limit or server error). */
@@ -80,26 +95,50 @@ export async function fetchWithBudget(
 ): Promise<Response> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxRetries = opts.retries ?? DEFAULT_RETRIES;
+  const deadlineAtMs = opts.deadlineAtMs;
+  const deadlineSignal = deadlineAtMs === undefined
+    ? undefined
+    : AbortSignal.timeout(Math.max(0, Math.floor(deadlineAtMs - Date.now())));
+  const callSignal = init.signal && deadlineSignal
+    ? AbortSignal.any([init.signal, deadlineSignal])
+    : init.signal ?? deadlineSignal;
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      if (init.signal?.aborted) throw init.signal.reason ?? new Error('fetch aborted');
-      const attemptSignal = init.signal
-        ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
-        : AbortSignal.timeout(timeoutMs);
+      if (callSignal?.aborted) throw callSignal.reason ?? new Error('fetch aborted');
+      const remainingMs = deadlineAtMs === undefined ? timeoutMs : deadlineAtMs - Date.now();
+      if (remainingMs <= 0) throw new DOMException('Request deadline exceeded', 'TimeoutError');
+      const attemptTimeoutSignal = AbortSignal.timeout(Math.max(1, Math.floor(Math.min(timeoutMs, remainingMs))));
+      const attemptSignal = callSignal
+        ? AbortSignal.any([callSignal, attemptTimeoutSignal])
+        : attemptTimeoutSignal;
       const res = await fetch(url, { ...init, signal: attemptSignal });
       if (attempt < maxRetries && isRetryableStatus(res.status)) {
         const retryAfterMs = parseRetryAfterMs(res.headers.get('retry-after'));
-        await sleep(retryAfterMs ?? jitteredBackoffMs(attempt));
+        const backoffMs = retryAfterMs ?? jitteredBackoffMs(attempt);
+        // A retryable response is discarded; cancel its body before sleeping so sockets and
+        // unread response data do not outlive the caller's request budget.
+        void res.body?.cancel().catch(() => undefined);
+        if (deadlineAtMs !== undefined && backoffMs >= deadlineAtMs - Date.now()) {
+          await sleep(Math.max(0, deadlineAtMs - Date.now()), callSignal);
+          throw new DOMException('Request deadline exceeded before retry', 'TimeoutError');
+        }
+        await sleep(backoffMs, callSignal);
         continue;
       }
       return res;
     } catch (err) {
       lastError = err;
-      if (init.signal?.aborted) throw err;
+      if (callSignal?.aborted) throw err;
+      if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) throw err;
       if (attempt < maxRetries) {
-        await sleep(jitteredBackoffMs(attempt));
+        const backoffMs = jitteredBackoffMs(attempt);
+        if (deadlineAtMs !== undefined && backoffMs >= deadlineAtMs - Date.now()) {
+          await sleep(Math.max(0, deadlineAtMs - Date.now()), callSignal);
+          throw err;
+        }
+        await sleep(backoffMs, callSignal);
         continue;
       }
       throw err;

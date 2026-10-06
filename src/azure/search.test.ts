@@ -341,6 +341,7 @@ test('hybridSearch (chunked room): dedups chunks to one hit per parent, cites th
       assert.deepEqual(res!.matches.map((m) => m.id).sort(), ['p1', 'p2'], 'hits are cited by parent_id, not chunk_id');
       const p1 = res!.matches.find((m) => m.id === 'p1')!;
       assert.equal(p1.path, 'legal/contractA.pdf', 'parent path is carried for citation');
+      assert.equal(p1.source_version, undefined, 'version metadata is absent when the backend does not provide it');
       assert.equal(p1.text, 'chunk one of contract A', 'the higher-scored chunk (p1#1) represents the parent');
       const vq = (capturedBody?.vectorQueries as Array<Record<string, unknown>>)[0];
       assert.equal(vq.fields, 'text_vector', 'chunked rooms query text_vector, never contentVector');
@@ -470,6 +471,31 @@ test('hybridSearch (chunked room): byte-identical content under TWO DIFFERENT pa
       const unrelated = res!.matches.find((m) => m.path === 'legal/unrelated-contract.pdf')!;
       assert.ok(unrelated);
       assert.equal(unrelated.variants, undefined, 'a hit with no collapsed duplicate must never carry a variants key');
+    },
+  );
+});
+
+test('hybridSearch (chunked room): source versions survive, and identical text from distinct versions stays separate', async () => {
+  const versionA = `sha256:${'a'.repeat(64)}`;
+  const versionB = `sha256:${'b'.repeat(64)}`;
+  const sharedText = 'Synthetic source passage with enough content length for deterministic duplicate handling.';
+  const documents = [
+    { chunk_id: 'v1#0', parent_id: 'same-source', path: 'current/source.pdf', source_version: versionA, text: sharedText, type: 'decision', '@search.rerankerScore': 2 },
+    { chunk_id: 'v2#0', parent_id: 'same-source', path: 'archive/source.pdf', source_version: versionB, text: sharedText, type: 'decision', '@search.rerankerScore': 2 },
+  ];
+  await withStubbedFetch(
+    (async (url: string | URL) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isSearchUrl(u)) return new Response(JSON.stringify({ value: documents }), { status: 200 });
+      throw new Error(`unexpected fetch to ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const result = await hybridSearch('commons-company-journal', 'source', 8, { includeOps: false });
+      assert.ok(result);
+      assert.equal(result.matches.length, 2, 'different immutable versions remain separate evidence');
+      assert.deepEqual(new Set(result.matches.map((hit) => hit.source_version)), new Set([versionA, versionB]));
+      assert.deepEqual(new Set(result.matches.map((hit) => hit.path)), new Set(['current/source.pdf', 'archive/source.pdf']));
     },
   );
 });

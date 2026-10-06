@@ -55,6 +55,10 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
     env -u DD_API_KEY DD_SITE=us3.datadoghq.com /app/datadog-init /bin/sh -ceu "test \"\${DD_API_KEY:-}\" = \"\"; echo datadog-init-child-ok"
   '
 
+# Check the actual compiled modules with fixed synthetic metadata and mocked provider I/O.
+timeout 45s docker run --rm --platform "$PLATFORM" --network none \
+  --entrypoint node "$IMAGE_REF" tools/brain-runtime-check.mjs
+
 # Full app boot + /health check in an isolated network namespace. Placeholder tokens satisfy
 # config validation; all connector/provider actions remain dark, memory revocations are local,
 # and the request is only the built-in health endpoint. Neither body nor env contains customer data.

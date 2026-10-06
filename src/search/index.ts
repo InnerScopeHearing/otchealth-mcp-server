@@ -81,6 +81,8 @@ export async function hybridSearch(
   top: number,
   opts?: HybridSearchOptions,
 ): Promise<{ matches: KbHit[]; mode: string } | null> {
+  // Keep the caller's optional deadline/signal on the common option object; backend dispatch is
+  // otherwise unchanged and every legacy caller remains unbounded exactly as before.
   const backend = activeBackend();
   const res =
     backend === 'opensearch'
