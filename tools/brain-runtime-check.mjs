@@ -58,11 +58,15 @@ const full = {
   errors: [], doctrine: { definition_of_done: 'synthetic', pitfalls: [], standing_directives: [] },
 };
 const current = filterSupersededWakeData(full, [{ id: 'synthetic-new', agent: 'cto', type: 'status', supersedes: old.id }], new Set([old.id]));
-for (const view of [current, buildBriefWake(current), buildM365LiteWake(current)]) {
+for (const view of [current, buildBriefWake(current)]) {
   assert.equal(view.pack.status, null);
   assert.deepEqual(view.memory_records, []);
   assert.equal(view.inbound.notes[0].agent, 'cro');
 }
+const m365Current = buildM365LiteWake(current);
+assert.equal(m365Current.pack.status, null);
+assert.deepEqual(m365Current.memory_records, []);
+assert.deepEqual(m365Current.inbound.notes, []);
 const packed = filterSupersededPackData({ agent:'cto', status:old, corrections:[], decisions:[], recent:[old], count:1 }, [], new Set([old.id]));
 assert.equal(packed.status, null); assert.deepEqual(packed.recent, []);
 const prefixedLocal = [{agent:'cto',type:'status',supersedes:'cto__'+old.id}];

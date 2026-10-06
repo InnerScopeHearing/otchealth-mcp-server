@@ -170,7 +170,7 @@ test('STANDING_DIRECTIVES carries the four non-negotiables', () => {
 
 test('STANDING_DIRECTIVES contains no em/en dashes (published-string rule)', () => {
   for (const line of STANDING_DIRECTIVES) {
-    assert.ok(!line.includes('-'), `em dash in: ${line}`);
+    assert.ok(!line.includes('\u2014'), `em dash in: ${line}`);
     assert.ok(!line.includes('\u2013'), `en dash in: ${line}`);
   }
 });
