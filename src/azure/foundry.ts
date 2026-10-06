@@ -350,10 +350,22 @@ export function isFlexCapacityError(status: number, message: string | undefined 
  *  original request, and, on a matched flex-capacity 429, one fallback retry -- and both must
  *  agree on exactly what they read back. */
 interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{
+    finish_reason?: string;
+    message?: { content?: string; refusal?: string | null };
+  }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
   model?: string;
   service_tier?: string;
+}
+
+/** Additive Chat Completions result metadata; usage retains its existing public type. */
+export interface ChatResult {
+  text: string;
+  usage?: unknown;
+  model: string;
+  finishReason?: string;
+  refusal?: string;
 }
 
 /**
@@ -400,7 +412,7 @@ export async function chat(
     /** Caller cancellation signal, composed with the provider timeout. */
     signal?: AbortSignal;
   },
-): Promise<{ text: string; usage?: unknown; model: string }> {
+): Promise<ChatResult> {
   const target = chatTarget(opts?.tier, opts?.deployment);
   if (!target) {
     const e = loadEnv();
@@ -535,5 +547,12 @@ export async function chat(
     });
   }
   // Surface the API's echoed model id, falling back to the configured OpenAI model label.
-  return { text: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: resolvedModel };
+  const choice = j.choices?.[0];
+  return {
+    text: choice?.message?.content ?? '',
+    usage: j.usage,
+    model: resolvedModel,
+    finishReason: choice?.finish_reason,
+    refusal: choice?.message?.refusal ?? undefined,
+  };
 }
