@@ -23,18 +23,20 @@ assert.deepEqual(buildCitations(hits).map(c => [c.source, c.source_version]), hi
 const timing = deepStageTimingFields('planning', 10, 20, 'partial', 'synthetic-correlation', process.env.GIT_SHA);
 assert.deepEqual(Object.keys(timing).sort(), ['correlation_id','duration_ms','outcome','release_id','stage','type']);
 assert.equal(timing.duration_ms, 10); assert.equal(timing.release_id, process.env.GIT_SHA);
+// Allow emulated ARM startup to reach the mock before expiry; this is a cancellation
+// fixture, not a microsecond performance threshold. Production defaults are unchanged.
 const originalFetch = globalThis.fetch;
 let aborted = false, retrievalCalls = 0;
 try {
   globalThis.fetch = async (url, init) => {
     if (String(url).includes('/chat/completions')) return await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => resolve(new Response(JSON.stringify({ choices: [{ message: { content: '{"sub_queries":["synthetic"]}' } }] }))), 200);
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify({ choices: [{ message: { content: '{"sub_queries":["synthetic"]}' } }] }))), 10_000);
       const abort = () => { clearTimeout(timer); aborted = true; reject(init.signal.reason); };
       if (init.signal?.aborted) abort(); else init.signal?.addEventListener('abort', abort, { once: true });
     });
     retrievalCalls++; throw new Error('Unexpected synthetic provider request');
   };
-  const result = await deepRetrieve('synthetic-runtime-query', { rooms: ['memory-exec'], budgetMs: 20 });
+  const result = await deepRetrieve('synthetic-runtime-query', { rooms: ['memory-exec'], budgetMs: 2_000 });
   assert.equal(aborted, true); assert.equal(retrievalCalls, 0);
   assert.equal(result.partial, true); assert.equal(result.answer, PARTIAL_BUDGET_ANSWER);
   assert.deepEqual(result.hits, []); assert.deepEqual(result.citations, []);
