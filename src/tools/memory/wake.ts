@@ -379,12 +379,14 @@ export const WAKE_BRIEF_INBOUND_CAP = 3; // inbound.notes
  * exists there was doubly invisible. The fix is structural, not a bigger allowlist: compute one
  * id-set from EVERY entry available (every type, every source, unsliced) BEFORE any type-specific
  * filtering/capping happens, then filter every downstream list through that same set. */
-export function computeRetractedIds(...entryLists: Array<Array<{ id?: unknown; supersedes?: unknown }>>): Set<string> {
+export function computeRetractedIds(...entryLists: Array<Array<{ id?: unknown; supersedes?: unknown; agent?: unknown }>>): Set<string> {
   const retracted = new Set<string>();
   for (const list of entryLists) {
     for (const e of list) {
       const s = e.supersedes;
-      if (typeof s === 'string' && s.trim()) retracted.add(s.trim());
+      if (typeof s === 'string' && s.trim()) {
+        retracted.add(typeof e.agent === 'string' ? normalizeSupersedesId(s, e.agent) : s.trim());
+      }
     }
   }
   return retracted;

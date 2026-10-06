@@ -9,7 +9,18 @@ import {
   filterWakeDataForAgent,
   filterSupersededWakeData,
   wakeRecordVisibleToAgent,
+  computeRetractedIds,
 } from './wake.js';
+
+test('local retraction sets normalize only the source lane prefix for full and brief current views', () => {
+  const ids = computeRetractedIds([
+    {agent:'cto',supersedes:'cto__old'},
+    {agent:'cto',supersedes:'cro__foreign'},
+  ]);
+  assert.equal(ids.has('old'),true);
+  assert.equal(ids.has('cro__foreign'),true);
+  assert.equal(ids.has('foreign'),false);
+});
 import type { MemoryEntry } from '../../memory/store.js';
 
 const entry = (id: string, extra: Record<string, unknown> = {}): MemoryEntry =>

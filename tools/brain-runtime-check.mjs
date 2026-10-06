@@ -44,7 +44,7 @@ try {
 } finally { globalThis.fetch = originalFetch; }
 
 const { filterSupersededWakeData, buildBriefWake, buildM365LiteWake, readWakeTasks } = await import('../dist/tools/memory/wake.js');
-const { filterSupersededPackData } = await import('../dist/tools/memory/pack.js');
+const { filterSupersededPackData, buildBriefPack } = await import('../dist/tools/memory/pack.js');
 const { getRetractionSnapshot, __setRetractionReadersForTests, __resetRetractionCache } = await import('../dist/memory/retractions.js');
 const { deliverCheckpointBatch } = await import('../dist/tools/memory/checkpoint-delivery.js');
 const { handleBrainSearch } = await import('../dist/tools/kb/brain-search.js');
@@ -68,6 +68,8 @@ assert.equal(packed.status, null); assert.deepEqual(packed.recent, []);
 const prefixedLocal = [{agent:'cto',type:'status',supersedes:'cto__'+old.id}];
 assert.equal(filterSupersededWakeData(full,prefixedLocal,new Set()).pack.status,null);
 assert.equal(filterSupersededPackData({agent:'cto',status:old,corrections:[],decisions:[],recent:[old],count:1},prefixedLocal,new Set()).status,null);
+assert.deepEqual(buildBriefWake(full,[...prefixedLocal,old],new Set()).pack.recent,[]);
+assert.deepEqual(buildBriefPack({agent:'cto',status:old,corrections:[],decisions:[],recent:[old],count:1},[...prefixedLocal,old],new Set()).recent,[]);
 const terminal = Array.from({length:75},(_,i)=>({id:'done-'+i,owner_agent:'cto',status:'done',created_at:'2026-10-06T00:00:00Z'}));
 const active = {id:'old-open',owner_agent:'cto',status:'open',created_at:'2026-01-01T00:00:00Z'};
 const taskResult = await readWakeTasks('cto','cto',5,async opts => [...terminal,active].filter(t=>t.owner_agent===opts.owner_agent&&t.status===opts.status).slice(0,opts.limit));
