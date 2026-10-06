@@ -373,7 +373,7 @@ export async function handleBrainSearch(
         (deep.injection_screen?.attackDetected
           ? ` INJECTION SCREEN flagged a retrieved passage (mode=${deep.injection_screen.mode}).`
           : '') +
-        (deep.partial
+        (deep.partial && !retractionChanged
           ? ' BUDGET: the wall-clock budget ran out before synthesis; pass back `continuation` to resume.'
           : '') +
         (deep.budget_skipped?.length ? ` Skipped for time: ${deep.budget_skipped.join(', ')}.` : ''),
