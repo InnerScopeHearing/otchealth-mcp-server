@@ -498,6 +498,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // AWARE release review needs the registered claims gate on its shipping
+  // connectors. Preserve explicit overrides and all other default lane sets;
+  // execution keeps the existing handler, provider and governance checks.
+  if ((lane === 'cto' || lane === 'developer') && !env.CONNECTOR_TOOLSET) tools.add('claims_check');
   // This handler intentionally accepts only the six authenticated company seats. The shared
   // executive ship set also serves cpo/cco/exec and clo-personal, so keep its public-KB visibility
   // aligned with the handler's exact lane contract instead of exposing it to those seats.
