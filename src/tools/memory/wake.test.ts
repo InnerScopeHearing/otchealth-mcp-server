@@ -159,8 +159,8 @@ test('STANDING_DIRECTIVES carries the four non-negotiables', () => {
 
 test('STANDING_DIRECTIVES contains no em/en dashes (published-string rule)', () => {
   for (const line of STANDING_DIRECTIVES) {
-    assert.ok(!line.includes('—'), `em dash in: ${line}`);
-    assert.ok(!line.includes('–'), `en dash in: ${line}`);
+    assert.ok(!line.includes('-'), `em dash in: ${line}`);
+    assert.ok(!line.includes('-'), `en dash in: ${line}`);
   }
 });
 
@@ -199,7 +199,7 @@ test('buildDoctrinePitfalls: caps each pitfall text length and flags truncation 
   const shared: MemoryEntry[] = [entry('s1', { type: 'pitfall', text: longText })];
   const out = buildDoctrinePitfalls(shared, []);
   assert.ok(out[0]!.text.length < longText.length);
-  assert.ok(out[0]!.text.endsWith('…'));
+  assert.ok(out[0]!.text.endsWith('.'));
 });
 
 test('buildDoctrinePitfalls: empty inputs yield an empty list (no pitfalls is a valid, safe doctrine)', () => {
@@ -211,4 +211,30 @@ test('STANDING_DIRECTIVES leads with Rule #1 (the 20% stop-and-report rule, Matt
   assert.match(first, /RULE #1/);
   assert.match(first, /20% better/);
   assert.match(first, /Rule #1 is in effect/);
+});
+
+
+test('full wake unions cross-store and beyond-slice same-agent retractions while preserving a colliding other-agent ID', () => {
+  const full: any = {
+    agent: 'cfo',
+    pack: { configured: true, status: null, corrections: [{ id: 'collision', type: 'fact', agent: 'cfo' }], decisions: [], recent: [{ id: 'collision', type: 'fact', agent: 'cto' }], count: 2 },
+    memory_records: [{ id: 'old-cross-type', kind: 'memory_record', agent: 'cfo' }, { id: 'cosmos-only', kind: 'memory_record', agent: 'cfo' }],
+    tasks: { configured: true, active: [], counts: {} },
+    inbox: { configured: true, count: 0, preview: [] },
+    inbound: { configured: true, count: 1, sinceMarker: '', notes: [{ id: 'collision', type: 'fact', sender_agent: 'cto' }] },
+    errors: [], doctrine: { definition_of_done: '', pitfalls: [], standing_directives: [] },
+  };
+  const completeFeed = [{ id: 'decision-beyond-cutoff', type: 'decision', agent: 'cfo', supersedes: 'old-cross-type' }];
+  const externalIds = new Set(['cosmos-only', 'collision']);
+  const result = filterSupersededWakeData(full, completeFeed, externalIds);
+  const visibleIds = JSON.stringify(result);
+  assert.equal(visibleIds.includes('old-cross-type'), false, 'cross-type local proof from beyond the output slice must apply');
+  assert.equal(visibleIds.includes('cosmos-only'), false, 'canonical cross-store retraction must apply in full mode');
+  const localOnly = filterSupersededWakeData(full, completeFeed, new Set());
+  assert.equal(JSON.stringify(localOnly).includes('old-cross-type'), false, 'locally proven rows stay retracted if canonical lookup fails open');
+  assert.equal(result.pack.corrections.some((r: any) => r.id === 'collision'), false);
+  assert.equal(result.pack.recent.some((r: any) => r.id === 'collision'), true, 'same bare id on another agent must remain visible');
+  const { buildBriefWake } = await import('./wake.js');
+  const brief = buildBriefWake(full, completeFeed, externalIds) as any;
+  assert.equal(brief.inbound.notes.some((r: any) => r.id === 'collision'), true, 'brief mode must retain another agent\'s colliding inbound id');
 });

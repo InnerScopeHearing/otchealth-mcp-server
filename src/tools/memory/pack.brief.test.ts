@@ -268,3 +268,22 @@ test('buildBriefPack lets a live correction backfill the slot a retracted one va
   assert.equal(brief.corrections.length, PACK_BRIEF_LIST_CAP, 'expected a live entry to backfill the retracted slot');
   assert.ok(!brief.corrections.some((c: any) => c.id === 'c0'));
 });
+
+
+test('full pack unions canonical cross-store retractions with complete-feed cross-type proof beyond output caps', () => {
+  const data = fullData({
+    corrections: [entry('shared-stale', 'correction'), entry('cosmos-stale', 'correction'), entry('live', 'correction')],
+    decisions: [],
+    recent: [entry('recent-stale', 'fact'), entry('recent-live', 'fact')],
+  });
+  const completeFeed = [
+    entry('decision-outside-surface', 'decision', { supersedes: 'shared-stale' }),
+    entry('fact-outside-surface', 'fact', { supersedes: 'recent-stale' }),
+  ];
+  const filtered = filterSupersededPackData(data, completeFeed, new Set(['cosmos-stale'])) as any;
+  assert.deepEqual(filtered.corrections.map((r: any) => r.id), ['live']);
+  assert.deepEqual(filtered.recent.map((r: any) => r.id), ['recent-live']);
+  const localOnly = filterSupersededPackData(data, completeFeed, new Set()) as any;
+  assert.deepEqual(localOnly.corrections.map((r: any) => r.id), ['cosmos-stale', 'live']);
+  assert.deepEqual(localOnly.recent.map((r: any) => r.id), ['recent-live']);
+});

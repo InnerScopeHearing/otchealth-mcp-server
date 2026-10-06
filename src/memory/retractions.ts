@@ -1,5 +1,5 @@
 /**
- * RETRACTION FILTERING — a belief we have RETRACTED must not come back as a live truth.
+ * RETRACTION FILTERING - a belief we have RETRACTED must not come back as a live truth.
  *
  * ============================ THE BUG THIS FIXES (found live, 2026-07-13) ============================
  * `supersedes` was only ever honoured in `wake` (and only on type==='correction'). Retrieval ignored
@@ -40,6 +40,29 @@ let cache: {
   /** True when at least one source failed to load, so this cache may be MISSING retractions. */
   degraded: boolean;
 } | null = null;
+let refreshInFlight: Promise<void> | null = null;
+
+type RetractionRows = Array<{ agent?: unknown; supersedes?: unknown }>;
+type RetractionReaders = { shared: () => Promise<RetractionRows>; memory: () => Promise<RetractionRows> };
+const defaultReaders: RetractionReaders = {
+  shared: async () => await readSharedAll(),
+  memory: async () => await queryDocs(
+    'memory',
+    "SELECT c.agent, c.supersedes FROM c WHERE c.type = 'memory' AND IS_DEFINED(c.supersedes)",
+    [],
+    // Keep the supersedes-only projection bounded but large enough to avoid reopening retractions
+    // beyond the old 500-row cap; agent is required for collision-safe lane grouping.
+    { max: 5000 },
+  ) as RetractionRows,
+};
+let readers = defaultReaders;
+
+export interface RetractionSnapshot {
+  /** Lane-scoped retractions and their verification state captured from the same cache revision. */
+  byAgent: Map<string, Set<string>>;
+  /** False means at least one authoritative retraction source could not be read. */
+  verified: boolean;
+}
 
 /** doc ids are `{agent}__{entryId}` (semantic.mjs docId). Recover the entry id. Pure. */
 export function entryIdFromDocId(docId: unknown): string {
@@ -173,6 +196,18 @@ export async function retractedIdsByAgent(): Promise<Map<string, Set<string>>> {
   return cache?.byAgent ?? new Map();
 }
 
+/** Return the lane-scoped map and its completeness status as one atomic snapshot.
+ * The defensive copy prevents callers from changing cache state after the status was captured. */
+export async function getRetractionSnapshot(): Promise<RetractionSnapshot> {
+  await refreshCache();
+  const current = cache;
+  const byAgent = new Map<string, Set<string>>();
+  if (current) {
+    for (const [agent, ids] of current.byAgent) byAgent.set(agent, new Set(ids));
+  }
+  return { byAgent, verified: current ? !current.degraded : false };
+}
+
 /** Shared cache-fill for retractedIds/retractedIdsForAgent -- one fetch of both stores serves both
  * the bare fleet-wide Set and the per-agent grouping. FAIL-OPEN throughout: a failed fetch leaves
  * whatever was already collected (possibly nothing) rather than throwing. */
@@ -181,7 +216,18 @@ async function refreshCache(): Promise<void> {
   // A degraded cache expires far sooner: it was built while a source was down and may be missing
   // retractions, so we retry rather than trusting it for the full TTL.
   if (cache && now - cache.at < (cache.degraded ? DEGRADED_RETRY_MS : TTL_MS)) return;
+  if (refreshInFlight) return refreshInFlight;
 
+  const pending = loadRetractionCache(now);
+  refreshInFlight = pending;
+  try {
+    await pending;
+  } finally {
+    if (refreshInFlight === pending) refreshInFlight = null;
+  }
+}
+
+async function loadRetractionCache(now: number): Promise<void> {
   const ids = new Set<string>();
   const byAgent = new Map<string, Set<string>>();
   const merge = (m: Map<string, Set<string>>) => {
@@ -198,7 +244,7 @@ async function refreshCache(): Promise<void> {
   // module can make, and it would be made on the basis of a network error. See the cache write below.
   let degraded = false;
   try {
-    const rows = await readSharedAll();
+    const rows = await readers.shared();
     for (const id of collectRetracted(rows)) ids.add(id);
     merge(collectRetractedByAgent(rows));
   } catch {
@@ -206,18 +252,7 @@ async function refreshCache(): Promise<void> {
   }
   // Cosmos memory-of-record (memory_write can declare supersedes since 2026-07-13).
   try {
-    const rows = await queryDocs(
-      'memory',
-      "SELECT c.agent, c.supersedes FROM c WHERE c.type = 'memory' AND IS_DEFINED(c.supersedes)",
-      [],
-      // Was {max:500}: at fleet scale that silently TRUNCATES the retracted set, re-opening the exact
-      // rank-#1-retracted-belief bug this module exists to close (a superseded id past #500 would no
-      // longer be filtered). Lift to 5000 (a projection of two tiny fields over the supersedes-bearing
-      // subset only, so it stays cheap). `agent` was added to the projection alongside `supersedes`
-      // (review finding, 2026-07-30) so the by-agent grouping below can be built from the SAME query
-      // rather than a second one.
-      { max: 5000 },
-    );
+    const rows = await readers.memory();
     const typed = rows as Array<{ agent?: unknown; supersedes?: unknown }>;
     for (const id of collectRetracted(typed)) ids.add(id);
     merge(collectRetractedByAgent(typed));
@@ -225,7 +260,9 @@ async function refreshCache(): Promise<void> {
     degraded = true;
   }
 
-  // NEVER let a failed load DROP a retraction we already knew about.
+  // NEVER let a load DROP a retraction we already knew about, including a local noteRetraction
+  // made while either read was pending. Retractions are append-only proof; retaining one briefly
+  // can hide a stale row, while dropping one can surface a known-retracted claim.
   //
   // Before this, a transient failure on either source still installed the resulting (empty or
   // partial) set as the authoritative cache for the full TTL. "Nothing has been retracted" is the
@@ -238,7 +275,7 @@ async function refreshCache(): Promise<void> {
   // Union, never replace: anything newly learned is added, and everything previously known is kept.
   // Over-retracting (holding a stale retraction slightly too long) merely hides a belief;
   // under-retracting resurfaces a known-false one. The asymmetry is deliberate.
-  if (degraded && cache) {
+  if (cache) {
     for (const id of cache.ids) ids.add(id);
     merge(cache.byAgent);
   }
@@ -268,4 +305,25 @@ export function noteRetraction(agent: unknown, supersedes: unknown): void {
 /** Test seam: drop the cache so one test never sees another test's retractions. */
 export function __resetRetractionCache(): void {
   cache = null;
+  refreshInFlight = null;
+  readers = defaultReaders;
+}
+
+/** Test seam for exercising atomic snapshot disclosure without making live backend calls. */
+export function __seedRetractionCacheForTests(
+  byAgent: Map<string, Set<string>>,
+  degraded: boolean,
+  ageMs = 0,
+): void {
+  const copy = new Map<string, Set<string>>();
+  for (const [agent, ids] of byAgent) copy.set(agent, new Set(ids));
+  cache = { at: Date.now() - ageMs, ids: new Set([...copy.values()].flatMap((ids) => [...ids])), byAgent: copy, degraded };
+  refreshInFlight = null;
+}
+
+/** Test seam: source failures must be deterministic and never depend on live credentials. */
+export function __setRetractionReadersForTests(next: RetractionReaders): void {
+  readers = next;
+  cache = null;
+  refreshInFlight = null;
 }

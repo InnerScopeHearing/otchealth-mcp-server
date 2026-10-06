@@ -16,15 +16,15 @@ type TaskStatus = (typeof TASK_STATUSES)[number];
 import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
 import { isConfigured as inboxConfigured, readMessages } from '../../agentstate/queue.js';
 import { isM365StaticAuth } from '../../server/request-context.js';
-import { retractedIdsForAgent } from '../../memory/retractions.js';
+import { retractedIdsForAgent, normalizeSupersedesId } from '../../memory/retractions.js';
 import { resolveAgentReadScope } from './agent-scope.js';
 
 /**
- * wake — ONE federated boot call for any agent on any platform. Composes, server-side, everything
+ * wake - ONE federated boot call for any agent on any platform. Composes, server-side, everything
  * a waking agent previously had to remember to fetch across 5+ separate calls (and demonstrably
- * forgot to — see memory record m_mrikfrv1_60d479d6, finding F1): the shared-feed pack
+ * forgot to - see memory record m_mrikfrv1_60d479d6, finding F1): the shared-feed pack
  * (status + corrections + decisions), the Cosmos memory-of-record, the agent's ACTIVE work-ledger
- * tasks, an inbox PEEK (never drains — draining stays an explicit inbox_read act), and unreconciled
+ * tasks, an inbox PEEK (never drains - draining stays an explicit inbox_read act), and unreconciled
  * cross-agent inbound notes. Each subsystem is fetched in parallel and error-isolated: one
  * unconfigured/failing store degrades to a per-section error string instead of blanking the wake.
  * (W1-6 audit, 2026-07-17: re-verified every sub-read below is an immediately-invoked async IIFE
@@ -33,7 +33,7 @@ import { resolveAgentReadScope } from './agent-scope.js';
  * await chain was found, so no change was needed here.)
  *
  * Size discipline (finding F6, memory_pack ~70KB JIT-offloads): corrections are superseded-collapsed
- * (a correction referenced by a newer correction's `supersedes` is dropped — the newer one IS the
+ * (a correction referenced by a newer correction's `supersedes` is dropped - the newer one IS the
  * current truth), every record's text is capped (id retained so the full record is one
  * memory_search/task_get away), and per-section counts are bounded.
  *
@@ -58,7 +58,7 @@ export function collapseSuperseded<T extends { id: string }>(entries: T[]): T[] 
 export function capText<T extends Record<string, unknown>>(rec: T, cap = TEXT_CAP): T {
   const text = rec['text'];
   if (typeof text !== 'string' || text.length <= cap) return rec;
-  return { ...rec, text: `${text.slice(0, cap)} …[truncated ${text.length - cap} chars — fetch full record by id]`, truncated: true };
+  return { ...rec, text: `${text.slice(0, cap)} .[truncated ${text.length - cap} chars - fetch full record by id]`, truncated: true };
 }
 
 const ACTIVE_STATUSES: TaskStatus[] = ['open', 'claimed', 'in_progress', 'blocked'];
@@ -67,7 +67,7 @@ const ACTIVE_STATUSES: TaskStatus[] = ['open', 'claimed', 'in_progress', 'blocke
 // wake() is every agent's first call on any platform, so it is the natural place to hand back
 // standing operating doctrine alongside state: the Definition of Done, the pitfalls most likely to
 // repeat, and the non-negotiable standing directives. ADDITIVE ONLY: sourced from data wake ALREADY
-// fetches (the shared feed + the Cosmos memory-of-record) — no new store, no new network fetch, and
+// fetches (the shared feed + the Cosmos memory-of-record) - no new store, no new network fetch, and
 // no change to any existing wake field.
 const DOCTRINE_PITFALL_CAP = 8;
 const DOCTRINE_TEXT_CAP = 220;
@@ -102,7 +102,7 @@ export interface Doctrine {
 function toDoctrinePitfall(rec: Record<string, unknown>, source: DoctrinePitfall['source']): DoctrinePitfall | null {
   const text = typeof rec['text'] === 'string' ? rec['text'].trim() : '';
   if (!text) return null;
-  const capped = text.length > DOCTRINE_TEXT_CAP ? `${text.slice(0, DOCTRINE_TEXT_CAP)}…` : text;
+  const capped = text.length > DOCTRINE_TEXT_CAP ? `${text.slice(0, DOCTRINE_TEXT_CAP)}.` : text;
   return { id: typeof rec['id'] === 'string' ? rec['id'] : '', text: capped, source };
 }
 
@@ -177,6 +177,7 @@ interface WakeTasks {
   configured: boolean;
   active: Record<string, unknown>[];
   counts: Record<string, number>;
+  counts_scope?: 'bounded_active_status_samples';
 }
 interface WakeInbox {
   configured: boolean;
@@ -231,7 +232,7 @@ export function boundValue(value: unknown, depth: number, textCap: number = M365
   if (depth > M365_LITE_MAX_DEPTH) return value;
   if (typeof value === 'string') {
     if (value.length <= textCap) return value;
-    return `${value.slice(0, textCap)} …[truncated ${value.length - textCap} chars]`;
+    return `${value.slice(0, textCap)} .[truncated ${value.length - textCap} chars]`;
   }
   if (Array.isArray(value)) {
     return value.slice(0, M365_LITE_MAX_ARRAY_ITEMS).map((v) => boundValue(v, depth + 1, textCap));
@@ -484,7 +485,7 @@ export function buildBriefWake(
 
   const notRetracted = (r: Record<string, unknown>) => {
     const id = r['id'];
-    return !(typeof id === 'string' && retractedIds.has(id));
+    return !(typeof id === 'string' && wakeRecordBelongsToAgent(r, full.agent) && retractedIds.has(id));
   };
 
   // corrections/decisions are sourced from `mine` (type-filtered), NOT from full.pack.corrections/
@@ -506,8 +507,8 @@ export function buildBriefWake(
     .slice(0, WAKE_BRIEF_LIST_CAP)
     .map(boundNonNull);
   const memory_records = full.memory_records.filter(notRetracted).slice(0, WAKE_BRIEF_MEMORY_CAP).map(boundNonNull);
-  const active = full.tasks.active.slice(0, WAKE_BRIEF_TASK_CAP).map(boundNonNull);
-  const preview = (full.inbox.preview as Record<string, unknown>[]).slice(0, WAKE_BRIEF_INBOX_CAP).map(boundNonNull);
+  const active = full.tasks.active.filter(notRetracted).slice(0, WAKE_BRIEF_TASK_CAP).map(boundNonNull);
+  const preview = (full.inbox.preview as Record<string, unknown>[]).filter(notRetracted).slice(0, WAKE_BRIEF_INBOX_CAP).map(boundNonNull);
   // inbound notes ARE shared-feed MemoryEntry rows (unlike inbox.preview, which is a queue message
   // with no `supersedes` contract), so they must pass through the same global retraction filter --
   // review finding, 2026-07-30: this list previously skipped notRetracted entirely.
@@ -520,7 +521,7 @@ export function buildBriefWake(
   // 2026-07-30: this previously bypassed notRetracted entirely and could return a known-stale
   // status as current truth even while the SAME id was filtered out of every other section.
   const statusId = full.pack.status?.['id'];
-  const statusRetracted = typeof statusId === 'string' && retractedIds.has(statusId);
+  const statusRetracted = typeof statusId === 'string' && wakeRecordBelongsToAgent(full.pack.status ?? {}, full.agent) && retractedIds.has(statusId);
   const status = full.pack.status && !statusRetracted ? boundNonNull(full.pack.status) : null;
 
   // doctrine.pitfalls is built upstream (buildDoctrine, shared with full mode) from its own
@@ -558,20 +559,35 @@ export async function readWakeTasks(
   taskLimit: number,
   readTasks: typeof listTasks = listTasks,
 ): Promise<WakeTasks> {
-  const rows = await readTasks({
-    owner_agent: agent,
-    limit: 50,
-    exclude_personal_legal: !canReadPersonalTasks(callerAgent),
-  });
+  // Filter active status in storage before each bounded query limit. A single newest-50 query
+  // across all statuses lets recent terminal rows hide older work from wake().
+  const statusRows = await Promise.all(
+    ACTIVE_STATUSES.map(async (status) => ({
+      status,
+      rows: await readTasks({
+        owner_agent: agent,
+        status,
+        limit: 50,
+        exclude_personal_legal: !canReadPersonalTasks(callerAgent),
+      }),
+    })),
+  );
   // Defense against legacy/malformed adapters. Hidden rows cannot affect counts or previews.
-  const visible = rows.filter((task) => taskVisibleToCaller(task, callerAgent));
+  const visible = statusRows.flatMap(({ status, rows }) =>
+    rows.filter((task) =>
+      task.status === status &&
+      task.owner_agent === agent &&
+      taskVisibleToCaller(task, callerAgent),
+    ),
+  );
   const counts: Record<string, number> = {};
   for (const task of visible) counts[task.status] = (counts[task.status] ?? 0) + 1;
   const active = visible
     .filter((task) => (ACTIVE_STATUSES as string[]).includes(String(task.status)))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .slice(0, taskLimit)
     .map((task) => capText(task as unknown as Record<string, unknown>, 600));
-  return { configured: true, active, counts };
+  return { configured: true, active, counts, counts_scope: 'bounded_active_status_samples' };
 }
 
 const PERSONAL_WAKE_LANE = 'clo-personal';
@@ -614,7 +630,19 @@ export function filterWakeDataForAgent(full: WakeFullData): WakeFullData {
  * after provenance filtering, so only corrections already authorized for this caller can affect
  * its view. It never inspects record text.
  */
-export function filterSupersededWakeData(full: WakeFullData): WakeFullData {
+function wakeRecordBelongsToAgent(record: Record<string, unknown>, agent: string): boolean {
+  // Source ownership is decisive. A message addressed to this lane still belongs to its sender.
+  for (const field of ['agent', 'owner_agent', 'from', 'sender_agent', 'by', 'created_by']) {
+    if (typeof record[field] === 'string') return record[field] === agent;
+  }
+  return true; // Legacy records without ownership were already authorized by provenance filtering.
+}
+
+export function filterSupersededWakeData(
+  full: WakeFullData,
+  localRetractionEntries: Record<string, unknown>[] = [],
+  externalRetractedIds?: Set<string>,
+): WakeFullData {
   const collections: Record<string, unknown>[][] = [
     full.pack.corrections,
     full.pack.decisions,
@@ -624,12 +652,16 @@ export function filterSupersededWakeData(full: WakeFullData): WakeFullData {
     full.inbox.preview as Record<string, unknown>[],
     full.inbound.notes as Record<string, unknown>[],
   ];
-  const corrections = collections.flat().filter((record) => record['type'] === 'correction' || record['kind'] === 'correction');
-  const supersededIds = computeRetractedIds(corrections);
+  const sameAgentEntries = [...collections.flat(), ...localRetractionEntries].filter((record) => wakeRecordBelongsToAgent(record, full.agent));
+  const supersededIds = computeRetractedIds(sameAgentEntries.map((record) => ({
+    ...record,
+    supersedes: typeof record['supersedes'] === 'string' ? normalizeSupersedesId(record['supersedes'], full.agent) : record['supersedes'],
+  })));
+  if (externalRetractedIds) for (const id of externalRetractedIds) supersededIds.add(id);
   if (!supersededIds.size) return full;
   const current = (record: Record<string, unknown>) => {
     const id = record['id'];
-    return !(typeof id === 'string' && supersededIds.has(id));
+    return !(typeof id === 'string' && wakeRecordBelongsToAgent(record, full.agent) && supersededIds.has(id));
   };
   const status = full.pack.status && current(full.pack.status) ? full.pack.status : null;
   return {
@@ -768,7 +800,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
 
         const inboxP = (async () => {
           if (!inboxConfigured()) return { configured: false, count: 0, preview: [] as unknown[] };
-          const msgs = await readMessages(agent, { max: 8, ack: false }); // PEEK — wake never drains
+          const msgs = await readMessages(agent, { max: 8, ack: false }); // PEEK - wake never drains
           const visible = msgs.filter((m) => wakeRecordVisibleToAgent(m as unknown as Record<string, unknown>, agent));
           return { configured: true, count: visible.length, preview: visible.slice(0, 5).map((m) => capText(m as unknown as Record<string, unknown>, 400)) };
         })();
@@ -783,7 +815,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
 
         // Doctrine pitfalls (shared-feed half): the shared feed's own type='pitfall' rows,
         // superseded-collapsed with the same helper wake already uses for corrections. Reuses
-        // sharedFeedP above — no extra network fetch.
+        // sharedFeedP above - no extra network fetch.
         const doctrinePitfallsSharedP = (async () => {
           const mine = (await sharedFeedP).filter((r) => r.agent === agent && wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent));
           return collapseSuperseded(mine.filter((r) => r.type === 'pitfall'));
@@ -805,21 +837,14 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
 
         const packV = take(pack, 'pack', { configured: false, status: null, corrections: [], decisions: [], recent: [], count: 0 });
         const memV = take(memory, 'memory_records', { configured: false, records: [] });
-        const tasksV = take(tasks, 'tasks', { configured: false, active: [], counts: {} });
+        const tasksV = take(tasks, 'tasks', {
+          configured: false, active: [], counts: {}, counts_scope: 'bounded_active_status_samples' as const,
+        });
         const inboxV = take(inbox, 'inbox', { configured: false, count: 0, preview: [] });
         const inboundV = take(inbound, 'inbound', { configured: false, count: 0, sinceMarker: '', notes: [] });
         const doctrinePitfallsSharedV = take(doctrinePitfallsShared, 'doctrine_pitfalls', [] as MemoryEntry[]);
 
-        const activeCount = (tasksV as { active: unknown[] }).active.length;
-        const summaryBits = [
-          `pack ${(packV as { count: number }).count}`,
-          `mem ${(memV as { records: unknown[] }).records.length}`,
-          `tasks ${activeCount} active`,
-          `inbox ${(inboxV as { count: number }).count}`,
-          `inbound ${(inboundV as { count: number }).count}`,
-        ];
-
-        // Doctrine pitfalls (Cosmos half): reuses the memory_records ALREADY fetched above (memV) —
+        // Doctrine pitfalls (Cosmos half): reuses the memory_records ALREADY fetched above (memV) -
         // no extra fetch. ADDITIVE: this only READS memV.records; it never changes what is returned
         // under the existing `memory_records` field.
         const cosmosPitfalls = (memV as { records: Record<string, unknown>[] }).records.filter(
@@ -845,25 +870,15 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         // (m365Lite/brief themselves are computed earlier now, above packP/memP, so the memory_limit
         // widening above can see `brief` -- see that call site's own comment.)
         //
-        // sharedFeedP is already resolved by this point (awaited inside packP above via
-        // Promise.allSettled); re-awaiting it here is instant, not a second network fetch. Only
-        // done when brief is actually requested, so the non-brief path pays nothing extra.
-        //
-        // BOTH awaits below are wrapped individually (review finding, 2026-07-30): re-awaiting an
-        // already-REJECTED sharedFeedP throws again, and that throw was previously unguarded here --
-        // bypassing wake's own documented per-section error isolation (every other section degrades
-        // via Promise.allSettled + take() to a fallback with an entry in `errors`; this bare await
-        // would instead reject the WHOLE wake() call, but only when brief:true). Each is now caught
-        // independently and degrades to `undefined`, which buildBriefWake already handles
-        // gracefully (rawMine falls back to the already-capped union; externalRetractedIds simply
-        // contributes nothing extra to the union, computeRetractedIds alone still runs).
+        // Reuse the full same-agent shared feed as local proof in both full and brief modes. The
+        // provenance gate is applied before these entries can contribute a retraction edge.
         let rawMine: Record<string, unknown>[] | undefined;
-        if (brief && sharedConfigured()) {
+        if (sharedConfigured()) {
           try {
             rawMine = (await sharedFeedP)
               .filter((r) => r.agent === agent && wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent)) as unknown as Record<string, unknown>[];
           } catch (e) {
-            errors.push(`brief_raw_feed: ${e instanceof Error ? e.message : String(e)}`);
+            errors.push(`shared_feed_retractions: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
         // The canonical, AGENT-SCOPED retraction set (memory/retractions.ts's retractedIdsForAgent,
@@ -880,23 +895,31 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         // see buildBriefWake's header for why replacing risks un-retracting something the payload
         // itself already proves is stale.
         let externalRetractedIds: Set<string> | undefined;
-        if (brief) {
-          try {
-            externalRetractedIds = await retractedIdsForAgent(agent);
-          } catch (e) {
-            errors.push(`brief_retracted_ids: ${e instanceof Error ? e.message : String(e)}`);
-          }
+        try {
+          externalRetractedIds = await retractedIdsForAgent(agent);
+        } catch (e) {
+          errors.push(`retracted_ids: ${e instanceof Error ? e.message : String(e)}`);
         }
+        const currentData = filterSupersededWakeData(fullData, rawMine, externalRetractedIds);
         const data = m365Lite
-          ? buildM365LiteWake(fullData)
+          ? buildM365LiteWake(currentData)
           : brief
-            ? buildBriefWake(fullData, rawMine, externalRetractedIds, recentLimit)
-            : fullData;
+            ? buildBriefWake(currentData, rawMine, externalRetractedIds, recentLimit)
+            : currentData;
         const modeTag = m365Lite ? ' [M365-lite]' : brief ? ' [brief]' : '';
+        const returnedActive = (data as { tasks?: { active?: unknown[] } }).tasks?.active;
+        const activeCount = Array.isArray(returnedActive) ? returnedActive.length : 0;
+        const summaryBits = [
+          `pack ${(packV as { count: number }).count}`,
+          `mem ${(memV as { records: unknown[] }).records.length}`,
+          `tasks showing ${activeCount} active`,
+          `inbox ${(inboxV as { count: number }).count}`,
+          `inbound ${(inboundV as { count: number }).count}`,
+        ];
 
         return {
           data,
-          summary: `wake(${agent})${modeTag}: ${summaryBits.join(' · ')}${errors.length ? ` · ${errors.length} section error(s)` : ''}.${activeCount ? ` ⚠ ${activeCount} active task(s) awaiting you.` : ''}`,
+          summary: `wake(${agent})${modeTag}: ${summaryBits.join(' � ')} � counts are bounded active-status samples${errors.length ? ` � ${errors.length} section error(s)` : ''}.${activeCount ? ` ? showing ${activeCount} active task(s) awaiting you.` : ''}`,
         };
       },
     },
