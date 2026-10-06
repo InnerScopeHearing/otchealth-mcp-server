@@ -107,6 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           docker buildx build --platform linux/amd64,linux/arm64 --push \
+            --build-arg "GIT_SHA=$GITHUB_SHA" \
             --provenance=false --sbom=false \
             --tag "${{ steps.ecr.outputs.registry }}/otchealth-mcp-gateway:${{ steps.tag.outputs.tag }}" .
 

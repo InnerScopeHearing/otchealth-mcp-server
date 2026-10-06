@@ -53,6 +53,11 @@ interface ProviderTarget {
 
 export interface EmbeddingsTarget extends ProviderTarget {}
 
+export interface ProviderRequestBudget {
+  deadlineAtMs?: number;
+  signal?: AbortSignal;
+}
+
 export function embeddingsTarget(): EmbeddingsTarget | null {
   const e = loadEnv();
   if (e.EMBEDDINGS_PROVIDER === 'openai') {
@@ -182,13 +187,14 @@ export function chatConfigured(): boolean {
 async function postToTarget<T>(
   target: ProviderTarget,
   body: Record<string, unknown>,
-  budget?: { timeoutMs?: number; retries?: number },
+  budget?: { timeoutMs?: number; retries?: number; deadlineAtMs?: number; signal?: AbortSignal },
 ): Promise<T> {
   const payload = target.model ? { ...body, model: target.model } : body;
   const res = await fetchWithBudget(target.url, {
     method: 'POST',
     headers: target.headers,
     body: JSON.stringify(payload),
+    signal: budget?.signal,
   }, budget ?? {});
   const text = await res.text();
   let data: unknown;
@@ -221,15 +227,15 @@ export function chatRequestBudget(env: { FOUNDRY_CHAT_TIMEOUT_MS?: number } = lo
 /** POST to a fully-formed embeddings target. Kept as a thin named wrapper (rather than calling
  *  postToTarget directly at each call site) so embed()/embedBatch() below read exactly as they did
  *  before this refactor. */
-async function postEmbeddings<T>(target: EmbeddingsTarget, body: Record<string, unknown>): Promise<T> {
-  return postToTarget<T>(target, body);
+async function postEmbeddings<T>(target: EmbeddingsTarget, body: Record<string, unknown>, budget?: ProviderRequestBudget): Promise<T> {
+  return postToTarget<T>(target, body, budget);
 }
 
 /** Embed a single string with text-embedding-3-large. Returns the vector, or null when unconfigured. */
-export async function embed(text: string): Promise<number[] | null> {
+export async function embed(text: string, budget?: ProviderRequestBudget): Promise<number[] | null> {
   const target = embeddingsTarget();
   if (!target) return null;
-  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: text });
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: text }, budget);
   // Cost visibility for OpenAI-direct calls (target.model is set only on that active path).
   // Never throws (recordOpenAIUsage's own contract); instrumentation must not break embeddings.
   if (target.model) {
@@ -389,6 +395,10 @@ export async function chat(
     serviceTier?: 'flex' | 'default';
     /** Stable OpenAI prompt-cache key supplied by the caller. */
     promptCacheKey?: string;
+    /** Caller-owned absolute deadline, enforced across retries and response-body reads. */
+    deadlineAtMs?: number;
+    /** Caller cancellation signal, composed with the provider timeout. */
+    signal?: AbortSignal;
   },
 ): Promise<{ text: string; usage?: unknown; model: string }> {
   const target = chatTarget(opts?.tier, opts?.deployment);
@@ -460,7 +470,11 @@ export async function chat(
   // new one).
   let requestedServiceTier = opts?.serviceTier;
   try {
-    j = await postToTarget<ChatCompletionResponse>(target, body, chatRequestBudget());
+    j = await postToTarget<ChatCompletionResponse>(target, body, {
+      ...chatRequestBudget(),
+      deadlineAtMs: opts?.deadlineAtMs,
+      signal: opts?.signal,
+    });
   } catch (err) {
     // NARROW on purpose: only fall back when (a) THIS request actually carried
     // service_tier:'flex' -- never touch a plain rate-limit 429 on a call that never requested flex
@@ -478,7 +492,11 @@ export async function chat(
       // for a worst case of 2 + 2 = 4 physical attempts total. That is one additional LOGICAL retry
       // layered on top of the existing budget, not a multiplied ladder: a call that never requests
       // flex, or a flex call that fails for any other reason, keeps today's worst case of 2.
-      j = await postToTarget<ChatCompletionResponse>(target, fallbackBody, chatRequestBudget());
+      j = await postToTarget<ChatCompletionResponse>(target, fallbackBody, {
+        ...chatRequestBudget(),
+        deadlineAtMs: opts?.deadlineAtMs,
+        signal: opts?.signal,
+      });
       requestedServiceTier = undefined;
     } else {
       throw err;

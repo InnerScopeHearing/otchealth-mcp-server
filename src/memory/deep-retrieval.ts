@@ -58,11 +58,73 @@
  * a redeploy. When off, brain-search.ts never calls into this module at all for mode:'deep' — it
  * just runs the fast path, so 'deep' behaves EXACTLY like 'fast'.
  */
-import { chat, chatConfigured, type ChatMessage } from '../azure/foundry.js';
+import { chat, chatConfigured, type ChatMessage, type ProviderRequestBudget } from '../azure/foundry.js';
 import { hybridSearch, searchConfigured, type KbHit } from '../search/index.js';
 import { rrfFuse, type FusedHit } from './rrf.js';
 import { retractedIdsByAgent, filterRetractedByAgent } from './retractions.js';
 import { retrievalShield, type GuardMode } from '../safety/auto-guard.js';
+import { logger } from '../audit/logger.js';
+import { currentCorrelationId } from '../server/request-context.js';
+
+// Stage events use the existing structured application logger. Keep the schema deliberately
+// content-free: stage/outcome are closed enums, duration is a finite non-negative number, and no
+// query, passage, room, caller, provider error, or generated text can enter this event.
+export type DeepStage = 'planning' | 'retrieval' | 'refinement' | 'synthesis';
+export type DeepStageOutcome = 'success' | 'error' | 'partial';
+
+export function deepStageTimingFields(
+  stage: DeepStage,
+  startedAt: number,
+  endedAt: number,
+  outcome: DeepStageOutcome,
+  correlationId = 'unknown',
+  releaseId = 'unknown',
+): Readonly<{ type: 'brain_deep_stage_timing'; stage: DeepStage; duration_ms: number; outcome: DeepStageOutcome; correlation_id: string; release_id: string }> {
+  const rawDuration = endedAt - startedAt;
+  const duration = Number.isFinite(rawDuration) ? Math.max(0, Math.round(rawDuration)) : 0;
+  const safeCorrelationId = /^[A-Za-z0-9._:-]{1,128}$/.test(correlationId) ? correlationId : 'unknown';
+  const safeReleaseId = /^[a-f0-9]{7,64}$/i.test(releaseId) ? releaseId : 'unknown';
+  return {
+    type: 'brain_deep_stage_timing',
+    stage,
+    duration_ms: duration,
+    outcome,
+    correlation_id: safeCorrelationId,
+    release_id: safeReleaseId,
+  };
+}
+
+export function emitDeepStageTiming(
+  stage: DeepStage,
+  startedAt: number,
+  endedAt: number,
+  outcome: DeepStageOutcome,
+  write: (fields: ReturnType<typeof deepStageTimingFields>) => void = (fields) => logger.info(fields, 'brain_deep_stage_timing'),
+): void {
+  try {
+    const gitSha = process.env.GIT_SHA ?? '';
+    write(deepStageTimingFields(stage, startedAt, endedAt, outcome, currentCorrelationId(), gitSha));
+  } catch {
+    // Observability must never change retrieval behavior.
+  }
+}
+
+function recordSkippedDeepStage(stage: DeepStage): void {
+  const at = performance.now();
+  emitDeepStageTiming(stage, at, at, 'partial');
+}
+
+async function timedDeepStage<T>(stage: DeepStage, run: () => Promise<{ value: T; outcome?: DeepStageOutcome }>): Promise<T> {
+  const startedAt = performance.now();
+  try {
+    const result = await run();
+    emitDeepStageTiming(stage, startedAt, performance.now(), result.outcome ?? 'success');
+    return result.value;
+  } catch (error) {
+    emitDeepStageTiming(stage, startedAt, performance.now(), 'error');
+    throw error;
+  }
+}
 
 // ---- constants ────────────────────────────────────────────────────────────────────────────────
 
@@ -182,7 +244,10 @@ export interface Citation {
   n: number;
   source: string;
   path?: string;
+  variants?: string[];
   id?: unknown;
+  type?: string;
+  source_version?: string;
 }
 
 export interface DeepRetrieveResult {
@@ -372,9 +437,10 @@ export function dedupeById(hits: FusedHit[]): FusedHit[] {
   const seen = new Set<string>();
   const out: FusedHit[] = [];
   for (const h of hits) {
-    const key = typeof h.id === 'string' && h.id
-      ? h.id.includes('__') || !h.agent ? h.id : `${h.agent}__${h.id}`
-      : typeof h.id === 'number' ? String(h.id) : `text:${h.text.slice(0, 200)}`;
+    const versionKey = h.source_version ? `\0version:${h.source_version}` : '';
+    const key = h.source + '\0' + (typeof h.id === 'string' && h.id
+      ? (h.id.includes('__') || !h.agent ? h.id : `${h.agent}__${h.id}`) + versionKey
+      : typeof h.id === 'number' ? String(h.id) + versionKey : `text:${h.text.slice(0, 200)}` + versionKey);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(h);
@@ -388,7 +454,10 @@ export function buildCitations(hits: FusedHit[]): Citation[] {
   return hits.map((h, i) => {
     const c: Citation = { n: i + 1, source: h.source };
     if (h.path) c.path = h.path;
+    if (h.variants?.length) c.variants = [...h.variants];
     if (h.id !== undefined) c.id = h.id;
+    if (h.type) c.type = h.type;
+    if (h.source_version) c.source_version = h.source_version;
     return c;
   });
 }
@@ -464,55 +533,68 @@ export function buildSynthesisMessages(query: string, hits: FusedHit[]): ChatMes
 
 /** FAIL-OPEN: the chat provider unconfigured or a chat() failure degrades to a trivial
  *  one-sub-query plan over every allowed room — never throws. */
-async function planQuery(query: string, allowedRooms: string[]): Promise<QueryPlan> {
-  if (!chatConfigured()) return { subQueries: [query], rooms: allowedRooms };
-  try {
-    const res = await chat(buildPlanMessages(query, allowedRooms), { maxTokens: 500, jsonMode: true, tier: 'standard' });
-    return parseQueryPlan(res.text, query, allowedRooms);
-  } catch {
-    return { subQueries: [query], rooms: allowedRooms };
-  }
+function providerDeadline(deadline: number, now: () => number): { deadlineAtMs: number; signal: AbortSignal } {
+  const remainingMs = Math.max(0, Math.floor(deadline - now()));
+  return { deadlineAtMs: Date.now() + remainingMs, signal: AbortSignal.timeout(remainingMs) };
+}
+
+async function planQuery(query: string, allowedRooms: string[], deadline: number, now: () => number): Promise<QueryPlan> {
+  return timedDeepStage('planning', async () => {
+    if (!chatConfigured()) return { value: { subQueries: [query], rooms: allowedRooms }, outcome: 'partial' };
+    try {
+      const res = await chat(buildPlanMessages(query, allowedRooms), { maxTokens: 500, jsonMode: true, tier: 'standard', ...providerDeadline(deadline, now) });
+      return { value: parseQueryPlan(res.text, query, allowedRooms) };
+    } catch {
+      return { value: { subQueries: [query], rooms: allowedRooms }, outcome: 'partial' };
+    }
+  });
 }
 
 /** FAIL-OPEN: the chat provider unconfigured or a chat() failure yields no refinement (the caller
  *  keeps round 1's hits rather than spending a round on a query set that failed to even plan) —
  *  never throws. */
-async function refineSubQueries(query: string, triedSubQueries: string[], resultsSoFar: number): Promise<string[]> {
-  if (!chatConfigured()) return [];
-  try {
-    const res = await chat(buildRefineMessages(query, triedSubQueries, resultsSoFar), {
-      maxTokens: 300,
-      jsonMode: true,
-      tier: 'standard',
-    });
-    return parseRefineResponse(res.text, triedSubQueries);
-  } catch {
-    return [];
-  }
+async function refineSubQueries(query: string, triedSubQueries: string[], resultsSoFar: number, deadline: number, now: () => number): Promise<string[]> {
+  return timedDeepStage('refinement', async () => {
+    if (!chatConfigured()) return { value: [], outcome: 'partial' };
+    try {
+      const res = await chat(buildRefineMessages(query, triedSubQueries, resultsSoFar), {
+        maxTokens: 300,
+        jsonMode: true,
+        tier: 'standard',
+        ...providerDeadline(deadline, now),
+      });
+      return { value: parseRefineResponse(res.text, triedSubQueries) };
+    } catch {
+      return { value: [], outcome: 'partial' };
+    }
+  });
 }
 
 /** FAIL-OPEN: no hits -> a plain "nothing retrieved" note (no LLM call spent). The chat provider
  *  unconfigured or a chat() failure -> a clear "synthesis unavailable" note, with the retrieved
  *  hits still returned by the caller. Never throws. Runs on tier 'high': this is the user-facing
  *  answer, the one step in the pipeline worth the better-quality deployment. */
-async function synthesizeAnswer(query: string, hits: FusedHit[]): Promise<string> {
-  if (hits.length === 0) return NO_CONTEXT_ANSWER;
-  if (!chatConfigured()) return SYNTH_UNAVAILABLE_ANSWER;
-  try {
-    const res = await chat(buildSynthesisMessages(query, hits.slice(0, MAX_SYNTH_HITS)), {
-      maxTokens: 900,
-      tier: 'high',
-    });
-    const text = res.text.trim();
-    return text || SYNTH_UNAVAILABLE_ANSWER;
-  } catch {
-    return SYNTH_UNAVAILABLE_ANSWER;
-  }
+async function synthesizeAnswer(query: string, hits: FusedHit[], deadline: number, now: () => number): Promise<string> {
+  return timedDeepStage('synthesis', async () => {
+    if (hits.length === 0) return { value: NO_CONTEXT_ANSWER, outcome: 'partial' };
+    if (!chatConfigured()) return { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
+    try {
+      const res = await chat(buildSynthesisMessages(query, hits.slice(0, MAX_SYNTH_HITS)), {
+        maxTokens: 900,
+        tier: 'high',
+        ...providerDeadline(deadline, now),
+      });
+      const text = res.text.trim();
+      return text ? { value: text } : { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
+    } catch {
+      return { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
+    }
+  });
 }
 
 // ---- IO: retrieval ─────────────────────────────────────────────────────────────────────────────
 
-type RoomHitList = { room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> };
+type RoomHitList = { room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; variants?: string[]; type?: string; source_version?: string }> };
 
 /**
  * One retrieval round: every (bounded) sub-query runs against every target room in parallel. A
@@ -527,13 +609,14 @@ async function runRetrievalRound(
   rooms: string[],
   top: number,
   includeOps: boolean,
+  requestBudget?: ProviderRequestBudget,
 ): Promise<{ perRoom: RoomHitList[]; searched: string[]; failed: string[] }> {
   const perRoomTop = Math.min(25, Math.max(top, 10));
   const bounded = boundSubQueries(subQueries, rooms.length);
 
   const settled = await Promise.allSettled(
     rooms.map(async (room): Promise<RoomHitList> => {
-      const perSubQuery = await Promise.allSettled(bounded.map((sq) => hybridSearch(room, sq, perRoomTop, { includeOps })));
+      const perSubQuery = await Promise.allSettled(bounded.map((sq) => hybridSearch(room, sq, perRoomTop, { includeOps, ...requestBudget })));
       const lists: Array<{ room: string; hits: KbHit[] }> = [];
       perSubQuery.forEach((s, i) => {
         if (s.status === 'fulfilled' && s.value) lists.push({ room: `sq${i}`, hits: s.value.matches });
@@ -541,7 +624,7 @@ async function runRetrievalRound(
       if (lists.length === 0) throw new Error(`room ${room}: every sub-query failed`);
       // Intra-room fusion across this room's sub-query result lists — reuses the SAME rrfFuse.
       const fused = rrfFuse(lists, perRoomTop);
-      return { room, hits: fused.map((f) => ({ score: f.score, text: f.text, id: f.id, path: f.path, agent: f.agent })) };
+      return { room, hits: fused.map((f) => ({ score: f.score, text: f.text, id: f.id, path: f.path, agent: f.agent, variants: f.variants, type: f.type, source_version: f.source_version })) };
     }),
   );
 
@@ -599,19 +682,43 @@ async function runDeepFlow(
   const failed = new Set<string>();
 
   if (resumed && resumeFrom) {
+    recordSkippedDeepStage('planning');
     subQueries = resumeFrom.subQueries;
     targetRooms = resumeFrom.rooms;
     rounds = resumeFrom.roundsUsed;
-    const round = await runRetrievalRound(subQueries, targetRooms, top, includeOps);
+    if (overBudget()) {
+      return {
+        mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: [], sub_queries: subQueries,
+        rounds_used: rounds, hits: [], rooms_searched: [], partial: true,
+        continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds }, resumed: true,
+      };
+    }
+    const round = await timedDeepStage('retrieval', async () => {
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now));
+      return { value, outcome: value.failed.length ? 'partial' : undefined };
+    });
     pool = [...round.perRoom];
     for (const s of round.searched) searched.add(s);
     for (const f of round.failed) failed.add(f);
   } else {
-    const plan = await planQuery(query, rooms);
+    const plan = await planQuery(query, rooms, deadline, now);
     subQueries = plan.subQueries;
     targetRooms = plan.rooms;
 
-    const round1 = await runRetrievalRound(subQueries, targetRooms, top, includeOps);
+    // A planner that consumed the request's last milliseconds may degrade to the original query,
+    // but must not launch a fresh embedding/search fan-out after its deadline.
+    if (overBudget()) {
+      return {
+        mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: [], sub_queries: subQueries,
+        rounds_used: 0, hits: [], rooms_searched: [], partial: true,
+        continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: 0 },
+      };
+    }
+
+    const round1 = await timedDeepStage('retrieval', async () => {
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now));
+      return { value, outcome: value.failed.length ? 'partial' : undefined };
+    });
     rounds = 1;
     pool = [...round1.perRoom];
     for (const s of round1.searched) searched.add(s);
@@ -625,16 +732,21 @@ async function runDeepFlow(
         // budget left to spend on it. Never silently drop this: disclose the skip explicitly
         // rather than letting the result look identical to "round 1 was rich enough."
         budgetSkipped.push('refine');
+        recordSkippedDeepStage('refinement');
       } else {
-        const refined = await refineSubQueries(query, subQueries, fusedPreview.length);
+        const refined = await refineSubQueries(query, subQueries, fusedPreview.length, deadline, now);
         if (refined.length) {
           subQueries = [...subQueries, ...refined];
           // Refinement is sequential with retrieval. If it consumed the remaining budget, do not
           // start another embedding/search fan-out; the continuation can run the planned queries.
           if (overBudget()) {
             budgetSkipped.push('round-2-retrieval');
+            recordSkippedDeepStage('retrieval');
           } else {
-            const round2 = await runRetrievalRound(refined, targetRooms, top, includeOps);
+            const round2 = await timedDeepStage('retrieval', async () => {
+      const value = await runRetrievalRound(refined, targetRooms, top, includeOps, providerDeadline(deadline, now));
+      return { value, outcome: value.failed.length ? 'partial' : undefined };
+    });
             rounds = 2;
             pool = [...pool, ...round2.perRoom];
             for (const r of round2.searched) searched.add(r);
@@ -656,6 +768,7 @@ async function runDeepFlow(
   // Nothing already computed is discarded -- hits/citations below are the FULL retrieved set, only
   // the narrated answer is replaced with an honest explanation plus a continuation.
   if (overBudget()) {
+    recordSkippedDeepStage('synthesis');
     const result: DeepRetrieveResult = {
       mode: 'deep-agentic',
       answer: PARTIAL_BUDGET_ANSWER,
@@ -681,12 +794,13 @@ async function runDeepFlow(
   // synthesizeAnswer normally, just annotates the result; enforce withholds ONLY the synthesized
   // narrative when a passage is flagged, never the raw hits themselves (returned below regardless).
   const synthHits = hits.slice(0, MAX_SYNTH_HITS);
-  const injectionScreen = await shield(query, synthHits.map((h) => h.text));
+  const injectionScreen = await shield(query, synthHits.map((h) => h.text), providerDeadline(deadline, now));
   // A blocked shield result is already the final safe response and must survive an expired
   // deadline. Otherwise, do not start the paid synthesis call after the shield consumed the rest
-  // of the budget. This remains a soft checkpoint: it does not cancel an in-flight shield call.
+  // of the budget. The remaining provider budget also cancels an in-flight shield request.
   const postShield = postShieldAction(injectionScreen.blocked, overBudget());
   if (postShield === 'partial') {
+    recordSkippedDeepStage('synthesis');
     budgetSkipped.push('synthesis');
     const result: DeepRetrieveResult = {
       mode: 'deep-agentic',
@@ -707,7 +821,26 @@ async function runDeepFlow(
     result.budget_skipped = budgetSkipped;
     return result;
   }
-  const answer = postShield === 'blocked' ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits);
+  if (postShield === 'blocked') recordSkippedDeepStage('synthesis');
+  const answer = postShield === 'blocked' ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits, deadline, now);
+
+  // A provider may abort at the deadline after fetch headers while its response body is still
+  // streaming. Preserve the retrieved, retraction-filtered passages and report the skipped answer
+  // honestly, with the same resumable continuation as the pre-synthesis checkpoint above.
+  if (postShield !== 'blocked' && overBudget()) {
+    const result: DeepRetrieveResult = {
+      mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: buildCitations(hits),
+      sub_queries: subQueries, rounds_used: rounds, hits, rooms_searched: [...searched],
+      partial: true, continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds },
+    };
+    if (resumed) result.resumed = true;
+    if (failed.size) result.rooms_failed = [...failed];
+    if (dropped.length) result.retracted_dropped = dropped;
+    const evidence = injectionScreenEvidence(injectionScreen);
+    if (evidence) result.injection_screen = evidence;
+    result.budget_skipped = [...budgetSkipped, 'synthesis'];
+    return result;
+  }
 
   const result: DeepRetrieveResult = {
     mode: 'deep-agentic',
@@ -740,50 +873,55 @@ async function runDeepFlow(
  * directly) as well as being deepRetrieve's own internal fallback.
  */
 export async function fallbackFastSearch(query: string, rooms: string[], top: number, includeOps: boolean): Promise<DeepRetrieveResult> {
-  try {
-    const perRoomTop = Math.min(25, Math.max(top, 10));
-    const settled = await Promise.allSettled(
-      rooms.map(async (room) => ({ room, res: await hybridSearch(room, query, perRoomTop, { includeOps }) })),
-    );
-    const perRoom: RoomHitList[] = [];
-    const searched: string[] = [];
-    const failed: string[] = [];
-    settled.forEach((s, i) => {
-      if (s.status === 'fulfilled' && s.value.res) {
-        perRoom.push({ room: s.value.room, hits: s.value.res.matches });
-        searched.push(s.value.room);
-      } else {
-        const why = s.status === 'rejected' ? String((s.reason as Error)?.message ?? s.reason).slice(0, 80) : 'empty result';
-        failed.push(`${rooms[i]!}: ${why}`);
-      }
-    });
-    const pool = rrfFuse(perRoom, top * 3);
-    const retracted = await retractedIdsByAgent();
-    const { kept, dropped } = filterRetractedByAgent(pool, retracted);
-    const hits = kept.slice(0, top);
-    const result: DeepRetrieveResult = {
-      mode: 'deep-fallback-fast',
-      answer: SYNTH_UNAVAILABLE_ANSWER,
-      citations: buildCitations(hits),
-      sub_queries: [query],
-      rounds_used: 0,
-      hits,
-      rooms_searched: searched,
-    };
-    if (failed.length) result.rooms_failed = failed;
-    if (dropped.length) result.retracted_dropped = dropped;
-    return result;
-  } catch {
-    return {
-      mode: 'deep-fallback-fast',
-      answer: SYNTH_UNAVAILABLE_ANSWER,
-      citations: [],
-      sub_queries: [query],
-      rounds_used: 0,
-      hits: [],
-      rooms_searched: [],
-    };
-  }
+  return timedDeepStage('retrieval', async () => {
+    try {
+      const perRoomTop = Math.min(25, Math.max(top, 10));
+      const settled = await Promise.allSettled(
+        rooms.map(async (room) => ({ room, res: await hybridSearch(room, query, perRoomTop, { includeOps }) })),
+      );
+      const perRoom: RoomHitList[] = [];
+      const searched: string[] = [];
+      const failed: string[] = [];
+      settled.forEach((s, i) => {
+        if (s.status === 'fulfilled' && s.value.res) {
+          perRoom.push({ room: s.value.room, hits: s.value.res.matches });
+          searched.push(s.value.room);
+        } else {
+          const why = s.status === 'rejected' ? String((s.reason as Error)?.message ?? s.reason).slice(0, 80) : 'empty result';
+          failed.push(`${rooms[i]!}: ${why}`);
+        }
+      });
+      const pool = rrfFuse(perRoom, top * 3);
+      const retracted = await retractedIdsByAgent();
+      const { kept, dropped } = filterRetractedByAgent(pool, retracted);
+      const hits = kept.slice(0, top);
+      const result: DeepRetrieveResult = {
+        mode: 'deep-fallback-fast',
+        answer: SYNTH_UNAVAILABLE_ANSWER,
+        citations: buildCitations(hits),
+        sub_queries: [query],
+        rounds_used: 0,
+        hits,
+        rooms_searched: searched,
+      };
+      if (failed.length) result.rooms_failed = failed;
+      if (dropped.length) result.retracted_dropped = dropped;
+      return { value: result, outcome: failed.length ? 'partial' : undefined };
+    } catch {
+      return {
+        value: {
+          mode: 'deep-fallback-fast',
+          answer: SYNTH_UNAVAILABLE_ANSWER,
+          citations: [],
+          sub_queries: [query],
+          rounds_used: 0,
+          hits: [],
+          rooms_searched: [],
+        },
+        outcome: 'partial',
+      };
+    }
+  });
 }
 
 // ---- public entry point ───────────────────────────────────────────────────────────────────────
@@ -803,6 +941,7 @@ export async function deepRetrieve(
   const includeOps = opts.includeOps ?? false;
   const now = opts.now ?? Date.now;
   const budgetMs = opts.budgetMs ?? resolveDeepBudgetMs(process.env.DEEP_RETRIEVAL_BUDGET_MS);
+  const deadline = now() + budgetMs;
 
   if (rooms.length === 0) {
     return { mode: 'no-rooms', answer: '', citations: [], sub_queries: [], rounds_used: 0, hits: [], rooms_searched: [] };
@@ -817,11 +956,23 @@ export async function deepRetrieve(
       rooms,
       top,
       includeOps,
-      { deadline: now() + budgetMs, now },
+      { deadline, now },
       opts.continuation,
       testDeps.retrievalShield,
     );
   } catch {
+    // Once the caller's budget has expired, never enter the unbounded fast-path fallback: it
+    // would start a fresh embedding/search request after cancellation. Return the honest partial
+    // shape, constrained to the rooms this invocation was already authorized to read.
+    if (now() >= deadline) {
+      const subQueries = opts.continuation?.sub_queries?.filter((q): q is string => typeof q === 'string').slice(0, 4) ?? [query];
+      return {
+        mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: [],
+        sub_queries: subQueries.length ? subQueries : [query], rounds_used: 0, hits: [], rooms_searched: [],
+        partial: true,
+        continuation: { rooms, sub_queries: subQueries.length ? subQueries : [query], rounds_used: 0 },
+      };
+    }
     // FAIL-OPEN: any unexpected error anywhere in the agentic flow degrades to a single plain
     // search pass across the same rooms — deep mode can never throw, and can never be WORSE than
     // brain_search's existing fast path, only sometimes no better than it.

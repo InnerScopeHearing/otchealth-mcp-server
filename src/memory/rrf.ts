@@ -24,6 +24,12 @@ export interface FusedHit {
   agent?: string;
   /** Source path of the parent doc (chunked doc rooms), threaded through for citation. */
   path?: string;
+  /** Alternate parent paths collapsed as byte-identical chunks; retain every locator for citations. */
+  variants?: string[];
+  /** Record discriminator, when the index carries one. */
+  type?: string;
+  /** Immutable source version supplied by the backend, when available. */
+  source_version?: string;
 }
 
 /**
@@ -36,14 +42,16 @@ export interface FusedHit {
  * itself (see memory/deep-retrieval.ts's dedupeById for that case). Pure + unit-tested.
  */
 export function rrfFuse(
-  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }>,
+  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; variants?: string[]; type?: string; source_version?: string }> }>,
   top: number,
   k = 60,
 ): FusedHit[] {
   const fused: FusedHit[] = [];
   for (const { room, hits } of perRoom) {
     hits.forEach((h, i) => {
-      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id, path: h.path, agent: h.agent });
+      fused.push({ score: 1 / (k + (i + 1)), source: room, text: h.text, id: h.id, path: h.path, agent: h.agent,
+        ...(h.variants?.length ? { variants: [...h.variants] } : {}), ...(h.type ? { type: h.type } : {}),
+        ...(h.source_version ? { source_version: h.source_version } : {}) });
     });
   }
   return fused.sort((a, b) => b.score - a.score).slice(0, top);

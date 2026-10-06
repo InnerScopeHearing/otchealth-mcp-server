@@ -97,6 +97,30 @@ test('opaque literal witness survives federation rank loss but remains retractab
   assert.equal(filtered.kept.some((hit) => hit.id === 'cto__literal'), false);
 });
 
+test('direct and opaque-ID preferred candidates retain citation locators through RRF', () => {
+  const candidate = exactIdentifierCandidate('MXVEDTUKA2', 'memory-exec', [{
+    id: 'cto__literal', text: 'synthetic evidence', agent: 'cto', exactIdentifierMatch: true,
+    path: 'current/source.pdf', variants: ['archive/source.pdf'], type: 'decision', source_version: `sha256:${'a'.repeat(64)}`,
+  }]);
+  assert.ok(candidate);
+  const pool = fuseWithDirectCandidate([{ room: 'memory-exec', hits: [] }], 1, candidate);
+  assert.equal(pool[0]?.path, 'current/source.pdf');
+  assert.deepEqual(pool[0]?.variants, ['archive/source.pdf']);
+  assert.equal(pool[0]?.type, 'decision');
+  assert.equal(pool[0]?.source_version, `sha256:${'a'.repeat(64)}`);
+});
+
+test('preferred version candidate does not discard a same-ID hit from another supplied version', () => {
+  const a = `sha256:${'a'.repeat(64)}`;
+  const b = `sha256:${'b'.repeat(64)}`;
+  const pool = fuseWithDirectCandidate([{ room: 'commons-company-journal', hits: [
+    { id: 'doc', text: 'version a', source_version: a },
+    { id: 'doc', text: 'version b', source_version: b },
+  ] }], 2, { score: 1, source: 'commons-company-journal', id: 'doc', text: 'version a', source_version: a });
+  assert.equal(pool.length, 2);
+  assert.deepEqual(pool.map((hit) => hit.source_version), [a, b]);
+});
+
 test('natural-language queries and unmarked identifier hits keep existing federation behavior', () => {
   assert.equal(isOpaqueIdentifierQuery('what is the current plan'), false);
   assert.equal(exactIdentifierCandidate('what is the current plan', 'memory-exec', [{ id: 'x', text: 'plan', exactIdentifierMatch: true }]), undefined);

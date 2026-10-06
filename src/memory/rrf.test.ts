@@ -66,3 +66,13 @@ test('rrfFuse preserves the owning agent for collision-safe retraction filtering
   }] }], 5);
   assert.equal(fused[0]?.agent, 'cto');
 });
+
+test('rrfFuse preserves alternate source locators and record type for citations', () => {
+  const fused = rrfFuse([{ room: 'commons-company-journal', hits: [{
+    text: 'synthetic public excerpt', id: 'doc-1', path: 'current/doc.pdf',
+    variants: ['archive/doc.pdf'], type: 'decision', source_version: `sha256:${'a'.repeat(64)}`,
+  }] }], 5);
+  assert.deepEqual(fused[0]?.variants, ['archive/doc.pdf']);
+  assert.equal(fused[0]?.type, 'decision');
+  assert.equal(fused[0]?.source_version, `sha256:${'a'.repeat(64)}`);
+});

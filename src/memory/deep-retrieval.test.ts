@@ -43,9 +43,41 @@ const {
   SYNTH_UNAVAILABLE_ANSWER,
   PARTIAL_BUDGET_ANSWER,
   DEFAULT_DEEP_BUDGET_MS,
+  deepStageTimingFields,
+  emitDeepStageTiming,
 } = await import('./deep-retrieval.js');
 import { __resetRetractionCache, noteRetraction, retractedIdsByAgent } from './retractions.js';
+import { chat } from '../azure/foundry.js';
+import { logger } from '../audit/logger.js';
+import { requestContext } from '../server/request-context.js';
 type FusedHit = import('./rrf.js').FusedHit;
+
+test('deep stage timing fields are fixed, content-free, and clamp invalid clock deltas', () => {
+  const event = deepStageTimingFields('retrieval', 10.2, 23.8, 'partial');
+  assert.deepEqual(event, {
+    type: 'brain_deep_stage_timing',
+    stage: 'retrieval',
+    duration_ms: 14,
+    outcome: 'partial',
+    correlation_id: 'unknown',
+    release_id: 'unknown',
+  });
+  assert.deepEqual(Object.keys(event).sort(), ['correlation_id', 'duration_ms', 'outcome', 'release_id', 'stage', 'type']);
+  assert.equal(deepStageTimingFields('planning', 20, 10, 'error').duration_ms, 0);
+  assert.equal(deepStageTimingFields('synthesis', Number.NaN, 10, 'success').duration_ms, 0);
+  const emitted: unknown[] = [];
+  emitDeepStageTiming('planning', 100, 135, 'error', (fields) => emitted.push(fields));
+  assert.deepEqual(emitted, [{
+    type: 'brain_deep_stage_timing',
+    stage: 'planning',
+    duration_ms: 35,
+    outcome: 'error',
+    correlation_id: 'unknown',
+    release_id: 'unknown',
+  }]);
+  assert.equal(deepStageTimingFields('retrieval', 1, 2, 'success', 'synthetic-correlation', 'abcdef012345').correlation_id, 'synthetic-correlation');
+  assert.equal(deepStageTimingFields('retrieval', 1, 2, 'success', 'prompt text', 'bad').correlation_id, 'unknown');
+});
 
 // Pure network mocking via globalThis.fetch — the same seam src/memory/agentic.test.ts and
 // src/azure/search.test.ts use.
@@ -56,6 +88,24 @@ async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): P
     return await run();
   } finally {
     globalThis.fetch = original;
+  }
+}
+
+async function captureDeepTimingEvents<T>(run: () => Promise<T>): Promise<{ result: T; events: Record<string, unknown>[] }> {
+  const events: Record<string, unknown>[] = [];
+  const mutableLogger = logger as unknown as { info: (...args: unknown[]) => unknown };
+  const originalInfo = mutableLogger.info;
+  mutableLogger.info = (...args: unknown[]) => {
+    const fields = args[0];
+    if (fields && typeof fields === 'object' && (fields as Record<string, unknown>).type === 'brain_deep_stage_timing') {
+      events.push({ ...(fields as Record<string, unknown>) });
+    }
+    return originalInfo.apply(logger, args);
+  };
+  try {
+    return { result: await run(), events };
+  } finally {
+    mutableLogger.info = originalInfo;
   }
 }
 
@@ -116,6 +166,15 @@ test('dedupeById keeps colliding legacy bare IDs from distinct agents', () => {
     { score: 0.4, source: 'memory-exec', id: '20260730-001', agent: 'cfo', text: 'CFO row' },
   ]);
   assert.equal(deduped.length, 2);
+});
+
+test('dedupeById keeps same document identity at distinct supplied source versions separate', () => {
+  const deduped = dedupeById([
+    { score: 0.5, source: 'commons-company-journal', id: 'doc', text: 'same content', source_version: `sha256:${'a'.repeat(64)}` },
+    { score: 0.4, source: 'commons-company-journal', id: 'doc', text: 'same content', source_version: `sha256:${'b'.repeat(64)}` },
+  ]);
+  assert.equal(deduped.length, 2);
+  assert.notEqual(deduped[0]?.source_version, deduped[1]?.source_version);
 });
 
 // --- parseQueryPlan: the planner model's JSON reply, defensively parsed ---
@@ -242,7 +301,7 @@ test('dedupeById: falls back to a text-prefix key when a hit carries no id', () 
     { score: 0.8, source: 'c', text: 'a totally different passage' },
   ];
   const out = dedupeById(hits);
-  assert.equal(out.length, 2, 'two id-less hits with the same text collapse to one');
+  assert.equal(out.length, 3, 'identical text in distinct authorized rooms remains distinct evidence');
 });
 
 test('dedupeById: an empty list stays empty', () => {
@@ -251,13 +310,17 @@ test('dedupeById: an empty list stays empty', () => {
 
 // --- buildCitations ---
 
-test('buildCitations: 1-based indices matching the [n] convention, path/id only when present', () => {
-  const cites = buildCitations([hit('doc1', 'a', 'memory-exec'), { score: 0.1, source: 'legal-company', text: 'b', path: 'x/y.pdf' }]);
+test('buildCitations: 1-based indices preserve source locator variants and type', () => {
+  const cites = buildCitations([hit('doc1', 'a', 'memory-exec'), { score: 0.1, source: 'legal-company', text: 'b', path: 'x/y.pdf', variants: ['archive/x/y.pdf'], type: 'decision', source_version: `sha256:${'c'.repeat(64)}` }]);
   assert.equal(cites[0]?.n, 1);
   assert.equal(cites[0]?.source, 'memory-exec');
   assert.equal(cites[0]?.id, 'doc1');
   assert.equal(cites[1]?.n, 2);
   assert.equal(cites[1]?.path, 'x/y.pdf');
+  assert.deepEqual(cites[1]?.variants, ['archive/x/y.pdf']);
+  assert.equal(cites[1]?.type, 'decision');
+  assert.equal(cites[1]?.source_version, `sha256:${'c'.repeat(64)}`);
+  assert.equal(cites[0]?.source_version, undefined, 'version metadata is never fabricated');
 });
 
 test('buildCitations: an empty hit list yields an empty citation list', () => {
@@ -407,20 +470,43 @@ test('deepRetrieve: thin round 1 triggers exactly ONE refine round, never more (
           round <= 1
             ? [{ id: 'doc1', text: 'one thin hit', '@search.rerankerScore': 1 }]
             : [
-                { id: 'doc2', text: 'hit two', '@search.rerankerScore': 3 },
-                { id: 'doc3', text: 'hit three', '@search.rerankerScore': 2.5 },
-                { id: 'doc4', text: 'hit four', '@search.rerankerScore': 2 },
+                { id: 'chunk2a', parent_id: 'doc2', path: 'current/source.pdf', source_version: `sha256:${'a'.repeat(64)}`, text: 'same synthetic public source excerpt with enough length to qualify for duplicate collapse', type: 'decision', '@search.rerankerScore': 3 },
+                { id: 'chunk2b', parent_id: 'doc2-copy', path: 'archive/source.pdf', source_version: `sha256:${'a'.repeat(64)}`, text: 'same synthetic public source excerpt with enough length to qualify for duplicate collapse', type: 'decision', '@search.rerankerScore': 3 },
+                { id: 'chunk3', parent_id: 'doc3', path: 'current/third.pdf', text: 'hit three', '@search.rerankerScore': 2.5 },
+                { id: 'chunk4', parent_id: 'doc4', path: 'current/four.pdf', text: 'hit four', '@search.rerankerScore': 2 },
               ];
         return new Response(JSON.stringify({ value }), { status: 200 });
       }
       throw new Error(`unexpected fetch to ${u}`);
     }) as typeof fetch,
     async () => {
-      const res = await deepRetrieve('q', { rooms: ['memory-exec'] });
+      const captured = await captureDeepTimingEvents(() => requestContext.run(
+        { correlationId: 'synthetic-correlation-49', callerHash: 'synthetic-caller-hash', callerAgent: 'coo' },
+        () => deepRetrieve('SYNTHETIC_QUERY_SENTINEL_49', { rooms: ['commons-company-journal'] }),
+      ));
+      const res = captured.result;
       assert.equal(planCalls, 1, 'exactly one initial planning call');
       assert.equal(refineCalls, 1, 'exactly one refine call -- the bounded evaluate-refine round');
       assert.equal(res.rounds_used, 2, 'round 1 + the one refine round');
       assert.ok(res.sub_queries.includes('narrow query') && res.sub_queries.includes('a broader reformulation'));
+      assert.deepEqual(captured.events.map((event) => event.stage), ['planning', 'retrieval', 'refinement', 'retrieval', 'synthesis']);
+      for (const event of captured.events) {
+        assert.deepEqual(Object.keys(event).sort(), ['correlation_id', 'duration_ms', 'outcome', 'release_id', 'stage', 'type']);
+        assert.equal(event.type, 'brain_deep_stage_timing');
+        assert.equal(event.correlation_id, 'synthetic-correlation-49');
+        assert.equal(typeof event.duration_ms, 'number');
+        assert.ok(Number.isInteger(event.duration_ms) && (event.duration_ms as number) >= 0);
+        assert.ok(['success', 'error', 'partial'].includes(String(event.outcome)));
+      }
+      const serializedEvents = JSON.stringify(captured.events);
+      assert.ok(!serializedEvents.includes('SYNTHETIC_QUERY_SENTINEL_49'));
+      assert.ok(!serializedEvents.includes('one thin hit'));
+      assert.ok(!serializedEvents.includes('synthesized answer'));
+      const cited = res.citations.find((citation) => citation.id === 'doc2');
+      assert.equal(cited?.path, 'current/source.pdf');
+      assert.deepEqual(cited?.variants, ['archive/source.pdf']);
+      assert.equal(cited?.type, 'decision');
+      assert.equal(cited?.source_version, `sha256:${'a'.repeat(64)}`);
     },
   );
 });
@@ -753,6 +839,130 @@ test('deepRetrieve: a normal, budget-respecting call carries NONE of the new par
   );
 });
 
+test('deepRetrieve BUDGET: an in-flight planner is aborted at the remaining deadline and returns only authorized retrieved passages as an honest partial', async () => {
+  let plannerAborted = false;
+  let synthCalled = false;
+  let unboundedControl = true;
+  let boundedEmbeddingCalls = 0;
+  let boundedSearchCalls = 0;
+  let started = 0;
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) {
+        if (!unboundedControl) boundedEmbeddingCalls++;
+        return embeddingsOk();
+      }
+      if (isChatUrl(u)) {
+        const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+        const sys = body.messages[0]?.content ?? '';
+        if (sys.includes('retrieval query planner')) {
+          if (unboundedControl) {
+            return await new Promise<Response>((resolve) => setTimeout(() => resolve(chatJson({ sub_queries: ['late plan'] })), 120));
+          }
+          const signal = init?.signal;
+          return await new Promise<Response>((_resolve, reject) => {
+            if (!signal) return;
+            signal.addEventListener('abort', () => {
+              plannerAborted = true;
+              reject(signal.reason ?? new Error('aborted'));
+            }, { once: true });
+            setTimeout(() => _resolve(chatJson({ sub_queries: ['late plan'], rooms: ['unauthorized-room'] })), 120);
+          });
+        }
+        if (sys.includes('One Brain')) {
+          synthCalled = true;
+          return chatText('invented answer');
+        }
+        throw new Error(`unexpected chat call: ${sys.slice(0, 60)}`);
+      }
+      if (isSearchUrl(u)) {
+        boundedSearchCalls++;
+        return new Response(JSON.stringify({ value: [
+          { id: 'doc1', text: 'authorized passage one', '@search.rerankerScore': 3 },
+          { id: 'doc2', text: 'authorized passage two', '@search.rerankerScore': 2 },
+          { id: 'doc3', text: 'authorized passage three', '@search.rerankerScore': 1 },
+        ] }), { status: 200 });
+      }
+      // Retraction lookups are synthetic too; the provider-call behavior under test stays local.
+      return new Response(JSON.stringify({ value: [] }), { status: 200 });
+    }) as typeof fetch,
+    async () => {
+      const baselineStarted = Date.now();
+      await chat([{ role: 'system', content: 'retrieval query planner' }, { role: 'user', content: 'q' }], { tier: 'standard' });
+      const baselineElapsed = Date.now() - baselineStarted;
+      assert.ok(baselineElapsed >= 100, `unbounded provider call reproduces the delayed planner overrun, took ${baselineElapsed}ms`);
+      unboundedControl = false;
+
+      started = Date.now();
+      const res = await deepRetrieve('q', { rooms: ['memory-exec'], budgetMs: 20 });
+      const elapsed = Date.now() - started;
+      assert.equal(plannerAborted, true, 'the actual in-flight provider request must receive and observe cancellation');
+      assert.ok(elapsed < 100, `20ms request budget must cancel the 120ms planner, took ${elapsed}ms`);
+      assert.equal(res.partial, true);
+      assert.equal(res.answer, PARTIAL_BUDGET_ANSWER, 'no unsupported narrative is invented when planning exhausts the budget');
+      assert.equal(synthCalled, false);
+      assert.deepEqual(res.rooms_searched, [], 'expired planning returns before starting retrieval');
+      assert.deepEqual(res.hits, []);
+      assert.deepEqual(res.citations, []);
+      assert.equal(boundedEmbeddingCalls, 0, 'expired planning must not start an embedding call');
+      assert.equal(boundedSearchCalls, 0, 'expired planning must not start a search fan-out');
+      assert.ok(res.continuation);
+      assert.deepEqual(res.continuation!.rooms, ['memory-exec']);
+    },
+  );
+});
+
+test('deepRetrieve BUDGET: an in-flight AI Search request is aborted and does not launch fallback work after expiry', async () => {
+  let searchAborted = false;
+  let searchCalls = 0;
+  let embeddingCalls = 0;
+  let synthCalled = false;
+  const started = Date.now();
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) {
+        embeddingCalls++;
+        return embeddingsOk();
+      }
+      if (isChatUrl(u)) {
+        const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+        const sys = body.messages[0]?.content ?? '';
+        if (sys.includes('retrieval query planner')) return chatJson({ sub_queries: ['q'] });
+        if (sys.includes('One Brain')) synthCalled = true;
+        return chatText('unavailable');
+      }
+      if (isSearchUrl(u)) {
+        searchCalls++;
+        const signal = init?.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          if (!signal) return;
+          signal.addEventListener('abort', () => {
+            searchAborted = true;
+            reject(signal.reason ?? new Error('aborted'));
+          }, { once: true });
+          setTimeout(() => _resolve(new Response(JSON.stringify({ value: [] }), { status: 200 })), 120);
+        });
+      }
+      return new Response(JSON.stringify({ value: [] }), { status: 200 });
+    }) as typeof fetch,
+    async () => {
+      const res = await deepRetrieve('q', { rooms: ['memory-exec'], budgetMs: 40 });
+      const elapsed = Date.now() - started;
+      assert.equal(searchAborted, true, 'the active search fetch must observe the request abort');
+      assert.ok(elapsed < 100, `40ms budget must abort the 120ms AI Search request, took ${elapsed}ms`);
+      assert.equal(embeddingCalls, 1, 'only the embedding required by the one started search ran');
+      assert.equal(searchCalls, 1, 'no fallback search starts after the in-flight search deadline');
+      assert.equal(synthCalled, false);
+      assert.equal(res.partial, true);
+      assert.equal(res.answer, PARTIAL_BUDGET_ANSWER);
+      assert.deepEqual(res.rooms_searched, []);
+      assert.deepEqual(res.hits, []);
+    },
+  );
+});
+
 // --- budget enforcement: a slow round confirms the wall-clock gate, not real wall-clock waiting ---
 //
 // Rather than actually sleeping for tens of seconds, `now` is injected as a fake clock the fetch
@@ -789,7 +999,11 @@ test('deepRetrieve BUDGET: a round-1 search that "takes" longer than the budget 
       throw new Error(`unexpected fetch to ${u}`);
     }) as typeof fetch,
     async () => {
-      const res = await deepRetrieve('q', { rooms: ['memory-exec'], now, budgetMs: 1_000 });
+      const captured = await captureDeepTimingEvents(() => requestContext.run(
+        { correlationId: 'synthetic-partial-correlation', callerHash: 'synthetic-caller-hash', callerAgent: 'coo' },
+        () => deepRetrieve('SYNTHETIC_PARTIAL_QUERY_SENTINEL', { rooms: ['memory-exec'], now, budgetMs: 1_000 }),
+      ));
+      const res = captured.result;
       assert.equal(res.partial, true);
       assert.equal(res.answer, PARTIAL_BUDGET_ANSWER);
       assert.equal(synthCalled, false, 'synth must never be reached once the budget is blown');
@@ -800,6 +1014,10 @@ test('deepRetrieve BUDGET: a round-1 search that "takes" longer than the budget 
       assert.deepEqual(res.continuation!.sub_queries, ['sub one']);
       assert.equal(res.continuation!.rounds_used, 1);
       assert.equal(res.resumed, undefined, 'this was a first attempt, not a resumed one');
+      const synthesisEvent = captured.events.find((event) => event.stage === 'synthesis');
+      assert.equal(synthesisEvent?.outcome, 'partial', 'budget-skipped synthesis is represented as partial');
+      assert.equal(synthesisEvent?.correlation_id, 'synthetic-partial-correlation');
+      assert.ok(!JSON.stringify(captured.events).includes('SYNTHETIC_PARTIAL_QUERY_SENTINEL'));
     },
   );
 });
@@ -1015,6 +1233,8 @@ test('deepRetrieve BUDGET: a blocked shield result wins over expiry and keeps it
 test('deepRetrieve CONTINUATION: a partial response\'s continuation, passed back with a fresh budget, skips planning and resumes straight into a real synthesized answer', async () => {
   let planCalls = 0;
   let searchCalls = 0;
+  let clock = 0;
+  const now = () => clock;
   await withStubbedFetch(
     (async (url: string | URL, init?: RequestInit) => {
       const u = String(url);
@@ -1031,6 +1251,7 @@ test('deepRetrieve CONTINUATION: a partial response\'s continuation, passed back
       }
       if (isSearchUrl(u)) {
         searchCalls++;
+        if (searchCalls === 1) clock = 1_001; // planner ran within budget; retrieval itself exhausts it
         return new Response(
           JSON.stringify({ value: [{ id: 'doc1', text: 'a real hit', '@search.rerankerScore': 3 }, { id: 'doc2', text: 'b', '@search.rerankerScore': 2 }, { id: 'doc3', text: 'c', '@search.rerankerScore': 1 }] }),
           { status: 200 },
@@ -1039,14 +1260,14 @@ test('deepRetrieve CONTINUATION: a partial response\'s continuation, passed back
       throw new Error(`unexpected fetch to ${u}`);
     }) as typeof fetch,
     async () => {
-      // First call: budgetMs:0 guarantees an immediate over-budget at the tail gate.
-      const first = await deepRetrieve('q', { rooms: ['memory-exec'], budgetMs: 0 });
+      // First call: let the planner run, then model retrieval exhausting the budget.
+      const first = await deepRetrieve('q', { rooms: ['memory-exec'], now, budgetMs: 1_000 });
       assert.equal(first.partial, true);
       assert.ok(first.continuation);
       assert.equal(planCalls, 1, 'the first call plans exactly once');
 
       // Second call: pass the continuation back with a generous budget.
-      const resumed = await deepRetrieve('q', { rooms: ['memory-exec'], continuation: first.continuation, budgetMs: 60_000 });
+      const resumed = await deepRetrieve('q', { rooms: ['memory-exec'], continuation: first.continuation, now, budgetMs: 60_000 });
       assert.equal(planCalls, 1, 'the resumed call must NOT re-plan -- it reuses the continuation\'s sub_queries/rooms');
       assert.equal(searchCalls, 2, 'the resumed call still runs exactly one retrieval pass');
       assert.equal(resumed.resumed, true);
@@ -1115,4 +1336,12 @@ test('deepRetrieve CONTINUATION: a garbage/empty continuation degrades to a norm
       assert.equal(res.hits.length, 1);
     },
   );
+});
+
+test('dedupeById preserves same ID from distinct authorized rooms without mixing citations', () => {
+  const a = { score: 1, source: 'room-a', id: 'same', agent: 'coo', text: 'body A', source_version: 'v1' };
+  const b = { ...a, source: 'room-b', text: 'body B' };
+  const out = dedupeById([a, b, { ...a, score: 0.2 }]);
+  assert.deepEqual(out, [a, b]);
+  assert.deepEqual(buildCitations(out).map(c => [c.source, c.source_version]), [['room-a', 'v1'], ['room-b', 'v1']]);
 });

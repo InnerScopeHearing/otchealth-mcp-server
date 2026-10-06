@@ -80,14 +80,15 @@ export type { FusedHit };
 /** Fuse the normal bounded pool while retaining a direct exact-ID candidate ahead of truncation.
  * Retraction filtering still runs after this helper, so retention cannot revive a withdrawn row. */
 export function fuseWithDirectCandidate(
-  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }>,
+  perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; variants?: string[]; type?: string; source_version?: string }> }>,
   top: number,
   directCandidate?: FusedHit,
 ): FusedHit[] {
   const pool = rrfFuse(perRoom, top * 3);
   if (!directCandidate) return pool;
   return [directCandidate, ...pool.filter((hit) =>
-    hit.source !== directCandidate.source || String(hit.id ?? '') !== String(directCandidate.id ?? ''))];
+    hit.source !== directCandidate.source || String(hit.id ?? '') !== String(directCandidate.id ?? '') ||
+    hit.source_version !== directCandidate.source_version)];
 }
 
 /** Keep opaque identifiers out of natural-language ranking. Mirrors the OpenSearch detector. */
@@ -99,11 +100,11 @@ export function isOpaqueIdentifierQuery(query: string): boolean {
 export function exactIdentifierCandidate(
   query: string,
   room: string,
-  hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; exactIdentifierMatch?: unknown }>,
+  hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; variants?: string[]; type?: string; source_version?: string; exactIdentifierMatch?: unknown }>,
 ): FusedHit | undefined {
   if (!isOpaqueIdentifierQuery(query)) return undefined;
   const hit = hits.find((value) => value.exactIdentifierMatch === true);
-  return hit ? { score: 1, source: room, text: hit.text, id: hit.id, path: hit.path, agent: hit.agent } : undefined;
+  return hit ? { score: 1, source: room, text: hit.text, id: hit.id, path: hit.path, agent: hit.agent, variants: hit.variants, type: hit.type, source_version: hit.source_version } : undefined;
 }
 
 
@@ -296,7 +297,7 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
     rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps }) })),
   );
 
-  const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string }> }> = [];
+  const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; variants?: string[]; type?: string; source_version?: string }> }> = [];
   const searched: string[] = [];
   const failed: string[] = [];
   let directCandidate: FusedHit | undefined;
@@ -316,6 +317,9 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
             id: exact.id,
             path: exact.path,
             agent: exact.agent,
+            variants: exact.variants,
+            type: exact.type,
+            source_version: exact.source_version,
           };
         }
       }
@@ -338,9 +342,11 @@ export async function handleBrainSearch(input: BrainSearchInput, ctx: ToolContex
   const retracted = await retractedIdsByAgent();
   const { kept, dropped } = filterRetractedByAgent(pool, retracted);
   const directSurvived = Boolean(directCandidate && kept.some((hit) =>
-    hit.source === directCandidate?.source && String(hit.id ?? '') === String(directCandidate?.id ?? '')));
+    hit.source === directCandidate?.source && String(hit.id ?? '') === String(directCandidate?.id ?? '') &&
+    hit.source_version === directCandidate?.source_version));
   const identifierSurvived = Boolean(!directCandidate && identifierCandidate && kept.some((hit) =>
-    hit.source === identifierCandidate?.source && String(hit.id ?? '') === String(identifierCandidate?.id ?? '')));
+    hit.source === identifierCandidate?.source && String(hit.id ?? '') === String(identifierCandidate?.id ?? '') &&
+    hit.source_version === identifierCandidate?.source_version));
 
   // W1-3 DETERMINISTIC CURRENT-VALUE PROMOTION (fail-open, kill-switch ENTITY_LOOKUP_MODE). If the
   // query resolves to a known typed-entity key ("what is the ASC key id", "n8n base url"), surface

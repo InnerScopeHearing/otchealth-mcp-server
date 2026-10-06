@@ -43,6 +43,49 @@ test('fetchWithBudget: aborts at the timeout when the upstream never responds', 
   }
 });
 
+test('fetchWithBudget: the same deadline aborts a response body that stalls after headers', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.flushHeaders();
+    // Deliberately leave the body open. Real fetch must retain the request signal after headers.
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const started = Date.now();
+    const response = await fetchWithBudget(`http://127.0.0.1:${port}/`, {}, {
+      timeoutMs: 500,
+      retries: 0,
+      deadlineAtMs: started + 60,
+    });
+    await assert.rejects(() => response.text());
+    assert.ok(Date.now() - started < 300, 'body read must be aborted by the same 60ms deadline');
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('fetchWithBudget: Retry-After cannot consume more than the request deadline or start a late retry', async () => {
+  let calls = 0;
+  await withStubbedFetch(
+    (async () => {
+      calls++;
+      return new Response('busy', { status: 429, headers: { 'retry-after': '5' } });
+    }) as typeof fetch,
+    async () => {
+      const started = Date.now();
+      await assert.rejects(() => fetchWithBudget('https://example.invalid/budgeted-retry', {}, {
+        timeoutMs: 1000,
+        retries: 1,
+        deadlineAtMs: started + 40,
+      }));
+      assert.equal(calls, 1, 'the second physical attempt must not start after the shared deadline');
+      assert.ok(Date.now() - started < 250, 'Retry-After must be cut off at the caller deadline');
+    },
+  );
+});
+
 test('fetchWithBudget: retries exactly once on HTTP 429, then returns the retry response', async () => {
   let callCount = 0;
   await withStubbedFetch(
