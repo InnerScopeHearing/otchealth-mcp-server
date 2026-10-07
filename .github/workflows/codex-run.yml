@@ -42,7 +42,9 @@ jobs:
       DEFAULT_TASK: >-
         Weekly continuity canary. Inspect this repository, run one existing fast test or
         validation command, and make no source change unless a small safe defect is found.
-        Report the command and result in the run log. Do not create work merely to create work.
+        Report the command and its result in your final message only; the workflow log is the
+        record. Do not create or modify any file to record it (no run log, journal, or audit
+        note). Do not create work merely to create work.
     steps:
       - uses: actions/checkout@v4
 
@@ -177,9 +179,31 @@ jobs:
           git add -A
           git commit -m "codex API run ${RUN_ID}: capture bounded work"
           git push -u origin "$BRANCH"
-          gh pr create --draft --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+          if PR_OUTPUT="$(gh pr create --draft --base "$DEFAULT_BRANCH" --head "$BRANCH" \
             --title "Codex API run ${RUN_ID}: bounded work" \
-            --body "API-backed Codex continuity run ${RUN_ID}. Model: ${MODEL_NORMALIZED}. Reasoning: ${REASONING_NORMALIZED}. Review before merge."
+            --body "API-backed Codex continuity run ${RUN_ID}. Model: ${MODEL_NORMALIZED}. Reasoning: ${REASONING_NORMALIZED}. Review before merge." 2>&1)"; then
+            printf '%s\n' "$PR_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "$PR_OUTPUT"
+          # The branch is already pushed and the Codex turn already succeeded. When the
+          # repository or organization setting "Allow GitHub Actions to create and approve
+          # pull requests" is off, GitHub refuses only this call. Report the pushed branch
+          # instead of failing the lane. Any other error still fails the step.
+          if [[ "$PR_OUTPUT" == *"not permitted to create or approve pull requests"* ]]; then
+            COMPARE_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${DEFAULT_BRANCH}...${BRANCH}?expand=1"
+            echo "::warning title=Draft pull request not opened::GitHub Actions may not create pull requests here. The work is pushed to ${BRANCH}. Open the draft from ${COMPARE_URL}"
+            {
+              echo "### Codex API run ${RUN_ID}: branch pushed, draft pull request not opened"
+              echo
+              echo "GitHub refused pull request creation because \"Allow GitHub Actions to create and approve pull requests\" is off for this repository or its organization."
+              echo
+              echo "- Branch: ${BRANCH}"
+              echo "- Open the draft pull request: ${COMPARE_URL}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit 1
 
       - name: Write content-safe receipt
         if: always()
