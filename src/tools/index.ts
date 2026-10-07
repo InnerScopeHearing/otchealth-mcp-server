@@ -1406,6 +1406,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerGitHubWorkflowRunGet(server, callerHash);
   registerGitHubWorkflowRunListArtifacts(server, callerHash);
   registerGitHubWorkflowRunListJobs(server, callerHash);
+  registerGitHubWorkflowRunFailedLogExcerpt(server, callerHash);
   registerGitHubWorkflowRunRerun(server, callerHash);
   registerGraphAttachmentAdd(server, callerHash);
   registerGraphAttachmentGet(server, callerHash);
