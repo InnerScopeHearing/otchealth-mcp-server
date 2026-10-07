@@ -79,6 +79,19 @@ def require_logs(data: dict) -> Path:
     return expected
 
 
+def require_safe_tree(root: Path) -> None:
+    require_no_reparse(root)
+    def walk_error(error):
+        raise ContractError("cannot inspect cleanup tree; preserve target") from error
+    for current, dirs, files in os.walk(root, onerror=walk_error):
+        require_no_reparse(Path(current))
+        for name in dirs + files:
+            candidate = Path(current) / name
+            require_no_reparse(candidate)
+            if not candidate.is_dir() and not candidate.is_file():
+                raise ContractError("non-regular cleanup content; preserve target")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -440,6 +453,7 @@ def validate_deregistered_residual(source: Path, target: Path) -> dict:
                 kept_dirs.append(name)
                 continue
             source_dir = source / rel_dir / name
+            require_no_reparse(source_dir)
             if not source_dir.is_dir() or source_dir.is_symlink():
                 raise ContractError(f"recorded residual contains an unknown directory: {rel}")
             kept_dirs.append(name)
@@ -458,6 +472,7 @@ def validate_deregistered_residual(source: Path, target: Path) -> dict:
             if rel not in tracked_files:
                 raise ContractError(f"recorded residual contains an untracked or ignored file: {rel}")
             source_file = source / rel_dir / name
+            require_no_reparse(source_file)
             if not source_file.is_file() or source_file.is_symlink():
                 raise ContractError(f"recorded residual contains an unknown file: {rel}")
             candidate_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
@@ -511,6 +526,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             require_no_reparse(repo)
             require_no_reparse(target)
             require_logs(data)
+            require_safe_tree(target)
             recovery = remove_windows_deregistered_residual(target)
             prior_cleanup["residual_recovery"] = recovery
             prior_cleanup["recovery_completed_utc"] = utc_now()
@@ -556,6 +572,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         raise ContractError("exact target is not registered as a Git worktree; preserve for owner review")
     require_logs(data)
     # Git refuses dirty/locked linked worktrees without --force. Never add --force.
+    require_safe_tree(target)
     removal_error = None
     try:
         git(repo, "worktree", "remove", str(target))

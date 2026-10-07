@@ -202,7 +202,7 @@ class EvalWorktreeTests(unittest.TestCase):
         self.assertEqual(ew.head_sha(target), self.pin)
         self.assertEqual(manifest["pin"], self.pin)
         logs_base = Path(manifest["logs_dir"])
-        logs_base.mkdir(parents=True, mode=0o700)
+        logs_base.mkdir(parents=True, mode=0o700, exist_ok=True)
         logs = logs_base / "run-0001"
         logs.mkdir(mode=0o700)
         (logs / "receipt.json").write_text(json.dumps({"exit_status": 0, "fixture": "synthetic"}), encoding="utf-8")
@@ -449,6 +449,8 @@ class EvalWorktreeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         with self.assertRaisesRegex(ew.ContractError, "reparse"):
             ew.validate_deregistered_residual(self.source, residual)
+        with self.assertRaisesRegex(ew.ContractError, "reparse"):
+            ew.require_safe_tree(residual)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
 
 
