@@ -107,3 +107,12 @@ test('infra/money tools outside the 2026-07-26 directive remain cto-exclusive', 
     assert.ok(!roleAllows(gov!.role, 'developer'), `${name} must NOT allow developer -- outside the GitHub/Depot directive scope`);
   }
 });
+
+test('failed-step CI log excerpt reader is CTO-only', () => {
+  const gov = requiredRoleFor('github_workflow_run_failed_log_excerpt');
+  assert.ok(gov, 'the CI log excerpt reader must have an explicit role gate');
+  assert.ok(roleAllows(gov!.role, 'cto'));
+  for (const other of [...OTHER_LANES, 'developer', 'exec']) {
+    assert.ok(!roleAllows(gov!.role, other), `the CI log excerpt reader must refuse lane "${other}"`);
+  }
+});
