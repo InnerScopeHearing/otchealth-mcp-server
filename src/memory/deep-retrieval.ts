@@ -67,6 +67,7 @@ import { retrievalShield, type GuardMode } from '../safety/auto-guard.js';
 import { logger } from '../audit/logger.js';
 import { currentCorrelationId } from '../server/request-context.js';
 import { withProviderUsageStage } from '../telemetry/provider-usage-receipt.js';
+import { identifierEvidenceSnippet, literalIndex, opaqueIdentifierQuery } from '../search/identifier-match.js';
 
 // Stage events use the existing structured application logger. Keep the schema deliberately
 // content-free: stage/outcome are closed enums, duration is a finite non-negative number, and no
@@ -268,11 +269,11 @@ export interface DeepRetrieveResult {
    *  AND Content Safety is configured). Mirrors the "surface auto-guard outcomes when they ran"
    *  convention in tools/registry.ts. Absent when not run/inert. */
   injection_screen?: { attackDetected: boolean; mode: GuardMode };
-  /** True ONLY when the wall-clock budget was exhausted before the injection screen + synthesis
-   *  could run. `hits`/`citations` above are still the FULL retrieved set; only the narrated
-   *  `answer` was skipped (see PARTIAL_BUDGET_ANSWER). Absent (not merely false) in the normal
-   *  case, so an ordinary deep-agentic result's shape is completely unchanged by this fix. */
+  /** True when the wall-clock budget stopped the response before synthesis or bounded exact-id
+   *  probes could not cover every caller-authorized room. */
   partial?: true;
+  /** True when the bounded fanout or an anchor-search failure prevented complete exact-id coverage. */
+  coverage_limited?: true;
   /** Present only when partial is true. Pass this back as brain_search's `continuation` input on a
    *  new mode:'deep' call to skip planning and resume straight into one retrieval pass + shield +
    *  synth under a fresh budget. */
@@ -393,6 +394,75 @@ export function parseRefineResponse(raw: string, alreadyTried: string[]): string
   } catch {
     return [];
   }
+}
+
+/** Extract only a whole opaque identifier or an explicitly named record/marker from the caller's
+ *  original question. Planner and continuation text are never accepted as the source of an anchor. */
+export function extractExactIdentifierAnchor(query: string): string | null {
+  const whole = opaqueIdentifierQuery(query);
+  if (whole) return whole;
+  const fnd = query.match(/\bFND-\d{8}-\d{3,6}\b/);
+  if (fnd) return fnd[0];
+  const named = query.match(/\b(?:record|marker|identifier|id)\s*(?:is|=|:)?\s*([A-Za-z0-9_=-]{8,128})\b/i)?.[1];
+  if (!named) return null;
+  return opaqueIdentifierQuery(named) ?? (/^(?=.*\d)[A-Z0-9]{8,64}$/.test(named) ? named : null);
+}
+
+export interface DeepSearchPair {
+  room: string;
+  query: string;
+  anchor: boolean;
+}
+
+/** Anchor pairs are scheduled first; semantic pairs use only remaining slots. */
+export function scheduleDeepSearchPairs(
+  subQueries: string[],
+  targetRooms: string[],
+  anchorQuery?: string | null,
+  anchorRooms: string[] = targetRooms,
+  maxPairs = MAX_FANOUT_PAIRS,
+): { pairs: DeepSearchPair[]; unscheduledAnchorRooms: string[] } {
+  const pairs: DeepSearchPair[] = [];
+  const seen = new Set<string>();
+  const add = (room: string, query: string, anchor: boolean) => {
+    const key = `${room.toLowerCase()}\0${query.toLowerCase()}`;
+    if (seen.has(key) || pairs.length >= maxPairs) return false;
+    seen.add(key);
+    pairs.push({ room, query, anchor });
+    return true;
+  };
+  const authorized = [...new Set(anchorRooms)];
+  const unscheduledAnchorRooms: string[] = [];
+  if (anchorQuery) {
+    for (const room of authorized) if (!add(room, anchorQuery, true)) unscheduledAnchorRooms.push(room);
+  }
+  for (const query of subQueries) {
+    for (const room of [...new Set(targetRooms)]) add(room, query, false);
+  }
+  return { pairs, unscheduledAnchorRooms };
+}
+
+/** Return a grounded exact witness from one backend result; a requested token alone is never evidence. */
+export function exactIdentifierWitness(hit: KbHit, room: string, token: string): FusedHit | null {
+  const id = typeof hit.id === 'string' ? hit.id : '';
+  const separator = id.indexOf('__');
+  const canonicalId = separator > 0 && /^[a-z0-9][a-z0-9_-]{0,40}$/.test(id.slice(0, separator));
+  const directId = token.includes('__')
+    ? id === token
+    : id === token || (canonicalId && id.slice(separator + 2) === token);
+  const snippet = identifierEvidenceSnippet(hit.text, token);
+  if (!directId && (snippet === null || literalIndex(hit.text, token) < 0)) return null;
+  return {
+    score: Number.isFinite(hit.score) ? Number(hit.score) : 1,
+    source: room,
+    text: snippet ?? hit.text,
+    id: hit.id,
+    agent: hit.agent,
+    path: hit.path,
+    variants: hit.variants,
+    type: hit.type,
+    source_version: hit.source_version,
+  };
 }
 
 /** Pure cap on how many sub-queries are actually issued against a given room count, so total
@@ -615,37 +685,49 @@ async function runRetrievalRound(
   includeOps: boolean,
   requestBudget?: ProviderRequestBudget,
   embeddingCache?: EmbeddingRequestCache,
-): Promise<{ perRoom: RoomHitList[]; searched: string[]; failed: string[] }> {
+  anchor?: { query: string; rooms: string[] },
+): Promise<{ perRoom: RoomHitList[]; searched: string[]; failed: string[]; preferredWitnesses: FusedHit[]; anchorCoverageIncomplete: boolean }> {
   const perRoomTop = Math.min(25, Math.max(top, 10));
-  const bounded = boundSubQueries(subQueries, rooms.length);
-
-  const settled = await Promise.allSettled(
-    rooms.map(async (room): Promise<RoomHitList> => {
-      const perSubQuery = await Promise.allSettled(bounded.map((sq) => hybridSearch(room, sq, perRoomTop, { includeOps, ...requestBudget, embeddingCache })));
-      const lists: Array<{ room: string; hits: KbHit[] }> = [];
-      perSubQuery.forEach((s, i) => {
-        if (s.status === 'fulfilled' && s.value) lists.push({ room: `sq${i}`, hits: s.value.matches });
-      });
-      if (lists.length === 0) throw new Error(`room ${room}: every sub-query failed`);
-      // Intra-room fusion across this room's sub-query result lists — reuses the SAME rrfFuse.
-      const fused = rrfFuse(lists, perRoomTop);
-      return { room, hits: fused.map((f) => ({ score: f.score, text: f.text, id: f.id, path: f.path, agent: f.agent, variants: f.variants, type: f.type, source_version: f.source_version })) };
-    }),
-  );
+  const schedule = scheduleDeepSearchPairs(subQueries, rooms, anchor?.query, anchor?.rooms ?? rooms);
+  const settled = await Promise.allSettled(schedule.pairs.map((pair) =>
+    hybridSearch(pair.room, pair.query, perRoomTop, { includeOps, ...requestBudget, embeddingCache }),
+  ));
+  const preferredWitnesses: FusedHit[] = [];
+  let anchorCoverageIncomplete = schedule.unscheduledAnchorRooms.length > 0;
+  for (let i = 0; i < schedule.pairs.length; i++) {
+    const pair = schedule.pairs[i]!;
+    const outcome = settled[i]!;
+    if (pair.anchor && (outcome.status === 'rejected' || outcome.value === null)) anchorCoverageIncomplete = true;
+    if (pair.anchor && outcome.status === 'fulfilled' && outcome.value) {
+      for (const hit of outcome.value.matches) {
+        const witness = exactIdentifierWitness(hit, pair.room, pair.query);
+        if (witness) preferredWitnesses.push(witness);
+      }
+    }
+  }
 
   const perRoom: RoomHitList[] = [];
   const searched: string[] = [];
   const failed: string[] = [];
-  settled.forEach((s, i) => {
-    if (s.status === 'fulfilled') {
-      perRoom.push(s.value);
-      searched.push(s.value.room);
-    } else {
-      // Disclose WHY the room failed (quota vs auth vs missing index), not just that it did.
-      failed.push(`${rooms[i]!}: ${String((s.reason as Error)?.message ?? s.reason).slice(0, 80)}`);
+  const queriedRooms = [...new Set(schedule.pairs.map((pair) => pair.room))];
+  for (const room of queriedRooms) {
+    const lists: Array<{ room: string; hits: KbHit[] }> = [];
+    schedule.pairs.forEach((pair, i) => {
+      if (pair.room !== room) return;
+      const outcome = settled[i]!;
+      if (outcome.status === 'fulfilled' && outcome.value) lists.push({ room: `pair${i}`, hits: outcome.value.matches });
+    });
+    if (lists.length === 0) {
+      const reasons = schedule.pairs.map((pair, i) => ({ pair, outcome: settled[i] })).filter((x) => x.pair.room === room);
+      const why = reasons.find((x) => x.outcome?.status === 'rejected')?.outcome;
+      failed.push(`${room}: ${why?.status === 'rejected' ? String((why.reason as Error)?.message ?? why.reason).slice(0, 80) : 'empty result'}`);
+      continue;
     }
-  });
-  return { perRoom, searched, failed };
+    const fused = rrfFuse(lists, perRoomTop);
+    perRoom.push({ room, hits: fused.map((f) => ({ score: f.score, text: f.text, id: f.id, path: f.path, agent: f.agent, variants: f.variants, type: f.type, source_version: f.source_version })) });
+    searched.push(room);
+  }
+  return { perRoom, searched, failed, preferredWitnesses, anchorCoverageIncomplete };
 }
 
 /**
@@ -676,6 +758,9 @@ async function runDeepFlow(
   const { deadline, now } = budget;
   const overBudget = (): boolean => now() >= deadline;
   const budgetSkipped: string[] = [];
+  const anchorQuery = extractExactIdentifierAnchor(query);
+  let preferredWitnesses: FusedHit[] = [];
+  let anchorCoverageIncomplete = false;
 
   const resumeFrom = continuation ? sanitizeContinuation(continuation, rooms) : null;
   const resumed = resumeFrom !== null && resumeFrom.subQueries.length > 0;
@@ -696,14 +781,17 @@ async function runDeepFlow(
       return {
         mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: [], sub_queries: subQueries,
         rounds_used: rounds, hits: [], rooms_searched: [], partial: true,
-        continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds }, resumed: true,
+        continuation: { rooms: anchorQuery ? rooms : targetRooms, sub_queries: subQueries, rounds_used: rounds }, resumed: true,
+        ...(anchorQuery ? { coverage_limited: true } : {}),
       };
     }
     const round = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache);
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
     pool = [...round.perRoom];
+    preferredWitnesses = round.preferredWitnesses;
+    anchorCoverageIncomplete = round.anchorCoverageIncomplete;
     for (const s of round.searched) searched.add(s);
     for (const f of round.failed) failed.add(f);
   } else {
@@ -717,16 +805,19 @@ async function runDeepFlow(
       return {
         mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: [], sub_queries: subQueries,
         rounds_used: 0, hits: [], rooms_searched: [], partial: true,
-        continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: 0 },
+        continuation: { rooms: anchorQuery ? rooms : targetRooms, sub_queries: subQueries, rounds_used: 0 },
+        ...(anchorQuery ? { coverage_limited: true } : {}),
       };
     }
 
     const round1 = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache);
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
     rounds = 1;
     pool = [...round1.perRoom];
+    preferredWitnesses = round1.preferredWitnesses;
+    anchorCoverageIncomplete = round1.anchorCoverageIncomplete;
     for (const s of round1.searched) searched.add(s);
     for (const f of round1.failed) failed.add(f);
 
@@ -764,7 +855,7 @@ async function runDeepFlow(
     }
   }
 
-  const fusedFinal = dedupeById(rrfFuse(pool, top * 3));
+  const fusedFinal = dedupeById([...preferredWitnesses, ...rrfFuse(pool, top * 3)]);
   const retracted = await retractedIdsByAgent();
   const { kept, dropped } = filterRetractedByAgent(fusedFinal, retracted);
   const hits = kept.slice(0, top);
@@ -784,9 +875,10 @@ async function runDeepFlow(
       hits,
       rooms_searched: [...searched],
       partial: true,
-      continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds },
+      continuation: { rooms: anchorCoverageIncomplete ? rooms : targetRooms, sub_queries: subQueries, rounds_used: rounds },
     };
     if (resumed) result.resumed = true;
+    if (anchorCoverageIncomplete) result.coverage_limited = true;
     if (failed.size) result.rooms_failed = [...failed];
     if (dropped.length) result.retracted_dropped = dropped;
     if (budgetSkipped.length) result.budget_skipped = budgetSkipped;
@@ -817,9 +909,10 @@ async function runDeepFlow(
       hits,
       rooms_searched: [...searched],
       partial: true,
-      continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds },
+      continuation: { rooms: anchorCoverageIncomplete ? rooms : targetRooms, sub_queries: subQueries, rounds_used: rounds },
     };
     if (resumed) result.resumed = true;
+    if (anchorCoverageIncomplete) result.coverage_limited = true;
     if (failed.size) result.rooms_failed = [...failed];
     if (dropped.length) result.retracted_dropped = dropped;
     const evidence = injectionScreenEvidence(injectionScreen);
@@ -837,9 +930,10 @@ async function runDeepFlow(
     const result: DeepRetrieveResult = {
       mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: buildCitations(hits),
       sub_queries: subQueries, rounds_used: rounds, hits, rooms_searched: [...searched],
-      partial: true, continuation: { rooms: targetRooms, sub_queries: subQueries, rounds_used: rounds },
+      partial: true, continuation: { rooms: anchorCoverageIncomplete ? rooms : targetRooms, sub_queries: subQueries, rounds_used: rounds },
     };
     if (resumed) result.resumed = true;
+    if (anchorCoverageIncomplete) result.coverage_limited = true;
     if (failed.size) result.rooms_failed = [...failed];
     if (dropped.length) result.retracted_dropped = dropped;
     const evidence = injectionScreenEvidence(injectionScreen);
@@ -858,6 +952,11 @@ async function runDeepFlow(
     rooms_searched: [...searched],
   };
   if (resumed) result.resumed = true;
+  if (anchorCoverageIncomplete) {
+    result.partial = true;
+    result.coverage_limited = true;
+    result.continuation = { rooms, sub_queries: subQueries, rounds_used: rounds };
+  }
   if (failed.size) result.rooms_failed = [...failed];
   if (dropped.length) result.retracted_dropped = dropped;
   const evidence = injectionScreenEvidence(injectionScreen);
@@ -887,25 +986,11 @@ export async function fallbackFastSearch(
 ): Promise<DeepRetrieveResult> {
   return timedDeepStage('retrieval', async () => {
     try {
-      const perRoomTop = Math.min(25, Math.max(top, 10));
-      const settled = await Promise.allSettled(
-        rooms.map(async (room) => ({ room, res: await hybridSearch(room, query, perRoomTop, { includeOps, embeddingCache }) })),
-      );
-      const perRoom: RoomHitList[] = [];
-      const searched: string[] = [];
-      const failed: string[] = [];
-      settled.forEach((s, i) => {
-        if (s.status === 'fulfilled' && s.value.res) {
-          perRoom.push({ room: s.value.room, hits: s.value.res.matches });
-          searched.push(s.value.room);
-        } else {
-          const why = s.status === 'rejected' ? String((s.reason as Error)?.message ?? s.reason).slice(0, 80) : 'empty result';
-          failed.push(`${rooms[i]!}: ${why}`);
-        }
-      });
-      const pool = rrfFuse(perRoom, top * 3);
+      const anchorQuery = extractExactIdentifierAnchor(query);
+      const round = await runRetrievalRound([query], rooms, top, includeOps, undefined, embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
+      const pool = [...round.preferredWitnesses, ...rrfFuse(round.perRoom, top * 3)];
       const retracted = await retractedIdsByAgent();
-      const { kept, dropped } = filterRetractedByAgent(pool, retracted);
+      const { kept, dropped } = filterRetractedByAgent(dedupeById(pool), retracted);
       const hits = kept.slice(0, top);
       const result: DeepRetrieveResult = {
         mode: 'deep-fallback-fast',
@@ -914,11 +999,16 @@ export async function fallbackFastSearch(
         sub_queries: [query],
         rounds_used: 0,
         hits,
-        rooms_searched: searched,
+        rooms_searched: round.searched,
       };
-      if (failed.length) result.rooms_failed = failed;
+      if (round.failed.length) result.rooms_failed = round.failed;
       if (dropped.length) result.retracted_dropped = dropped;
-      return { value: result, outcome: failed.length ? 'partial' : undefined };
+      if (round.anchorCoverageIncomplete) {
+        result.partial = true;
+        result.coverage_limited = true;
+        result.continuation = { rooms, sub_queries: [query], rounds_used: 0 };
+      }
+      return { value: result, outcome: round.failed.length || round.anchorCoverageIncomplete ? 'partial' : undefined };
     } catch {
       return {
         value: {
@@ -993,5 +1083,6 @@ export async function deepRetrieve(
     return fallbackFastSearch(query, rooms, top, includeOps, embeddingCache);
   }
 }
+
 
 

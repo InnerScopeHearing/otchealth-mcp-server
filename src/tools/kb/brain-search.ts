@@ -354,6 +354,7 @@ export async function handleBrainSearch(
     // consumed (resumed) -- an ordinary, fully-completed deep call carries none of these, so its
     // shape is unchanged from before this fix.
     if (deep.partial) data.partial = true;
+    if (deep.coverage_limited) data.coverage_limited = true;
     if (deep.continuation) data.continuation = deep.continuation;
     if (deep.resumed) data.resumed = true;
     if (deep.budget_skipped?.length) data.budget_skipped = deep.budget_skipped;
@@ -374,7 +375,9 @@ export async function handleBrainSearch(
         (deep.injection_screen?.attackDetected
           ? ` INJECTION SCREEN flagged a retrieved passage (mode=${deep.injection_screen.mode}).`
           : '') +
-        (deep.partial && !retractionChanged
+        (deep.coverage_limited
+          ? ' COVERAGE: one or more original identifier probes failed or could not be scheduled; pass back `continuation` to retry.'
+          : deep.partial && !retractionChanged
           ? ' BUDGET: the wall-clock budget ran out before synthesis; pass back `continuation` to resume.'
           : '') +
         (deep.budget_skipped?.length ? ` Skipped for time: ${deep.budget_skipped.join(', ')}.` : ''),
@@ -533,6 +536,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
         // present only when actually true/non-empty, so a normal deep result (let alone fast mode)
         // is unchanged by this fix. See memory/deep-retrieval.ts's budget block.
         partial: z.boolean().optional(),
+        coverage_limited: z.boolean().optional(),
         continuation: z
           .object({ rooms: z.array(z.string()), sub_queries: z.array(z.string()), rounds_used: z.number() })
           .optional(),
@@ -544,4 +548,5 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
     callerHash,
   );
 }
+
 
