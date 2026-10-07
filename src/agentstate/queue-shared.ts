@@ -24,7 +24,14 @@ export interface ReadMessage extends InboxMessage {
   message_id: string;
   dequeue_count: number;
   acked: boolean;
+  /** Present only on dead-letter audit reads (ReadMessagesOptions.deadLetter); derived at read time. */
+  dead_letter_reason?: 'expired' | 'max_deliveries';
 }
+
+/** A message older than this is dead-lettered even when its enqueue-time TTL is longer. */
+export const INBOX_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
+/** A message fetched more than this many times is treated as poison: dead-lettered, never redelivered. */
+export const INBOX_MAX_DELIVERIES = 50;
 
 /**
  * inbox-<agent>. Routes through normalizeAgent FIRST so the privilege wall (were one reinstated)
@@ -45,5 +52,12 @@ export function queueName(agent: string): string {
 export interface ReadMessagesOptions {
   max?: number;
   ack?: boolean;
+  /** Azure-only: how long a peeked message stays hidden. The Postgres peek is side-effect free and ignores it. */
   visibilitySec?: number;
+  /** AUDIT: return the dead-lettered messages (newest first). Read-only -- never drains, hides or counts a
+   *  delivery. Postgres backend only (the dispatcher returns [] for any other backend). */
+  deadLetter?: boolean;
+  /** Overrides INBOX_MAX_AGE_SECONDS / INBOX_MAX_DELIVERIES. Test seams; production uses the defaults. */
+  maxAgeSec?: number;
+  maxDeliveries?: number;
 }

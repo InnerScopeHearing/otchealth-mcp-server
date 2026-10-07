@@ -45,5 +45,9 @@ export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604
 }
 
 export async function readMessages(agent: string, opts: ReadMessagesOptions = {}): Promise<ReadMessage[]> {
-  return activeBackend() === 'postgres' ? postgres.readMessages(agent, opts) : azure.readMessages(agent, opts);
+  if (activeBackend() === 'postgres') return postgres.readMessages(agent, opts);
+  // The dead-letter audit exists only on the Postgres backend. Never let the flag fall through to a
+  // live Azure read: with the default ack=true that would DRAIN real messages instead of auditing.
+  if (opts.deadLetter) return [];
+  return azure.readMessages(agent, opts);
 }

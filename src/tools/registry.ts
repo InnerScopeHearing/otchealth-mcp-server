@@ -512,10 +512,12 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   if (lane === 'cto') {
     if (!env.CONNECTOR_TOOLSET) {
       tools.add(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+      tools.add('github_workflow_run_failed_log_excerpt');
       tools.add(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
     }
   } else {
     tools.delete(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+    tools.delete('github_workflow_run_failed_log_excerpt');
     tools.delete(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
   }
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who

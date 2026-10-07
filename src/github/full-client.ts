@@ -16,6 +16,7 @@ import { createHash, createSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { CI_LOG_HARD_CAP_BYTES, CI_LOG_KEEP_BYTES, readResponseTail, type JobLogResult } from './ci-log-excerpt.js';
 import type {
   PinnedObservationFailureDetail,
   PinnedObservationFailureStage,
@@ -1037,6 +1038,58 @@ async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
     }
   }
   return readBoundedResponseBytes(downloadResponse, MAX_GRAPHRAG_ARCHIVE_BYTES);
+}
+
+/** GET /repos/{owner}/{repo}/actions/jobs/{job_id} */
+export async function workflowJobGet(owner: string, repo: string, jobId: number): Promise<any> {
+  return ghGet(`/repos/${O(owner)}/${O(repo)}/actions/jobs/${jobId}`);
+}
+
+const CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS = 15_000;
+
+/**
+ * GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs answers 302 with a short-lived signed storage
+ * URL. Follow it by hand with the same safeguards as the pinned artifact download: the redirect target
+ * must pass the GitHub Actions storage host allowlist, the installation token is never sent to
+ * storage, no further redirects are followed, and only the newest CI_LOG_KEEP_BYTES are retained.
+ * Never throws and never echoes upstream text: every failure maps to a fixed status/reason.
+ */
+export async function workflowJobLogTail(owner: string, repo: string, jobId: number): Promise<JobLogResult> {
+  try {
+    const token = await getInstallationToken();
+    const redirectResponse = await fetchWithBudget(
+      new URL(`/repos/${O(owner)}/${O(repo)}/actions/jobs/${jobId}/logs`, PINNED_OBSERVATION_API),
+      { method: 'GET', redirect: 'manual', headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` } },
+      { retries: 1, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS },
+    );
+    const location = redirectResponse.headers.get('location');
+    await cancelResponseBody(redirectResponse);
+    if (redirectResponse.status === 404 || redirectResponse.status === 410) return { status: 'unavailable' };
+    if (redirectResponse.status !== 302) return { status: 'failed', reason: `api_http_${redirectResponse.status}` };
+    let signedUrl: URL;
+    try {
+      signedUrl = validateSignedArtifactUrl(location);
+    } catch {
+      return { status: 'failed', reason: 'untrusted_redirect' };
+    }
+    const download = await fetchWithBudget(signedUrl, {
+      method: 'GET',
+      redirect: 'error',
+      headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
+    }, { retries: 0, timeoutMs: CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS });
+    if (download.status === 404 || download.status === 410) {
+      await cancelResponseBody(download);
+      return { status: 'unavailable' };
+    }
+    if (download.status !== 200) {
+      await cancelResponseBody(download);
+      return { status: 'failed', reason: `download_http_${download.status}` };
+    }
+    const tail = await readResponseTail(download, CI_LOG_KEEP_BYTES, CI_LOG_HARD_CAP_BYTES, CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS);
+    return { status: 'ok', text: tail.bytes.toString('utf8'), headTruncated: tail.headTruncated };
+  } catch (error) {
+    return { status: 'failed', reason: error instanceof Error && error.message === 'response too large' ? 'log_too_large' : 'request_error' };
+  }
 }
 
 export interface PinnedGraphRagObservationResult {
