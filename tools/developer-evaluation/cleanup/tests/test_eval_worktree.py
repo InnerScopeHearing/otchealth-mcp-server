@@ -231,7 +231,7 @@ class EvalWorktreeTests(unittest.TestCase):
     def test_remove_failure_receipt_preserves_partial_deregister_residual(self) -> None:
         target = self.prepare("partial-remove")
         logs = ew.ARTIFACT_ROOT / "partial-remove"
-        logs.mkdir(parents=True)
+        logs.mkdir(parents=True, exist_ok=True)
         sentinel = logs / "stdout.log"
         sentinel.write_text("preserve\n", encoding="utf-8")
         original_git = ew.git
@@ -301,7 +301,7 @@ class EvalWorktreeTests(unittest.TestCase):
         target = self.prepare("windows-retry")
         manifest_path = ew.state_path("windows-retry")
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        Path(data["logs_dir"]).mkdir(parents=True)
+        Path(data["logs_dir"]).mkdir(parents=True, exist_ok=True)
         original_git = ew.git
         original_git(self.source, "worktree", "remove", str(target))
         target.mkdir(parents=True)
@@ -315,7 +315,7 @@ class EvalWorktreeTests(unittest.TestCase):
             "source_checkout_unchanged": True,
             "logs_preserved": True,
             "force_used": False,
-            "git_remove_error": "git worktree remove failed (255): synthetic residual",
+            "git_remove_error": f"git worktree remove {target} failed (255): synthetic residual",
         }
         ew.write_json(manifest_path, data)
 
@@ -344,7 +344,7 @@ class EvalWorktreeTests(unittest.TestCase):
         target = self.prepare("windows-injected")
         manifest_path = ew.state_path("windows-injected")
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        Path(data["logs_dir"]).mkdir(parents=True)
+        Path(data["logs_dir"]).mkdir(parents=True, exist_ok=True)
         ew.git(self.source, "worktree", "remove", str(target))
         target.mkdir(parents=True)
         injected = target / "injected.txt"
@@ -353,7 +353,7 @@ class EvalWorktreeTests(unittest.TestCase):
             "completed": False, "target": str(target), "target_present": True,
             "target_registered_after": False, "worktree_list_absent": True,
             "source_checkout_unchanged": True, "logs_preserved": True,
-            "force_used": False, "git_remove_error": "git failed (255)",
+            "force_used": False, "git_remove_error": f"git worktree remove {target} failed (255): synthetic residual",
         }
         ew.write_json(manifest_path, data)
         with (
@@ -369,7 +369,7 @@ class EvalWorktreeTests(unittest.TestCase):
         target = self.prepare("windows-ignored-match")
         manifest_path = ew.state_path("windows-ignored-match")
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        Path(data["logs_dir"]).mkdir(parents=True)
+        Path(data["logs_dir"]).mkdir(parents=True, exist_ok=True)
         ignored_source = self.source / ".env"
         ignored_source.write_text("must survive\n", encoding="utf-8")
         ew.git(self.source, "worktree", "remove", str(target))
@@ -380,7 +380,7 @@ class EvalWorktreeTests(unittest.TestCase):
             "completed": False, "target": str(target), "target_present": True,
             "target_registered_after": False, "worktree_list_absent": True,
             "source_checkout_unchanged": True, "logs_preserved": True,
-            "force_used": False, "git_remove_error": "git failed (255)",
+            "force_used": False, "git_remove_error": f"git worktree remove {target} failed (255): synthetic residual",
         }
         ew.write_json(manifest_path, data)
         with (
@@ -427,6 +427,29 @@ class EvalWorktreeTests(unittest.TestCase):
         self.assertEqual(kwargs["env"]["OTCHEALTH_CLEANUP_TARGET"], str(target))
         self.assertNotIn(str(target), args[0])
         self.assertTrue(receipt["completed"])
+
+    def test_missing_exact_logs_refuse_before_removal(self) -> None:
+        target = self.prepare("missing-logs")
+        (ew.ARTIFACT_ROOT / "missing-logs").rmdir()
+        with self.assertRaisesRegex(ew.ContractError, "log directory"):
+            ew.cmd_cleanup(Namespace(run_id="missing-logs"))
+        self.assertTrue(target.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_nested_generated_junction_refuses_and_preserves_outside(self) -> None:
+        residual = self.root / "synthetic-residual"
+        generated = residual / "node_modules"
+        generated.mkdir(parents=True)
+        outside = self.root / "outside-generated"
+        outside.mkdir()
+        sentinel = outside / "keep.txt"
+        sentinel.write_text("preserve\n", encoding="utf-8")
+        junction = generated / "linked-output"
+        result = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with self.assertRaisesRegex(ew.ContractError, "reparse"):
+            ew.validate_deregistered_residual(self.source, residual)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
 
 
 if __name__ == "__main__":

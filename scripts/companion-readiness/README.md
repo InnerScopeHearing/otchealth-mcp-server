@@ -117,6 +117,13 @@ hash, then invokes Node with the CLI as its first argument. It uses no shell or
 .cmd shim and does not bootstrap a toolchain. POSIX keeps the existing pnpm path.
 The receipt records the actual executable and arguments.
 
+If Windows exposes no platform environment ID, declare a nonempty
+`CODEX_ENVIRONMENT_BINDING` in the invoking process and bind the identical value
+in admission `host.environment_binding`, with `host.environment_id: null`.
+This is a local declaration, not a platform attestation. Missing runtime session
+and environment identifiers fail closed; an admission cannot invent them.
+Use explicit executable paths, not Windows application-execution aliases.
+
 To use the published cleanup helper in place, without copying a Local adapter,
 pass `--cleanup-root <absolute tools/developer-evaluation/cleanup path>`.
 Bind that same canonical root in admission field `cleanup_root`; state, worktree

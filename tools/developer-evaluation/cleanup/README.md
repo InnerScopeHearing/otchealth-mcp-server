@@ -2,6 +2,14 @@
 
 This small local Git-backed toolset provides a reproducible way to evaluate a Developer-owned app revision without creating a remote branch or touching the source checkout. It is separate from the pagination and runner worktrees. It changes no Developer permissions and grants no delete authority.
 
+The control root is the helper's actual containing cleanup directory. When run
+from the published location, use `tools/developer-evaluation/cleanup/worktrees`,
+`state`, and `artifacts`, not the historical `repair2/cleanup` copy layout below.
+Use Git 2.36 or newer for NUL-delimited worktree registration readback.
+Recovery refuses symlinks and all Windows reparse points, including junctions
+nested inside generated output. Its retry is restricted to the recorded exact
+Git exit 255 and requires the exact retained log directory before removal.
+
 ## Ownership and exact targets
 
 | Object | Writer / owner | Guard and cleanup |

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, realpath, rename, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -8,6 +8,68 @@ import { runCompanionReadiness, DEFAULT_PIN, FOCUSED_ARGS, MOBILE_SUITE_ARGS, pn
 
 const SESSION = 'test-session';
 const ENVIRONMENT = 'test-environment';
+
+test('missing runtime identifiers fail closed before commands', async (t) => {
+  const f = await fixture(t);
+  const admission = JSON.parse(await readFile(f.admissionPath, 'utf8'));
+  admission.host = {};
+  await writeFile(f.admissionPath, JSON.stringify(admission));
+  const fake = fakeCommands({});
+  await assert.rejects(run(f, fake, {}, { env: {} }), /session|environment|binding/i);
+  assert.equal(fake.calls.length, 0);
+});
+
+test('explicit local binding works without claiming a platform environment ID', async (t) => {
+  const f = await fixture(t);
+  const admission = JSON.parse(await readFile(f.admissionPath, 'utf8'));
+  admission.host = { session_id: SESSION, environment_id: null, environment_binding: 'synthetic-local-binding' };
+  await writeFile(f.admissionPath, JSON.stringify(admission));
+  const fake = fakeCommands({});
+  const result = await run(f, fake, {}, { env: { CODEX_SESSION_ID: SESSION, CODEX_ENVIRONMENT_BINDING: 'synthetic-local-binding' } });
+  assert.equal(result.host.environment_id, null);
+  assert.equal(result.host.environment_binding, 'synthetic-local-binding');
+});
+
+test('cleanup target and logs bind the exact run ID', async (t) => {
+  for (const field of ['target', 'logs_dir']) {
+    const f = await fixture(t);
+    const state = JSON.parse(await readFile(f.state, 'utf8'));
+    state[field] += '-other-run';
+    await mkdir(state[field], { recursive: true });
+    await writeFile(f.state, JSON.stringify(state));
+    const fake = fakeCommands({});
+    await assert.rejects(run(f, fake), /run_id/);
+    assert.equal(fake.calls.length, 0);
+  }
+});
+
+test('escaping state junction refuses before commands', async (t) => {
+  const f = await fixture(t);
+  const stateDir = join(f.workspaceRoot, 'repair2/cleanup/state');
+  const outside = join(f.workspaceRoot, 'outside-state');
+  await rename(stateDir, outside);
+  await symlink(outside, stateDir, process.platform === 'win32' ? 'junction' : 'dir');
+  const fake = fakeCommands({});
+  await assert.rejects(run(f, fake), /link|junction|canonical/);
+  assert.equal(fake.calls.length, 0);
+});
+
+test('spawn error messages are redacted in both output sinks', async (t) => {
+  const f = await fixture(t);
+  const fake = fakeCommands({});
+  const marker = 'synthetic-message-marker';
+  const execute = async (file, args, options) => {
+    if (file === 'pnpm' && args[0] === 'install') throw new Error(`https://user:${marker}@github.com/example Authorization: Bearer ${marker}`);
+    return fake.execute(file, args, options);
+  };
+  await assert.rejects(run(f, { execute }), /frozen-install failed/);
+  const receiptText = await readFile(join(f.artifacts, 'readiness-receipt.json'), 'utf8');
+  const receipt = JSON.parse(receiptText);
+  const command = receipt.commands.find((entry) => entry.label === 'frozen-install');
+  assert.equal(receiptText.includes(marker), false);
+  assert.equal((await readFile(command.log_path, 'utf8')).includes(marker), false);
+  assert.match(command.spawn_error, /REDACTED/);
+});
 
 async function fixture(t, overrides = {}) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), 'companion-runner-'));

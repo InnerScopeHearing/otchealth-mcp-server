@@ -2,7 +2,7 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile, readdir, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, readdir, realpath, lstat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -57,6 +57,30 @@ function inside(parent, child) {
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
 }
 
+function samePath(left, right) {
+  const a = resolve(left);
+  const b = resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+async function canonicalNoLinks(path, allowMissing = false) {
+  const absolute = resolve(path);
+  let current = absolute;
+  while (true) {
+    try {
+      const info = await lstat(current);
+      assert(!info.isSymbolicLink(), 'symlink or junction path is not admitted');
+      assert(samePath(await realpath(current), current), 'noncanonical linked path is not admitted');
+    } catch (error) {
+      if (!(allowMissing && error.code === 'ENOENT')) throw error;
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return absolute;
+}
+
 function commandString(executable, args) {
   return [executable, ...args].map((part) => JSON.stringify(part)).join(' ');
 }
@@ -88,7 +112,7 @@ async function runOne(execute, receipt, { executable, args, cwd, label, env, log
   } catch (error) {
     stdout = error?.stdout ?? '';
     stderr = error?.stderr ?? '';
-    spawnError = error?.code ?? error?.message ?? 'command failed';
+    spawnError = redact(error?.code ?? error?.message ?? 'command failed');
     timedOut = error?.code === 'ETIMEDOUT' || error?.killed === true;
     exitCode = Number.isInteger(error?.exitCode)
       ? error.exitCode
@@ -127,7 +151,7 @@ async function writeReceipt(receipt) {
   await writeFile(receipt.receipt_path, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
 }
 
-function assertAdmission(admission, { repository, pin, sessionId, environmentId }) {
+function assertAdmission(admission, { repository, pin, sessionId, environmentId, environmentBinding }) {
   assert(admission && admission.schema_version === RUNNER_VERSION, 'admission schema_version must be 1');
   assert(admission.allowed === true, 'admission.allowed must be true');
   assert(admission.scope === RUNNER_SCOPE, `admission.scope must be ${RUNNER_SCOPE}`);
@@ -140,8 +164,16 @@ function assertAdmission(admission, { repository, pin, sessionId, environmentId 
   assert(admission.dependency_install_route_approved === true, 'frozen dependency install route is not admitted');
   assert(admission.synthetic_tests_only === true, 'admission must constrain execution to synthetic tests');
   assert(admission.no_live_provider_calls === true, 'admission must prohibit live provider calls');
+  assert(typeof sessionId === 'string' && sessionId.trim().length > 0, 'current session ID is required');
   assert(admission.host && admission.host.session_id === sessionId, 'admission session binding mismatch');
-  assert(admission.host.environment_id === environmentId, 'admission environment binding mismatch');
+  if (typeof environmentId === 'string' && environmentId.trim().length > 0) {
+    assert(admission.host.environment_id === environmentId, 'admission environment binding mismatch');
+  } else {
+    assert(typeof environmentBinding === 'string' && environmentBinding.trim().length > 0,
+      'current environment ID or explicitly declared local binding is required');
+    assert(admission.host.environment_id == null && admission.host.environment_binding === environmentBinding,
+      'admission local environment binding mismatch');
+  }
   assert(typeof admission.expires_at_utc === 'string' && Date.parse(admission.expires_at_utc) > Date.now(), 'admission is missing or expired');
 }
 
@@ -241,26 +273,28 @@ export async function runCompanionReadiness(options, deps = {}) {
   const repository = options.repository ?? DEFAULT_REPOSITORY;
   const workspaceRoot = resolve(deps.workspaceRoot ?? '/workspace/scratch/5dbf17436df9');
   assert(options.cleanupRoot === undefined || (typeof options.cleanupRoot === 'string' && isAbsolute(options.cleanupRoot)), 'cleanup root must be absolute');
-  const cleanupRoot = options.cleanupRoot ? resolve(options.cleanupRoot) : join(workspaceRoot, 'repair2', 'cleanup');
+  const cleanupRoot = await canonicalNoLinks(options.cleanupRoot ? resolve(options.cleanupRoot) : join(workspaceRoot, 'repair2', 'cleanup'));
   let state;
   let sourceValue = options.repo;
   let artifactValue = options.artifacts;
   let pin = options.pin ?? DEFAULT_PIN;
   if (options.state) {
-    const statePath = resolve(options.state);
+    const statePath = await canonicalNoLinks(options.state);
     assert(inside(join(cleanupRoot, 'state'), statePath), 'state file must be under repair2/cleanup/state');
     state = JSON.parse(await readFile(statePath, 'utf8'));
     sourceValue = state.target;
     artifactValue = state.logs_dir;
     assert(parseSha(state.pin) && state.pin === pin, 'cleanup state pin does not match requested exact pin');
-    assert(typeof state.run_id === 'string' && /^[A-Za-z0-9._-]+$/.test(state.run_id), 'cleanup state must contain a safe run_id');
+    assert(typeof state.run_id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(state.run_id), 'cleanup state must contain a safe run_id');
+    assert(samePath(statePath, join(cleanupRoot, 'state', `${state.run_id}.json`)), 'state filename must bind the exact run_id');
   } else {
     assert(deps.allowDirectTarget === true, 'CLI requires cleanup state from eval_worktree.py prepare');
   }
   const sessionId = env.CODEX_SESSION_ID;
   const environmentId = env.CODEX_ENVIRONMENT_ID;
-  const source = resolve(sourceValue ?? '');
-  const artifactDir = resolve(artifactValue ?? '');
+  const environmentBinding = env.CODEX_ENVIRONMENT_BINDING;
+  const source = await canonicalNoLinks(sourceValue ?? '');
+  const artifactDir = await canonicalNoLinks(artifactValue ?? '', true);
   assert(sourceValue && artifactValue, '--state cleanup state file is required');
   assert(parseSha(pin), 'pin must be a full 40-character lowercase commit SHA');
   assert(repository === DEFAULT_REPOSITORY, 'runner is scoped to the Companion repository');
@@ -268,7 +302,12 @@ export async function runCompanionReadiness(options, deps = {}) {
   assert(inside(join(cleanupRoot, 'worktrees'), source), 'repo must be a prepared cleanup-owned worktree');
   assert(inside(join(cleanupRoot, 'artifacts'), artifactDir), 'artifacts must be under the cleanup artifacts root');
   assert(!inside(source, artifactDir), 'artifacts must be outside the source worktree');
+  if (state) {
+    assert(samePath(source, join(cleanupRoot, 'worktrees', state.run_id)), 'target must bind the exact run_id');
+    assert(samePath(artifactDir, join(cleanupRoot, 'artifacts', state.run_id)), 'logs must bind the exact run_id');
+  }
   await mkdir(artifactDir, { recursive: true, mode: 0o700 });
+  await canonicalNoLinks(artifactDir);
   const existing = await readdir(artifactDir);
   assert(existing.length === 0, 'artifact directory must be empty; refusing to overwrite prior evidence');
   const receiptPath = join(artifactDir, 'readiness-receipt.json');
@@ -277,7 +316,7 @@ export async function runCompanionReadiness(options, deps = {}) {
     task_id: 't_idem_2bde337b',
     runner: 'companion-readiness',
     started_at_utc: startedAt,
-    host: { os: `${os.platform()} ${os.arch()}`, hostname: os.hostname(), cwd: process.cwd(), session_id: sessionId ?? null, thread_id: env.CODEX_THREAD_ID ?? null, environment_id: environmentId ?? null },
+    host: { os: `${os.platform()} ${os.arch()}`, hostname: os.hostname(), cwd: process.cwd(), session_id: sessionId ?? null, thread_id: env.CODEX_THREAD_ID ?? null, environment_id: environmentId ?? null, environment_binding: environmentBinding ?? null },
     source: { repository, path: source, expected_sha: pin },
     cleanup_run_id: state?.run_id ?? null,
     cleanup_root: cleanupRoot,
@@ -297,8 +336,9 @@ export async function runCompanionReadiness(options, deps = {}) {
     throw error;
   }
   assert(!inside(source, admissionFile), 'admission file must be outside the source worktree');
+  await canonicalNoLinks(admissionFile);
   const admission = JSON.parse(await readFile(admissionFile, 'utf8'));
-  assertAdmission(admission, { repository, pin, sessionId, environmentId });
+  assertAdmission(admission, { repository, pin, sessionId, environmentId, environmentBinding });
   if (options.cleanupRoot) {
     assert(typeof admission.cleanup_root === 'string' && isAbsolute(admission.cleanup_root), 'explicit cleanup root must be bound in admission');
     const [admittedRoot, actualRoot] = await Promise.all([realpath(admission.cleanup_root), realpath(cleanupRoot)]);
