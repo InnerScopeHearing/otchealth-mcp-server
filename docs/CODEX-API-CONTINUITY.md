@@ -13,7 +13,8 @@ They do not draw from the ChatGPT or Codex subscription allowance.
 - The ephemeral GitHub-hosted VM is the external execution sandbox
 - The API key is removed from the worker environment immediately after Codex login
 - Repository-local write access only
-- Any changes are pushed to a `claude/*` branch and opened as a draft pull request
+- Any changes are pushed to a `claude/*` branch and opened as a draft pull request when the repository allows GitHub Actions to create pull requests. When it does not, the run still succeeds, and a warning annotation and the job summary give the pushed branch and a compare link so a person or an agent with pull request rights can open the draft
+- A weekly schedule (`17 9 * * 1`, UTC) runs a no-change canary task that reports in its final message and must not write files, so a healthy week should leave no branch behind
 - No automatic credit purchase or fallback provider
 - Every run uploads a content-safe receipt, authentication status, and Codex JSONL log
 - A run fails unless it proves that an API-backed model turn completed
