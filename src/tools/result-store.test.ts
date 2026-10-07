@@ -19,8 +19,29 @@ const {
   offloadResult,
   fetchStoredResult,
   PAGE_CHARS,
+  COMPACT_RESULT_JSON_MODE_ENV,
+  compactResultJsonWritesEnabled,
 } = await import('./result-store.js');
 const { handleGatewayFetchResult } = await import('./gateway-fetch-result.js');
+
+async function withCompactJsonMode<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+  const previous = process.env[COMPACT_RESULT_JSON_MODE_ENV];
+  if (value === undefined) delete process.env[COMPACT_RESULT_JSON_MODE_ENV];
+  else process.env[COMPACT_RESULT_JSON_MODE_ENV] = value;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env[COMPACT_RESULT_JSON_MODE_ENV];
+    else process.env[COMPACT_RESULT_JSON_MODE_ENV] = previous;
+  }
+}
+
+test('compact serialization writes require exact opt-in and default off', async () => {
+  await withCompactJsonMode(undefined, async () => assert.equal(compactResultJsonWritesEnabled(), false));
+  await withCompactJsonMode('off', async () => assert.equal(compactResultJsonWritesEnabled(), false));
+  await withCompactJsonMode('ON', async () => assert.equal(compactResultJsonWritesEnabled(), false));
+  await withCompactJsonMode('on', async () => assert.equal(compactResultJsonWritesEnabled(), true));
+});
 
 test('extractResultSummary: Xero list envelope -> pagination + array lengths, nothing else copied', () => {
   const data = {
@@ -111,11 +132,13 @@ test('escape-heavy Unicode JSON pages stay bounded and reassemble to the exact U
   const data = {
     history: ('quote=" slash=\\ newline=\n tab=\t nul=\u0000 emoji=😀 musical=𝄞 ').repeat(5000),
   };
-  const serialized = JSON.stringify(data, null, 2);
-  const outcome = await offloadResult(serialized, data, 'corr_escape_heavy', callerHash, store.deps);
+  const serialized = JSON.stringify(data);
+  const outcome = await withCompactJsonMode('on', () =>
+    offloadResult(serialized, data, 'corr_escape_heavy', callerHash, store.deps));
   assert.ok(outcome);
 
-  const first = await fetchStoredResult(outcome.resultId, 0, callerHash, store.deps);
+  const first = await withCompactJsonMode('off', () =>
+    fetchStoredResult(outcome.resultId, 0, callerHash, store.deps));
   assert.equal(first.found, true);
   assert.ok(first.pages! > Math.ceil(serialized.length / PAGE_CHARS), 'fixture exercises JSON escape expansion');
   const chunks: string[] = [];
@@ -123,7 +146,8 @@ test('escape-heavy Unicode JSON pages stay bounded and reassemble to the exact U
     const response = await handleGatewayFetchResult(
       { result_id: outcome.resultId, page },
       { callerHash },
-      { fetchStoredResult: (id, requestedPage, hash) => fetchStoredResult(id, requestedPage, hash, store.deps) },
+      { fetchStoredResult: (id, requestedPage, hash) =>
+        withCompactJsonMode('off', () => fetchStoredResult(id, requestedPage, hash, store.deps)) },
     );
     const fetched = response.data as {
       found: boolean;
@@ -139,7 +163,7 @@ test('escape-heavy Unicode JSON pages stay bounded and reassemble to the exact U
     assert.ok(renderedBytes < 40000, 'page ' + page + ' rendered ' + renderedBytes + ' UTF-8 bytes');
     assert.equal(/[\uD800-\uDBFF]$/.test(fetched.chunk), false, 'page ' + page + ' ends with a split surrogate');
     assert.equal(/^[\uDC00-\uDFFF]/.test(fetched.chunk), false, 'page ' + page + ' starts with a split surrogate');
-    chunks.push(fetched.chunk);
+    chunks.push(fetched.chunk!);
   }
 
   const reassembled = chunks.join('');
@@ -278,4 +302,101 @@ test('gateway fetch handler forwards the exact request caller hash on every page
   assert.deepEqual(calls, [['jitres_synthetic', 7, callerHash]]);
   assert.deepEqual(response.data, { found: false });
   assert.match(response.summary, /unauthorized/);
+});
+
+test('compact stored JSON preserves nested values and reduces a large invoice payload by over 20%', async () => {
+  const store = fakeResultStore();
+  const callerHash = '8'.repeat(64);
+  const data = {
+    body: {
+      Id: 'synthetic',
+      Status: 'OK',
+      pagination: { page: 1, pageSize: 100, pageCount: 1, itemCount: 100 },
+      Invoices: Array.from({ length: 100 }, (_, i) => ({
+        InvoiceID: `INV-${String(i).padStart(6, '0')}`,
+        Contact: { ContactID: `CONTACT-${i}`, Name: `Synthetic customer ${i}` },
+        Date: '2026-09-01',
+        DueDate: '2026-09-30',
+        Status: 'AUTHORISED',
+        LineItems: [{ Description: 'Synthetic service', Quantity: 1, UnitAmount: 125.5, TaxType: 'OUTPUT', AccountCode: '200' }],
+        Total: 125.5,
+        CurrencyCode: 'USD',
+      })),
+    },
+  };
+  const pretty = JSON.stringify(data, null, 2);
+  const compact = JSON.stringify(data);
+  assert.deepEqual(JSON.parse(compact), JSON.parse(pretty));
+  assert.ok(Buffer.byteLength(compact, 'utf8') < Buffer.byteLength(pretty, 'utf8') * 0.8);
+
+  const outcome = await withCompactJsonMode('on', () =>
+    offloadResult(pretty, data, 'corr_compact_synthetic', callerHash, store.deps));
+  assert.ok(outcome);
+  const stored = store.docs.get(outcome.resultId);
+  assert.equal(stored?.serialization_format, 'compact-json-v1');
+  assert.equal(stored?.total_bytes, Buffer.byteLength(compact, 'utf8'));
+  const first = await withCompactJsonMode('off', () =>
+    fetchStoredResult(outcome.resultId, 0, callerHash, store.deps));
+  assert.equal(first.found, true);
+  assert.equal(first.pages, 2);
+  const chunks: string[] = [];
+  for (let page = 0; page < first.pages!; page++) {
+    const fetched = await withCompactJsonMode('off', () =>
+      fetchStoredResult(outcome.resultId, page, callerHash, store.deps));
+    assert.equal(fetched.found, true);
+    assert.ok(fetched.chunk !== undefined);
+    chunks.push(fetched.chunk!);
+    assert.equal(fetched.total_bytes, Buffer.byteLength(compact, 'utf8'));
+  }
+  const reassembled = chunks.join('');
+  assert.equal(reassembled, compact);
+  assert.equal(outcome.totalBytes, Buffer.byteLength(compact, 'utf8'));
+  assert.deepEqual(JSON.parse(reassembled), data);
+});
+
+test('legacy results stay pretty and paginate identically when compact writes are enabled', async () => {
+  const store = fakeResultStore();
+  const callerHash = '7'.repeat(64);
+  const data = { rows: Array.from({ length: 100 }, (_, i) => ({ id: i, name: 'Synthetic row ' + i, nested: { active: true } })) };
+  const pretty = JSON.stringify(data, null, 2);
+  const outcome = await withCompactJsonMode('off', () =>
+    offloadResult(pretty, data, 'corr_legacy_read', callerHash, store.deps));
+  assert.ok(outcome);
+  const stored = store.docs.get(outcome.resultId);
+  assert.equal(stored?.serialization_format, undefined);
+  assert.equal(stored?.total_bytes, Buffer.byteLength(pretty, 'utf8'));
+  assert.equal(outcome.totalBytes, Buffer.byteLength(pretty, 'utf8'));
+
+  const fetched = await withCompactJsonMode('on', async () => {
+    const first = await fetchStoredResult(outcome.resultId, 0, callerHash, store.deps);
+    const chunks: string[] = [];
+    for (let page = 0; page < first.pages!; page++) {
+      chunks.push((await fetchStoredResult(outcome.resultId, page, callerHash, store.deps)).chunk!);
+    }
+    return { first, chunks };
+  });
+  assert.equal(fetched.first.total_bytes, Buffer.byteLength(pretty, 'utf8'));
+  assert.equal(fetched.first.pages, pageCount(pretty));
+  assert.equal(fetched.chunks.join(''), pretty);
+  assert.deepEqual(JSON.parse(fetched.chunks.join('')), data);
+});
+
+test('unknown stored serialization formats fail closed before payload serialization', async () => {
+  const callerHash = '6'.repeat(64);
+  const result = await fetchStoredResult('jitres_unknown_format', 0, callerHash, {
+    newId: () => 'unused',
+    upsertDoc: async () => undefined,
+    readDoc: async () => ({
+      doc: {
+        id: 'jitres_unknown_format',
+        type: 'jit_result',
+        caller_hash: callerHash,
+        expiresAt: Date.now() + 60_000,
+        serialization_format: 'compact-json-v2',
+        data: 1n,
+      },
+    }),
+    now: Date.now,
+  });
+  assert.deepEqual(result, { found: false });
 });

@@ -27,6 +27,8 @@
  */
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
+import { withProviderUsageStage } from '../telemetry/provider-usage-receipt.js';
+import { embedWithRequestCache, type EmbeddingRequestCache } from '../search/embedding-request-cache.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { demoteExhaustHits } from '../memory/room-hygiene.js';
 import { rerankByAuthority, rerankEnabled } from '../memory/authority-rerank.js';
@@ -101,6 +103,8 @@ export interface HybridSearchOptions {
   deadlineAtMs?: number;
   /** Optional cancellation signal for a caller-bounded request. */
   signal?: AbortSignal;
+  /** Shared only among the room lookups belonging to one brain_search request. */
+  embeddingCache?: EmbeddingRequestCache;
 }
 
 /** Exported so alternate search backends (see src/search/opensearch.ts) reuse the exact same
@@ -146,7 +150,7 @@ export async function hybridSearch(
     // call-site convention exactly) so the shadow branch's own network calls can never add latency
     // to, or fail, this response. See azure/search.test.ts for a live proof that this function
     // resolves before the shadow branch's own fetch even settles.
-    void runShadowEvalIfSampled(index, query, top, opts, result).catch(() => undefined);
+    void withProviderUsageStage('shadow', () => runShadowEvalIfSampled(index, query, top, opts, result)).catch(() => undefined);
   }
   return result;
 }
@@ -179,7 +183,10 @@ async function runHybridSearch(
 
   let vector: number[] | null = null;
   try {
-    vector = await embed(query, { deadlineAtMs: opts?.deadlineAtMs, signal: opts?.signal });
+    const budget = { deadlineAtMs: opts?.deadlineAtMs, signal: opts?.signal };
+    vector = opts?.embeddingCache
+      ? await embedWithRequestCache(opts.embeddingCache, query, () => embed(query, budget), budget, Date.now)
+      : await embed(query, budget);
   } catch {
     if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
     vector = null;
@@ -585,3 +592,5 @@ async function getChunkedDocument(
     mode: 'reassembled',
   };
 }
+
+

@@ -235,7 +235,7 @@ async function postEmbeddings<T>(target: EmbeddingsTarget, body: Record<string, 
 export async function embed(text: string, budget?: ProviderRequestBudget): Promise<number[] | null> {
   const target = embeddingsTarget();
   if (!target) return null;
-  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: text }, budget);
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number }; model?: string }>(target, { input: text }, budget);
   // Cost visibility for OpenAI-direct calls (target.model is set only on that active path).
   // Never throws (recordOpenAIUsage's own contract); instrumentation must not break embeddings.
   if (target.model) {
@@ -244,6 +244,8 @@ export async function embed(text: string, budget?: ProviderRequestBudget): Promi
       kind: 'embedding',
       promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0,
       caller: 'gateway-embed',
+      rawUsage: j.usage,
+      responseModel: j.model,
     });
   }
   return j.data?.[0]?.embedding ?? null;
@@ -260,6 +262,7 @@ export async function embedBatch(texts: string[]): Promise<number[][] | null> {
   const j = await postEmbeddings<{
     data?: Array<{ embedding: number[]; index?: number }>;
     usage?: { prompt_tokens?: number; total_tokens?: number };
+    model?: string;
   }>(target, {
     input: texts,
   });
@@ -269,6 +272,8 @@ export async function embedBatch(texts: string[]): Promise<number[][] | null> {
       kind: 'embedding',
       promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0,
       caller: 'gateway-embed-batch',
+      rawUsage: j.usage,
+      responseModel: j.model,
     });
   }
   const data = j.data ?? [];
@@ -284,8 +289,8 @@ export async function embedBatch(texts: string[]): Promise<number[][] | null> {
 export async function historicalRepairEmbed(text: string): Promise<number[] | null> {
   const target = historicalRepairEmbeddingsTarget();
   if (!target) return null;
-  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: text });
-  recordOpenAIUsage({ model: target.model!, kind: 'embedding', promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0, caller: 'historical-repair-embed' });
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number }; model?: string }>(target, { input: text });
+  recordOpenAIUsage({ model: target.model!, kind: 'embedding', promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0, caller: 'historical-repair-embed', rawUsage: j.usage, responseModel: j.model });
   return j.data?.[0]?.embedding ?? null;
 }
 
@@ -293,8 +298,8 @@ export async function historicalRepairEmbedBatch(texts: string[]): Promise<numbe
   const target = historicalRepairEmbeddingsTarget();
   if (!target) return null;
   if (texts.length === 0) return [];
-  const j = await postEmbeddings<{ data?: Array<{ embedding: number[]; index?: number }>; usage?: { prompt_tokens?: number; total_tokens?: number } }>(target, { input: texts });
-  recordOpenAIUsage({ model: target.model!, kind: 'embedding', promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0, caller: 'historical-repair-embed-batch' });
+  const j = await postEmbeddings<{ data?: Array<{ embedding: number[]; index?: number }>; usage?: { prompt_tokens?: number; total_tokens?: number }; model?: string }>(target, { input: texts });
+  recordOpenAIUsage({ model: target.model!, kind: 'embedding', promptTokens: j.usage?.prompt_tokens ?? j.usage?.total_tokens ?? 0, caller: 'historical-repair-embed-batch', rawUsage: j.usage, responseModel: j.model });
   return [...(j.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map((d) => d.embedding);
 }
 
@@ -544,6 +549,8 @@ export async function chat(
       cachedTokens: j.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       caller: 'gateway-chat',
       serviceTier: resolvedServiceTier,
+      rawUsage: j.usage,
+      responseModel: j.model,
     });
   }
   // Surface the API's echoed model id, falling back to the configured OpenAI model label.
@@ -556,3 +563,4 @@ export async function chat(
     refusal: choice?.message?.refusal ?? undefined,
   };
 }
+

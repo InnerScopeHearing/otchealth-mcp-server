@@ -131,6 +131,11 @@ async function n8nRequest<T = unknown>(
     query?: Record<string, string | number | boolean | undefined>;
     correlationId?: string;
     timeoutMs?: number;
+    /**
+     * Absolute wall-clock deadline (epoch ms) shared by every attempt AND the body read. A request
+     * that has used up its window is not repeated at the same size (see listExecutions()).
+     */
+    deadlineAtMs?: number;
   },
 ): Promise<T> {
   const key = requireKey();
@@ -150,7 +155,11 @@ async function n8nRequest<T = unknown>(
         accept: 'application/json',
       },
       body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    }, { timeoutMs: opts?.timeoutMs ?? 30_000, retries });
+    }, {
+      timeoutMs: opts?.timeoutMs ?? 30_000,
+      retries,
+      ...(opts?.deadlineAtMs === undefined ? {} : { deadlineAtMs: opts.deadlineAtMs }),
+    });
     const body = await res.text();
     const latency = Date.now() - started;
     if (res.status >= 200 && res.status < 300) {
@@ -247,7 +256,7 @@ export interface ListExecutionsArgs {
   /** Window bounds. Validated here but NEVER sent upstream: n8n's public API cannot filter by date. */
   startedAfter: string;
   startedBefore: string;
-  /** Page size for ONE upstream request. */
+  /** Page size for ONE upstream request (sent to n8n as at most N8N_EXECUTION_LIST_MAX_PAGE_SIZE). */
   limit: number;
   /** Opaque pagination cursor taken from the previous page's nextCursor. */
   cursor?: string;
@@ -260,7 +269,23 @@ export const N8N_EXECUTION_LIST_MAX_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
 export const N8N_EXECUTION_LIST_MAX_PAGES = 50;
 export const N8N_EXECUTION_LIST_SCAN_BUDGET_MS = 20_000;
 export const N8N_EXECUTION_LIST_MAX_CURSOR_CHARS = 2048;
+/**
+ * Largest page ever requested from n8n in one call, whatever limit the caller passed. On the
+ * Lightsail instance one page of 100 could outlast the per-page timeout (live 2026-10-07), so a
+ * larger caller limit is served as several pages of at most this size.
+ */
+export const N8N_EXECUTION_LIST_MAX_PAGE_SIZE = 50;
+/** Smallest page size the timeout back-off shrinks to; a caller-requested size below it is kept. */
+export const N8N_EXECUTION_LIST_MIN_PAGE_SIZE = 10;
+/**
+ * Time one page gets, shared by every HTTP attempt at it. Deliberately left at 8 s: pages normally
+ * return in a few seconds, a longer wait does not rescue a stalled request, and every extra second
+ * comes out of the fixed 20 s scan budget (two full-length attempts already use 16 s of it). The
+ * half-size retry in tools/n8n/execution-list.ts is the remedy for a slow page, not a longer wait.
+ */
 const N8N_EXECUTION_LIST_PAGE_TIMEOUT_MS = 8_000;
+/** Code of the typed error listExecutions() throws when a page times out (see isN8nExecutionPageTimeout). */
+export const N8N_EXECUTION_PAGE_TIMEOUT_CODE = 'n8n_execution_page_timeout';
 
 function isIsoDateTime(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
@@ -296,29 +321,100 @@ export function validateListExecutionsArgs(args: ListExecutionsArgs): void {
  * sanitising reduced the 400 to the opaque n8n_execution_list_request_failed. The date window is
  * now applied client-side over newest-first pages (see tools/n8n/execution-list.ts); nothing but
  * the three supported parameters below may be added here.
+ *
+ * Page size: the limit sent is capped at N8N_EXECUTION_LIST_MAX_PAGE_SIZE, and a cursor is sent with
+ * the same page size stamped into it (n8n takes the page size from the cursor, see withCursorLimit).
  */
 export function buildListExecutionsQuery(
   args: ListExecutionsArgs,
 ): Record<string, string | number | boolean> {
   validateListExecutionsArgs(args);
+  // Last line of defence: no caller, retry path or future change can send n8n a page above the cap.
+  const limit = Math.min(args.limit, N8N_EXECUTION_LIST_MAX_PAGE_SIZE);
   return {
-    limit: args.limit,
+    limit,
     includeData: false,
-    ...(args.cursor ? { cursor: args.cursor } : {}),
+    ...(args.cursor ? { cursor: withCursorLimit(args.cursor, limit) } : {}),
   };
+}
+
+/**
+ * n8n's pagination cursor is base64 JSON that embeds the page size, and when a cursor is sent n8n
+ * takes `limit` FROM THE CURSOR and ignores the `limit` query parameter. Verified live 2026-10-07 on
+ * GET /workflows: a cursor minted with limit 1 ({"limit":1,"offset":1}) sent together with limit=3
+ * returned one row. The executions endpoint uses the same pagination middleware (its cursor carries
+ * lastId where the workflows cursor carries offset). Without this, shrinking a page after a timeout
+ * would silently do nothing on every page after the first. This re-stamps the cursor's limit so the
+ * size we ask for is the size n8n uses. A cursor in any other shape is passed through unchanged: the
+ * request still works, the page size just cannot change.
+ */
+export function withCursorLimit(cursor: string, limit: number): string {
+  try {
+    const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+    if (decoded === null || typeof decoded !== 'object' || Array.isArray(decoded)) return cursor;
+    const fields = decoded as Record<string, unknown>;
+    if (!Number.isInteger(fields.limit) || fields.limit === limit) return cursor;
+    return Buffer.from(JSON.stringify({ ...fields, limit })).toString('base64');
+  } catch {
+    return cursor;
+  }
+}
+
+/** True for the DOMException that AbortSignal.timeout() / abort() produce: the request ran out of time. */
+function isAbortError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const name = (err as { name?: unknown }).name;
+  return name === 'TimeoutError' || name === 'AbortError';
+}
+
+/** True for the typed error listExecutions() throws when n8n did not answer a page in time. */
+export function isN8nExecutionPageTimeout(err: unknown): boolean {
+  return err instanceof N8nFullError && err.code === N8N_EXECUTION_PAGE_TIMEOUT_CODE;
 }
 
 /**
  * GET /api/v1/executions
  * One page of execution metadata, newest first. Payload data is always excluded.
+ *
+ * The page gets ONE time window (N8N_EXECUTION_LIST_PAGE_TIMEOUT_MS, further bounded by the caller's
+ * `deadlineAtMs`, the scan's overall budget) shared by all its HTTP attempts. A stalled page is
+ * therefore reported at once as an N8nFullError with code N8N_EXECUTION_PAGE_TIMEOUT_CODE instead of
+ * being repeated at the same size for a second full timeout; a fast 429/5xx is still retried once
+ * inside the window. What a timed-out page means is the caller's decision (the scanner in
+ * tools/n8n/execution-list.ts retries it at half the size).
  */
-export async function listExecutions(args: ListExecutionsArgs): Promise<any> {
+export async function listExecutions(
+  args: ListExecutionsArgs,
+  opts?: { deadlineAtMs?: number },
+): Promise<any> {
   const query = buildListExecutionsQuery(args);
-  return n8nRequest('GET', '/executions', {
-    query,
-    correlationId: args.correlationId,
-    timeoutMs: N8N_EXECUTION_LIST_PAGE_TIMEOUT_MS,
-  });
+  const pageDeadlineAtMs = Math.min(
+    Date.now() + N8N_EXECUTION_LIST_PAGE_TIMEOUT_MS,
+    opts?.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+  );
+  try {
+    return await n8nRequest('GET', '/executions', {
+      query,
+      correlationId: args.correlationId,
+      timeoutMs: N8N_EXECUTION_LIST_PAGE_TIMEOUT_MS,
+      deadlineAtMs: pageDeadlineAtMs,
+    });
+  } catch (err) {
+    if (err instanceof N8nFullError && err.code === 'n8n_network_error' && isAbortError(err.upstream)) {
+      logger.warn(
+        { type: 'n8n_execution_list_page_timeout', limit: query.limit, correlation_id: args.correlationId },
+        'n8n executions page timed out',
+      );
+      throw new N8nFullError({
+        code: N8N_EXECUTION_PAGE_TIMEOUT_CODE,
+        status: 0,
+        message: `n8n did not return a page of ${query.limit} executions in time.`,
+        nextStep: 'The scanner retries once at half the page size. If this persists, check load and CPU credits on the AWS Lightsail n8n instance (cs-n8n.otchealthmart.com).',
+        upstream: err.upstream,
+      });
+    }
+    throw err;
+  }
 }
 
 /**

@@ -34,6 +34,7 @@
  */
 import { loadEnv } from '../config/env.js';
 import { embed, type ProviderRequestBudget } from '../azure/foundry.js';
+import { embedWithRequestCache } from './embedding-request-cache.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { resolveAwsCredentials, signRequest } from './sigv4.js';
 import { isChunkedRoom, pickText, type KbHit, type FetchedDocument, type HybridSearchOptions } from '../azure/search.js';
@@ -244,7 +245,9 @@ export async function hybridSearch(
 
   let vector: number[] | null = null;
   try {
-    vector = await embed(query, budget);
+    vector = opts?.embeddingCache
+      ? await embedWithRequestCache(opts.embeddingCache, query, () => embed(query, budget), budget, Date.now)
+      : await embed(query, budget);
   } catch {
     if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
     vector = null;
@@ -460,3 +463,4 @@ function assembleChunked(key: string, rows: RawHit[]): FetchedDocument | null {
     mode: 'reassembled',
   };
 }
+
