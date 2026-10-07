@@ -53,6 +53,6 @@ Tests build tiny synthetic local Git repositories. They cover path containment, 
 
 ## Windows removal and coverage
 
-Registration readback compares complete normalized paths from NUL-delimited Git porcelain. If Git partially deregisters a worktree and returns an error, cleanup records `completed: false`, exact target and registration state, source before/after hashes, logs and the error. It preserves residual files for owner reconciliation; it never recursively deletes an unregistered orphan. The Windows residual-removal cause still needs its actual Git error log and a fresh platform regression before an automated recovery can be accepted.
+Registration readback compares complete normalized paths from NUL-delimited Git porcelain. If Git partially deregisters a worktree and returns an error, cleanup records `completed: false`, exact target and registration state, source before/after hashes, logs and the error. It preserves residual files for owner reconciliation; it never recursively deletes an unrecorded orphan. The Windows residual-removal cause still needs its actual Git error log and a fresh platform regression before an automated recovery can be accepted.
 
 Symlink fixture tests skip only Windows privilege error 1314 and report that coverage gap. Other errors remain failures; supported Linux and Windows environments must exercise the symlink tests before full platform acceptance.
