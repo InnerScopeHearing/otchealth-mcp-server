@@ -754,3 +754,46 @@ test('only a timeout is typed as a page timeout: a 5xx that survives its retry s
     },
   );
 });
+
+/** What node's fetch rejects with when a connection is reset or refused: a TypeError, not an abort. */
+function connectionReset(): Error {
+  return Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+  });
+}
+
+test('only a timeout is typed as a page timeout: a reset connection stays an ordinary network error (mocked fetch)', async () => {
+  await withMockedN8nFetch(
+    () => {
+      throw connectionReset();
+    },
+    async (requests) => {
+      await assert.rejects(
+        listExecutions({ ...apiArgs, limit: 50 }),
+        (error: unknown) => error instanceof N8nFullError && error.code === 'n8n_network_error' && !isN8nExecutionPageTimeout(error),
+      );
+      // Like a 5xx, a network error is retried once inside the page window.
+      assert.equal(requests.length, 2);
+    },
+  );
+});
+
+test('a connection failure that is not a timeout fails the scan closed even after a page was gathered, without a half-size retry (mocked fetch)', async () => {
+  await withMockedN8nFetch(
+    (url) => {
+      if (url.searchParams.get('cursor') === null) return json(inWindowPage(50, encodeCursor({ lastId: '51', limit: 50 })));
+      throw connectionReset();
+    },
+    async (requests) => {
+      await assert.rejects(
+        getN8nExecutionCountSummary({ ...validInput, limit: 100 }, ctoContext),
+        (error: unknown) => error instanceof Error && error.message === 'n8n_execution_list_request_failed',
+      );
+      assert.ok(requests.length >= 2);
+      assert.ok(
+        requests.every((url) => url.searchParams.get('limit') === '50'),
+        'a failure that is not a timeout must not shrink the page',
+      );
+    },
+  );
+});
