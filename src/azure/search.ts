@@ -27,6 +27,7 @@
  */
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
+import { embedWithRequestCache, type EmbeddingRequestCache } from '../search/embedding-request-cache.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { demoteExhaustHits } from '../memory/room-hygiene.js';
 import { rerankByAuthority, rerankEnabled } from '../memory/authority-rerank.js';
@@ -101,6 +102,8 @@ export interface HybridSearchOptions {
   deadlineAtMs?: number;
   /** Optional cancellation signal for a caller-bounded request. */
   signal?: AbortSignal;
+  /** Shared only among the room lookups belonging to one brain_search request. */
+  embeddingCache?: EmbeddingRequestCache;
 }
 
 /** Exported so alternate search backends (see src/search/opensearch.ts) reuse the exact same
@@ -179,7 +182,10 @@ async function runHybridSearch(
 
   let vector: number[] | null = null;
   try {
-    vector = await embed(query, { deadlineAtMs: opts?.deadlineAtMs, signal: opts?.signal });
+    const budget = { deadlineAtMs: opts?.deadlineAtMs, signal: opts?.signal };
+    vector = opts?.embeddingCache
+      ? await embedWithRequestCache(opts.embeddingCache, query, () => embed(query, budget), budget, Date.now)
+      : await embed(query, budget);
   } catch {
     if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
     vector = null;
@@ -585,3 +591,4 @@ async function getChunkedDocument(
     mode: 'reassembled',
   };
 }
+

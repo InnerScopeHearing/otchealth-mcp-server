@@ -62,6 +62,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z, type ZodRawShape } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolContext, type ToolResultPayload } from '../registry.js';
 import { hybridSearch, searchConfigured } from '../../search/index.js';
+import { createEmbeddingRequestCache } from '../../search/embedding-request-cache.js';
 import { isLaneAllowed } from './search-privileged.js';
 import { getRetractionSnapshot, filterRetractedByAgent, type retractedIdsByAgent } from '../../memory/retractions.js';
 import { rrfFuse, type FusedHit } from '../../memory/rrf.js';
@@ -383,8 +384,9 @@ export async function handleBrainSearch(
   // ---- fast path: the ORIGINAL brain_search behavior, untouched line-for-line ----
   // Over-fetch per room so RRF has depth to fuse from, then trim to `top`.
   const perRoomTop = Math.min(25, Math.max(top, 10));
+  const embeddingCache = createEmbeddingRequestCache();
   const settled = await Promise.allSettled(
-    rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps }) })),
+    rooms.map(async (room) => ({ room, res: await hybridSearch(room, input.query, perRoomTop, { includeOps, embeddingCache }) })),
   );
 
   const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; variants?: string[]; type?: string; source_version?: string }> }> = [];
@@ -542,3 +544,4 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
     callerHash,
   );
 }
+

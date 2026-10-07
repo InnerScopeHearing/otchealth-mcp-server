@@ -60,6 +60,7 @@
  */
 import { chat, chatConfigured, type ChatMessage, type ProviderRequestBudget } from '../azure/foundry.js';
 import { hybridSearch, searchConfigured, type KbHit } from '../search/index.js';
+import { createEmbeddingRequestCache, type EmbeddingRequestCache } from '../search/embedding-request-cache.js';
 import { rrfFuse, type FusedHit } from './rrf.js';
 import { retractedIdsByAgent, filterRetractedByAgent } from './retractions.js';
 import { retrievalShield, type GuardMode } from '../safety/auto-guard.js';
@@ -610,13 +611,14 @@ async function runRetrievalRound(
   top: number,
   includeOps: boolean,
   requestBudget?: ProviderRequestBudget,
+  embeddingCache?: EmbeddingRequestCache,
 ): Promise<{ perRoom: RoomHitList[]; searched: string[]; failed: string[] }> {
   const perRoomTop = Math.min(25, Math.max(top, 10));
   const bounded = boundSubQueries(subQueries, rooms.length);
 
   const settled = await Promise.allSettled(
     rooms.map(async (room): Promise<RoomHitList> => {
-      const perSubQuery = await Promise.allSettled(bounded.map((sq) => hybridSearch(room, sq, perRoomTop, { includeOps, ...requestBudget })));
+      const perSubQuery = await Promise.allSettled(bounded.map((sq) => hybridSearch(room, sq, perRoomTop, { includeOps, ...requestBudget, embeddingCache })));
       const lists: Array<{ room: string; hits: KbHit[] }> = [];
       perSubQuery.forEach((s, i) => {
         if (s.status === 'fulfilled' && s.value) lists.push({ room: `sq${i}`, hits: s.value.matches });
@@ -665,6 +667,7 @@ async function runDeepFlow(
   includeOps: boolean,
   budget: { deadline: number; now: () => number },
   continuation?: DeepContinuation,
+  embeddingCache?: EmbeddingRequestCache,
   shield: typeof retrievalShield = retrievalShield,
 ): Promise<DeepRetrieveResult> {
   const { deadline, now } = budget;
@@ -694,7 +697,7 @@ async function runDeepFlow(
       };
     }
     const round = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now));
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
     pool = [...round.perRoom];
@@ -716,7 +719,7 @@ async function runDeepFlow(
     }
 
     const round1 = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now));
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
     rounds = 1;
@@ -744,7 +747,7 @@ async function runDeepFlow(
             recordSkippedDeepStage('retrieval');
           } else {
             const round2 = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(refined, targetRooms, top, includeOps, providerDeadline(deadline, now));
+      const value = await runRetrievalRound(refined, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
             rounds = 2;
@@ -872,12 +875,18 @@ async function runDeepFlow(
  * ever propagating a throw to the caller. Exported as a test seam (deepRetrieve.test.ts exercises it
  * directly) as well as being deepRetrieve's own internal fallback.
  */
-export async function fallbackFastSearch(query: string, rooms: string[], top: number, includeOps: boolean): Promise<DeepRetrieveResult> {
+export async function fallbackFastSearch(
+  query: string,
+  rooms: string[],
+  top: number,
+  includeOps: boolean,
+  embeddingCache: EmbeddingRequestCache = createEmbeddingRequestCache(),
+): Promise<DeepRetrieveResult> {
   return timedDeepStage('retrieval', async () => {
     try {
       const perRoomTop = Math.min(25, Math.max(top, 10));
       const settled = await Promise.allSettled(
-        rooms.map(async (room) => ({ room, res: await hybridSearch(room, query, perRoomTop, { includeOps }) })),
+        rooms.map(async (room) => ({ room, res: await hybridSearch(room, query, perRoomTop, { includeOps, embeddingCache }) })),
       );
       const perRoom: RoomHitList[] = [];
       const searched: string[] = [];
@@ -942,6 +951,7 @@ export async function deepRetrieve(
   const now = opts.now ?? Date.now;
   const budgetMs = opts.budgetMs ?? resolveDeepBudgetMs(process.env.DEEP_RETRIEVAL_BUDGET_MS);
   const deadline = now() + budgetMs;
+  const embeddingCache = createEmbeddingRequestCache();
 
   if (rooms.length === 0) {
     return { mode: 'no-rooms', answer: '', citations: [], sub_queries: [], rounds_used: 0, hits: [], rooms_searched: [] };
@@ -958,6 +968,7 @@ export async function deepRetrieve(
       includeOps,
       { deadline, now },
       opts.continuation,
+      embeddingCache,
       testDeps.retrievalShield,
     );
   } catch {
@@ -976,6 +987,7 @@ export async function deepRetrieve(
     // FAIL-OPEN: any unexpected error anywhere in the agentic flow degrades to a single plain
     // search pass across the same rooms — deep mode can never throw, and can never be WORSE than
     // brain_search's existing fast path, only sometimes no better than it.
-    return fallbackFastSearch(query, rooms, top, includeOps);
+    return fallbackFastSearch(query, rooms, top, includeOps, embeddingCache);
   }
 }
+
