@@ -45,6 +45,9 @@ const {
   DEFAULT_DEEP_BUDGET_MS,
   deepStageTimingFields,
   emitDeepStageTiming,
+  extractExactIdentifierAnchor,
+  scheduleDeepSearchPairs,
+  exactIdentifierWitness,
 } = await import('./deep-retrieval.js');
 import { __resetRetractionCache, noteRetraction, retractedIdsByAgent } from './retractions.js';
 import { chat } from '../azure/foundry.js';
@@ -1345,3 +1348,4 @@ test('dedupeById preserves same ID from distinct authorized rooms without mixing
   assert.deepEqual(out, [a, b]);
   assert.deepEqual(buildCitations(out).map(c => [c.source, c.source_version]), [['room-a', 'v1'], ['room-b', 'v1']]);
 });
+
