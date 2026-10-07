@@ -244,14 +244,23 @@ export async function transferWorkflow(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export interface ListExecutionsArgs {
+  /** Window bounds. Validated here but NEVER sent upstream: n8n's public API cannot filter by date. */
   startedAfter: string;
   startedBefore: string;
+  /** Page size for ONE upstream request. */
   limit: number;
+  /** Opaque pagination cursor taken from the previous page's nextCursor. */
+  cursor?: string;
   correlationId?: string;
 }
 
 export const N8N_EXECUTION_LIST_MAX_LIMIT = 100;
 export const N8N_EXECUTION_LIST_MAX_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
+/** Hard bounds on the newest-first scan a single tool call may perform. */
+export const N8N_EXECUTION_LIST_MAX_PAGES = 50;
+export const N8N_EXECUTION_LIST_SCAN_BUDGET_MS = 20_000;
+export const N8N_EXECUTION_LIST_MAX_CURSOR_CHARS = 2048;
+const N8N_EXECUTION_LIST_PAGE_TIMEOUT_MS = 8_000;
 
 function isIsoDateTime(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
@@ -268,31 +277,48 @@ export function validateListExecutionsArgs(args: ListExecutionsArgs): void {
     before - after > N8N_EXECUTION_LIST_MAX_WINDOW_MS ||
     !Number.isInteger(args.limit) ||
     args.limit < 1 ||
-    args.limit > N8N_EXECUTION_LIST_MAX_LIMIT
+    args.limit > N8N_EXECUTION_LIST_MAX_LIMIT ||
+    (args.cursor !== undefined &&
+      (typeof args.cursor !== 'string' || args.cursor.length === 0 || args.cursor.length > N8N_EXECUTION_LIST_MAX_CURSOR_CHARS))
   ) {
     throw new Error('n8n_execution_list_invalid_input');
   }
 }
 
+/**
+ * Query for ONE page of GET /api/v1/executions.
+ *
+ * ROOT CAUSE of n8n_execution_list failing for 11+ days: this used to send
+ * startedAfter/startedBefore. The n8n public API accepts only includeData, status, workflowId,
+ * projectId, limit and cursor on this endpoint and rejects any other query parameter with a 400
+ * (OpenAPI request validation). Every call therefore failed upstream while every other n8n tool
+ * (which sends only supported parameters) kept working, and the handler's deliberate error
+ * sanitising reduced the 400 to the opaque n8n_execution_list_request_failed. The date window is
+ * now applied client-side over newest-first pages (see tools/n8n/execution-list.ts); nothing but
+ * the three supported parameters below may be added here.
+ */
 export function buildListExecutionsQuery(
   args: ListExecutionsArgs,
 ): Record<string, string | number | boolean> {
   validateListExecutionsArgs(args);
   return {
-    startedAfter: args.startedAfter,
-    startedBefore: args.startedBefore,
     limit: args.limit,
     includeData: false,
+    ...(args.cursor ? { cursor: args.cursor } : {}),
   };
 }
 
 /**
  * GET /api/v1/executions
- * List only a date-bounded page of execution metadata. Payload data is always excluded.
+ * One page of execution metadata, newest first. Payload data is always excluded.
  */
 export async function listExecutions(args: ListExecutionsArgs): Promise<any> {
   const query = buildListExecutionsQuery(args);
-  return n8nRequest('GET', '/executions', { query, correlationId: args.correlationId });
+  return n8nRequest('GET', '/executions', {
+    query,
+    correlationId: args.correlationId,
+    timeoutMs: N8N_EXECUTION_LIST_PAGE_TIMEOUT_MS,
+  });
 }
 
 /**

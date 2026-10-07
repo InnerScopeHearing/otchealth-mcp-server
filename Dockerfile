@@ -13,6 +13,7 @@ COPY src ./src
 # The one-off registry exporter runs as a bounded ECS task from this same reviewed
 # image. Keep its source runner and wrapper alongside the compiled server modules it
 # imports at runtime; no handoff, key, or source record is included in the image.
+COPY tools/brain-runtime-check.mjs ./tools/brain-runtime-check.mjs
 COPY tools/identity-registry-exporter-task.mjs ./tools/identity-registry-exporter-task.mjs
 COPY tools/xero-organisation-explicit-export-run.mjs ./tools/xero-organisation-explicit-export-run.mjs
 COPY tools/identity-registry-explicit-export.mjs ./tools/identity-registry-explicit-export.mjs
@@ -33,6 +34,8 @@ RUN npm run build && npm prune --omit=dev
 # node_modules match the runtime ABI.
 FROM node:22-trixie-slim@sha256:b26b04c123d9ff8ab646ceb18b9d75a1173acf64b9a401094b906d27b29338d4 AS runtime
 
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
 ENV NODE_ENV=production
 ENV PORT=8080
 
@@ -68,6 +71,7 @@ RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell 
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/package.json ./package.json
+COPY --from=build --chown=app:app /app/tools/brain-runtime-check.mjs ./tools/brain-runtime-check.mjs
 COPY --from=build --chown=app:app /app/tools/identity-registry-exporter-task.mjs ./tools/identity-registry-exporter-task.mjs
 COPY --from=build --chown=app:app /app/tools/xero-organisation-explicit-export-run.mjs ./tools/xero-organisation-explicit-export-run.mjs
 COPY --from=build --chown=app:app /app/tools/identity-registry-explicit-export.mjs ./tools/identity-registry-explicit-export.mjs

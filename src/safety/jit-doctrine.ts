@@ -214,11 +214,26 @@ export function shouldSurfaceDoctrine(callerHash: string, toolName: string): boo
  * EVERY tool category (read and write) -- see the module doc comment for why this deliberately
  * does NOT mirror cold-start/capture-pressure's `def.category !== 'read'` gate.
  */
-export function evaluateJitDoctrine(callerHash: string, toolName: string): JitDoctrineOutcome {
+export function evaluateJitDoctrine(
+  callerHash: string,
+  toolName: string,
+  handlerInput?: Record<string, unknown>,
+): JitDoctrineOutcome {
   const mode = parseJitDoctrineMode(process.env.JIT_DOCTRINE_MODE);
   try {
     if (mode === 'off') return { pitfalls: [], mode };
-    const pitfalls = jitDoctrineFor(toolName);
+    let pitfalls = jitDoctrineFor(toolName);
+    // A supersedes reminder is actionable only when the caller has not already supplied a
+    // non-blank supersedes value. Keep malformed/missing/blank values on the warning path, and
+    // scope this exception to the two tools whose doctrine is that reminder.
+    const supersedes = handlerInput?.supersedes;
+    if (
+      (toolName === 'memory_write' || toolName === 'memory_remember') &&
+      typeof supersedes === 'string' &&
+      supersedes.trim().length > 0
+    ) {
+      pitfalls = pitfalls.filter((pitfall) => !pitfall.startsWith('Set supersedes when'));
+    }
     if (!pitfalls.length) return { pitfalls: [], mode };
     if (!shouldSurfaceDoctrine(callerHash, toolName)) return { pitfalls: [], mode };
     return { pitfalls, mode };

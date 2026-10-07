@@ -33,7 +33,8 @@
  * throw (a genuine outage surfaces; a filter/schema problem degrades).
  */
 import { loadEnv } from '../config/env.js';
-import { embed } from '../azure/foundry.js';
+import { embed, type ProviderRequestBudget } from '../azure/foundry.js';
+import { embedWithRequestCache } from './embedding-request-cache.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { resolveAwsCredentials, signRequest } from './sigv4.js';
 import { isChunkedRoom, pickText, type KbHit, type FetchedDocument, type HybridSearchOptions } from '../azure/search.js';
@@ -81,7 +82,7 @@ export function exactFlatMemoryId(index: string, query: string): string | null {
   return /^[a-z0-9][a-z0-9_-]{0,40}__[A-Za-z0-9][A-Za-z0-9_=-]{2,127}$/.test(q) ? q : null;
 }
 
-async function signedSearchFetch(index: string, body: Record<string, unknown>): Promise<Response> {
+async function signedSearchFetch(index: string, body: Record<string, unknown>, budget?: ProviderRequestBudget): Promise<Response> {
   const e = loadEnv();
   const host = (e.OPENSEARCH_ENDPOINT || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
   const credentials = await resolveAwsCredentials();
@@ -97,17 +98,17 @@ async function signedSearchFetch(index: string, body: Record<string, unknown>): 
     service: 'es',
     credentials,
   });
-  return fetchWithBudget(`https://${host}${path}`, { method: 'POST', headers: signed.headers, body: bodyStr });
+  return fetchWithBudget(`https://${host}${path}`, { method: 'POST', headers: signed.headers, body: bodyStr, signal: budget?.signal }, budget);
 }
 
-async function signedGetFetch(index: string, key: string): Promise<Response> {
+async function signedGetFetch(index: string, key: string, budget?: ProviderRequestBudget): Promise<Response> {
   const e = loadEnv();
   const host = (e.OPENSEARCH_ENDPOINT || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
   const credentials = await resolveAwsCredentials();
   if (!credentials) throw new Error('opensearch credentials unavailable');
   const path = `/${index}/_doc/${encodeURIComponent(key)}`;
   const signed = signRequest({ method: 'GET', host, path, region: e.OPENSEARCH_REGION || 'us-east-1', service: 'es', credentials });
-  return fetchWithBudget(`https://${host}${path}`, { method: 'GET', headers: signed.headers });
+  return fetchWithBudget(`https://${host}${path}`, { method: 'GET', headers: signed.headers, signal: budget?.signal }, budget);
 }
 
 /**
@@ -154,10 +155,12 @@ type SearchHit = {
   agent?: string;
   type?: string;
   path?: string;
+  source_version?: string;
   ts?: string;
   source?: string;
   by?: string;
   _parent: string;
+  _dedupeParent: string;
 };
 
 function promoteLiteralIdentifier<T extends { fullText: string }>(hits: T[], token: string | null): T[] {
@@ -194,6 +197,8 @@ export async function hybridSearch(
   opts?: HybridSearchOptions,
 ): Promise<{ matches: KbHit[]; mode: string } | null> {
   const e = loadEnv();
+  const budget: ProviderRequestBudget = { deadlineAtMs: opts?.deadlineAtMs, signal: opts?.signal };
+  const budgetExpired = () => Boolean(opts?.signal?.aborted || (opts?.deadlineAtMs !== undefined && Date.now() >= opts.deadlineAtMs));
   if (!e.OPENSEARCH_ENDPOINT) return null;
 
   const includeOps = opts?.includeOps ?? true;
@@ -208,7 +213,7 @@ export async function hybridSearch(
   const exactId = opts?.filter ? null : exactFlatMemoryId(index, query);
   if (exactId) {
     try {
-      const direct = await signedGetFetch(index, exactId);
+      const direct = await signedGetFetch(index, exactId, budget);
       if (direct.ok) {
         const payload = (await direct.json()) as { found?: boolean; _source?: Record<string, unknown> };
         const doc = payload._source;
@@ -222,6 +227,7 @@ export async function hybridSearch(
             id: exactId,
             agent: exactId.slice(0, sep),
             type: typeof doc['type'] === 'string' ? (doc['type'] as string) : undefined,
+            source_version: typeof doc['source_version'] === 'string' && doc['source_version'].trim() ? doc['source_version'] as string : undefined,
           };
           return {
             // includeOps=false deprioritizes operational rows but does not remove them. Passing the
@@ -232,14 +238,18 @@ export async function hybridSearch(
         }
       }
     } catch {
+      if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
       // Fail open to the existing hybrid path.
     }
   }
 
   let vector: number[] | null = null;
   try {
-    vector = await embed(query);
+    vector = opts?.embeddingCache
+      ? await embedWithRequestCache(opts.embeddingCache, query, () => embed(query, budget), budget, Date.now)
+      : await embed(query, budget);
   } catch {
+    if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
     vector = null;
   }
 
@@ -285,10 +295,14 @@ export async function hybridSearch(
   // for a third, wasted network round trip before finally surfacing).
   let bmRes: Response;
   try {
-    bmRes = await signedSearchFetch(index, bm25Body(true));
-    if (!bmRes.ok) bmRes = await signedSearchFetch(index, bm25Body(false));
+    bmRes = await signedSearchFetch(index, bm25Body(true), budget);
+    if (!bmRes.ok) {
+      if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
+      bmRes = await signedSearchFetch(index, bm25Body(false), budget);
+    }
   } catch {
-    bmRes = await signedSearchFetch(index, bm25Body(false));
+    if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
+    bmRes = await signedSearchFetch(index, bm25Body(false), budget);
   }
   if (!bmRes.ok) throw new Error(`opensearch search ${bmRes.status}`);
   const bmHits = extractHits(await bmRes.json());
@@ -297,12 +311,13 @@ export async function hybridSearch(
   let usedVector = false;
   if (knnBody) {
     try {
-      const r = await signedSearchFetch(index, knnBody);
+      const r = await signedSearchFetch(index, knnBody, budget);
       if (r.ok) {
         vecHits = extractHits(await r.json());
         usedVector = true;
       }
     } catch {
+      if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
       vecHits = []; // vector side is best-effort; keyword result alone is still a valid answer
     }
   }
@@ -315,6 +330,7 @@ export async function hybridSearch(
     .sort((a, b) => b[1] - a[1])
     .map(([id, rrfScore]) => {
       const doc = bySource.get(id) ?? {};
+      const sourceVersion = typeof doc['source_version'] === 'string' && doc['source_version'].trim() ? doc['source_version'] as string : undefined;
       return {
         score: rrfScore,
         text: pickText(doc).slice(0, 1200),
@@ -323,10 +339,12 @@ export async function hybridSearch(
         agent: typeof doc['agent'] === 'string' ? (doc['agent'] as string) : undefined,
         type: typeof doc['type'] === 'string' ? (doc['type'] as string) : undefined,
         path: typeof doc['path'] === 'string' ? (doc['path'] as string) : undefined,
+        source_version: sourceVersion,
         ts: typeof doc['ts'] === 'string' ? (doc['ts'] as string) : undefined,
         source: typeof doc['source'] === 'string' ? (doc['source'] as string) : undefined,
         by: typeof doc['by'] === 'string' ? (doc['by'] as string) : undefined,
         _parent: String(doc['parent_id'] ?? doc['path'] ?? doc['id'] ?? doc['chunk_id'] ?? id),
+        _dedupeParent: `${String(doc['parent_id'] ?? doc['path'] ?? doc['id'] ?? doc['chunk_id'] ?? id)}\0${sourceVersion ?? ''}`,
       };
     });
 
@@ -338,10 +356,10 @@ export async function hybridSearch(
     // NOT reimplemented here -- flagged as a known gap in the PR description, not attempted blind.
     const best = new Map<string, (typeof raw)[number]>();
     for (const h of raw) {
-      const cur = best.get(h._parent);
+      const cur = best.get(h._dedupeParent);
       const exact = identifier !== null && literalIndex(h.fullText, identifier) >= 0;
       const currentExact = cur && identifier !== null && literalIndex(cur.fullText, identifier) >= 0;
-      if (!cur || (exact && !currentExact) || (!exact && !currentExact && h.score > cur.score)) best.set(h._parent, h);
+      if (!cur || (exact && !currentExact) || (!exact && !currentExact && h.score > cur.score)) best.set(h._dedupeParent, h);
     }
     hits = promoteLiteralIdentifier([...best.values()].sort((a, b) => b.score - a.score), identifier)
       .slice(0, top)
@@ -352,7 +370,7 @@ export async function hybridSearch(
 
   hits = promoteLiteralIdentifier(hits, identifier);
 
-  let matches: KbHit[] = hits.map(({ _parent, ts, source, by, fullText, ...h }) => {
+  let matches: KbHit[] = hits.map(({ _parent, _dedupeParent, ts, source, by, fullText, ...h }) => {
     const evidence = identifier ? identifierEvidenceSnippet(fullText, identifier) : null;
     return { ...h, text: evidence ?? h.text, ...(evidence ? { exactIdentifierMatch: true } : {}) } as KbHit;
   });
@@ -445,3 +463,4 @@ function assembleChunked(key: string, rows: RawHit[]): FetchedDocument | null {
     mode: 'reassembled',
   };
 }
+

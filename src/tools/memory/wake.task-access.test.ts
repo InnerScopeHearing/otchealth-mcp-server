@@ -16,20 +16,28 @@ function task(id: string, overrides: Partial<Task> = {}): Task {
 }
 
 test('wake passes owner and creator exclusions through the actual database translator before its cap', async () => {
-  let query;
+  const queries: any[] = [];
   const result = await readWakeTasks('cfo', 'cfo', 1, async (filter) => {
-    assert.deepEqual(filter, { owner_agent: 'cfo', limit: 50, exclude_personal_legal: true });
+    assert.deepEqual(filter, {
+      owner_agent: 'cfo', status: filter.status, limit: 50, exclude_personal_legal: true,
+    });
     const built = buildTaskListQuery(filter);
-    query = translate({ table: 'agentstate_tasks', query: built.query, parameters: built.parameters, pk: built.board, max: built.max });
+    queries.push(translate({
+      table: 'agentstate_tasks', query: built.query, parameters: built.parameters, pk: built.board, max: built.max,
+    }));
     return [task('ordinary')];
   });
-  assert.ok(query);
-  assert.match(query.text, /owner_agent.*!=/);
-  assert.match(query.text, /created_by.*!=/);
-  assert.ok(query.text.indexOf('created_by') < query.text.indexOf('LIMIT'));
-  assert.ok(query.values.includes('clo-personal'));
-  assert.doesNotMatch(query.text, /clo-personal/);
+  assert.equal(queries.length, 4);
+  for (const query of queries) {
+    assert.match(query.text, /owner_agent.*!=/);
+    assert.match(query.text, /created_by.*!=/);
+    assert.match(query.text, /status.*=/);
+    assert.ok(query.text.indexOf('created_by') < query.text.indexOf('LIMIT'));
+    assert.ok(query.values.includes('clo-personal'));
+    assert.doesNotMatch(query.text, /clo-personal/);
+  }
   assert.deepEqual(result.active.map((row) => row.id), ['ordinary']);
+  assert.equal(result.counts_scope, 'bounded_active_status_samples');
 });
 
 test('wake excludes hidden owners and creators before counts, active filtering and preview limits', async () => {
@@ -59,5 +67,7 @@ test('a caller-less internal wake cannot impersonate a personal ring by selectin
     assert.equal(filter.exclude_personal_legal, true);
     return [task('hidden', { owner_agent: 'clo-personal' })];
   });
-  assert.deepEqual(result, { configured: true, active: [], counts: {} });
+  assert.deepEqual(result, {
+    configured: true, active: [], counts: {}, counts_scope: 'bounded_active_status_samples',
+  });
 });

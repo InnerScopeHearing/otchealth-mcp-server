@@ -51,7 +51,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check'].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
@@ -176,10 +176,23 @@ test('the Make pilot identity gets exactly the broker and catalog probe even und
 
 test('(b) developer lane gets the full ship-lane set', () => {
   const set = connectorToolset(testEnv(), 'developer');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, 'claims_check'].sort());
   assert.equal(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), false);
   assert.ok(set.has('brain_graph_search'));
   assert.ok(set.has('brain_public_kb_search'));
+});
+
+test('AWARE claims review is discoverable only on the default CTO and Developer connector lanes', () => {
+  const env = testEnv();
+  for (const lane of ['cto', 'developer']) {
+    assert.equal(connectorToolset(env, lane).has('claims_check'), true, lane);
+    assert.equal(connectorToolset({ ...env, CONNECTOR_TOOLSET: 'brain_search' } as Env, lane).has('claims_check'), false, `${lane} explicit override stays authoritative`);
+  }
+  for (const lane of ['external-read', 'unknown', '', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'wefunder-campaign-director', 'cto-make-github-pilot']) {
+    assert.equal(connectorToolset(env, lane).has('claims_check'), false, lane);
+  }
+  assert.equal(EXTERNAL_READONLY_TOOLSET.includes('claims_check'), false);
+  assert.equal(EXTERNAL_READONLY_TOOLSET.length, 13);
 });
 
 test('(c) EXEC_RING lanes get only public-KB visibility authorized for their company identity', () => {

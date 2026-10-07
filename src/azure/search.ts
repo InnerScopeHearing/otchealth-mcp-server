@@ -27,6 +27,7 @@
  */
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
+import { embedWithRequestCache, type EmbeddingRequestCache } from '../search/embedding-request-cache.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { demoteExhaustHits } from '../memory/room-hygiene.js';
 import { rerankByAuthority, rerankEnabled } from '../memory/authority-rerank.js';
@@ -51,6 +52,8 @@ export interface KbHit {
   type?: string;
   /** Source path of the parent document (chunked doc rooms only), for citation. Flat rooms omit it. */
   path?: string;
+  /** Immutable source version when the existing backend response provides one. Never inferred. */
+  source_version?: string;
   /** Other parent paths (chunked doc rooms only) collapsed into this hit because their content was
    *  BYTE-IDENTICAL to it (e.g. the same source document filed under two organizational prefixes).
    *  Present only when at least one alternate was collapsed; `path` above is the survivor (shallowest
@@ -95,6 +98,12 @@ export interface HybridSearchOptions {
    * same reasoning as the exhaust filter skip below).
    */
   filter?: string;
+  /** Optional caller deadline for bounded multi-stage requests such as deep retrieval. */
+  deadlineAtMs?: number;
+  /** Optional cancellation signal for a caller-bounded request. */
+  signal?: AbortSignal;
+  /** Shared only among the room lookups belonging to one brain_search request. */
+  embeddingCache?: EmbeddingRequestCache;
 }
 
 /** Exported so alternate search backends (see src/search/opensearch.ts) reuse the exact same
@@ -161,6 +170,7 @@ async function runHybridSearch(
   rerankModeOverride?: string,
 ): Promise<{ matches: KbHit[]; mode: string } | null> {
   const e = loadEnv();
+  const budgetExpired = () => Boolean(opts?.signal?.aborted || (opts?.deadlineAtMs !== undefined && Date.now() >= opts.deadlineAtMs));
   const ep = (e.AZURE_SEARCH_ENDPOINT || '').replace(/\/+$/, '');
   const key = e.AZURE_SEARCH_QUERY_KEY || '';
   if (!ep || !key) return null;
@@ -172,8 +182,12 @@ async function runHybridSearch(
 
   let vector: number[] | null = null;
   try {
-    vector = await embed(query);
+    const budget = { deadlineAtMs: opts?.deadlineAtMs, signal: opts?.signal };
+    vector = opts?.embeddingCache
+      ? await embedWithRequestCache(opts.embeddingCache, query, () => embed(query, budget), budget, Date.now)
+      : await embed(query, budget);
   } catch {
+    if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
     vector = null;
   }
 
@@ -230,7 +244,8 @@ async function runHybridSearch(
       method: 'POST',
       headers: { 'api-key': key, 'Content-Type': 'application/json' },
       body: JSON.stringify(b),
-    });
+      signal: opts?.signal,
+    }, { deadlineAtMs: opts?.deadlineAtMs });
 
   // The keyword fail-open fallback carries NO select and no vector: if the primary 400 came FROM the
   // select (naming a field absent on the live index, e.g. a room not yet cut over to the chunked
@@ -249,9 +264,11 @@ async function runHybridSearch(
   try {
     r = await doSearch(body);
     if (!r.ok) {
+      if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
       r = await doSearch(fallbackBody);
     }
   } catch {
+    if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
     r = await doSearch(fallbackBody);
   }
   if (!r.ok) throw new Error(`search ${r.status}`);
@@ -263,6 +280,7 @@ async function runHybridSearch(
     agent: typeof d['agent'] === 'string' ? (d['agent'] as string) : undefined,
     type: typeof d['type'] === 'string' ? (d['type'] as string) : undefined,
     path: typeof d['path'] === 'string' ? (d['path'] as string) : undefined,
+    source_version: typeof d['source_version'] === 'string' && d['source_version'].trim() ? d['source_version'] as string : undefined,
     // Authority/freshness signals for the memory-room re-rank (stripped before returning KbHit, so the
     // client output shape is unchanged). Absent on chunked doc rooms — those skip the re-rank anyway.
     ts: typeof d['ts'] === 'string' ? (d['ts'] as string) : undefined,
@@ -294,8 +312,11 @@ async function runHybridSearch(
     // result set with N of its own chunks, and makes `count` mean "distinct documents", not "chunks".
     const best = new Map<string, (typeof visible)[number]>();
     for (const h of visible) {
-      const cur = best.get(h._parent);
-      if (!cur || (h.score ?? -Infinity) > (cur.score ?? -Infinity)) best.set(h._parent, h);
+      // A reindexed source may retain its parent ID while its immutable version changes.
+      // Keep those versions distinct; version is metadata only and is never synthesized.
+      const parentVersion = `${h._parent}\0${h.source_version ?? ''}`;
+      const cur = best.get(parentVersion);
+      if (!cur || (h.score ?? -Infinity) > (cur.score ?? -Infinity)) best.set(parentVersion, h);
     }
     const collapsed = [...best.values()];
 
@@ -321,8 +342,10 @@ async function runHybridSearch(
     const MIN_DEDUP_TEXT_LEN = 40;
     const contentKey = (h: (typeof collapsed)[number]): string => {
       const t = h.text.trim();
-      if (t.length < MIN_DEDUP_TEXT_LEN || h.score === undefined) return `__unique_${h._parent}`;
-      return `${h.score}::${t}`;
+      if (t.length < MIN_DEDUP_TEXT_LEN || h.score === undefined) return `__unique_${h._parent}\0${h.source_version ?? ''}`;
+      // Identical excerpts from different immutable versions are distinct evidence.
+      // Preserve the old dedup behavior for backends that do not return a version.
+      return `${h.score}::${h.source_version ?? ''}::${t}`;
     };
     const byContent = new Map<string, typeof collapsed>();
     for (const h of collapsed) {
@@ -568,3 +591,4 @@ async function getChunkedDocument(
     mode: 'reassembled',
   };
 }
+

@@ -498,6 +498,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // AWARE release review needs the registered claims gate on its shipping
+  // connectors. Preserve explicit overrides and all other default lane sets;
+  // execution keeps the existing handler, provider and governance checks.
+  if ((lane === 'cto' || lane === 'developer') && !env.CONNECTOR_TOOLSET) tools.add('claims_check');
   // This handler intentionally accepts only the six authenticated company seats. The shared
   // executive ship set also serves cpo/cco/exec and clo-personal, so keep its public-KB visibility
   // aligned with the handler's exact lane contract instead of exposing it to those seats.
@@ -508,10 +512,12 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   if (lane === 'cto') {
     if (!env.CONNECTOR_TOOLSET) {
       tools.add(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+      tools.add('github_workflow_run_failed_log_excerpt');
       tools.add(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
     }
   } else {
     tools.delete(CTO_ONLY_GITHUB_RECEIPT_TOOL);
+    tools.delete('github_workflow_run_failed_log_excerpt');
     tools.delete(RESTRICTED_GITHUB_MAKE_BROKER_TOOL);
   }
   // This only reads fixed upstream MCP tool metadata. Keep it discoverable to the company CTO who
@@ -659,6 +665,8 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
    */
   connectorInputShapeByLane?: Readonly<Record<string, Partial<Shape>>>;
   outputShape: Output;
+  /** Maximum UTF-8 bytes for the complete inline MCP response, including text and structured content. */
+  maxResponseBytes?: number;
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
   redactInputForLog?: (input: Record<string, unknown>) => unknown;
@@ -1357,7 +1365,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // per process so the same pitfall does not nag on every subsequent call.
         // canonicalName, not def.name -- a pitfall bound to e.g. "posthog_" or "azure_containerapp_set_env"
         // should still fire when reached via an M365 alias, not silently go dark under the stripped name.
-        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName);
+        const jitDoctrine = evaluateJitDoctrine(callerHash, canonicalName, handlerInput);
         if (jitDoctrine.pitfalls.length) {
           structured.doctrine = { pitfalls: jitDoctrine.pitfalls, mode: jitDoctrine.mode };
           // PHASE 2 SLO TELEMETRY (observe-only): feeds the doctrine-coverage SLO -- how often a
@@ -1399,6 +1407,21 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           warning,
           capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
         );
+
+        // Check the complete inline envelope before JIT handling. A constrained tool must fail
+        // closed instead of persisting an oversized response and returning an offload reference.
+        if (def.maxResponseBytes !== undefined) {
+          const serializedResponse = JSON.stringify({
+            content: [{ type: 'text', text }],
+            structuredContent: structured,
+          });
+          if (serializedResponse === undefined) {
+            throw new Error(`Tool ${def.name} response could not be sized safely.`);
+          }
+          if (Buffer.byteLength(serializedResponse, 'utf8') > def.maxResponseBytes) {
+            throw new Error(`Tool ${def.name} response exceeded its configured size limit.`);
+          }
+        }
 
         // JIT tool-payload retrieval: offload an oversized result to Cosmos and return a preview +
         // result_id instead of the full payload (agent pulls it on demand via gateway_fetch_result).
@@ -1551,4 +1574,3 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
 }
 
 export type CallerHashProvider = () => string;
-

@@ -16,7 +16,12 @@ import { createHash, createSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
-import type { PinnedObservationFailureStage } from '../audit/internal-diagnostics.js';
+import { CI_LOG_HARD_CAP_BYTES, CI_LOG_KEEP_BYTES, readResponseTail, type JobLogResult } from './ci-log-excerpt.js';
+import type {
+  PinnedObservationFailureDetail,
+  PinnedObservationFailureStage,
+  PinnedObservationRunMetadataField,
+} from '../audit/internal-diagnostics.js';
 import {
   extractPinnedReceiptJson,
   MAX_GRAPHRAG_ARCHIVE_BYTES,
@@ -44,12 +49,20 @@ export class GitHubFullError extends Error {
 }
 
 class PinnedObservationReaderError extends GitHubFullError {
-  readonly internalDiagnostic: { type: 'github_observation_receipt'; stage: PinnedObservationFailureStage };
+  readonly internalDiagnostic: {
+    type: 'github_observation_receipt';
+    stage: PinnedObservationFailureStage;
+    detail?: PinnedObservationFailureDetail;
+  };
 
-  constructor(stage: PinnedObservationFailureStage) {
+  constructor(stage: PinnedObservationFailureStage, detail?: PinnedObservationFailureDetail) {
     super(PINNED_OBSERVATION_ERROR);
     this.name = 'PinnedObservationReaderError';
-    this.internalDiagnostic = { type: 'github_observation_receipt', stage };
+    this.internalDiagnostic = {
+      type: 'github_observation_receipt',
+      stage,
+      ...(detail ? { detail } : {}),
+    };
   }
 }
 
@@ -710,6 +723,54 @@ function requireString(value: unknown, expected?: string): string {
   return value;
 }
 
+class PinnedObservationHttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super('GitHub API request failed');
+    this.name = 'PinnedObservationHttpStatusError';
+  }
+}
+
+class PinnedObservationRunMetadataValidationError extends Error {
+  constructor(readonly field: PinnedObservationRunMetadataField) {
+    super('pinned workflow run metadata mismatch');
+    this.name = 'PinnedObservationRunMetadataValidationError';
+  }
+}
+
+function workflowRunMetadataFailureDetail(error: unknown): PinnedObservationFailureDetail | undefined {
+  if (error instanceof PinnedObservationHttpStatusError && Number.isInteger(error.status) &&
+      error.status >= 200 && error.status <= 599) {
+    return { kind: 'http_status', status: error.status };
+  }
+  if (error instanceof PinnedObservationRunMetadataValidationError) {
+    return { kind: 'run_metadata_field', field: error.field };
+  }
+  return undefined;
+}
+
+function runMetadataFailure(field: PinnedObservationRunMetadataField): never {
+  throw new PinnedObservationRunMetadataValidationError(field);
+}
+
+function requireRunMetadataRecord(value: unknown, field: PinnedObservationRunMetadataField): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return runMetadataFailure(field);
+  return value as Record<string, unknown>;
+}
+
+function requireRunMetadataInteger(value: unknown, field: PinnedObservationRunMetadataField): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) return runMetadataFailure(field);
+  return value;
+}
+
+function requireRunMetadataString(
+  value: unknown,
+  field: PinnedObservationRunMetadataField,
+  expected: string,
+): string {
+  if (typeof value !== 'string' || value !== expected) return runMetadataFailure(field);
+  return value;
+}
+
 async function cancelResponseBody(response: Response): Promise<void> {
   try {
     await response.body?.cancel();
@@ -826,7 +887,7 @@ async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unkn
   }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
   if (response.status !== 200) {
     await cancelResponseBody(response);
-    throw new Error('GitHub API request failed');
+    throw new PinnedObservationHttpStatusError(response.status);
   }
   const bytes = await readBoundedResponseBytes(response, PINNED_OBSERVATION_MAX_METADATA_BYTES);
   let text: string;
@@ -848,25 +909,22 @@ function verifyRepositoryMetadata(value: unknown): number {
 }
 
 function verifyRunMetadata(value: unknown, repositoryId: number): void {
-  const run = requireRecord(value);
-  if (requireSafeInteger(run.id, 1) !== PINNED_GRAPHRAG_OBSERVATION.runId ||
-      requireString(run.name, PINNED_GRAPHRAG_OBSERVATION.workflowName) !== PINNED_GRAPHRAG_OBSERVATION.workflowName ||
-      requireString(run.path, PINNED_GRAPHRAG_OBSERVATION.workflowPath) !== PINNED_GRAPHRAG_OBSERVATION.workflowPath ||
-      requireString(run.event, 'workflow_dispatch') !== 'workflow_dispatch' ||
-      requireString(run.status, 'completed') !== 'completed' ||
-      requireString(run.conclusion, 'success') !== 'success' ||
-      requireString(run.head_branch, 'main') !== 'main' ||
-      requireString(run.head_sha, PINNED_GRAPHRAG_OBSERVATION.headSha) !== PINNED_GRAPHRAG_OBSERVATION.headSha) {
-    throw new Error('run mismatch');
-  }
-  const sourceRepository = requireRecord(run.repository);
-  const headRepository = requireRecord(run.head_repository);
-  if (requireSafeInteger(sourceRepository.id, 1) !== repositoryId ||
-      requireString(sourceRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository ||
-      requireSafeInteger(headRepository.id, 1) !== repositoryId ||
-      requireString(headRepository.full_name, PINNED_GRAPHRAG_OBSERVATION.repository) !== PINNED_GRAPHRAG_OBSERVATION.repository) {
-    throw new Error('run repository mismatch');
-  }
+  const run = requireRunMetadataRecord(value, 'run');
+  if (requireRunMetadataInteger(run.id, 'id') !== PINNED_GRAPHRAG_OBSERVATION.runId) runMetadataFailure('id');
+  requireRunMetadataString(run.name, 'name', PINNED_GRAPHRAG_OBSERVATION.workflowName);
+  requireRunMetadataString(run.path, 'path', PINNED_GRAPHRAG_OBSERVATION.workflowPath);
+  requireRunMetadataString(run.event, 'event', 'workflow_dispatch');
+  requireRunMetadataString(run.status, 'status', 'completed');
+  requireRunMetadataString(run.conclusion, 'conclusion', 'success');
+  requireRunMetadataString(run.head_branch, 'head_branch', 'main');
+  requireRunMetadataString(run.head_sha, 'head_sha', PINNED_GRAPHRAG_OBSERVATION.headSha);
+
+  const sourceRepository = requireRunMetadataRecord(run.repository, 'repository');
+  const headRepository = requireRunMetadataRecord(run.head_repository, 'head_repository');
+  if (requireRunMetadataInteger(sourceRepository.id, 'repository.id') !== repositoryId) runMetadataFailure('repository.id');
+  requireRunMetadataString(sourceRepository.full_name, 'repository.full_name', PINNED_GRAPHRAG_OBSERVATION.repository);
+  if (requireRunMetadataInteger(headRepository.id, 'head_repository.id') !== repositoryId) runMetadataFailure('head_repository.id');
+  requireRunMetadataString(headRepository.full_name, 'head_repository.full_name', PINNED_GRAPHRAG_OBSERVATION.repository);
 }
 
 function verifyContentBlob(value: unknown, path: string, expectedSha: string): void {
@@ -982,6 +1040,58 @@ async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
   return readBoundedResponseBytes(downloadResponse, MAX_GRAPHRAG_ARCHIVE_BYTES);
 }
 
+/** GET /repos/{owner}/{repo}/actions/jobs/{job_id} */
+export async function workflowJobGet(owner: string, repo: string, jobId: number): Promise<any> {
+  return ghGet(`/repos/${O(owner)}/${O(repo)}/actions/jobs/${jobId}`);
+}
+
+const CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS = 15_000;
+
+/**
+ * GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs answers 302 with a short-lived signed storage
+ * URL. Follow it by hand with the same safeguards as the pinned artifact download: the redirect target
+ * must pass the GitHub Actions storage host allowlist, the installation token is never sent to
+ * storage, no further redirects are followed, and only the newest CI_LOG_KEEP_BYTES are retained.
+ * Never throws and never echoes upstream text: every failure maps to a fixed status/reason.
+ */
+export async function workflowJobLogTail(owner: string, repo: string, jobId: number): Promise<JobLogResult> {
+  try {
+    const token = await getInstallationToken();
+    const redirectResponse = await fetchWithBudget(
+      new URL(`/repos/${O(owner)}/${O(repo)}/actions/jobs/${jobId}/logs`, PINNED_OBSERVATION_API),
+      { method: 'GET', redirect: 'manual', headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` } },
+      { retries: 1, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS },
+    );
+    const location = redirectResponse.headers.get('location');
+    await cancelResponseBody(redirectResponse);
+    if (redirectResponse.status === 404 || redirectResponse.status === 410) return { status: 'unavailable' };
+    if (redirectResponse.status !== 302) return { status: 'failed', reason: `api_http_${redirectResponse.status}` };
+    let signedUrl: URL;
+    try {
+      signedUrl = validateSignedArtifactUrl(location);
+    } catch {
+      return { status: 'failed', reason: 'untrusted_redirect' };
+    }
+    const download = await fetchWithBudget(signedUrl, {
+      method: 'GET',
+      redirect: 'error',
+      headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
+    }, { retries: 0, timeoutMs: CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS });
+    if (download.status === 404 || download.status === 410) {
+      await cancelResponseBody(download);
+      return { status: 'unavailable' };
+    }
+    if (download.status !== 200) {
+      await cancelResponseBody(download);
+      return { status: 'failed', reason: `download_http_${download.status}` };
+    }
+    const tail = await readResponseTail(download, CI_LOG_KEEP_BYTES, CI_LOG_HARD_CAP_BYTES, CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS);
+    return { status: 'ok', text: tail.bytes.toString('utf8'), headTruncated: tail.headTruncated };
+  } catch (error) {
+    return { status: 'failed', reason: error instanceof Error && error.message === 'response too large' ? 'log_too_large' : 'request_error' };
+  }
+}
+
 export interface PinnedGraphRagObservationResult {
   schema: typeof PINNED_GRAPHRAG_OBSERVATION.resultSchema;
   repository: typeof PINNED_GRAPHRAG_OBSERVATION.repository;
@@ -1077,9 +1187,10 @@ export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraph
       receipt_sha256: createHash('sha256').update(receiptBytes).digest('hex'),
       receipt_bytes: receiptBytes.length,
     };
-  } catch {
+  } catch (error) {
     // Never surface a GitHub error body, signed object URL, malformed receipt value, or token detail.
-    throw new PinnedObservationReaderError(failureStage);
+    const detail = failureStage === 'workflow_run_metadata' ? workflowRunMetadataFailureDetail(error) : undefined;
+    throw new PinnedObservationReaderError(failureStage, detail);
   }
 }
 

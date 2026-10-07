@@ -107,6 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           docker buildx build --platform linux/amd64,linux/arm64 --push \
+            --build-arg "GIT_SHA=$GITHUB_SHA" \
             --provenance=false --sbom=false \
             --tag "${{ steps.ecr.outputs.registry }}/otchealth-mcp-gateway:${{ steps.tag.outputs.tag }}" .
 
@@ -182,10 +183,33 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           set -euo pipefail
-          image="$REGISTRY/otchealth-mcp-gateway:$TAG"
+          digests=runtime-acceptance/ecr-digests.json
+          [[ -s "$digests" ]]
+          [[ "$(jq -er '.source_sha' "$digests")" == "$GITHUB_SHA" ]] \
+            || { echo "accepted image source SHA does not match this workflow" >&2; exit 1; }
+          [[ "$(jq -er '.tag' "$digests")" == "$TAG" ]] \
+            || { echo "accepted image tag does not match this workflow" >&2; exit 1; }
+          INDEX=$(jq -er '.index' "$digests")
+          AMD64=$(jq -er '.amd64' "$digests")
+          ARM64=$(jq -er '.arm64' "$digests")
+          [[ "$INDEX" =~ ^sha256:[a-f0-9]{64}$ && "$AMD64" =~ ^sha256:[a-f0-9]{64}$ && "$ARM64" =~ ^sha256:[a-f0-9]{64}$ ]]
+          for spec in "amd64:$AMD64" "arm64:$ARM64"; do
+            arch=${spec%%:*}
+            child=${spec#*:}
+            jq -e --arg arch "$arch" --arg child "$child" \
+              '([.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)] | length == 1 and .[0].digest == $child)' \
+              runtime-acceptance/ecr-index.json > /dev/null \
+              || { echo "accepted $arch child digest is absent from the accepted index" >&2; exit 1; }
+          done
           work=$(mktemp -d)
           trap 'rm -rf "$work"' EXIT
           for platform in linux/amd64 linux/arm64; do
+            case "$platform" in
+              linux/amd64) child="$AMD64" ;;
+              linux/arm64) child="$ARM64" ;;
+              *) echo "unsupported platform $platform" >&2; exit 1 ;;
+            esac
+            image="$REGISTRY/otchealth-mcp-gateway@$child"
             docker pull --platform "$platform" "$image"
             cid=$(docker create --platform "$platform" "$image")
             trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT

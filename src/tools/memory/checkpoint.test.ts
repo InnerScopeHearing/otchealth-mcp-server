@@ -52,6 +52,43 @@ test('actual checkpoint handler preserves partial IDs and resets pressure only f
   }
 });
 
+test('actual checkpoint handler overlaps independent writes, keeps ordered receipts, and waits before the episode', async () => {
+  let handler: import('../registry.js').ToolHandler<never> | undefined;
+  let active = 0, maximum = 0, completed = 0, resets = 0;
+  const completionOrder: string[] = [];
+  registerCheckpoint({} as import('@modelcontextprotocol/sdk/server/mcp.js').McpServer, () => 'fixture', {
+    register: (_server, definition) => { handler = definition.handler; },
+    configured: () => true,
+    reset: () => { resets++; },
+    deliver: async (_agent, kind, text) => {
+      if (kind === 'episode') {
+        assert.equal(completed, 3, 'episode must wait until every explicit delivery settles');
+        return { id: 'episode-id', stored: true, indexed: true };
+      }
+      active++;
+      maximum = Math.max(maximum, active);
+      const delay = text === 'slow' ? 20 : text === 'fail' ? 2 : 5;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      active--;
+      completed++;
+      completionOrder.push(text);
+      if (text === 'fail') throw new Error('synthetic storage acknowledgement lost');
+      return { id: `${text}-id`, stored: true, indexed: true };
+    },
+  });
+  assert.ok(handler);
+  const result = await handler({agent:'cto',memories:[
+    {kind:'fact',text:'slow'}, {kind:'fact',text:'fail'}, {kind:'fact',text:'fast'},
+  ]} as never, {callerHash:'fixture',callerAgent:'cto',correlationId:'fixture',dryRun:false,acknowledgeWarning:false});
+  const data = result.data as {written:string[];storage_unconfirmed:number;checkpoint:boolean};
+  assert.equal(maximum, 3);
+  assert.deepEqual(completionOrder, ['fail', 'fast', 'slow']);
+  assert.deepEqual(data.written, ['slow-id', 'fast-id', 'episode-id']);
+  assert.equal(data.storage_unconfirmed, 1);
+  assert.equal(data.checkpoint, false);
+  assert.equal(resets, 0);
+});
+
 // Pure network mocking via globalThis.fetch, the same seam src/memory/deep-retrieval.test.ts and
 // src/memory/agentic.test.ts use.
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
@@ -147,7 +184,7 @@ test('parseDistillResponse: never throws on malformed JSON, missing memories key
   assert.deepEqual(parseDistillResponse(''), []);
 });
 
-// ── distillSummary: the LLM call site itself requests the cost-conscious router tier ──────────────
+// ?? distillSummary: the LLM call site itself requests the cost-conscious router tier ??????????????
 
 function isChatUrl(url: string): boolean {
   return url.includes('/chat/completions');

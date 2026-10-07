@@ -197,7 +197,11 @@ export interface RetrievalShieldOutcome {
  * Content Safety error, or an unconfigured endpoint/key, degrades to ran:false and never throws. A
  * safety dependency must never break retrieval.
  */
-export async function retrievalShield(query: string, documents: string[]): Promise<RetrievalShieldOutcome> {
+export async function retrievalShield(
+  query: string,
+  documents: string[],
+  budget?: { deadlineAtMs?: number; signal?: AbortSignal },
+): Promise<RetrievalShieldOutcome> {
   const mode = parseMode(process.env.RETRIEVAL_SHIELD_MODE, 'report');
   const scanned = (Array.isArray(documents) ? documents : [])
     .filter((d): d is string => typeof d === 'string' && d.trim().length > 0)
@@ -208,7 +212,7 @@ export async function retrievalShield(query: string, documents: string[]): Promi
     return { ran: false, attackDetected: false, blocked: false, mode, scannedCount: 0 };
   }
   try {
-    const r = await shieldPrompt((query || '').slice(0, MAX_SCAN_CHARS), scanned);
+    const r = await shieldPrompt((query || '').slice(0, MAX_SCAN_CHARS), scanned, budget);
     if (!configured(r.raw)) {
       return { ran: false, attackDetected: false, blocked: false, mode, scannedCount: 0 };
     }

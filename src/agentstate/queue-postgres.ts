@@ -40,24 +40,32 @@
  * forever)
  *   DRAIN (ack=true, inbox_read's default): a single `DELETE ... WHERE seq IN (SELECT ... FOR
  *   UPDATE SKIP LOCKED) RETURNING ...`. The row is gone the instant this statement commits; there
- *   is no window in which a second reader could see it.
- *   PEEK (ack=false, wake's mode): a single `UPDATE ... SET visible_at = now() + Nsec FROM
- *   (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING ...`. The row is never deleted; it is simply
- *   hidden from `readMessages` (both modes) until `visible_at` passes, then reappears --
- *   byte-identical semantics to the Azure client's visibilitytimeout=N with no DELETE call,
- *   which is exactly what wake's `ack:false` relies on today.
+ *   is no window in which a second reader could see it. This is the ONLY operation that counts as
+ *   a delivery (dequeue_count + 1).
+ *   PEEK (ack=false, wake's mode): a plain SELECT. It locks nothing, writes nothing, hides nothing
+ *   and is NOT a delivery attempt. (It used to lease the rows for visibilitySec and bump
+ *   dequeue_count on every call, so wake alone drove unread handoffs to 79-138 "deliveries" and the
+ *   lease hid a freshly peeked batch from the very drain that followed it.)
+ *
+ * DEAD LETTER (2026-10-07). Messages that can no longer be usefully delivered -- past their TTL,
+ * older than INBOX_MAX_AGE_SECONDS (7 days), or fetched more than INBOX_MAX_DELIVERIES times -- are
+ * moved out of the live set before every read by setting visible_at = 'infinity'. Every claim
+ * query requires visible_at <= now(), so a dead letter never reaches wake, a peek or a drain, yet
+ * its row (payload, counts, timestamps) stays put and is listed by readMessages(.., { deadLetter:
+ * true }). No schema change: the state lives in an existing column, so this adds no DDL to a
+ * production table that ensureSchema() must keep provisioning on every replica.
  *
  * CONCURRENT READERS (two gateway replicas can call readMessages for the SAME agent at the SAME
- * moment): both statements above select their candidate rows via a subquery carrying `FOR UPDATE
- * SKIP LOCKED`. Postgres row locks make that subquery's row-selection and the outer
- * DELETE/UPDATE's row-mutation atomic with respect to every OTHER transaction running the same
+ * moment): the drain selects its candidate rows via a subquery carrying `FOR UPDATE SKIP LOCKED`
+ * inside the ONE `DELETE` statement. Postgres row locks make that subquery's row-selection and the
+ * outer DELETE's row-removal atomic with respect to every OTHER transaction running the same
  * statement shape: transaction A's SELECT...FOR UPDATE takes a row lock the instant it selects a
  * row, and transaction B's own FOR UPDATE SKIP LOCKED on the same query simply skips any row A
  * already holds -- it can never select it too. So of two concurrent drains, each ready row is
- * deleted by exactly one of them; of two concurrent peeks, each ready row's visibility is
- * extended by exactly one of them. This is the standard Postgres "competing consumers" queue
- * pattern (the same one SELECT ... FOR UPDATE SKIP LOCKED job-queue recipes use), not read-then-
- * write in two statements, which is exactly the shape that would race.
+ * deleted by exactly one of them. A peek takes no lock and writes nothing, so concurrent peeks
+ * simply read the same rows. This is the standard Postgres "competing consumers" queue pattern
+ * (the same one SELECT ... FOR UPDATE SKIP LOCKED job-queue recipes use), not read-then-write in
+ * two statements, which is exactly the shape that would race.
  *
  * ORDERING: rows are claimed oldest-`seq`-first (an auto-incrementing bigserial), which is FIFO
  * within a queue and at least as strong an ordering guarantee as Azure Queue Storage's own
@@ -65,14 +73,11 @@
  *
  * TTL / EXPIRY: `expires_at` is set once at enqueue time (`enqueued_at + ttlSeconds`) and both the
  * drain and peek claim queries exclude any row past it, so an expired message is never delivered
- * -- matching Azure's behaviour that an expired message stops being returned. UNLIKE Azure, this
- * adapter does not itself garbage-collect expired rows out of the table (Azure auto-removes them
- * server-side; here they simply become permanently unreachable dead rows once expired). This is a
- * known, flagged gap: harmless for correctness (an expired row can never be claimed or counted),
- * but it is an unbounded-growth risk for a queue/agent pair nobody ever reads, and needs a
- * periodic sweep (`DELETE FROM agentstate_queue WHERE expires_at <= now()`) added to whatever
- * nightly job already exists for this repo's other durable-state hygiene, before this backend
- * carries real production traffic.
+ * -- matching Azure's behaviour that an expired message stops being returned. Unlike Azure, rows
+ * are not deleted on expiry: they become dead letters (see above) and stay for audit. Purging old
+ * dead letters (`DELETE ... WHERE visible_at = 'infinity' AND enqueued_at < <retention>`) is still
+ * a flagged follow-up for whatever nightly job owns this repo's durable-state hygiene; it is
+ * harmless for correctness and the table grows by a handful of rows per day.
  *
  * FAILURE SHAPE: every function throws (never returns an empty-looking success) when Postgres is
  * unreachable, unauthenticated, or the table is missing -- the underlying `pg` error propagates
@@ -84,7 +89,14 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { loadEnv } from '../config/env.js';
-import { queueName, type InboxMessage, type ReadMessage, type ReadMessagesOptions } from './queue-shared.js';
+import {
+  INBOX_MAX_AGE_SECONDS,
+  INBOX_MAX_DELIVERIES,
+  queueName,
+  type InboxMessage,
+  type ReadMessage,
+  type ReadMessagesOptions,
+} from './queue-shared.js';
 
 export type { InboxMessage, ReadMessage };
 export { queueName };
@@ -230,19 +242,59 @@ export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604
 }
 
 /**
- * Read up to `max` messages from <agent>'s inbox. ack=true (default) DRAINS: each returned
- * message is deleted, atomically, as part of the same statement that selected it. ack=false PEEKS:
- * messages are claimed (dequeue_count bumped, visible_at pushed out by visibilitySec) but never
- * deleted, so they reappear for any reader once that window passes -- they are NEVER consumed.
+ * Read up to `max` messages from <agent>'s inbox.
+ *
+ *   ack=true (default) DRAINS: each returned message is deleted, atomically, by the same statement
+ *   that selected it, and counts as one delivery.
+ *   ack=false PEEKS: a plain read. No lock, no write, no hidden window, no delivery counted -- so a
+ *   drain that follows a peek returns exactly the messages the peek showed, and repeated peeks
+ *   (wake runs one on every boot) leave dequeue_count untouched.
+ *   deadLetter=true AUDITS the dead-letter set, newest first. Read-only whatever `ack` says.
+ *
+ * Dead-lettering (see the module header) runs first, on every call, for this queue only.
  */
 export async function readMessages(agent: string, opts: ReadMessagesOptions = {}): Promise<ReadMessage[]> {
-  const { max = 16, ack = true, visibilitySec = 60 } = opts;
+  const {
+    max = 16,
+    ack = true,
+    deadLetter = false,
+    maxAgeSec = INBOX_MAX_AGE_SECONDS,
+    maxDeliveries = INBOX_MAX_DELIVERIES,
+  } = opts;
   if (!isConfigured()) throw new Error('Postgres agent inbox not configured (PG_HOST unset).');
   const q = queueName(agent);
   await ensureSchema();
   const n = Math.min(32, Math.max(1, max));
-  const vis = Math.max(1, Math.floor(visibilitySec));
+  const maxAge = Math.max(1, Math.floor(maxAgeSec));
+  const maxDeliv = Math.max(0, Math.floor(maxDeliveries));
   const p = getPool();
+
+  // Move undeliverable messages out of the live set. Idempotent, touches only this queue's rows, and
+  // matches nothing in the steady state. 'infinity' is the dead-letter marker: every claim below
+  // requires visible_at <= now(), so a dead letter is unreachable by wake, peeks and drains.
+  await p.query(
+    `UPDATE ${TABLE}
+        SET visible_at = 'infinity'
+      WHERE queue = $1 AND visible_at < 'infinity'
+        AND (expires_at <= now()
+             OR enqueued_at <= now() - ($2 * interval '1 second')
+             OR dequeue_count > $3)`,
+    [q, maxAge, maxDeliv],
+  );
+
+  if (deadLetter) {
+    const r = await p.query<{ message_id: string; payload: unknown; dequeue_count: number; dead_letter_reason: 'expired' | 'max_deliveries' }>(
+      `SELECT message_id, payload, dequeue_count,
+              CASE WHEN expires_at <= now() OR enqueued_at <= now() - ($3 * interval '1 second')
+                   THEN 'expired' ELSE 'max_deliveries' END AS dead_letter_reason
+         FROM ${TABLE}
+        WHERE queue = $1 AND visible_at = 'infinity'
+        ORDER BY seq DESC
+        LIMIT $2`,
+      [q, n, maxAge],
+    );
+    return r.rows.map((row) => ({ ...toReadMessage(agent, row, false), dead_letter_reason: row.dead_letter_reason }));
+  }
 
   if (ack) {
     // DRAIN. The DELETE and the row-selecting subquery are ONE statement, so no other transaction
@@ -276,26 +328,15 @@ export async function readMessages(agent: string, opts: ReadMessagesOptions = {}
     return r.rows.map((row) => toReadMessage(agent, row, true));
   }
 
-  // PEEK. Same FOR-UPDATE-SKIP-LOCKED claim, but an UPDATE that only pushes visible_at out --
-  // nothing is ever removed by this branch. Same outer-ORDER-BY requirement as the DRAIN branch
-  // above: an UPDATE's RETURNING order is not guaranteed to match the FROM subquery's order either.
+  // PEEK: read-only. Same liveness predicate as the drain, no lock and no write, so it can never
+  // consume, hide or count anything.
   const r = await p.query<{ message_id: string; payload: unknown; dequeue_count: number }>(
-    `WITH claimed AS (
-       UPDATE ${TABLE} t
-          SET dequeue_count = t.dequeue_count + 1,
-              visible_at = now() + ($3 * interval '1 second')
-         FROM (
-            SELECT seq FROM ${TABLE}
-             WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
-             ORDER BY seq
-             LIMIT $2
-               FOR UPDATE SKIP LOCKED
-         ) c
-        WHERE t.seq = c.seq
-        RETURNING t.seq, t.message_id, t.payload, t.dequeue_count
-     )
-     SELECT message_id, payload, dequeue_count FROM claimed ORDER BY seq`,
-    [q, n, vis],
+    `SELECT message_id, payload, dequeue_count
+       FROM ${TABLE}
+      WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
+      ORDER BY seq
+      LIMIT $2`,
+    [q, n],
   );
   return r.rows.map((row) => toReadMessage(agent, row, false));
 }

@@ -98,7 +98,11 @@ export class ContentSafetyError extends Error {
   }
 }
 
-async function csPost<T = unknown>(path: string, body: unknown): Promise<T> {
+async function csPost<T = unknown>(
+  path: string,
+  body: unknown,
+  budget?: { deadlineAtMs?: number; signal?: AbortSignal },
+): Promise<T> {
   const base = endpoint()!;
   const key = apiKey()!;
   const url = `${base}${path}`;
@@ -112,7 +116,8 @@ async function csPost<T = unknown>(path: string, body: unknown): Promise<T> {
       'Ocp-Apim-Subscription-Key': key,
     },
     body: JSON.stringify(body),
-  }, { retries: 1 });
+    signal: budget?.signal,
+  }, { retries: 1, deadlineAtMs: budget?.deadlineAtMs });
 
   const statusCode = res.status;
   const text = await res.text();
@@ -156,6 +161,7 @@ export interface ShieldPromptResult {
 export async function shieldPrompt(
   userPrompt: string,
   documents?: string[],
+  budget?: { deadlineAtMs?: number; signal?: AbortSignal },
 ): Promise<ShieldPromptResult> {
   if (!isConfigured()) {
     return {
@@ -174,6 +180,7 @@ export async function shieldPrompt(
       userPrompt,
       ...(documents && documents.length > 0 ? { documents } : {}),
     },
+    budget,
   );
 
   // API response shape:

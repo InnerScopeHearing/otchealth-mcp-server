@@ -28,10 +28,12 @@ process.env.AZURE_SEARCH_ENDPOINT ||= 'https://otchealth-dataroom-search.example
 process.env.AZURE_SEARCH_QUERY_KEY ||= 'test-search-key';
 
 const { roomsFor, rrfFuse, fuseWithDirectCandidate, exactIdentifierCandidate, isOpaqueIdentifierQuery, canUseEntityLookup, buildEntityPromotion, OPEN_ROOMS, RING_ROOMS, handleBrainSearch, brainSearchInputShape } = await import('./brain-search.js');
-const { filterRetractedByAgent } = await import('../../memory/retractions.js');
+const { activeEntityRows, matchEntity } = await import('../../memory/entity-lookup.js');
+const { filterRetractedByAgent, __resetRetractionCache, __seedRetractionCacheForTests } = await import('../../memory/retractions.js');
 const { z } = await import('zod');
+type FixtureEntityRow = import('../../memory/entity-lookup.js').EntityRow;
 
-// Pure network mocking via globalThis.fetch — the same seam src/memory/agentic.test.ts and
+// Pure network mocking via globalThis.fetch - the same seam src/memory/agentic.test.ts and
 // src/azure/search.test.ts use, since this repo's ESM build does not let node:test's mock.method()
 // redefine another module's live named export.
 async function withStubbedFetch<T>(stub: typeof fetch, run: () => Promise<T>): Promise<T> {
@@ -53,9 +55,50 @@ function fakeCtx(callerAgent: string) {
   return { correlationId: 'test-corr', callerHash: 'test-hash', dryRun: false, acknowledgeWarning: false, callerAgent };
 }
 
+function fixtureEntityLookup(rows: FixtureEntityRow[]) {
+  return async (query: string, mode?: string, retractions?: ReadonlyMap<string, ReadonlySet<string>>) => {
+    if ((mode || '').trim().toLowerCase() === 'off') return null;
+    return matchEntity(query, activeEntityRows(rows, retractions));
+  };
+}
+
+function primaryCloudEntityRows(): FixtureEntityRow[] {
+  return [
+    {
+      id: '20260907-001', type: 'entity', ekey: 'otchealth_primary_cloud', evalue: 'legacy cloud',
+      ts: '2026-09-01T12:00:00.000Z', agent: 'cto', source: 'verified record', tags: ['current-value'],
+    },
+    {
+      id: '20260907-002', type: 'entity', ekey: 'otchealth_primary_cloud', evalue: 'AWS',
+      ts: '2026-09-07T12:00:00.000Z', agent: 'cto', source: 'verified record', tags: ['current-value'],
+      supersedes: '20260907-001',
+    },
+  ];
+}
+
+async function withEntityMode<T>(run: () => Promise<T>): Promise<T> {
+  const prior = process.env.ENTITY_LOOKUP_MODE;
+  process.env.ENTITY_LOOKUP_MODE = 'on';
+  try { return await run(); }
+  finally {
+    if (prior === undefined) delete process.env.ENTITY_LOOKUP_MODE;
+    else process.env.ENTITY_LOOKUP_MODE = prior;
+  }
+}
+
+async function withRetrievalShield<T>(mode: string, run: () => Promise<T>): Promise<T> {
+  const prior = process.env.RETRIEVAL_SHIELD_MODE;
+  process.env.RETRIEVAL_SHIELD_MODE = mode;
+  try { return await run(); }
+  finally {
+    if (prior === undefined) delete process.env.RETRIEVAL_SHIELD_MODE;
+    else process.env.RETRIEVAL_SHIELD_MODE = prior;
+  }
+}
+
 // --- ring safety: federation must NEVER become a side door around a privilege boundary ---
 
-test('a non-ring caller (cto) gets ONLY the open rooms — no finance, no legal', () => {
+test('a non-ring caller (cto) gets ONLY the open rooms - no finance, no legal', () => {
   const rooms = roomsFor('cto');
   assert.deepEqual(rooms, [...OPEN_ROOMS]);
   for (const r of RING_ROOMS) assert.ok(!rooms.includes(r), `cto must not reach ${r}`);
@@ -95,6 +138,30 @@ test('opaque literal witness survives federation rank loss but remains retractab
   assert.equal(pool[0]?.id, 'cto__literal');
   const filtered = filterRetractedByAgent(pool, new Map([['cto', new Set(['literal'])]]));
   assert.equal(filtered.kept.some((hit) => hit.id === 'cto__literal'), false);
+});
+
+test('direct and opaque-ID preferred candidates retain citation locators through RRF', () => {
+  const candidate = exactIdentifierCandidate('MXVEDTUKA2', 'memory-exec', [{
+    id: 'cto__literal', text: 'synthetic evidence', agent: 'cto', exactIdentifierMatch: true,
+    path: 'current/source.pdf', variants: ['archive/source.pdf'], type: 'decision', source_version: `sha256:${'a'.repeat(64)}`,
+  }]);
+  assert.ok(candidate);
+  const pool = fuseWithDirectCandidate([{ room: 'memory-exec', hits: [] }], 1, candidate);
+  assert.equal(pool[0]?.path, 'current/source.pdf');
+  assert.deepEqual(pool[0]?.variants, ['archive/source.pdf']);
+  assert.equal(pool[0]?.type, 'decision');
+  assert.equal(pool[0]?.source_version, `sha256:${'a'.repeat(64)}`);
+});
+
+test('preferred version candidate does not discard a same-ID hit from another supplied version', () => {
+  const a = `sha256:${'a'.repeat(64)}`;
+  const b = `sha256:${'b'.repeat(64)}`;
+  const pool = fuseWithDirectCandidate([{ room: 'commons-company-journal', hits: [
+    { id: 'doc', text: 'version a', source_version: a },
+    { id: 'doc', text: 'version b', source_version: b },
+  ] }], 2, { score: 1, source: 'commons-company-journal', id: 'doc', text: 'version a', source_version: a });
+  assert.equal(pool.length, 2);
+  assert.deepEqual(pool.map((hit) => hit.source_version), [a, b]);
 });
 
 test('natural-language queries and unmarked identifier hits keep existing federation behavior', () => {
@@ -196,6 +263,41 @@ function mockSearchOnlyFetch(): typeof fetch {
   }) as typeof fetch;
 }
 
+test('fast and deep brain_search disclose incomplete retraction verification with fixed content-free warning', async () => {
+  const priorMode = process.env.DEEP_RETRIEVAL_MODE;
+  const warning = 'Retraction verification incomplete; one or more sources were unavailable.';
+  try {
+    __seedRetractionCacheForTests(new Map([['cto', new Set(['known-proof'])]]), false);
+    await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+      const result = await handleBrainSearch({ query: 'q', mode: 'fast' }, fakeCtx('cto'));
+      const data = result.data as Record<string, unknown>;
+      assert.equal(data.retraction_verification, 'complete');
+      assert.equal(result.summary.includes(warning), false);
+    });
+
+    __seedRetractionCacheForTests(new Map([['cto', new Set(['known-proof'])]]), true);
+    await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+      const result = await handleBrainSearch({ query: 'q', mode: 'fast' }, fakeCtx('cto'));
+      const data = result.data as Record<string, unknown>;
+      assert.equal(data.retraction_verification, 'incomplete');
+      assert.equal(result.summary.includes(warning), true);
+    });
+
+    process.env.DEEP_RETRIEVAL_MODE = 'on';
+    __seedRetractionCacheForTests(new Map([['cto', new Set(['known-proof'])]]), true);
+    await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+      const result = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'));
+      const data = result.data as Record<string, unknown>;
+      assert.equal(data.retraction_verification, 'incomplete');
+      assert.equal(result.summary.includes(warning), true);
+    });
+  } finally {
+    __resetRetractionCache();
+    if (priorMode === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
+    else process.env.DEEP_RETRIEVAL_MODE = priorMode;
+  }
+});
+
 test('handleBrainSearch mode:"fast" is a regression: same output shape as brain_search before deep mode existed', async () => {
   await withStubbedFetch(mockSearchOnlyFetch(), async () => {
     const result = await handleBrainSearch({ query: 'what is the ASC key id', mode: 'fast' }, fakeCtx('cto'));
@@ -270,6 +372,151 @@ test('DEEP_RETRIEVAL_MODE unset (default "on"): mode:"deep" takes the deep path 
   });
 });
 
+test('deep mode promotes the current typed entity, removes its semantic duplicate, and cites the authoritative match', async () => {
+  const rows = primaryCloudEntityRows();
+  const currentId = '20260907-002';
+  assert.deepEqual(activeEntityRows(rows).map((row: { id?: string }) => row.id), [currentId], 'the superseded entity row must be inactive');
+  const searchDocId = `cto__${currentId}`;
+  const fixtureFetch = (async (url: string | URL) => {
+    const u = String(url);
+    if (isSearchUrl(u)) return new Response(JSON.stringify({ value: [{
+      id: searchDocId, text: 'semantic duplicate of current entity', agent: 'cto', type: 'entity', '@search.rerankerScore': 1,
+    }] }), { status: 200 });
+    throw new Error(`unexpected provider request ${u}`);
+  }) as typeof fetch;
+  await withEntityMode(() => withRetrievalShield('off', () => withStubbedFetch(fixtureFetch, async () => {
+    const result = await handleBrainSearch(
+      { query: 'what is OTCHealth primary cloud now', mode: 'deep' }, fakeCtx('cto'),
+      { lookupEntity: fixtureEntityLookup(rows), retractedIdsByAgent: async () => new Map() },
+    );
+    const data = result.data as Record<string, unknown>;
+    const matches = data.matches as Array<Record<string, unknown>>;
+    const entityAnswer = data.entity_answer as Record<string, unknown>;
+    assert.equal(entityAnswer.value, 'AWS');
+    assert.equal(entityAnswer.id, currentId);
+    assert.equal(entityAnswer.source, 'verified record');
+    assert.equal(entityAnswer.owner, 'cto');
+    assert.equal(entityAnswer.matched_by, 'containment');
+    assert.match(String(data.answer), /Current value: otchealth_primary_cloud = AWS \[1\]\./);
+    assert.equal(matches[0]?.id, currentId);
+    assert.equal(matches[0]?.authoritative, true);
+    assert.equal(matches.length, 1, 'the prefixed deep search duplicate must be removed against its bare ledger ID');
+    assert.equal(data.count, matches.length);
+    assert.deepEqual(data.citations, [{ n: 1, source: 'memory-exec', id: currentId, type: 'entity' }]);
+  })));
+});
+
+test('an enforce-mode retrieval shield block suppresses entity promotion and keeps the withheld answer', async () => {
+  const deepRetrieveForTest = async () => ({
+    mode: 'deep-agentic' as const,
+    answer: 'Synthesis withheld by the retrieval shield.',
+    citations: [],
+    sub_queries: ['what is OTCHealth primary cloud now'],
+    rounds_used: 1,
+    hits: [],
+    rooms_searched: ['memory-exec'],
+    injection_screen: { attackDetected: true, mode: 'enforce' as const },
+  });
+  await withEntityMode(() => withRetrievalShield('enforce', async () => {
+    const result = await handleBrainSearch(
+      { query: 'what is OTCHealth primary cloud now', mode: 'deep' }, fakeCtx('cto'),
+      {
+        lookupEntity: fixtureEntityLookup(primaryCloudEntityRows()),
+        retractedIdsByAgent: async () => new Map(),
+        deepRetrieve: deepRetrieveForTest,
+      },
+    );
+    const data = result.data as Record<string, unknown>;
+    assert.equal(data.answer, 'Synthesis withheld by the retrieval shield.');
+    assert.equal('entity_answer' in data, false);
+    assert.equal((data.matches as Array<Record<string, unknown>>).some((hit) => hit.authoritative === true), false);
+    assert.deepEqual(data.injection_screen, { attackDetected: true, mode: 'enforce' });
+  }));
+});
+
+test('deep mode does not promote historical or foreign-scoped queries', async () => {
+  const rows = primaryCloudEntityRows();
+  await withEntityMode(() => withRetrievalShield('off', async () => {
+    for (const query of ['what was the OTCHealth primary cloud', 'what is their OTCHealth primary cloud now']) {
+      await withStubbedFetch(mockSearchOnlyFetch(), async () => {
+        const result = await handleBrainSearch(
+          { query, mode: 'deep' }, fakeCtx('cto'),
+          { lookupEntity: fixtureEntityLookup(rows), retractedIdsByAgent: async () => new Map() },
+        );
+        const data = result.data as Record<string, unknown>;
+        assert.equal('entity_answer' in data, false, `query must not be promoted: ${query}`);
+        assert.equal((data.matches as Array<Record<string, unknown>>).some((hit) => hit.authoritative === true), false);
+      });
+    }
+  }));
+});
+
+test('deep mode does not run entity promotion when the domain excludes memory-exec', async () => {
+  let lookupCalls = 0;
+  const rows = primaryCloudEntityRows();
+  const lookupEntityForTest = async (
+    query: string,
+    mode?: string,
+    retractions?: ReadonlyMap<string, ReadonlySet<string>>,
+  ) => {
+    lookupCalls++;
+    return fixtureEntityLookup(rows)(query, mode, retractions);
+  };
+  await withEntityMode(() => withRetrievalShield('off', () => withStubbedFetch(mockSearchOnlyFetch(), async () => {
+    const result = await handleBrainSearch(
+      { query: 'what is OTCHealth primary cloud now', domain: 'commons', mode: 'deep' }, fakeCtx('cto'),
+      { lookupEntity: lookupEntityForTest, retractedIdsByAgent: async () => new Map() },
+    );
+    const data = result.data as Record<string, unknown>;
+    assert.equal(lookupCalls, 0);
+    assert.equal('entity_answer' in data, false);
+    assert.deepEqual(data.rooms_searched, ['commons-company-journal']);
+  })));
+});
+
+test('deep continuation and partial budget retain original hits and citation indices', async () => {
+  const originalNow = Date.now;
+  let clock = originalNow();
+  const currentId = '20260907-002';
+  const rows = primaryCloudEntityRows();
+  const stub = (async (url: string | URL) => {
+    const u = String(url);
+    if (isSearchUrl(u)) {
+      const response = new Response(JSON.stringify({ value: [{ id: `cto__${currentId}`, text: 'current entity hit', agent: 'cto', '@search.rerankerScore': 1 }] }), { status: 200 });
+      const readJson = response.json.bind(response);
+      response.json = async () => { const body = await readJson(); clock += 30_001; return body; };
+      return response;
+    }
+    throw new Error(`unexpected provider request ${u}`);
+  }) as typeof fetch;
+  await withEntityMode(() => withRetrievalShield('off', () => withStubbedFetch(stub, async () => {
+    const priorBudget = process.env.DEEP_RETRIEVAL_BUDGET_MS;
+    process.env.DEEP_RETRIEVAL_BUDGET_MS = '30000';
+    Date.now = () => clock;
+    try {
+      const result = await handleBrainSearch(
+        { query: 'what is OTCHealth primary cloud now', mode: 'deep', continuation: { rooms: ['memory-exec'], sub_queries: ['resume exact current cloud lookup'], rounds_used: 1 } },
+        fakeCtx('cto'),
+        { lookupEntity: fixtureEntityLookup(rows), retractedIdsByAgent: async () => new Map() },
+      );
+      const data = result.data as Record<string, unknown>;
+      assert.equal(data.partial, true);
+      assert.equal(data.resumed, true);
+      assert.deepEqual(data.continuation, { rooms: ['memory-exec'], sub_queries: ['resume exact current cloud lookup'], rounds_used: 1 });
+      assert.deepEqual(data.sub_queries, ['resume exact current cloud lookup']);
+      assert.equal('entity_answer' in data, false);
+      assert.equal(String(data.answer).includes('Current value:'), false, 'a partial status answer must not be rewritten as complete synthesis');
+      const matches = data.matches as Array<Record<string, unknown>>;
+      assert.equal(matches[0]?.id, `cto__${currentId}`);
+      assert.equal((data.citations as Array<Record<string, unknown>>)[0]?.id, `cto__${currentId}`);
+    } finally {
+      Date.now = originalNow;
+      if (priorBudget === undefined) delete process.env.DEEP_RETRIEVAL_BUDGET_MS;
+      else process.env.DEEP_RETRIEVAL_BUDGET_MS = priorBudget;
+    }
+  })));
+});
+
 // --- FND-20260829-e454: handleBrainSearch wires input.continuation through to deepRetrieve, and
 // surfaces partial/continuation/resumed/budget_skipped on the tool's own `data` object exactly
 // like it already does for rooms_failed/retracted_dropped/injection_screen above. ---
@@ -303,34 +550,43 @@ test('handleBrainSearch: input.continuation reaches deepRetrieve and its rooms/s
 });
 
 test('handleBrainSearch: exceeding the wall-clock budget surfaces partial:true + a continuation on the tool response (not just inside deepRetrieve)', async () => {
+  const originalNow = Date.now;
+  let clock = originalNow();
+  let searchCalls = 0;
   const stub = (async (url: string | URL) => {
     const u = String(url);
     if (isSearchUrl(u)) {
-      // A real (if tiny) sleep -- combined with DEEP_RETRIEVAL_BUDGET_MS=1 below, this
-      // deterministically guarantees the shared deadline has passed by the time deepRetrieve
-      // reaches its budget check, without depending on microsecond-scale scheduling luck.
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      return new Response(JSON.stringify({ value: [{ id: 'doc1', text: 'a hit', '@search.rerankerScore': 1 }] }), { status: 200 });
+      searchCalls++;
+      const response = new Response(JSON.stringify({ value: [{ id: 'doc1', text: 'a hit', '@search.rerankerScore': 1 }] }), { status: 200 });
+      const readJson = response.json.bind(response);
+      response.json = async () => {
+        const body = await readJson();
+        // Move the clock only after the synthetic response body has been read. This proves
+        // retention of an already-retrieved hit, independently of CI scheduling; a 1ms real
+        // budget could correctly expire before retrieval starts under the stricter deadline.
+        clock += 30_001;
+        return body;
+      };
+      return response;
     }
     throw new Error(`unexpected fetch to ${u} (Foundry is unconfigured in this file -- no chat/embeddings call should ever be attempted)`);
   }) as typeof fetch;
 
   await withStubbedFetch(stub, async () => {
-    // budgetMs is not a wire-level input field -- this proves the shape end to end using the
-    // DEEP_RETRIEVAL_BUDGET_MS env override, the same "read fresh from process.env" convention
-    // deepRetrieve itself documents. 1ms (not 0) deliberately -- resolveDeepBudgetMs treats
-    // 0/negative as "unset" and falls back to the real default.
     const prior = process.env.DEEP_RETRIEVAL_BUDGET_MS;
-    process.env.DEEP_RETRIEVAL_BUDGET_MS = '1';
+    process.env.DEEP_RETRIEVAL_BUDGET_MS = '30000';
+    Date.now = () => clock;
     try {
       const result = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'));
       const data = result.data as Record<string, unknown>;
+      assert.ok(searchCalls > 0, 'the fixture must actually retrieve before its clock expires');
       assert.equal(data.partial, true);
       assert.ok(data.continuation, 'the tool response must surface deepRetrieve\'s continuation, not just deepRetrieve\'s own return value');
       assert.equal(typeof data.answer, 'string');
       assert.ok((data.answer as string).length > 0);
       assert.ok(Array.isArray(data.matches) && (data.matches as unknown[]).length > 0, 'the already-retrieved hit is still returned in full');
     } finally {
+      Date.now = originalNow;
       if (prior === undefined) delete process.env.DEEP_RETRIEVAL_BUDGET_MS;
       else process.env.DEEP_RETRIEVAL_BUDGET_MS = prior;
     }
