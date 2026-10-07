@@ -46,6 +46,8 @@ export interface CloudBrowserSession {
 export interface CloudBrowserStore {
   loadProfile(profileId: string): Promise<CloudBrowserProfile | null>;
   saveProfile(profile: CloudBrowserProfile): Promise<void>;
+  /** Atomic create-only binding; false means an item with this profile key already exists. */
+  saveProfileIfAbsent(profile: CloudBrowserProfile): Promise<boolean>;
   loadSession(sessionId: string): Promise<CloudBrowserSession | null>;
   saveSession(session: CloudBrowserSession): Promise<void>;
   saveSessionUnderLock(session: CloudBrowserSession, lockOwner: string): Promise<void>;
@@ -61,8 +63,19 @@ export interface CloudBrowserTransport {
   start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, 'providerSessionId' | 'automationEndpoint'>>;
   execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null>;
   stop(session: CloudBrowserSession): Promise<void>;
+  /** Read metadata for one configured provider profile; implementations must not enumerate profiles. */
+  getBrowserProfile?(profileId: string): Promise<CloudBrowserProviderProfile>;
   /** Persist the active remote browser state (cookies/local storage) at the provider, never locally. */
   saveProfile?(session: CloudBrowserSession, profile: CloudBrowserProfile): Promise<void>;
+}
+
+export interface CloudBrowserProviderProfile {
+  profileId: string;
+  name: string;
+  status: string;
+  profileArn: string;
+  lastSavedAt?: string;
+  lastSavedBrowserId?: string;
 }
 
 export class CloudBrowserError extends Error {

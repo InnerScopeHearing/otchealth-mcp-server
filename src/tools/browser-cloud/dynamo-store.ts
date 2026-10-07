@@ -35,11 +35,16 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     const host = `dynamodb.${this.region}.amazonaws.com`; const body = JSON.stringify(payload);
     const signed = signRequest({ method: 'POST', host, path: '/', body, region: this.region, service: 'dynamodb', credentials, extraHeaders: { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': `DynamoDB_20120810.${target}` } });
     const response = await this.fetchImpl(`https://${host}/`, { method: 'POST', headers: signed.headers, body, signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) throw new CloudBrowserError('session_store_failed', 'Cloud browser session store rejected the request.');
+    if (!response.ok) {
+      const raw = await response.text().catch(() => '');
+      if (/ConditionalCheckFailedException/.test(raw)) throw new CloudBrowserError('profile_binding_conflict', 'The browser profile key is already bound.');
+      throw new CloudBrowserError('session_store_failed', 'Cloud browser session store rejected the request.');
+    }
     return response.json();
   }
   async loadProfile(profileId: string): Promise<CloudBrowserProfile | null> { const r = await this.call('GetItem', { TableName: this.tableName, Key: { pk: { S: `PROFILE#${profileId}` } }, ConsistentRead: true }) as { Item?: DynamoItem }; return readProfile(r.Item); }
   async saveProfile(profile: CloudBrowserProfile): Promise<void> { await this.call('PutItem', { TableName: this.tableName, Item: profileItem(profile), ConditionExpression: 'attribute_not_exists(pk) OR #owner = :owner', ExpressionAttributeNames: { '#owner': 'owner' }, ExpressionAttributeValues: { ':owner': { S: profile.owner } } }); }
+  async saveProfileIfAbsent(profile: CloudBrowserProfile): Promise<boolean> { try { await this.call('PutItem', { TableName: this.tableName, Item: profileItem(profile), ConditionExpression: 'attribute_not_exists(pk)' }); return true; } catch (error) { if (error instanceof CloudBrowserError && error.code === 'profile_binding_conflict') return false; throw error; } }
   async loadSession(sessionId: string): Promise<CloudBrowserSession | null> { const r = await this.call('GetItem', { TableName: this.tableName, Key: { pk: { S: `SESSION#${sessionId}` } }, ConsistentRead: true }) as { Item?: DynamoItem }; return readSession(r.Item); }
   async saveSession(session: CloudBrowserSession): Promise<void> { await this.call('PutItem', { TableName: this.tableName, Item: sessionItem(session) }); }
   async saveSessionUnderLock(session: CloudBrowserSession, lockOwner: string): Promise<void> { await this.call('UpdateItem', { TableName: this.tableName, Key: { pk: { S: `SESSION#${session.sessionId}` } }, UpdateExpression: 'SET actionsUsed = :actions, expiresAt = :expires, expiresAtEpoch = :ttl', ConditionExpression: 'lockOwner = :owner', ExpressionAttributeValues: { ':actions': { N: String(session.actionsUsed) }, ':expires': { N: String(session.expiresAt) }, ':ttl': { N: String(Math.ceil(session.expiresAt / 1_000)) }, ':owner': { S: lockOwner } } }); }
