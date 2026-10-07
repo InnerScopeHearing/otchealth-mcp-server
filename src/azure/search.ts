@@ -27,6 +27,7 @@
  */
 import { loadEnv } from '../config/env.js';
 import { embed } from './foundry.js';
+import { withProviderUsageStage } from '../telemetry/provider-usage-receipt.js';
 import { embedWithRequestCache, type EmbeddingRequestCache } from '../search/embedding-request-cache.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { demoteExhaustHits } from '../memory/room-hygiene.js';
@@ -149,7 +150,7 @@ export async function hybridSearch(
     // call-site convention exactly) so the shadow branch's own network calls can never add latency
     // to, or fail, this response. See azure/search.test.ts for a live proof that this function
     // resolves before the shadow branch's own fetch even settles.
-    void runShadowEvalIfSampled(index, query, top, opts, result).catch(() => undefined);
+    void withProviderUsageStage('shadow', () => runShadowEvalIfSampled(index, query, top, opts, result)).catch(() => undefined);
   }
   return result;
 }
@@ -591,4 +592,5 @@ async function getChunkedDocument(
     mode: 'reassembled',
   };
 }
+
 

@@ -66,6 +66,7 @@ import { retractedIdsByAgent, filterRetractedByAgent } from './retractions.js';
 import { retrievalShield, type GuardMode } from '../safety/auto-guard.js';
 import { logger } from '../audit/logger.js';
 import { currentCorrelationId } from '../server/request-context.js';
+import { withProviderUsageStage } from '../telemetry/provider-usage-receipt.js';
 
 // Stage events use the existing structured application logger. Keep the schema deliberately
 // content-free: stage/outcome are closed enums, duration is a finite non-negative number, and no
@@ -116,15 +117,17 @@ function recordSkippedDeepStage(stage: DeepStage): void {
 }
 
 async function timedDeepStage<T>(stage: DeepStage, run: () => Promise<{ value: T; outcome?: DeepStageOutcome }>): Promise<T> {
-  const startedAt = performance.now();
-  try {
-    const result = await run();
-    emitDeepStageTiming(stage, startedAt, performance.now(), result.outcome ?? 'success');
-    return result.value;
-  } catch (error) {
-    emitDeepStageTiming(stage, startedAt, performance.now(), 'error');
-    throw error;
-  }
+  return withProviderUsageStage(stage, async () => {
+    const startedAt = performance.now();
+    try {
+      const result = await run();
+      emitDeepStageTiming(stage, startedAt, performance.now(), result.outcome ?? 'success');
+      return result.value;
+    } catch (error) {
+      emitDeepStageTiming(stage, startedAt, performance.now(), 'error');
+      throw error;
+    }
+  });
 }
 
 // ---- constants ────────────────────────────────────────────────────────────────────────────────
@@ -990,4 +993,5 @@ export async function deepRetrieve(
     return fallbackFastSearch(query, rooms, top, includeOps, embeddingCache);
   }
 }
+
 
