@@ -34,7 +34,7 @@ process.env.PG_USER = 'postgres';
 process.env.PG_PASSWORD = 'postgres';
 process.env.PG_SSL_VERIFY = 'false';
 
-const { isConfigured, ensureQueue, enqueue, readMessages, resetPoolForTests } = await import('./queue-postgres.js');
+const { isConfigured, ensureQueue, enqueue, readMessages, queueName, resetPoolForTests } = await import('./queue-postgres.js');
 // Raw pg used only to inspect/clean table state between tests -- not the code under test.
 const pg = (await import('pg')).default;
 const rawPool = new pg.Pool({
@@ -87,27 +87,28 @@ test('DRAIN (ack=true, default): consumes -- a message read once is never read a
   assert.equal(second.length, 0, 'a drained message must never be delivered again');
 });
 
-test('PEEK (ack=false): does NOT consume -- the message is still there for a later drain', async () => {
+test('PEEK (ack=false) is read-only: it does not consume, hide, or count as a delivery', async () => {
   const agent = uniqueAgent('peek');
   await enqueue(agent, { to: agent, from: 'cto', subject: 'peek-me', body: 'peek body', ts: new Date().toISOString() });
 
-  const peeked = await readMessages(agent, { max: 8, ack: false, visibilitySec: 1 });
-  assert.equal(peeked.length, 1);
-  assert.equal(peeked[0].acked, false);
-  assert.equal(peeked[0].dequeue_count, 1, 'a peek is still a fetch, so dequeue_count must increment');
+  // wake peeks on every boot: five peeks in a row must all see the same message, untouched.
+  let firstId = '';
+  for (let i = 0; i < 5; i++) {
+    const peeked = await readMessages(agent, { max: 8, ack: false });
+    assert.equal(peeked.length, 1, `peek ${i + 1} must still see the message (a peek hides nothing)`);
+    assert.equal(peeked[0].acked, false);
+    assert.equal(peeked[0].dequeue_count, 0, 'a peek is not a delivery attempt');
+    if (i === 0) firstId = peeked[0].message_id;
+    else assert.equal(peeked[0].message_id, firstId);
+  }
+  const stored = await rawPool.query('SELECT dequeue_count FROM agentstate_queue WHERE message_id = $1', [firstId]);
+  assert.equal(stored.rows[0].dequeue_count, 0, 'the stored counter must not move on a peek');
 
-  // Immediately re-peeking must NOT see it again -- it is hidden until the visibility window
-  // passes, exactly like Azure's visibilitytimeout.
-  const immediateRepeek = await readMessages(agent, { max: 8, ack: false, visibilitySec: 1 });
-  assert.equal(immediateRepeek.length, 0, 'a just-peeked message must be hidden during its visibility window');
-
-  await new Promise((r) => setTimeout(r, 1300)); // let the 1s visibility window lapse
-
-  // A DRAIN after the window passes must still find the SAME message -- proof peek never deleted it.
+  // A drain right after the peeks (wake, then inbox_read) gets the SAME message: nothing was leased.
   const drained = await readMessages(agent, { max: 8, ack: true });
   assert.equal(drained.length, 1);
-  assert.equal(drained[0].message_id, peeked[0].message_id, 'must be the identical message, not a new one');
-  assert.equal(drained[0].dequeue_count, 2, 'second fetch (the drain) increments dequeue_count again');
+  assert.equal(drained[0].message_id, firstId, 'must be the identical message, not a new one');
+  assert.equal(drained[0].dequeue_count, 1, 'the drain is the one real delivery');
 
   const afterDrain = await readMessages(agent, { max: 8, ack: true });
   assert.equal(afterDrain.length, 0);
@@ -136,7 +137,7 @@ test('two concurrent DRAINS never double-deliver (FOR UPDATE SKIP LOCKED under r
   assert.equal(remaining.length, 0, 'nothing should be left after all 40 were claimed across the 5 readers');
 });
 
-test('two concurrent PEEKS never double-claim (same FOR UPDATE SKIP LOCKED path, non-destructive)', async () => {
+test('concurrent PEEKS are read-only: every reader sees every message and a drain still gets them all', async () => {
   const agent = uniqueAgent('peekrace');
   const TOTAL = 10;
   for (let i = 0; i < TOTAL; i++) {
@@ -144,17 +145,17 @@ test('two concurrent PEEKS never double-claim (same FOR UPDATE SKIP LOCKED path,
   }
 
   const results = await Promise.all([
-    readMessages(agent, { max: 32, ack: false, visibilitySec: 5 }),
-    readMessages(agent, { max: 32, ack: false, visibilitySec: 5 }),
+    readMessages(agent, { max: 32, ack: false }),
+    readMessages(agent, { max: 32, ack: false }),
+    readMessages(agent, { max: 32, ack: false }),
   ]);
-  const allIds = results.flatMap((r) => r.map((m) => m.message_id));
-  assert.equal(allIds.length, TOTAL, 'both peeks together must see each message exactly once, not twice');
-  assert.equal(new Set(allIds).size, TOTAL);
+  const expected = results[0].map((m) => m.message_id);
+  assert.equal(expected.length, TOTAL);
+  for (const r of results) assert.deepEqual(r.map((m) => m.message_id), expected, 'a peek claims nothing, so every reader sees everything');
 
-  // And nothing was deleted: after the window, a drain must find all 10 still there.
-  await new Promise((r) => setTimeout(r, 5300));
   const drained = await readMessages(agent, { max: 32, ack: true });
   assert.equal(drained.length, TOTAL, 'peeking must never consume messages, even under concurrency');
+  assert.ok(drained.every((m) => m.dequeue_count === 1), 'only the drain counted as a delivery');
 });
 
 test('ordering is FIFO within a queue', async () => {
@@ -184,11 +185,71 @@ test('expired messages (ttlSeconds) are never delivered, by drain or peek', asyn
   assert.equal(peeked.length, 0);
   const drained = await readMessages(agent, { max: 8, ack: true });
   assert.equal(drained.length, 0);
+  // Expired is not erased: it is dead-lettered and stays retrievable for audit.
+  const audit = await readMessages(agent, { max: 8, deadLetter: true });
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].dead_letter_reason, 'expired');
 });
 
 test('the agent id is validated/normalized (invalid ids are rejected, not silently accepted)', async () => {
   await assert.rejects(() => enqueue('not a valid id!', { to: 'x', from: 'cto', subject: 's', body: 'b', ts: '' }));
   await assert.rejects(() => readMessages('not a valid id!'));
+});
+
+test('dead letter: a message fetched more than maxDeliveries times leaves peeks and drains but stays auditable', async () => {
+  const agent = uniqueAgent('dlq-count');
+  const ts = new Date().toISOString();
+  await enqueue(agent, { to: agent, from: 'cto', subject: 'poison', body: 'poison', ts });
+  await enqueue(agent, { to: agent, from: 'cto', subject: 'healthy', body: 'healthy', ts });
+  // A legacy row whose counter was inflated by the old peek-leasing (production showed 79-138).
+  await rawPool.query(`UPDATE agentstate_queue SET dequeue_count = 120 WHERE queue = $1 AND payload->>'body' = 'poison'`, [queueName(agent)]);
+
+  assert.deepEqual((await readMessages(agent, { ack: false })).map((m) => m.body), ['healthy'], 'the default threshold (50) retires a 120-delivery message');
+  const audit = await readMessages(agent, { deadLetter: true });
+  assert.deepEqual(audit.map((m) => [m.body, m.dead_letter_reason, m.dequeue_count]), [['poison', 'max_deliveries', 120]]);
+  assert.deepEqual((await readMessages(agent, { ack: true })).map((m) => m.body), ['healthy']);
+
+  // Ack semantics are unchanged AND the dead letter survived the drain: retained for audit, not deleted.
+  const rows = await rawPool.query('SELECT count(*)::int AS n FROM agentstate_queue WHERE queue = $1', [queueName(agent)]);
+  assert.equal(rows.rows[0].n, 1);
+  assert.equal((await readMessages(agent, { deadLetter: true })).length, 1);
+});
+
+test('dead letter: the threshold is strictly "more than" maxDeliveries', async () => {
+  const agent = uniqueAgent('dlq-edge');
+  await enqueue(agent, { to: agent, from: 'cto', subject: 's', body: 'edge', ts: new Date().toISOString() });
+  await rawPool.query('UPDATE agentstate_queue SET dequeue_count = 3 WHERE queue = $1', [queueName(agent)]);
+  assert.equal((await readMessages(agent, { ack: false, maxDeliveries: 3 })).length, 1, 'exactly at the limit is still live');
+  await rawPool.query('UPDATE agentstate_queue SET dequeue_count = 4 WHERE queue = $1', [queueName(agent)]);
+  assert.equal((await readMessages(agent, { ack: false, maxDeliveries: 3 })).length, 0, 'one over the limit is dead-lettered');
+  assert.equal((await readMessages(agent, { deadLetter: true, maxDeliveries: 3 })).length, 1);
+});
+
+test('dead letter: a message older than the max age is retired even when its TTL is longer', async () => {
+  const agent = uniqueAgent('dlq-age');
+  const ts = new Date().toISOString();
+  await enqueue(agent, { to: agent, from: 'cto', subject: 'old', body: 'old', ts }, 30 * 24 * 3600); // TTL far in the future
+  await enqueue(agent, { to: agent, from: 'cto', subject: 'fresh', body: 'fresh', ts });
+  await rawPool.query(`UPDATE agentstate_queue SET enqueued_at = now() - interval '8 days' WHERE queue = $1 AND payload->>'body' = 'old'`, [queueName(agent)]);
+
+  assert.deepEqual((await readMessages(agent, { ack: false })).map((m) => m.body), ['fresh']);
+  const audit = await readMessages(agent, { deadLetter: true });
+  assert.deepEqual(audit.map((m) => [m.body, m.dead_letter_reason]), [['old', 'expired']]);
+  assert.deepEqual((await readMessages(agent, { ack: true })).map((m) => m.body), ['fresh']);
+});
+
+test('the dead-letter audit is read-only (ack is ignored) and isolated per agent queue', async () => {
+  const agent = uniqueAgent('dlq-audit');
+  const other = uniqueAgent('dlq-other');
+  await enqueue(agent, { to: agent, from: 'cto', subject: 's', body: 'gone', ts: new Date().toISOString() }, 1);
+  await new Promise((r) => setTimeout(r, 1300));
+
+  const first = await readMessages(agent, { deadLetter: true, ack: true });
+  const second = await readMessages(agent, { deadLetter: true, ack: true });
+  assert.equal(first.length, 1);
+  assert.equal(first[0].acked, false);
+  assert.deepEqual(second.map((m) => m.message_id), first.map((m) => m.message_id), 'auditing must never consume');
+  assert.equal((await readMessages(other, { deadLetter: true })).length, 0, "another agent's audit must not see these");
 });
 
 // A real backend failure (connection refused, missing table) must throw rather than resolve to an
