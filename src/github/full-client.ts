@@ -16,6 +16,7 @@ import { createHash, createSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { loadEnv } from '../config/env.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import { CI_LOG_HARD_CAP_BYTES, CI_LOG_KEEP_BYTES, readResponseTail, type JobLogResult } from './ci-log-excerpt.js';
 import type {
   PinnedObservationFailureDetail,
   PinnedObservationFailureStage,
