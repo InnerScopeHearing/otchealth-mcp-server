@@ -42,7 +42,9 @@ jobs:
       DEFAULT_TASK: >-
         Weekly continuity canary. Inspect this repository, run one existing fast test or
         validation command, and make no source change unless a small safe defect is found.
-        Report the command and result in the run log. Do not create work merely to create work.
+        Report the command and its result in your final message only; the workflow log is the
+        record. Do not create or modify any file to record it (no run log, journal, or audit
+        note). Do not create work merely to create work.
     steps:
       - uses: actions/checkout@v4
 
