@@ -19,6 +19,8 @@
  * bug here must never break the real OpenAI call site it is bolted onto.
  */
 import { emitOpenAIFleetMetrics, openAIUsageMetricPoints } from './datadog-metrics.js';
+import { logger } from '../audit/logger.js';
+import { buildProviderUsageReceipt, currentProviderUsageContext } from './provider-usage-receipt.js';
 
 export const PRICE_TABLE_VERSION = '2026-09-03';
 
@@ -174,6 +176,9 @@ export interface RecordOpenAIUsageInput {
    *  break down spend by service tier. Optional; omitted/non-'flex' means full price, tagged
    *  'default'. */
   serviceTier?: string;
+  /** Original provider response fields; used only for a content-free allowlist receipt. */
+  rawUsage?: unknown;
+  responseModel?: unknown;
 }
 
 /**
@@ -205,8 +210,20 @@ export function recordOpenAIUsage(input: RecordOpenAIUsageInput): void {
         serviceTier,
       }),
     );
+    const receipt = buildProviderUsageReceipt({
+      kind,
+      usage: input.rawUsage,
+      returnedModel: input.responseModel,
+      requestedModel: input.model,
+      context: currentProviderUsageContext(),
+      estimate: ({ model: estimateModel, kind: estimateKind, promptTokens: inputTokens, completionTokens: outputTokens, cachedTokens: cachedInputTokens }) =>
+        estimateOpenAICostUsd({ model: estimateModel, kind: estimateKind, promptTokens: inputTokens, completionTokens: outputTokens, cachedTokens: cachedInputTokens, serviceTier }),
+      priceTableVersion: PRICE_TABLE_VERSION,
+    });
+    logger.info(receipt, 'provider_usage_receipt');
   } catch {
     // Never let a bug in cost-visibility instrumentation break the real OpenAI call site it is
     // bolted onto -- mirrors the toolkit's identical contract.
   }
 }
+
