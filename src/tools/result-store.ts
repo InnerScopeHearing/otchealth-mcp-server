@@ -12,6 +12,13 @@
  */
 import * as cosmos from '../agentstate/store.js';
 
+// Writer-only migration gate. Read fresh from process.env so task-definition rollout can enable
+// compact writes after every task has a reader that understands serialization_format.
+export const COMPACT_RESULT_JSON_MODE_ENV = 'JIT_RESULT_COMPACT_JSON_MODE';
+export function compactResultJsonWritesEnabled(): boolean {
+  return process.env[COMPACT_RESULT_JSON_MODE_ENV] === 'on';
+}
+
 // Offload only when the serialized text exceeds this. Env-overridable. Kept well above typical
 // results so only genuinely large payloads are offloaded.
 const THRESHOLD_CHARS = Number(process.env.JIT_RESULT_THRESHOLD_CHARS) || 40000;
@@ -190,6 +197,10 @@ export async function offloadResult(
     if (!validCallerHash(callerHash)) return null;
     const resultId = deps.newId('jitres');
     const now = deps.now();
+    const compactWrite = compactResultJsonWritesEnabled();
+    const totalBytes = compactWrite
+      ? Buffer.byteLength(JSON.stringify(data ?? null), 'utf8')
+      : Buffer.byteLength(fullText, 'utf8');
     // The cache container partitions on /cacheScope. resultId remains the point-read key while
     // caller_hash is the mandatory authorization binding checked before expiry or payload parsing.
     await deps.upsertDoc('cache', resultId, {
@@ -198,8 +209,9 @@ export async function offloadResult(
       type: 'jit_result',
       caller_hash: callerHash,
       correlation_id: correlationId,
+      ...(compactWrite ? { serialization_format: 'compact-json-v1' } : {}),
       data,
-      total_bytes: Buffer.byteLength(fullText, 'utf8'),
+      total_bytes: totalBytes,
       created: new Date(now).toISOString(),
       expiresAt: now + TTL_SECONDS * 1000,
       ttl: TTL_SECONDS + 60,
@@ -207,7 +219,7 @@ export async function offloadResult(
     return {
       preview: buildPreview(fullText, resultId),
       resultId,
-      totalBytes: Buffer.byteLength(fullText, 'utf8'),
+      totalBytes,
     };
   } catch {
     return null; // fail-open: caller keeps the full inline result
@@ -241,7 +253,16 @@ export async function fetchStoredResult(
   if (typeof doc.expiresAt === 'number' && deps.now() > doc.expiresAt) {
     return { found: false, expired: true };
   }
-  const serialized = JSON.stringify(doc.data ?? null, null, 2);
+  let serialized: string;
+  if (doc.serialization_format === undefined) {
+    // Legacy documents have no format marker and remain byte-compatible with old readers.
+    serialized = JSON.stringify(doc.data ?? null, null, 2);
+  } else if (doc.serialization_format === 'compact-json-v1') {
+    serialized = JSON.stringify(doc.data ?? null);
+  } else {
+    // Unknown formats cannot be safely paged. Hide them as a miss without serializing the payload.
+    return { found: false };
+  }
   const sliced = pageSlice(serialized, page);
   return {
     found: true,
