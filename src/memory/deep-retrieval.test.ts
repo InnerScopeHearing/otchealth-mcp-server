@@ -147,6 +147,143 @@ function hit(id: string, text: string, source = 'memory-exec'): FusedHit {
   return { score: 0.5, source, text, id };
 }
 
+
+
+test('exact identifier anchor extracts only bare identifiers or explicitly named record markers', () => {
+  assert.equal(extractExactIdentifierAnchor('MXVEDTUKA2'), 'MXVEDTUKA2');
+  assert.equal(extractExactIdentifierAnchor('Recall record MXVEDTUKA2'), 'MXVEDTUKA2');
+  assert.equal(extractExactIdentifierAnchor('Find marker FND-20261007-1234 please'), 'FND-20261007-1234');
+  assert.equal(extractExactIdentifierAnchor('What changed in cloud policy?'), null);
+  assert.equal(extractExactIdentifierAnchor('Unlabeled MXVEDTUKA2 in prose'), null);
+  assert.equal(extractExactIdentifierAnchor('FND-20261007-1234suffix'), null);
+});
+
+test('exact anchor scheduler reserves probes first and never exceeds the shared 24-pair fanout', () => {
+  const rooms = Array.from({ length: 26 }, (_, i) => `room-${i}`);
+  const scheduled = scheduleDeepSearchPairs(['plan-a', 'plan-b', 'plan-c', 'plan-d'], rooms, 'MXVEDTUKA2', rooms);
+  assert.equal(scheduled.pairs.length, 24);
+  assert.ok(scheduled.pairs.every((p) => p.anchor));
+  assert.deepEqual(scheduled.unscheduledAnchorRooms, ['room-24', 'room-25']);
+  assert.equal(scheduleDeepSearchPairs(['q'], ['room-a'], 'MXVEDTUKA2', ['room-a']).pairs[0]?.query, 'MXVEDTUKA2');
+});
+
+test('exact identifier witness requires a real id or boundary-delimited text occurrence and retains provenance', () => {
+  assert.equal(exactIdentifierWitness(hit('generic', 'XMXVEDTUKA2suffix'), 'commons-company-journal', 'MXVEDTUKA2'), null);
+  assert.equal(exactIdentifierWitness(hit('cto__record123', 'generic returned evidence'), 'r', 'cto__Record123'), null);
+  assert.equal(exactIdentifierWitness(hit('other__cto__Record123', 'generic returned evidence'), 'r', 'cto__Record123'), null);
+  assert.equal(exactIdentifierWitness(hit('cto__MXVEDTUKA2', 'generic returned evidence'), 'r', 'MXVEDTUKA2')?.id, 'cto__MXVEDTUKA2');
+  const witness = exactIdentifierWitness({
+    score: 0.8, text: `${'x'.repeat(1500)} MXVEDTUKA2 ${'y'.repeat(100)}`, id: 'cto__record-1',
+    agent: 'cto', path: 'current/record.md', variants: ['archive/record.md'], type: 'decision', source_version: 'v2',
+  }, 'commons-company-journal', 'MXVEDTUKA2');
+  assert.ok(witness);
+  assert.ok(witness.text.includes('MXVEDTUKA2'));
+  assert.equal(witness.source, 'commons-company-journal');
+  assert.equal(witness.source_version, 'v2');
+  assert.deepEqual(witness.variants, ['archive/record.md']);
+});
+
+test('deepRetrieve preserves original named record through planner rewrite and room narrowing, including top=1 citation', async () => {
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isChatUrl(u)) {
+        const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+        const sys = body.messages[0]?.content ?? '';
+        if (sys.includes('retrieval query planner')) return chatJson({ sub_queries: ['generic cloud plan'], rooms: ['memory-exec'] });
+        if (sys.includes('One Brain')) return chatText('The named record is cited [1].');
+        throw new Error(`unexpected chat call: ${sys.slice(0, 80)}`);
+      }
+      if (isSearchUrl(u)) {
+        const room = new URL(u).pathname.split('/indexes/')[1]?.split('/')[0];
+        const body = JSON.parse(String(init?.body ?? '{}')) as { search?: string };
+        if (room === 'commons-company-journal' && body.search === 'MXVEDTUKA2') {
+          const exactRecordText = `Record body ${'x'.repeat(300)} MXVEDTUKA2 literal evidence`;
+          return new Response(JSON.stringify({ value: [
+            { chunk_id: 'chunk-current', parent_id: 'cto__record-1', path: 'current/record.md', chunk: exactRecordText, type: 'decision', source_version: 'v2', '@search.rerankerScore': 1 },
+            { chunk_id: 'chunk-archive', parent_id: 'cto__record-copy', path: 'archive/record.md', chunk: exactRecordText, type: 'decision', source_version: 'v2', '@search.rerankerScore': 1 },
+          ] }), { status: 200 });
+        }
+        if (room === 'memory-exec' && body.search === 'generic cloud plan') {
+          return new Response(JSON.stringify({ value: [1, 2, 3].map((n) => ({ id: `generic-${n}`, agent: 'cto', text: `generic result ${n}`, '@search.rerankerScore': 4 - n })) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ value: [] }), { status: 200 });
+      }
+      return new Response('unavailable', { status: 503 });
+    }) as typeof fetch,
+    async () => {
+      const res = await deepRetrieve('Recall record MXVEDTUKA2', { rooms: ['memory-exec', 'commons-company-journal'], top: 1 });
+      assert.equal(res.mode, 'deep-agentic');
+      assert.equal(res.hits.length, 1);
+      assert.equal(res.hits[0]?.id, 'cto__record-1');
+      assert.equal(res.hits[0]?.source, 'commons-company-journal');
+      assert.equal(res.hits[0]?.source_version, 'v2');
+      assert.equal(res.citations[0]?.path, 'current/record.md');
+      assert.deepEqual(res.citations[0]?.variants, ['archive/record.md']);
+      assert.equal(res.citations[0]?.n, 1);
+      assert.deepEqual(res.rooms_searched, ['memory-exec', 'commons-company-journal']);
+    },
+  );
+});
+
+test('retracted exact witness is dropped and surviving generic evidence fills top=1', async () => {
+  await seedSyntheticRetraction('record-1');
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isEmbeddingsUrl(u)) return embeddingsOk();
+      if (isChatUrl(u)) {
+        const body = init?.body ? (JSON.parse(init.body as string) as { messages: Array<{ role: string; content: string }> }) : { messages: [] };
+        const sys = body.messages[0]?.content ?? '';
+        if (sys.includes('retrieval query planner')) return chatJson({ sub_queries: ['generic plan'], rooms: ['memory-exec'] });
+        if (sys.includes('One Brain')) return chatText('Live generic evidence [1].');
+        throw new Error(`unexpected chat call: ${sys.slice(0, 80)}`);
+      }
+      if (isSearchUrl(u)) {
+        const room = new URL(u).pathname.split('/indexes/')[1]?.split('/')[0];
+        const body = JSON.parse(String(init?.body ?? '{}')) as { search?: string };
+        if (room === 'commons-company-journal' && body.search === 'MXVEDTUKA2') {
+          return new Response(JSON.stringify({ value: [{ id: 'synthetic-agent__record-1', agent: 'synthetic-agent', text: 'MXVEDTUKA2 retracted witness', '@search.rerankerScore': 5 }] }), { status: 200 });
+        }
+        if (room === 'memory-exec' && body.search === 'generic plan') {
+          return new Response(JSON.stringify({ value: [1, 2, 3].map((n) => ({ id: `live-${n}`, agent: 'other-agent', text: `live generic ${n}`, '@search.rerankerScore': 4 - n })) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ value: [] }), { status: 200 });
+      }
+      return new Response('unavailable', { status: 503 });
+    }) as typeof fetch,
+    async () => {
+      const res = await deepRetrieve('Recall record MXVEDTUKA2', { rooms: ['memory-exec', 'commons-company-journal'], top: 1 });
+      assert.equal(res.hits.length, 1);
+      assert.equal(res.hits[0]?.id, 'live-1');
+      assert.ok(res.retracted_dropped?.includes('synthetic-agent__record-1'));
+    },
+  );
+});
+
+test('fallbackFastSearch keeps a grounded exact identifier witness in its top=1 cited result', async () => {
+  await withStubbedFetch(
+    (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (isSearchUrl(u)) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { search?: string };
+        const room = new URL(u).pathname.split('/indexes/')[1]?.split('/')[0];
+        const rows = room === 'commons-company-journal' && body.search === 'MXVEDTUKA2'
+          ? [{ id: 'cto__record-1', parent_id: 'cto__record-1', agent: 'cto', path: 'record.md', text: 'Grounded MXVEDTUKA2 evidence', '@search.rerankerScore': 1 }]
+          : [{ id: 'generic', agent: 'cto', text: 'generic result', '@search.rerankerScore': 2 }];
+        return new Response(JSON.stringify({ value: rows }), { status: 200 });
+      }
+      throw new Error(`fallback must not call provider endpoints: ${u}`);
+    }) as typeof fetch,
+    async () => {
+      const res = await fallbackFastSearch('Find record MXVEDTUKA2', ['memory-exec', 'commons-company-journal'], 1, false);
+      assert.equal(res.hits[0]?.id, 'cto__record-1');
+      assert.equal(res.citations[0]?.path, 'record.md');
+    },
+  );
+});
+
 // ============================================================================================
 // (b) pure functions: plan-parse + confidence-threshold + friends
 // ============================================================================================
