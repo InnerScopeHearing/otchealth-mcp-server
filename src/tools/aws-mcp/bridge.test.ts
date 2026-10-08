@@ -51,6 +51,7 @@ type FetchLike = import('./signed-fetch.js').FetchLike;
 type AwsMcpDeps = import('./tools.js').AwsMcpDeps;
 type AwsMcpToolContext = import('./tools.js').AwsMcpToolContext;
 type AuthKind = import('../../server/request-context.js').AuthKind;
+type OAuthGrantType = import('../../server/request-context.js').OAuthGrantType;
 
 // ---------------------------------------------------------------------------------------------
 // Synthetic fixtures. Key-shaped literals are assembled so no source line looks like a credential.
