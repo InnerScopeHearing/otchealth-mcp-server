@@ -103,6 +103,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
         connectorSurface: ctx.connector_surface,
         m365StaticAuth: ctx.m365_static_auth,
         authKind: ctx.auth_kind,
+        authGrant: ctx.auth_grant,
       },
       async () => {
         // serverOptions() advertises listChanged (so a Custom MCP client cannot cache an earlier
