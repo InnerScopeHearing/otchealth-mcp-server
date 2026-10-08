@@ -1586,7 +1586,7 @@ test('wrapper: the CTO lane over any static credential kind, or with no recorded
   bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
   for (const authKind of [...NON_OAUTH_KINDS, 'none' as const]) {
     for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
-      const response = await invoke(tools.get(name)!, { ...args }, 'cto', authKind);
+      const response = await invoke(tools.get(name)!, { ...args }, 'cto', authKind, 'none');
       assert.equal(response.isError, true, `${name} as ${authKind}`);
       const text = response.content?.[0].text ?? '';
       assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only`));
