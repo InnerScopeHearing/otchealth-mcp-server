@@ -18,13 +18,16 @@
  *
  * WHO MAY CALL (see access.ts): the CTO lane over an OAuth-authenticated session only, which is the
  * claude.ai connector path. Static credentials that resolve to the CTO lane (the connector token, the
- * M365 and Codex tokens) are refused, whatever lane they carry. Three independent layers, all CTO only:
+ * M365 and Codex tokens) are refused, whatever lane they carry. So is an OAuth token from the
+ * client_credentials grant (a machine credential): only a token from an interactive sign-in
+ * (authorization_code, or the refresh_token grant that renews it) is served. Three independent layers,
+ * all CTO only:
  *   1. connector visibility: registry.ts connectorToolset advertises these names to the cto lane only
  *      (lane-toolsets.ts keeps them in the cto curated list so real CTO sessions still see them);
  *   2. execution governance: catalog/governance.ts `aws_mcp_*` requires the cto role;
  *   3. in-handler check: every core function below refuses any other caller, and any request that
- *      did not authenticate with OAuth, before touching AWS. The kill switch AWS_MCP_BRIDGE_DISABLED
- *      is checked in the same place.
+ *      did not authenticate with an interactive OAuth sign-in, before touching AWS. The kill switch
+ *      AWS_MCP_BRIDGE_DISABLED is checked in the same place.
  *
  * FAIL CLOSED. If the reader role cannot be assumed, the call fails with a clear message and no
  * request is sent to the AWS MCP Server. There is no fallback to any other credentials.
@@ -38,7 +41,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { currentAuthKind, type AuthKind } from '../../server/request-context.js';
+import { currentAuthGrant, currentAuthKind, type AuthKind, type OAuthGrantType } from '../../server/request-context.js';
 import { registerTool, type CallerHashProvider, type ToolContext } from '../registry.js';
 import { AwsMcpRefusalError, assertBridgeAccess } from './access.js';
 import { BridgeCallAudit, sha256Hex } from './audit.js';
@@ -119,6 +122,8 @@ const toolListInputSchema = z.object(AWS_MCP_TOOL_LIST_INPUT_SHAPE).strict();
 export type AwsMcpToolContext = Pick<ToolContext, 'callerAgent' | 'correlationId' | 'callerHash'> & {
   /** How the request authenticated (request context authKind); only 'oauth' is served. */
   authKind?: AuthKind;
+  /** For an OAuth request, the grant that issued its token (request context authGrant); only interactive grants are served. */
+  authGrant?: OAuthGrantType;
 };
 
 /** Test seam: everything that touches the network or the clock can be replaced. */
@@ -137,6 +142,7 @@ function auditFor(tool: typeof AWS_MCP_TOOL_LIST_NAME | typeof AWS_MCP_TOOL_CALL
     correlationId: ctx.correlationId,
     callerHash: ctx.callerHash,
     authKind: ctx.authKind,
+    authGrant: ctx.authGrant,
   });
 }
 
@@ -336,13 +342,14 @@ async function callAwsMcpToolChecked(
   };
 }
 
-/** The registry passes a ToolContext; the authentication kind comes from the request context. */
+/** The registry passes a ToolContext; the authentication kind and OAuth grant come from the request context. */
 function bridgeContext(ctx: ToolContext): AwsMcpToolContext {
   return {
     callerAgent: ctx.callerAgent,
     correlationId: ctx.correlationId,
     callerHash: ctx.callerHash,
     authKind: currentAuthKind(),
+    authGrant: currentAuthGrant(),
   };
 }
 
@@ -362,7 +369,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: list upstream tools',
         description:
-          'CTO lane only, OAuth-authenticated sessions only (static credentials are refused). List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
+          'CTO lane only, interactive OAuth sessions only (static credentials and client_credentials tokens are refused). List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
           'allowed, blocked or not_allowlisted by this bridge. Read-only: access runs as the dedicated read-only AWS role ' +
           `${AWS_AI_READER_ROLE_NAME}, assumed by the gateway with STS, so it does not depend on a claude.ai connector sign-in. ` +
           'If the role has not been created yet the call fails closed and says what the owner must run. ' +
@@ -398,7 +405,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: call an upstream tool',
         description:
-          'CTO lane only, OAuth-authenticated sessions only (static credentials are refused). Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
+          'CTO lane only, interactive OAuth sessions only (static credentials and client_credentials tokens are refused). Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
           'for listing resources and checking their properties), aws___search_documentation, aws___read_documentation, ' +
           'aws___retrieve_skill, aws___list_regions, aws___get_regional_availability, aws___get_tasks. ' +
           'aws___get_presigned_url is blocked. Read-only: the call runs as the dedicated read-only AWS role ' +
