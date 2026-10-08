@@ -698,3 +698,16 @@ export function issuedAgent(token: string): string | null {
   if (!claims || claims.typ !== 'access') return null;
   return claims.agent || '';
 }
+
+/**
+ * The OAuth grant that issued a valid access token: the signed `gty` claim stamped at the token endpoint
+ * (authorization_code, refresh_token or client_credentials). Null when the token is not a valid access
+ * token, records no grant (minted before grant tracking), or carries a value that is not one of the three
+ * grant names. Callers that need an interactive sign-in must treat null as NOT interactive.
+ */
+export function issuedGrantType(token: string): OAuthGrantType | null {
+  if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
+  const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
+  if (!claims || claims.typ !== 'access') return null;
+  return isOAuthGrantType(claims.gty) ? claims.gty : null;
+}
