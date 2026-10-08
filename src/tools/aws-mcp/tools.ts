@@ -16,22 +16,32 @@
  * only read metadata. The bridge adds an upstream-tool allowlist on top, and blocks
  * `aws___get_presigned_url` outright so the bridge never mints data upload or download links.
  *
- * LANE GATE (three independent layers, all CTO only):
- *   1. connector visibility: registry.ts connectorToolset advertises these names to the cto lane only;
+ * WHO MAY CALL (see access.ts): the CTO lane over an OAuth-authenticated session only, which is the
+ * claude.ai connector path. Static credentials that resolve to the CTO lane (the connector token, the
+ * M365 and Codex tokens) are refused, whatever lane they carry. Three independent layers, all CTO only:
+ *   1. connector visibility: registry.ts connectorToolset advertises these names to the cto lane only
+ *      (lane-toolsets.ts keeps them in the cto curated list so real CTO sessions still see them);
  *   2. execution governance: catalog/governance.ts `aws_mcp_*` requires the cto role;
- *   3. in-handler check: every core function below refuses any other caller before touching AWS.
+ *   3. in-handler check: every core function below refuses any other caller, and any request that
+ *      did not authenticate with OAuth, before touching AWS. The kill switch AWS_MCP_BRIDGE_DISABLED
+ *      is checked in the same place.
  *
  * FAIL CLOSED. If the reader role cannot be assumed, the call fails with a clear message and no
  * request is sent to the AWS MCP Server. There is no fallback to any other credentials.
  *
  * Output is untrusted external data: capped, control characters stripped, credential-shaped strings
- * redacted, and labelled (see output.ts). Nothing here logs credentials, signatures or tokens. The
+ * redacted, and labelled (see output.ts). It is returned inline and never offloaded to the shared
+ * result cache (result-store.ts mayOffloadToolResult). Every call writes one audit line (audit.ts)
+ * with hashes and sizes only. Nothing here logs credentials, signatures, tokens or script text. The
  * registry's tool-start log records only a count of input fields, and redactInputForLog keeps
  * argument values (a pasted script can carry anything) out of any other record of the call.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { currentAuthKind, type AuthKind } from '../../server/request-context.js';
 import { registerTool, type CallerHashProvider, type ToolContext } from '../registry.js';
+import { AwsMcpRefusalError, assertBridgeAccess } from './access.js';
+import { BridgeCallAudit, sha256Hex } from './audit.js';
 import {
   AWS_AI_READER_ROLE_NAME,
   readerCredentials,
@@ -51,9 +61,11 @@ const AWS_MCP_LIST_DATA_BUDGET_BYTES = 26_000;
 const AWS_MCP_LIST_MAX_ENTRIES = 200;
 const MAX_TOOL_DESCRIPTION_BYTES = 1_500;
 
+const RUN_SCRIPT_UPSTREAM_TOOL = 'aws___run_script';
+
 /** Upstream tools the bridge will call. Anything else is refused until it is reviewed and added here. */
 export const AWS_MCP_ALLOWED_UPSTREAM_TOOLS: readonly string[] = [
-  'aws___run_script',
+  RUN_SCRIPT_UPSTREAM_TOOL,
   'aws___search_documentation',
   'aws___read_documentation',
   'aws___retrieve_skill',
@@ -103,7 +115,11 @@ export const AWS_MCP_TOOL_CALL_INPUT_SHAPE = {
 const toolCallInputSchema = z.object(AWS_MCP_TOOL_CALL_INPUT_SHAPE).strict();
 const toolListInputSchema = z.object(AWS_MCP_TOOL_LIST_INPUT_SHAPE).strict();
 
-export type AwsMcpToolContext = Pick<ToolContext, 'callerAgent' | 'correlationId'>;
+/** What the bridge needs to know about one call: who called, how they authenticated, and the correlation id. */
+export type AwsMcpToolContext = Pick<ToolContext, 'callerAgent' | 'correlationId' | 'callerHash'> & {
+  /** How the request authenticated (request context authKind); only 'oauth' is served. */
+  authKind?: AuthKind;
+};
 
 /** Test seam: everything that touches the network or the clock can be replaced. */
 export type AwsMcpDeps = Partial<UpstreamDeps>;
@@ -115,11 +131,17 @@ function resolveDeps(deps: AwsMcpDeps | undefined): UpstreamDeps {
   };
 }
 
-function assertCtoLane(ctx: AwsMcpToolContext): void {
-  if (ctx.callerAgent !== 'cto') {
-    throw new Error('aws_mcp_forbidden: the AWS bridge is available to the CTO lane only.');
-  }
+function auditFor(tool: typeof AWS_MCP_TOOL_LIST_NAME | typeof AWS_MCP_TOOL_CALL_NAME, ctx: AwsMcpToolContext): BridgeCallAudit {
+  return new BridgeCallAudit({
+    bridgeTool: tool,
+    correlationId: ctx.correlationId,
+    callerHash: ctx.callerHash,
+    authKind: ctx.authKind,
+  });
 }
+
+/** Reported when the credential provider did not say which role it assumed (test doubles only). */
+const ROLE_NOT_REPORTED = 'unknown';
 
 export interface AwsMcpToolListEntry {
   name: string;
@@ -137,7 +159,8 @@ export interface AwsMcpToolListResult {
   /** Tools advertised but not listed at all (entry cap or output budget): tools.length + omitted_tools = tool_count. */
   omitted_tools: number;
   truncated: boolean;
-  bridge: { endpoint_host: string; signing_service: string; signing_region: string; reader_role_name: string };
+  /** reader_role_arn is the role that was actually assumed for this call. */
+  bridge: { endpoint_host: string; signing_service: string; signing_region: string; reader_role_arn: string };
   notice: string;
 }
 
@@ -147,13 +170,29 @@ export async function listAwsMcpTools(
   ctx: AwsMcpToolContext,
   deps?: AwsMcpDeps,
 ): Promise<AwsMcpToolListResult> {
-  assertCtoLane(ctx);
+  const audit = auditFor(AWS_MCP_TOOL_LIST_NAME, ctx);
+  try {
+    const result = await listAwsMcpToolsChecked(rawInput, ctx, audit, deps);
+    return result;
+  } catch (err) {
+    audit.failure(err);
+    throw err;
+  }
+}
+
+async function listAwsMcpToolsChecked(
+  rawInput: unknown,
+  ctx: AwsMcpToolContext,
+  audit: BridgeCallAudit,
+  deps?: AwsMcpDeps,
+): Promise<AwsMcpToolListResult> {
+  assertBridgeAccess(ctx);
   if (!toolListInputSchema.safeParse(rawInput ?? {}).success) {
-    throw new Error('aws_mcp_invalid_input: aws_mcp_tool_list takes no arguments.');
+    throw new AwsMcpRefusalError('aws_mcp_invalid_input', 'aws_mcp_tool_list takes no arguments.');
   }
   const resolved = resolveDeps(deps);
   const scope = resolved.scope ?? resolveSigningScope();
-  const upstream = await listUpstreamTools({ ...resolved, scope }, ctx.correlationId);
+  const { tools: upstream, identity } = await listUpstreamTools({ ...resolved, scope }, ctx.correlationId);
 
   // Measured on the pretty-printed form the gateway renders, so the whole response stays under the
   // size at which the registry would offload a result into the shared cache.
@@ -191,6 +230,11 @@ export async function listAwsMcpTools(
   const omittedTools = upstream.length - tools.length;
   const truncated = omittedTools > 0 || descriptionsTruncated || tools.some((t) => t.detail_omitted);
 
+  audit.success({
+    responseBytes: Buffer.byteLength(JSON.stringify(upstream), 'utf8'),
+    isError: false,
+    roleSessionName: identity?.roleSessionName,
+  });
   return {
     tools,
     tool_count: upstream.length,
@@ -200,7 +244,7 @@ export async function listAwsMcpTools(
       endpoint_host: new URL(AWS_MCP_ENDPOINT).host,
       signing_service: scope.service,
       signing_region: scope.region,
-      reader_role_name: AWS_AI_READER_ROLE_NAME,
+      reader_role_arn: identity?.roleArn ?? ROLE_NOT_REPORTED,
     },
     notice: AWS_MCP_UNTRUSTED_NOTICE,
   };
@@ -209,6 +253,8 @@ export async function listAwsMcpTools(
 export interface AwsMcpToolCallResult {
   upstream_tool: string;
   region: string;
+  /** The reader role that was actually assumed for this call. */
+  reader_role_arn: string;
   /** True when the upstream tool itself reported an error (the text then says why). */
   is_error: boolean;
   content_text: string;
@@ -226,32 +272,60 @@ export async function callAwsMcpTool(
   ctx: AwsMcpToolContext,
   deps?: AwsMcpDeps,
 ): Promise<AwsMcpToolCallResult> {
-  assertCtoLane(ctx);
+  const audit = auditFor(AWS_MCP_TOOL_CALL_NAME, ctx);
+  try {
+    return await callAwsMcpToolChecked(rawInput, ctx, audit, deps);
+  } catch (err) {
+    audit.failure(err);
+    throw err;
+  }
+}
+
+async function callAwsMcpToolChecked(
+  rawInput: unknown,
+  ctx: AwsMcpToolContext,
+  audit: BridgeCallAudit,
+  deps?: AwsMcpDeps,
+): Promise<AwsMcpToolCallResult> {
+  assertBridgeAccess(ctx);
 
   const parsed = toolCallInputSchema.safeParse(rawInput);
   if (!parsed.success) {
-    throw new Error('aws_mcp_invalid_input: expected { tool_name, arguments?, region? } with a valid tool_name and region.');
+    throw new AwsMcpRefusalError('aws_mcp_invalid_input', 'expected { tool_name, arguments?, region? } with a valid tool_name and region.');
   }
   const { tool_name: toolName, arguments: args = {}, region = 'us-east-1' } = parsed.data;
+  // Only values that passed the schema above are noted for the audit line.
+  audit.note({ upstreamTool: toolName, region });
 
   const blockedReason = BLOCKED_UPSTREAM_TOOLS.get(toolName);
   if (blockedReason) {
-    throw new Error(`aws_mcp_tool_blocked: ${toolName} is blocked by the bridge because ${blockedReason}.`);
+    throw new AwsMcpRefusalError('aws_mcp_tool_blocked', `${toolName} is blocked by the bridge because ${blockedReason}.`);
   }
   if (!AWS_MCP_ALLOWED_UPSTREAM_TOOLS.includes(toolName)) {
-    throw new Error(
-      `aws_mcp_tool_not_allowed: ${toolName} is not on the bridge allowlist. Allowed: ${AWS_MCP_ALLOWED_UPSTREAM_TOOLS.join(', ')}.`,
+    throw new AwsMcpRefusalError(
+      'aws_mcp_tool_not_allowed',
+      `${toolName} is not on the bridge allowlist. Allowed: ${AWS_MCP_ALLOWED_UPSTREAM_TOOLS.join(', ')}.`,
     );
   }
   if (Buffer.byteLength(JSON.stringify(args), 'utf8') > MAX_ARGUMENTS_JSON_BYTES) {
-    throw new Error('aws_mcp_invalid_input: arguments exceed the 100 KB limit.');
+    throw new AwsMcpRefusalError('aws_mcp_invalid_input', 'arguments exceed the 100 KB limit.');
+  }
+  // A script is never logged, only its SHA-256, so a run can be matched to a pasted script later.
+  if (toolName === RUN_SCRIPT_UPSTREAM_TOOL && typeof args.script === 'string') {
+    audit.note({ scriptSha256: sha256Hex(args.script) });
   }
 
   const upstream = await callUpstreamTool(resolveDeps(deps), ctx.correlationId, toolName, args, region);
   const shaped = shapeUpstreamText(upstream.texts.join('\n'));
+  audit.success({
+    responseBytes: shaped.originalBytes,
+    isError: upstream.isError,
+    roleSessionName: upstream.identity?.roleSessionName,
+  });
   return {
     upstream_tool: toolName,
     region,
+    reader_role_arn: upstream.identity?.roleArn ?? ROLE_NOT_REPORTED,
     is_error: upstream.isError,
     content_text: shaped.text,
     truncated: shaped.truncated,
@@ -259,6 +333,16 @@ export async function callAwsMcpTool(
     redactions: shaped.redactions,
     omitted_non_text_blocks: upstream.omittedNonTextBlocks,
     notice: AWS_MCP_UNTRUSTED_NOTICE,
+  };
+}
+
+/** The registry passes a ToolContext; the authentication kind comes from the request context. */
+function bridgeContext(ctx: ToolContext): AwsMcpToolContext {
+  return {
+    callerAgent: ctx.callerAgent,
+    correlationId: ctx.correlationId,
+    callerHash: ctx.callerHash,
+    authKind: currentAuthKind(),
   };
 }
 
@@ -278,7 +362,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: list upstream tools',
         description:
-          'CTO lane only. List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
+          'CTO lane only, OAuth-authenticated sessions only (static credentials are refused). List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
           'allowed, blocked or not_allowlisted by this bridge. Read-only: access runs as the dedicated read-only AWS role ' +
           `${AWS_AI_READER_ROLE_NAME}, assumed by the gateway with STS, so it does not depend on a claude.ai connector sign-in. ` +
           'If the role has not been created yet the call fails closed and says what the owner must run. ' +
@@ -296,7 +380,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       },
       maxResponseBytes: AWS_MCP_MAX_RESPONSE_BYTES,
       handler: async (input, ctx) => {
-        const result = await listAwsMcpTools(input, ctx, deps);
+        const result = await listAwsMcpTools(input, bridgeContext(ctx), deps);
         return {
           data: result,
           summary: `AWS MCP Server advertises ${result.tool_count} tool(s). UNTRUSTED EXTERNAL DATA.`,
@@ -314,7 +398,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: call an upstream tool',
         description:
-          'CTO lane only. Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
+          'CTO lane only, OAuth-authenticated sessions only (static credentials are refused). Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
           'for listing resources and checking their properties), aws___search_documentation, aws___read_documentation, ' +
           'aws___retrieve_skill, aws___list_regions, aws___get_regional_availability, aws___get_tasks. ' +
           'aws___get_presigned_url is blocked. Read-only: the call runs as the dedicated read-only AWS role ' +
@@ -330,6 +414,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       outputShape: {
         upstream_tool: z.string(),
         region: z.string(),
+        reader_role_arn: z.string(),
         is_error: z.boolean(),
         content_text: z.string(),
         truncated: z.boolean(),
@@ -346,7 +431,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
         region: input.region,
       }),
       handler: async (input, ctx) => {
-        const result = await callAwsMcpTool(input, ctx, deps);
+        const result = await callAwsMcpTool(input, bridgeContext(ctx), deps);
         return {
           data: result,
           summary:
