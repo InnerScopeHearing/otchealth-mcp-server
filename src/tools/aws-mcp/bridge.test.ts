@@ -1101,6 +1101,7 @@ test('AUDIT: a successful call writes one line with the hashed caller, auth kind
     correlation_id: CTO.correlationId,
     caller_hash: CALLER_HASH,
     auth_kind: 'oauth',
+    auth_grant: 'authorization_code',
     outcome: 'ok',
     is_error: false,
     upstream_tool: 'aws___run_script',
