@@ -57,3 +57,8 @@ export function isConnectorSurface(): boolean {
 export function isM365StaticAuth(): boolean {
   return requestContext.getStore()?.m365StaticAuth === true;
 }
+
+/** How the current request authenticated, or undefined when no kind was recorded (treat as not OAuth). */
+export function currentAuthKind(): AuthKind | undefined {
+  return requestContext.getStore()?.authKind;
+}
