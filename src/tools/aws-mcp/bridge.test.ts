@@ -476,6 +476,96 @@ test('AUTH GATE: an OAuth CTO session is served (the one accepted kind), and the
 });
 
 // ---------------------------------------------------------------------------------------------
+// Grant gate: only a token from an interactive sign-in is served. An OAuth token from the
+// client_credentials grant is a machine credential (a client id plus a secret, no human sign-in) and is
+// refused with its own code, as is a token that records no grant at all.
+// ---------------------------------------------------------------------------------------------
+test('GRANT GATE: an OAuth CTO token from the client_credentials grant is refused before any credential, STS or network use', async () => {
+  const w = world();
+  const ctx: AwsMcpToolContext = { ...CTO, authGrant: 'client_credentials' };
+  for (const [label, run] of [
+    ['call', () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, ctx, w.deps)],
+    ['list', () => bridge.listAwsMcpTools({}, ctx, w.deps)],
+  ] as const) {
+    await assert.rejects(run(), (err: unknown) => {
+      assert.ok(err instanceof AwsMcpRefusalError, `${label}: ${String(err)}`);
+      assert.equal(err.code, 'aws_mcp_grant_refused');
+      assert.match(err.message, /^aws_mcp_grant_refused: the AWS bridge serves interactive OAuth sessions only/);
+      assert.match(err.message, /issued by the client_credentials grant, which is a machine credential and not an interactive sign-in/);
+      assert.match(err.message, /No AWS request was made\.$/);
+      return true;
+    });
+  }
+  assert.equal(w.credentialRequests(), 0, 'credentials requested for a machine token');
+  assert.equal(w.sts.calls.length, 0, 'STS reached for a machine token');
+  assert.equal(w.mcp.requests.length, 0, 'AWS MCP Server reached for a machine token');
+});
+
+test('GRANT GATE: an OAuth CTO token that records no grant (minted before grant tracking) is refused the same way', async () => {
+  const w = world();
+  const { authGrant: _recorded, ...noGrant } = CTO;
+  for (const run of [
+    () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, noGrant, w.deps),
+    () => bridge.listAwsMcpTools({}, noGrant, w.deps),
+  ]) {
+    await assert.rejects(run(), (err: unknown) => {
+      assert.ok(err instanceof AwsMcpRefusalError);
+      assert.equal(err.code, 'aws_mcp_grant_refused');
+      assert.match(err.message, /does not record how it was issued/);
+      assert.match(err.message, /reconnect the connector to get a fresh one/);
+      return true;
+    });
+  }
+  assert.equal(w.credentialRequests(), 0);
+  assert.equal(w.sts.calls.length, 0);
+  assert.equal(w.mcp.requests.length, 0);
+});
+
+test('GRANT GATE: the authorization_code grant and the refresh_token grant that renews it are both served, with a machine token refused in between', async () => {
+  const w = world();
+  for (const authGrant of ['authorization_code', 'refresh_token'] as const) {
+    const result = await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authGrant }, w.deps);
+    assert.equal(result.is_error, false, authGrant);
+    assert.equal(result.reader_role_arn, `arn:aws:iam::${ACCOUNT}:role/${AWS_AI_READER_ROLE_NAME}`, authGrant);
+    const listed = await bridge.listAwsMcpTools({}, { ...CTO, authGrant }, w.deps);
+    assert.equal(listed.tool_count, 0, authGrant);
+  }
+  const requestsBefore = w.mcp.requests.length;
+  const stsBefore = w.sts.calls.length;
+  assert.ok(requestsBefore > 0);
+  await assert.rejects(
+    bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authGrant: 'client_credentials' }, w.deps),
+    /aws_mcp_grant_refused/,
+  );
+  assert.equal(w.mcp.requests.length, requestsBefore, 'the machine token caused no further upstream request');
+  assert.equal(w.sts.calls.length, stsBefore, 'the machine token caused no further STS request');
+});
+
+test('GRANT GATE: the refusal comes before input validation, so a machine token learns nothing from validation errors', async () => {
+  const w = world();
+  const ctx: AwsMcpToolContext = { ...CTO, authGrant: 'client_credentials' };
+  for (const input of [{ tool_name: 'aws___get_presigned_url' }, { tool_name: 'not a tool!!' }, null, { bogus: true }]) {
+    await assert.rejects(bridge.callAwsMcpTool(input, ctx, w.deps), /aws_mcp_grant_refused/);
+  }
+  await assert.rejects(bridge.listAwsMcpTools({ unexpected: true }, ctx, w.deps), /aws_mcp_grant_refused/);
+  assert.equal(w.credentialRequests(), 0);
+});
+
+test('GRANT GATE: a machine token is told apart from a static credential, and the kind is checked first', async () => {
+  const w = world();
+  await assert.rejects(
+    bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authGrant: 'client_credentials' }, w.deps),
+    (err: unknown) => err instanceof AwsMcpRefusalError && err.code === 'aws_mcp_grant_refused',
+  );
+  // A static kind that somehow carried a grant is still refused as a static kind, not as a grant.
+  await assert.rejects(
+    bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authKind: 'connector', authGrant: 'client_credentials' }, w.deps),
+    (err: unknown) => err instanceof AwsMcpRefusalError && err.code === 'aws_mcp_forbidden',
+  );
+  assert.equal(w.credentialRequests(), 0);
+});
+
+// ---------------------------------------------------------------------------------------------
 // Kill switch: AWS_MCP_BRIDGE_DISABLED
 // ---------------------------------------------------------------------------------------------
 async function withBridgeSwitch<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
