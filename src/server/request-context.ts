@@ -84,3 +84,8 @@ export function isM365StaticAuth(): boolean {
 export function currentAuthKind(): AuthKind | undefined {
   return requestContext.getStore()?.authKind;
 }
+
+/** The OAuth grant that issued the current request's access token, or undefined when none was recorded. */
+export function currentAuthGrant(): OAuthGrantType | undefined {
+  return requestContext.getStore()?.authGrant;
+}
