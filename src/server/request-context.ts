@@ -1,5 +1,22 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+/**
+ * How a request authenticated, recorded once by auth/bearer.ts (validateBearer).
+ *
+ *   oauth        a gateway-issued OAuth 2.1 access token (the claude.ai / Claude Chat connector path)
+ *   descope      a Descope-issued session JWT (clo-lane pilot)
+ *   connector    the static PERPLEXITY_CONNECTOR_TOKEN
+ *   copilot      the static COPILOT_AGENT_TOKEN
+ *   copilot-dev  the static COPILOT_DEV_AGENT_TOKEN
+ *   eval         the static EVAL_AGENT_TOKEN
+ *   m365         an M365 declarative-agent static per-lane token (it travels in a published manifest URL)
+ *   codex        a Codex static per-seat token
+ *
+ * A tool that must serve interactive OAuth sessions only (the AWS MCP bridge) accepts 'oauth' and
+ * nothing else. A request whose code path never recorded a kind has none, and is refused the same way.
+ */
+export type AuthKind = 'oauth' | 'descope' | 'connector' | 'copilot' | 'copilot-dev' | 'eval' | 'm365' | 'codex';
+
 export interface RequestContext {
   callerHash: string;
   correlationId: string;
