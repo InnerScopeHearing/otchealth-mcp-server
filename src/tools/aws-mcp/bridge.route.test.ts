@@ -1,14 +1,17 @@
 /**
  * The AWS bridge over the REAL MCP route (src/server/mcp.ts) and the real bearer authentication.
  *
- * The unit tests set the authentication kind by hand. This file proves the plumbing that produces it:
- * validateBearer records how the request authenticated, mcp.ts puts that into the request context,
- * and the bridge handler refuses anything but an OAuth session on the CTO lane.
+ * The unit tests set the authentication kind and grant by hand. This file proves the plumbing that
+ * produces them: validateBearer records how the request authenticated (and which OAuth grant issued the
+ * token), mcp.ts puts both into the request context, and the bridge handler refuses anything but an
+ * interactive OAuth session on the CTO lane.
  *
  * AWS_MCP_BRIDGE_DISABLED is set for the whole file, so no request can reach STS or the AWS MCP Server
- * whatever the gate decides. The two refusal codes tell the cases apart: an OAuth CTO session passes
- * the gate and is stopped by the kill switch (aws_mcp_disabled); a static credential is stopped by
- * the gate itself (aws_mcp_forbidden) before the kill switch is even consulted.
+ * whatever the gate decides. The refusal codes tell the cases apart: an interactive OAuth CTO session
+ * passes the gate and is stopped by the kill switch (aws_mcp_disabled); a static credential is stopped
+ * by the gate itself (aws_mcp_forbidden) and a machine token by the grant check (aws_mcp_grant_refused),
+ * both before the kill switch is even consulted. bridge.route.oauth.test.ts runs the same route with the
+ * switch off, against fake STS and AWS MCP servers, to prove an accepted session end to end.
  *
  * The server listens on 127.0.0.1 only. Every credential is synthetic.
  */
@@ -128,20 +131,56 @@ async function callBridge(baseName: 'aws_mcp_tool_list' | 'aws_mcp_tool_call', a
 
 const BOTH = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 
-test('an OAuth CTO session (the claude.ai connector path) passes the access gate and is stopped only by the kill switch', async () => {
-  const token = issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
+const HOUR_SECONDS = 3600;
+const mint = (clientId: string, agent: string, grant?: 'authorization_code' | 'refresh_token' | 'client_credentials'): string =>
+  issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', agent, HOUR_SECONDS, grant);
+
+test('an interactive OAuth CTO session (the claude.ai connector path) passes the access gate and is stopped only by the kill switch', async () => {
+  const token = mint('dcr_fixture', 'cto', 'authorization_code');
   for (const tool of BOTH) {
     const outcome = await callBridge(tool, { bearer: token });
     assert.equal(outcome.isError, true, tool);
     assert.match(outcome.text, /aws_mcp_disabled: the AWS bridge is switched off by the operator/, `${tool}: ${outcome.text.slice(0, 200)}`);
-    assert.doesNotMatch(outcome.text, /aws_mcp_forbidden/);
+    assert.doesNotMatch(outcome.text, /aws_mcp_forbidden|aws_mcp_grant_refused/);
   }
 });
 
-test('an OAuth session issued to a per-agent client on the CTO lane is also an OAuth session', async () => {
-  const token = issueAccessToken('synthetic-per-agent-client', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
-  const outcome = await callBridge('aws_mcp_tool_list', { bearer: token });
-  assert.match(outcome.text, /aws_mcp_disabled/);
+test('a token from the refresh_token grant, or from a confidential connector client, passes the gate like any other interactive session', async () => {
+  for (const [clientId, grant] of [
+    ['dcr_fixture', 'refresh_token'],
+    ['occ_fixture', 'authorization_code'],
+    ['occ_fixture', 'refresh_token'],
+    ['synthetic-per-agent-client', 'authorization_code'],
+  ] as const) {
+    const outcome = await callBridge('aws_mcp_tool_list', { bearer: mint(clientId, 'cto', grant) });
+    assert.match(outcome.text, /aws_mcp_disabled/, `${clientId} ${grant}`);
+    assert.doesNotMatch(outcome.text, /aws_mcp_forbidden|aws_mcp_grant_refused/, `${clientId} ${grant}`);
+  }
+});
+
+test('an OAuth CTO token from the client_credentials grant is refused as a machine credential, whatever the client', async () => {
+  for (const clientId of ['synthetic-per-agent-client', 'occ_fixture', 'dcr_fixture']) {
+    for (const tool of BOTH) {
+      const outcome = await callBridge(tool, { bearer: mint(clientId, 'cto', 'client_credentials') });
+      assert.equal(outcome.isError, true, `${tool} ${clientId}`);
+      assert.match(
+        outcome.text,
+        /aws_mcp_grant_refused: the AWS bridge serves interactive OAuth sessions only .* issued by the client_credentials grant, which is a machine credential/,
+        `${tool} ${clientId}: ${outcome.text.slice(0, 240)}`,
+      );
+      assert.doesNotMatch(outcome.text, /aws_mcp_disabled|aws_mcp_forbidden/, 'refused by the grant check, before the kill switch');
+    }
+  }
+});
+
+test('an OAuth CTO token that records no grant (minted before grant tracking) is refused, with advice to reconnect', async () => {
+  for (const tool of BOTH) {
+    const outcome = await callBridge(tool, { bearer: mint('dcr_fixture', 'cto') });
+    assert.equal(outcome.isError, true, tool);
+    assert.match(outcome.text, /aws_mcp_grant_refused: .* does not record how it was issued/, `${tool}: ${outcome.text.slice(0, 240)}`);
+    assert.match(outcome.text, /reconnect the connector to get a fresh one/);
+    assert.doesNotMatch(outcome.text, /aws_mcp_disabled|aws_mcp_forbidden/);
+  }
 });
 
 test('the static connector token bound to the CTO lane is refused as a connector credential', async () => {
@@ -175,8 +214,8 @@ test('the Codex per-seat token for the CTO lane is refused as a codex credential
   }
 });
 
-test('an OAuth session on any other lane never reaches the bridge', async () => {
-  const token = issueAccessToken('synthetic-per-agent-client', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cfo');
+test('an interactive OAuth session on any other lane never reaches the bridge', async () => {
+  const token = mint('synthetic-per-agent-client', 'cfo', 'authorization_code');
   for (const tool of BOTH) {
     const args = tool === 'aws_mcp_tool_call' ? { tool_name: 'aws___list_regions' } : {};
     const outcome = await callTool(tool, args, { bearer: token });
