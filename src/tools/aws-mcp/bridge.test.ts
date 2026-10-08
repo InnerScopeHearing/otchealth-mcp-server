@@ -414,7 +414,7 @@ test('GOVERNANCE: the execution rule makes both tools CTO-only', () => {
 test('AUTH GATE: the CTO lane over every static or non-OAuth credential kind is refused before any credential, STS or network use', async () => {
   for (const authKind of NON_OAUTH_KINDS) {
     const w = world();
-    const ctx: AwsMcpToolContext = { ...CTO, authKind };
+    const ctx: AwsMcpToolContext = { ...CTO, authKind, authGrant: undefined };
     for (const [label, run] of [
       ['call', () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, ctx, w.deps)],
       ['list', () => bridge.listAwsMcpTools({}, ctx, w.deps)],
