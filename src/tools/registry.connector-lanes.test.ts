@@ -145,6 +145,24 @@ test('bounded n8n execution counts are advertised only to the CTO connector lane
   assert.equal(connectorToolset(overridden, 'cto').has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), false);
 });
 
+test('the AWS MCP bridge is advertised only to the CTO connector lane', () => {
+  for (const name of CTO_ONLY_AWS_MCP_TOOLS) {
+    assert.equal(CTO_SHIP_LANE_TOOLSET.includes(name), false, `${name} must not be in the shared ship set`);
+    assert.equal(EXTERNAL_READONLY_TOOLSET.includes(name), false, `${name} must not be in the external read set`);
+    assert.equal(connectorToolset(testEnv(), 'cto').has(name), true, name);
+    for (const lane of ['developer', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'external-read', 'wefunder-campaign-director', 'cto-make-github-pilot', 'unknown', '']) {
+      assert.equal(connectorToolset(testEnv(), lane).has(name), false, `${lane || '(empty lane)'} must not advertise ${name}`);
+    }
+    // A default-surface override that does not name the tool never adds it for the CTO lane, and an
+    // override that does name it can never leak it to another lane.
+    assert.equal(connectorToolset({ ...testEnv(), CONNECTOR_TOOLSET: 'brain_search' } as Env, 'cto').has(name), false);
+    const naming = { ...testEnv(), CONNECTOR_TOOLSET: `brain_search,${name}` } as Env;
+    for (const lane of ['developer', 'cfo', 'clo', 'exec', 'cpo']) {
+      assert.equal(connectorToolset(naming, lane).has(name), false, `a shared override must not leak ${name} to ${lane}`);
+    }
+  }
+});
+
 test('the fixed observation receipt is CTO-only; the Make broker is CTO/pilot-only, not shared ship lanes', () => {
   assert.equal(CTO_SHIP_LANE_TOOLSET.includes(CTO_ONLY_GITHUB_RECEIPT_TOOL), false, 'CTO-only receipt must not be in the shared ship set');
   assert.equal(CTO_SHIP_LANE_TOOLSET.includes(RESTRICTED_GITHUB_MAKE_BROKER_TOOL), false, 'Make broker must not be in the shared ship set');
