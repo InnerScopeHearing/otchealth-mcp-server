@@ -3,8 +3,9 @@
  * credentials.ts) against a fake AWS MCP Server and a fake STS. There are no live AWS calls: every
  * network hop is a mocked fetch, and every credential is synthetic.
  */
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 Object.assign(process.env, {
@@ -27,16 +28,29 @@ Object.assign(process.env, {
 });
 delete process.env.AWS_AI_READER_ROLE_ARN;
 delete process.env.AWS_MCP_SIGNING_SERVICE;
+delete process.env.AWS_MCP_BRIDGE_DISABLED;
 
 const { requestContext } = await import('../../server/request-context.js');
 const { requiredRoleFor } = await import('../../catalog/governance.js');
-const { AWS_AI_ACCESS_SETUP_SCRIPT, AWS_AI_READER_ROLE_NAME, AwsReaderUnavailableError, createReaderCredentialProvider } = await import('./credentials.js');
+const { logger } = await import('../../audit/logger.js');
+const {
+  AWS_AI_ACCESS_SETUP_POINTER,
+  AWS_AI_ACCESS_SETUP_SCRIPT,
+  AWS_AI_READER_ROLE_ARN_ENV,
+  AWS_AI_READER_ROLE_NAME,
+  AwsReaderUnavailableError,
+  READER_FAILURE_CACHE_MS,
+  createReaderCredentialProvider,
+} = await import('./credentials.js');
+const { AWS_MCP_BRIDGE_DISABLED_ENV, AwsMcpRefusalError } = await import('./access.js');
 const { AWS_MCP_ENDPOINT, AWS_MCP_MAX_UPSTREAM_BODY_BYTES } = await import('./signed-fetch.js');
 const { AWS_MCP_MAX_OUTPUT_BYTES, jsonEscapedBytes } = await import('./output.js');
 const { AwsMcpBridgeError, Semaphore } = await import('./upstream.js');
 const bridge = await import('./tools.js');
 type FetchLike = import('./signed-fetch.js').FetchLike;
 type AwsMcpDeps = import('./tools.js').AwsMcpDeps;
+type AwsMcpToolContext = import('./tools.js').AwsMcpToolContext;
+type AuthKind = import('../../server/request-context.js').AuthKind;
 
 // ---------------------------------------------------------------------------------------------
 // Synthetic fixtures. Key-shaped literals are assembled so no source line looks like a credential.
@@ -49,7 +63,11 @@ const BASE = {
 };
 const T0 = Date.parse('2026-10-08T00:00:00Z');
 const HOUR = 3_600_000;
-const CTO = { callerAgent: 'cto', correlationId: 'corr-1234-abcd-5678-efgh' };
+const CALLER_HASH = 'c0ffee'.repeat(10) + 'c0ff';
+/** The one kind of caller the bridge serves: the CTO lane over an OAuth session. */
+const CTO: AwsMcpToolContext = { callerAgent: 'cto', correlationId: 'corr-1234-abcd-5678-efgh', callerHash: CALLER_HASH, authKind: 'oauth' };
+/** Every authentication kind the gateway can record that is NOT an OAuth session. */
+const NON_OAUTH_KINDS = ['connector', 'm365', 'codex', 'copilot', 'copilot-dev', 'eval', 'descope'] as const;
 const readerKey = (n: number): string => 'ASIA' + 'SYNTHETICRD' + String(n).padStart(5, '0');
 const readerToken = (n: number): string => `synthetic-reader-session-token-${n}`;
 
@@ -227,11 +245,18 @@ function fakeAwsMcp(behavior: McpBehavior = {}) {
 // ---------------------------------------------------------------------------------------------
 // A "world": fake STS + fake AWS MCP Server + the real credential provider, wired through deps.
 // ---------------------------------------------------------------------------------------------
-function world(opts: { mcp?: McpBehavior; assumeFailure?: () => Response | Error | undefined; deps?: Partial<AwsMcpDeps> } = {}) {
+function world(
+  opts: { mcp?: McpBehavior; assumeFailure?: () => Response | Error | undefined; deps?: Partial<AwsMcpDeps>; roleArn?: string } = {},
+) {
   let clock = T0;
   const sts = fakeSts(() => clock, opts.assumeFailure);
   const mcp = fakeAwsMcp(opts.mcp);
-  const provider = createReaderCredentialProvider({ baseCredentials: async () => BASE, fetchImpl: sts.fetchImpl, now: () => clock });
+  const provider = createReaderCredentialProvider({
+    baseCredentials: async () => BASE,
+    fetchImpl: sts.fetchImpl,
+    now: () => clock,
+    ...(opts.roleArn === undefined ? {} : { roleArn: opts.roleArn }),
+  });
   let credentialRequests = 0;
   const deps: AwsMcpDeps = {
     getCredentials: (hint: string) => {
@@ -261,6 +286,43 @@ function assertSignedAsReader(requests: Recorded[], key: string, token: string):
     assert.equal(flat.includes(BASE.sessionToken), false, 'the gateway task-role token never reaches the AWS MCP Server');
     assert.equal(flat.includes(BASE.accessKeyId), false, 'the gateway task-role key id never reaches the AWS MCP Server');
   }
+}
+
+interface LogLine {
+  level: string;
+  fields: Record<string, unknown>;
+  message: string;
+}
+
+/** Every gateway log call made while `run` executes, at every level. pino writes through a stream, so the logger itself is spied on. */
+async function captureLogs(run: () => Promise<unknown>): Promise<{ lines: LogLine[]; error: unknown }> {
+  const lines: LogLine[] = [];
+  const spies = (['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const).map((level) =>
+    mock.method(logger, level, (...args: unknown[]) => {
+      const [first, second] = args;
+      if (typeof first === 'object' && first !== null) lines.push({ level, fields: first as Record<string, unknown>, message: String(second ?? '') });
+      else lines.push({ level, fields: {}, message: String(first ?? '') });
+    }),
+  );
+  let error: unknown;
+  try {
+    await run();
+  } catch (err) {
+    error = err;
+  } finally {
+    for (const spy of spies) spy.mock.restore();
+  }
+  return { lines, error };
+}
+
+const auditLines = (lines: LogLine[]): LogLine[] => lines.filter((l) => l.fields.type === 'aws_mcp_bridge_call');
+const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
+
+/** The audit fields without the (varying) latency, which is checked separately. */
+function auditFields(line: LogLine): Record<string, unknown> {
+  const { latency_ms: latency, ...rest } = line.fields;
+  assert.ok(Number.isInteger(latency) && (latency as number) >= 0, 'latency_ms is a non-negative integer');
+  return rest;
 }
 
 const TOOL_ENTRIES = [
@@ -310,7 +372,8 @@ test('Semaphore refuses with aws_mcp_busy after a bounded wait and leaves the qu
 test('LANE GATE: every non-CTO caller is refused by both tools before STS or the AWS MCP Server is touched', async () => {
   for (const callerAgent of ['developer', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'external-read', 'wefunder', '', 'CTO', 'cto ']) {
     const w = world();
-    const ctx = { callerAgent, correlationId: CTO.correlationId };
+    // An OAuth session on a lane other than cto: the lane check alone must refuse it.
+    const ctx: AwsMcpToolContext = { ...CTO, callerAgent };
     await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, ctx, w.deps), /aws_mcp_forbidden/, `call as "${callerAgent}"`);
     await assert.rejects(bridge.listAwsMcpTools({}, ctx, w.deps), /aws_mcp_forbidden/, `list as "${callerAgent}"`);
     assert.equal(w.credentialRequests(), 0, `credentials requested for "${callerAgent}"`);
@@ -321,7 +384,7 @@ test('LANE GATE: every non-CTO caller is refused by both tools before STS or the
 
 test('LANE GATE: the in-handler check comes first, so a non-CTO caller learns nothing from input validation either', async () => {
   const w = world();
-  const ctx = { callerAgent: 'cfo', correlationId: CTO.correlationId };
+  const ctx: AwsMcpToolContext = { ...CTO, callerAgent: 'cfo' };
   for (const input of [{ tool_name: 'aws___get_presigned_url' }, { tool_name: 'not a tool!!' }, null, { bogus: true }]) {
     await assert.rejects(bridge.callAwsMcpTool(input, ctx, w.deps), /aws_mcp_forbidden/);
   }
@@ -333,6 +396,143 @@ test('GOVERNANCE: the execution rule makes both tools CTO-only', () => {
     assert.ok(rule, `${name} has a governance rule`);
     assert.equal(rule.role, 'cto');
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Authentication gate: the bridge serves OAuth-authenticated CTO sessions only. The CTO lane is also
+// reachable with static credentials (the connector token bound to the default agent, the M365
+// declarative-agent token, the Codex seat tokens, the Copilot and eval tokens); none of them may
+// reach an AWS identity.
+// ---------------------------------------------------------------------------------------------
+test('AUTH GATE: the CTO lane over every static or non-OAuth credential kind is refused before any credential, STS or network use', async () => {
+  for (const authKind of NON_OAUTH_KINDS) {
+    const w = world();
+    const ctx: AwsMcpToolContext = { ...CTO, authKind };
+    for (const [label, run] of [
+      ['call', () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, ctx, w.deps)],
+      ['list', () => bridge.listAwsMcpTools({}, ctx, w.deps)],
+    ] as const) {
+      await assert.rejects(run(), (err: unknown) => {
+        assert.ok(err instanceof AwsMcpRefusalError, `${label} as ${authKind}: ${String(err)}`);
+        assert.equal(err.code, 'aws_mcp_forbidden');
+        assert.match(err.message, /^aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only/);
+        assert.ok(err.message.includes(`"${authKind}" credential`), `the message names the kind ${authKind}`);
+        assert.match(err.message, /Static tokens and other credential types are refused\. No AWS request was made\./);
+        return true;
+      });
+    }
+    assert.equal(w.credentialRequests(), 0, `credentials requested for kind ${authKind}`);
+    assert.equal(w.sts.calls.length, 0, `STS reached for kind ${authKind}`);
+    assert.equal(w.mcp.requests.length, 0, `AWS MCP Server reached for kind ${authKind}`);
+  }
+});
+
+test('AUTH GATE: a CTO session that never recorded how it authenticated is refused as not OAuth', async () => {
+  const w = world();
+  const { authKind: _recorded, ...unrecorded } = CTO;
+  for (const run of [
+    () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, unrecorded, w.deps),
+    () => bridge.listAwsMcpTools({}, unrecorded, w.deps),
+  ]) {
+    await assert.rejects(run(), (err: unknown) => {
+      assert.ok(err instanceof AwsMcpRefusalError);
+      assert.equal(err.code, 'aws_mcp_forbidden');
+      assert.match(err.message, /does not record how it authenticated/);
+      return true;
+    });
+  }
+  assert.equal(w.credentialRequests(), 0);
+  assert.equal(w.sts.calls.length, 0);
+  assert.equal(w.mcp.requests.length, 0);
+});
+
+test('AUTH GATE: the refusal comes before input validation, so a static credential learns nothing from validation errors', async () => {
+  const w = world();
+  const ctx: AwsMcpToolContext = { ...CTO, authKind: 'connector' };
+  for (const input of [{ tool_name: 'aws___get_presigned_url' }, { tool_name: 'not a tool!!' }, null, { bogus: true }]) {
+    await assert.rejects(bridge.callAwsMcpTool(input, ctx, w.deps), /aws_mcp_forbidden/);
+  }
+  await assert.rejects(bridge.listAwsMcpTools({ unexpected: true }, ctx, w.deps), /aws_mcp_forbidden/);
+  assert.equal(w.credentialRequests(), 0);
+});
+
+test('AUTH GATE: an OAuth CTO session is served (the one accepted kind), and the same world refuses a static kind in between', async () => {
+  const w = world();
+  const first = await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authKind: 'oauth' }, w.deps);
+  assert.equal(first.is_error, false);
+  const requestsAfterOauth = w.mcp.requests.length;
+  assert.ok(requestsAfterOauth > 0);
+  await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authKind: 'm365' }, w.deps), /aws_mcp_forbidden/);
+  assert.equal(w.mcp.requests.length, requestsAfterOauth, 'the static caller caused no further upstream request');
+  const again = await bridge.listAwsMcpTools({}, { ...CTO, authKind: 'oauth' }, w.deps);
+  assert.equal(again.tool_count, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Kill switch: AWS_MCP_BRIDGE_DISABLED
+// ---------------------------------------------------------------------------------------------
+async function withBridgeSwitch<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+  const previous = process.env[AWS_MCP_BRIDGE_DISABLED_ENV];
+  if (value === undefined) delete process.env[AWS_MCP_BRIDGE_DISABLED_ENV];
+  else process.env[AWS_MCP_BRIDGE_DISABLED_ENV] = value;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env[AWS_MCP_BRIDGE_DISABLED_ENV];
+    else process.env[AWS_MCP_BRIDGE_DISABLED_ENV] = previous;
+  }
+}
+
+test('KILL SWITCH: AWS_MCP_BRIDGE_DISABLED makes both tools refuse at once, before any credential, STS or network use', async () => {
+  for (const on of ['true', 'TRUE', ' true ', '1', 'yes', 'on']) {
+    const w = world();
+    await withBridgeSwitch(on, async () => {
+      for (const run of [
+        () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps),
+        () => bridge.listAwsMcpTools({}, CTO, w.deps),
+      ]) {
+        await assert.rejects(run(), (err: unknown) => {
+          assert.ok(err instanceof AwsMcpRefusalError, `value "${on}": ${String(err)}`);
+          assert.equal(err.code, 'aws_mcp_disabled');
+          assert.match(err.message, /^aws_mcp_disabled: the AWS bridge is switched off by the operator \(AWS_MCP_BRIDGE_DISABLED\)\. No AWS request was made\./);
+          return true;
+        });
+      }
+    });
+    assert.equal(w.credentialRequests(), 0, `credentials requested with the switch set to "${on}"`);
+    assert.equal(w.sts.calls.length, 0);
+    assert.equal(w.mcp.requests.length, 0);
+  }
+});
+
+test('KILL SWITCH: only an explicit on value disables the bridge, and the switch is read on every call', async () => {
+  for (const off of [undefined, '', '   ', 'false', '0', 'no', 'off', 'enabled', 'garbage']) {
+    const w = world();
+    await withBridgeSwitch(off, async () => {
+      const result = await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+      assert.equal(result.is_error, false, `value ${JSON.stringify(off)} must leave the bridge on`);
+    });
+  }
+  // Flipped while the process runs: no restart, no cached decision.
+  const w = world();
+  await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+  const before = w.mcp.requests.length;
+  await withBridgeSwitch('true', async () => {
+    await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps), /aws_mcp_disabled/);
+    await assert.rejects(bridge.listAwsMcpTools({}, CTO, w.deps), /aws_mcp_disabled/);
+  });
+  assert.equal(w.mcp.requests.length, before, 'no upstream request while the switch was on');
+  await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+  assert.ok(w.mcp.requests.length > before, 'calls work again as soon as the switch is cleared');
+});
+
+test('KILL SWITCH: the caller checks come first, so a non-CTO or static caller is told forbidden, not disabled', async () => {
+  await withBridgeSwitch('true', async () => {
+    const w = world();
+    await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent: 'cfo' }, w.deps), /aws_mcp_forbidden/);
+    await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authKind: 'codex' }, w.deps), /aws_mcp_forbidden/);
+    assert.equal(w.credentialRequests(), 0);
+  });
 });
 
 test('aws___get_presigned_url is blocked even for the CTO lane, with no credentials or network use', async () => {
@@ -387,24 +587,30 @@ test('malformed input is rejected before any credential use', async () => {
 // FAIL CLOSED
 // ---------------------------------------------------------------------------------------------
 test('FAIL CLOSED: when the reader role cannot be assumed, no request reaches the AWS MCP Server and the CTO is told what the owner must run', async () => {
-  const w = world({ assumeFailure: () => stsError('AccessDenied') });
+  type World = ReturnType<typeof world>;
   for (const run of [
-    () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps),
-    () => bridge.listAwsMcpTools({}, CTO, w.deps),
+    (w: World) => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps),
+    (w: World) => bridge.listAwsMcpTools({}, CTO, w.deps),
   ]) {
-    await assert.rejects(run(), (err: unknown) => {
+    const w = world({ assumeFailure: () => stsError('AccessDenied') });
+    await assert.rejects(run(w), (err: unknown) => {
       assert.ok(err instanceof AwsReaderUnavailableError);
+      assert.equal(err.cached, false, 'the first failure is the real STS answer');
       assert.match(err.message, /^aws_mcp_unavailable \(assume_role_failed, STS AccessDenied\)/);
+      assert.ok(
+        err.message.includes('InnerScopeHearing/otchealth-claude-tools setup/iam/aws-ai-access-2026-10-07.sh (owner-run CloudShell step)'),
+        'names the repository, the script and that it is an owner-run CloudShell step',
+      );
+      assert.equal(AWS_AI_ACCESS_SETUP_POINTER, 'InnerScopeHearing/otchealth-claude-tools setup/iam/aws-ai-access-2026-10-07.sh (owner-run CloudShell step)');
       assert.ok(err.message.includes(AWS_AI_ACCESS_SETUP_SCRIPT));
-      assert.ok(err.message.includes('AWS CloudShell'));
       assert.equal(err.message.includes('SYNTHETIC-PRIVATE-DETAIL'), false);
       assert.equal(err.message.includes(ACCOUNT), false);
       return true;
     });
+    assert.equal(w.mcp.requests.length, 0, 'zero requests were sent to the AWS MCP Server');
+    assert.deepEqual([...new Set(w.sts.calls.map((c) => c.action))].sort(), ['AssumeRole', 'GetCallerIdentity']);
+    assert.equal(w.sts.assumeCount(), 0);
   }
-  assert.equal(w.mcp.requests.length, 0, 'zero requests were sent to the AWS MCP Server');
-  assert.deepEqual([...new Set(w.sts.calls.map((c) => c.action))].sort(), ['AssumeRole', 'GetCallerIdentity']);
-  assert.equal(w.sts.assumeCount(), 0);
 });
 
 test('FAIL CLOSED: an unreachable STS and a missing base identity also stop the call before any MCP request', async () => {
@@ -451,6 +657,63 @@ test('an AWS MCP Server request is never sent with anything but reader-role cred
   assert.equal(assume?.params.get('RoleArn'), `arn:aws:iam::${ACCOUNT}:role/${AWS_AI_READER_ROLE_NAME}`);
   assert.match(assume?.params.get('RoleSessionName') ?? '', /^gw-cto-corr1234abcd$/);
   assert.equal(assume?.params.get('DurationSeconds'), '3600');
+});
+
+// ---------------------------------------------------------------------------------------------
+// The role is pinned, and the result reports the role that was actually assumed
+// ---------------------------------------------------------------------------------------------
+test('ROLE: both results report the role ARN that was actually assumed, from what STS was asked, not from a constant', async () => {
+  const w = world();
+  const call = await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+  const requested = w.sts.calls.find((c) => c.action === 'AssumeRole')?.params.get('RoleArn');
+  assert.equal(requested, `arn:aws:iam::${ACCOUNT}:role/${AWS_AI_READER_ROLE_NAME}`);
+  assert.equal(call.reader_role_arn, requested);
+  const list = await bridge.listAwsMcpTools({}, { ...CTO, correlationId: 'corr-second-call-0002' }, w.deps);
+  assert.equal(list.bridge.reader_role_arn, requested);
+  assert.equal(w.sts.assumeCount(), 1, 'the same role session served both');
+});
+
+test('ROLE: an override with an IAM path in front of the pinned name, in the same account, is assumed and reported as given', async () => {
+  const override = `arn:aws:iam::${ACCOUNT}:role/service-role/${AWS_AI_READER_ROLE_NAME}`;
+  const w = world({ roleArn: override });
+  const call = await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+  assert.equal(w.sts.calls.find((c) => c.action === 'AssumeRole')?.params.get('RoleArn'), override);
+  assert.equal(call.reader_role_arn, override);
+  const list = await bridge.listAwsMcpTools({}, { ...CTO, correlationId: 'corr-second-call-0002' }, w.deps);
+  assert.equal(list.bridge.reader_role_arn, override, 'the list result reports the assumed role too');
+  assert.equal(w.sts.calls.filter((c) => c.action === 'GetCallerIdentity').length, 1, 'the account is always verified, even for an override');
+  assertSignedAsReader(w.mcp.requests, readerKey(1), readerToken(1));
+});
+
+test('ROLE: an override naming any other role is refused before any STS call or upstream request', async () => {
+  for (const name of ['other-role', 'otchealth-ai-reader-role-2', 'Otchealth-AI-Reader-Role', 'admin', 'AdministratorAccess']) {
+    const w = world({ roleArn: `arn:aws:iam::${ACCOUNT}:role/${name}` });
+    for (const run of [
+      () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps),
+      () => bridge.listAwsMcpTools({}, CTO, w.deps),
+    ]) {
+      await assert.rejects(run(), (err: unknown) => {
+        assert.ok(err instanceof AwsReaderUnavailableError, String(err));
+        assert.equal(err.reason, 'role_name_not_allowed', name);
+        assert.equal(err.message.includes(name), false, 'the rejected role name is not echoed');
+        return true;
+      });
+    }
+    assert.equal(w.sts.calls.length, 0, `STS was called for role name ${name}`);
+    assert.equal(w.mcp.requests.length, 0);
+  }
+});
+
+test('ROLE: an override in another account is refused after the account lookup and before AssumeRole', async () => {
+  const w = world({ roleArn: `arn:aws:iam::444455556666:role/${AWS_AI_READER_ROLE_NAME}` });
+  await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps), (err: unknown) => {
+    assert.ok(err instanceof AwsReaderUnavailableError, String(err));
+    assert.equal(err.reason, 'role_account_mismatch');
+    assert.equal(err.message.includes('444455556666'), false, 'the foreign account id is not echoed');
+    return true;
+  });
+  assert.deepEqual(w.sts.calls.map((c) => c.action), ['GetCallerIdentity']);
+  assert.equal(w.mcp.requests.length, 0);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -565,7 +828,7 @@ test('aws_mcp_tool_list marks each upstream tool allowed, blocked or not_allowli
     endpoint_host: 'aws-mcp.us-east-1.api.aws',
     signing_service: 'aws-mcp',
     signing_region: 'us-east-1',
-    reader_role_name: AWS_AI_READER_ROLE_NAME,
+    reader_role_arn: `arn:aws:iam::${ACCOUNT}:role/${AWS_AI_READER_ROLE_NAME}`,
   });
   assert.match(result.notice, /UNTRUSTED EXTERNAL DATA/);
 });
@@ -619,6 +882,303 @@ test('credentials are reused across calls, then refreshed five minutes before ex
   assert.equal(w.sts.assumeCount(), 2, 'a fresh role session was assumed');
   assertSignedAsReader(w.mcp.requests.slice(before), readerKey(2), readerToken(2));
   assert.equal(w.sts.calls.filter((c) => c.action === 'GetCallerIdentity').length, 1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Negative cache: a failed AssumeRole is remembered for 60 seconds
+// ---------------------------------------------------------------------------------------------
+test('NEGATIVE CACHE: after an AssumeRole failure both tools answer aws_mcp_unavailable from the cache for 60 seconds without calling STS again', async () => {
+  assert.equal(READER_FAILURE_CACHE_MS, 60_000);
+  const w = world({ assumeFailure: () => stsError('AccessDenied') });
+  const callTool = () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+  const listTools = () => bridge.listAwsMcpTools({}, CTO, w.deps);
+
+  await assert.rejects(callTool(), (err: unknown) => err instanceof AwsReaderUnavailableError && err.cached === false);
+  const stsCallsAfterFirstFailure = w.sts.calls.length;
+  assert.deepEqual(w.sts.calls.map((c) => c.action), ['GetCallerIdentity', 'AssumeRole']);
+
+  for (let i = 0; i < 4; i += 1) {
+    for (const run of [callTool, listTools]) {
+      await assert.rejects(run(), (err: unknown) => {
+        assert.ok(err instanceof AwsReaderUnavailableError);
+        assert.equal(err.code, 'aws_mcp_unavailable');
+        assert.equal(err.reason, 'assume_role_failed');
+        assert.equal(err.stsCode, 'AccessDenied');
+        assert.equal(err.cached, true);
+        assert.match(err.message, /^aws_mcp_unavailable \(assume_role_failed, STS AccessDenied\)/);
+        assert.match(err.message, /This failure is cached, so STS is not called again for about \d+ more second\(s\)\./);
+        assert.ok(err.message.includes(AWS_AI_ACCESS_SETUP_POINTER), 'the cached answer still tells the owner what to run');
+        return true;
+      });
+    }
+  }
+  assert.equal(w.sts.calls.length, stsCallsAfterFirstFailure, 'no STS call at all inside the window');
+  assert.equal(w.mcp.requests.length, 0);
+
+  w.advance(READER_FAILURE_CACHE_MS - 1_000);
+  await assert.rejects(callTool(), (err: unknown) => err instanceof AwsReaderUnavailableError && err.cached === true && err.retryAfterSeconds === 1);
+  assert.equal(w.sts.calls.length, stsCallsAfterFirstFailure, 'still cached one second before the window ends');
+
+  w.advance(1_000);
+  await assert.rejects(callTool(), (err: unknown) => err instanceof AwsReaderUnavailableError && err.cached === false);
+  assert.ok(w.sts.calls.length > stsCallsAfterFirstFailure, 'STS is asked again once the window has passed');
+  assert.equal(w.sts.calls.at(-1)?.action, 'AssumeRole');
+});
+
+test('NEGATIVE CACHE: every kind of reader failure is cached, and the cached answer keeps its original reason', async () => {
+  const failures: Array<{ label: string; build: () => ReturnType<typeof world>; reason: string }> = [
+    { label: 'STS unreachable', build: () => world({ assumeFailure: () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }) }), reason: 'sts_unreachable' },
+    { label: 'role name not allowed', build: () => world({ roleArn: `arn:aws:iam::${ACCOUNT}:role/other-role` }), reason: 'role_name_not_allowed' },
+    { label: 'role in another account', build: () => world({ roleArn: `arn:aws:iam::444455556666:role/${AWS_AI_READER_ROLE_NAME}` }), reason: 'role_account_mismatch' },
+    { label: 'malformed role ARN', build: () => world({ roleArn: 'not-an-arn' }), reason: 'invalid_role_arn' },
+  ];
+  for (const failure of failures) {
+    const w = failure.build();
+    const callTool = () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+    await assert.rejects(callTool(), (err: unknown) => err instanceof AwsReaderUnavailableError && err.reason === failure.reason && !err.cached, failure.label);
+    const stsCalls = w.sts.calls.length;
+    await assert.rejects(callTool(), (err: unknown) => err instanceof AwsReaderUnavailableError && err.reason === failure.reason && err.cached, failure.label);
+    assert.equal(w.sts.calls.length, stsCalls, `${failure.label}: no STS call from the cache`);
+    assert.equal(w.mcp.requests.length, 0);
+  }
+});
+
+test('NEGATIVE CACHE: once the window has passed and the role exists, the next call succeeds and the failure is forgotten', async () => {
+  let failing = true;
+  const w = world({ assumeFailure: () => (failing ? stsError('AccessDenied') : undefined) });
+  const callTool = () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+
+  await assert.rejects(callTool(), AwsReaderUnavailableError);
+  failing = false; // the owner has now created the role
+  await assert.rejects(callTool(), (err: unknown) => err instanceof AwsReaderUnavailableError && err.cached, 'the cache still answers inside the window');
+  assert.equal(w.sts.assumeCount(), 0);
+
+  w.advance(READER_FAILURE_CACHE_MS);
+  const result = await callTool();
+  assert.equal(result.is_error, false);
+  assert.equal(w.sts.assumeCount(), 1);
+  assertSignedAsReader(w.mcp.requests, readerKey(1), readerToken(1));
+
+  await callTool();
+  assert.equal(w.sts.assumeCount(), 1, 'later calls reuse the new credentials');
+});
+
+test('NEGATIVE CACHE: a refresh failure near expiry reuses still-valid credentials and does not call STS again inside the window', async () => {
+  let failing = false;
+  const w = world({ assumeFailure: () => (failing ? stsError('Throttling') : undefined) });
+  const callTool = () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+  await callTool();
+  assert.equal(w.sts.assumeCount(), 1);
+
+  failing = true;
+  w.advance(HOUR - 4 * 60_000); // inside the refresh margin, with four minutes of validity left
+  const stsBefore = w.sts.calls.length;
+  const reused = await callTool();
+  assert.equal(reused.is_error, false, 'the still-valid reader credentials served the call');
+  assert.equal(w.sts.calls.length, stsBefore + 1, 'one refresh attempt was made');
+
+  await callTool();
+  await bridge.listAwsMcpTools({}, CTO, w.deps);
+  assert.equal(w.sts.calls.length, stsBefore + 1, 'no further STS call inside the failure window');
+  assertSignedAsReader(w.mcp.requests, readerKey(1), readerToken(1));
+});
+
+// ---------------------------------------------------------------------------------------------
+// Audit: one structured line per call, hashes and sizes only
+// ---------------------------------------------------------------------------------------------
+test('AUDIT: a successful call writes one line with the hashed caller, auth kind, upstream tool, region, script hash, response size and role session', async () => {
+  const script = 'import boto3\nprint("SYNTHETIC-SCRIPT-BODY-MARKER")\n';
+  const reply = 'listing output with caf' + String.fromCharCode(0xe9);
+  const w = world({ mcp: { onCall: () => ({ content: [{ type: 'text', text: reply }] }) } });
+  const { lines, error } = await captureLogs(() =>
+    bridge.callAwsMcpTool({ tool_name: 'aws___run_script', arguments: { script }, region: 'us-west-2' }, CTO, w.deps),
+  );
+  assert.equal(error, undefined);
+
+  const audit = auditLines(lines);
+  assert.equal(audit.length, 1, 'exactly one audit line');
+  assert.equal(audit[0].level, 'info');
+  assert.deepEqual(auditFields(audit[0]), {
+    type: 'aws_mcp_bridge_call',
+    bridge_tool: 'aws_mcp_tool_call',
+    correlation_id: CTO.correlationId,
+    caller_hash: CALLER_HASH,
+    auth_kind: 'oauth',
+    outcome: 'ok',
+    is_error: false,
+    upstream_tool: 'aws___run_script',
+    region: 'us-west-2',
+    script_sha256: sha256(script),
+    response_bytes: Buffer.byteLength(reply, 'utf8'),
+    role_session_name: 'gw-cto-corr1234abcd',
+  });
+
+  const assume = lines.filter((l) => l.fields.type === 'aws_mcp_assume_role');
+  assert.equal(assume.length, 1, 'one AssumeRole, one line');
+  assert.deepEqual(assume[0].fields, {
+    type: 'aws_mcp_assume_role',
+    role_name: AWS_AI_READER_ROLE_NAME,
+    role_session_name: 'gw-cto-corr1234abcd',
+    duration_seconds: 3600,
+  });
+  const stsRequest = w.sts.calls.find((c) => c.action === 'AssumeRole');
+  assert.equal(assume[0].fields.role_session_name, stsRequest?.params.get('RoleSessionName'), 'the logged session name is the one sent to STS');
+  assert.equal(audit[0].fields.role_session_name, assume[0].fields.role_session_name, 'the audit line joins to the AssumeRole line');
+});
+
+test('AUDIT: no credential, signature, token, script text or account id appears in any log line written during a call', async () => {
+  const script = 'import boto3\nprint("SYNTHETIC-SCRIPT-BODY-MARKER")\n';
+  const w = world();
+  const { lines } = await captureLogs(async () => {
+    await bridge.callAwsMcpTool({ tool_name: 'aws___run_script', arguments: { script } }, CTO, w.deps);
+    await bridge.listAwsMcpTools({}, CTO, w.deps);
+  });
+  assert.ok(lines.length >= 3, 'the calls were logged');
+  const everything = JSON.stringify(lines);
+  for (const forbidden of [
+    'SYNTHETIC-SCRIPT-BODY-MARKER',
+    'import boto3',
+    readerKey(1),
+    'synthetic-reader-secret-1',
+    readerToken(1),
+    BASE.accessKeyId,
+    BASE.secretAccessKey,
+    BASE.sessionToken,
+    'Signature=',
+    'AWS4-HMAC-SHA256',
+    ACCOUNT,
+  ]) {
+    assert.equal(everything.includes(forbidden), false, `a log line carries "${forbidden}"`);
+  }
+});
+
+test('AUDIT: the tool list call writes its own line with the upstream response size and no upstream tool or script hash', async () => {
+  const w = world({ mcp: { pages: [TOOL_ENTRIES] } });
+  const { lines, error } = await captureLogs(() => bridge.listAwsMcpTools({}, CTO, w.deps));
+  assert.equal(error, undefined);
+  const audit = auditLines(lines);
+  assert.equal(audit.length, 1);
+  const fields = auditFields(audit[0]);
+  assert.equal(fields.bridge_tool, 'aws_mcp_tool_list');
+  assert.equal(fields.outcome, 'ok');
+  assert.equal(fields.auth_kind, 'oauth');
+  assert.equal(fields.caller_hash, CALLER_HASH);
+  assert.equal(fields.is_error, false);
+  assert.ok(Number.isInteger(fields.response_bytes) && (fields.response_bytes as number) > 0);
+  assert.equal(fields.role_session_name, 'gw-cto-corr1234abcd');
+  for (const absent of ['upstream_tool', 'script_sha256', 'region', 'error_code']) assert.equal(absent in fields, false, absent);
+});
+
+test('AUDIT: an upstream tool that reports an error is an upstream_error line with the response size and a fixed error code', async () => {
+  const w = world({ mcp: { onCall: () => ({ isError: true, content: [{ type: 'text', text: 'AccessDenied: SYNTHETIC-DENIAL-TEXT' }] }) } });
+  const { lines } = await captureLogs(() => bridge.callAwsMcpTool({ tool_name: 'aws___run_script', arguments: { script: 'x' } }, CTO, w.deps));
+  const audit = auditLines(lines);
+  assert.equal(audit.length, 1);
+  const fields = auditFields(audit[0]);
+  assert.equal(fields.outcome, 'upstream_error');
+  assert.equal(fields.is_error, true);
+  assert.equal(fields.error_code, 'aws_mcp_upstream_tool_error');
+  assert.equal(fields.response_bytes, Buffer.byteLength('AccessDenied: SYNTHETIC-DENIAL-TEXT', 'utf8'));
+  assert.equal(JSON.stringify(audit[0]).includes('SYNTHETIC-DENIAL-TEXT'), false, 'upstream text is never logged');
+});
+
+test('AUDIT: a refused static credential is logged at warn level with its kind, before anything else is known about the request', async () => {
+  const w = world();
+  for (const authKind of NON_OAUTH_KINDS) {
+    const { lines, error } = await captureLogs(() =>
+      bridge.callAwsMcpTool({ tool_name: 'aws___run_script', arguments: { script: 'x' } }, { ...CTO, authKind }, w.deps),
+    );
+    assert.ok(error instanceof AwsMcpRefusalError);
+    const audit = auditLines(lines);
+    assert.equal(audit.length, 1, authKind);
+    assert.equal(audit[0].level, 'warn');
+    assert.deepEqual(auditFields(audit[0]), {
+      type: 'aws_mcp_bridge_call',
+      bridge_tool: 'aws_mcp_tool_call',
+      correlation_id: CTO.correlationId,
+      caller_hash: CALLER_HASH,
+      auth_kind: authKind,
+      outcome: 'refused',
+      is_error: true,
+      error_code: 'aws_mcp_forbidden',
+    });
+  }
+  assert.equal(w.credentialRequests(), 0);
+});
+
+test('AUDIT: refusals by lane, kill switch, blocked tool, allowlist and input validation are each logged with their code', async () => {
+  const w = world();
+  const run = async (input: unknown, ctx: AwsMcpToolContext, expectedCode: string, expectedUpstream?: string, switchValue?: string) => {
+    const { lines, error } = await withBridgeSwitch(switchValue, () => captureLogs(() => bridge.callAwsMcpTool(input, ctx, w.deps)));
+    assert.ok(error instanceof AwsMcpRefusalError, `${expectedCode}: ${String(error)}`);
+    const audit = auditLines(lines);
+    assert.equal(audit.length, 1, expectedCode);
+    assert.equal(audit[0].level, 'warn');
+    const fields = auditFields(audit[0]);
+    assert.equal(fields.outcome, 'refused');
+    assert.equal(fields.error_code, expectedCode);
+    assert.equal(fields.upstream_tool, expectedUpstream);
+    assert.equal('response_bytes' in fields, false);
+    assert.equal('role_session_name' in fields, false);
+  };
+  await run({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent: 'cfo' }, 'aws_mcp_forbidden');
+  await run({ tool_name: 'aws___list_regions' }, CTO, 'aws_mcp_disabled', undefined, 'true');
+  await run({ tool_name: 'aws___get_presigned_url' }, CTO, 'aws_mcp_tool_blocked', 'aws___get_presigned_url');
+  await run({ tool_name: 'aws___brand_new_tool' }, CTO, 'aws_mcp_tool_not_allowed', 'aws___brand_new_tool');
+  await run({ tool_name: 'aws___list_regions', extra: 1 }, CTO, 'aws_mcp_invalid_input');
+  await run({ tool_name: 'aws___run_script', arguments: { script: 'x'.repeat(100_001) } }, CTO, 'aws_mcp_invalid_input', 'aws___run_script');
+  assert.equal(w.credentialRequests(), 0);
+});
+
+test('AUDIT: a failed reader role and a failed upstream call are logged as errors with the error code, never the message text', async () => {
+  const noRole = world({ assumeFailure: () => stsError('AccessDenied') });
+  const first = await captureLogs(() => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, noRole.deps));
+  const unavailable = auditLines(first.lines);
+  assert.equal(unavailable.length, 1);
+  assert.equal(unavailable[0].level, 'warn');
+  const fields = auditFields(unavailable[0]);
+  assert.equal(fields.outcome, 'error');
+  assert.equal(fields.error_code, 'aws_mcp_unavailable');
+  assert.equal(fields.is_error, true);
+  assert.equal(fields.upstream_tool, 'aws___list_regions');
+  const unavailableLog = first.lines.find((l) => l.fields.type === 'aws_mcp_reader_unavailable');
+  assert.deepEqual(unavailableLog?.fields, { type: 'aws_mcp_reader_unavailable', reason: 'assume_role_failed', sts_code: 'AccessDenied' });
+  assert.equal(JSON.stringify(first.lines).includes('SYNTHETIC-PRIVATE-DETAIL'), false);
+
+  const serverDown = world({ mcp: { onRequest: () => new Response('SYNTHETIC-UPSTREAM-BODY', { status: 500 }) } });
+  const second = await captureLogs(() => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, serverDown.deps));
+  const upstream = auditLines(second.lines);
+  assert.equal(upstream.length, 1);
+  const upstreamFields = auditFields(upstream[0]);
+  assert.equal(upstreamFields.outcome, 'error');
+  assert.equal(upstreamFields.error_code, 'aws_mcp_upstream_http');
+  assert.equal(upstreamFields.role_session_name, undefined, 'a failed call has no completed role session to report');
+  assert.equal(JSON.stringify(second.lines).includes('SYNTHETIC-UPSTREAM-BODY'), false);
+});
+
+test('AUDIT: a logger that throws never changes the outcome of a call', async () => {
+  const w = world({ mcp: { onCall: () => ({ content: [{ type: 'text', text: 'still works' }] }) } });
+  const spies = (['info', 'warn'] as const).map((level) =>
+    mock.method(logger, level, () => {
+      throw new Error('log sink is down');
+    }),
+  );
+  try {
+    const result = await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
+    assert.equal(result.content_text, 'still works');
+    await assert.rejects(
+      bridge.callAwsMcpTool({ tool_name: 'aws___get_presigned_url' }, CTO, w.deps),
+      (err: unknown) => err instanceof AwsMcpRefusalError && err.code === 'aws_mcp_tool_blocked',
+    );
+    const failing = world({ assumeFailure: () => stsError('AccessDenied') });
+    await assert.rejects(
+      bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, failing.deps),
+      (err: unknown) => err instanceof AwsReaderUnavailableError && err.reason === 'assume_role_failed' && !err.cached,
+      'the reader failure keeps its own reason even when the log call throws',
+    );
+  } finally {
+    for (const spy of spies) spy.mock.restore();
+  }
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -790,7 +1350,7 @@ test('a slot is released after a failed call', async () => {
 interface WrapperResponse {
   isError?: boolean;
   content?: Array<{ type: string; text: string }>;
-  structuredContent?: { result?: Record<string, unknown> | null; error?: { code: string; message: string } };
+  structuredContent?: { result?: Record<string, unknown> | null; error?: { code: string; message: string }; correlation_id?: string };
 }
 interface CapturedTool {
   config: { annotations?: Record<string, unknown>; description?: string };
@@ -810,18 +1370,23 @@ function fakeServer(): { server: McpServer; tools: Map<string, CapturedTool> } {
   };
 }
 
-function invoke(tool: CapturedTool, args: Record<string, unknown>, callerAgent: string): Promise<WrapperResponse> {
-  return requestContext.run({ callerHash: 'synthetic-hash', correlationId: 'corr-wrapper-0001', callerAgent }, () => tool.handler(args));
+/** Run a registered tool the way the HTTP route does: inside a request context that carries the lane and how the request authenticated. */
+function invoke(tool: CapturedTool, args: Record<string, unknown>, callerAgent: string, authKind: AuthKind | 'none' = 'oauth'): Promise<WrapperResponse> {
+  return requestContext.run(
+    { callerHash: CALLER_HASH, correlationId: 'corr-wrapper-0001', callerAgent, ...(authKind === 'none' ? {} : { authKind }) },
+    () => tool.handler(args),
+  );
 }
 
 test('registration: both tools are registered read-only with an honest description', () => {
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', world().deps);
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, world().deps);
   assert.deepEqual([...tools.keys()].sort(), ['aws_mcp_tool_call', 'aws_mcp_tool_list']);
   for (const tool of tools.values()) {
     assert.equal(tool.config.annotations?.readOnlyHint, true);
     assert.equal(tool.config.annotations?.destructiveHint, false);
     assert.match(String(tool.config.description), /CTO lane only/);
+    assert.match(String(tool.config.description), /OAuth-authenticated sessions only \(static credentials are refused\)/);
     assert.match(String(tool.config.description), /untrusted external data/i);
   }
   assert.match(String(tools.get('aws_mcp_tool_call')?.config.description), /aws___get_presigned_url is blocked/);
@@ -830,7 +1395,7 @@ test('registration: both tools are registered read-only with an honest descripti
 test('wrapper: the CTO lane gets a result, including under READ_ONLY_MODE (this is a read tool)', async () => {
   const w = world({ mcp: { onCall: () => ({ content: [{ type: 'text', text: 'us-east-1 us-east-2' }] }) } });
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', w.deps);
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
   const response = await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___list_regions' }, 'cto');
   assert.equal(response.isError, undefined);
   assert.equal(response.structuredContent?.result?.content_text, 'us-east-1 us-east-2');
@@ -841,7 +1406,7 @@ test('wrapper: the CTO lane gets a result, including under READ_ONLY_MODE (this 
 test('wrapper: a non-CTO caller is stopped by the execution governance rule before the handler runs', async () => {
   const w = world();
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', w.deps);
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
   for (const callerAgent of ['developer', 'cfo', 'coo', 'cro', 'clo', 'exec', '']) {
     for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
       const response = await invoke(tools.get(name)!, { ...args }, callerAgent);
@@ -856,7 +1421,7 @@ test('wrapper: a non-CTO caller is stopped by the execution governance rule befo
 test('wrapper: the presigned-URL tool is blocked for the CTO lane with a clear error', async () => {
   const w = world();
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', w.deps);
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
   const response = await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___get_presigned_url' }, 'cto');
   assert.equal(response.isError, true);
   assert.match(response.content?.[0].text ?? '', /^Tool aws_mcp_tool_call failed: aws_mcp_tool_blocked: aws___get_presigned_url is blocked/);
@@ -864,40 +1429,96 @@ test('wrapper: the presigned-URL tool is blocked for the CTO lane with a clear e
 });
 
 test('wrapper: the fail-closed message reaches the CTO and names the owner script', async () => {
-  const w = world({ assumeFailure: () => stsError('AccessDenied') });
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', w.deps);
   for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
+    const w = world({ assumeFailure: () => stsError('AccessDenied') });
+    bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
     const response = await invoke(tools.get(name)!, { ...args }, 'cto');
     assert.equal(response.isError, true);
     const text = response.content?.[0].text ?? '';
     assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_unavailable \\(assume_role_failed, STS AccessDenied\\)`));
-    assert.ok(text.includes(AWS_AI_ACCESS_SETUP_SCRIPT));
+    assert.ok(text.includes('InnerScopeHearing/otchealth-claude-tools setup/iam/aws-ai-access-2026-10-07.sh (owner-run CloudShell step)'));
     assert.equal(text.includes('SYNTHETIC-PRIVATE-DETAIL'), false);
+    assert.equal(w.mcp.requests.length, 0);
   }
+});
+
+test('wrapper: the CTO lane over any static credential kind, or with no recorded kind, is refused by the handler before any AWS use', async () => {
+  const w = world();
+  const { server, tools } = fakeServer();
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
+  for (const authKind of [...NON_OAUTH_KINDS, 'none' as const]) {
+    for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
+      const response = await invoke(tools.get(name)!, { ...args }, 'cto', authKind);
+      assert.equal(response.isError, true, `${name} as ${authKind}`);
+      const text = response.content?.[0].text ?? '';
+      assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only`));
+      assert.match(text, authKind === 'none' ? /does not record how it authenticated/ : new RegExp(`"${authKind}" credential`));
+    }
+  }
+  assert.equal(w.credentialRequests(), 0);
+  assert.equal(w.sts.calls.length, 0);
   assert.equal(w.mcp.requests.length, 0);
+});
+
+test('wrapper: with the kill switch on, an OAuth CTO session is told the bridge is switched off and nothing reaches AWS', async () => {
+  const w = world();
+  const { server, tools } = fakeServer();
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
+  await withBridgeSwitch('true', async () => {
+    for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
+      const response = await invoke(tools.get(name)!, { ...args }, 'cto', 'oauth');
+      assert.equal(response.isError, true);
+      assert.match(response.content?.[0].text ?? '', new RegExp(`^Tool ${name} failed: aws_mcp_disabled: the AWS bridge is switched off by the operator`));
+    }
+  });
+  assert.equal(w.credentialRequests(), 0);
+  assert.equal(w.mcp.requests.length, 0);
+});
+
+test('wrapper: a pasted script never reaches a log line, only its hash does, and the result reports the assumed role', async () => {
+  const script = 'import boto3\nprint("SYNTHETIC-WRAPPER-SCRIPT-MARKER")\n';
+  const w = world();
+  const { server, tools } = fakeServer();
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
+  let response: WrapperResponse | undefined;
+  const { lines } = await captureLogs(async () => {
+    response = await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___run_script', arguments: { script } }, 'cto');
+  });
+  assert.equal(response?.isError, undefined);
+  assert.equal(response?.structuredContent?.result?.reader_role_arn, `arn:aws:iam::${ACCOUNT}:role/${AWS_AI_READER_ROLE_NAME}`);
+  assert.equal(JSON.stringify(lines).includes('SYNTHETIC-WRAPPER-SCRIPT-MARKER'), false, 'no log line, from the registry or the bridge, carries the script');
+  const audit = auditLines(lines);
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].fields.script_sha256, sha256(script));
+  assert.equal(audit[0].fields.caller_hash, CALLER_HASH);
+  assert.equal(audit[0].fields.auth_kind, 'oauth');
+  assert.match(String(audit[0].fields.correlation_id), /^[0-9a-f-]{36}$/);
+  assert.equal(audit[0].fields.correlation_id, response?.structuredContent?.correlation_id, 'the audit line carries the correlation id the caller was given');
 });
 
 test('wrapper: the strict input schema rejects unknown fields', async () => {
   const w = world();
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', w.deps);
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
   const response = await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___list_regions', credentials: 'x' }, 'cto');
   assert.equal(response.isError, true);
   assert.equal(response.structuredContent?.error?.code, 'invalid_input');
   assert.equal(w.mcp.requests.length, 0);
 });
 
-test('wrapper: worst-case output stays under the response cap and under the shared-cache offload threshold', async () => {
+// Whether the registry would offload a result is NOT asserted here: with the default threshold and no
+// storage configured, nothing could be offloaded whatever the bridge did. bridge.no-offload.test.ts
+// proves it with a low threshold and live-looking storage, and checks that a control tool does offload.
+test('wrapper: worst-case output stays under the response cap and under the default offload threshold', async () => {
   // Quote-dense text is the worst case: every character is escaped once in the pretty-printed text
   // block and again when that block is embedded in the response envelope.
   const w = world({ mcp: { onCall: () => ({ content: [{ type: 'text', text: '"'.repeat(500_000) }] }) } });
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', w.deps);
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
   const response = await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___run_script', arguments: { script: 'x' } }, 'cto');
   assert.equal(response.isError, undefined, response.content?.[0].text);
   assert.equal(response.structuredContent?.result?.truncated, true);
-  assert.equal(response.structuredContent?.result?._jit_offloaded, undefined, 'AWS output is never offloaded into the shared cache');
   const envelope = Buffer.byteLength(JSON.stringify({ content: response.content, structuredContent: response.structuredContent }), 'utf8');
   assert.ok(envelope < 128 * 1024, `envelope ${envelope} bytes`);
   assert.ok((response.content?.[0].text.length ?? Infinity) < 40_000, 'below the default JIT offload threshold');
@@ -911,10 +1532,9 @@ test('wrapper: a maximal tool list also stays under the response cap and the off
   }));
   const w = world({ mcp: { pages: [many.slice(0, 100), many.slice(100, 200), many.slice(200)] } });
   const { server, tools } = fakeServer();
-  bridge.registerAwsMcpTools(server, () => 'synthetic-hash', w.deps);
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
   const response = await invoke(tools.get('aws_mcp_tool_list')!, {}, 'cto');
   assert.equal(response.isError, undefined, response.content?.[0].text);
-  assert.equal(response.structuredContent?.result?._jit_offloaded, undefined);
   const envelope = Buffer.byteLength(JSON.stringify({ content: response.content, structuredContent: response.structuredContent }), 'utf8');
   assert.ok(envelope < 128 * 1024, `envelope ${envelope} bytes`);
   assert.ok((response.content?.[0].text.length ?? Infinity) < 40_000);
