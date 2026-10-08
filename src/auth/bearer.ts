@@ -277,6 +277,8 @@ export async function validateBearer(
   // Every external authentication path must resolve a concrete lane before requestContext exists.
   // An empty identity is not the same thing as a caller-less direct internal invocation.
   if (typeof caller_agent !== 'string' || caller_agent.trim().length === 0) return null;
+  // How an issued token was minted (null when it records no grant, or is not an issued token).
+  const authGrant = issued ? issuedGrantType(token) : null;
   const clientId = issued ? issuedClientId(token) : null;
   // Connector clients: DCR public clients (dcr_) OR manually-registered confidential connector clients
   // (occ_ = OTCHealth Connector Client) entered in Claude's Advanced settings to bypass the DCR tool-delivery
