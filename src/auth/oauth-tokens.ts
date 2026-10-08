@@ -79,9 +79,24 @@ export function verifyToken(token: string, secret: string): AccessClaims | null 
   return claims;
 }
 
-export function issueAccessToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 3600): string {
+/**
+ * Issue a signed access token. `grantType` records which OAuth grant the token endpoint used (claim `gty`);
+ * leave it out and the token carries no grant, exactly as every token did before grant tracking.
+ */
+export function issueAccessToken(
+  clientId: string,
+  scope: string,
+  secret: string,
+  baseUrl: string,
+  agent = '',
+  ttlSeconds = 3600,
+  grantType?: OAuthGrantType,
+): string {
   const now = Math.floor(Date.now() / 1000);
-  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds }, secret);
+  return signToken(
+    { iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds, ...(grantType ? { gty: grantType } : {}) },
+    secret,
+  );
 }
 
 export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 60 * 60 * 24 * 30): string {
