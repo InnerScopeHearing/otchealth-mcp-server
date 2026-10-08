@@ -1523,7 +1523,7 @@ test('registration: both tools are registered read-only with an honest descripti
     assert.equal(tool.config.annotations?.readOnlyHint, true);
     assert.equal(tool.config.annotations?.destructiveHint, false);
     assert.match(String(tool.config.description), /CTO lane only/);
-    assert.match(String(tool.config.description), /OAuth-authenticated sessions only \(static credentials are refused\)/);
+    assert.match(String(tool.config.description), /interactive OAuth sessions only \(static credentials and client_credentials tokens are refused\)/);
     assert.match(String(tool.config.description), /untrusted external data/i);
   }
   assert.match(String(tools.get('aws_mcp_tool_call')?.config.description), /aws___get_presigned_url is blocked/);
