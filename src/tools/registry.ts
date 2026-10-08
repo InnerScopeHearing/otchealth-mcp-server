@@ -529,6 +529,13 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // This execution list returns bounded aggregate counts only. Keep its connector binding on the
   // CTO lane; the read handler also enforces the caller identity before making an upstream request.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_N8N_EXECUTION_LIST_TOOL);
+  // The AWS MCP bridge is discoverable only on the CTO connector. A shared CONNECTOR_TOOLSET override never
+  // widens it to another lane: every non-CTO lane has the names removed, and the handlers refuse them anyway.
+  if (lane === 'cto') {
+    if (!env.CONNECTOR_TOOLSET) for (const name of CTO_ONLY_AWS_MCP_TOOLS) tools.add(name);
+  } else {
+    for (const name of CTO_ONLY_AWS_MCP_TOOLS) tools.delete(name);
+  }
   // Provisioning is deliberately discoverable only to the CTO Chat lane. Its handler and
   // write_orchestrated governance independently re-check that same identity at execution time.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('browser_cloud_profile_provision_public_trial');
