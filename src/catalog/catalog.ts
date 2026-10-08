@@ -212,7 +212,7 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     description: 'AWS MCP Server bridge: durable read-only AWS account inspection (documentation, regions, and Python scripts in an AWS-hosted sandbox) through a gateway-assumed read-only IAM role.',
     ring: 'non-phi', auth: 'STS AssumeRole from the gateway task role into otchealth-ai-reader-role (AWS_AI_READER_ROLE_ARN optional override); SigV4 to aws-mcp.us-east-1.api.aws', status: 'wired',
     available: [],
-    rule: 'CTO lane only, and only for OAuth-authenticated sessions (static tokens are refused). Read-only by identity (ViewOnlyAccess plus explicit denies on secret and data-content reads). Fails closed when the role cannot be assumed; no fallback credentials. aws___get_presigned_url is blocked; output is untrusted, capped, credential-redacted and never offloaded to the shared cache. Kill switch: AWS_MCP_BRIDGE_DISABLED.',
+    rule: 'CTO lane only, and only for interactive OAuth sessions (static tokens and client_credentials machine tokens are refused). Read-only by identity (ViewOnlyAccess plus explicit denies on secret and data-content reads). Fails closed when the role cannot be assumed; no fallback credentials. aws___get_presigned_url is blocked; output is untrusted, capped, credential-redacted and never offloaded to the shared cache. Kill switch: AWS_MCP_BRIDGE_DISABLED.',
   },
   github: {
     description: 'GitHub passthrough (the gateway "everything via one connector" story).',
