@@ -47,6 +47,7 @@ import {
   type OAuthConsentDeps,
 } from './oauth-consent.js';
 import { EXEC_RING } from '../tools/kb/search-privileged.js';
+import { isOAuthGrantType, type OAuthGrantType } from './request-context.js';
 
 const env = loadEnv();
 
