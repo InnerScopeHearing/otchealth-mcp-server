@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked, isStaticTokenAuthReady } from './revocation-store.js';
-import { isValidIssuedAccessToken, issuedAgent, issuedClientId, baseUrlOf } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, baseUrlOf } from '../server/oauth.js';
 import type { AuthKind } from '../server/request-context.js';
 import { agentFromDescopeToken } from './descope.js';
 
