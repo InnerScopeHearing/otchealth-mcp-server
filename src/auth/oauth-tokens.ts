@@ -8,6 +8,7 @@
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isConfigured as cosmosConfigured, createDoc, readDoc, deleteDoc } from '../agentstate/store.js';
+import type { OAuthGrantType } from '../server/request-context.js';
 
 const AUD = 'otchealth-mcp';
 
