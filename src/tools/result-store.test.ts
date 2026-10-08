@@ -126,6 +126,18 @@ test('gateway_fetch_result is a terminal transport that cannot recursively offlo
   assert.equal(mayOffloadToolResult('catalog_list_tools'), true);
 });
 
+test('the AWS bridge tools are never offloaded to the shared result cache, and other tools still are', () => {
+  // The whole aws_mcp_ family is excluded by prefix, so a tool added to it later is covered too.
+  for (const name of ['aws_mcp_tool_call', 'aws_mcp_tool_list', 'aws_mcp_added_later', 'aws_mcp_']) {
+    assert.equal(mayOffloadToolResult(name), false, name);
+  }
+  // It is a prefix match on the canonical name: lookalikes keep the normal offload behaviour.
+  for (const name of ['catalog_list_tools', 'aws_inventory_read', 'aws_mcp', 'my_aws_mcp_tool_call', 'gateway_fetch_results']) {
+    assert.equal(mayOffloadToolResult(name), true, name);
+  }
+  assert.equal(mayOffloadToolResult('brain_graph_search'), false);
+});
+
 test('escape-heavy Unicode JSON pages stay bounded and reassemble to the exact UTF-8 bytes', async () => {
   const store = fakeResultStore();
   const callerHash = '9'.repeat(64);
