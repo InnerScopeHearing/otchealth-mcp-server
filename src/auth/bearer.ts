@@ -249,10 +249,13 @@ export async function validateBearer(
     if (token.split('.').length === 3) {
       descopeAgent = await agentFromDescopeToken(token);
     }
-    if (!descopeAgent) {
+    if (descopeAgent) {
+      authKind = 'descope';
+    } else {
       const match = resolveUniqueStaticCredential(token, staticCredentialCandidates());
       if (!match) return null;
       staticAgent = match.agent;
+      authKind = match.kind;
       isM365Static = match.kind === 'm365';
       isCodexStatic = match.kind === 'codex';
     }
