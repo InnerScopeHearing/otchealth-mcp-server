@@ -3,7 +3,7 @@
  * gateway's redaction rules).
  *
  * WHAT THE LINE HOLDS: the gateway tool, the correlation id, the hashed caller, how the caller
- * authenticated, the upstream tool and region, the SHA-256 of a run_script `script` argument, the
+ * authenticated (the credential kind and, for OAuth, the grant that issued the token), the upstream tool and region, the SHA-256 of a run_script `script` argument, the
  * size of the upstream response, whether the call ended in error and with which error code, and the
  * RoleSessionName of the reader role session used (the join key to CloudTrail). Together these answer
  * "who ran what against the AWS account, and what came back" without recording any of the content.
@@ -34,6 +34,8 @@ export interface BridgeCallAuditEntry {
   callerHash: string;
   /** How the caller authenticated, or undefined when none was recorded. */
   authKind: string | undefined;
+  /** For an OAuth caller, the grant that issued its token (authorization_code, refresh_token, client_credentials). */
+  authGrant?: string | undefined;
   upstreamTool?: string;
   region?: string;
   /** SHA-256 (hex) of an aws___run_script `script` argument. The script text itself is never logged. */
@@ -50,6 +52,7 @@ export interface BridgeCallAuditEntry {
 
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const KIND_PATTERN = /^[a-z0-9-]{1,16}$/;
+const GRANT_PATTERN = /^[a-z_]{1,32}$/;
 const UPSTREAM_TOOL_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 const REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -86,6 +89,7 @@ export function bridgeCallLogFields(entry: BridgeCallAuditEntry): Record<string,
     correlation_id: matching(entry.correlationId, ID_PATTERN) ?? 'invalid',
     caller_hash: matching(entry.callerHash, ID_PATTERN) ?? 'unknown',
     auth_kind: matching(entry.authKind, KIND_PATTERN) ?? 'none',
+    auth_grant: matching(entry.authGrant, GRANT_PATTERN) ?? 'none',
     outcome: entry.outcome,
     is_error: entry.isError === true,
   };
@@ -121,6 +125,7 @@ export interface BridgeCallAuditBase {
   correlationId: string;
   callerHash: string;
   authKind: string | undefined;
+  authGrant?: string | undefined;
 }
 
 /** Collects what is known about one call and writes exactly one audit line when it ends. */
