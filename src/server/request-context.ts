@@ -29,6 +29,8 @@ export interface RequestContext {
    * AuthContext.m365_static_auth doc comment for why.
    */
   m365StaticAuth?: boolean;
+  /** How the request authenticated (see AuthKind). Unset when the code path did not record it. */
+  authKind?: AuthKind;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
