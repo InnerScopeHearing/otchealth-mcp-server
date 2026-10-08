@@ -24,7 +24,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { AwsCredentials } from '../../search/sigv4.js';
-import { AwsReaderUnavailableError } from './credentials.js';
+import { AwsReaderUnavailableError, type ReaderIdentity } from './credentials.js';
 import { redactCredentialShapes, stripControlChars } from './output.js';
 import {
   AWS_MCP_ENDPOINT,
@@ -126,8 +126,12 @@ const ListToolsPageSchema = z
   .passthrough();
 
 export interface UpstreamDeps {
-  /** Reader-role credentials (never the gateway's own). `sessionHint` only names a new STS session. */
-  getCredentials: (sessionHint: string) => Promise<AwsCredentials>;
+  /**
+   * Reader-role credentials (never the gateway's own). `sessionHint` only names a new STS session.
+   * The reader provider also reports which role session the credentials came from; it is passed
+   * back to the caller so the result can say which role was actually assumed.
+   */
+  getCredentials: (sessionHint: string) => Promise<AwsCredentials & Partial<ReaderIdentity>>;
   fetchImpl?: FetchLike;
   now?: () => Date;
   deadlineMs?: number;
@@ -148,6 +152,14 @@ export interface UpstreamCallResult {
   texts: string[];
   /** Image, audio, resource-link and binary blocks that were not returned. */
   omittedNonTextBlocks: number;
+  /** The reader role session that signed the call, when the credential provider reports it. */
+  identity: ReaderIdentity | undefined;
+}
+
+export interface UpstreamListResult {
+  tools: UpstreamTool[];
+  /** The reader role session that signed the call, when the credential provider reports it. */
+  identity: ReaderIdentity | undefined;
 }
 
 interface SessionControl {
@@ -256,7 +268,7 @@ async function withUpstreamSession<T>(
   deps: UpstreamDeps,
   sessionHint: string,
   operation: (client: Client, control: SessionControl) => Promise<T>,
-): Promise<T> {
+): Promise<{ value: T; identity: ReaderIdentity | undefined }> {
   const deadlineMs = deps.deadlineMs ?? AWS_MCP_DEADLINE_MS;
   const startedAt = Date.now();
   const remainingMs = (): number => Math.max(0, deadlineMs - (Date.now() - startedAt));
@@ -274,12 +286,26 @@ async function withUpstreamSession<T>(
   try {
     release = await (deps.limiter ?? defaultLimiter).acquire(Math.min(AWS_MCP_QUEUE_WAIT_MS, deadlineMs));
 
+    // Only the three signing fields are ever handed to the signer; the identity stays here.
+    let identity: ReaderIdentity | undefined;
+    const signingCredentials = async (): Promise<AwsCredentials> => {
+      const credentials = await deps.getCredentials(sessionHint);
+      if (credentials.roleArn && credentials.roleSessionName) {
+        identity = { roleArn: credentials.roleArn, roleSessionName: credentials.roleSessionName };
+      }
+      return {
+        accessKeyId: credentials.accessKeyId,
+        secretAccessKey: credentials.secretAccessKey,
+        sessionToken: credentials.sessionToken,
+      };
+    };
+
     // Fail closed before any request leaves for the AWS MCP Server.
-    await deps.getCredentials(sessionHint);
+    await signingCredentials();
 
     const signingFetch = createSigningFetch({
       scope: deps.scope ?? resolveSigningScope(),
-      getCredentials: () => deps.getCredentials(sessionHint),
+      getCredentials: signingCredentials,
       fetchImpl: deps.fetchImpl ?? ((url, init) => fetch(url, init)),
       now: deps.now,
       remainingMs,
@@ -298,7 +324,8 @@ async function withUpstreamSession<T>(
     });
     client = new Client({ name: 'otchealth-gateway-aws-bridge', version: '1.0.0' }, { capabilities: {} });
     await client.connect(transport, { signal: abort.signal, timeout: Math.max(1, remainingMs()) });
-    return await operation(client, { signal: abort.signal, remainingMs });
+    const value = await operation(client, { signal: abort.signal, remainingMs });
+    return { value, identity };
   } catch (err) {
     throw mapUpstreamError(err, { oversized, deadlineHit });
   } finally {
@@ -309,8 +336,8 @@ async function withUpstreamSession<T>(
 }
 
 /** List the tools the AWS MCP Server advertises (names, descriptions, input schemas). */
-export async function listUpstreamTools(deps: UpstreamDeps, sessionHint: string): Promise<UpstreamTool[]> {
-  return withUpstreamSession(deps, sessionHint, async (client, control) => {
+export async function listUpstreamTools(deps: UpstreamDeps, sessionHint: string): Promise<UpstreamListResult> {
+  const { value, identity } = await withUpstreamSession(deps, sessionHint, async (client, control) => {
     const tools: UpstreamTool[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < AWS_MCP_MAX_LIST_PAGES; page += 1) {
@@ -331,6 +358,7 @@ export async function listUpstreamTools(deps: UpstreamDeps, sessionHint: string)
     }
     return tools;
   });
+  return { tools: value, identity };
 }
 
 /** Call one upstream tool and return its text output. */
@@ -341,7 +369,7 @@ export async function callUpstreamTool(
   args: Record<string, unknown>,
   region: string = DEFAULT_REGION,
 ): Promise<UpstreamCallResult> {
-  return withUpstreamSession(deps, sessionHint, async (client, control) => {
+  const { value, identity } = await withUpstreamSession(deps, sessionHint, async (client, control) => {
     const result = await client.callTool(
       // _meta.AWS_REGION is how the AWS MCP Server learns the default region for SigV4 callers.
       { name: toolName, arguments: args, _meta: { AWS_REGION: region } },
@@ -365,4 +393,5 @@ export async function callUpstreamTool(
     }
     return { isError: result.isError === true, texts, omittedNonTextBlocks: omitted };
   });
+  return { ...value, identity };
 }
