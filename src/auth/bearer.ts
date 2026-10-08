@@ -19,6 +19,12 @@ export interface AuthContext {
    * interactive OAuth session, such as the AWS MCP bridge, treats a missing value as NOT oauth.
    */
   auth_kind?: AuthKind;
+  /**
+   * For an 'oauth' request, the grant that issued the access token (the signed `gty` claim, see
+   * issuedGrantType in server/oauth.ts). Absent for a token minted before grant tracking and for
+   * every non-oauth kind. A consumer that needs an interactive sign-in treats absent as NOT interactive.
+   */
+  auth_grant?: OAuthGrantType;
   /** True when the token was issued to a Dynamic-Client-Registration (Claude Chat) connector client. */
   connector_surface: boolean;
   /**
