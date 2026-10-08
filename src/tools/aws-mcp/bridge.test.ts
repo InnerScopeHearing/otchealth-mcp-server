@@ -1598,6 +1598,35 @@ test('wrapper: the CTO lane over any static credential kind, or with no recorded
   assert.equal(w.mcp.requests.length, 0);
 });
 
+test('wrapper: an OAuth CTO session from the client_credentials grant, or with no recorded grant, is refused by the handler before any AWS use', async () => {
+  const w = world();
+  const { server, tools } = fakeServer();
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
+  for (const authGrant of ['client_credentials', 'none'] as const) {
+    for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
+      const response = await invoke(tools.get(name)!, { ...args }, 'cto', 'oauth', authGrant);
+      assert.equal(response.isError, true, `${name} with grant ${authGrant}`);
+      const text = response.content?.[0].text ?? '';
+      assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_grant_refused: the AWS bridge serves interactive OAuth sessions only`));
+      assert.match(text, authGrant === 'none' ? /does not record how it was issued/ : /client_credentials grant, which is a machine credential/);
+    }
+  }
+  assert.equal(w.credentialRequests(), 0);
+  assert.equal(w.sts.calls.length, 0);
+  assert.equal(w.mcp.requests.length, 0);
+});
+
+test('wrapper: an OAuth CTO session from the authorization_code grant, or from the refresh_token grant, gets a result', async () => {
+  const w = world({ mcp: { onCall: () => ({ content: [{ type: 'text', text: 'us-east-1' }] }) } });
+  const { server, tools } = fakeServer();
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
+  for (const authGrant of ['authorization_code', 'refresh_token'] as const) {
+    const response = await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___list_regions' }, 'cto', 'oauth', authGrant);
+    assert.equal(response.isError, undefined, authGrant);
+    assert.equal(response.structuredContent?.result?.content_text, 'us-east-1', authGrant);
+  }
+});
+
 test('wrapper: with the kill switch on, an OAuth CTO session is told the bridge is switched off and nothing reaches AWS', async () => {
   const w = world();
   const { server, tools } = fakeServer();
