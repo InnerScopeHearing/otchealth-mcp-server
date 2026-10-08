@@ -40,6 +40,7 @@ const FULL: Entry = {
   correlationId: 'b3f4b1c2-0d5e-4d3a-9a7f-1234567890ab',
   callerHash: CALLER_HASH,
   authKind: 'oauth',
+  authGrant: 'authorization_code',
   upstreamTool: 'aws___run_script',
   region: 'us-east-1',
   scriptSha256: SHA,
@@ -79,6 +80,7 @@ test('a complete entry becomes exactly the documented fields', () => {
     correlation_id: FULL.correlationId,
     caller_hash: CALLER_HASH,
     auth_kind: 'oauth',
+    auth_grant: 'authorization_code',
     outcome: 'ok',
     is_error: false,
     upstream_tool: 'aws___run_script',
@@ -107,6 +109,7 @@ test('optional fields that were not known are absent, not empty', () => {
     correlation_id: FULL.correlationId,
     caller_hash: CALLER_HASH,
     auth_kind: 'm365',
+    auth_grant: 'none',
     outcome: 'refused',
     is_error: true,
     error_code: 'aws_mcp_forbidden',
@@ -119,6 +122,7 @@ test('every free-text field is validated against a strict pattern, so it can nev
     correlationId: 'corr\nforged-line',
     callerHash: 'caller hash with spaces',
     authKind: 'Bearer abc',
+    authGrant: 'authorization_code; DROP TABLE tokens',
     upstreamTool: 'aws___run_script; rm -rf /',
     region: 'us east 1',
     scriptSha256: 'import boto3\nprint("the script itself")',
@@ -129,18 +133,20 @@ test('every free-text field is validated against a strict pattern, so it can nev
   assert.equal(fields.correlation_id, 'invalid');
   assert.equal(fields.caller_hash, 'unknown');
   assert.equal(fields.auth_kind, 'none');
+  assert.equal(fields.auth_grant, 'none');
   for (const absent of ['upstream_tool', 'region', 'script_sha256', 'error_code', 'role_session_name']) {
     assert.equal(absent in fields, false, absent);
   }
   const everything = JSON.stringify(fields);
-  for (const forbidden of ['forged-line', 'with spaces', 'Bearer', 'rm -rf', 'import boto3', 'SYNTHETIC-DETAIL']) {
+  for (const forbidden of ['forged-line', 'with spaces', 'Bearer', 'rm -rf', 'import boto3', 'SYNTHETIC-DETAIL', 'DROP TABLE']) {
     assert.equal(everything.includes(forbidden), false, forbidden);
   }
 });
 
-test('a missing auth kind is recorded as none, and a missing correlation id or caller hash is replaced', () => {
-  const fields = bridgeCallLogFields({ ...FULL, authKind: undefined, correlationId: '', callerHash: '' });
+test('a missing auth kind or grant is recorded as none, and a missing correlation id or caller hash is replaced', () => {
+  const fields = bridgeCallLogFields({ ...FULL, authKind: undefined, authGrant: undefined, correlationId: '', callerHash: '' });
   assert.equal(fields.auth_kind, 'none');
+  assert.equal(fields.auth_grant, 'none');
   assert.equal(fields.correlation_id, 'invalid');
   assert.equal(fields.caller_hash, 'unknown');
 });
@@ -169,12 +175,13 @@ test('fields that are not in the allowlist are never copied, even when a caller 
   const fields = bridgeCallLogFields(sneaky);
   assert.deepEqual(
     Object.keys(fields).sort(),
-    ['auth_kind', 'bridge_tool', 'caller_hash', 'correlation_id', 'is_error', 'latency_ms', 'outcome', 'region', 'response_bytes', 'role_session_name', 'script_sha256', 'type', 'upstream_tool'],
+    ['auth_grant', 'auth_kind', 'bridge_tool', 'caller_hash', 'correlation_id', 'is_error', 'latency_ms', 'outcome', 'region', 'response_bytes', 'role_session_name', 'script_sha256', 'type', 'upstream_tool'],
   );
 });
 
 test('errorCodeOf reads the code of a typed bridge error and never derives it from message text', () => {
   assert.equal(errorCodeOf(new AwsMcpRefusalError('aws_mcp_forbidden', 'x')), 'aws_mcp_forbidden');
+  assert.equal(errorCodeOf(new AwsMcpRefusalError('aws_mcp_grant_refused', 'x')), 'aws_mcp_grant_refused');
   assert.equal(errorCodeOf(new AwsMcpRefusalError('aws_mcp_disabled', 'x')), 'aws_mcp_disabled');
   assert.equal(errorCodeOf(new AwsMcpBridgeError('aws_mcp_timeout', 'x')), 'aws_mcp_timeout');
   assert.equal(errorCodeOf(new AwsReaderUnavailableError('assume_role_failed', 'AccessDenied')), 'aws_mcp_unavailable');
@@ -221,7 +228,7 @@ test('logBridgeCall never throws, even when the logger does', () => {
   }
 });
 
-const BASE = { bridgeTool: 'aws_mcp_tool_call' as const, correlationId: FULL.correlationId, callerHash: CALLER_HASH, authKind: 'oauth' };
+const BASE = { bridgeTool: 'aws_mcp_tool_call' as const, correlationId: FULL.correlationId, callerHash: CALLER_HASH, authKind: 'oauth', authGrant: 'authorization_code' };
 
 test('BridgeCallAudit success writes one info line with what was noted, the size, and the role session', () => {
   const cap = captureLogger();
@@ -244,6 +251,7 @@ test('BridgeCallAudit success writes one info line with what was noted, the size
     correlation_id: FULL.correlationId,
     caller_hash: CALLER_HASH,
     auth_kind: 'oauth',
+    auth_grant: 'authorization_code',
     outcome: 'ok',
     is_error: false,
     upstream_tool: 'aws___run_script',
@@ -301,4 +309,26 @@ test('BridgeCallAudit writes exactly one line however many times it is told the 
   assert.equal(cap.lines.length, 1);
   assert.equal(cap.lines[0].fields.outcome, 'refused');
   assert.equal(cap.lines[0].fields.error_code, 'aws_mcp_tool_blocked');
+});
+
+test('every OAuth grant is recorded by name, and a refused machine token leaves a warn line naming its grant and the refusal code', () => {
+  const cap = captureLogger();
+  try {
+    for (const authGrant of ['authorization_code', 'refresh_token', 'client_credentials']) {
+      new BridgeCallAudit({ ...BASE, authGrant }).success({ responseBytes: 5, isError: false });
+    }
+    new BridgeCallAudit({ ...BASE, authGrant: 'client_credentials' }).failure(
+      new AwsMcpRefusalError('aws_mcp_grant_refused', 'SYNTHETIC-MESSAGE-TEXT'),
+    );
+    new BridgeCallAudit({ ...BASE, authGrant: undefined }).failure(new AwsMcpRefusalError('aws_mcp_grant_refused', 'x'));
+  } finally {
+    cap.restore();
+  }
+  assert.deepEqual(cap.lines.map((l) => l.level), ['info', 'info', 'info', 'warn', 'warn']);
+  assert.deepEqual(cap.lines.map((l) => l.fields.auth_grant), ['authorization_code', 'refresh_token', 'client_credentials', 'client_credentials', 'none']);
+  assert.deepEqual(cap.lines.slice(3).map((l) => [l.fields.outcome, l.fields.error_code, l.fields.auth_kind]), [
+    ['refused', 'aws_mcp_grant_refused', 'oauth'],
+    ['refused', 'aws_mcp_grant_refused', 'oauth'],
+  ]);
+  assert.equal(JSON.stringify(cap.lines).includes('SYNTHETIC-MESSAGE-TEXT'), false);
 });
