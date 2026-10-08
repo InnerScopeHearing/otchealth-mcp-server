@@ -17,6 +17,26 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  */
 export type AuthKind = 'oauth' | 'descope' | 'connector' | 'copilot' | 'copilot-dev' | 'eval' | 'm365' | 'codex';
 
+/**
+ * Which OAuth grant issued a gateway access token. The token endpoint (server/oauth.ts) stamps it into
+ * the signed token as the `gty` claim, and auth/bearer.ts reads it back for an 'oauth' request.
+ *
+ *   authorization_code  an interactive sign-in (browser consent plus PKCE): the claude.ai connector flow
+ *   refresh_token       a refresh of an authorization_code session (only those sessions hold a refresh token)
+ *   client_credentials  a machine credential (client id plus secret) with no human sign-in
+ *
+ * A token minted before grant tracking existed carries no grant. A tool that must serve interactive
+ * sessions only (the AWS MCP bridge) accepts the first two and refuses a client_credentials token and
+ * a token that records no grant.
+ */
+export const OAUTH_GRANT_TYPES = ['authorization_code', 'refresh_token', 'client_credentials'] as const;
+export type OAuthGrantType = (typeof OAUTH_GRANT_TYPES)[number];
+
+/** True for one of the three grant names above (a claim read from a token is never trusted as typed). */
+export function isOAuthGrantType(value: unknown): value is OAuthGrantType {
+  return typeof value === 'string' && (OAUTH_GRANT_TYPES as readonly string[]).includes(value);
+}
+
 export interface RequestContext {
   callerHash: string;
   correlationId: string;
