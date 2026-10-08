@@ -33,7 +33,8 @@ const CREDS = {
   secretAccessKey: 'synthetic-loopback-secret-not-real',
   sessionToken: 'synthetic-loopback-session-token',
 };
-const CTO = { callerAgent: 'cto', correlationId: 'corr-loopback-0001' };
+// The only caller the bridge serves: the CTO lane over an OAuth session.
+const CTO = { callerAgent: 'cto', correlationId: 'corr-loopback-0001', callerHash: 'c0ffee'.repeat(10) + 'c0ff', authKind: 'oauth' as const };
 const AWS_ORIGIN = 'https://aws-mcp.us-east-1.api.aws';
 const AWS_HOST = 'aws-mcp.us-east-1.api.aws';
 
