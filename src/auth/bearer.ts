@@ -287,7 +287,7 @@ export async function validateBearer(
   // curated per-lane connector toolset, exactly as if it had elevated to that lane via OAuth.
   const connector_surface =
     Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_'))) || isCodexStatic;
-  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static, auth_kind: authKind };
+  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static, auth_kind: authKind, ...(authGrant ? { auth_grant: authGrant } : {}) };
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {
