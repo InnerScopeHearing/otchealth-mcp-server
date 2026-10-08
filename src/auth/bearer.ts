@@ -237,6 +237,7 @@ export async function validateBearer(
   // the Codex per-seat static tokens (see codexStaticAgentTokens above), presented as a REAL
   // Authorization header and flagged connector_surface. All rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
+  let authKind: AuthKind = 'oauth';
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
   let isM365Static = false;
