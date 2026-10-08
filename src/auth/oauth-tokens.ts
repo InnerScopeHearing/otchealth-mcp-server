@@ -30,6 +30,13 @@ export interface AccessClaims {
   scope: string;
   typ: 'access' | 'refresh';
   agent?: string;
+  /**
+   * The OAuth grant that issued this ACCESS token, stamped by the token endpoint (server/oauth.ts).
+   * It is part of the signed payload, so a client cannot change it. Absent on a token minted before
+   * grant tracking, and on refresh tokens. Read it with issuedGrantType() in server/oauth.ts, which
+   * accepts only the three known grant names.
+   */
+  gty?: OAuthGrantType;
   iat: number;
   exp: number;
   jti: string;
