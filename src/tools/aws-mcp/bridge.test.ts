@@ -1496,9 +1496,21 @@ function fakeServer(): { server: McpServer; tools: Map<string, CapturedTool> } {
 }
 
 /** Run a registered tool the way the HTTP route does: inside a request context that carries the lane and how the request authenticated. */
-function invoke(tool: CapturedTool, args: Record<string, unknown>, callerAgent: string, authKind: AuthKind | 'none' = 'oauth'): Promise<WrapperResponse> {
+function invoke(
+  tool: CapturedTool,
+  args: Record<string, unknown>,
+  callerAgent: string,
+  authKind: AuthKind | 'none' = 'oauth',
+  authGrant: OAuthGrantType | 'none' = 'authorization_code',
+): Promise<WrapperResponse> {
   return requestContext.run(
-    { callerHash: CALLER_HASH, correlationId: 'corr-wrapper-0001', callerAgent, ...(authKind === 'none' ? {} : { authKind }) },
+    {
+      callerHash: CALLER_HASH,
+      correlationId: 'corr-wrapper-0001',
+      callerAgent,
+      ...(authKind === 'none' ? {} : { authKind }),
+      ...(authGrant === 'none' ? {} : { authGrant }),
+    },
     () => tool.handler(args),
   );
 }
