@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import {
   createAuthCode,
   consumeAuthCode,
+  issueAccessToken,
+  issueRefreshToken,
   verifyPkceS256,
   signToken,
   verifyToken,
