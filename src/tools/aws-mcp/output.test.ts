@@ -78,8 +78,8 @@ test('redactCredentialShapes leaves ordinary infrastructure data alone', () => {
 test('jsonEscapedBytes counts escapes and multi-byte characters', () => {
   assert.equal(jsonEscapedBytes('abc'), 3);
   assert.equal(jsonEscapedBytes('a"b\n'), 6); // a \" b \n
-  assert.equal(jsonEscapedBytes('é'), 2); // two-byte UTF-8 character
-  assert.equal(jsonEscapedBytes('€'), 3); // three-byte UTF-8 character
+  assert.equal(jsonEscapedBytes(String.fromCharCode(0xe9)), 2); // two-byte UTF-8 character
+  assert.equal(jsonEscapedBytes(String.fromCharCode(0x20ac)), 3); // three-byte UTF-8 character
 });
 
 test('truncateToJsonBytes returns short text unchanged and never exceeds the budget once escaped', () => {
