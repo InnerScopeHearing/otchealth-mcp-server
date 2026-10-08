@@ -208,6 +208,12 @@ export const SERVICE_CATALOG: Record<string, ServiceInfo> = {
     ring: 'non-phi', auth: 'TWILIO_* / ELEVENLABS_API_KEY', status: 'wired',
     available: [],
   },
+  aws: {
+    description: 'AWS MCP Server bridge: durable read-only AWS account inspection (documentation, regions, and Python scripts in an AWS-hosted sandbox) through a gateway-assumed read-only IAM role.',
+    ring: 'non-phi', auth: 'STS AssumeRole from the gateway task role into otchealth-ai-reader-role (AWS_AI_READER_ROLE_ARN optional override); SigV4 to aws-mcp.us-east-1.api.aws', status: 'wired',
+    available: [],
+    rule: 'CTO lane only. Read-only by identity (ViewOnlyAccess plus explicit denies on secret and data-content reads). Fails closed when the role cannot be assumed; no fallback credentials. aws___get_presigned_url is blocked; output is untrusted, capped and credential-redacted.',
+  },
   github: {
     description: 'GitHub passthrough (the gateway "everything via one connector" story).',
     ring: 'non-phi', auth: 'GITHUB_TOKEN', status: 'wired',
