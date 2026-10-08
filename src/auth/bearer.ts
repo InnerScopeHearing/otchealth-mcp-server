@@ -13,6 +13,12 @@ export interface AuthContext {
   caller_hash: string;
   raw_token: string;
   caller_agent: string;
+  /**
+   * How this request authenticated (see AuthKind in server/request-context.ts). Optional so an
+   * in-process AuthContext built without a credential simply has none; a consumer that needs an
+   * interactive OAuth session, such as the AWS MCP bridge, treats a missing value as NOT oauth.
+   */
+  auth_kind?: AuthKind;
   /** True when the token was issued to a Dynamic-Client-Registration (Claude Chat) connector client. */
   connector_surface: boolean;
   /**
