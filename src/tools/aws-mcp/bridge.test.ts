@@ -1185,7 +1185,7 @@ test('AUDIT: a refused static credential is logged at warn level with its kind, 
   const w = world();
   for (const authKind of NON_OAUTH_KINDS) {
     const { lines, error } = await captureLogs(() =>
-      bridge.callAwsMcpTool({ tool_name: 'aws___run_script', arguments: { script: 'x' } }, { ...CTO, authKind }, w.deps),
+      bridge.callAwsMcpTool({ tool_name: 'aws___run_script', arguments: { script: 'x' } }, { ...CTO, authKind, authGrant: undefined }, w.deps),
     );
     assert.ok(error instanceof AwsMcpRefusalError);
     const audit = auditLines(lines);
