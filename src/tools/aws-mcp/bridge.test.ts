@@ -1206,6 +1206,31 @@ test('AUDIT: a refused static credential is logged at warn level with its kind, 
   assert.equal(w.credentialRequests(), 0);
 });
 
+test('AUDIT: a refused machine token is logged at warn level with its grant and its own refusal code, and a missing grant is logged as none', async () => {
+  const w = world();
+  for (const [authGrant, expected] of [['client_credentials', 'client_credentials'], [undefined, 'none']] as const) {
+    const { lines, error } = await captureLogs(() =>
+      bridge.callAwsMcpTool({ tool_name: 'aws___run_script', arguments: { script: 'x' } }, { ...CTO, authGrant }, w.deps),
+    );
+    assert.ok(error instanceof AwsMcpRefusalError);
+    const audit = auditLines(lines);
+    assert.equal(audit.length, 1, String(authGrant));
+    assert.equal(audit[0].level, 'warn');
+    assert.deepEqual(auditFields(audit[0]), {
+      type: 'aws_mcp_bridge_call',
+      bridge_tool: 'aws_mcp_tool_call',
+      correlation_id: CTO.correlationId,
+      caller_hash: CALLER_HASH,
+      auth_kind: 'oauth',
+      auth_grant: expected,
+      outcome: 'refused',
+      is_error: true,
+      error_code: 'aws_mcp_grant_refused',
+    });
+  }
+  assert.equal(w.credentialRequests(), 0);
+});
+
 test('AUDIT: refusals by lane, kill switch, blocked tool, allowlist and input validation are each logged with their code', async () => {
   const w = world();
   const run = async (input: unknown, ctx: AwsMcpToolContext, expectedCode: string, expectedUpstream?: string, switchValue?: string) => {
