@@ -51,6 +51,8 @@ export interface RequestContext {
   m365StaticAuth?: boolean;
   /** How the request authenticated (see AuthKind). Unset when the code path did not record it. */
   authKind?: AuthKind;
+  /** For an 'oauth' request, the grant that issued its access token (see OAuthGrantType). Unset when the token records none. */
+  authGrant?: OAuthGrantType;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
