@@ -970,6 +970,8 @@ import { registerInboxRead } from './agentstate/inbox-read.js';
 import { registerXeroTools } from './xero/tools.js';
 import { registerHeyGenTools } from './heygen/index.js';
 import { registerHyperagentTools } from './hyperagent/tools.js';
+// CTO-lane bridge to the AWS MCP Server: durable read-only AWS access through a gateway-assumed role.
+import { registerAwsMcpTools } from './aws-mcp/tools.js';
 import { registerMailArchiveTools } from './mail/tools.js';
 // Connector setup-code role elevation (URL-only ChatGPT/Claude connect + owner-code elevation at
 // consent -- see server/oauth-consent.ts + auth/setup-codes.ts).
