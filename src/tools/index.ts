@@ -1956,6 +1956,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // Hyperagent broker: one delegated account credential, ring-gated per lane (hyperagent/ring.ts).
   registerHyperagentTools(server, callerHash);
+  // AWS MCP bridge (CTO lane only): aws_mcp_tool_list + aws_mcp_tool_call. Read-only by construction:
+  // the gateway assumes the dedicated read-only AWS role and fails closed when it cannot.
+  registerAwsMcpTools(server, callerHash);
   // AgentCore Browser (legacy Wefunder bridge retained during broker migration).
   registerBrowserAgentcoreTools(server, callerHash);
   // General Browser broker: per-agent capability enrollments, beginning with Wefunder Campaign Director.
