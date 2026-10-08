@@ -65,8 +65,14 @@ const BASE = {
 const T0 = Date.parse('2026-10-08T00:00:00Z');
 const HOUR = 3_600_000;
 const CALLER_HASH = 'c0ffee'.repeat(10) + 'c0ff';
-/** The one kind of caller the bridge serves: the CTO lane over an OAuth session. */
-const CTO: AwsMcpToolContext = { callerAgent: 'cto', correlationId: 'corr-1234-abcd-5678-efgh', callerHash: CALLER_HASH, authKind: 'oauth' };
+/** The one kind of caller the bridge serves: the CTO lane over an OAuth session from an interactive sign-in. */
+const CTO: AwsMcpToolContext = {
+  callerAgent: 'cto',
+  correlationId: 'corr-1234-abcd-5678-efgh',
+  callerHash: CALLER_HASH,
+  authKind: 'oauth',
+  authGrant: 'authorization_code',
+};
 /** Every authentication kind the gateway can record that is NOT an OAuth session. */
 const NON_OAUTH_KINDS = ['connector', 'm365', 'codex', 'copilot', 'copilot-dev', 'eval', 'descope'] as const;
 const readerKey = (n: number): string => 'ASIA' + 'SYNTHETICRD' + String(n).padStart(5, '0');
