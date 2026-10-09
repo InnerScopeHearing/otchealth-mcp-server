@@ -1640,6 +1640,30 @@ test('wrapper: an OAuth CTO session from the authorization_code grant, or from t
   }
 });
 
+test('wrapper: the audit line names the client id of the OAuth session that called, and none for a refused static credential', async () => {
+  const w = world({ mcp: { onCall: () => ({ content: [{ type: 'text', text: 'us-east-1' }] }) } });
+  const { server, tools } = fakeServer();
+  bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
+  const { lines } = await captureLogs(async () => {
+    await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___list_regions' }, 'cto', 'oauth', 'refresh_token', 'occ_other');
+    await invoke(tools.get('aws_mcp_tool_list')!, {}, 'cto', 'oauth', 'authorization_code', 'dcr_abc.def');
+    await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___list_regions' }, 'cto', 'connector', 'none', 'none');
+    await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___list_regions' }, 'cto', 'oauth', 'client_credentials', 'machine_client');
+    await invoke(tools.get('aws_mcp_tool_call')!, { tool_name: 'aws___list_regions' }, 'cto', 'oauth', 'authorization_code', 'not a client id');
+  });
+  assert.deepEqual(
+    auditLines(lines).map((l) => [l.fields.bridge_tool, l.fields.auth_kind, l.fields.auth_grant, l.fields.auth_subject, l.fields.outcome]),
+    [
+      ['aws_mcp_tool_call', 'oauth', 'refresh_token', 'occ_other', 'ok'],
+      ['aws_mcp_tool_list', 'oauth', 'authorization_code', 'dcr_abc.def', 'ok'],
+      ['aws_mcp_tool_call', 'connector', 'none', 'none', 'refused'],
+      ['aws_mcp_tool_call', 'oauth', 'client_credentials', 'machine_client', 'refused'],
+      ['aws_mcp_tool_call', 'oauth', 'authorization_code', 'invalid', 'ok'],
+    ],
+  );
+  assert.equal(JSON.stringify(lines).includes('not a client id'), false, 'a malformed client id is never copied into a line');
+});
+
 test('wrapper: with the kill switch on, an OAuth CTO session is told the bridge is switched off and nothing reaches AWS', async () => {
   const w = world();
   const { server, tools } = fakeServer();
