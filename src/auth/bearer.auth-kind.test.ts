@@ -1,9 +1,11 @@
 /**
  * validateBearer records HOW a request authenticated (auth_kind), and for an OAuth token which grant
- * issued it (auth_grant, the signed `gty` claim). The AWS MCP bridge uses both to serve interactive
- * OAuth CTO sessions only, so each credential type must be classified correctly here: a static token
- * that resolves to the CTO lane must never look like an OAuth session, and a client_credentials token
- * must never look like an interactive sign-in.
+ * issued it (auth_grant, the signed `gty` claim) and the client id it was issued to (auth_subject, the
+ * token's sub). The AWS MCP bridge uses them to serve OAuth-issued CTO sessions only, so each credential
+ * type must be classified correctly here: a static token that resolves to the CTO lane must never look
+ * like an OAuth session, and a client_credentials token must never look like an authorization_code one.
+ * The grant shows how a token was issued, not that a person is present. The kind is never defaulted to
+ * 'oauth': only a gateway-issued access token records it, and a path that records none leaves it undefined.
  *
  * Every credential below is synthetic (at least 32 characters, the minimum for a static token).
  */
@@ -71,6 +73,7 @@ test('a gateway-issued OAuth access token is recorded as oauth, whatever its cli
     assert.equal(auth.connector_surface, connectorSurface);
     assert.equal(auth.m365_static_auth, false);
     assert.equal(auth.auth_grant, undefined, 'a token issued without a grant records none');
+    assert.equal(auth.auth_subject, clientId, 'the client id the token was issued to is recorded');
   }
 });
 
@@ -82,6 +85,7 @@ test('the OAuth grant that issued an access token is recorded as auth_grant, wha
       assert.ok(auth, `${clientId} ${grant}`);
       assert.equal(auth.auth_kind, 'oauth');
       assert.equal(auth.auth_grant, grant, `${clientId} ${grant}`);
+      assert.equal(auth.auth_subject, clientId, `${clientId} ${grant}`);
       assert.equal(auth.caller_agent, 'cto');
     }
   }
@@ -94,6 +98,7 @@ test('a token that records no grant has none, and an unrecognized grant claim co
   assert.ok(legacyAuth);
   assert.equal(legacyAuth.auth_kind, 'oauth');
   assert.equal('auth_grant' in legacyAuth, false, 'the field is absent, not set to a placeholder');
+  assert.equal(legacyAuth.auth_subject, 'dcr_fixture', 'the client id is recorded even when the grant is not');
 
   // signToken is the real signer, so each of these carries a VALID signature and a gty the gateway never writes.
   for (const gty of ['password', 'implicit', 'AUTHORIZATION_CODE', 'authorization_code ', '', 42, null, true, { grant: 'authorization_code' }, ['authorization_code']]) {
@@ -106,6 +111,45 @@ test('a token that records no grant has none, and an unrecognized grant claim co
     assert.equal(auth.auth_kind, 'oauth');
     assert.equal(auth.auth_grant, undefined, `gty ${JSON.stringify(gty)} must not count as a grant`);
   }
+});
+
+test('a token that names no client has no auth_subject, and its kind is still oauth', async () => {
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  for (const sub of ['', undefined]) {
+    const token = signToken(
+      { iss: 'https://fixture.invalid', aud: 'otchealth-mcp', sub, scope: 'mcp', typ: 'access', agent: 'cto', exp, gty: 'authorization_code' } as never,
+      SIGNING_SECRET,
+    );
+    const auth = await validateBearer(bearer(token), ready);
+    assert.ok(auth, String(sub));
+    assert.equal(auth.auth_kind, 'oauth');
+    assert.equal(auth.auth_grant, 'authorization_code');
+    assert.equal('auth_subject' in auth, false, `sub ${JSON.stringify(sub)} records no subject`);
+  }
+});
+
+test('the kind is recorded only where a credential proves it: every accepted credential has one, and a failed match has no context at all', async () => {
+  const accepted: Array<[string, string]> = [
+    ['oauth', issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, 'authorization_code')],
+    ['connector', TOKENS.connector],
+    ['copilot', TOKENS.copilot],
+    ['eval', TOKENS.eval],
+    ['copilot-dev', TOKENS.copilotDev],
+    ['m365', TOKENS.m365Cto],
+    ['codex', TOKENS.codexCto],
+  ];
+  for (const [kind, token] of accepted) {
+    const auth = await validateBearer(bearer(token), ready);
+    assert.ok(auth, kind);
+    assert.equal(auth.auth_kind, kind, `an accepted ${kind} credential records its kind`);
+  }
+  // A credential that proves nothing never reaches a context, so there is no kind to default.
+  for (const token of [pad('unknown', 'u'), 'x'.repeat(64), 'a.b.c', '']) {
+    assert.equal(await validateBearer(bearer(token), ready), null, token.slice(0, 20));
+  }
+  // A hand-built context that records no kind says so: the field is absent, not a default.
+  const handBuilt: import('./bearer.js').AuthContext = { caller_hash: 'h', raw_token: 't', caller_agent: 'cto', connector_surface: false, m365_static_auth: false };
+  assert.equal(handBuilt.auth_kind, undefined);
 });
 
 test('the grant is part of the signed payload: editing it breaks the signature, so a client cannot upgrade a machine token', async () => {
@@ -151,6 +195,7 @@ test('every static credential is recorded with its own kind and never as oauth',
     assert.equal(auth.m365_static_auth, c.m365);
     assert.equal(auth.connector_surface, c.connectorSurface);
     assert.equal(auth.auth_grant, undefined, `${c.kind} is not an OAuth token, so it has no grant`);
+    assert.equal('auth_subject' in auth, false, `${c.kind} is not an OAuth token, so it has no client id`);
   }
 });
 
@@ -218,6 +263,7 @@ test('a verified Descope session JWT is recorded as descope, and a lane outside 
     assert.equal(auth.caller_agent, 'cto');
     assert.equal(auth.m365_static_auth, false);
     assert.equal(auth.auth_grant, undefined, 'a Descope session is not a gateway OAuth token, so it has no grant');
+    assert.equal('auth_subject' in auth, false, 'the Descope user subject is a person, not a client id, and is never recorded as one');
 
     assert.equal(await validateBearer(bearer(descopeJwt({ ...claims, lane: 'cfo' })), ready), null, 'a lane outside DESCOPE_PILOT_LANES');
     assert.equal(await validateBearer(bearer(descopeJwt({ ...claims, lane: 'cto', exp: exp - 7200 })), ready), null, 'an expired token');
