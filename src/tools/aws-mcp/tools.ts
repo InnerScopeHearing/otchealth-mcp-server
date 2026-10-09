@@ -41,7 +41,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { currentAuthGrant, currentAuthKind, type AuthKind, type OAuthGrantType } from '../../server/request-context.js';
+import { currentAuthGrant, currentAuthKind, currentAuthSubject, type AuthKind, type OAuthGrantType } from '../../server/request-context.js';
 import { registerTool, type CallerHashProvider, type ToolContext } from '../registry.js';
 import { AwsMcpRefusalError, assertBridgeAccess } from './access.js';
 import { BridgeCallAudit, sha256Hex } from './audit.js';
