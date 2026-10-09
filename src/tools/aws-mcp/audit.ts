@@ -3,10 +3,12 @@
  * gateway's redaction rules).
  *
  * WHAT THE LINE HOLDS: the gateway tool, the correlation id, the hashed caller, how the caller
- * authenticated (the credential kind and, for OAuth, the grant that issued the token), the upstream tool and region, the SHA-256 of a run_script `script` argument, the
+ * authenticated (the credential kind and, for OAuth, the grant that issued the token and the client id
+ * it was issued to), the upstream tool and region, the SHA-256 of a run_script `script` argument, the
  * size of the upstream response, whether the call ended in error and with which error code, and the
  * RoleSessionName of the reader role session used (the join key to CloudTrail). Together these answer
  * "who ran what against the AWS account, and what came back" without recording any of the content.
+ * The client id is the token's subject, a public identifier and not a secret.
  *
  * WHAT IT NEVER HOLDS: credentials, signatures, tokens, argument values or script text. The line is
  * built from an allowlist of fields, and every value is either an enumerated constant, a number, a
@@ -36,6 +38,8 @@ export interface BridgeCallAuditEntry {
   authKind: string | undefined;
   /** For an OAuth caller, the grant that issued its token (authorization_code, refresh_token, client_credentials). */
   authGrant?: string | undefined;
+  /** For an OAuth caller, the client id the token was issued to (the token's subject). A public identifier, not a secret. */
+  authSubject?: string | undefined;
   upstreamTool?: string;
   region?: string;
   /** SHA-256 (hex) of an aws___run_script `script` argument. The script text itself is never logged. */
@@ -53,6 +57,8 @@ export interface BridgeCallAuditEntry {
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const KIND_PATTERN = /^[a-z0-9-]{1,16}$/;
 const GRANT_PATTERN = /^[a-z_]{1,32}$/;
+/** A client id: a configured name, or a stateless DCR id (dcr_ plus two base64url parts). Never free text. */
+const SUBJECT_PATTERN = /^[A-Za-z0-9_.:@-]{1,512}$/;
 const UPSTREAM_TOOL_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 const REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -61,6 +67,12 @@ const SESSION_NAME_PATTERN = /^[A-Za-z0-9+=,.@_-]{1,64}$/;
 
 function matching(value: string | undefined, pattern: RegExp): string | undefined {
   return typeof value === 'string' && pattern.test(value) ? value : undefined;
+}
+
+/** The audit value for a token subject: none when the caller has no OAuth client, invalid when it does not match the pattern. */
+function subjectField(value: string | undefined): string {
+  if (value === undefined || value === '') return 'none';
+  return matching(value, SUBJECT_PATTERN) ?? 'invalid';
 }
 
 /** SHA-256 of a string as lowercase hex. */
@@ -90,6 +102,7 @@ export function bridgeCallLogFields(entry: BridgeCallAuditEntry): Record<string,
     caller_hash: matching(entry.callerHash, ID_PATTERN) ?? 'unknown',
     auth_kind: matching(entry.authKind, KIND_PATTERN) ?? 'none',
     auth_grant: matching(entry.authGrant, GRANT_PATTERN) ?? 'none',
+    auth_subject: subjectField(entry.authSubject),
     outcome: entry.outcome,
     is_error: entry.isError === true,
   };
@@ -126,6 +139,7 @@ export interface BridgeCallAuditBase {
   callerHash: string;
   authKind: string | undefined;
   authGrant?: string | undefined;
+  authSubject?: string | undefined;
 }
 
 /** Collects what is known about one call and writes exactly one audit line when it ends. */
