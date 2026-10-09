@@ -291,7 +291,7 @@ interface Session {
 function sessionFrom(clientId: string, response: { statusCode: number; payload: string; json: () => unknown }): Session {
   assert.equal(response.statusCode, 200, response.payload.slice(0, 200));
   const body = response.json() as { access_token: string; refresh_token: string };
-  assert.ok(body.access_token && body.refresh_token, 'an interactive sign-in returns an access token and a refresh token');
+  assert.ok(body.access_token && body.refresh_token, 'an OAuth sign-in returns an access token and a refresh token');
   return { clientId, access: body.access_token, refresh: body.refresh_token };
 }
 
