@@ -146,9 +146,13 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli() -> int:
     try:
-        raise SystemExit(main())
+        return main()
     except CheckFailure as failure:
         print(f"::error::Deep-health verification failed: {failure}", file=sys.stderr)
-        raise SystemExit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
