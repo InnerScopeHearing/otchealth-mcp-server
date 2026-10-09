@@ -614,7 +614,9 @@ test('KILL SWITCH: it fails closed, so only a blank, false, 0, no or off value l
       assert.equal(result.is_error, false, `value ${JSON.stringify(off)} must leave the bridge on`);
     });
   }
-  // Flipped while the process runs: no restart, no cached decision.
+  // The environment is read on every call, with no cached decision. A deployed task's environment does not
+  // change while it runs, so the operator sets the value and restarts the task; this changes process.env
+  // between calls to stand in for that restart.
   const w = world();
   await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
   const before = w.mcp.requests.length;
