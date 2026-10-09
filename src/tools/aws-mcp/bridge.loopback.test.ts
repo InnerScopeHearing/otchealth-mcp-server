@@ -40,6 +40,7 @@ const CTO = {
   callerHash: 'c0ffee'.repeat(10) + 'c0ff',
   authKind: 'oauth' as const,
   authGrant: 'authorization_code' as const,
+  authSubject: 'occ_fixture',
 };
 const AWS_ORIGIN = 'https://aws-mcp.us-east-1.api.aws';
 const AWS_HOST = 'aws-mcp.us-east-1.api.aws';
