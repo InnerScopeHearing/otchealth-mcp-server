@@ -1,16 +1,17 @@
 /**
  * The AWS bridge over the REAL MCP route (src/server/mcp.ts) and the real bearer authentication.
  *
- * The unit tests set the authentication kind and grant by hand. This file proves the plumbing that
- * produces them: validateBearer records how the request authenticated (and which OAuth grant issued the
- * token), mcp.ts puts both into the request context, and the bridge handler refuses anything but an
- * interactive OAuth session on the CTO lane.
+ * The unit tests set the authentication kind, grant and client id by hand. This file proves the plumbing
+ * that produces them: validateBearer records how the request authenticated (which OAuth grant issued the
+ * token, and the client id it was issued to), mcp.ts puts them into the request context, and the bridge
+ * handler refuses anything but an OAuth-issued session on the CTO lane. The grant shows how the token was
+ * issued, not that a person is present.
  *
  * AWS_MCP_BRIDGE_DISABLED is set for the whole file, so no request can reach STS or the AWS MCP Server
- * whatever the gate decides. The refusal codes tell the cases apart: an interactive OAuth CTO session
- * passes the gate and is stopped by the kill switch (aws_mcp_disabled); a static credential is stopped
- * by the gate itself (aws_mcp_forbidden) and a machine token by the grant check (aws_mcp_grant_refused),
- * both before the kill switch is even consulted. bridge.route.oauth.test.ts runs the same route with the
+ * whatever the gate decides. The refusal codes tell the cases apart: an OAuth-issued CTO session passes
+ * the gate and is stopped by the kill switch (aws_mcp_disabled); a static credential is stopped by the
+ * gate itself (aws_mcp_forbidden) and a machine token by the grant check (aws_mcp_grant_refused), both
+ * before the kill switch is even consulted. bridge.route.oauth.test.ts runs the same route with the
  * switch off, against fake STS and AWS MCP servers, to prove an accepted session end to end.
  *
  * The server listens on 127.0.0.1 only. Every credential is synthetic.
@@ -135,17 +136,17 @@ const HOUR_SECONDS = 3600;
 const mint = (clientId: string, agent: string, grant?: 'authorization_code' | 'refresh_token' | 'client_credentials'): string =>
   issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', agent, HOUR_SECONDS, grant);
 
-test('an interactive OAuth CTO session (the claude.ai connector path) passes the access gate and is stopped only by the kill switch', async () => {
+test('an OAuth-issued CTO session (the claude.ai connector path) passes the access gate and is stopped only by the kill switch', async () => {
   const token = mint('dcr_fixture', 'cto', 'authorization_code');
   for (const tool of BOTH) {
     const outcome = await callBridge(tool, { bearer: token });
     assert.equal(outcome.isError, true, tool);
-    assert.match(outcome.text, /aws_mcp_disabled: the AWS bridge is switched off by the operator/, `${tool}: ${outcome.text.slice(0, 200)}`);
+    assert.match(outcome.text, /aws_mcp_disabled: the AWS bridge is switched off \(AWS_MCP_BRIDGE_DISABLED is set to something other than blank, false, 0, no or off\)/, `${tool}: ${outcome.text.slice(0, 200)}`);
     assert.doesNotMatch(outcome.text, /aws_mcp_forbidden|aws_mcp_grant_refused/);
   }
 });
 
-test('a token from the refresh_token grant, or from a confidential connector client, passes the gate like any other interactive session', async () => {
+test('a token from the refresh_token grant, or from a confidential connector client, passes the gate like any other OAuth-issued session', async () => {
   for (const [clientId, grant] of [
     ['dcr_fixture', 'refresh_token'],
     ['occ_fixture', 'authorization_code'],
@@ -165,7 +166,7 @@ test('an OAuth CTO token from the client_credentials grant is refused as a machi
       assert.equal(outcome.isError, true, `${tool} ${clientId}`);
       assert.match(
         outcome.text,
-        /aws_mcp_grant_refused: the AWS bridge serves interactive OAuth sessions only .* issued by the client_credentials grant, which is a machine credential/,
+        /aws_mcp_grant_refused: the AWS bridge serves OAuth-issued sessions only .* issued by the client_credentials grant, which is a machine credential/,
         `${tool} ${clientId}: ${outcome.text.slice(0, 240)}`,
       );
       assert.doesNotMatch(outcome.text, /aws_mcp_disabled|aws_mcp_forbidden/, 'refused by the grant check, before the kill switch');
@@ -214,7 +215,7 @@ test('the Codex per-seat token for the CTO lane is refused as a codex credential
   }
 });
 
-test('an interactive OAuth session on any other lane never reaches the bridge', async () => {
+test('an OAuth-issued session on any other lane never reaches the bridge', async () => {
   const token = mint('synthetic-per-agent-client', 'cfo', 'authorization_code');
   for (const tool of BOTH) {
     const args = tool === 'aws_mcp_tool_call' ? { tool_name: 'aws___list_regions' } : {};
@@ -224,6 +225,24 @@ test('an interactive OAuth session on any other lane never reaches the bridge', 
     assert.equal(outcome.isError, true, tool);
     assert.match(outcome.raw, /forbidden_role/);
     assert.doesNotMatch(outcome.text, /aws_mcp_disabled/);
+  }
+});
+
+test('the kill switch fails closed over the real route: a typo in its value still stops an accepted session, and only blank, false, 0, no or off would leave it on', async () => {
+  const token = mint('occ_fixture', 'cto', 'authorization_code');
+  const previous = process.env.AWS_MCP_BRIDGE_DISABLED;
+  try {
+    for (const value of ['enabled', 'ture', 'y', 'garbage', 'TRUE']) {
+      process.env.AWS_MCP_BRIDGE_DISABLED = value;
+      for (const tool of BOTH) {
+        const outcome = await callBridge(tool, { bearer: token });
+        assert.equal(outcome.isError, true, `${tool} with the switch at ${JSON.stringify(value)}`);
+        assert.match(outcome.text, /aws_mcp_disabled/, `${tool} with the switch at ${JSON.stringify(value)}: ${outcome.text.slice(0, 200)}`);
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.AWS_MCP_BRIDGE_DISABLED;
+    else process.env.AWS_MCP_BRIDGE_DISABLED = previous;
   }
 });
 
