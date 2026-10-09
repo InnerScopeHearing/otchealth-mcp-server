@@ -3,7 +3,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked, isStaticTokenAuthReady } from './revocation-store.js';
-import { isValidIssuedAccessToken, issuedAgent, issuedClientId, baseUrlOf } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, baseUrlOf } from '../server/oauth.js';
+import type { AuthKind, OAuthGrantType } from '../server/request-context.js';
 import { agentFromDescopeToken } from './descope.js';
 
 const env = loadEnv();
@@ -12,6 +13,24 @@ export interface AuthContext {
   caller_hash: string;
   raw_token: string;
   caller_agent: string;
+  /**
+   * How this request authenticated (see AuthKind in server/request-context.ts). Left undefined unless the
+   * credential that matched proves a kind (it is never defaulted to 'oauth'), so an in-process AuthContext
+   * built without a credential, and any path that forgets to record one, has none. A consumer that serves
+   * OAuth-issued sessions only, such as the AWS MCP bridge, treats a missing value as NOT oauth.
+   */
+  auth_kind?: AuthKind;
+  /**
+   * For an 'oauth' request, the grant that issued the access token (the signed `gty` claim, see
+   * issuedGrantType in server/oauth.ts). Absent for a token minted before grant tracking and for
+   * every non-oauth kind. A consumer that serves only the accepted grants treats absent as NOT accepted.
+   */
+  auth_grant?: OAuthGrantType;
+  /**
+   * For an 'oauth' request, the client id the access token was issued to (its sub claim, see
+   * issuedClientId in server/oauth.ts). A public identifier, not a secret. Absent for every non-oauth kind.
+   */
+  auth_subject?: string;
   /** True when the token was issued to a Dynamic-Client-Registration (Claude Chat) connector client. */
   connector_surface: boolean;
   /**
@@ -230,6 +249,10 @@ export async function validateBearer(
   // the Codex per-seat static tokens (see codexStaticAgentTokens above), presented as a REAL
   // Authorization header and flagged connector_surface. All rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
+  // The kind is recorded only where a credential proves it: 'oauth' for a valid issued access token, and
+  // below for a Descope session or the static credential that matched. It is never defaulted to 'oauth',
+  // so a path that records no kind leaves it undefined and the AWS MCP bridge refuses the request.
+  let authKind: AuthKind | undefined = issued ? 'oauth' : undefined;
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
   let isM365Static = false;
@@ -241,10 +264,13 @@ export async function validateBearer(
     if (token.split('.').length === 3) {
       descopeAgent = await agentFromDescopeToken(token);
     }
-    if (!descopeAgent) {
+    if (descopeAgent) {
+      authKind = 'descope';
+    } else {
       const match = resolveUniqueStaticCredential(token, staticCredentialCandidates());
       if (!match) return null;
       staticAgent = match.agent;
+      authKind = match.kind;
       isM365Static = match.kind === 'm365';
       isCodexStatic = match.kind === 'codex';
     }
@@ -260,6 +286,8 @@ export async function validateBearer(
   // Every external authentication path must resolve a concrete lane before requestContext exists.
   // An empty identity is not the same thing as a caller-less direct internal invocation.
   if (typeof caller_agent !== 'string' || caller_agent.trim().length === 0) return null;
+  // How an issued token was minted (null when it records no grant, or is not an issued token).
+  const authGrant = issued ? issuedGrantType(token) : null;
   const clientId = issued ? issuedClientId(token) : null;
   // Connector clients: DCR public clients (dcr_) OR manually-registered confidential connector clients
   // (occ_ = OTCHealth Connector Client) entered in Claude's Advanced settings to bypass the DCR tool-delivery
@@ -268,7 +296,7 @@ export async function validateBearer(
   // curated per-lane connector toolset, exactly as if it had elevated to that lane via OAuth.
   const connector_surface =
     Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_'))) || isCodexStatic;
-  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static };
+  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static, ...(authKind ? { auth_kind: authKind } : {}), ...(authGrant ? { auth_grant: authGrant } : {}), ...(clientId ? { auth_subject: clientId } : {}) };
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {

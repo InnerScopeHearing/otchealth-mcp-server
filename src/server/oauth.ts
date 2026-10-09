@@ -47,6 +47,7 @@ import {
   type OAuthConsentDeps,
 } from './oauth-consent.js';
 import { EXEC_RING } from '../tools/kb/search-privileged.js';
+import { isOAuthGrantType, type OAuthGrantType } from './request-context.js';
 
 const env = loadEnv();
 
@@ -518,7 +519,8 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       reply.header('Cache-Control', 'no-store');
       logger.info({ type: 'oauth_client_credentials', agent: rc.agent }, 'issued client_credentials access token');
       return reply.send({
-        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS),
+        // gty records the grant (see issuedGrantType below): a machine credential, with no code exchange and no refresh token.
+        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS, 'client_credentials'),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
         scope: 'mcp',
@@ -557,7 +559,9 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         // Same 24h TTL as client_credentials (OAUTH_CC_TTL_SECONDS). The 2026-07-16 TTL fix only
         // covered the CC grant; Chat/Cowork connectors (authorization_code + refresh) kept the old
         // hardcoded 1h and dropped mid-session — the recurring "brain went offline" experience.
-        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS),
+        // gty: a refresh token is only ever issued alongside an authorization_code access token (the
+        // client_credentials grant returns no refresh token), so this session descends from a code exchange.
+        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'refresh_token'),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
         refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS),
@@ -614,7 +618,8 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // 24h, matching the CC grant (see the refresh_token grant note above).
-        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS),
+        // gty: a code exchange with PKCE. A public client was shown the consent screen; a confidential client's code was issued without one.
+        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'authorization_code'),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
         refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS),
@@ -692,4 +697,18 @@ export function issuedAgent(token: string): string | null {
   const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
   if (!claims || claims.typ !== 'access') return null;
   return claims.agent || '';
+}
+
+/**
+ * The OAuth grant that issued a valid access token: the signed `gty` claim stamped at the token endpoint
+ * (authorization_code, refresh_token or client_credentials). Null when the token is not a valid access
+ * token, records no grant (minted before grant tracking), or carries a value that is not one of the three
+ * grant names. Callers that serve only the accepted grants must treat null as NOT accepted. The grant
+ * records how the token was issued; it is not proof that a person is present.
+ */
+export function issuedGrantType(token: string): OAuthGrantType | null {
+  if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
+  const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
+  if (!claims || claims.typ !== 'access') return null;
+  return isOAuthGrantType(claims.gty) ? claims.gty : null;
 }

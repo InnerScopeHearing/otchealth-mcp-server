@@ -89,6 +89,9 @@ import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
+// AWS MCP bridge: durable read-only AWS access for the CTO lane. Visibility, the aws_mcp_* governance rule and
+// the in-handler lane check (tools/aws-mcp/tools.ts) are three independent CTO-only layers.
+const CTO_ONLY_AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 const PUBLIC_KB_COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
 
@@ -526,6 +529,13 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // This execution list returns bounded aggregate counts only. Keep its connector binding on the
   // CTO lane; the read handler also enforces the caller identity before making an upstream request.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add(CTO_ONLY_N8N_EXECUTION_LIST_TOOL);
+  // The AWS MCP bridge is discoverable only on the CTO connector. A shared CONNECTOR_TOOLSET override never
+  // widens it to another lane: every non-CTO lane has the names removed, and the handlers refuse them anyway.
+  if (lane === 'cto') {
+    if (!env.CONNECTOR_TOOLSET) for (const name of CTO_ONLY_AWS_MCP_TOOLS) tools.add(name);
+  } else {
+    for (const name of CTO_ONLY_AWS_MCP_TOOLS) tools.delete(name);
+  }
   // Provisioning is deliberately discoverable only to the CTO Chat lane. Its handler and
   // write_orchestrated governance independently re-check that same identity at execution time.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('browser_cloud_profile_provision_public_trial');

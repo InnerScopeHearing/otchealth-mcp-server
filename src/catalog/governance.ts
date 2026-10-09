@@ -138,6 +138,10 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'github_merge_pull_request', requiredRole: ['cto', 'developer'], reason: 'Merging PRs: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   { pattern: 'github_graphrag_observation_receipt_get', requiredRole: 'cto', reason: 'The fixed GraphRAG observation receipt is a CTO-only provenance check and never exposes source content.' },
   { pattern: 'github_workflow_run_failed_log_excerpt', requiredRole: 'cto', reason: 'CI job logs can echo environment content; the bounded, redacted failed-step excerpt is a CTO-only diagnostic read.' },
+  // AWS MCP bridge: durable read-only AWS access for the CTO lane (gateway-assumed read-only role, SigV4 to
+  // the AWS MCP Server). The whole family is CTO-only, matched by prefix so any future aws_mcp_* tool
+  // inherits the gate; the in-handler lane check (tools/aws-mcp/tools.ts) repeats it.
+  { pattern: 'aws_mcp_*', requiredRole: 'cto', reason: 'AWS account inspection through the gateway-assumed read-only role is CTO-only infrastructure access.' },
   // ===== FULL READ+WRITE WAVE: write-tool role gates (CTO = the operator connector identity) =====
   // GitHub writes (single-initiator, mirrors existing push/PR/merge rules) -- widened alongside them.
   { pattern: 'github_create_branch', requiredRole: ['cto', 'developer'], reason: 'Branch creation: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },

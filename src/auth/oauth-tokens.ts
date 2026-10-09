@@ -8,6 +8,7 @@
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isConfigured as cosmosConfigured, createDoc, readDoc, deleteDoc } from '../agentstate/store.js';
+import type { OAuthGrantType } from '../server/request-context.js';
 
 const AUD = 'otchealth-mcp';
 
@@ -29,6 +30,13 @@ export interface AccessClaims {
   scope: string;
   typ: 'access' | 'refresh';
   agent?: string;
+  /**
+   * The OAuth grant that issued this ACCESS token, stamped by the token endpoint (server/oauth.ts).
+   * It is part of the signed payload, so a client cannot change it. Absent on a token minted before
+   * grant tracking, and on refresh tokens. Read it with issuedGrantType() in server/oauth.ts, which
+   * accepts only the three known grant names.
+   */
+  gty?: OAuthGrantType;
   iat: number;
   exp: number;
   jti: string;
@@ -71,9 +79,24 @@ export function verifyToken(token: string, secret: string): AccessClaims | null 
   return claims;
 }
 
-export function issueAccessToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 3600): string {
+/**
+ * Issue a signed access token. `grantType` records which OAuth grant the token endpoint used (claim `gty`);
+ * leave it out and the token carries no grant, exactly as every token did before grant tracking.
+ */
+export function issueAccessToken(
+  clientId: string,
+  scope: string,
+  secret: string,
+  baseUrl: string,
+  agent = '',
+  ttlSeconds = 3600,
+  grantType?: OAuthGrantType,
+): string {
   const now = Math.floor(Date.now() / 1000);
-  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds }, secret);
+  return signToken(
+    { iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds, ...(grantType ? { gty: grantType } : {}) },
+    secret,
+  );
 }
 
 export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 60 * 60 * 24 * 30): string {

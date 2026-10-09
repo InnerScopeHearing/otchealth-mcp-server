@@ -970,6 +970,8 @@ import { registerInboxRead } from './agentstate/inbox-read.js';
 import { registerXeroTools } from './xero/tools.js';
 import { registerHeyGenTools } from './heygen/index.js';
 import { registerHyperagentTools } from './hyperagent/tools.js';
+// CTO-lane bridge to the AWS MCP Server: durable read-only AWS access through a gateway-assumed role.
+import { registerAwsMcpTools } from './aws-mcp/tools.js';
 import { registerMailArchiveTools } from './mail/tools.js';
 // Connector setup-code role elevation (URL-only ChatGPT/Claude connect + owner-code elevation at
 // consent -- see server/oauth-consent.ts + auth/setup-codes.ts).
@@ -1954,6 +1956,9 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
 
   // Hyperagent broker: one delegated account credential, ring-gated per lane (hyperagent/ring.ts).
   registerHyperagentTools(server, callerHash);
+  // AWS MCP bridge (CTO lane only): aws_mcp_tool_list + aws_mcp_tool_call. Read-only by construction:
+  // the gateway assumes the dedicated read-only AWS role and fails closed when it cannot.
+  registerAwsMcpTools(server, callerHash);
   // AgentCore Browser (legacy Wefunder bridge retained during broker migration).
   registerBrowserAgentcoreTools(server, callerHash);
   // General Browser broker: per-agent capability enrollments, beginning with Wefunder Campaign Director.
