@@ -1672,7 +1672,7 @@ test('wrapper: with the kill switch on, an OAuth CTO session is told the bridge 
     for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
       const response = await invoke(tools.get(name)!, { ...args }, 'cto', 'oauth');
       assert.equal(response.isError, true);
-      assert.match(response.content?.[0].text ?? '', new RegExp(`^Tool ${name} failed: aws_mcp_disabled: the AWS bridge is switched off by the operator`));
+      assert.match(response.content?.[0].text ?? '', new RegExp(`^Tool ${name} failed: aws_mcp_disabled: the AWS bridge is switched off \\(AWS_MCP_BRIDGE_DISABLED is set to something other than blank, false, 0, no or off\\)`));
     }
   });
   assert.equal(w.credentialRequests(), 0);
