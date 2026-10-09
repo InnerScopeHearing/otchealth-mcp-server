@@ -1,5 +1,6 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { buildBearerTestJwt } from './bearer-test-jwt.js';
 
 const SIGNING_SECRET = 'duplicate-client-signing-' + 's'.repeat(40);
 const DUPLICATE_CLIENT_ID = 'configured-in-both-oauth-slots';
@@ -29,13 +30,10 @@ before(() => {
 
 test('valid duplicate client id preserves OAUTH_CLIENTS precedence over the single legacy connector', async () => {
   const { validateBearer } = await import('./bearer.js');
-  const { issueAccessToken } = await import('./oauth-tokens.js');
-  const token = issueAccessToken(
+  const token = buildBearerTestJwt(
     DUPLICATE_CLIENT_ID,
-    'mcp',
-    SIGNING_SECRET,
-    'https://precedence.invalid',
     'developer',
+    SIGNING_SECRET,
   );
   const ctx = await validateBearer(`Bearer ${token}`);
 

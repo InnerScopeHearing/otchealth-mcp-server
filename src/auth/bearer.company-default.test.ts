@@ -2,6 +2,7 @@ import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition } from '../tools/registry.js';
+import { buildBearerTestJwt } from './bearer-test-jwt.js';
 
 const CONNECTOR_TOKEN = 'company-connector-' + 'x'.repeat(32);
 const SIGNING_SECRET = 'company-signing-' + 's'.repeat(40);
@@ -33,7 +34,6 @@ before(() => {
 
 test('PERPLEXITY_CONNECTOR_TOKEN mapped to a company lane receives that lane exact GitHub surface', async () => {
   const { validateBearer } = await import('./bearer.js');
-  const { issueAccessToken } = await import('./oauth-tokens.js');
   const { requestContext } = await import('../server/request-context.js');
   const { registerTool } = await import('../tools/registry.js');
   const ctx = await validateBearer(`Bearer ${CONNECTOR_TOKEN}`);
@@ -43,12 +43,10 @@ test('PERPLEXITY_CONNECTOR_TOKEN mapped to a company lane receives that lane exa
   assert.equal(ctx.connector_surface, true);
   assert.equal(ctx.m365_static_auth, false);
 
-  const legacyToken = issueAccessToken(
+  const legacyToken = buildBearerTestJwt(
     LEGACY_OAUTH_CLIENT_ID,
-    'mcp',
-    SIGNING_SECRET,
-    'https://company.invalid',
     'cfo',
+    SIGNING_SECRET,
   );
   const legacyCtx = await validateBearer(`Bearer ${legacyToken}`);
   assert.ok(legacyCtx);
@@ -59,12 +57,10 @@ test('PERPLEXITY_CONNECTOR_TOKEN mapped to a company lane receives that lane exa
     'the single legacy OAuth connector is curated even when its configured id has no connector prefix',
   );
 
-  const internalToken = issueAccessToken(
+  const internalToken = buildBearerTestJwt(
     INTERNAL_CLIENT_ID,
-    'mcp',
-    SIGNING_SECRET,
-    'https://company.invalid',
     'developer',
+    SIGNING_SECRET,
   );
   const internalCtx = await validateBearer(`Bearer ${internalToken}`);
   assert.ok(internalCtx);
