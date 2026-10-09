@@ -1232,6 +1232,7 @@ test('AUDIT: a refused machine token is logged at warn level with its grant, its
       caller_hash: CALLER_HASH,
       auth_kind: 'oauth',
       auth_grant: expected,
+      auth_subject: CLIENT_ID,
       outcome: 'refused',
       is_error: true,
       error_code: 'aws_mcp_grant_refused',
