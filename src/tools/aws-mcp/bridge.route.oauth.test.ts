@@ -13,10 +13,17 @@
  *    aws_mcp_grant_refused, causes no STS or AWS request, and cannot be upgraded by editing its claims.
  *  - A token that records no grant (minted before grant tracking) is refused, with advice to reconnect.
  *
- * LIMIT, stated plainly: GET /oauth/authorize issues a confidential client's code with no consent screen,
- * so the holder of such a client's secret can also run the authorization_code grant without a browser.
- * The grant check closes the direct machine path (client_credentials) and untracked tokens. It is a
- * statement about how a token was issued, not proof that a person was at a keyboard.
+ * LIMITS, stated plainly. The grant check is a statement about how a token was issued, not proof that a
+ * person was at a keyboard, and two routes still reach an authorization_code session without one:
+ *  1. A holder of a static CTO-lane credential (the connector token, a Codex seat, the M365 CTO token) can
+ *     call connector_setup_code_create, register a DCR client at POST /register, and redeem the setup code
+ *     at POST /oauth/authorize/consent with plain HTTP. The consent endpoint takes a code, not a browser,
+ *     so signInThroughConsentScreen below is exactly what that headless caller would send.
+ *  2. GET /oauth/authorize issues a confidential client's code with no consent screen, so the holder of
+ *     such a client's secret can run the authorization_code grant without a browser.
+ * The grant check closes the direct machine path (client_credentials) and untracked tokens. Hardening the
+ * setup-code tool and the consent endpoint is tracked as a separate follow-up and is not part of this
+ * change. What bounds both routes is the read-only reader role, which the bridge pins.
  *
  * The server listens on 127.0.0.1 only. Every credential is synthetic.
  */
