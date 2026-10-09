@@ -9,7 +9,7 @@ export function registerGitHubLabelUpdate(server: McpServer, callerHash: CallerH
     category: 'write_simple',
     annotations: {
       title: 'GitHub: update label',
-      description: 'Update the name, color, or description of an existing label. Defaults to dry_run.',
+      description: 'Update the name, color, or description of an existing label. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

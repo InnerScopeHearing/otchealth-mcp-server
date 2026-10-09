@@ -12,8 +12,16 @@
 
 import { createSign } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { isGitHubWriteCarvedOutRepository } from '../config/github-operator.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 import { planStrEdit, assertShaMatch, makeEditPreview } from './edit-core.js';
+import {
+  buildGitHubApiUrl,
+  encodeGitHubHierarchicalRoutePath,
+  encodeGitHubOpaqueRouteParam,
+  encodeGitHubRepositorySegment,
+  GitHubPathSafetyError,
+} from './path-safety.js';
 
 const env = loadEnv();
 
@@ -36,7 +44,7 @@ export class GitHubWriteError extends Error {
 // ── Ring-safety guard ─────────────────────────────────────────────────────────
 
 function assertNotPhi(repo: string): void {
-  if (/^medreview/i.test(repo) || /phi/i.test(repo)) {
+  if (isGitHubWriteCarvedOutRepository(repo)) {
     throw new GitHubWriteError({
       code: 'github_write_phi_rejected',
       status: 0,
@@ -83,6 +91,33 @@ const GITHUB_HEADERS = {
   'X-GitHub-Api-Version': '2022-11-28',
 };
 
+const GITHUB_API_ORIGIN = 'https://api.github.com';
+
+/** Keep the validated repository destination stable across the actual HTTP request. */
+async function githubApiFetch(path: string, init: RequestInit, retries: number): Promise<Response> {
+  const url = validatedGitHubApiUrl(path);
+  const response = await fetchWithBudget(url, { ...init, redirect: 'error' }, { retries });
+  if (response.redirected || (response.status >= 300 && response.status < 400)) {
+    throw new GitHubWriteError({
+      code: 'github_redirect_refused', status: response.status,
+      message: 'Refusing a redirect from the GitHub API.',
+      nextStep: 'Use the repository current canonical owner and name, then retry.',
+    });
+  }
+  return response;
+}
+
+function validatedGitHubApiUrl(path: string): URL {
+  try {
+    return buildGitHubApiUrl(path, GITHUB_API_ORIGIN);
+  } catch (error) {
+    if (error instanceof GitHubPathSafetyError) {
+      throw new GitHubWriteError({ code: error.code, status: error.status, message: error.message, nextStep: error.nextStep });
+    }
+    throw error;
+  }
+}
+
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
 
@@ -99,13 +134,14 @@ async function getInstallationToken(): Promise<string> {
       nextStep: 'Add GITHUB_APP_INSTALLATION_ID to the vault.',
     });
 
+  const path = `/app/installations/${encodeGitHubRepositorySegment(installationId)}/access_tokens`;
+  validatedGitHubApiUrl(path);
   const jwt = mintJwt();
-  const url = `https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
   // Token mint: retries:0 (a duplicate mint is wasted, not harmful, but be conservative).
-  const res = await fetchWithBudget(url, {
+  const res = await githubApiFetch(path, {
     method: 'POST',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${jwt}` },
-  }, { retries: 0 });
+  }, 0);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -131,10 +167,11 @@ async function ghSend<T = any>(
   path: string,
   body?: unknown,
 ): Promise<T> {
+  validatedGitHubApiUrl(path);
   const token = await getInstallationToken();
   // Non-idempotent write (create branch/file/issue/release, dispatch a workflow, etc.):
   // retries:0 so a timeout never causes a duplicate GitHub mutation.
-  const res = await fetchWithBudget(`https://api.github.com${path}`, {
+  const res = await githubApiFetch(path, {
     method,
     headers: {
       ...GITHUB_HEADERS,
@@ -142,7 +179,7 @@ async function ghSend<T = any>(
       'Content-Type': 'application/json',
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  }, { retries: 0 });
+  }, 0);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -158,13 +195,14 @@ async function ghSend<T = any>(
 }
 
 async function ghGet<T = any>(path: string): Promise<T> {
+  validatedGitHubApiUrl(path);
   const token = await getInstallationToken();
   // Read-only GET (used here to resolve a branch head / repo default branch before a
   // write): safe to retry once on a network blip / 429 / 5xx.
-  const res = await fetchWithBudget(`https://api.github.com${path}`, {
+  const res = await githubApiFetch(path, {
     method: 'GET',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  }, { retries: 1 });
+  }, 1);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -179,7 +217,8 @@ async function ghGet<T = any>(path: string): Promise<T> {
   return data as T;
 }
 
-const O = encodeURIComponent;
+const O = encodeGitHubOpaqueRouteParam;
+const S = encodeGitHubRepositorySegment;
 
 // ── Write operations ──────────────────────────────────────────────────────────
 
@@ -194,7 +233,8 @@ export async function createBranch(
   fromSha?: string,
 ): Promise<{ branch: string; sha: string }> {
   assertNotPhi(repo);
-  const base = `/repos/${O(owner)}/${O(repo)}`;
+  O(branch);
+  const base = `/repos/${S(owner)}/${S(repo)}`;
 
   let sha = fromSha;
   if (!sha) {
@@ -231,8 +271,9 @@ export async function createOrUpdateFile(opts: {
   if (opts.sha) body.sha = opts.sha;
   if (opts.author) body.author = opts.author;
 
-  const filePath = opts.path.split('/').map(O).join('/');
-  const r = await ghSend<any>('PUT', `/repos/${O(opts.owner)}/${O(opts.repo)}/contents/${filePath}`, body);
+  const filePath = encodeGitHubHierarchicalRoutePath(opts.path);
+  if (opts.branch) O(opts.branch);
+  const r = await ghSend<any>('PUT', `/repos/${S(opts.owner)}/${S(opts.repo)}/contents/${filePath}`, body);
   return {
     commit: r.commit?.sha ?? '',
     path: opts.path,
@@ -315,7 +356,7 @@ export async function createIssue(opts: {
   milestone?: number;
 }): Promise<{ number: number; url: string; state: string }> {
   assertNotPhi(opts.repo);
-  const r = await ghSend<any>('POST', `/repos/${O(opts.owner)}/${O(opts.repo)}/issues`, {
+  const r = await ghSend<any>('POST', `/repos/${S(opts.owner)}/${S(opts.repo)}/issues`, {
     title: opts.title,
     body: opts.body ?? '',
     labels: opts.labels ?? [],
@@ -338,7 +379,7 @@ export async function commentOnIssue(
   assertNotPhi(repo);
   const r = await ghSend<any>(
     'POST',
-    `/repos/${O(owner)}/${O(repo)}/issues/${issueNumber}/comments`,
+    `/repos/${S(owner)}/${S(repo)}/issues/${issueNumber}/comments`,
     { body },
   );
   return { id: r.id, url: r.html_url };
@@ -357,7 +398,7 @@ export async function addLabels(
   assertNotPhi(repo);
   const r = await ghSend<any[]>(
     'POST',
-    `/repos/${O(owner)}/${O(repo)}/issues/${issueNumber}/labels`,
+    `/repos/${S(owner)}/${S(repo)}/issues/${issueNumber}/labels`,
     { labels },
   );
   return { labels: Array.isArray(r) ? r.map((l: any) => l.name as string) : [] };
@@ -379,7 +420,7 @@ export async function createRelease(opts: {
   generateReleaseNotes?: boolean;
 }): Promise<{ id: number; url: string; tagName: string; draft: boolean; prerelease: boolean }> {
   assertNotPhi(opts.repo);
-  const r = await ghSend<any>('POST', `/repos/${O(opts.owner)}/${O(opts.repo)}/releases`, {
+  const r = await ghSend<any>('POST', `/repos/${S(opts.owner)}/${S(opts.repo)}/releases`, {
     tag_name: opts.tagName,
     name: opts.name ?? opts.tagName,
     body: opts.body ?? '',
@@ -411,9 +452,11 @@ export async function dispatchWorkflow(
   inputs?: Record<string, string>,
 ): Promise<{ dispatched: true; owner: string; repo: string; workflow: string | number; ref: string }> {
   assertNotPhi(repo);
+  const workflowPath = O(String(workflowId));
+  O(ref);
   await ghSend<void>(
     'POST',
-    `/repos/${O(owner)}/${O(repo)}/actions/workflows/${O(String(workflowId))}/dispatches`,
+    `/repos/${S(owner)}/${S(repo)}/actions/workflows/${workflowPath}/dispatches`,
     { ref, inputs: inputs ?? {} },
   );
   return { dispatched: true, owner, repo, workflow: workflowId, ref };

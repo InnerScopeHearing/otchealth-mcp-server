@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { requiredRoleFor, roleAllows } from './governance.js';
 import {
   COMPANY_GITHUB_OPERATOR_LANES,
+  GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS,
   GITHUB_OPERATOR_TOOLSET,
   GITHUB_OPERATOR_WRITE_TOOLS,
 } from '../config/github-operator.js';
@@ -55,16 +56,41 @@ test('the Make pilot principal is denied direct GitHub writes and result fetchin
   }
 });
 
-test('adjacent release and label administration is not widened with the bounded operator surface', () => {
-  for (const name of ['github_add_labels', 'github_create_release']) {
+test('all adjacent write_simple mutations and release creation retain exact CTO/Developer governance', () => {
+  assert.deepEqual(GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS, [
+    'github_add_labels',
+    'github_git_tag_create',
+    'github_issue_add_assignees',
+    'github_issue_lock',
+    'github_issue_unlock',
+    'github_label_create',
+    'github_label_update',
+    'github_milestone_create',
+    'github_milestone_update',
+    'github_pr_request_reviewers',
+    'github_ref_create',
+    'github_ref_update',
+    'github_create_release',
+    'github_release_update',
+    'github_workflow_enable',
+  ]);
+  for (const name of GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS) {
     const gov = requiredRoleFor(name);
-    assert.ok(gov, `${name} must retain its prior explicit rule`);
-    assert.equal(roleAllows(gov!.role, 'cto'), true);
-    assert.equal(roleAllows(gov!.role, 'developer'), true);
+    assert.ok(gov, `${name} must have an explicit rule`);
+    assert.deepEqual(gov!.role, ['cto', 'developer'], `${name} must be exactly CTO/Developer`);
     for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
       if (lane === 'cto' || lane === 'developer') continue;
       assert.equal(roleAllows(gov!.role, lane), false, `${name} must not be widened to ${lane}`);
     }
+    for (const lane of NON_OPERATOR_LANES) {
+      assert.equal(roleAllows(gov!.role, lane), false, `${name} must refuse ${lane || '(empty)'}`);
+    }
+  }
+});
+
+test('destructive label and release deletion retain the write_orchestrated CTO-only default', () => {
+  for (const name of ['github_label_delete', 'github_release_delete']) {
+    assert.equal(requiredRoleFor(name), null, `${name} must not gain an explicit CTO/Developer grant`);
   }
 });
 

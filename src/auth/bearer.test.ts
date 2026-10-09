@@ -177,6 +177,12 @@ test('EVAL_AGENT_TOKEN and PERPLEXITY_CONNECTOR_TOKEN are independent: each auth
 
   const perplexityCtx = await validateBearer(`Bearer ${CONNECTOR_TOKEN}`);
   assert.ok(perplexityCtx, 'PERPLEXITY_CONNECTOR_TOKEN must still authenticate on its own');
+  assert.equal(perplexityCtx.caller_agent, 'cto');
+  assert.equal(
+    perplexityCtx.connector_surface,
+    true,
+    'a canonical company mapping must receive its role-specific connector toolset, never the full registry',
+  );
 
   const evalCtx = await validateBearer(`Bearer ${EVAL_TOKEN}`);
   assert.ok(evalCtx, 'EVAL_AGENT_TOKEN must authenticate on its own');

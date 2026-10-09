@@ -9,7 +9,7 @@ export function registerGitHubReleaseUpdate(server: McpServer, callerHash: Calle
     category: 'write_simple',
     annotations: {
       title: 'GitHub: update release',
-      description: 'Update a release name, body, draft/prerelease flags, or tag. Defaults to dry_run.',
+      description: 'Update a release name, body, draft/prerelease flags, or tag. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

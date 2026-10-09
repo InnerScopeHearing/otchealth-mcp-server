@@ -1,0 +1,118 @@
+import { before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolDefinition } from '../tools/registry.js';
+
+const CONNECTOR_TOKEN = 'company-connector-' + 'x'.repeat(32);
+const SIGNING_SECRET = 'company-signing-' + 's'.repeat(40);
+const LEGACY_OAUTH_CLIENT_ID = 'legacy-company-connector-without-prefix';
+const INTERNAL_CLIENT_ID = 'internal-machine-client';
+
+before(() => {
+  const required: Record<string, string> = {
+    CIO_SITE_ID: 'test',
+    CIO_TRACK_KEY: 'test',
+    CIO_APP_API_BEARER: 'test',
+    PERPLEXITY_CONNECTOR_TOKEN: CONNECTOR_TOKEN,
+    ADMIN_REVOKE_TOKEN: 'b'.repeat(32),
+    N8N_WEBHOOK_SECRET: 'c'.repeat(32),
+    NODE_ENV: 'test',
+    REVOCATION_MEMORY_ONLY_MODE: 'development',
+    OAUTH_TOKEN_SIGNING_SECRET: SIGNING_SECRET,
+    OAUTH_CLIENT_ID: LEGACY_OAUTH_CLIENT_ID,
+    OAUTH_CLIENT_SECRET: 'company-client-secret-' + 'c'.repeat(32),
+    OAUTH_CLIENTS: JSON.stringify([{
+      client_id: INTERNAL_CLIENT_ID,
+      secret: 'internal-client-secret-' + 'i'.repeat(32),
+      agent: 'developer',
+    }]),
+    OAUTH_DEFAULT_AGENT: 'cfo',
+  };
+  for (const [key, value] of Object.entries(required)) process.env[key] = value;
+});
+
+test('PERPLEXITY_CONNECTOR_TOKEN mapped to a company lane receives that lane exact GitHub surface', async () => {
+  const { validateBearer } = await import('./bearer.js');
+  const { issueAccessToken } = await import('./oauth-tokens.js');
+  const { requestContext } = await import('../server/request-context.js');
+  const { registerTool } = await import('../tools/registry.js');
+  const ctx = await validateBearer(`Bearer ${CONNECTOR_TOKEN}`);
+
+  assert.ok(ctx);
+  assert.equal(ctx.caller_agent, 'cfo');
+  assert.equal(ctx.connector_surface, true);
+  assert.equal(ctx.m365_static_auth, false);
+
+  const legacyToken = issueAccessToken(
+    LEGACY_OAUTH_CLIENT_ID,
+    'mcp',
+    SIGNING_SECRET,
+    'https://company.invalid',
+    'cfo',
+  );
+  const legacyCtx = await validateBearer(`Bearer ${legacyToken}`);
+  assert.ok(legacyCtx);
+  assert.equal(legacyCtx.caller_agent, 'cfo');
+  assert.equal(
+    legacyCtx.connector_surface,
+    true,
+    'the single legacy OAuth connector is curated even when its configured id has no connector prefix',
+  );
+
+  const internalToken = issueAccessToken(
+    INTERNAL_CLIENT_ID,
+    'mcp',
+    SIGNING_SECRET,
+    'https://company.invalid',
+    'developer',
+  );
+  const internalCtx = await validateBearer(`Bearer ${internalToken}`);
+  assert.ok(internalCtx);
+  assert.equal(internalCtx.caller_agent, 'developer');
+  assert.equal(
+    internalCtx.connector_surface,
+    false,
+    'an intentional OAUTH_CLIENTS machine client retains its existing internal catalog behavior',
+  );
+
+  const registered: string[] = [];
+  const server = {
+    registerTool: (name: string) => {
+      registered.push(name);
+      return { remove: () => undefined };
+    },
+  } as unknown as McpServer;
+  const definition = (name: string): ToolDefinition<Record<string, never>, Record<string, never>> => ({
+    name,
+    category: 'read',
+    annotations: {
+      title: name,
+      description: name,
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    inputShape: {},
+    outputShape: {},
+    handler: async () => ({ data: null }),
+  });
+
+  requestContext.run({
+    callerHash: legacyCtx.caller_hash,
+    correlationId: 'company-auth-registration',
+    callerAgent: legacyCtx.caller_agent,
+    connectorSurface: legacyCtx.connector_surface,
+    m365StaticAuth: legacyCtx.m365_static_auth,
+  }, () => {
+    registerTool(server, definition('github_create_issue'), () => legacyCtx.caller_hash, true);
+    registerTool(server, definition('github_label_create'), () => legacyCtx.caller_hash, true);
+    registerTool(server, definition('aws_identity_get'), () => legacyCtx.caller_hash, true);
+  });
+
+  assert.deepEqual(
+    registered,
+    ['github_create_issue'],
+    'the authenticated company connector receives its exact shared operator set, not the full catalog',
+  );
+});

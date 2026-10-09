@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseAutoJournalMode,
   isPrivilegedOrLegalTool,
+  suppressJournalArgs,
   looksLikeSecretValue,
   redactArgs,
   buildEpisodeText,
@@ -12,6 +13,7 @@ import {
   MAX_VALUE_CHARS,
   MAX_TOTAL_CHARS,
 } from './journal.js';
+import { GITHUB_REPOSITORY_WRITE_TOOLS } from '../config/github-operator.js';
 
 // ---- parseAutoJournalMode -------------------------------------------------------------------------
 
@@ -49,6 +51,53 @@ test('isPrivilegedOrLegalTool: an ordinary tool name does not match', () => {
   assert.equal(isPrivilegedOrLegalTool('memory_write'), false);
   assert.equal(isPrivilegedOrLegalTool('github_push_files'), false);
   assert.equal(isPrivilegedOrLegalTool('checkpoint'), false);
+});
+
+test('every direct GitHub repository write suppresses auto-journal arguments', () => {
+  for (const tool of GITHUB_REPOSITORY_WRITE_TOOLS) {
+    assert.equal(suppressJournalArgs(tool), true, tool);
+    assert.equal(redactArgs(tool, {
+      owner: 'InnerScopeHearing',
+      repo: 'otchealth-mcp-server',
+      content: 'caller-supplied file or issue content',
+    }), null, tool);
+  }
+});
+
+test('stripped M365 aliases cannot bypass GitHub write argument suppression', () => {
+  for (const tool of GITHUB_REPOSITORY_WRITE_TOOLS) {
+    const alias = tool.slice('github_'.length);
+    assert.equal(suppressJournalArgs(alias), true, alias);
+    assert.equal(redactArgs(alias, { body: 'content that must remain destination-local' }), null, alias);
+  }
+});
+
+test('suppressed GitHub content and branch names cannot reach the indexed episode text', () => {
+  const secretBranch = 'client-smith-divorce-strategy';
+  const secretContent = 'unmarked caller content that must remain destination-local';
+  const redactedArgs = redactArgs('github_create_branch', {
+    owner: 'InnerScopeHearing',
+    repo: 'otchealth-mcp-server',
+    branch: secretBranch,
+    content: secretContent,
+  });
+  assert.equal(redactedArgs, null);
+  const episode = buildEpisodeText({
+    tool: 'github_create_branch',
+    actor: 'clo-personal',
+    outcome: 'success',
+    redactedArgs,
+    artifact: 'https://github.example/should-not-be-indexed',
+  });
+  assert.equal(episode, 'clo-personal called github_create_branch (success)');
+  assert.doesNotMatch(episode, new RegExp(secretBranch));
+  assert.doesNotMatch(episode, new RegExp(secretContent));
+});
+
+test('GitHub reads and the separately redacted Make broker do not inherit write suppression', () => {
+  for (const tool of ['github_get_file_contents', 'github_list_pull_requests', 'github_make_broker']) {
+    assert.equal(suppressJournalArgs(tool), false, tool);
+  }
 });
 
 // ---- looksLikeSecretValue --------------------------------------------------------------------------
@@ -120,7 +169,7 @@ test('redactArgs: privileged/legal tools drop args entirely (returns null)', () 
 });
 
 test('redactArgs: a non-privileged tool still returns a (possibly empty) object, never null', () => {
-  const out = redactArgs('github_push_files', { path: 'a.ts' });
+  const out = redactArgs('github_get_file_contents', { path: 'a.ts' });
   assert.notEqual(out, null);
 });
 

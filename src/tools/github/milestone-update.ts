@@ -9,7 +9,7 @@ export function registerGitHubMilestoneUpdate(server: McpServer, callerHash: Cal
     category: 'write_simple',
     annotations: {
       title: 'GitHub: update milestone',
-      description: 'Update a milestone title, description, due date, or state. Defaults to dry_run.',
+      description: 'Update a milestone title, description, due date, or state. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

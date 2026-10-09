@@ -1,7 +1,20 @@
 import { createSign } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
-import { isCompanyGitHubOperatorLane } from '../config/github-operator.js';
+import {
+  COMPANY_GITHUB_ALLOWED_OWNERS,
+  isCompanyGitHubAllowedOwner,
+  isCompanyGitHubOperatorLane,
+  isGitHubWriteCarvedOutRepository,
+} from '../config/github-operator.js';
+import { evaluateGitHubPreShareGate } from '../safety/github-pre-share.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import {
+  buildGitHubApiUrl,
+  encodeGitHubHierarchicalRoutePath,
+  encodeGitHubOpaqueRouteParam,
+  encodeGitHubRepositorySegment,
+  GitHubPathSafetyError,
+} from './path-safety.js';
 
 const env = loadEnv();
 
@@ -22,18 +35,27 @@ export class GitHubApiError extends Error {
  * called by READ-category tools so non-operator callers cannot read outside a configured repo
  * allowlist.
  *
- * Every named company GitHub operator lane has unrestricted repository-read reach, matching its
- * explicit all-repository ship-cycle grant. Every other caller is checked against
- * DEVELOPER_ALLOWED_REPOS -- a CSV of "owner/repo" pairs, case-insensitive, env-overridable exactly
- * like GRAPH_CS_MAILBOXES. This leaves the legacy allowlist as defense in depth for unknown,
- * external, and pilot identities without silently narrowing an approved company operator lane.
+ * The legacy CTO/Exec identities retain unrestricted diagnostic-read reach. Every other named
+ * company GitHub operator is fenced to InnerScopeHearing here as well as on the exact shared
+ * 29-tool surface, so an adjacent read cannot bypass the company-owner boundary. Callers outside
+ * the named operator set retain the legacy DEVELOPER_ALLOWED_REPOS behavior -- a CSV of
+ * "owner/repo" pairs, case-insensitive, env-overridable exactly like GRAPH_CS_MAILBOXES.
  *
  * DEFAULT (env unset/empty) IS UNRESTRICTED -- this ships as a zero-risk, inert control point
  * (Matt's explicit call, 2026-07-26: "unrestricted by default, no behavior change today"), not a
  * live restriction. Narrowing it later is a config change, not a redeploy.
  */
 export function assertRepoAllowed(callerAgent: string, owner: string, repo: string): void {
-  if (isCompanyGitHubOperatorLane(callerAgent)) return;
+  if (callerAgent === 'cto' || callerAgent === 'exec') return;
+  if (isCompanyGitHubOperatorLane(callerAgent)) {
+    if (isCompanyGitHubAllowedOwner(owner)) return;
+    throw new GitHubApiError({
+      code: 'github_owner_not_allowed',
+      status: 0,
+      message: `Repository owner "${owner}" is outside the company GitHub boundary (${COMPANY_GITHUB_ALLOWED_OWNERS.join('/')}).`,
+      nextStep: 'Use a repository owned by InnerScopeHearing.',
+    });
+  }
   const csv = env.DEVELOPER_ALLOWED_REPOS;
   if (!csv) return; // unrestricted by default -- see header above
   const allowed = new Set(csv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
@@ -46,6 +68,37 @@ export function assertRepoAllowed(callerAgent: string, owner: string, repo: stri
       nextStep: 'If this repo should be reachable, add it to DEVELOPER_ALLOWED_REPOS.',
     });
   }
+}
+
+function assertCompanyOwner(owner: string): void {
+  if (isCompanyGitHubAllowedOwner(owner)) return;
+  throw new GitHubApiError({
+    code: 'github_owner_not_allowed',
+    status: 0,
+    message: `Repository owner "${owner}" is outside the company GitHub boundary (${COMPANY_GITHUB_ALLOWED_OWNERS.join('/')}).`,
+    nextStep: 'Use a repository owned by InnerScopeHearing.',
+  });
+}
+
+function assertNotPhi(repo: string): void {
+  if (!isGitHubWriteCarvedOutRepository(repo)) return;
+  throw new GitHubApiError({
+    code: 'github_write_phi_rejected',
+    status: 0,
+    message: `Write to repo "${repo}" is blocked: medreview/PHI repositories are read-only via this gateway.`,
+    nextStep: 'Use a non-PHI repository, or contact the CTO to authorise this operation outside the gateway.',
+  });
+}
+
+function assertProtectedContent(toolName: string, args: unknown): void {
+  const gate = evaluateGitHubPreShareGate(toolName, null, args);
+  if (!gate.blocked) return;
+  throw new GitHubApiError({
+    code: 'github_pre_share_blocked',
+    status: 0,
+    message: gate.reason,
+    nextStep: 'Remove protected/MNPI material and keep it in its authorized private destination.',
+  });
 }
 
 function b64url(x: object): string {
@@ -111,20 +164,25 @@ function githubPullRequestPathNumber(value: unknown): string {
  * refused because an App token must never be forwarded to another authority.
  */
 async function githubApiFetch(urlPath: string, init: RequestInit, retries: number): Promise<Response> {
-  if (!urlPath.startsWith('/') || urlPath.startsWith('//') || urlPath.includes('\\') || urlPath.includes('\0')) {
-    throw new GitHubApiError({ code: 'github_invalid_path', status: 0, message: 'Refusing an invalid GitHub API path.', nextStep: 'Use a validated GitHub repository selector.' });
-  }
-  const url = new URL(urlPath, GITHUB_API_ORIGIN);
-  if (url.protocol !== 'https:' || url.origin !== GITHUB_API_ORIGIN || url.hostname !== 'api.github.com' || url.port !== '' || url.username !== '' || url.password !== '') {
-    throw new GitHubApiError({ code: 'github_invalid_origin', status: 0, message: 'Refusing a non-GitHub API origin.', nextStep: 'Use the fixed GitHub API origin.' });
-  }
+  const url = validatedGitHubApiUrl(urlPath);
   const response = await fetchWithBudget(url, { ...init, redirect: 'error' }, { retries });
   // Native fetch rejects a redirect with redirect:'error'. Keep this guard as
   // defense in depth for alternate fetch implementations and test doubles.
-  if (response.status >= 300 && response.status < 400) {
+  if (response.redirected || (response.status >= 300 && response.status < 400)) {
     throw new GitHubApiError({ code: 'github_redirect_refused', status: response.status, message: 'Refusing a redirect from the GitHub API.', nextStep: 'Investigate the GitHub API response before retrying.' });
   }
   return response;
+}
+
+function validatedGitHubApiUrl(path: string): URL {
+  try {
+    return buildGitHubApiUrl(path, GITHUB_API_ORIGIN);
+  } catch (error) {
+    if (error instanceof GitHubPathSafetyError) {
+      throw new GitHubApiError({ code: error.code, status: error.status, message: error.message, nextStep: error.nextStep });
+    }
+    throw error;
+  }
 }
 
 // Installation token cache
@@ -139,8 +197,9 @@ async function getInstallationToken(): Promise<string> {
   const installationId = env.GITHUB_APP_INSTALLATION_ID;
   if (!installationId) throw new GitHubApiError({ code: 'github_not_configured', status: 0, message: 'GITHUB_APP_INSTALLATION_ID not set.', nextStep: 'Add GITHUB_APP_INSTALLATION_ID to the vault.' });
 
+  const accessTokenPath = `/app/installations/${encodeGitHubRepositorySegment(installationId)}/access_tokens`;
+  validatedGitHubApiUrl(accessTokenPath);
   const jwt = mintJwt();
-  const accessTokenPath = `/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
   // Token mint is a POST but has no side effect on GitHub state; still, be conservative
   // and do not retry (a second identical mint is wasted, not harmful, but avoids doubt).
   const res = await githubApiFetch(accessTokenPath, {
@@ -161,6 +220,7 @@ async function getInstallationToken(): Promise<string> {
 }
 
 async function githubGet<T = any>(path: string): Promise<T> {
+  validatedGitHubApiUrl(path);
   const token = await getInstallationToken();
   // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
   const res = await githubApiFetch(path, {
@@ -176,7 +236,7 @@ async function githubGet<T = any>(path: string): Promise<T> {
 }
 
 export async function listPullRequests(owner: string, repo: string, state = 'open'): Promise<any[]> {
-  const data = await githubGet<any[]>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?state=${encodeURIComponent(state)}&per_page=20`);
+  const data = await githubGet<any[]>(`/repos/${encodeGitHubRepositorySegment(owner)}/${encodeGitHubRepositorySegment(repo)}/pulls?state=${encodeURIComponent(state)}&per_page=20`);
   return Array.isArray(data) ? data : [];
 }
 
@@ -211,12 +271,13 @@ export async function listWorkflowRuns(owner: string, repo: string, filters: Lis
   if (filters.exclude_pull_requests !== undefined) params.set('exclude_pull_requests', String(filters.exclude_pull_requests));
   if (filters.check_suite_id !== undefined) params.set('check_suite_id', String(filters.check_suite_id));
   if (filters.head_sha !== undefined) params.set('head_sha', filters.head_sha);
-  const data = await githubGet<{ workflow_runs: any[] }>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs?${params}`);
+  const data = await githubGet<{ workflow_runs: any[] }>(`/repos/${encodeGitHubRepositorySegment(owner)}/${encodeGitHubRepositorySegment(repo)}/actions/runs?${params}`);
   return Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
 }
 
 // ── Writes (App installation token; company-operator-gated at the tool layer) ───────────────
 async function githubSend<T = any>(method: 'POST' | 'PATCH' | 'PUT', path: string, body: unknown): Promise<T> {
+  validatedGitHubApiUrl(path);
   const token = await getInstallationToken();
   // Non-idempotent write (creates/updates a branch, file, PR, comment, merge, etc.):
   // retries:0 so a timeout never causes a duplicate GitHub mutation.
@@ -233,12 +294,14 @@ async function githubSend<T = any>(method: 'POST' | 'PATCH' | 'PUT', path: strin
   return data as T;
 }
 
-const O = encodeURIComponent;
+const O = encodeGitHubOpaqueRouteParam;
+const S = encodeGitHubRepositorySegment;
 
 /** Read a file's decoded text + sha from a repo (helper for write workflows). */
 export async function getFileContents(owner: string, repo: string, path: string, ref?: string): Promise<{ path: string; sha: string; text: string }> {
-  const q = ref ? `?ref=${O(ref)}` : '';
-  const d = await githubGet<any>(`/repos/${O(owner)}/${O(repo)}/contents/${path.split('/').map(O).join('/')}${q}`);
+  if (ref) O(ref);
+  const q = ref ? `?${new URLSearchParams({ ref })}` : '';
+  const d = await githubGet<any>(`/repos/${S(owner)}/${S(repo)}/contents/${encodeGitHubHierarchicalRoutePath(path)}${q}`);
   return { path, sha: d.sha, text: d.content ? Buffer.from(d.content, 'base64').toString('utf8') : '' };
 }
 
@@ -250,7 +313,10 @@ export async function pushFiles(
   owner: string, repo: string, branch: string,
   files: Array<{ path: string; content: string }>, message: string,
 ): Promise<{ commit: string; branch: string; files: number }> {
-  const base = `/repos/${O(owner)}/${O(repo)}`;
+  assertCompanyOwner(owner);
+  assertNotPhi(repo);
+  assertProtectedContent('github_push_files', { owner, repo, branch, files, message });
+  const base = `/repos/${S(owner)}/${S(repo)}`;
   // Resolve branch head; create the branch from default if missing.
   let headSha: string;
   try {
@@ -283,29 +349,38 @@ export function isGithubAppConfigured(): boolean {
 
 /** Fetch a commit. Used by the artifact resolver to verify gh:commit: URIs. */
 export async function getCommit(owner: string, repo: string, sha: string): Promise<any> {
-  return githubGet(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}`);
+  return githubGet(`/repos/${S(owner)}/${S(repo)}/commits/${O(sha)}`);
 }
 
 export async function getPullRequest(owner: string, repo: string, number: unknown): Promise<any> {
   const pullRequestNumber = githubPullRequestPathNumber(number);
-  return githubGet<any>(`/repos/${O(owner)}/${O(repo)}/pulls/${pullRequestNumber}`);
+  return githubGet<any>(`/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}`);
 }
 
 export async function createIssueComment(owner: string, repo: string, number: number, body: string): Promise<void> {
-  await githubSend('POST', `/repos/${O(owner)}/${O(repo)}/issues/${number}/comments`, { body });
+  assertCompanyOwner(owner);
+  assertNotPhi(repo);
+  assertProtectedContent('github_comment_on_issue', { owner, repo, issue_number: number, body });
+  await githubSend('POST', `/repos/${S(owner)}/${S(repo)}/issues/${number}/comments`, { body });
 }
 
 export async function createPullRequest(
   owner: string, repo: string, title: string, head: string, base: string, body?: string, draft?: boolean,
 ): Promise<{ number: number; url: string; state: string }> {
-  const pr = await githubSend<any>('POST', `/repos/${O(owner)}/${O(repo)}/pulls`, { title, head, base, body: body ?? '', draft: draft ?? false });
+  assertCompanyOwner(owner);
+  assertNotPhi(repo);
+  assertProtectedContent('github_create_pull_request', { owner, repo, title, head, base, body, draft });
+  const pr = await githubSend<any>('POST', `/repos/${S(owner)}/${S(repo)}/pulls`, { title, head, base, body: body ?? '', draft: draft ?? false });
   return { number: pr.number, url: pr.html_url, state: pr.state };
 }
 
 export async function mergePullRequest(
   owner: string, repo: string, number: unknown, method: 'merge' | 'squash' | 'rebase' = 'squash', title?: string,
 ): Promise<{ merged: boolean; sha: string; message: string }> {
+  assertCompanyOwner(owner);
+  assertNotPhi(repo);
+  assertProtectedContent('github_merge_pull_request', { owner, repo, number, method, title });
   const pullRequestNumber = githubPullRequestPathNumber(number);
-  const r = await githubSend<any>('PUT', `/repos/${O(owner)}/${O(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+  const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
   return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
 }

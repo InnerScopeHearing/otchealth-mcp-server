@@ -90,6 +90,23 @@ test('postAlert: createIssueComment failing + SNS configured + AWS credentials p
   }
 });
 
+test('postAlert: protected content is refused before both GitHub and SNS fallback transports', async () => {
+  for (const k of AWS_KEYS) delete process.env[k];
+  process.env.AWS_ACCESS_KEY_ID = 'fake-access-key-id';
+  process.env.AWS_SECRET_ACCESS_KEY = 'fake-secret-access-key';
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch;
+  try {
+    await assert.doesNotReject(() => postAlert('[MNPI] restricted test alert body'));
+    assert.equal(fetchCalled, false);
+  } finally {
+    resetEnvAndFetch();
+  }
+});
+
 test('postAlert: never throws even when the SNS publish itself gets a non-2xx response (e.g. a bad/expired credential)', async () => {
   for (const k of AWS_KEYS) delete process.env[k];
   process.env.AWS_ACCESS_KEY_ID = 'fake-access-key-id';

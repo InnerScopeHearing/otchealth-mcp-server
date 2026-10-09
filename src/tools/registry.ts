@@ -12,7 +12,17 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
 import { CTO_MAKE_GITHUB_PILOT_LANE, CTO_MAKE_GITHUB_PILOT_TOOLSET } from '../config/lane-toolsets.js';
-import { GITHUB_OPERATOR_TOOLSET } from '../config/github-operator.js';
+import {
+  COMPANY_GITHUB_ALLOWED_OWNERS,
+  GITHUB_OPERATOR_TOOLSET,
+  isCompanyGitHubAllowedOwner,
+  isCompanyGitHubOperatorLane,
+  isGitHubOperatorTool,
+  isGitHubRepositoryWriteTool,
+  isGitHubWriteCarvedOutRepository,
+} from '../config/github-operator.js';
+import { evaluateGitHubPreShareGate } from '../safety/github-pre-share.js';
+import { GitHubPathSafetyError, validateGitHubRepositoryToolArgs } from '../github/path-safety.js';
 import {
   logToolEnd,
   logToolStart,
@@ -81,10 +91,12 @@ import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
 // (defense-in-depth: refuses the call outright even if a future toolset override or the confidential
 // occ_ client path ever lets a non-ship lane reach it). See registry.connector-lanes.test.ts.
 //
-// Overridable via env for BOTH lists: CONNECTOR_TOOLSET (csv) overrides the ship set (back-compat
-// with the pre-split var name); EXTERNAL_READONLY_TOOLSET (csv) overrides the external set.
-// Empty/unset means "use the built-in default" for that set. DCR/occ_ connector requests are
-// curated; all other callers normally see the full catalog, with one deliberate exception:
+// Overridable via env for BOTH lists: CONNECTOR_TOOLSET (csv) curates the ship set (back-compat with
+// the pre-split var name), except that approved company lanes always retain the mandatory bounded
+// GitHub operator surface and ordinary seats cannot gain other github_* tools;
+// EXTERNAL_READONLY_TOOLSET (csv) curates the non-GitHub external set but cannot inject any GitHub
+// capability. Empty/unset means "use the built-in default" for that set. DCR/occ_ connector requests
+// are curated; all other callers normally see the full catalog, with one deliberate exception:
 // cto-make-github-pilot is always fixed to its exact two-tool allowlist on every auth path and cannot
 // be widened by either shared override.
 // ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -517,6 +529,25 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
     for (const name of ['browser_cloud_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
       'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get']) tools.add(name);
   }
+  // CONNECTOR_TOOLSET may curate the surrounding ship catalog, but it cannot remove the bounded
+  // company GitHub operator surface. Ordinary company seats are exact at this boundary: discard
+  // every override-injected GitHub tool outside the shared 29. CTO and Developer retain their
+  // separately governed GitHub supersets; the dedicated Make pilot returned above unchanged.
+  if (isCompanyGitHubOperatorLane(lane)) {
+    for (const name of GITHUB_OPERATOR_TOOLSET) tools.add(name);
+    if (lane !== 'cto' && lane !== 'developer') {
+      for (const name of tools) {
+        if (name.startsWith('github_') && !isGitHubOperatorTool(name)) tools.delete(name);
+      }
+    }
+  } else {
+    // No GitHub capability is approved for an external or unknown connector. Keep the external
+    // override useful for its intended non-GitHub curation without letting configuration widen the
+    // public connector across the company-repository boundary. The fixed Make pilot returned above.
+    for (const name of tools) {
+      if (name.startsWith('github_')) tools.delete(name);
+    }
+  }
   return tools;
 }
 
@@ -894,7 +925,16 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   const connectorSurfaceForThisTool = isConnectorSurface()
     || laneForThisTool === WEFUNDER_CAMPAIGN_DIRECTOR_LANE
     || laneForThisTool === CTO_MAKE_GITHUB_PILOT_LANE;
-  if (connectorSurfaceForThisTool && !CONNECTOR_TOOLSET.has(def.name)) return;
+  // Connector visibility is keyed to the advertised name, but an alias also carries the real
+  // capability in canonicalName. For GitHub, require BOTH identities to survive the lane-normalized
+  // allowlist: otherwise an external override could name a bare alias such as `push_files` and evade
+  // the github_* filter, or an ordinary company lane could alias an adjacent mutation outside its
+  // exact 29. Primary registrations have identical names, so existing company and pilot behavior is
+  // unchanged.
+  if (connectorSurfaceForThisTool && (
+    !CONNECTOR_TOOLSET.has(def.name)
+    || (canonicalName.startsWith('github_') && !CONNECTOR_TOOLSET.has(canonicalName))
+  )) return;
   // PER-LANE TOOL-CATALOG CURATION (Wave 6 item 6.2): extends the SAME idea above to INTERNAL
   // client_credentials lanes (cto/cfo/clo/clo-personal/coo/cro/cpo/cco/developer/exec), which today
   // always see the full catalog because isConnectorSurface() is only ever true for a dcr_/occ_ client
@@ -1110,6 +1150,124 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         };
       }
 
+      // Repository-owner boundary for the shared operator surface and every direct GitHub
+      // repository mutation. The GitHub App
+      // installation remains least-privilege, but authorization does not rely on installation
+      // configuration alone: all shared reads/writes plus adjacent mutations independently reject
+      // external organizations.
+      // Repo names remain unrestricted, so every repository under the approved company owner is
+      // reachable. Evaluate the canonical name so M365 prefix aliases cannot bypass this check.
+      if (isGitHubOperatorTool(canonicalName) || isGitHubRepositoryWriteTool(canonicalName)) {
+        try {
+          validateGitHubRepositoryToolArgs(args);
+        } catch (error) {
+          if (!(error instanceof GitHubPathSafetyError)) throw error;
+          const gmsg = `Tool "${def.name}" rejected an unsafe GitHub route argument. ${error.message}`;
+          logToolEnd({
+            correlation_id: correlationId,
+            tool: def.name,
+            caller_hash: callerHash,
+            outcome: 'rejected',
+            latency_ms: Date.now() - started,
+            error_code: error.code,
+          });
+          return {
+            isError: true,
+            content: [{ type: 'text', text: gmsg }],
+            structuredContent: {
+              result: null,
+              compliance_warning: null,
+              correlation_id: correlationId,
+              dry_run: dryRun,
+              error: { code: error.code, message: gmsg },
+            },
+          };
+        }
+        const githubOwner = (args as Record<string, unknown>).owner;
+        if (!isCompanyGitHubAllowedOwner(githubOwner)) {
+          const ownerLabel = typeof githubOwner === 'string' && githubOwner ? githubOwner : '(missing)';
+          const gmsg = `Tool "${def.name}" is restricted to repositories owned by ${COMPANY_GITHUB_ALLOWED_OWNERS.join('/')}. Requested owner: ${ownerLabel}.`;
+          logToolEnd({
+            correlation_id: correlationId,
+            tool: def.name,
+            caller_hash: callerHash,
+            outcome: 'rejected',
+            latency_ms: Date.now() - started,
+            error_code: 'github_owner_not_allowed',
+          });
+          return {
+            isError: true,
+            content: [{ type: 'text', text: gmsg }],
+            structuredContent: {
+              result: null,
+              compliance_warning: null,
+              correlation_id: correlationId,
+              dry_run: dryRun,
+              error: { code: 'github_owner_not_allowed', message: gmsg },
+            },
+          };
+        }
+      }
+
+      // Preserve the established MedReview/`phi` repository-name write carveout at the same shared
+      // boundary for all 36 direct mutations. Reads remain available. This is deliberately a
+      // repository naming rule, not a claim that the gateway can classify arbitrary PHI content.
+      if (isGitHubRepositoryWriteTool(canonicalName)) {
+        const githubRepo = (args as Record<string, unknown>).repo;
+        if (isGitHubWriteCarvedOutRepository(githubRepo)) {
+          const gmsg = `Write to repo "${githubRepo}" is blocked: medreview/PHI repositories are read-only via this gateway.`;
+          logToolEnd({
+            correlation_id: correlationId,
+            tool: def.name,
+            caller_hash: callerHash,
+            outcome: 'rejected',
+            latency_ms: Date.now() - started,
+            error_code: 'github_write_phi_rejected',
+          });
+          return {
+            isError: true,
+            content: [{ type: 'text', text: gmsg }],
+            structuredContent: {
+              result: null,
+              compliance_warning: null,
+              correlation_id: correlationId,
+              dry_run: dryRun,
+              error: { code: 'github_write_phi_rejected', message: gmsg },
+            },
+          };
+        }
+      }
+
+      // Protected-content boundary for every direct GitHub repository mutation. Scan every nested
+      // string without truncation before any handler, dry-run preview, or upstream request. This
+      // also enforces the personal-legal lane's existing no-broad-content-export boundary. The
+      // fixed-repository Make pilot remains outside this path and retains its own validator.
+      if (isGitHubRepositoryWriteTool(canonicalName)) {
+        const preShare = evaluateGitHubPreShareGate(canonicalName, callerAgent, args);
+        if (preShare.blocked) {
+          const gmsg = `Tool "${def.name}" was refused by the GitHub protected-content pre-share gate. ${preShare.reason}`;
+          logToolEnd({
+            correlation_id: correlationId,
+            tool: def.name,
+            caller_hash: callerHash,
+            outcome: 'rejected',
+            latency_ms: Date.now() - started,
+            error_code: 'github_pre_share_blocked',
+          });
+          return {
+            isError: true,
+            content: [{ type: 'text', text: gmsg }],
+            structuredContent: {
+              result: null,
+              compliance_warning: null,
+              correlation_id: correlationId,
+              dry_run: dryRun,
+              error: { code: 'github_pre_share_blocked', message: gmsg },
+            },
+          };
+        }
+      }
+
       // Write-tool gating.
       const gate = gatedReject(env, def.category, def.name);
       if (gate.rejected) {
@@ -1301,7 +1459,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           const journaled = parseAutoJournalMode(process.env.AUTO_JOURNAL_MODE) === 'on';
           if (journaled) {
             void journalMutation({
-              tool: def.name,
+              // Aliases retain `def.name` (for example `push_files`) but every safety boundary is
+              // keyed to the canonical name. Journaling must do the same or alias calls can evade
+              // GitHub mutation argument suppression and copy file/issue content into memory-exec.
+              tool: canonicalName,
               actor: callerAgent,
               correlationId,
               args: def.redactInputForLog

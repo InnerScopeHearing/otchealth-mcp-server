@@ -9,7 +9,7 @@ export function registerGitHubWorkflowEnable(server: McpServer, callerHash: Call
     category: 'write_simple',
     annotations: {
       title: 'GitHub: enable workflow',
-      description: 'Enable a disabled GitHub Actions workflow so it can be triggered. Defaults to dry_run.',
+      description: 'Enable a disabled GitHub Actions workflow so it can be triggered. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

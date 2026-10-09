@@ -9,7 +9,7 @@ export function registerGitHubIssueLock(server: McpServer, callerHash: CallerHas
     category: 'write_simple',
     annotations: {
       title: 'GitHub: lock issue conversation',
-      description: 'Lock an issue or PR conversation so only collaborators can comment. Defaults to dry_run.',
+      description: 'Lock an issue or PR conversation so only collaborators can comment. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

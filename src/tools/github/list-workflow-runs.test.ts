@@ -33,8 +33,8 @@ import { COMPANY_GITHUB_OPERATOR_LANES } from '../../config/github-operator.js';
 // So the whole file runs under ONE fixed, deliberately-restrictive value; tests that want to prove
 // a filter/pipeline behavior unrelated to repo-scoping use callerAgent='cto' (which
 // assertRepoAllowed always exempts, matching every sibling github_* read tool), and the two tests
-// that specifically exercise assertRepoAllowed use an external identity versus every canonical
-// company operator lane against that same fixed allowlist instead of toggling the env var.
+// that specifically exercise assertRepoAllowed use the same fixed allowlist instead of toggling
+// the env var.
 const RESTRICTED_TEST_REPO_ALLOWLIST = 'InnerScopeHearing/some-other-repo-not-under-test';
 
 before(() => {
@@ -230,4 +230,48 @@ test('github_list_workflow_runs: every canonical company operator lane bypasses 
     assert.ok(!result.isError, `${lane} must retain all-repository read access: ${JSON.stringify(result)}`);
     assert.ok(urls.some((u) => u.includes('/actions/runs')), `${lane} must reach the Actions API`);
   }
+});
+
+test('github_list_workflow_runs: every canonical company operator lane rejects an external owner before upstream', async () => {
+  for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+    const urls: string[] = [];
+    const result = await withStubbedFetch(githubStub(urls), () =>
+      callThroughRealMcpServer(
+        { owner: 'external-owner', repo: 'some-repo' },
+        lane,
+      ),
+    );
+    assert.equal(result.isError, true, `${lane} must refuse an external repository owner`);
+    assert.match(result.content?.[0]?.text ?? '', /restricted|owner|InnerScopeHearing/i);
+    assert.equal(urls.length, 0, `${lane} must be rejected before an upstream GitHub call`);
+  }
+});
+
+test('adjacent GitHub reads preserve legacy CTO/Exec reach but owner-fence every other operator lane', async () => {
+  const { assertRepoAllowed } = await import('../../github/api-client.js');
+
+  for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+    assert.doesNotThrow(
+      () => assertRepoAllowed(lane, 'innerscopehearing', 'a-company-repo'),
+      `${lane} must reach company repos independently of the restrictive legacy repo allowlist`,
+    );
+  }
+
+  for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+    if (lane === 'cto' || lane === 'exec') {
+      assert.doesNotThrow(() => assertRepoAllowed(lane, 'external-owner', 'legacy-diagnostic-repo'), lane);
+      continue;
+    }
+    assert.throws(
+      () => assertRepoAllowed(lane, 'external-owner', 'legacy-diagnostic-repo'),
+      (error: unknown) => (error as { code?: string }).code === 'github_owner_not_allowed',
+      `${lane} must not use an adjacent release/repo/workflow read to cross the company-owner boundary`,
+    );
+  }
+
+  assert.throws(
+    () => assertRepoAllowed('external-github-reader', 'InnerScopeHearing', 'a-company-repo'),
+    (error: unknown) => (error as { code?: string }).code === 'repo_not_allowed',
+    'non-operator identities must retain the legacy configured repo allowlist',
+  );
 });

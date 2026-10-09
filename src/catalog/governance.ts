@@ -11,6 +11,7 @@
 import { CTO_MAKE_GITHUB_PILOT_LANE } from '../config/lane-toolsets.js';
 import {
   COMPANY_GITHUB_OPERATOR_LANES,
+  GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS,
   GITHUB_OPERATOR_TOOLSET,
 } from '../config/github-operator.js';
 
@@ -25,7 +26,13 @@ export interface GovRule {
 const GITHUB_OPERATOR_GOVERNANCE: readonly GovRule[] = GITHUB_OPERATOR_TOOLSET.map((pattern) => ({
   pattern,
   requiredRole: COMPANY_GITHUB_OPERATOR_LANES,
-  reason: 'The bounded GitHub ship-cycle surface is available only to the named company GitHub operator lanes; mutations still honor repository protections, write-mode gates, high-risk gates, and dry-run defaults.',
+  reason: 'The bounded GitHub ship-cycle surface is available only to the named company GitHub operator lanes; mutations retain the company-owner and protected-content boundaries, repository protections, the write-mode gate, the high-risk gate for write_orchestrated tools, and dry-run defaults.',
+}));
+
+const GITHUB_ADJACENT_WRITE_GOVERNANCE: readonly GovRule[] = GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS.map((pattern) => ({
+  pattern,
+  requiredRole: ['cto', 'developer'],
+  reason: 'GitHub mutations outside the shared operator surface remain limited to the CTO and Developer lanes.',
 }));
 
 export const GOVERNANCE: GovRule[] = [
@@ -144,13 +151,12 @@ export const GOVERNANCE: GovRule[] = [
   // leaving credentials, secrets, repository/org administration, destructive catalog management,
   // releases, raw failed logs, the fixed receipt, and the isolated Make broker outside the grant.
   ...GITHUB_OPERATOR_GOVERNANCE,
+  ...GITHUB_ADJACENT_WRITE_GOVERNANCE,
   { pattern: 'github_graphrag_observation_receipt_get', requiredRole: 'cto', reason: 'The fixed GraphRAG observation receipt is a CTO-only provenance check and never exposes source content.' },
   { pattern: 'github_workflow_run_failed_log_excerpt', requiredRole: 'cto', reason: 'CI job logs can echo environment content; the bounded, redacted failed-step excerpt is a CTO-only diagnostic read.' },
   { pattern: 'github_make_broker', requiredRole: ['cto', CTO_MAKE_GITHUB_PILOT_LANE], reason: 'The Make pilot broker is available only to CTO and the isolated cto-make-github-pilot principal; it is hard-scoped to one repository and claude/make-pilot refs.' },
-  // These adjacent GitHub writes were never part of CTO_SHIP_LANE_TOOLSET and remain on their
-  // prior cto/developer governance; the fleet grant above must not grow by prefix accident.
-  { pattern: 'github_add_labels', requiredRole: ['cto', 'developer'], reason: 'Label writes: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
-  { pattern: 'github_create_release', requiredRole: ['cto', 'developer'], reason: 'Releases (single initiator): cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  // Adjacent GitHub writes are generated above from one exact list. Do not add a github_* rule:
+  // the shared operator grant must not grow by prefix accident.
   // Netlify deploy + env + hooks are CTO-owned infra. NOT part of the 2026-07-26 directive (which
   // was scoped to GitHub + Depot specifically) -- stays CTO-only.
   { pattern: 'netlify_trigger_deploy', requiredRole: 'cto', reason: 'Production deploys are CTO-only.' },
