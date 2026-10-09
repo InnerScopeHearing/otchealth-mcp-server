@@ -294,8 +294,8 @@ for (const [lane, upperBound, mustInclude] of [
   // 'checkpoint' when the 13 azure_* tools (and their CTO_M365_CURATED entries) were deleted
   // outright -- both are real, still-registered CTO_M365_CURATED members, so this proves the same
   // thing.
-  ['cto', 300, ['brain_search', 'checkpoint', 'github_branch_get', 'github_dispatch_workflow', 'github_merge_pull_request', 'github_graphrag_observation_receipt_get', 'cio_admin_read_workspace_health']],
-  ['cro', 300, ['brain_search', 'github_dispatch_workflow', 'github_merge_pull_request', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
+  ['cto', 265, ['brain_search', 'checkpoint', 'github_branch_get', 'github_dispatch_workflow', 'github_merge_pull_request', 'github_graphrag_observation_receipt_get', 'cio_admin_read_workspace_health']],
+  ['cro', 273, ['brain_search', 'github_dispatch_workflow', 'github_merge_pull_request', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
   // 2026-08-02: developer_wake_lite was silently excluded from the developer lane's M365-curated
   // registration (no wildcard/exact match in LANE_TOOLSETS.developer covered it) -- invisible to
   // catalog_probe's known_tools_present check (which reads the full unscoped catalog, not this
@@ -310,8 +310,8 @@ for (const [lane, upperBound, mustInclude] of [
     assert.ok(
       names.length <= upperBound,
       `${lane}'s M365-curated registration should stay at or under ${upperBound} tools ` +
-        `(the prior 240 ceiling plus the exact 29-tool company GitHub operator surface and its ` +
-        `bounded alias-collision effects; 300 is a ceiling, not the exact count) -- got ${names.length}. A ` +
+        `(this branch measures 260/268 tools for CTO/CRO after the exact 29-tool GitHub addition; ` +
+        `each lane keeps only a five-tool drift buffer above its measured count) -- got ${names.length}. A ` +
         `count blowing past this means CTO_M365_CURATED/CRO_M365_CURATED regressed toward a wildcard ` +
         `again or the dedup fix broke.`,
     );
