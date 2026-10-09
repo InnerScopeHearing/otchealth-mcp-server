@@ -595,7 +595,7 @@ test('KILL SWITCH: AWS_MCP_BRIDGE_DISABLED makes both tools refuse before any cr
         await assert.rejects(run(), (err: unknown) => {
           assert.ok(err instanceof AwsMcpRefusalError, `value "${on}": ${String(err)}`);
           assert.equal(err.code, 'aws_mcp_disabled');
-          assert.match(err.message, /^aws_mcp_disabled: the AWS bridge is switched off by the operator \(AWS_MCP_BRIDGE_DISABLED\)\. No AWS request was made\./);
+          assert.match(err.message, /^aws_mcp_disabled: the AWS bridge is switched off \(AWS_MCP_BRIDGE_DISABLED is set to something other than blank, false, 0, no or off\)\. No AWS request was made\./);
           return true;
         });
       }
