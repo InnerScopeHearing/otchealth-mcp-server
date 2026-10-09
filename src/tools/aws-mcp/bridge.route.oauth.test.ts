@@ -531,7 +531,9 @@ test('a confidential connector client that signs in with authorization_code is s
   assert.equal(refreshed.statusCode, 200, refreshed.payload.slice(0, 200));
   const access = (refreshed.json() as { access_token: string }).access_token;
   assert.equal(issuedGrantType(access), 'refresh_token');
+  const refreshFrom = auditLines.length;
   assertServed(await callList(access), 'aws_mcp_tool_list');
+  assertAudited(refreshFrom, 'aws_mcp_tool_list', 'refresh_token', CONNECTOR_CLIENT.client_id);
 });
 
 test('a client_credentials token for the CTO lane is refused as a machine credential, with no STS or AWS request', async () => {
