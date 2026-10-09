@@ -1,0 +1,27 @@
+name: Verify AWS gateway deep health
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_image_tag:
+        description: "Expected live gateway image tag (40-character commit SHA)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Verify live gateway health
+        env:
+          ADMIN_REVOKE_TOKEN: ${{ secrets.ADMIN_REVOKE_TOKEN }}
+          EXPECTED_IMAGE_TAG: ${{ inputs.expected_image_tag }}
+        run: python3 scripts/check-deep-health.py
