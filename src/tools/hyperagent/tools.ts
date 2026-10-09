@@ -454,6 +454,8 @@ export function registerHyperagentTools(
         threadId: z.string().optional(),
         ok: z.boolean(),
         error: z.string().optional(),
+        upstreamOutcome: z.literal('uncertain').optional(),
+        retryable: z.literal(false).optional(),
       },
       handler: async (input, ctx) => {
         if (!transport.configured()) return unconfigured('starting a thread');
@@ -482,9 +484,15 @@ export function registerHyperagentTools(
         const res = await transport.call('create_thread', { agentId: input.agentId, message: input.message });
         if (!res.ok) return { data: { ok: false, error: res.error ?? 'provider_error' }, summary: `create_thread failed: ${res.error}.` };
         const tid = (res.data as { threadId?: string } | null)?.threadId;
+        if (typeof tid !== 'string' || tid.trim().length === 0) {
+          return {
+            data: { ok: false, error: 'thread_id_missing', upstreamOutcome: 'uncertain', retryable: false },
+            summary: 'create_thread returned no usable thread ID; upstream outcome is uncertain. Do not retry automatically.',
+          };
+        }
         return {
           data: { ok: true, threadId: tid },
-          summary: tid ? `Started thread ${tid} on agent ${input.agentId}. Poll hyperagent_get_thread for results.` : 'Thread created.',
+          summary: `Started thread ${tid} on agent ${input.agentId}. Poll hyperagent_get_thread for results.`,
         };
       },
     },
