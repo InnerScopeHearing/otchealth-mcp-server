@@ -14,9 +14,10 @@ export interface AuthContext {
   raw_token: string;
   caller_agent: string;
   /**
-   * How this request authenticated (see AuthKind in server/request-context.ts). Optional so an
-   * in-process AuthContext built without a credential simply has none; a consumer that needs an
-   * interactive OAuth session, such as the AWS MCP bridge, treats a missing value as NOT oauth.
+   * How this request authenticated (see AuthKind in server/request-context.ts). Left undefined unless the
+   * credential that matched proves a kind (it is never defaulted to 'oauth'), so an in-process AuthContext
+   * built without a credential, and any path that forgets to record one, has none. A consumer that serves
+   * OAuth-issued sessions only, such as the AWS MCP bridge, treats a missing value as NOT oauth.
    */
   auth_kind?: AuthKind;
   /**
