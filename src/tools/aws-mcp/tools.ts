@@ -373,7 +373,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: list upstream tools',
         description:
-          'CTO lane only, interactive OAuth sessions only (static credentials and client_credentials tokens are refused). List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
+          'CTO lane only, OAuth-issued sessions only (static credentials and client_credentials tokens are refused). List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
           'allowed, blocked or not_allowlisted by this bridge. Read-only: access runs as the dedicated read-only AWS role ' +
           `${AWS_AI_READER_ROLE_NAME}, assumed by the gateway with STS, so it does not depend on a claude.ai connector sign-in. ` +
           'If the role has not been created yet the call fails closed and says what the owner must run. ' +
