@@ -34,6 +34,7 @@ test('valid duplicate client id preserves OAUTH_CLIENTS precedence over the sing
     DUPLICATE_CLIENT_ID,
     'developer',
     SIGNING_SECRET,
+    false,
   );
   const ctx = await validateBearer(`Bearer ${token}`);
 

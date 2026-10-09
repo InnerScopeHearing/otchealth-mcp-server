@@ -44,6 +44,7 @@ test('PERPLEXITY_CONNECTOR_TOKEN mapped to an external lane receives the curated
     LEGACY_OAUTH_CLIENT_ID,
     'external-read',
     SIGNING_SECRET,
+    true,
   );
   const legacyCtx = await validateBearer(`Bearer ${legacyToken}`);
   assert.ok(legacyCtx);

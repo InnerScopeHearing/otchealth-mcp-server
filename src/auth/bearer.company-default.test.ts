@@ -47,6 +47,7 @@ test('PERPLEXITY_CONNECTOR_TOKEN mapped to a company lane receives that lane exa
     LEGACY_OAUTH_CLIENT_ID,
     'cfo',
     SIGNING_SECRET,
+    true,
   );
   const legacyCtx = await validateBearer(`Bearer ${legacyToken}`);
   assert.ok(legacyCtx);
@@ -61,6 +62,7 @@ test('PERPLEXITY_CONNECTOR_TOKEN mapped to a company lane receives that lane exa
     INTERNAL_CLIENT_ID,
     'developer',
     SIGNING_SECRET,
+    false,
   );
   const internalCtx = await validateBearer(`Bearer ${internalToken}`);
   assert.ok(internalCtx);

@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 
 /** Build a deterministic, synthetic access JWT for bearer-routing tests without minting a credential. */
-export function buildBearerTestJwt(clientId: string, agent: string, signingSecret: string): string {
+export function buildBearerTestJwt(clientId: string, agent: string, signingSecret: string, connectorSurface?: boolean): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
   const header = encode({ alg: 'HS256', typ: 'JWT' });
@@ -12,6 +12,7 @@ export function buildBearerTestJwt(clientId: string, agent: string, signingSecre
     scope: 'mcp',
     agent,
     typ: 'access',
+    ...(typeof connectorSurface === 'boolean' ? { cs: connectorSurface } : {}),
     iat: now,
     exp: now + 60,
     jti: `bearer-test-${clientId}`,
