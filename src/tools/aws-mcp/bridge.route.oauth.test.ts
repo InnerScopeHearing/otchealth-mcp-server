@@ -425,6 +425,7 @@ function assertAudited(from: number, tool: string, grant: string, clientId: stri
   assert.equal(lines[0].outcome, 'ok');
   assert.equal(lines[0].auth_kind, 'oauth');
   assert.equal(lines[0].auth_grant, grant);
+  assert.equal(lines[0].auth_subject, clientId, 'the audit line names the client the token was issued to');
 }
 
 /** A refused call is stopped before any AWS request: the counters do not move, and the audit line records the refusal. */
