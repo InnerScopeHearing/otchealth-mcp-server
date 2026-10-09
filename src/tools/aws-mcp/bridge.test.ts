@@ -1089,7 +1089,7 @@ test('NEGATIVE CACHE: a refresh failure near expiry reuses still-valid credentia
 // ---------------------------------------------------------------------------------------------
 // Audit: one structured line per call, hashes and sizes only
 // ---------------------------------------------------------------------------------------------
-test('AUDIT: a successful call writes one line with the hashed caller, auth kind, upstream tool, region, script hash, response size and role session', async () => {
+test('AUDIT: a successful call writes one line with the hashed caller, auth kind, grant, client id, upstream tool, region, script hash, response size and role session', async () => {
   const script = 'import boto3\nprint("SYNTHETIC-SCRIPT-BODY-MARKER")\n';
   const reply = 'listing output with caf' + String.fromCharCode(0xe9);
   const w = world({ mcp: { onCall: () => ({ content: [{ type: 'text', text: reply }] }) } });
