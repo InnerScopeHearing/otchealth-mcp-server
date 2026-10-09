@@ -19,8 +19,8 @@ test('verification fails closed and validates the pinned deep-health contract', 
   assert.match(script, /admin_token_invalid/);
   assert.match(script, /::add-mask::\{token\}/);
   assert.match(script, /payload\.get\("status"\) != "ok" or payload\.get\("readiness"\) != "ready"/);
-  assert.match(script, /EXPECTED_IMAGE_DIGEST = "sha256:be9a19ae72378c3dfbeee6ebd3d974c97c185619a4fb71dddf2c53b01704053d"/);
-  assert.match(script, /EXPECTED_TASK_DEFINITION = "otchealth-gateway:199"/);
+  assert.match(script, /EXPECTED_IMAGE_DIGEST = "sha256:5f17111e63aa99743b6f17d92d80a5c105d4d7954208f248107c3aa75fca007f"/);
+  assert.match(script, /EXPECTED_TASK_DEFINITION = "otchealth-gateway:200"/);
   assert.match(script, /if set\(payload\) != DEEP_FIELDS:/);
   assert.match(script, /if status == "down":/);
   assert.match(script, /if payload\["postgres_tls_verify"\] is not True:/);
