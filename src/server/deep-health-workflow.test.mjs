@@ -7,6 +7,7 @@ const script = await readFile('scripts/check-deep-health.py', 'utf8');
 
 test('manual gateway verification is dispatch-only and least-privileged', () => {
   assert.match(workflow, /workflow_dispatch:/);
+  assert.ok(workflow.includes("if: github.repository == 'InnerScopeHearing/otchealth-mcp-server' && github.ref == 'refs/heads/main'"));
   assert.match(workflow, /expected_image_tag:[\s\S]*required: true[\s\S]*type: string/);
   assert.match(workflow, /permissions:\n  contents: read/);
   assert.doesNotMatch(workflow, /(^|\n)\s*(push|pull_request|schedule):/);
