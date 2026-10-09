@@ -17,6 +17,8 @@ export function buildBearerTestJwt(clientId: string, agent: string, signingSecre
     jti: `bearer-test-${clientId}`,
   });
   const unsigned = `${header}.${payload}`;
+  // This synthetic test JWT uses the protocol-required HS256 MAC; no password is stored or derived.
+  // codeql[js/insufficient-password-hash]
   const signature = createHmac('sha256', signingSecret).update(unsigned).digest('base64url');
   return `${unsigned}.${signature}`;
 }

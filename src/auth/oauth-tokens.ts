@@ -57,6 +57,8 @@ export function verifyToken(token: string, secret: string): AccessClaims | null 
   if (parts.length !== 3) return null;
   const [header, payload, sig] = parts;
   const data = `${header}.${payload}`;
+  // HS256 requires an HMAC-SHA-256 verifier; this is protocol authentication, not password hashing.
+  // codeql[js/insufficient-password-hash]
   const expected = createHmac('sha256', secret).update(data).digest('base64url');
   if (!safeEqualStr(sig, expected)) return null;
   let claims: AccessClaims;
