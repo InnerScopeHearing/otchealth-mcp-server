@@ -1215,7 +1215,7 @@ test('AUDIT: a refused static credential is logged at warn level with its kind, 
   assert.equal(w.credentialRequests(), 0);
 });
 
-test('AUDIT: a refused machine token is logged at warn level with its grant and its own refusal code, and a missing grant is logged as none', async () => {
+test('AUDIT: a refused machine token is logged at warn level with its grant, its client id and its own refusal code, and a missing grant is logged as none', async () => {
   const w = world();
   for (const [authGrant, expected] of [['client_credentials', 'client_credentials'], [undefined, 'none']] as const) {
     const { lines, error } = await captureLogs(() =>
