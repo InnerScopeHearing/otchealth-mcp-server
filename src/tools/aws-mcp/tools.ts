@@ -345,7 +345,7 @@ async function callAwsMcpToolChecked(
   };
 }
 
-/** The registry passes a ToolContext; the authentication kind and OAuth grant come from the request context. */
+/** The registry passes a ToolContext; the authentication kind, OAuth grant and token subject come from the request context. */
 function bridgeContext(ctx: ToolContext): AwsMcpToolContext {
   return {
     callerAgent: ctx.callerAgent,
