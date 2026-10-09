@@ -122,8 +122,10 @@ const toolListInputSchema = z.object(AWS_MCP_TOOL_LIST_INPUT_SHAPE).strict();
 export type AwsMcpToolContext = Pick<ToolContext, 'callerAgent' | 'correlationId' | 'callerHash'> & {
   /** How the request authenticated (request context authKind); only 'oauth' is served. */
   authKind?: AuthKind;
-  /** For an OAuth request, the grant that issued its token (request context authGrant); only interactive grants are served. */
+  /** For an OAuth request, the grant that issued its token (request context authGrant); only authorization_code and refresh_token are served. */
   authGrant?: OAuthGrantType;
+  /** For an OAuth request, the client id the token was issued to (request context authSubject); recorded in the audit line only. */
+  authSubject?: string;
 };
 
 /** Test seam: everything that touches the network or the clock can be replaced. */
