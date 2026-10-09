@@ -58,6 +58,8 @@ export interface RequestContext {
   authKind?: AuthKind;
   /** For an 'oauth' request, the grant that issued its access token (see OAuthGrantType). Unset when the token records none. */
   authGrant?: OAuthGrantType;
+  /** For an 'oauth' request, the client id the access token was issued to (its sub claim, a public identifier). Unset otherwise. */
+  authSubject?: string;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
