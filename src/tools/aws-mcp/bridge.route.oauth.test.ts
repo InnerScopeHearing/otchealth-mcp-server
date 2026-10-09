@@ -544,7 +544,7 @@ test('a client_credentials token for the CTO lane is refused as a machine creden
     assert.equal(body.refresh_token, undefined, 'a machine credential is never given a refresh token, so no refresh_token grant can descend from it');
     assert.equal(issuedGrantType(body.access_token), 'client_credentials', 'the token endpoint stamped the grant');
     assert.equal(issuedAgent(body.access_token), 'cto', 'it is a CTO-lane token, which is exactly what the grant check exists to stop');
-    await assertRefusedBeforeAws(body.access_token, client.client_id, MACHINE_REFUSAL, 'client_credentials');
+    await assertRefusedBeforeAws(body.access_token, client.client_id, MACHINE_REFUSAL, 'client_credentials', client.client_id);
   }
 });
 
