@@ -417,6 +417,32 @@ test('external and unknown connectors receive no Hyperagent broker tools', () =>
   assert.deepEqual(calls, []);
 });
 
+test('create_thread succeeds only with the direct threadId response field', async () => {
+  __resetInvocationBudgetForTests();
+  const { transport, calls } = fakeTransport(async () => ({ ok: true, status: 200, data: { threadId: 'created-thread' } }));
+  const { server, tools } = fakeServer();
+  registerHyperagentTools(server, () => 'synthetic-hash', transport);
+
+  const response = await invoke(tools.get('hyperagent_create_thread')!, { agentId: 'agent-general', message: 'synthetic task' });
+
+  assert.deepEqual(resultOf(response), { ok: true, threadId: 'created-thread' });
+  assert.deepEqual(calls, [{ name: 'create_thread', args: { agentId: 'agent-general', message: 'synthetic task' } }]);
+});
+
+test('create_thread missing its ID fails closed and does not retry an uncertain upstream outcome', async () => {
+  __resetInvocationBudgetForTests();
+  const { transport, calls } = fakeTransport(async () => ({ ok: true, status: 200, data: {} }));
+  const { server, tools } = fakeServer();
+  registerHyperagentTools(server, () => 'synthetic-hash', transport);
+
+  const response = await invoke(tools.get('hyperagent_create_thread')!, { agentId: 'agent-general', message: 'synthetic task' });
+
+  assert.deepEqual(resultOf(response), { ok: false, error: 'thread_id_missing', upstreamOutcome: 'uncertain' });
+  assert.match(JSON.stringify(response), /Do not retry automatically/);
+  assert.equal(calls.length, 1, 'a successful response without an ID must never replay the write');
+  assert.equal(calls[0].name, 'create_thread');
+});
+
 test('get_thread permits current namedAgentId shape with exact thread id and ring match', async () => {
   const provider = {
     thread: { id: 'thread-current', name: 'Allowed title', namedAgentId: 'agent-general' },
