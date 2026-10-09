@@ -74,6 +74,7 @@ const CTO: AwsMcpToolContext = {
   callerHash: CALLER_HASH,
   authKind: 'oauth',
   authGrant: 'authorization_code',
+  authSubject: CLIENT_ID,
 };
 /** Every authentication kind the gateway can record that is NOT an OAuth session. */
 const NON_OAUTH_KINDS = ['connector', 'm365', 'codex', 'copilot', 'copilot-dev', 'eval', 'descope'] as const;
