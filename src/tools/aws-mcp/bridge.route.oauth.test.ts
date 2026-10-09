@@ -507,7 +507,7 @@ test('the refresh_token successor of that session is served too, and stays on th
   const list = await callList(access);
   assertServed(list, 'aws_mcp_tool_list');
   assertListed(list);
-  assertAudited(listFrom, 'aws_mcp_tool_list', 'refresh_token');
+  assertAudited(listFrom, 'aws_mcp_tool_list', 'refresh_token', session.clientId);
 
   const callFrom = auditLines.length;
   const call = await callRegions(access);
