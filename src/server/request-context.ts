@@ -12,8 +12,9 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  *   m365         an M365 declarative-agent static per-lane token (it travels in a published manifest URL)
  *   codex        a Codex static per-seat token
  *
- * A tool that must serve interactive OAuth sessions only (the AWS MCP bridge) accepts 'oauth' and
- * nothing else. A request whose code path never recorded a kind has none, and is refused the same way.
+ * A tool that must serve OAuth-issued sessions only (the AWS MCP bridge) accepts 'oauth' and nothing
+ * else. A request whose code path never recorded a kind has none, and is refused the same way.
+ * 'oauth' says how the token was issued (see OAuthGrantType). It does not say that a person is present.
  */
 export type AuthKind = 'oauth' | 'descope' | 'connector' | 'copilot' | 'copilot-dev' | 'eval' | 'm365' | 'codex';
 
