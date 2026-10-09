@@ -96,3 +96,8 @@ export function currentAuthKind(): AuthKind | undefined {
 export function currentAuthGrant(): OAuthGrantType | undefined {
   return requestContext.getStore()?.authGrant;
 }
+
+/** The client id the current request's OAuth access token was issued to, or undefined when none was recorded. */
+export function currentAuthSubject(): string | undefined {
+  return requestContext.getStore()?.authSubject;
+}
