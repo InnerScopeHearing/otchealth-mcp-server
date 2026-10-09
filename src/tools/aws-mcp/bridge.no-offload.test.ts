@@ -123,7 +123,7 @@ function installStorage() {
 
 function invoke(tool: CapturedTool, args: Record<string, unknown>): Promise<WrapperResponse> {
   return requestContext.run(
-    { callerHash: CALLER_HASH, correlationId: 'corr-no-offload-0001', callerAgent: 'cto', authKind: 'oauth', authGrant: 'authorization_code' },
+    { callerHash: CALLER_HASH, correlationId: 'corr-no-offload-0001', callerAgent: 'cto', authKind: 'oauth', authGrant: 'authorization_code', authSubject: 'occ_fixture' },
     () => tool.handler(args),
   );
 }
