@@ -467,7 +467,7 @@ test('a claude.ai session signed in on the consent screen (authorization_code, e
   const list = await callList(session.access);
   assertServed(list, 'aws_mcp_tool_list');
   assertListed(list);
-  assertAudited(listFrom, 'aws_mcp_tool_list', 'authorization_code');
+  assertAudited(listFrom, 'aws_mcp_tool_list', 'authorization_code', session.clientId);
 
   const callFrom = auditLines.length;
   const call = await callRegions(session.access);
