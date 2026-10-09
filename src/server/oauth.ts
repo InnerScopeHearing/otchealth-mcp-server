@@ -703,7 +703,8 @@ export function issuedAgent(token: string): string | null {
  * The OAuth grant that issued a valid access token: the signed `gty` claim stamped at the token endpoint
  * (authorization_code, refresh_token or client_credentials). Null when the token is not a valid access
  * token, records no grant (minted before grant tracking), or carries a value that is not one of the three
- * grant names. Callers that need an interactive sign-in must treat null as NOT interactive.
+ * grant names. Callers that serve only the accepted grants must treat null as NOT accepted. The grant
+ * records how the token was issued; it is not proof that a person is present.
  */
 export function issuedGrantType(token: string): OAuthGrantType | null {
   if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
