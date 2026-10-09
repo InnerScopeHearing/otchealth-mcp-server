@@ -249,7 +249,10 @@ export async function validateBearer(
   // the Codex per-seat static tokens (see codexStaticAgentTokens above), presented as a REAL
   // Authorization header and flagged connector_surface. All rotate-before-launch.
   const issued = isValidIssuedAccessToken(token);
-  let authKind: AuthKind = 'oauth';
+  // The kind is recorded only where a credential proves it: 'oauth' for a valid issued access token, and
+  // below for a Descope session or the static credential that matched. It is never defaulted to 'oauth',
+  // so a path that records no kind leaves it undefined and the AWS MCP bridge refuses the request.
+  let authKind: AuthKind | undefined = issued ? 'oauth' : undefined;
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
   let isM365Static = false;
