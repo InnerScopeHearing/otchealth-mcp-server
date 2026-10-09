@@ -1108,6 +1108,7 @@ test('AUDIT: a successful call writes one line with the hashed caller, auth kind
     caller_hash: CALLER_HASH,
     auth_kind: 'oauth',
     auth_grant: 'authorization_code',
+    auth_subject: CLIENT_ID,
     outcome: 'ok',
     is_error: false,
     upstream_tool: 'aws___run_script',
