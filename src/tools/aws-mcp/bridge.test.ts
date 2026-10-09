@@ -1168,6 +1168,7 @@ test('AUDIT: the tool list call writes its own line with the upstream response s
   assert.equal(fields.outcome, 'ok');
   assert.equal(fields.auth_kind, 'oauth');
   assert.equal(fields.auth_grant, 'authorization_code');
+  assert.equal(fields.auth_subject, CLIENT_ID);
   assert.equal(fields.caller_hash, CALLER_HASH);
   assert.equal(fields.is_error, false);
   assert.ok(Number.isInteger(fields.response_bytes) && (fields.response_bytes as number) > 0);
