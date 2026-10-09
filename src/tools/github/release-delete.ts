@@ -9,7 +9,7 @@ export function registerGitHubReleaseDelete(server: McpServer, callerHash: Calle
     category: 'write_orchestrated',
     annotations: {
       title: 'GitHub: delete release',
-      description: 'Permanently delete a release (does NOT delete the associated git tag). Irreversible. Defaults to dry_run.',
+      description: 'Permanently delete a release (does NOT delete the associated git tag). Irreversible. CTO only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,

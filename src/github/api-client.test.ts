@@ -23,7 +23,16 @@ before(() => {
   process.env.GITHUB_APP_PRIVATE_KEY ??= privateKey;
 });
 
-const { getPullRequest, isGitHubPullRequestNumber, listWorkflowRuns, mergePullRequest, parseGitHubRepositoryFullName } = await import('./api-client.js');
+const {
+  createIssueComment,
+  createPullRequest,
+  getPullRequest,
+  isGitHubPullRequestNumber,
+  listWorkflowRuns,
+  mergePullRequest,
+  parseGitHubRepositoryFullName,
+  pushFiles,
+} = await import('./api-client.js');
 
 // This repo's ESM build does not allow node:test's mock.method() to override another module's
 // live named export, but globalThis.fetch is a genuine global -- direct reassignment works fine.
@@ -155,6 +164,22 @@ test('GitHub API calls reject a redirect response without making a follow-up req
   assert.equal(new URL(urls[0]!).origin, 'https://api.github.com');
 });
 
+test('GitHub API calls reject an alternate fetch implementation that returns a followed response', async () => {
+  const urls: string[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    const response = new Response(JSON.stringify({ workflow_runs: [] }), { status: 200 });
+    Object.defineProperty(response, 'redirected', { value: true });
+    return response;
+  }) as typeof fetch, async () => {
+    await assert.rejects(
+      () => listWorkflowRuns('InnerScopeHearing', 'otchealth-mcp-server'),
+      (error: unknown) => (error as { code?: string }).code === 'github_redirect_refused',
+    );
+  });
+  assert.equal(urls.length, 1, 'a followed response must be refused without another request');
+});
+
 test('GitHub pull-request routes reject malformed numbers before credentials or network access', async () => {
   let calls = 0;
   await withStubbedFetch((async () => {
@@ -173,6 +198,80 @@ test('GitHub pull-request routes reject malformed numbers before credentials or 
     }
   });
   assert.equal(calls, 0);
+});
+
+test('all api-client write paths reject MedReview/phi repositories before upstream access', async () => {
+  let calls = 0;
+  await withStubbedFetch((async () => {
+    calls += 1;
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch, async () => {
+    for (const repo of ['MedReview-App', 'synthetic-phi-service']) {
+      const operations = [
+        () => pushFiles('InnerScopeHearing', repo, 'codex/test', [{ path: 'fixture.txt', content: 'synthetic' }], 'test'),
+        () => createIssueComment('InnerScopeHearing', repo, 1, 'synthetic'),
+        () => createPullRequest('InnerScopeHearing', repo, 'synthetic', 'head', 'main'),
+        () => mergePullRequest('InnerScopeHearing', repo, 1),
+      ];
+      for (const operation of operations) {
+        await assert.rejects(
+          operation,
+          (error: unknown) => (error as { code?: string }).code === 'github_write_phi_rejected',
+        );
+      }
+    }
+  });
+  assert.equal(calls, 0);
+});
+
+test('direct webhook/client paths reject external owners and protected markers before upstream access', async () => {
+  let calls = 0;
+  await withStubbedFetch((async () => {
+    calls += 1;
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch, async () => {
+    const externalOperations = [
+      () => pushFiles('external-owner', 'repo', 'branch', [{ path: 'a.ts', content: 'clean' }], 'clean'),
+      () => createIssueComment('external-owner', 'repo', 1, 'clean'),
+      () => createPullRequest('external-owner', 'repo', 'clean', 'head', 'main'),
+      () => mergePullRequest('external-owner', 'repo', 1),
+    ];
+    for (const operation of externalOperations) {
+      await assert.rejects(
+        operation,
+        (error: unknown) => (error as { code?: string }).code === 'github_owner_not_allowed',
+      );
+    }
+
+    const protectedOperations = [
+      () => pushFiles('InnerScopeHearing', 'repo', 'branch', [{ path: 'a.ts', content: '[MNPI] restricted' }], 'clean'),
+      () => createIssueComment('InnerScopeHearing', 'repo', 1, 'from legal-personal'),
+      () => createPullRequest('InnerScopeHearing', 'repo', '[MNPI] restricted', 'head', 'main'),
+      () => mergePullRequest('InnerScopeHearing', 'repo', 1, 'squash', 'from finance-cfo-memory'),
+    ];
+    for (const operation of protectedOperations) {
+      await assert.rejects(
+        operation,
+        (error: unknown) => (error as { code?: string }).code === 'github_pre_share_blocked',
+      );
+    }
+  });
+  assert.equal(calls, 0);
+});
+
+test('generic pull-request artifact reads remain owner-agnostic while mutations stay company-fenced', async () => {
+  const seen: string[] = [];
+  await withStubbedFetch((async (input: RequestInfo | URL) => {
+    seen.push(String(input));
+    return new Response(JSON.stringify({ number: 1, state: 'open' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch, async () => {
+    const pull = await getPullRequest('external-owner', 'artifact-repo', 1);
+    assert.equal(pull.number, 1);
+  });
+  assert.ok(seen.some((url) => url.endsWith('/repos/external-owner/artifact-repo/pulls/1')));
 });
 
 test('GitHub pull-request routes use canonical numeric path segments', async () => {

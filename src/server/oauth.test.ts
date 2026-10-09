@@ -31,11 +31,39 @@ before(() => {
     OAUTH_TOKEN_SIGNING_SECRET: SIGNING_SECRET,
     OAUTH_CLIENT_ID: 'confidential-client',
     OAUTH_CLIENT_SECRET: 'e'.repeat(32),
+    OAUTH_CLIENTS: JSON.stringify([{ client_id: 'internal-machine', secret: 'f'.repeat(32), agent: 'cto' }]),
     // OAUTH_DEFAULT_AGENT deliberately left unset (defaults to '' -> not privileged), so the startup
     // guard does not fire during these tests. The guard's own condition is unit-tested via the
     // exported isPrivilegedDefaultAgent() helper below.
   };
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
+});
+
+test('OAUTH_CLIENTS client_credentials and refresh keep the signed internal surface', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerOAuthRoutes, issuedConnectorSurface } = await import('./oauth.js');
+  const { issueRefreshToken } = await import('../auth/oauth-tokens.js');
+  const app = Fastify();
+  registerOAuthRoutes(app);
+  const clientId = 'internal-machine';
+  const secret = 'f'.repeat(32);
+  const minted = await app.inject({
+    method: 'POST', url: '/oauth/token', headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ grant_type: 'client_credentials', client_id: clientId, client_secret: secret }),
+  });
+  assert.equal(minted.statusCode, 200);
+  assert.equal(issuedConnectorSurface(minted.json().access_token), false);
+
+  const refreshToken = issueRefreshToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, false);
+  const refreshed = await app.inject({
+    method: 'POST', url: '/oauth/token', headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ grant_type: 'refresh_token', refresh_token: refreshToken, client_secret: secret }),
+  });
+  assert.equal(refreshed.statusCode, 200);
+  assert.equal(issuedConnectorSurface(refreshed.json().access_token), false);
+  const refreshedClaims = (await import('../auth/oauth-tokens.js')).verifyToken(refreshed.json().refresh_token, SIGNING_SECRET);
+  assert.equal(refreshedClaims?.cs, false, 'the replacement refresh token carries the same surface');
+  await app.close();
 });
 
 const CLAUDE_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';

@@ -9,7 +9,7 @@ export function registerGitHubRefCreate(server: McpServer, callerHash: CallerHas
     category: 'write_simple',
     annotations: {
       title: 'GitHub: create git ref',
-      description: 'Create a new git ref (e.g. refs/heads/my-branch or refs/tags/v1.0.0) pointing to a commit SHA. Defaults to dry_run.',
+      description: 'Create a new git ref (e.g. refs/heads/my-branch or refs/tags/v1.0.0) pointing to a commit SHA. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { createBranch } from '../../github/write-client.js';
 
-/** github_create_branch — create a new branch. CTO-gated + write-gated; honors dry_run. */
+/** github_create_branch — create a new branch. Company-operator + write-gated; honors dry_run. */
 export function registerGitHubCreateBranch(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -13,7 +13,7 @@ export function registerGitHubCreateBranch(server: McpServer, callerHash: Caller
       annotations: {
         title: 'GitHub: create branch',
         description:
-          'Create a new branch in a repository via the App installation token. Defaults to branching from the repo default-branch HEAD; pass from_sha to pin to a specific commit. CTO-only; honors dry_run.',
+          'Create a new branch in a repository via the App installation token. Defaults to branching from the repo default-branch HEAD; pass from_sha to pin to a specific commit. Named company GitHub operators only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

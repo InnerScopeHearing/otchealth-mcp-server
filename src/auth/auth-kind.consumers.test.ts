@@ -255,12 +255,13 @@ test('DIFFERENTIAL: the client id changes neither the tool list nor a non-bridge
 });
 
 test('DIFFERENTIAL: a static credential and an OAuth token on the same lane and surface get identical results from non-bridge tools', async () => {
-  // The static connector token (kind connector) is CTO-lane, not the connector surface: the same shape as
-  // a client_credentials client. The Codex seat token (kind codex) is CTO-lane on the connector surface:
-  // the same shape as a DCR client. Only the recorded kind differs, and no non-bridge tool may care.
+  // Both the legacy static connector and the Codex seat token are CTO-lane connector-surface
+  // credentials, matching DCR/occ_ OAuth clients. An internal client_credentials client is a
+  // different catalog surface and is covered by the grant differential above. Only the recorded
+  // kind differs here, and no non-bridge tool may care.
   const pairs: Array<[string, string, string]> = [
-    ['connector static vs oauth per-agent client', STATIC.connector, mint('synthetic-per-agent-client', 'client_credentials')],
-    ['codex static vs oauth dcr client', STATIC.codexCto, mint('dcr_fixture', 'authorization_code')],
+    ['connector static vs oauth dcr client', STATIC.connector, mint('dcr_fixture', 'authorization_code')],
+    ['codex static vs oauth occ client', STATIC.codexCto, mint('occ_fixture', 'authorization_code')],
   ].map(([label, a, b]) => [label, a, b] as [string, string, string]);
   for (const [label, staticToken, oauthToken] of pairs) {
     const [staticList, oauthList] = [await listTools(staticToken), await listTools(oauthToken)];

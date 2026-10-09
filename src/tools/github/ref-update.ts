@@ -9,7 +9,7 @@ export function registerGitHubRefUpdate(server: McpServer, callerHash: CallerHas
     category: 'write_simple',
     annotations: {
       title: 'GitHub: update git ref',
-      description: 'Update an existing git ref to point to a new SHA (fast-forward or force). Defaults to dry_run.',
+      description: 'Update an existing git ref to point to a new SHA (fast-forward or force). CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

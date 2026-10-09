@@ -6,6 +6,7 @@ import {
   isKnownInternalLane,
   isToolInLaneAllowlist,
 } from './lane-toolsets.js';
+import { GITHUB_OPERATOR_TOOLSET } from './github-operator.js';
 
 test('KNOWN_INTERNAL_LANES lists exactly the 10 documented internal client_credentials lanes', () => {
   assert.deepEqual(
@@ -28,6 +29,27 @@ test('isKnownInternalLane: true for every listed lane, false for anything else',
 test('every lane in LANE_TOOLSETS has a non-empty allowlist', () => {
   for (const lane of KNOWN_INTERNAL_LANES) {
     assert.ok(LANE_TOOLSETS[lane].length > 0, `${lane} should have a non-empty seed allowlist`);
+  }
+});
+
+test('every internal lane seed preserves the bounded GitHub operator surface under curation', () => {
+  for (const lane of KNOWN_INTERNAL_LANES) {
+    for (const tool of GITHUB_OPERATOR_TOOLSET) {
+      assert.equal(isToolInLaneAllowlist(lane, tool), true, `${lane} must retain ${tool}`);
+    }
+  }
+});
+
+test('GitHub operator curation does not add restricted CTO or administrative neighbors', () => {
+  for (const lane of ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco'] as const) {
+    for (const tool of [
+      'github_graphrag_observation_receipt_get',
+      'github_workflow_run_failed_log_excerpt',
+      'github_make_broker',
+      'github_contents_delete_file',
+      'github_release_delete',
+      'github_workflow_disable',
+    ]) assert.equal(isToolInLaneAllowlist(lane, tool), false, `${lane} must not gain ${tool}`);
   }
 });
 

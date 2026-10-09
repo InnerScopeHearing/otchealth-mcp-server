@@ -10,7 +10,7 @@ export function registerGitHubRepoListBranches(server: McpServer, callerHash: Ca
     category: 'read',
     annotations: {
       title: 'GitHub: list branches',
-      description: 'List branches for a repository. Read-only.',
+      description: 'List branches for a repository. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { createIssue } from '../../github/write-client.js';
 
-/** github_create_issue — open a new issue. CTO-gated + write-gated; honors dry_run. */
+/** github_create_issue — open a new issue. Company-operator + write-gated; honors dry_run. */
 export function registerGitHubCreateIssue(
   server: McpServer,
   callerHash: CallerHashProvider,
@@ -16,7 +16,7 @@ export function registerGitHubCreateIssue(
       annotations: {
         title: 'GitHub: create issue',
         description:
-          'Open a new issue in a repository via the App installation token. Supports labels, assignees, and milestone. CTO-only; honors dry_run.',
+          'Open a new issue in a repository via the App installation token. Supports labels, assignees, and milestone. Named company GitHub operators only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

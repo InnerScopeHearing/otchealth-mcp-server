@@ -9,7 +9,7 @@ export function registerGitHubPrUpdate(server: McpServer, callerHash: CallerHash
     category: 'write_simple',
     annotations: {
       title: 'GitHub: update pull request',
-      description: 'Update a pull request title, body, state (open/closed), or base branch. Defaults to dry_run.',
+      description: 'Update a pull request title, body, state (open/closed), or base branch. Named company GitHub operators only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

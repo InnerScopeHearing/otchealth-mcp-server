@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { addLabels } from '../../github/write-client.js';
 
-/** github_add_labels — add labels to an issue or PR. CTO-gated + write-gated; honors dry_run. */
+/** github_add_labels — add labels to an issue or PR. CTO/developer + write-gated; honors dry_run. */
 export function registerGitHubAddLabels(
   server: McpServer,
   callerHash: CallerHashProvider,
@@ -16,7 +16,7 @@ export function registerGitHubAddLabels(
       annotations: {
         title: 'GitHub: add labels to issue or PR',
         description:
-          'Add one or more labels to an existing issue or pull request. Labels must already exist in the repository. CTO-only; honors dry_run.',
+          'Add one or more labels to an existing issue or pull request. Labels must already exist in the repository. CTO/developer only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,

@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
+import { isCompanyGitHubAllowedOwner } from '../config/github-operator.js';
 import { logger } from '../audit/logger.js';
 import { getPullRequest, mergePullRequest, createIssueComment, isGitHubPullRequestNumber, parseGitHubRepositoryFullName, type GitHubRepositoryReference } from '../github/api-client.js';
+import { evaluateBroadcastMnpiGate } from '../safety/mnpi-gate.js';
 import { resolveAwsCredentials, signRequest } from '../search/sigv4.js';
 
 const env = loadEnv();
@@ -92,6 +94,16 @@ async function publishToSnsFallback(message: string): Promise<void> {
  *  coverage at all before that PR; see that file's header for why the failure trigger it uses is
  *  "GitHub App not configured" rather than a mocked 403 from GitHub itself. */
 export async function postAlert(body: string): Promise<void> {
+  // Both the GitHub issue and SNS fanout are broad destinations. Gate before the primary attempt so
+  // a protected-content refusal cannot fall through and relay the same payload via the fallback.
+  const preShare = evaluateBroadcastMnpiGate({ body });
+  if (preShare.blocked) {
+    logger.warn(
+      { type: 'fleet_medic_alert_route_blocked', reason: 'protected_content' },
+      'refused protected content before GitHub/SNS fleet-medic alert routing',
+    );
+    return;
+  }
   const target = env.FLEET_MEDIC_LOG_REPO;
   const issue = parseInt(env.FLEET_MEDIC_LOG_ISSUE || '0', 10);
   if (!target || !issue) return;
@@ -166,6 +178,9 @@ export function registerWebhookRoutes(app: FastifyInstance): void {
     const event = (request.headers['x-github-event'] as string) || 'unknown';
     const p = (request.body ?? {}) as Record<string, any>;
     const repository = parseGitHubRepositoryFullName(p.repository?.full_name);
+    const companyRepository = repository && isCompanyGitHubAllowedOwner(repository.owner)
+      ? repository
+      : null;
     const repo = repository?.fullName ?? 'unknown';
     const action = p.action ?? '';
     const delivery = request.headers['x-github-delivery'] as string | undefined;
@@ -179,7 +194,7 @@ export function registerWebhookRoutes(app: FastifyInstance): void {
       // v2: on GREEN, attempt auto-merge of any agent-authored PR tied to this run.
       if (conclusion === 'success') {
         const prNums = (node?.pull_requests ?? []).map((x: any) => x?.number).filter(isGitHubPullRequestNumber);
-        if (repository && prNums.length) void tryAutoMerge(repository, prNums);
+        if (companyRepository && prNums.length) void tryAutoMerge(companyRepository, prNums);
       }
       if (conclusion && FAIL_CONCLUSIONS.has(conclusion)) {
         logger.warn(
@@ -195,7 +210,9 @@ export function registerWebhookRoutes(app: FastifyInstance): void {
           },
           `FLEET-MEDIC: CI failure in ${repo} (${conclusion})`,
         );
-        void postAlert(`🔴 **CI failure** — \`${repo}\` (${conclusion}) on \`${node?.head_branch ?? ''}\`. ${node?.html_url ?? ''}`);
+        if (companyRepository) {
+          void postAlert(`🔴 **CI failure** — \`${repo}\` (${conclusion}) on \`${node?.head_branch ?? ''}\`. ${node?.html_url ?? ''}`);
+        }
       }
     }
 

@@ -15,8 +15,9 @@
  * SECRET_KEY_PATTERN, and separately masks any STRING VALUE that itself looks like a secret blob
  * (PEM block, JWT, long base64 run) regardless of what its key is named -- a value-shaped check,
  * not just a key-name check, because a secret can arrive under an innocuous key. Privileged/legal
- * tools (legal_*, anything with "privileged" in its name) get NO args at all: redactArgs returns
- * null for them, and buildEpisodeText renders only {tool, outcome} when redactedArgs is null.
+ * tools (legal_*, anything with "privileged" in its name) and every direct GitHub repository write
+ * get NO args at all: redactArgs returns null for them, and buildEpisodeText renders only
+ * {actor, tool, outcome} when redactedArgs is null.
  *
  * ============================ FAIL-OPEN, NEVER THROW, ZERO LATENCY IMPACT ============================
  * journalMutation is always called via `void journalMutation(...).catch(() => undefined)` at the
@@ -29,11 +30,13 @@
  * ============================ NON-PHI RING ============================
  * The gateway is already non-PHI carved (see config/env.ts, catalog/catalog.ts). This module adds
  * no new PHI path: it only ever journals gateway tool-call metadata, never clo-personal content,
- * and privileged/legal tools are stripped down to {tool, outcome} as above.
+ * and privileged/legal or direct GitHub write tools are stripped down to {actor, tool, outcome} as
+ * above.
  */
 import { writeMemory, recordMemoryIndexOutcome } from '../agentstate/memory.js';
 import { indexMemory as indexMemoryNow } from '../search/index.js';
 import { isConfigured as cosmosConfigured } from '../agentstate/store.js';
+import { isGitHubRepositoryWriteTool } from '../config/github-operator.js';
 
 // ---- pure core -------------------------------------------------------------------------------
 
@@ -51,6 +54,17 @@ export function parseAutoJournalMode(value: string | undefined): AutoJournalMode
 export function isPrivilegedOrLegalTool(toolName: string): boolean {
   const n = (toolName || '').toLowerCase();
   return n.startsWith('legal_') || n.includes('privileged');
+}
+
+/**
+ * Tool calls whose arguments must never enter the shared auto-journal. Direct GitHub repository
+ * writes can contain complete files, issue/PR prose, review comments, workflow inputs, or sensitive
+ * ref names. Their successful execution is still journaled as {tool, actor, outcome}, but the
+ * destination-specific payload remains only at GitHub.
+ */
+export function suppressJournalArgs(toolName: string): boolean {
+  const canonicalGitHubName = toolName.startsWith('github_') ? toolName : `github_${toolName}`;
+  return isPrivilegedOrLegalTool(toolName) || isGitHubRepositoryWriteTool(canonicalGitHubName);
 }
 
 const PEM_RE = /-----BEGIN [A-Z0-9 ]*(PRIVATE KEY|CERTIFICATE|RSA PRIVATE KEY|EC PRIVATE KEY)-----/;
@@ -106,8 +120,8 @@ function redactValue(v: unknown): unknown {
 
 /**
  * Pure redaction of a tool-call args object for episode journaling.
- *  - Privileged/legal tools (isPrivilegedOrLegalTool) return null -- the caller must then journal
- *    ONLY {tool, outcome}, no args at all.
+ *  - Privileged/legal and direct GitHub repository-write tools (suppressJournalArgs) return null --
+ *    the caller must then journal ONLY {actor, tool, outcome}, no args at all.
  *  - Otherwise: any key matching SECRET_KEY_PATTERN is masked (at every nesting level); any STRING
  *    VALUE that looks like a secret blob is masked regardless of its key; every surviving value is
  *    capped to MAX_VALUE_CHARS; the whole serialized result is capped to MAX_TOTAL_CHARS.
@@ -115,7 +129,7 @@ function redactValue(v: unknown): unknown {
  * call so this is belt-and-suspenders, not a known failure mode).
  */
 export function redactArgs(toolName: string, args: unknown): Record<string, unknown> | null {
-  if (isPrivilegedOrLegalTool(toolName)) return null;
+  if (suppressJournalArgs(toolName)) return null;
   try {
     if (!args || typeof args !== 'object' || Array.isArray(args)) return {};
     const out: Record<string, unknown> = {};

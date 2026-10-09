@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked, isStaticTokenAuthReady } from './revocation-store.js';
-import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, baseUrlOf } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, issuedConnectorSurface, baseUrlOf } from '../server/oauth.js';
 import type { AuthKind, OAuthGrantType } from '../server/request-context.js';
 import { agentFromDescopeToken } from './descope.js';
 
@@ -216,6 +216,33 @@ function staticCredentialCandidates(): StaticCredentialCandidate[] {
 }
 
 /**
+ * Identify the original single OAuth connector without overriding resolveClient()'s documented
+ * OAUTH_CLIENTS-first precedence. A malformed multi-client value is ignored by resolveClient(), so
+ * it must not declassify an otherwise valid single connector here either.
+ */
+export function isLegacyOAuthConnectorClient(
+  clientId: string | null,
+  legacyClientId: string,
+  oauthClientsJson: string,
+): boolean {
+  if (!clientId || !legacyClientId || clientId !== legacyClientId) return false;
+  if (!oauthClientsJson) return true;
+  try {
+    const parsed: unknown = JSON.parse(oauthClientsJson);
+    if (!Array.isArray(parsed)) return true;
+    const belongsToMultiClientConfig = parsed.some(
+      (entry) => typeof entry === 'object'
+        && entry !== null
+        && 'client_id' in entry
+        && (entry as { client_id?: unknown }).client_id === clientId,
+    );
+    return !belongsToMultiClientConfig;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Validates a bearer against PERPLEXITY_CONNECTOR_TOKEN. On success returns
  * the AuthContext (with SHA256 caller hash). On failure returns null and the
  * caller is responsible for sending 401. Never logs the raw token.
@@ -255,6 +282,7 @@ export async function validateBearer(
   let authKind: AuthKind | undefined = issued ? 'oauth' : undefined;
   let descopeAgent: string | null = null;
   let staticAgent: string | null = null;
+  let isLegacyConnectorStatic = false;
   let isM365Static = false;
   let isCodexStatic = false;
   if (!issued) {
@@ -271,6 +299,7 @@ export async function validateBearer(
       if (!match) return null;
       staticAgent = match.agent;
       authKind = match.kind;
+      isLegacyConnectorStatic = match.kind === 'connector';
       isM365Static = match.kind === 'm365';
       isCodexStatic = match.kind === 'codex';
     }
@@ -289,13 +318,29 @@ export async function validateBearer(
   // How an issued token was minted (null when it records no grant, or is not an issued token).
   const authGrant = issued ? issuedGrantType(token) : null;
   const clientId = issued ? issuedClientId(token) : null;
+  // OAUTH_CLIENT_ID is the original single connector credential. Its identifier predates the dcr_/
+  // occ_ naming convention and is operator-configurable, so its connector status cannot safely be
+  // inferred from a prefix. OAUTH_CLIENTS entries are intentionally excluded: those are per-lane
+  // machine-to-machine clients whose existing internal-catalog behavior remains unchanged.
+  const isLegacyOAuthConnector = issued ? false : isLegacyOAuthConnectorClient(
+    clientId,
+    env.OAUTH_CLIENT_ID,
+    env.OAUTH_CLIENTS,
+  );
   // Connector clients: DCR public clients (dcr_) OR manually-registered confidential connector clients
   // (occ_ = OTCHealth Connector Client) entered in Claude's Advanced settings to bypass the DCR tool-delivery
   // bug (modelcontextprotocol#1675). Both get the curated, spec-bare connector surface.
   // A Codex static per-seat token (codexStaticAgentTokens) is ALSO connector surface: the seat gets the
   // curated per-lane connector toolset, exactly as if it had elevated to that lane via OAuth.
-  const connector_surface =
-    Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_'))) || isCodexStatic;
+  // PERPLEXITY_CONNECTOR_TOKEN is a connector credential for every configured lane. Canonical
+  // company mappings receive their role-specific connectorToolset; external or unrecognized
+  // mappings receive EXTERNAL_READONLY_TOOLSET. Neither may inherit the full internal catalog.
+  const connector_surface = issued
+    ? issuedConnectorSurface(token) !== false
+    : Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_')))
+      || isLegacyOAuthConnector
+      || isCodexStatic
+      || isLegacyConnectorStatic;
   return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static, ...(authKind ? { auth_kind: authKind } : {}), ...(authGrant ? { auth_grant: authGrant } : {}), ...(clientId ? { auth_subject: clientId } : {}) };
 }
 

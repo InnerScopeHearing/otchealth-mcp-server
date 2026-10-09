@@ -15,7 +15,15 @@
 import { createHash, createSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { loadEnv } from '../config/env.js';
+import { isGitHubWriteCarvedOutRepository } from '../config/github-operator.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
+import {
+  buildGitHubApiUrl,
+  encodeGitHubHierarchicalRoutePath,
+  encodeGitHubOpaqueRouteParam,
+  encodeGitHubRepositorySegment,
+  GitHubPathSafetyError,
+} from './path-safety.js';
 import { CI_LOG_HARD_CAP_BYTES, CI_LOG_KEEP_BYTES, readResponseTail, type JobLogResult } from './ci-log-excerpt.js';
 import type {
   PinnedObservationFailureDetail,
@@ -69,7 +77,7 @@ class PinnedObservationReaderError extends GitHubFullError {
 // ── Ring-safety guard ──────────────────────────────────────────────────────────
 
 export function assertNotPhi(repo: string): void {
-  if (/^medreview/i.test(repo) || /phi/i.test(repo)) {
+  if (isGitHubWriteCarvedOutRepository(repo)) {
     throw new GitHubFullError({
       code: 'github_write_phi_rejected',
       status: 0,
@@ -106,6 +114,33 @@ const GITHUB_HEADERS = {
   'X-GitHub-Api-Version': '2022-11-28',
 };
 
+const GITHUB_API_ORIGIN = 'https://api.github.com';
+
+/** Keep the validated repository destination stable across ordinary API reads and mutations. */
+async function githubApiFetch(path: string, init: RequestInit, retries: number): Promise<Response> {
+  const url = validatedGitHubApiUrl(path);
+  const response = await fetchWithBudget(url, { ...init, redirect: 'error' }, { retries });
+  if (response.redirected || (response.status >= 300 && response.status < 400)) {
+    throw new GitHubFullError({
+      code: 'github_redirect_refused', status: response.status,
+      message: 'Refusing a redirect from the GitHub API.',
+      nextStep: 'Use the repository current canonical owner and name, then retry.',
+    });
+  }
+  return response;
+}
+
+function validatedGitHubApiUrl(path: string): URL {
+  try {
+    return buildGitHubApiUrl(path, GITHUB_API_ORIGIN);
+  } catch (error) {
+    if (error instanceof GitHubPathSafetyError) {
+      throw new GitHubFullError({ code: error.code, status: error.status, message: error.message, nextStep: error.nextStep });
+    }
+    throw error;
+  }
+}
+
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
 
@@ -117,13 +152,14 @@ async function getInstallationToken(): Promise<string> {
   if (!installationId)
     throw new GitHubFullError({ code: 'github_not_configured', status: 0, message: 'GITHUB_APP_INSTALLATION_ID not set.', nextStep: 'Add GITHUB_APP_INSTALLATION_ID to the vault.' });
 
+  const path = `/app/installations/${encodeGitHubRepositorySegment(installationId)}/access_tokens`;
+  validatedGitHubApiUrl(path);
   const jwt = mintJwt();
-  const url = `https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
   // Token mint: retries:0 (a duplicate mint is wasted, not harmful, but be conservative).
-  const res = await fetchWithBudget(url, {
+  const res = await githubApiFetch(path, {
     method: 'POST',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${jwt}` },
-  }, { retries: 0 });
+  }, 0);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -139,15 +175,17 @@ async function getInstallationToken(): Promise<string> {
 
 // ── Core HTTP helpers ──────────────────────────────────────────────────────────
 
-const O = encodeURIComponent;
+const O = encodeGitHubOpaqueRouteParam;
+const S = encodeGitHubRepositorySegment;
 
 async function ghGet<T = any>(path: string): Promise<T> {
+  validatedGitHubApiUrl(path);
   const token = await getInstallationToken();
   // Read-only GET: safe to retry once on a network blip / 429 / 5xx.
-  const res = await fetchWithBudget(`https://api.github.com${path}`, {
+  const res = await githubApiFetch(path, {
     method: 'GET',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
-  }, { retries: 1 });
+  }, 1);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -162,10 +200,11 @@ async function ghSend<T = any>(
   path: string,
   body?: unknown,
 ): Promise<{ statusCode: number; data: T }> {
+  validatedGitHubApiUrl(path);
   const token = await getInstallationToken();
   // Non-idempotent write (create/update/delete refs, tags, releases, labels, etc.):
   // retries:0 so a timeout never causes a duplicate GitHub mutation.
-  const res = await fetchWithBudget(`https://api.github.com${path}`, {
+  const res = await githubApiFetch(path, {
     method,
     headers: {
       ...GITHUB_HEADERS,
@@ -173,7 +212,7 @@ async function ghSend<T = any>(
       'Content-Type': 'application/json',
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  }, { retries: 0 });
+  }, 0);
   const statusCode = res.status;
   const text = await res.text();
   let data: any;
@@ -189,42 +228,42 @@ async function ghSend<T = any>(
 
 /** GET /repos/{owner}/{repo} */
 export async function repoGet(owner: string, repo: string): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}`);
 }
 
 /** GET /orgs/{org}/repos */
 export async function repoListForOrg(org: string, type = 'all', perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/orgs/${O(org)}/repos?type=${O(type)}&per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/orgs/${S(org)}/repos?type=${O(type)}&per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /users/{username}/repos */
 export async function repoListForUser(username: string, type = 'all', perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/users/${O(username)}/repos?type=${O(type)}&per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/users/${S(username)}/repos?type=${O(type)}&per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/branches */
 export async function repoListBranches(owner: string, repo: string, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/branches?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/branches?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/tags */
 export async function repoListTags(owner: string, repo: string, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/tags?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/tags?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/contributors */
 export async function repoListContributors(owner: string, repo: string, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/contributors?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/contributors?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/languages */
 export async function repoListLanguages(owner: string, repo: string): Promise<Record<string, number>> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/languages`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/languages`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -236,18 +275,18 @@ export async function commitList(owner: string, repo: string, sha?: string, path
   const params = new URLSearchParams({ per_page: String(perPage), page: String(page) });
   if (sha) params.set('sha', sha);
   if (path) params.set('path', path);
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/commits?${params}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/commits?${params}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/commits/{ref} */
 export async function commitGet(owner: string, repo: string, ref: string): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/commits/${O(ref)}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/commits/${O(ref)}`);
 }
 
 /** GET /repos/{owner}/{repo}/compare/{base}...{head} */
 export async function commitCompare(owner: string, repo: string, base: string, head: string): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/compare/${O(base)}...${O(head)}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/compare/${O(base)}...${O(head)}`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -268,11 +307,12 @@ export async function contentsDeleteFile(opts: {
   author?: { name: string; email: string };
 }): Promise<{ commit: string; path: string }> {
   assertNotPhi(opts.repo);
-  const filePath = opts.path.split('/').map(O).join('/');
+  const filePath = encodeGitHubHierarchicalRoutePath(opts.path);
+  if (opts.branch) O(opts.branch);
   const body: Record<string, unknown> = { message: opts.message, sha: opts.sha };
   if (opts.branch) body.branch = opts.branch;
   if (opts.author) body.author = opts.author;
-  const { data: r } = await ghSend<any>('DELETE', `/repos/${O(opts.owner)}/${O(opts.repo)}/contents/${filePath}`, body);
+  const { data: r } = await ghSend<any>('DELETE', `/repos/${S(opts.owner)}/${S(opts.repo)}/contents/${filePath}`, body);
   return { commit: r.commit?.sha ?? '', path: opts.path };
 }
 
@@ -282,12 +322,12 @@ export async function contentsDeleteFile(opts: {
 
 /** GET /repos/{owner}/{repo}/branches/{branch} */
 export async function branchGet(owner: string, repo: string, branch: string): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/branches/${O(branch)}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/branches/${O(branch)}`);
 }
 
 /** GET /repos/{owner}/{repo}/branches/{branch}/protection */
 export async function branchGetProtection(owner: string, repo: string, branch: string): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/branches/${O(branch)}/protection`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/branches/${O(branch)}/protection`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -297,21 +337,22 @@ export async function branchGetProtection(owner: string, repo: string, branch: s
 /** POST /repos/{owner}/{repo}/git/refs — create a ref */
 export async function refCreate(owner: string, repo: string, ref: string, sha: string): Promise<any> {
   assertNotPhi(repo);
-  const { data } = await ghSend<any>('POST', `/repos/${O(owner)}/${O(repo)}/git/refs`, { ref, sha });
+  encodeGitHubHierarchicalRoutePath(ref);
+  const { data } = await ghSend<any>('POST', `/repos/${S(owner)}/${S(repo)}/git/refs`, { ref, sha });
   return data;
 }
 
 /** PATCH /repos/{owner}/{repo}/git/refs/{ref} — update (fast-forward or force) */
 export async function refUpdate(owner: string, repo: string, ref: string, sha: string, force = false): Promise<any> {
   assertNotPhi(repo);
-  const { data } = await ghSend<any>('PATCH', `/repos/${O(owner)}/${O(repo)}/git/refs/${ref}`, { sha, force });
+  const { data } = await ghSend<any>('PATCH', `/repos/${S(owner)}/${S(repo)}/git/refs/${encodeGitHubHierarchicalRoutePath(ref)}`, { sha, force });
   return data;
 }
 
 /** DELETE /repos/{owner}/{repo}/git/refs/{ref} */
 export async function refDelete(owner: string, repo: string, ref: string): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('DELETE', `/repos/${O(owner)}/${O(repo)}/git/refs/${ref}`);
+  await ghSend<void>('DELETE', `/repos/${S(owner)}/${S(repo)}/git/refs/${encodeGitHubHierarchicalRoutePath(ref)}`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -339,7 +380,7 @@ export async function gitTagCreate(opts: {
     type: opts.type ?? 'commit',
   };
   if (opts.tagger) body.tagger = opts.tagger;
-  const { data: r } = await ghSend<any>('POST', `/repos/${O(opts.owner)}/${O(opts.repo)}/git/tags`, body);
+  const { data: r } = await ghSend<any>('POST', `/repos/${S(opts.owner)}/${S(opts.repo)}/git/tags`, body);
   return { tagSha: r.sha, tag: r.tag };
 }
 
@@ -349,7 +390,7 @@ export async function gitTagCreate(opts: {
 
 /** GET /repos/{owner}/{repo}/pulls/{pull_number} */
 export async function prGet(owner: string, repo: string, pullNumber: number): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/pulls/${pullNumber}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/pulls/${pullNumber}`);
 }
 
 /** PATCH /repos/{owner}/{repo}/pulls/{pull_number} — update title/body/state/base */
@@ -370,25 +411,25 @@ export async function prUpdate(opts: {
   if (opts.state !== undefined) body.state = opts.state;
   if (opts.base !== undefined) body.base = opts.base;
   if (opts.maintainerCanModify !== undefined) body.maintainer_can_modify = opts.maintainerCanModify;
-  const { data } = await ghSend<any>('PATCH', `/repos/${O(opts.owner)}/${O(opts.repo)}/pulls/${opts.pullNumber}`, body);
+  const { data } = await ghSend<any>('PATCH', `/repos/${S(opts.owner)}/${S(opts.repo)}/pulls/${opts.pullNumber}`, body);
   return data;
 }
 
 /** GET /repos/{owner}/{repo}/pulls/{pull_number}/files */
 export async function prListFiles(owner: string, repo: string, pullNumber: number, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/pulls/${pullNumber}/files?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/pulls/${pullNumber}/files?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/pulls/{pull_number}/commits */
 export async function prListCommits(owner: string, repo: string, pullNumber: number, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/pulls/${pullNumber}/commits?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/pulls/${pullNumber}/commits?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews */
 export async function prListReviews(owner: string, repo: string, pullNumber: number): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/pulls/${pullNumber}/reviews`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/pulls/${pullNumber}/reviews`);
   return Array.isArray(data) ? data : [];
 }
 
@@ -407,7 +448,7 @@ export async function prCreateReview(opts: {
   if (opts.commitId) body.commit_id = opts.commitId;
   if (opts.body) body.body = opts.body;
   if (opts.comments) body.comments = opts.comments;
-  const { data: r } = await ghSend<any>('POST', `/repos/${O(opts.owner)}/${O(opts.repo)}/pulls/${opts.pullNumber}/reviews`, body);
+  const { data: r } = await ghSend<any>('POST', `/repos/${S(opts.owner)}/${S(opts.repo)}/pulls/${opts.pullNumber}/reviews`, body);
   return { id: r.id, state: r.state, body: r.body ?? '' };
 }
 
@@ -423,7 +464,7 @@ export async function prRequestReviewers(opts: {
   const body: Record<string, unknown> = {};
   if (opts.reviewers) body.reviewers = opts.reviewers;
   if (opts.teamReviewers) body.team_reviewers = opts.teamReviewers;
-  const { data } = await ghSend<any>('POST', `/repos/${O(opts.owner)}/${O(opts.repo)}/pulls/${opts.pullNumber}/requested_reviewers`, body);
+  const { data } = await ghSend<any>('POST', `/repos/${S(opts.owner)}/${S(opts.repo)}/pulls/${opts.pullNumber}/requested_reviewers`, body);
   return data;
 }
 
@@ -432,7 +473,7 @@ export async function prUpdateBranch(owner: string, repo: string, pullNumber: nu
   assertNotPhi(repo);
   const body: Record<string, unknown> = {};
   if (expectedHeadSha) body.expected_head_sha = expectedHeadSha;
-  const { data: r } = await ghSend<any>('PUT', `/repos/${O(owner)}/${O(repo)}/pulls/${pullNumber}/update-branch`, body);
+  const { data: r } = await ghSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullNumber}/update-branch`, body);
   return { message: r.message ?? '', url: r.url ?? '' };
 }
 
@@ -442,7 +483,7 @@ export async function prUpdateBranch(owner: string, repo: string, pullNumber: nu
 
 /** GET /repos/{owner}/{repo}/issues/{issue_number} */
 export async function issueGet(owner: string, repo: string, issueNumber: number): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/issues/${issueNumber}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/issues/${issueNumber}`);
 }
 
 /** PATCH /repos/{owner}/{repo}/issues/{issue_number} — update or close */
@@ -467,7 +508,7 @@ export async function issueUpdate(opts: {
   if (opts.labels !== undefined) body.labels = opts.labels;
   if (opts.assignees !== undefined) body.assignees = opts.assignees;
   if (opts.milestone !== undefined) body.milestone = opts.milestone;
-  const { data } = await ghSend<any>('PATCH', `/repos/${O(opts.owner)}/${O(opts.repo)}/issues/${opts.issueNumber}`, body);
+  const { data } = await ghSend<any>('PATCH', `/repos/${S(opts.owner)}/${S(opts.repo)}/issues/${opts.issueNumber}`, body);
   return data;
 }
 
@@ -475,13 +516,13 @@ export async function issueUpdate(opts: {
 export async function issueList(owner: string, repo: string, state = 'open', labels?: string, perPage = 20, page = 1): Promise<any[]> {
   const params = new URLSearchParams({ state, per_page: String(perPage), page: String(page) });
   if (labels) params.set('labels', labels);
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/issues?${params}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/issues?${params}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/issues/{issue_number}/comments */
 export async function issueListComments(owner: string, repo: string, issueNumber: number, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/issues/${issueNumber}/comments?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/issues/${issueNumber}/comments?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
@@ -490,19 +531,19 @@ export async function issueLock(owner: string, repo: string, issueNumber: number
   assertNotPhi(repo);
   const body: Record<string, unknown> = {};
   if (lockReason) body.lock_reason = lockReason;
-  await ghSend<void>('PUT', `/repos/${O(owner)}/${O(repo)}/issues/${issueNumber}/lock`, body);
+  await ghSend<void>('PUT', `/repos/${S(owner)}/${S(repo)}/issues/${issueNumber}/lock`, body);
 }
 
 /** DELETE /repos/{owner}/{repo}/issues/{issue_number}/lock */
 export async function issueUnlock(owner: string, repo: string, issueNumber: number): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('DELETE', `/repos/${O(owner)}/${O(repo)}/issues/${issueNumber}/lock`);
+  await ghSend<void>('DELETE', `/repos/${S(owner)}/${S(repo)}/issues/${issueNumber}/lock`);
 }
 
 /** POST /repos/{owner}/{repo}/issues/{issue_number}/assignees */
 export async function issueAddAssignees(owner: string, repo: string, issueNumber: number, assignees: string[]): Promise<any> {
   assertNotPhi(repo);
-  const { data } = await ghSend<any>('POST', `/repos/${O(owner)}/${O(repo)}/issues/${issueNumber}/assignees`, { assignees });
+  const { data } = await ghSend<any>('POST', `/repos/${S(owner)}/${S(repo)}/issues/${issueNumber}/assignees`, { assignees });
   return data;
 }
 
@@ -512,7 +553,7 @@ export async function issueAddAssignees(owner: string, repo: string, issueNumber
 
 /** GET /repos/{owner}/{repo}/labels */
 export async function labelList(owner: string, repo: string, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/labels?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/labels?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
@@ -521,7 +562,7 @@ export async function labelCreate(owner: string, repo: string, name: string, col
   assertNotPhi(repo);
   const body: Record<string, unknown> = { name, color: color.replace('#', '') };
   if (description) body.description = description;
-  const { data } = await ghSend<any>('POST', `/repos/${O(owner)}/${O(repo)}/labels`, body);
+  const { data } = await ghSend<any>('POST', `/repos/${S(owner)}/${S(repo)}/labels`, body);
   return data;
 }
 
@@ -532,14 +573,14 @@ export async function labelUpdate(owner: string, repo: string, labelName: string
   if (opts.name) body.name = opts.name;
   if (opts.color) body.color = opts.color.replace('#', '');
   if (opts.description !== undefined) body.description = opts.description;
-  const { data } = await ghSend<any>('PATCH', `/repos/${O(owner)}/${O(repo)}/labels/${O(labelName)}`, body);
+  const { data } = await ghSend<any>('PATCH', `/repos/${S(owner)}/${S(repo)}/labels/${O(labelName)}`, body);
   return data;
 }
 
 /** DELETE /repos/{owner}/{repo}/labels/{name} */
 export async function labelDelete(owner: string, repo: string, labelName: string): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('DELETE', `/repos/${O(owner)}/${O(repo)}/labels/${O(labelName)}`);
+  await ghSend<void>('DELETE', `/repos/${S(owner)}/${S(repo)}/labels/${O(labelName)}`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -548,13 +589,13 @@ export async function labelDelete(owner: string, repo: string, labelName: string
 
 /** GET /repos/{owner}/{repo}/milestones */
 export async function milestoneList(owner: string, repo: string, state = 'open', perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/milestones?state=${O(state)}&per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/milestones?state=${O(state)}&per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/milestones/{milestone_number} */
 export async function milestoneGet(owner: string, repo: string, milestoneNumber: number): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/milestones/${milestoneNumber}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/milestones/${milestoneNumber}`);
 }
 
 /** POST /repos/{owner}/{repo}/milestones */
@@ -564,7 +605,7 @@ export async function milestoneCreate(owner: string, repo: string, title: string
   if (opts?.description) body.description = opts.description;
   if (opts?.dueOn) body.due_on = opts.dueOn;
   if (opts?.state) body.state = opts.state;
-  const { data } = await ghSend<any>('POST', `/repos/${O(owner)}/${O(repo)}/milestones`, body);
+  const { data } = await ghSend<any>('POST', `/repos/${S(owner)}/${S(repo)}/milestones`, body);
   return data;
 }
 
@@ -576,14 +617,14 @@ export async function milestoneUpdate(owner: string, repo: string, milestoneNumb
   if (opts.description !== undefined) body.description = opts.description;
   if (opts.dueOn !== undefined) body.due_on = opts.dueOn;
   if (opts.state) body.state = opts.state;
-  const { data } = await ghSend<any>('PATCH', `/repos/${O(owner)}/${O(repo)}/milestones/${milestoneNumber}`, body);
+  const { data } = await ghSend<any>('PATCH', `/repos/${S(owner)}/${S(repo)}/milestones/${milestoneNumber}`, body);
   return data;
 }
 
 /** DELETE /repos/{owner}/{repo}/milestones/{milestone_number} */
 export async function milestoneDelete(owner: string, repo: string, milestoneNumber: number): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('DELETE', `/repos/${O(owner)}/${O(repo)}/milestones/${milestoneNumber}`);
+  await ghSend<void>('DELETE', `/repos/${S(owner)}/${S(repo)}/milestones/${milestoneNumber}`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -592,18 +633,18 @@ export async function milestoneDelete(owner: string, repo: string, milestoneNumb
 
 /** GET /repos/{owner}/{repo}/releases */
 export async function releaseList(owner: string, repo: string, perPage = 20, page = 1): Promise<any[]> {
-  const data = await ghGet<any[]>(`/repos/${O(owner)}/${O(repo)}/releases?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<any[]>(`/repos/${S(owner)}/${S(repo)}/releases?per_page=${perPage}&page=${page}`);
   return Array.isArray(data) ? data : [];
 }
 
 /** GET /repos/{owner}/{repo}/releases/{release_id} */
 export async function releaseGet(owner: string, repo: string, releaseId: number): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/releases/${releaseId}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/releases/${releaseId}`);
 }
 
 /** GET /repos/{owner}/{repo}/releases/latest */
 export async function releaseGetLatest(owner: string, repo: string): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/releases/latest`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/releases/latest`);
 }
 
 /** PATCH /repos/{owner}/{repo}/releases/{release_id} */
@@ -623,14 +664,14 @@ export async function releaseUpdate(owner: string, repo: string, releaseId: numb
   if (opts.draft !== undefined) body.draft = opts.draft;
   if (opts.prerelease !== undefined) body.prerelease = opts.prerelease;
   if (opts.makeLatest !== undefined) body.make_latest = opts.makeLatest;
-  const { data } = await ghSend<any>('PATCH', `/repos/${O(owner)}/${O(repo)}/releases/${releaseId}`, body);
+  const { data } = await ghSend<any>('PATCH', `/repos/${S(owner)}/${S(repo)}/releases/${releaseId}`, body);
   return data;
 }
 
 /** DELETE /repos/{owner}/{repo}/releases/{release_id} */
 export async function releaseDelete(owner: string, repo: string, releaseId: number): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('DELETE', `/repos/${O(owner)}/${O(repo)}/releases/${releaseId}`);
+  await ghSend<void>('DELETE', `/repos/${S(owner)}/${S(repo)}/releases/${releaseId}`);
 }
 
 /**
@@ -642,7 +683,7 @@ export async function releaseGenerateNotes(owner: string, repo: string, tagName:
   if (opts?.targetCommitish) body.target_commitish = opts.targetCommitish;
   if (opts?.previousTagName) body.previous_tag_name = opts.previousTagName;
   if (opts?.configurationFilePath) body.configuration_file_path = opts.configurationFilePath;
-  const { data } = await ghSend<any>('POST', `/repos/${O(owner)}/${O(repo)}/releases/generate-notes`, body);
+  const { data } = await ghSend<any>('POST', `/repos/${S(owner)}/${S(repo)}/releases/generate-notes`, body);
   return { name: data.name ?? tagName, body: data.body ?? '' };
 }
 
@@ -652,25 +693,25 @@ export async function releaseGenerateNotes(owner: string, repo: string, tagName:
 
 /** GET /repos/{owner}/{repo}/actions/workflows */
 export async function workflowList(owner: string, repo: string, perPage = 30, page = 1): Promise<any[]> {
-  const data = await ghGet<{ workflows: any[] }>(`/repos/${O(owner)}/${O(repo)}/actions/workflows?per_page=${perPage}&page=${page}`);
+  const data = await ghGet<{ workflows: any[] }>(`/repos/${S(owner)}/${S(repo)}/actions/workflows?per_page=${perPage}&page=${page}`);
   return Array.isArray(data?.workflows) ? data.workflows : [];
 }
 
 /** GET /repos/{owner}/{repo}/actions/workflows/{workflow_id} */
 export async function workflowGet(owner: string, repo: string, workflowId: string | number): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/actions/workflows/${O(String(workflowId))}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/actions/workflows/${O(String(workflowId))}`);
 }
 
 /** PUT /repos/{owner}/{repo}/actions/workflows/{workflow_id}/enable */
 export async function workflowEnable(owner: string, repo: string, workflowId: string | number): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('PUT', `/repos/${O(owner)}/${O(repo)}/actions/workflows/${O(String(workflowId))}/enable`);
+  await ghSend<void>('PUT', `/repos/${S(owner)}/${S(repo)}/actions/workflows/${O(String(workflowId))}/enable`);
 }
 
 /** PUT /repos/{owner}/{repo}/actions/workflows/{workflow_id}/disable */
 export async function workflowDisable(owner: string, repo: string, workflowId: string | number): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('PUT', `/repos/${O(owner)}/${O(repo)}/actions/workflows/${O(String(workflowId))}/disable`);
+  await ghSend<void>('PUT', `/repos/${S(owner)}/${S(repo)}/actions/workflows/${O(String(workflowId))}/disable`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -679,18 +720,18 @@ export async function workflowDisable(owner: string, repo: string, workflowId: s
 
 /** GET /repos/{owner}/{repo}/actions/runs/{run_id} */
 export async function workflowRunGet(owner: string, repo: string, runId: number): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/actions/runs/${runId}`);
 }
 
 /** GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs */
 export async function workflowRunListJobs(owner: string, repo: string, runId: number, filter: 'latest' | 'all' = 'latest'): Promise<any[]> {
-  const data = await ghGet<{ jobs: any[] }>(`/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/jobs?filter=${filter}`);
+  const data = await ghGet<{ jobs: any[] }>(`/repos/${S(owner)}/${S(repo)}/actions/runs/${runId}/jobs?filter=${filter}`);
   return Array.isArray(data?.jobs) ? data.jobs : [];
 }
 
 /** GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts */
 export async function workflowRunListArtifacts(owner: string, repo: string, runId: number): Promise<any[]> {
-  const data = await ghGet<{ artifacts: any[] }>(`/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/artifacts`);
+  const data = await ghGet<{ artifacts: any[] }>(`/repos/${S(owner)}/${S(repo)}/actions/runs/${runId}/artifacts`);
   return Array.isArray(data?.artifacts) ? data.artifacts : [];
 }
 
@@ -845,6 +886,8 @@ async function getPinnedObservationInstallationToken(): Promise<string> {
     },
   }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
 
+  await assertPinnedResponseUrl(response, tokenUrl);
+
   if (response.status !== 201) {
     await cancelResponseBody(response);
     throw new Error('GitHub installation token request failed');
@@ -885,6 +928,7 @@ async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unkn
     redirect: 'error',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
   }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  await assertPinnedResponseUrl(response, url);
   if (response.status !== 200) {
     await cancelResponseBody(response);
     throw new PinnedObservationHttpStatusError(response.status);
@@ -897,6 +941,27 @@ async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unkn
     throw new Error('invalid GitHub API response');
   }
   return parseStrictJson(text, PINNED_OBSERVATION_MAX_METADATA_BYTES);
+}
+
+/** fetch redirect modes are defense in depth; reject followed or misdirected responses even when a
+ * custom fetch implementation ignores the requested mode. Native Response.url is empty in some
+ * test doubles, so compare it when the implementation supplies it. */
+async function assertPinnedResponseUrl(response: Response, expected: URL): Promise<void> {
+  if (response.redirected) {
+    await cancelResponseBody(response);
+    throw new Error('unexpected GitHub response redirect');
+  }
+  if (response.url) {
+    let actual: URL;
+    try { actual = new URL(response.url); } catch {
+      await cancelResponseBody(response);
+      throw new Error('invalid GitHub response URL');
+    }
+    if (actual.href !== expected.href) {
+      await cancelResponseBody(response);
+      throw new Error('unexpected GitHub response URL');
+    }
+  }
 }
 
 function verifyRepositoryMetadata(value: unknown): number {
@@ -1042,7 +1107,7 @@ async function downloadPinnedArtifactArchive(token: string): Promise<Buffer> {
 
 /** GET /repos/{owner}/{repo}/actions/jobs/{job_id} */
 export async function workflowJobGet(owner: string, repo: string, jobId: number): Promise<any> {
-  return ghGet(`/repos/${O(owner)}/${O(repo)}/actions/jobs/${jobId}`);
+  return ghGet(`/repos/${S(owner)}/${S(repo)}/actions/jobs/${jobId}`);
 }
 
 const CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS = 15_000;
@@ -1058,7 +1123,7 @@ export async function workflowJobLogTail(owner: string, repo: string, jobId: num
   try {
     const token = await getInstallationToken();
     const redirectResponse = await fetchWithBudget(
-      new URL(`/repos/${O(owner)}/${O(repo)}/actions/jobs/${jobId}/logs`, PINNED_OBSERVATION_API),
+      new URL(`/repos/${S(owner)}/${S(repo)}/actions/jobs/${jobId}/logs`, PINNED_OBSERVATION_API),
       { method: 'GET', redirect: 'manual', headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` } },
       { retries: 1, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS },
     );
@@ -1077,6 +1142,10 @@ export async function workflowJobLogTail(owner: string, repo: string, jobId: num
       redirect: 'error',
       headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
     }, { retries: 0, timeoutMs: CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS });
+    if (download.redirected || (download.url && download.url !== signedUrl.href)) {
+      await cancelResponseBody(download);
+      return { status: 'failed', reason: 'untrusted_redirect' };
+    }
     if (download.status === 404 || download.status === 410) {
       await cancelResponseBody(download);
       return { status: 'unavailable' };
@@ -1197,11 +1266,11 @@ export async function getPinnedGraphRagObservationReceipt(): Promise<PinnedGraph
 /** POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel */
 export async function workflowRunCancel(owner: string, repo: string, runId: number): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('POST', `/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/cancel`);
+  await ghSend<void>('POST', `/repos/${S(owner)}/${S(repo)}/actions/runs/${runId}/cancel`);
 }
 
 /** POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun */
 export async function workflowRunRerun(owner: string, repo: string, runId: number, enableDebugLogging = false): Promise<void> {
   assertNotPhi(repo);
-  await ghSend<void>('POST', `/repos/${O(owner)}/${O(repo)}/actions/runs/${runId}/rerun`, { enable_debug_logging: enableDebugLogging });
+  await ghSend<void>('POST', `/repos/${S(owner)}/${S(repo)}/actions/runs/${runId}/rerun`, { enable_debug_logging: enableDebugLogging });
 }

@@ -101,6 +101,16 @@ test('issueAccessToken stamps the grant as the signed gty claim, and leaves it o
   assert.equal('gty' in none, false);
 });
 
+test('OAuth access and refresh tokens preserve only the explicitly issued surface boolean', () => {
+  const secret = 'unit-test-secret';
+  const access = verifyToken(issueAccessToken('internal-client', 'mcp', secret, 'https://mcp.otchealth.app', 'cto', 60, 'client_credentials', false), secret);
+  const refresh = verifyToken(issueRefreshToken('internal-client', 'mcp', secret, 'https://mcp.otchealth.app', 'cto', 60, false), secret);
+  assert.equal(access?.cs, false);
+  assert.equal(refresh?.cs, false);
+  const legacy = verifyToken(issueAccessToken('old-client', 'mcp', secret, 'https://mcp.otchealth.app', 'cto'), secret);
+  assert.equal('cs' in (legacy ?? {}), false, 'legacy issuance without an explicit decision keeps no claim');
+});
+
 test('a refresh token never carries a grant claim', () => {
   const secret = 'unit-test-secret';
   const claims = verifyToken(issueRefreshToken('client-abc', 'mcp', secret, 'https://mcp.otchealth.app', 'cto'), secret);

@@ -9,7 +9,7 @@ export function registerGitHubIssueUnlock(server: McpServer, callerHash: CallerH
     category: 'write_simple',
     annotations: {
       title: 'GitHub: unlock issue conversation',
-      description: 'Unlock a previously locked issue or PR conversation. Defaults to dry_run.',
+      description: 'Unlock a previously locked issue or PR conversation. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

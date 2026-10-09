@@ -5,7 +5,7 @@ import { createOrUpdateFile } from '../../github/write-client.js';
 
 /**
  * github_create_or_update_file — single-file commit via PUT /repos/{o}/{r}/contents/{path}.
- * CTO-gated + write-gated; honors dry_run.
+ * Company-operator + write-gated; honors dry_run.
  *
  * For multi-file commits use github_push_files instead.
  */
@@ -21,7 +21,7 @@ export function registerGitHubCreateOrUpdateFile(
       annotations: {
         title: 'GitHub: create or update a single file',
         description:
-          'Create or update a single file in a repository using the Contents API (PUT /repos/{owner}/{repo}/contents/{path}). Provide sha to update an existing file; omit to create. CTO-only; honors dry_run.',
+          'Create or update a single file in a repository using the Contents API (PUT /repos/{owner}/{repo}/contents/{path}). Provide sha to update an existing file; omit to create. Named company GitHub operators only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,

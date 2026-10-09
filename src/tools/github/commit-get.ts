@@ -10,7 +10,7 @@ export function registerGitHubCommitGet(server: McpServer, callerHash: CallerHas
     category: 'read',
     annotations: {
       title: 'GitHub: get commit',
-      description: 'Get detailed information about a single commit including changed files and stats. Read-only.',
+      description: 'Get detailed information about a single commit including changed files and stats. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

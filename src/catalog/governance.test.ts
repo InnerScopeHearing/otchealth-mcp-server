@@ -1,50 +1,37 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { requiredRoleFor, roleAllows } from './governance.js';
+import {
+  COMPANY_GITHUB_OPERATOR_LANES,
+  GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS,
+  GITHUB_OPERATOR_TOOLSET,
+  GITHUB_OPERATOR_WRITE_TOOLS,
+} from '../config/github-operator.js';
 
-// Regression guard for the connector-surface widen (2026-07-12): the DCR toolset now surfaces the
-// git write tools. Every WRITE tool exposed there must be role-gated at execution time, or the
-// widen becomes a real privilege grant to any write-enabled lane (cfo/clo/coo/cro). The
-// read tools (list/get workflow runs) intentionally carry no role gate. github_pr_update was the
-// gap this test locks shut: it is category write_simple (no write_orchestrated default gate), so it
-// needs an explicit governance rule.
-//
-// UPDATED 2026-07-26 (Matt/CEO directive): these tools are no longer cto-EXCLUSIVE -- the
-// 'otchealth-dev' Copilot custom agent (caller_agent='developer') was deliberately widened to full
-// GitHub read+write. This test now asserts the INTENT of that widen precisely via roleAllows():
-// cto and developer must both pass, and every OTHER write-enabled lane (cfo/clo/coo/cro/etc.) must
-// still be refused -- the widen was scoped to developer specifically, not opened to everyone.
-const CONNECTOR_WRITE_TOOLS = [
-  'github_create_branch',
-  'github_create_or_update_file',
-  'github_edit_file',
-  'github_push_files',
-  'github_create_pull_request',
-  'github_pr_update',
-];
+const GITHUB_OPERATOR_READ_TOOLS = GITHUB_OPERATOR_TOOLSET.filter(
+  (tool) => !(GITHUB_OPERATOR_WRITE_TOOLS as readonly string[]).includes(tool),
+);
+const NON_OPERATOR_LANES = ['', 'external-read', 'unknown', 'cto-make-github-pilot', 'make-github-pilot'];
 
-const CONNECTOR_READ_TOOLS = ['github_list_workflow_runs', 'github_workflow_run_get'];
-
-// A representative sample of OTHER write-enabled lanes that must NOT gain access from this widen.
-const OTHER_LANES = ['cfo', 'clo', 'coo', 'cro', 'cpo', 'cco', ''];
-
-test('every git write tool on the connector surface is role-gated to cto/developer only', () => {
-  for (const name of CONNECTOR_WRITE_TOOLS) {
+test('every bounded GitHub operator tool is governed by the canonical company lane list', () => {
+  for (const name of GITHUB_OPERATOR_TOOLSET) {
     const gov = requiredRoleFor(name);
-    assert.ok(gov, `${name} must have a governance rule (else any write-enabled lane can execute it)`);
-    assert.ok(roleAllows(gov!.role, 'cto'), `${name} must allow cto`);
-    assert.ok(roleAllows(gov!.role, 'developer'), `${name} must allow developer (2026-07-26 widen)`);
-    for (const other of OTHER_LANES) {
-      assert.ok(!roleAllows(gov!.role, other), `${name} must NOT allow lane "${other}" -- the widen was scoped to developer only`);
+    assert.ok(gov, `${name} must have an execution governance rule`);
+    assert.deepEqual(gov!.role, COMPANY_GITHUB_OPERATOR_LANES, `${name} must reuse the canonical lane list`);
+    for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+      assert.equal(roleAllows(gov!.role, lane), true, `${name} must allow ${lane}`);
+    }
+    for (const lane of NON_OPERATOR_LANES) {
+      assert.equal(roleAllows(gov!.role, lane), false, `${name} must refuse ${lane || '(empty)'}`);
     }
   }
 });
 
-test('github_pr_update specifically allows cto and developer only (write_simple has no orchestrated-default gate)', () => {
-  const gov = requiredRoleFor('github_pr_update');
-  assert.ok(roleAllows(gov?.role ?? '', 'cto'));
-  assert.ok(roleAllows(gov?.role ?? '', 'developer'));
-  assert.ok(!roleAllows(gov?.role ?? '', 'cfo'));
+test('bounded GitHub reads carry the same defense-in-depth execution gate as writes', () => {
+  for (const name of GITHUB_OPERATOR_READ_TOOLS) {
+    const gov = requiredRoleFor(name);
+    assert.deepEqual(gov?.role, COMPANY_GITHUB_OPERATOR_LANES, `${name} must deny non-operator identities even if exposed accidentally`);
+  }
 });
 
 test('github_make_broker is limited to CTO and the restricted Make pilot principal', () => {
@@ -69,9 +56,41 @@ test('the Make pilot principal is denied direct GitHub writes and result fetchin
   }
 });
 
-test('workflow-run readers are intentionally ungated (reads are not an escalation)', () => {
-  for (const name of CONNECTOR_READ_TOOLS) {
-    assert.equal(requiredRoleFor(name), null, `${name} is a read; it should carry no role gate`);
+test('all adjacent write_simple mutations and release creation retain exact CTO/Developer governance', () => {
+  assert.deepEqual(GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS, [
+    'github_add_labels',
+    'github_git_tag_create',
+    'github_issue_add_assignees',
+    'github_issue_lock',
+    'github_issue_unlock',
+    'github_label_create',
+    'github_label_update',
+    'github_milestone_create',
+    'github_milestone_update',
+    'github_pr_request_reviewers',
+    'github_ref_create',
+    'github_ref_update',
+    'github_create_release',
+    'github_release_update',
+    'github_workflow_enable',
+  ]);
+  for (const name of GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS) {
+    const gov = requiredRoleFor(name);
+    assert.ok(gov, `${name} must have an explicit rule`);
+    assert.deepEqual(gov!.role, ['cto', 'developer'], `${name} must be exactly CTO/Developer`);
+    for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+      if (lane === 'cto' || lane === 'developer') continue;
+      assert.equal(roleAllows(gov!.role, lane), false, `${name} must not be widened to ${lane}`);
+    }
+    for (const lane of NON_OPERATOR_LANES) {
+      assert.equal(roleAllows(gov!.role, lane), false, `${name} must refuse ${lane || '(empty)'}`);
+    }
+  }
+});
+
+test('destructive label and release deletion retain the write_orchestrated CTO-only default', () => {
+  for (const name of ['github_label_delete', 'github_release_delete']) {
+    assert.equal(requiredRoleFor(name), null, `${name} must not gain an explicit CTO/Developer grant`);
   }
 });
 
@@ -79,7 +98,7 @@ test('pinned GraphRAG observation receipt reader is CTO-only', () => {
   const gov = requiredRoleFor('github_graphrag_observation_receipt_get');
   assert.ok(gov, 'the pinned receipt reader must have an explicit role gate');
   assert.ok(roleAllows(gov!.role, 'cto'));
-  for (const other of [...OTHER_LANES, 'developer', 'exec']) {
+  for (const other of [...COMPANY_GITHUB_OPERATOR_LANES.filter((lane) => lane !== 'cto'), ...NON_OPERATOR_LANES]) {
     assert.ok(!roleAllows(gov!.role, other), `the pinned receipt reader must refuse lane "${other}"`);
   }
 });
@@ -89,7 +108,7 @@ test('depot_* is role-gated to cto/developer only (2026-07-26 widen -- full Depo
   assert.ok(gov, 'depot_trigger_build must have a governance rule');
   assert.ok(roleAllows(gov!.role, 'cto'), 'depot_trigger_build must allow cto');
   assert.ok(roleAllows(gov!.role, 'developer'), 'depot_trigger_build must allow developer');
-  for (const other of OTHER_LANES) {
+  for (const other of [...COMPANY_GITHUB_OPERATOR_LANES.filter((lane) => lane !== 'cto' && lane !== 'developer'), ...NON_OPERATOR_LANES]) {
     assert.ok(!roleAllows(gov!.role, other), `depot_trigger_build must NOT allow lane "${other}"`);
   }
 });
@@ -112,7 +131,7 @@ test('failed-step CI log excerpt reader is CTO-only', () => {
   const gov = requiredRoleFor('github_workflow_run_failed_log_excerpt');
   assert.ok(gov, 'the CI log excerpt reader must have an explicit role gate');
   assert.ok(roleAllows(gov!.role, 'cto'));
-  for (const other of [...OTHER_LANES, 'developer', 'exec']) {
+  for (const other of [...COMPANY_GITHUB_OPERATOR_LANES.filter((lane) => lane !== 'cto'), ...NON_OPERATOR_LANES]) {
     assert.ok(!roleAllows(gov!.role, other), `the CI log excerpt reader must refuse lane "${other}"`);
   }
 });
@@ -123,7 +142,7 @@ test('the AWS MCP bridge tools (the whole aws_mcp_* family) are CTO-only', () =>
     const gov = requiredRoleFor(name);
     assert.ok(gov, `${name} must have an explicit role gate`);
     assert.ok(roleAllows(gov!.role, 'cto'), `${name} must allow cto`);
-    for (const other of [...OTHER_LANES, 'developer', 'exec']) {
+    for (const other of [...COMPANY_GITHUB_OPERATOR_LANES.filter((lane) => lane !== 'cto'), ...NON_OPERATOR_LANES]) {
       assert.ok(!roleAllows(gov!.role, other), `${name} must refuse lane "${other}"`);
     }
   }

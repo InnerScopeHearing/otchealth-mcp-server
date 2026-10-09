@@ -10,7 +10,7 @@ export function registerGitHubCommitCompare(server: McpServer, callerHash: Calle
     category: 'read',
     annotations: {
       title: 'GitHub: compare commits / branches',
-      description: 'Compare two commits, branches, or tags and return ahead/behind counts, diff stats, and changed files. Read-only.',
+      description: 'Compare two commits, branches, or tags and return ahead/behind counts, diff stats, and changed files. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

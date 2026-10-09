@@ -201,6 +201,8 @@ type StubOverrides = {
   archive?: Buffer;
   downloadChunk?: Uint8Array;
   downloadLocation?: string;
+  followedResponsePath?: string;
+  unexpectedResponseUrl?: string;
 };
 
 type CapturedRequest = { url: string; authorization: string | null; method: string };
@@ -211,13 +213,20 @@ function githubStub(captured: CapturedRequest[], overrides: StubOverrides = {}):
     const url = new URL(String(input));
     const headers = new Headers(init.headers);
     captured.push({ url: url.toString(), authorization: headers.get('authorization'), method: init.method ?? 'GET' });
+    const respond = (response: Response): Response => {
+      if (overrides.followedResponsePath === url.pathname) {
+        Object.defineProperty(response, 'redirected', { value: overrides.unexpectedResponseUrl === undefined });
+        if (overrides.unexpectedResponseUrl !== undefined) Object.defineProperty(response, 'url', { value: overrides.unexpectedResponseUrl });
+      }
+      return response;
+    };
 
     if (url.origin === 'https://api.github.com' && url.pathname === '/app/installations/789/access_tokens') {
-      if (overrides.tokenMintResponse) return overrides.tokenMintResponse;
-      return new Response(JSON.stringify({ token: 'ghs_test_token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }), { status: 201 });
+      if (overrides.tokenMintResponse) return respond(overrides.tokenMintResponse);
+      return respond(new Response(JSON.stringify({ token: 'ghs_test_token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }), { status: 201 }));
     }
     if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}`) {
-      return new Response(JSON.stringify(overrides.repo ?? makeRepo()), { status: 200 });
+      return respond(new Response(JSON.stringify(overrides.repo ?? makeRepo()), { status: 200 }));
     }
     if (url.origin === 'https://api.github.com' && url.pathname === `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`) {
       if (overrides.runResponseStatus !== undefined) {
@@ -287,6 +296,20 @@ async function callThroughRealMcpServer(
 }
 
 test('pinned observation reader bounds and validates installation-token mint responses', async (t) => {
+  await t.test('rejects followed or misdirected successful token mint responses without exposing data', async () => {
+    for (const redirect of [
+      { followedResponsePath: '/app/installations/789/access_tokens' },
+      { followedResponsePath: '/app/installations/789/access_tokens', unexpectedResponseUrl: 'https://evil.invalid/token' },
+    ]) {
+      const requests: CapturedRequest[] = [];
+      const tokenMintResponse = new Response(JSON.stringify({ token: 'ghs_should_not_escape', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }), { status: 201 });
+      const result = await withStubbedFetch(githubStub(requests, { ...redirect, tokenMintResponse }), () => callThroughRealMcpServer());
+      assert.equal(result.isError, true);
+      assert.equal(JSON.stringify(result).includes('ghs_should_not_escape'), false);
+      assert.equal(requests.length, 1, 'no metadata request follows a rejected token response');
+    }
+  });
+
   await t.test('oversized token response is rejected before its body is consumed', async () => {
     const requests: CapturedRequest[] = [];
     const tokenResponseBody = Buffer.from(`oversized-token-sentinel-${'x'.repeat(16 * 1024)}`);
@@ -870,4 +893,17 @@ test('non-CTO failure responses never include pinned observation diagnostics', a
   assert.equal(JSON.stringify(result).includes('archive_digest'), false);
   assert.equal(JSON.stringify(result).includes('synthetic-provider-metadata-must-not-leak'), false);
   assert.equal(requests.length, 0, 'non-CTO role refusal must happen before GitHub API access');
+});
+
+test('pinned metadata rejects followed or misdirected successful responses', async () => {
+  for (const redirect of [
+    { followedResponsePath: `/repos/${REPOSITORY}` },
+    { followedResponsePath: `/repos/${REPOSITORY}`, unexpectedResponseUrl: 'https://evil.invalid/repo' },
+  ]) {
+    const requests: CapturedRequest[] = [];
+    const result = await withStubbedFetch(githubStub(requests, redirect), () => callThroughRealMcpServer());
+    assert.equal(result.isError, true);
+    assert.equal(requests.filter((request) => request.url === `https://api.github.com/repos/${REPOSITORY}`).length, 1);
+    assert.equal(JSON.stringify(result).includes('evil.invalid'), false);
+  }
 });

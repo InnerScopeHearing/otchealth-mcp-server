@@ -9,7 +9,7 @@ export function registerGitHubPrUpdateBranch(server: McpServer, callerHash: Call
     category: 'write_simple',
     annotations: {
       title: 'GitHub: update PR branch (merge base into head)',
-      description: 'Update the PR head branch with the latest changes from the base branch (equivalent to "Update branch" button in GitHub UI). Defaults to dry_run.',
+      description: 'Update the PR head branch with the latest changes from the base branch (equivalent to "Update branch" button in GitHub UI). Named company GitHub operators only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

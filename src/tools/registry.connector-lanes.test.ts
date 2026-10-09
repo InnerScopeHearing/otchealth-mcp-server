@@ -1,8 +1,21 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, COO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET, WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET } from './registry.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+  connectorToolset,
+  isShipLane,
+  registerTool,
+  CTO_SHIP_LANE_TOOLSET,
+  CRO_CONNECTOR_TOOLSET,
+  COO_CONNECTOR_TOOLSET,
+  EXTERNAL_READONLY_TOOLSET,
+  WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET,
+  type ToolDefinition,
+} from './registry.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
+import { COMPANY_GITHUB_OPERATOR_LANES, GITHUB_OPERATOR_TOOLSET } from '../config/github-operator.js';
+import { requestContext } from '../server/request-context.js';
 
 // Pins the Phase 5/6 connector-ring closure (2026-07-15), layer 1: the connector toolset a caller
 // sees MUST depend on its OAuth-derived lane, not be one global set. Before this split, EVERY
@@ -36,6 +49,10 @@ const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
 const CTO_ONLY_AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
+const ORDINARY_SHARED_GITHUB_LANES = [
+  'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec',
+  'wefunder-campaign-director',
+] as const;
 function testEnv(): Env {
   return loadEnv();
 }
@@ -201,6 +218,110 @@ test('(b) developer lane gets the full ship-lane set', () => {
   assert.ok(set.has('brain_public_kb_search'));
 });
 
+test('every named company lane advertises the exact bounded GitHub operator surface', () => {
+  const env = testEnv();
+  for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+    const set = connectorToolset(env, lane);
+    for (const tool of GITHUB_OPERATOR_TOOLSET) {
+      assert.equal(set.has(tool), true, `${lane} must advertise ${tool}`);
+    }
+    if (lane !== 'cto') {
+      for (const restricted of [
+        CTO_ONLY_GITHUB_RECEIPT_TOOL,
+        'github_workflow_run_failed_log_excerpt',
+        RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
+      ]) assert.equal(set.has(restricted), false, `${lane} must not advertise ${restricted}`);
+    }
+  }
+
+  for (const lane of ORDINARY_SHARED_GITHUB_LANES) {
+    const visibleGitHub = [...connectorToolset(env, lane)]
+      .filter((tool) => tool.startsWith('github_'))
+      .sort();
+    assert.deepEqual(
+      visibleGitHub,
+      [...GITHUB_OPERATOR_TOOLSET].sort(),
+      `${lane} must expose exactly the shared 29 GitHub tools and no adjacent mutation`,
+    );
+  }
+
+  for (const lane of ['cto', 'developer']) {
+    const set = connectorToolset(env, lane);
+    for (const tool of GITHUB_OPERATOR_TOOLSET) {
+      assert.equal(set.has(tool), true, `${lane} must retain the shared ${tool}`);
+    }
+  }
+
+  const ctoGitHubExtras = [
+    CTO_ONLY_GITHUB_RECEIPT_TOOL,
+    'github_workflow_run_failed_log_excerpt',
+    RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
+  ];
+  for (const tool of ctoGitHubExtras) {
+    assert.equal(connectorToolset(env, 'cto').has(tool), true, `CTO must retain ${tool}`);
+    assert.equal(connectorToolset(env, 'developer').has(tool), false, `Developer must not inherit ${tool}`);
+    for (const lane of ORDINARY_SHARED_GITHUB_LANES) {
+      assert.equal(connectorToolset(env, lane).has(tool), false, `${lane} must not inherit ${tool}`);
+    }
+  }
+});
+
+test('a nonempty connector override cannot narrow the mandatory 29 or widen ordinary GitHub lanes', () => {
+  const adjacentGitHubTool = 'github_label_create';
+  const injectedGitHubExtras = [
+    adjacentGitHubTool,
+    'github_release_delete',
+    CTO_ONLY_GITHUB_RECEIPT_TOOL,
+    'github_workflow_run_failed_log_excerpt',
+    RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
+    'github_unregistered_override_probe',
+  ];
+  const env = {
+    ...testEnv(),
+    CONNECTOR_TOOLSET: ['brain_search', ...injectedGitHubExtras].join(','),
+  } as Env;
+  const expectedSharedGitHub = [...GITHUB_OPERATOR_TOOLSET].sort();
+
+  for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+    const visibleGitHub = [...connectorToolset(env, lane)]
+      .filter((tool) => tool.startsWith('github_'))
+      .sort();
+    for (const tool of GITHUB_OPERATOR_TOOLSET) {
+      assert.equal(visibleGitHub.includes(tool), true, `${lane} override must retain mandatory ${tool}`);
+    }
+    if (ORDINARY_SHARED_GITHUB_LANES.includes(lane as (typeof ORDINARY_SHARED_GITHUB_LANES)[number])) {
+      assert.deepEqual(
+        visibleGitHub,
+        expectedSharedGitHub,
+        `${lane} override must expose exactly the shared 29 GitHub tools`,
+      );
+    }
+  }
+
+  for (const lane of ['cto', 'developer']) {
+    assert.equal(
+      connectorToolset(env, lane).has(adjacentGitHubTool),
+      true,
+      `${lane} must retain its governed GitHub superset`,
+    );
+  }
+
+  assert.deepEqual(
+    [...connectorToolset(env, 'cto-make-github-pilot')].sort(),
+    ['catalog_probe', RESTRICTED_GITHUB_MAKE_BROKER_TOOL],
+    'the dedicated Make pilot remains its exact two-tool surface under the same override',
+  );
+});
+
+test('unknown and external connector lanes do not inherit the company GitHub operator surface', () => {
+  for (const lane of ['', 'unknown', 'external-read', 'totally-unknown-lane']) {
+    const set = connectorToolset(testEnv(), lane);
+    for (const tool of GITHUB_OPERATOR_TOOLSET) {
+      assert.equal(set.has(tool), false, `${lane || '(empty)'} must not advertise ${tool}`);
+    }
+  }
+});
+
 test('AWARE claims review is discoverable only on the default CTO and Developer connector lanes', () => {
   const env = testEnv();
   for (const lane of ['cto', 'developer']) {
@@ -226,7 +347,7 @@ test('(c) EXEC_RING lanes get only public-KB visibility authorized for their com
   }
 });
 
-test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus external reads', () => {
+test('(d) cro connector gets its fixed seat surface plus bounded company GitHub operations', () => {
   const set = connectorToolset(testEnv(), 'cro');
   assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.ok(set.has('brain_public_kb_search'), 'cro connector must expose fixed public-only KB retrieval');
@@ -239,7 +360,7 @@ test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus extern
   ]) assert.ok(set.has(required), `cro connector must expose ${required}`);
   for (const forbidden of [
     'heygen_pairing_start', 'heygen_pairing_status', 'heygen_prompt_avatar_create',
-    'heygen_avatar_look_name_update', 'github_push_files', 'kb_search_privileged',
+    'heygen_avatar_look_name_update', 'kb_search_privileged',
     'cio_admin_write_frequency_cap_delete', 'shopify_refund_create',
   ]) assert.equal(set.has(forbidden), false, `cro connector must not expose ${forbidden}`);
 });
@@ -250,12 +371,13 @@ test('(e) Wefunder Campaign Director gets exact-source migration tools with owne
   assert.ok(set.has('browser_broker_preflight'));
   assert.ok(set.has('browser_broker_inspect_public'));
   for (const required of ['catalog_probe', 'hyperagent_list_agents', 'hyperagent_list_threads',
-    'hyperagent_get_thread', 'hyperagent_create_thread', 'hyperagent_send_message']) {
+    'hyperagent_get_thread', 'hyperagent_create_thread', 'hyperagent_send_message',
+    'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow']) {
     assert.ok(set.has(required), required);
   }
   assert.equal(isShipLane('wefunder-campaign-director'), false);
   for (const forbidden of [
-    'browser_agentcore_wefunder_preflight', 'github_push_files', 'kb_search_privileged',
+    'browser_agentcore_wefunder_preflight', 'kb_search_privileged',
     'memory_write', 'memory_remember', 'checkpoint', 'legal_blob_put', 'legal_blob_get',
     'kb_get_document', 'kb_list_documents', 'xero_manual_journals', 'heygen_pairing_start', 'gateway_fetch_result',
     'shopify_location_list', 'cio_admin_read_workspace_health',
@@ -321,10 +443,10 @@ test('isShipLane: exact predicate matches the routing above', () => {
   assert.equal(isShipLane('CTO'), false);
 });
 
-test('CONNECTOR_TOOLSET env override still overrides the ship set (back-compat)', () => {
+test('CONNECTOR_TOOLSET env override still controls the non-GitHub ship set (back-compat)', () => {
   const env = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search,web_search' } as Env;
   const set = connectorToolset(env, 'cto');
-  assert.deepEqual([...set].sort(), ['brain_search', 'web_search']);
+  assert.deepEqual([...set].sort(), ['brain_search', 'web_search', ...GITHUB_OPERATOR_TOOLSET].sort());
 });
 
 test('CONNECTOR_TOOLSET override cannot expose public KB retrieval to denied ship lanes', () => {
@@ -338,6 +460,79 @@ test('EXTERNAL_READONLY_TOOLSET env override overrides the external set', () => 
   const env = { ...testEnv(), EXTERNAL_READONLY_TOOLSET: 'brain_search' } as Env;
   const set = connectorToolset(env, 'external-read');
   assert.deepEqual([...set], ['brain_search']);
+});
+
+test('EXTERNAL_READONLY_TOOLSET cannot inject GitHub capabilities into unknown or external lanes', () => {
+  const injectedGitHubTools = [
+    ...GITHUB_OPERATOR_TOOLSET,
+    'github_repo_list_for_org',
+    'github_label_create',
+    'github_contents_delete_file',
+    'github_release_delete',
+    CTO_ONLY_GITHUB_RECEIPT_TOOL,
+    'github_workflow_run_failed_log_excerpt',
+    RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
+    'github_unregistered_override_probe',
+  ];
+  const env = {
+    ...testEnv(),
+    EXTERNAL_READONLY_TOOLSET: ['brain_search', 'catalog_list_tools', ...injectedGitHubTools].join(','),
+  } as Env;
+
+  for (const lane of ['', 'unknown', 'external-read', 'totally-unknown-lane']) {
+    const set = connectorToolset(env, lane);
+    assert.deepEqual(
+      [...set].sort(),
+      ['brain_search', 'catalog_list_tools'],
+      `${lane || '(empty)'} must retain safe override tools while rejecting every github_* injection`,
+    );
+  }
+
+  assert.deepEqual(
+    [...connectorToolset(env, 'cto-make-github-pilot')].sort(),
+    ['catalog_probe', RESTRICTED_GITHUB_MAKE_BROKER_TOOL],
+    'the fixed Make pilot remains independent from the external override',
+  );
+});
+
+test('connector registration denies a GitHub capability hidden behind an external bare alias', () => {
+  const registered: string[] = [];
+  const server = {
+    registerTool: (name: string) => {
+      registered.push(name);
+      return { remove: () => undefined };
+    },
+  } as unknown as McpServer;
+  const fakeDef = (name: string, canonicalName?: string): ToolDefinition<Record<string, never>, Record<string, never>> => ({
+    name,
+    canonicalName,
+    category: 'read',
+    annotations: {
+      title: name,
+      description: name,
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    inputShape: {},
+    outputShape: {},
+    handler: async () => ({ data: null }),
+  });
+
+  requestContext.run({
+    callerHash: 'external-test',
+    correlationId: 'external-test',
+    callerAgent: 'external-read',
+    connectorSurface: true,
+  }, () => {
+    // Both advertised names are on the safe external baseline. Only the first hides a GitHub
+    // capability in its canonical identity and must be refused at the real registration sink.
+    registerTool(server, fakeDef('brain_search', 'github_repo_list_for_org'), () => 'external-test', true);
+    registerTool(server, fakeDef('catalog_list_tools'), () => 'external-test');
+  });
+
+  assert.deepEqual(registered, ['catalog_list_tools']);
 });
 
 test('cfo connector keeps its bounded relationship query through ship-set curation', () => {
@@ -360,25 +555,25 @@ test('synthetic company_shared typed query is advertised only to the CTO connect
 // memory_remember, checkpoint) were unfindable, and cro's surface carried HeyGen but none of the
 // commerce families its charter names. These tests lock the fixed seat surfaces AND their ceilings.
 
-test('coo lane: seat-memory + ledger coordination, and nothing privileged', () => {
+test('coo lane: seat-memory, ledger coordination, and bounded GitHub operations without unrelated privilege', () => {
   const set = connectorToolset(testEnv(), 'coo');
   assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.ok(set.has('brain_public_kb_search'), 'coo connector must expose fixed public-only KB retrieval');
-  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch', 'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get']) {
+  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch', 'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow', 'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
     assert.equal(set.has(excluded), false, `coo connector must NOT advertise ${excluded}`);
   }
 });
 
-test('cro lane: commerce curation present, engineering/legal/finance/privileged absent, destructive commerce absent', () => {
+test('cro lane: commerce and bounded GitHub curation present; unrelated privileged/destructive tools absent', () => {
   const set = connectorToolset(testEnv(), 'cro');
   assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
-  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'task_claim', 'task_heartbeat', 'task_complete', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list']) {
+  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'task_claim', 'task_heartbeat', 'task_complete', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list', 'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow']) {
     assert.ok(set.has(needed), `cro connector must advertise ${needed} (its charter names this family)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'github_merge_pull_request', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_admin_write_frequency_cap_delete', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_admin_write_frequency_cap_delete', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
     assert.equal(set.has(excluded), false, `cro connector must NOT advertise ${excluded}`);
   }
 });

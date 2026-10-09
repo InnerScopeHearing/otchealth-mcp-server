@@ -9,7 +9,7 @@ export function registerGitHubIssueAddAssignees(server: McpServer, callerHash: C
     category: 'write_simple',
     annotations: {
       title: 'GitHub: add assignees to issue',
-      description: 'Add one or more assignees to an issue or pull request. Defaults to dry_run.',
+      description: 'Add one or more assignees to an issue or pull request. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

@@ -220,6 +220,24 @@ test('log download refuses an untrusted redirect target and never fetches it', a
   assert.deepEqual(await workflowJobLogTail('o', 'r', 42), { status: 'failed', reason: 'untrusted_redirect' });
 });
 
+test('log download rejects a followed or misdirected signed download response without returning its body', async () => {
+  for (const followed of [true, false]) {
+    const seen = stubNetwork((url) => {
+      if (url === 'https://api.github.com/repos/o/r/actions/jobs/42/logs') {
+        return new Response(null, { status: 302, headers: { location: STORAGE } });
+      }
+      const response = new Response('SECRET_LOG_SHOULD_NOT_ESCAPE', { status: 200 });
+      if (followed) Object.defineProperty(response, 'redirected', { value: true });
+      else Object.defineProperty(response, 'url', { value: 'https://evil.example/final-log' });
+      return response;
+    });
+    const result = await workflowJobLogTail('o', 'r', 42);
+    assert.deepEqual(result, { status: 'failed', reason: 'untrusted_redirect' });
+    assert.equal(JSON.stringify(result).includes('SECRET_LOG_SHOULD_NOT_ESCAPE'), false);
+    assert.equal(seen.filter((url) => url === STORAGE).length, 1, 'the approved signed URL is fetched once without following another redirect');
+  }
+});
+
 test('log download maps missing, expired and failing responses to fixed statuses', async () => {
   stubNetwork(() => new Response('{"message":"SYNTHETIC_UPSTREAM"}', { status: 404 }));
   assert.deepEqual(await workflowJobLogTail('o', 'r', 42), { status: 'unavailable' });

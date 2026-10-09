@@ -9,7 +9,7 @@ export function registerGitHubLabelCreate(server: McpServer, callerHash: CallerH
     category: 'write_simple',
     annotations: {
       title: 'GitHub: create label',
-      description: 'Create a new label in a repository. Defaults to dry_run.',
+      description: 'Create a new label in a repository. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,

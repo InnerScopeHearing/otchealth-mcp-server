@@ -72,6 +72,8 @@ export function newCorrelationId(): string {
 }
 
 export function hashToken(token: string): string {
+  // This fingerprints a high-entropy bearer token for audit correlation; it does not hash a password.
+  // codeql[js/insufficient-password-hash]
   return createHash('sha256').update(token).digest('hex');
 }
 

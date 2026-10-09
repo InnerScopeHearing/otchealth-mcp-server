@@ -6,8 +6,8 @@ import { editFile } from '../../github/write-client.js';
 /**
  * github_edit_file — surgical, full-content-free in-place edit (old_str -> new_str), so a 2-line change
  * to a 65KB file no longer requires retyping the whole file through a chat channel. old_str must match
- * EXACTLY ONCE (or pass replace_all); an ambiguous/absent match fails loud. CTO-gated + write-gated;
- * dry_run defaults on and returns a diff preview without writing.
+ * EXACTLY ONCE (or pass replace_all); an ambiguous/absent match fails loud. Company-operator +
+ * write-gated; dry_run defaults on and returns a diff preview without writing.
  */
 export function registerGitHubEditFile(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
@@ -18,7 +18,7 @@ export function registerGitHubEditFile(server: McpServer, callerHash: CallerHash
       annotations: {
         title: 'GitHub: surgical in-place file edit (old_str/new_str)',
         description:
-          'Edit a file in place by replacing an exact substring (old_str -> new_str) via the App installation token, so a small change to a large file needs no full-file content. old_str MUST match exactly once (zero or multiple matches fail loud; pass replace_all=true for the deliberate multi-occurrence case). Supports expected_sha (optimistic concurrency). CTO-only; dry_run defaults true and returns a diff preview without writing.',
+          'Edit a file in place by replacing an exact substring (old_str -> new_str) via the App installation token, so a small change to a large file needs no full-file content. old_str MUST match exactly once (zero or multiple matches fail loud; pass replace_all=true for the deliberate multi-occurrence case). Supports expected_sha (optimistic concurrency). Named company GitHub operators only; dry_run defaults true and returns a diff preview without writing.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

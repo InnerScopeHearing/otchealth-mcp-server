@@ -9,7 +9,7 @@ export function registerGitHubWorkflowRunRerun(server: McpServer, callerHash: Ca
     category: 'write_orchestrated',
     annotations: {
       title: 'GitHub: re-run workflow run',
-      description: 'Re-run a failed or completed GitHub Actions workflow run (all jobs). This triggers a new build. Defaults to dry_run.',
+      description: 'Re-run a failed or completed GitHub Actions workflow run (all jobs). This triggers a new build. Named company GitHub operators only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,

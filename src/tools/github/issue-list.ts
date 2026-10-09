@@ -10,7 +10,7 @@ export function registerGitHubIssueList(server: McpServer, callerHash: CallerHas
     category: 'read',
     annotations: {
       title: 'GitHub: list issues',
-      description: 'List issues for a repository (excludes pull requests). Supports state and label filters. Read-only.',
+      description: 'List issues for a repository (excludes pull requests). Supports state and label filters. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

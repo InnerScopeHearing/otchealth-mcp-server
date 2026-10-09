@@ -9,7 +9,7 @@ export function registerGitHubRefDelete(server: McpServer, callerHash: CallerHas
     category: 'write_orchestrated',
     annotations: {
       title: 'GitHub: delete git ref',
-      description: 'Delete a git ref (e.g. delete a branch or lightweight tag). Irreversible. Defaults to dry_run.',
+      description: 'Delete a git ref (e.g. delete a branch or lightweight tag). Irreversible. Named company GitHub operators only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,

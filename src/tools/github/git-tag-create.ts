@@ -9,7 +9,7 @@ export function registerGitHubGitTagCreate(server: McpServer, callerHash: Caller
     category: 'write_simple',
     annotations: {
       title: 'GitHub: create annotated git tag',
-      description: 'Create an annotated git tag object and optionally wire up refs/tags/{tag} to point to it. Defaults to dry_run.',
+      description: 'Create an annotated git tag object and optionally wire up refs/tags/{tag} to point to it. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,

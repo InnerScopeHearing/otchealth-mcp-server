@@ -10,7 +10,7 @@ export function registerGitHubWorkflowRunGet(server: McpServer, callerHash: Call
     category: 'read',
     annotations: {
       title: 'GitHub: get workflow run',
-      description: 'Get details for a single GitHub Actions workflow run by its numeric ID. Read-only.',
+      description: 'Get details for a single GitHub Actions workflow run by its numeric ID. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

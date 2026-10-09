@@ -35,6 +35,8 @@
  * more than invisible to that lane; the in-handler ring/role checks are the real gate either way).
  */
 
+import { GITHUB_OPERATOR_TOOLSET } from './github-operator.js';
+
 /** A dedicated setup-code principal for the inactive Make GitHub broker pilot. It is intentionally
  * not a general internal lane and is not part of KNOWN_INTERNAL_LANES, EXEC_RING, or any ship set.
  * registry.ts applies this exact two-tool set on every authentication path, regardless of the
@@ -218,13 +220,14 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // auth caller); a Claude Code/Hyperagent cto session is unaffected either way today. If universal
   // 'curate' mode is ever armed for the cto lane specifically, this same narrower list would then also
   // apply there -- a deliberate call to make at that time, not implied by this change.
-  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...HEYGEN, 'agent_persona', 'hyperagent_discover_capabilities', 'aws_mcp_tool_list', 'aws_mcp_tool_call'],
+  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...GITHUB_OPERATOR_TOOLSET, ...HEYGEN, 'agent_persona', 'hyperagent_discover_capabilities', 'aws_mcp_tool_list', 'aws_mcp_tool_call'],
   // Engineering IC: its OWN app-repo ship cycle (branch/commit/PR/CI/dispatch) plus the shared
   // read/memory/task surface. No Azure control plane, no finance, no legal -- infra and the two
   // genuinely sensitive corpora (MNPI finance, privileged legal) are CTO/EXEC_RING-owned, not
   // developer's (see kb/search-privileged.ts's ring model).
   developer: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...GITHUB_OPERATOR_TOOLSET,
     'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', '!github_workflow_run_failed_log_excerpt', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
     ...HEYGEN,
     // 2026-08-02: developer_wake_lite (diagnostics/developer-wake-lite.ts) was never covered by
@@ -243,12 +246,14 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.
   cfo: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...GITHUB_OPERATOR_TOOLSET,
     'xero_*', 'stripe_*', 'docintel_*', 'graph_drive_*', 'graph_relationship_query', ...GRAPH_MAIL,
   ],
   // Company legal: legal_blob_* (company ring), contract/document intelligence, comms, plus the
   // shared read/memory/task surface.
   clo: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS,
+    ...GITHUB_OPERATOR_TOOLSET,
     'legal_blob_*', 'docintel_*', ...GRAPH_MAIL,
   ],
   // Personal legal (attorney-privileged CA matters, PERSONAL_LEGAL_RING-gated): a strict SUBSET of
@@ -256,6 +261,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // fleet comms tooling.
   'clo-personal': [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...GITHUB_OPERATOR_TOOLSET,
     'legal_blob_*', 'docintel_*', 'personal_graph_query', 'personal_bedrock_retrieve',
   ],
   // Operations: dispatch, comms, Notion-facing briefings. Removed from EXEC_RING 2026-07-21
@@ -263,6 +269,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // in-handler, this list keeps the advertised set honest with that reality.
   coo: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...GITHUB_OPERATOR_TOOLSET,
     ...GRAPH_MAIL, 'cio_*', ...HEYGEN,
   ],
   // Revenue / commerce: storefront, lifecycle CRM, help center, digital-products cash lane, revenue
@@ -275,6 +282,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // cto's CTO_M365_CURATED note above: only matters under curate-m365-only today.
   cro: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...GITHUB_OPERATOR_TOOLSET,
     ...CRO_M365_CURATED, ...GRAPH_MAIL, ...HEYGEN,
   ],
   // Product: app analytics, crash/error tracking, subscription entitlements, the privileged RAG rooms
@@ -282,19 +290,21 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // parity, not because usage has proven it).
   cpo: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...GITHUB_OPERATOR_TOOLSET,
     'posthog_*', 'sentry_*', 'revenuecat_*', ...HEYGEN,
   ],
   // Compliance / controls: the safety-check tools, the privileged RAG rooms (dormant EXEC_RING
   // member, same caveat as cpo above), legal + document-intelligence visibility for review.
   cco: [
     ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS,
+    ...GITHUB_OPERATOR_TOOLSET,
     'legal_blob_*', 'docintel_*',
   ],
   // The unified One-Brain chief: every hat at once (per search-privileged.ts's "solo operator" note),
   // so this is deliberately the union of the other EXEC_RING lanes' surfaces plus the CTO's
   // infra/build surface -- the solo operator does not context-switch identities to reach a tool exec
   // legitimately needs.
-  exec: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_INFRA],
+  exec: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...GITHUB_OPERATOR_TOOLSET, ...CTO_INFRA],
 };
 
 /**

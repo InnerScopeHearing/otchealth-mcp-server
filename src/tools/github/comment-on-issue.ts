@@ -5,7 +5,7 @@ import { commentOnIssue } from '../../github/write-client.js';
 
 /**
  * github_comment_on_issue — post a comment on an issue or PR.
- * CTO-gated + write-gated; honors dry_run.
+ * Company-operator + write-gated; honors dry_run.
  */
 export function registerGitHubCommentOnIssue(
   server: McpServer,
@@ -19,7 +19,7 @@ export function registerGitHubCommentOnIssue(
       annotations: {
         title: 'GitHub: comment on issue or PR',
         description:
-          'Post a comment on an existing issue or pull request (they share the same endpoint). CTO-only; honors dry_run.',
+          'Post a comment on an existing issue or pull request (they share the same endpoint). Named company GitHub operators only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

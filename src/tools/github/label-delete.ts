@@ -9,7 +9,7 @@ export function registerGitHubLabelDelete(server: McpServer, callerHash: CallerH
     category: 'write_orchestrated',
     annotations: {
       title: 'GitHub: delete label',
-      description: 'Permanently delete a label from a repository. The label is also removed from all issues and PRs. Irreversible. Defaults to dry_run.',
+      description: 'Permanently delete a label from a repository. The label is also removed from all issues and PRs. Irreversible. CTO only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,

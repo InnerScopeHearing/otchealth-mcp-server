@@ -10,7 +10,7 @@ export function registerGitHubBranchGetProtection(server: McpServer, callerHash:
     category: 'read',
     annotations: {
       title: 'GitHub: get branch protection rules',
-      description: 'Get the branch protection settings for a protected branch (required reviews, status checks, etc.). Read-only.',
+      description: 'Get the branch protection settings for a protected branch (required reviews, status checks, etc.). Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

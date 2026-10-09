@@ -134,7 +134,16 @@ const BOTH = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 
 const HOUR_SECONDS = 3600;
 const mint = (clientId: string, agent: string, grant?: 'authorization_code' | 'refresh_token' | 'client_credentials'): string =>
-  issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', agent, HOUR_SECONDS, grant);
+  issueAccessToken(
+    clientId,
+    'mcp',
+    SIGNING_SECRET,
+    'https://fixture.invalid',
+    agent,
+    HOUR_SECONDS,
+    grant,
+    clientId.startsWith('dcr_') || clientId.startsWith('occ_'),
+  );
 
 test('an OAuth-issued CTO session (the claude.ai connector path) passes the access gate and is stopped only by the kill switch', async () => {
   const token = mint('dcr_fixture', 'cto', 'authorization_code');

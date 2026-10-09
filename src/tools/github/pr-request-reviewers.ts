@@ -9,7 +9,7 @@ export function registerGitHubPrRequestReviewers(server: McpServer, callerHash: 
     category: 'write_simple',
     annotations: {
       title: 'GitHub: request PR reviewers',
-      description: 'Request specific users or teams to review a pull request. Defaults to dry_run.',
+      description: 'Request specific users or teams to review a pull request. CTO/Developer only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

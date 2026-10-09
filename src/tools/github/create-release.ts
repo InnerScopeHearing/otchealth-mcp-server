@@ -5,7 +5,7 @@ import { createRelease } from '../../github/write-client.js';
 
 /**
  * github_create_release — create a Git tag + GitHub release.
- * write_orchestrated (irreversible public release artifact). CTO-gated; honors dry_run.
+ * write_orchestrated (irreversible public release artifact). CTO/developer-gated; honors dry_run.
  */
 export function registerGitHubCreateRelease(
   server: McpServer,
@@ -19,7 +19,7 @@ export function registerGitHubCreateRelease(
       annotations: {
         title: 'GitHub: create release',
         description:
-          'Create a tagged release in a repository (creates the tag if it does not exist). Optionally auto-generate release notes from merged PRs. Defaults to dry_run. CTO-only.',
+          'Create a tagged release in a repository (creates the tag if it does not exist). Optionally auto-generate release notes from merged PRs. Defaults to dry_run. CTO/developer only.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
