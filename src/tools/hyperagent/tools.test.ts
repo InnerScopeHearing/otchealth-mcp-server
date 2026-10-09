@@ -443,6 +443,40 @@ test('create_thread missing its ID fails closed and does not retry an uncertain 
   assert.equal(calls[0].name, 'create_thread');
 });
 
+test('create_thread dry-run is an explicit preview and leaves invocation budget available', async () => {
+  __resetInvocationBudgetForTests();
+  const previousLimit = process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR;
+  process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR = '1';
+  try {
+    const { transport, calls } = fakeTransport(async () => ({ ok: true, status: 200, data: { threadId: 'created-after-preview' } }));
+    const { server, tools } = fakeServer();
+    registerHyperagentTools(server, () => 'synthetic-hash', transport);
+
+    const preview = await invoke(tools.get('hyperagent_create_thread')!, {
+      agentId: 'agent-general', message: 'synthetic task', dry_run: true,
+    });
+    assert.deepEqual(resultOf(preview), { ok: true, executed: false, preview: true });
+    assert.equal(JSON.stringify(preview).includes('pass dry_run=false'), true);
+    assert.deepEqual(calls, [], 'dry-run must not call the create provider write');
+
+    const deniedPreview = await invoke(tools.get('hyperagent_create_thread')!, {
+      agentId: 'agent-unassigned', message: 'must remain ring-gated', dry_run: true,
+    }, WEFUNDER_LANE);
+    assert.equal(resultOf(deniedPreview).error, 'forbidden_ring', 'dry-run must still enforce the agent ring');
+    assert.deepEqual(calls, [], 'a denied dry-run must not call the provider');
+
+    const executed = await invoke(tools.get('hyperagent_create_thread')!, {
+      agentId: 'agent-general', message: 'synthetic task', dry_run: false,
+    });
+    assert.deepEqual(resultOf(executed), { ok: true, threadId: 'created-after-preview' });
+    assert.deepEqual(calls.map(call => call.name), ['create_thread'], 'the preview must not consume the sole invocation slot');
+  } finally {
+    if (previousLimit === undefined) delete process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR;
+    else process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR = previousLimit;
+    __resetInvocationBudgetForTests();
+  }
+});
+
 test('get_thread permits current namedAgentId shape with exact thread id and ring match', async () => {
   const provider = {
     thread: { id: 'thread-current', name: 'Allowed title', namedAgentId: 'agent-general' },
@@ -505,6 +539,42 @@ test('send_message denial never invokes the provider write or returns probe cont
     assert.equal(calls.some((call) => call.name === 'send_message'), false, label);
     assert.equal(JSON.stringify(response).includes('probe-7c3'), false, label);
     assert.equal(resultOf(response).ok, false, label);
+  }
+});
+
+test('send_message dry-run resolves and ring-checks owner without sending or spending budget', async () => {
+  __resetInvocationBudgetForTests();
+  const previousLimit = process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR;
+  process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR = '1';
+  try {
+    const { transport, calls } = fakeTransport(async (name, args) => name === 'get_thread'
+      ? { ok: true, status: 200, data: { thread: { id: args.threadId, namedAgentId: args.threadId === 'restricted-thread' ? 'agent-exec' : 'agent-general' } } }
+      : { ok: true, status: 200, data: {} });
+    const { server, tools } = fakeServer();
+    registerHyperagentTools(server, () => 'synthetic-hash', transport);
+
+    const preview = await invoke(tools.get('hyperagent_send_message')!, {
+      threadId: 'owned-thread', message: 'synthetic follow up', dry_run: true,
+    });
+    assert.deepEqual(resultOf(preview), { ok: true, executed: false, preview: true });
+    assert.equal(JSON.stringify(preview).includes('pass dry_run=false'), true);
+    assert.deepEqual(calls.map(call => call.name), ['get_thread'], 'dry-run may resolve ownership but must not send');
+
+    const deniedPreview = await invoke(tools.get('hyperagent_send_message')!, {
+      threadId: 'restricted-thread', message: 'must remain ring-gated', dry_run: true,
+    }, 'coo');
+    assert.equal(resultOf(deniedPreview).error, 'forbidden_ring', 'dry-run must still enforce thread ownership');
+    assert.deepEqual(calls.map(call => call.name), ['get_thread', 'get_thread'], 'a denied dry-run must not send');
+
+    const executed = await invoke(tools.get('hyperagent_send_message')!, {
+      threadId: 'owned-thread', message: 'synthetic follow up', dry_run: false,
+    });
+    assert.deepEqual(resultOf(executed), { ok: true });
+    assert.deepEqual(calls.map(call => call.name), ['get_thread', 'get_thread', 'get_thread', 'send_message'], 'dry-runs must not consume the sole invocation slot');
+  } finally {
+    if (previousLimit === undefined) delete process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR;
+    else process.env.HYPERAGENT_MAX_INVOCATIONS_PER_HOUR = previousLimit;
+    __resetInvocationBudgetForTests();
   }
 });
 
