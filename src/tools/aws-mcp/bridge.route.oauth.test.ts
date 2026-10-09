@@ -573,7 +573,7 @@ test('a token that records no grant (minted before grant tracking) is refused, w
   const session = await getDcrSession();
   const legacy = issueAccessToken(session.clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600);
   assert.equal(issuedGrantType(legacy), null, 'no grant is recorded');
-  await assertRefusedBeforeAws(legacy, 'legacy', /aws_mcp_grant_refused: .* does not record how it was issued.*reconnect the connector to get a fresh one/, 'none');
+  await assertRefusedBeforeAws(legacy, 'legacy', /aws_mcp_grant_refused: .* does not record how it was issued.*reconnect the connector to get a fresh one/, 'none', session.clientId);
 });
 
 test('nothing in this file reached the network beyond the loopback server and the two fakes', () => {
