@@ -1521,6 +1521,7 @@ function invoke(
       callerAgent,
       ...(authKind === 'none' ? {} : { authKind }),
       ...(authGrant === 'none' ? {} : { authGrant }),
+      ...(authSubject === 'none' ? {} : { authSubject }),
     },
     () => tool.handler(args),
   );
