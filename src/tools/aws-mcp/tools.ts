@@ -16,12 +16,12 @@
  * only read metadata. The bridge adds an upstream-tool allowlist on top, and blocks
  * `aws___get_presigned_url` outright so the bridge never mints data upload or download links.
  *
- * WHO MAY CALL (see access.ts): the CTO lane over an OAuth-authenticated session only, which is the
- * claude.ai connector path. Static credentials that resolve to the CTO lane (the connector token, the
- * M365 and Codex tokens) are refused, whatever lane they carry. So is an OAuth token from the
- * client_credentials grant (a machine credential): only a token from an interactive sign-in
- * (authorization_code, or the refresh_token grant that renews it) is served. Three independent layers,
- * all CTO only:
+ * WHO MAY CALL (see access.ts): the CTO lane over an OAuth-issued session only: a token the gateway's
+ * OAuth endpoints issued through the authorization_code grant (the claude.ai connector flow), or through
+ * the refresh_token grant that renews it. Static credentials that resolve to the CTO lane (the connector
+ * token, the M365 and Codex tokens) are refused, whatever lane they carry. So is an OAuth token from the
+ * client_credentials grant (a machine credential). That shows how the token was issued, not that a
+ * person is present; access.ts says what it leaves open. Three independent layers, all CTO only:
  *   1. connector visibility: registry.ts connectorToolset advertises these names to the cto lane only
  *      (lane-toolsets.ts keeps them in the cto curated list so real CTO sessions still see them);
  *   2. execution governance: catalog/governance.ts `aws_mcp_*` requires the cto role;
