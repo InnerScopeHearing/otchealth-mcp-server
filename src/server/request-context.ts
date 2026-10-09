@@ -22,13 +22,17 @@ export type AuthKind = 'oauth' | 'descope' | 'connector' | 'copilot' | 'copilot-
  * Which OAuth grant issued a gateway access token. The token endpoint (server/oauth.ts) stamps it into
  * the signed token as the `gty` claim, and auth/bearer.ts reads it back for an 'oauth' request.
  *
- *   authorization_code  an interactive sign-in (browser consent plus PKCE): the claude.ai connector flow
+ *   authorization_code  a code exchange with PKCE: the claude.ai connector flow. A public (DCR) client
+ *                       reaches a privileged lane only through the owner's setup-code elevation on the
+ *                       consent screen; a confidential client's code is issued with no consent screen
  *   refresh_token       a refresh of an authorization_code session (only those sessions hold a refresh token)
- *   client_credentials  a machine credential (client id plus secret) with no human sign-in
+ *   client_credentials  a machine credential (client id plus secret): no code exchange, no refresh token
  *
- * A token minted before grant tracking existed carries no grant. A tool that must serve interactive
- * sessions only (the AWS MCP bridge) accepts the first two and refuses a client_credentials token and
- * a token that records no grant.
+ * The grant records how the token was ISSUED. It is not proof that a person is present: a holder of a
+ * static credential for a lane can mint a setup code and redeem it over plain HTTP. A token minted
+ * before grant tracking existed carries no grant. A tool that serves OAuth-issued sessions only (the AWS
+ * MCP bridge) accepts the first two grants and refuses a client_credentials token and a token that
+ * records no grant.
  */
 export const OAUTH_GRANT_TYPES = ['authorization_code', 'refresh_token', 'client_credentials'] as const;
 export type OAuthGrantType = (typeof OAUTH_GRANT_TYPES)[number];
