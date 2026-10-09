@@ -1512,6 +1512,7 @@ function invoke(
   callerAgent: string,
   authKind: AuthKind | 'none' = 'oauth',
   authGrant: OAuthGrantType | 'none' = 'authorization_code',
+  authSubject: string | 'none' = CLIENT_ID,
 ): Promise<WrapperResponse> {
   return requestContext.run(
     {
