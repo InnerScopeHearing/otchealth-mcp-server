@@ -47,6 +47,7 @@ const CLOUD_BROWSER_TOOLS = ['browser_cloud_profile_discover', 'browser_cloud_se
 const CTO_CLOUD_BROWSER_PROVISIONING_TOOL = 'browser_cloud_profile_provision_public_trial';
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
+const CTO_ONLY_AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 const ORDINARY_SHARED_GITHUB_LANES = [
   'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec',
@@ -68,7 +69,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...CTO_ONLY_AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check'].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
@@ -159,6 +160,24 @@ test('bounded n8n execution counts are advertised only to the CTO connector lane
   }
   const overridden = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search' } as Env;
   assert.equal(connectorToolset(overridden, 'cto').has(CTO_ONLY_N8N_EXECUTION_LIST_TOOL), false);
+});
+
+test('the AWS MCP bridge is advertised only to the CTO connector lane', () => {
+  for (const name of CTO_ONLY_AWS_MCP_TOOLS) {
+    assert.equal(CTO_SHIP_LANE_TOOLSET.includes(name), false, `${name} must not be in the shared ship set`);
+    assert.equal(EXTERNAL_READONLY_TOOLSET.includes(name), false, `${name} must not be in the external read set`);
+    assert.equal(connectorToolset(testEnv(), 'cto').has(name), true, name);
+    for (const lane of ['developer', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'external-read', 'wefunder-campaign-director', 'cto-make-github-pilot', 'unknown', '']) {
+      assert.equal(connectorToolset(testEnv(), lane).has(name), false, `${lane || '(empty lane)'} must not advertise ${name}`);
+    }
+    // A default-surface override that does not name the tool never adds it for the CTO lane, and an
+    // override that does name it can never leak it to another lane.
+    assert.equal(connectorToolset({ ...testEnv(), CONNECTOR_TOOLSET: 'brain_search' } as Env, 'cto').has(name), false);
+    const naming = { ...testEnv(), CONNECTOR_TOOLSET: `brain_search,${name}` } as Env;
+    for (const lane of ['developer', 'cfo', 'clo', 'exec', 'cpo']) {
+      assert.equal(connectorToolset(naming, lane).has(name), false, `a shared override must not leak ${name} to ${lane}`);
+    }
+  }
 });
 
 test('the fixed observation receipt is CTO-only; the Make broker is CTO/pilot-only, not shared ship lanes', () => {

@@ -154,6 +154,10 @@ export const GOVERNANCE: GovRule[] = [
   ...GITHUB_ADJACENT_WRITE_GOVERNANCE,
   { pattern: 'github_graphrag_observation_receipt_get', requiredRole: 'cto', reason: 'The fixed GraphRAG observation receipt is a CTO-only provenance check and never exposes source content.' },
   { pattern: 'github_workflow_run_failed_log_excerpt', requiredRole: 'cto', reason: 'CI job logs can echo environment content; the bounded, redacted failed-step excerpt is a CTO-only diagnostic read.' },
+  // AWS MCP bridge: durable read-only AWS access for the CTO lane (gateway-assumed read-only role, SigV4 to
+  // the AWS MCP Server). The whole family is CTO-only, matched by prefix so any future aws_mcp_* tool
+  // inherits the gate; the in-handler lane check (tools/aws-mcp/tools.ts) repeats it.
+  { pattern: 'aws_mcp_*', requiredRole: 'cto', reason: 'AWS account inspection through the gateway-assumed read-only role is CTO-only infrastructure access.' },
   { pattern: 'github_make_broker', requiredRole: ['cto', CTO_MAKE_GITHUB_PILOT_LANE], reason: 'The Make pilot broker is available only to CTO and the isolated cto-make-github-pilot principal; it is hard-scoped to one repository and claude/make-pilot refs.' },
   // Adjacent GitHub writes are generated above from one exact list. Do not add a github_* rule:
   // the shared operator grant must not grow by prefix accident.

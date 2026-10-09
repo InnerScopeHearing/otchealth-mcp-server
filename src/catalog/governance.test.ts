@@ -135,3 +135,15 @@ test('failed-step CI log excerpt reader is CTO-only', () => {
     assert.ok(!roleAllows(gov!.role, other), `the CI log excerpt reader must refuse lane "${other}"`);
   }
 });
+
+test('the AWS MCP bridge tools (the whole aws_mcp_* family) are CTO-only', () => {
+  // The prefix rule means a future aws_mcp_* tool inherits the gate without a new governance entry.
+  for (const name of ['aws_mcp_tool_list', 'aws_mcp_tool_call', 'aws_mcp_future_tool']) {
+    const gov = requiredRoleFor(name);
+    assert.ok(gov, `${name} must have an explicit role gate`);
+    assert.ok(roleAllows(gov!.role, 'cto'), `${name} must allow cto`);
+    for (const other of [...COMPANY_GITHUB_OPERATOR_LANES.filter((lane) => lane !== 'cto'), ...NON_OPERATOR_LANES]) {
+      assert.ok(!roleAllows(gov!.role, other), `${name} must refuse lane "${other}"`);
+    }
+  }
+});

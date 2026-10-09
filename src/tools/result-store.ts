@@ -90,9 +90,17 @@ function jsonEscapedUtf8Bytes(symbol: string): number {
   return Buffer.byteLength(symbol, 'utf8');
 }
 
-/** gateway_fetch_result is the terminal retrieval transport and must never produce another id. */
+/**
+ * gateway_fetch_result is the terminal retrieval transport and must never produce another id.
+ * The whole aws_mcp_* family is excluded as well: AWS bridge output is account data that is already
+ * capped and size-checked inline, and it must never be written to the shared result cache.
+ */
 export function mayOffloadToolResult(canonicalName: string): boolean {
-  return canonicalName !== 'gateway_fetch_result' && canonicalName !== 'brain_graph_search';
+  return (
+    canonicalName !== 'gateway_fetch_result' &&
+    canonicalName !== 'brain_graph_search' &&
+    !canonicalName.startsWith('aws_mcp_')
+  );
 }
 
 function pageBoundaries(s: string): Array<{ start: number; end: number }> {

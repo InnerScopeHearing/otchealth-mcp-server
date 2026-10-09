@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import {
   createAuthCode,
   consumeAuthCode,
+  issueAccessToken,
+  issueRefreshToken,
   verifyPkceS256,
   signToken,
   verifyToken,
@@ -80,4 +82,29 @@ test('access token verifies and a tampered token does not', () => {
   assert.ok(verifyToken(tok, secret));
   assert.equal(verifyToken(tok + 'x', secret), null);
   assert.equal(verifyToken(tok, 'wrong-secret'), null);
+});
+
+test('issueAccessToken stamps the grant as the signed gty claim, and leaves it out when none is given', () => {
+  const secret = 'unit-test-secret';
+  for (const grant of ['authorization_code', 'refresh_token', 'client_credentials'] as const) {
+    const claims = verifyToken(issueAccessToken('client-abc', 'mcp', secret, 'https://mcp.otchealth.app', 'cto', 60, grant), secret);
+    assert.ok(claims, grant);
+    assert.equal(claims.typ, 'access');
+    assert.equal(claims.gty, grant);
+    assert.equal(claims.sub, 'client-abc');
+    assert.equal(claims.agent, 'cto');
+  }
+  // Every token issued before grant tracking looks like this: no gty at all, and the token is otherwise identical.
+  const none = verifyToken(issueAccessToken('client-abc', 'mcp', secret, 'https://mcp.otchealth.app', 'cto', 60), secret);
+  assert.ok(none);
+  assert.equal(none.typ, 'access');
+  assert.equal('gty' in none, false);
+});
+
+test('a refresh token never carries a grant claim', () => {
+  const secret = 'unit-test-secret';
+  const claims = verifyToken(issueRefreshToken('client-abc', 'mcp', secret, 'https://mcp.otchealth.app', 'cto'), secret);
+  assert.ok(claims);
+  assert.equal(claims.typ, 'refresh');
+  assert.equal('gty' in claims, false);
 });

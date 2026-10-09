@@ -1,0 +1,273 @@
+/**
+ * validateBearer records HOW a request authenticated (auth_kind), and for an OAuth token which grant
+ * issued it (auth_grant, the signed `gty` claim) and the client id it was issued to (auth_subject, the
+ * token's sub). The AWS MCP bridge uses them to serve OAuth-issued CTO sessions only, so each credential
+ * type must be classified correctly here: a static token that resolves to the CTO lane must never look
+ * like an OAuth session, and a client_credentials token must never look like an authorization_code one.
+ * The grant shows how a token was issued, not that a person is present. The kind is never defaulted to
+ * 'oauth': only a gateway-issued access token records it, and a path that records none leaves it undefined.
+ *
+ * Every credential below is synthetic (at least 32 characters, the minimum for a static token).
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createSign, generateKeyPairSync } from 'node:crypto';
+
+const SIGNING_SECRET = 'synthetic-signing-' + 's'.repeat(40);
+const pad = (label: string, ch: string): string => `synthetic-${label}-` + ch.repeat(40);
+const TOKENS = {
+  connector: pad('connector', 'c'),
+  copilot: pad('copilot', 'p'),
+  eval: pad('eval', 'e'),
+  copilotDev: pad('copilot-dev', 'd'),
+  m365Cto: pad('m365-cto', 'm'),
+  m365Cfo: pad('m365-cfo', 'f'),
+  codexCto: pad('codex-cto', 'x'),
+  codexCfo: pad('codex-cfo', 'y'),
+};
+const DESCOPE_PROJECT = 'Psynthetic0project';
+
+Object.assign(process.env, {
+  CIO_SITE_ID: 'synthetic-site',
+  CIO_TRACK_KEY: 'synthetic-track-key',
+  CIO_APP_API_BEARER: 'synthetic-bearer',
+  PERPLEXITY_CONNECTOR_TOKEN: TOKENS.connector,
+  ADMIN_REVOKE_TOKEN: pad('admin', 'a'),
+  N8N_WEBHOOK_SECRET: pad('webhook', 'n'),
+  COPILOT_AGENT_TOKEN: TOKENS.copilot,
+  EVAL_AGENT_TOKEN: TOKENS.eval,
+  COPILOT_DEV_AGENT_TOKEN: TOKENS.copilotDev,
+  M365_CTO_MCP_TOKEN: TOKENS.m365Cto,
+  M365_CFO_MCP_TOKEN: TOKENS.m365Cfo,
+  CODEX_CTO_MCP_TOKEN: TOKENS.codexCto,
+  CODEX_CFO_MCP_TOKEN: TOKENS.codexCfo,
+  OAUTH_TOKEN_SIGNING_SECRET: SIGNING_SECRET,
+  // The connector token is bound to this lane, which is exactly the exposure the bridge guards against.
+  OAUTH_DEFAULT_AGENT: 'cto',
+  DESCOPE_PROJECT_ID: DESCOPE_PROJECT,
+  DESCOPE_PILOT_LANES: 'cto',
+  REVOCATION_MEMORY_ONLY_MODE: 'development',
+  SHIELD_MODE: 'off',
+  COLD_START_MODE: 'off',
+  TOOL_CATALOG_CURATION_MODE: 'off',
+});
+
+const { validateBearer, requireConnectorAuth } = await import('./bearer.js');
+const { issueAccessToken, issueRefreshToken, signToken } = await import('./oauth-tokens.js');
+const { default: Fastify } = await import('fastify');
+
+const ready = (): boolean => true;
+const bearer = (token: string): string => `Bearer ${token}`;
+
+test('a gateway-issued OAuth access token is recorded as oauth, whatever its client', async () => {
+  for (const [clientId, connectorSurface] of [
+    ['dcr_fixture', true], // a Claude Chat connector registered by Dynamic Client Registration
+    ['occ_fixture', true], // a manually registered confidential connector client
+    ['synthetic-per-agent-client', false], // a client_credentials client: also OAuth, but not the connector surface
+  ] as const) {
+    const token = issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
+    const auth = await validateBearer(bearer(token), ready);
+    assert.ok(auth, clientId);
+    assert.equal(auth.auth_kind, 'oauth', clientId);
+    assert.equal(auth.caller_agent, 'cto');
+    assert.equal(auth.connector_surface, connectorSurface);
+    assert.equal(auth.m365_static_auth, false);
+    assert.equal(auth.auth_grant, undefined, 'a token issued without a grant records none');
+    assert.equal(auth.auth_subject, clientId, 'the client id the token was issued to is recorded');
+  }
+});
+
+test('the OAuth grant that issued an access token is recorded as auth_grant, whatever its client', async () => {
+  for (const clientId of ['dcr_fixture', 'occ_fixture', 'synthetic-per-agent-client']) {
+    for (const grant of ['authorization_code', 'refresh_token', 'client_credentials'] as const) {
+      const token = issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, grant);
+      const auth = await validateBearer(bearer(token), ready);
+      assert.ok(auth, `${clientId} ${grant}`);
+      assert.equal(auth.auth_kind, 'oauth');
+      assert.equal(auth.auth_grant, grant, `${clientId} ${grant}`);
+      assert.equal(auth.auth_subject, clientId, `${clientId} ${grant}`);
+      assert.equal(auth.caller_agent, 'cto');
+    }
+  }
+});
+
+test('a token that records no grant has none, and an unrecognized grant claim counts as no grant', async () => {
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const legacy = issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
+  const legacyAuth = await validateBearer(bearer(legacy), ready);
+  assert.ok(legacyAuth);
+  assert.equal(legacyAuth.auth_kind, 'oauth');
+  assert.equal('auth_grant' in legacyAuth, false, 'the field is absent, not set to a placeholder');
+  assert.equal(legacyAuth.auth_subject, 'dcr_fixture', 'the client id is recorded even when the grant is not');
+
+  // signToken is the real signer, so each of these carries a VALID signature and a gty the gateway never writes.
+  for (const gty of ['password', 'implicit', 'AUTHORIZATION_CODE', 'authorization_code ', '', 42, null, true, { grant: 'authorization_code' }, ['authorization_code']]) {
+    const token = signToken(
+      { iss: 'https://fixture.invalid', aud: 'otchealth-mcp', sub: 'dcr_fixture', scope: 'mcp', typ: 'access', agent: 'cto', exp, gty } as never,
+      SIGNING_SECRET,
+    );
+    const auth = await validateBearer(bearer(token), ready);
+    assert.ok(auth, JSON.stringify(gty));
+    assert.equal(auth.auth_kind, 'oauth');
+    assert.equal(auth.auth_grant, undefined, `gty ${JSON.stringify(gty)} must not count as a grant`);
+  }
+});
+
+test('a token that names no client has no auth_subject, and its kind is still oauth', async () => {
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  for (const sub of ['', undefined]) {
+    const token = signToken(
+      { iss: 'https://fixture.invalid', aud: 'otchealth-mcp', sub, scope: 'mcp', typ: 'access', agent: 'cto', exp, gty: 'authorization_code' } as never,
+      SIGNING_SECRET,
+    );
+    const auth = await validateBearer(bearer(token), ready);
+    assert.ok(auth, String(sub));
+    assert.equal(auth.auth_kind, 'oauth');
+    assert.equal(auth.auth_grant, 'authorization_code');
+    assert.equal('auth_subject' in auth, false, `sub ${JSON.stringify(sub)} records no subject`);
+  }
+});
+
+test('the kind is recorded only where a credential proves it: every accepted credential has one, and a failed match has no context at all', async () => {
+  const accepted: Array<[string, string]> = [
+    ['oauth', issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, 'authorization_code')],
+    ['connector', TOKENS.connector],
+    ['copilot', TOKENS.copilot],
+    ['eval', TOKENS.eval],
+    ['copilot-dev', TOKENS.copilotDev],
+    ['m365', TOKENS.m365Cto],
+    ['codex', TOKENS.codexCto],
+  ];
+  for (const [kind, token] of accepted) {
+    const auth = await validateBearer(bearer(token), ready);
+    assert.ok(auth, kind);
+    assert.equal(auth.auth_kind, kind, `an accepted ${kind} credential records its kind`);
+  }
+  // A credential that proves nothing never reaches a context, so there is no kind to default.
+  for (const token of [pad('unknown', 'u'), 'x'.repeat(64), 'a.b.c', '']) {
+    assert.equal(await validateBearer(bearer(token), ready), null, token.slice(0, 20));
+  }
+  // A hand-built context that records no kind says so: the field is absent, not a default.
+  const handBuilt: import('./bearer.js').AuthContext = { caller_hash: 'h', raw_token: 't', caller_agent: 'cto', connector_surface: false, m365_static_auth: false };
+  assert.equal(handBuilt.auth_kind, undefined);
+});
+
+test('the grant is part of the signed payload: editing it breaks the signature, so a client cannot upgrade a machine token', async () => {
+  const token = issueAccessToken('synthetic-per-agent-client', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, 'client_credentials');
+  const [header, payload, signature] = token.split('.');
+  const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, unknown>;
+  assert.equal(claims.gty, 'client_credentials');
+  const upgraded = Buffer.from(JSON.stringify({ ...claims, gty: 'authorization_code' })).toString('base64url');
+  assert.equal(await validateBearer(bearer(`${header}.${upgraded}.${signature}`), ready), null);
+  const stripped = Buffer.from(JSON.stringify({ ...claims, gty: undefined })).toString('base64url');
+  assert.equal(await validateBearer(bearer(`${header}.${stripped}.${signature}`), ready), null);
+  // The untouched token still authenticates, as a machine credential.
+  const intact = await validateBearer(bearer(token), ready);
+  assert.equal(intact?.auth_grant, 'client_credentials');
+});
+
+test('refresh tokens, tokens signed with another secret and unknown tokens authenticate as nothing', async () => {
+  const refresh = issueRefreshToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
+  assert.equal(await validateBearer(bearer(refresh), ready), null);
+  const foreign = issueAccessToken('dcr_fixture', 'mcp', 'a-different-' + 's'.repeat(40), 'https://fixture.invalid', 'cto');
+  assert.equal(await validateBearer(bearer(foreign), ready), null);
+  assert.equal(await validateBearer(bearer(pad('unknown', 'u')), ready), null);
+  assert.equal(await validateBearer(undefined, ready), null);
+});
+
+test('every static credential is recorded with its own kind and never as oauth', async () => {
+  const cases: Array<{ token: string; kind: string; agent: string; m365: boolean; connectorSurface: boolean }> = [
+    { token: TOKENS.connector, kind: 'connector', agent: 'cto', m365: false, connectorSurface: true },
+    { token: TOKENS.copilot, kind: 'copilot', agent: 'copilot-agent', m365: false, connectorSurface: false },
+    { token: TOKENS.eval, kind: 'eval', agent: 'copilot-agent', m365: false, connectorSurface: false },
+    { token: TOKENS.copilotDev, kind: 'copilot-dev', agent: 'developer', m365: false, connectorSurface: false },
+    { token: TOKENS.m365Cto, kind: 'm365', agent: 'cto', m365: true, connectorSurface: false },
+    { token: TOKENS.m365Cfo, kind: 'm365', agent: 'cfo', m365: true, connectorSurface: false },
+    { token: TOKENS.codexCto, kind: 'codex', agent: 'cto', m365: false, connectorSurface: true },
+    { token: TOKENS.codexCfo, kind: 'codex', agent: 'cfo', m365: false, connectorSurface: true },
+  ];
+  for (const c of cases) {
+    const auth = await validateBearer(bearer(c.token), ready);
+    assert.ok(auth, c.kind);
+    assert.equal(auth.auth_kind, c.kind, `${c.kind} for ${c.agent}`);
+    assert.notEqual(auth.auth_kind, 'oauth');
+    assert.equal(auth.caller_agent, c.agent);
+    assert.equal(auth.m365_static_auth, c.m365);
+    assert.equal(auth.connector_surface, c.connectorSurface);
+    assert.equal(auth.auth_grant, undefined, `${c.kind} is not an OAuth token, so it has no grant`);
+    assert.equal('auth_subject' in auth, false, `${c.kind} is not an OAuth token, so it has no client id`);
+  }
+});
+
+test('the static credentials that reach the CTO lane are exactly the ones the bridge must refuse', async () => {
+  const reachingCto: string[] = [];
+  for (const [label, token] of Object.entries(TOKENS)) {
+    const auth = await validateBearer(bearer(token), ready);
+    if (auth?.caller_agent === 'cto') reachingCto.push(`${label}:${auth.auth_kind}`);
+  }
+  assert.deepEqual(reachingCto.sort(), ['codexCto:codex', 'connector:connector', 'm365Cto:m365']);
+});
+
+test('the M365 query-string token is classified m365 through the route, and a header token keeps its own kind', async () => {
+  const app = Fastify();
+  app.post('/probe', async (request, reply) => {
+    const auth = await requireConnectorAuth(request, reply, ready);
+    if (!auth) return undefined;
+    return reply.send({ auth_kind: auth.auth_kind, caller_agent: auth.caller_agent, m365_static_auth: auth.m365_static_auth });
+  });
+  try {
+    const viaQuery = await app.inject({ method: 'POST', url: `/probe?m365_dev_token=${encodeURIComponent(TOKENS.m365Cto)}` });
+    assert.equal(viaQuery.statusCode, 200);
+    assert.deepEqual(viaQuery.json(), { auth_kind: 'm365', caller_agent: 'cto', m365_static_auth: true });
+
+    const viaHeader = await app.inject({ method: 'POST', url: '/probe', headers: { authorization: bearer(TOKENS.codexCto) } });
+    assert.deepEqual(viaHeader.json(), { auth_kind: 'codex', caller_agent: 'cto', m365_static_auth: false });
+
+    const oauth = issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
+    const viaOauth = await app.inject({ method: 'POST', url: '/probe', headers: { authorization: bearer(oauth) } });
+    assert.deepEqual(viaOauth.json(), { auth_kind: 'oauth', caller_agent: 'cto', m365_static_auth: false });
+
+    const rejected = await app.inject({ method: 'POST', url: `/probe?m365_dev_token=${encodeURIComponent(pad('unknown', 'u'))}` });
+    assert.equal(rejected.statusCode, 401);
+  } finally {
+    await app.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Descope: a verified session JWT is its own kind, so it is not mistaken for a gateway OAuth session
+// ---------------------------------------------------------------------------------------------
+const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const KID = 'synthetic-kid-1';
+
+function descopeJwt(claims: Record<string, unknown>): string {
+  const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const signingInput = `${b64({ alg: 'RS256', kid: KID, typ: 'JWT' })}.${b64(claims)}`;
+  const signature = createSign('RSA-SHA256').update(signingInput).sign(privateKey).toString('base64url');
+  return `${signingInput}.${signature}`;
+}
+
+test('a verified Descope session JWT is recorded as descope, and a lane outside the pilot is refused outright', async () => {
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: KID, alg: 'RS256', use: 'sig' };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    assert.equal(String(url), `https://api.descope.com/${DESCOPE_PROJECT}/.well-known/jwks.json`);
+    return new Response(JSON.stringify({ keys: [jwk] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const claims = { iss: `https://api.descope.com/v1/apps/${DESCOPE_PROJECT}`, sub: 'synthetic-subject', exp };
+    const auth = await validateBearer(bearer(descopeJwt({ ...claims, lane: 'cto' })), ready);
+    assert.ok(auth);
+    assert.equal(auth.auth_kind, 'descope');
+    assert.equal(auth.caller_agent, 'cto');
+    assert.equal(auth.m365_static_auth, false);
+    assert.equal(auth.auth_grant, undefined, 'a Descope session is not a gateway OAuth token, so it has no grant');
+    assert.equal('auth_subject' in auth, false, 'the Descope user subject is a person, not a client id, and is never recorded as one');
+
+    assert.equal(await validateBearer(bearer(descopeJwt({ ...claims, lane: 'cfo' })), ready), null, 'a lane outside DESCOPE_PILOT_LANES');
+    assert.equal(await validateBearer(bearer(descopeJwt({ ...claims, lane: 'cto', exp: exp - 7200 })), ready), null, 'an expired token');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
