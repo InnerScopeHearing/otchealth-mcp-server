@@ -409,7 +409,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: call an upstream tool',
         description:
-          'CTO lane only, interactive OAuth sessions only (static credentials and client_credentials tokens are refused). Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
+          'CTO lane only, OAuth-issued sessions only (static credentials and client_credentials tokens are refused). Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
           'for listing resources and checking their properties), aws___search_documentation, aws___read_documentation, ' +
           'aws___retrieve_skill, aws___list_regions, aws___get_regional_availability, aws___get_tasks. ' +
           'aws___get_presigned_url is blocked. Read-only: the call runs as the dedicated read-only AWS role ' +
