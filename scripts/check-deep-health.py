@@ -118,6 +118,10 @@ def main() -> int:
     token = os.environ.get("ADMIN_REVOKE_TOKEN", "")
     if not token.strip():
         raise CheckFailure("admin_token_missing")
+    # ADMIN_REVOKE_TOKEN is generated as 32-byte lowercase hex; constrain it before emitting
+    # the Actions masking command so secret content cannot inject another workflow command.
+    if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise CheckFailure("admin_token_invalid")
     # Register the value with the Actions log masker before making an authenticated request.
     print(f"::add-mask::{token}", flush=True)
 
