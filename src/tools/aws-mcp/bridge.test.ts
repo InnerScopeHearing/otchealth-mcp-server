@@ -494,8 +494,8 @@ test('GRANT GATE: an OAuth CTO token from the client_credentials grant is refuse
     await assert.rejects(run(), (err: unknown) => {
       assert.ok(err instanceof AwsMcpRefusalError, `${label}: ${String(err)}`);
       assert.equal(err.code, 'aws_mcp_grant_refused');
-      assert.match(err.message, /^aws_mcp_grant_refused: the AWS bridge serves interactive OAuth sessions only/);
-      assert.match(err.message, /issued by the client_credentials grant, which is a machine credential and not an interactive sign-in/);
+      assert.match(err.message, /^aws_mcp_grant_refused: the AWS bridge serves OAuth-issued sessions only/);
+      assert.match(err.message, /issued by the client_credentials grant, which is a machine credential\. No AWS request/);
       assert.match(err.message, /No AWS request was made\.$/);
       return true;
     });
