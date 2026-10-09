@@ -584,8 +584,8 @@ async function withBridgeSwitch<T>(value: string | undefined, run: () => Promise
   }
 }
 
-test('KILL SWITCH: AWS_MCP_BRIDGE_DISABLED makes both tools refuse at once, before any credential, STS or network use', async () => {
-  for (const on of ['true', 'TRUE', ' true ', '1', 'yes', 'on']) {
+test('KILL SWITCH: AWS_MCP_BRIDGE_DISABLED makes both tools refuse before any credential, STS or network use, and a typo disables the bridge too', async () => {
+  for (const on of ['true', 'TRUE', ' true ', '1', 'yes', 'on', 'y', 'enabled', 'ture', 'garbage']) {
     const w = world();
     await withBridgeSwitch(on, async () => {
       for (const run of [
