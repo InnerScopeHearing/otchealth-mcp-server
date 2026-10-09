@@ -513,7 +513,7 @@ test('the refresh_token successor of that session is served too, and stays on th
   const call = await callRegions(access);
   assertServed(call, 'aws_mcp_tool_call');
   assertCalled(call);
-  assertAudited(callFrom, 'aws_mcp_tool_call', 'refresh_token');
+  assertAudited(callFrom, 'aws_mcp_tool_call', 'refresh_token', session.clientId);
 });
 
 test('a confidential connector client that signs in with authorization_code is served, and so is its refresh', async () => {
