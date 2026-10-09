@@ -350,7 +350,7 @@ async function signInConfidential(client: { client_id: string; secret: string })
   );
 }
 
-/** The machine path: client id plus secret, no sign-in. Returns the raw token response. */
+/** The machine path: client id plus secret, no code exchange. Returns the raw token response. */
 const clientCredentials = (client: { client_id: string; secret: string }) =>
   tokenRequest({ grant_type: 'client_credentials', client_id: client.client_id, client_secret: client.secret });
 
