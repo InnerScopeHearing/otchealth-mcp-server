@@ -15,10 +15,10 @@ check = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = check
 spec.loader.exec_module(check)
 
-IMAGE_TAG = "bf1c4284ab1b790a0a88abb550ad06c804fd7c90"
+IMAGE_TAG = "0989366c4bed376f973fb79791068f02da4be101"
 TOKEN = "a" * 64
 RAW_MARKER = "RAW_RESPONSE_MUST_NOT_BE_LOGGED"
-EXPECTED_DIGEST = "sha256:be9a19ae72378c3dfbeee6ebd3d974c97c185619a4fb71dddf2c53b01704053d"
+EXPECTED_DIGEST = "sha256:5f17111e63aa99743b6f17d92d80a5c105d4d7954208f248107c3aa75fca007f"
 
 
 class FakeResponse:
@@ -56,7 +56,7 @@ def health_body(status="ok", readiness="ready"):
         "revision": {
             "image_tag": IMAGE_TAG,
             "image_digest": EXPECTED_DIGEST,
-            "task_definition": "otchealth-gateway:199",
+            "task_definition": "otchealth-gateway:200",
         },
         "operator_detail": RAW_MARKER,
     }
@@ -102,7 +102,7 @@ class DeepHealthWorkflowBehaviorTests(unittest.TestCase):
         ])
         self.assertEqual(exit_code, 0, errors)
         self.assertIn('"result": "ok"', output)
-        self.assertIn('"task_definition": "otchealth-gateway:199"', output)
+        self.assertIn('"task_definition": "otchealth-gateway:200"', output)
         self.assertEqual(len(opener.requests), 2)
         self.assertEqual(opener.requests[0][0].full_url, f"{check.BASE_URL}/health")
         self.assertEqual(opener.requests[1][0].full_url, f"{check.BASE_URL}/health/deep")

@@ -14,8 +14,8 @@ import urllib.request
 from typing import Any
 
 BASE_URL = "https://mcp.otchealth.app"
-EXPECTED_IMAGE_DIGEST = "sha256:be9a19ae72378c3dfbeee6ebd3d974c97c185619a4fb71dddf2c53b01704053d"
-EXPECTED_TASK_DEFINITION = "otchealth-gateway:199"
+EXPECTED_IMAGE_DIGEST = "sha256:5f17111e63aa99743b6f17d92d80a5c105d4d7954208f248107c3aa75fca007f"
+EXPECTED_TASK_DEFINITION = "otchealth-gateway:200"
 DEEP_FIELDS = {
     "cosmos",
     "search",
