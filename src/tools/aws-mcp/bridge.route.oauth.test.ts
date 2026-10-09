@@ -448,6 +448,7 @@ async function assertRefusedBeforeAws(bearer: string, label: string, pattern: Re
     assert.equal(lines[0].error_code, 'aws_mcp_grant_refused');
     assert.equal(lines[0].auth_kind, 'oauth');
     assert.equal(lines[0].auth_grant, grant);
+    assert.equal(lines[0].auth_subject, clientId, `${label} ${tool}: the refusal names the client the token was issued to`);
   }
 }
 
