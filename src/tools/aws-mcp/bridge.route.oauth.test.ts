@@ -418,8 +418,8 @@ function assertCalled(outcome: Outcome): void {
 const auditSince = (from: number, tool: string): Array<Record<string, unknown>> =>
   auditLines.slice(from).filter((line) => line.bridge_tool === tool);
 
-/** An accepted call writes one audit line recording OAuth and the grant it came from. */
-function assertAudited(from: number, tool: string, grant: string): void {
+/** An accepted call writes one audit line recording OAuth, the grant it came from and the client id it was issued to. */
+function assertAudited(from: number, tool: string, grant: string, clientId: string): void {
   const lines = auditSince(from, tool);
   assert.equal(lines.length, 1, `one audit line for ${tool}`);
   assert.equal(lines[0].outcome, 'ok');
