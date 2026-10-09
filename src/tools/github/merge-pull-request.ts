@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { mergePullRequest } from '../../github/api-client.js';
 
-/** github_merge_pull_request — merge a PR. CTO-gated + write-gated; honors dry_run. */
+/** github_merge_pull_request — merge a PR. Company-operator + write-gated; honors dry_run. */
 export function registerGitHubMergePullRequest(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -12,7 +12,7 @@ export function registerGitHubMergePullRequest(server: McpServer, callerHash: Ca
       category: 'write_simple',
       annotations: {
         title: 'GitHub: merge pull request',
-        description: 'Merge a pull request (squash/merge/rebase) via the App installation token. CTO-only; honors dry_run.',
+        description: 'Merge a pull request (squash/merge/rebase) via the App installation token. Named company GitHub operators only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

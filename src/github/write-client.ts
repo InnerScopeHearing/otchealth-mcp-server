@@ -1,5 +1,5 @@
 /**
- * GitHub write-client — CTO-gated write operations via the App installation token.
+ * GitHub write-client — governed company-operator writes via the App installation token.
  *
  * Auth is identical to api-client.ts (GitHub App JWT → installation access token,
  * cached until ~1 min before expiry). This file is intentionally self-contained so

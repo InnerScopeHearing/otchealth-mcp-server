@@ -12,6 +12,7 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
 import { CTO_MAKE_GITHUB_PILOT_LANE, CTO_MAKE_GITHUB_PILOT_TOOLSET } from '../config/lane-toolsets.js';
+import { GITHUB_OPERATOR_TOOLSET } from '../config/github-operator.js';
 import {
   logToolEnd,
   logToolStart,
@@ -57,11 +58,11 @@ import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
 // caller's OAuth-derived agent lane (see connectorToolset() below) -- this split is a SECURITY
 // BOUNDARY, not just a findability curation:
 //
-//   CTO_SHIP_LANE_TOOLSET       the full ship-cycle toolset (branch/commit/PR/review/CI/merge/
-//                               dispatch, the PRIVILEGED kb_search_privileged + legal_blob_* +
-//                               memory_write, the Azure control plane, ...). Handed ONLY to a
-//                               connector lane that is cto, developer, or in the executive ring
-//                               (EXEC_RING). See isShipLane().
+//   CTO_SHIP_LANE_TOOLSET       the broad ship-seat catalog (including the shared, bounded GitHub
+//                               operator surface plus privileged finance/legal and control-plane
+//                               tools). Handed ONLY to cto, developer, or an executive-ring lane.
+//                               COO, CRO, and WeFunder receive only their existing seat catalog plus
+//                               GITHUB_OPERATOR_TOOLSET; they do not become broad ship lanes.
 //   EXTERNAL_READONLY_TOOLSET   a minimal, non-privileged read set. Handed to EVERY OTHER connector
 //                               lane: an unrecognized/self-named connector, an empty caller lane, or
 //                               any lane not in the ship set.
@@ -167,7 +168,8 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // the handler + governance both hard-gate execution to cto/exec regardless of who can SEE it.
   'connector_setup_code_create',
   'posthog_query_hogql', 'posthog_insight_list',
-  'github_get_file_contents', 'github_list_pull_requests', 'github_issue_list', 'sentry_list_issues',
+  ...GITHUB_OPERATOR_TOOLSET,
+  'sentry_list_issues',
   // ITEM #2 Azure control-plane READ lane (Phase A). MUST be on the connector surface or the
   // Claude Chat CTO cannot SEE them (execution stays cto-gated in governance.ts either way).
   'azure_jobs_list', 'azure_job_executions', 'azure_logs_query', 'azure_search_index_stats',
@@ -176,34 +178,6 @@ export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   // them (execution stays cto + high-risk gated; dry_run defaults TRUE; oauth-clients denied).
   'azure_job_execute', 'azure_job_upsert', 'azure_containerapp_set_env',
   'azure_search_index_upsert', 'azure_search_indexer_upsert',
-  // CTO SHIP-LANE (2026-07-12, widened 2026-07-13): the connector surface must carry the COMPLETE
-  // ship cycle -- branch, commit, PR, review, CI, MERGE, and workflow-dispatch. The 2026-07-12 pass
-  // added the write tools but omitted merge/dispatch/review, so the Claude Chat CTO could open a PR
-  // but not land it, and had to drive a human browser session to click Merge (slow, brittle, and a
-  // hard dependency on Matt being logged in). That is the SAME engine-migration gap as before, just
-  // one step further down the pipeline: Hyperagent's client_credentials lane always got the full 861
-  // tools; the Claude Chat DCR surface got a curated subset that was scoped when Chat was a STANDBY
-  // seat and never re-scoped when it became a PRIMARY one.
-  //
-  // NOT a privilege grant on its own: execution-time role gating in catalog/governance.ts still
-  // refuses every non-cto/non-developer caller for the write tools below. Other exec connectors used
-  // to merely SEE these entries and get refused if they called them -- as of the 2026-07-15 lane
-  // split, a non-ship connector lane no longer even SEES this list at all (it gets
-  // EXTERNAL_READONLY_TOOLSET instead), which is this file's actual security boundary;
-  // governance.ts's execution-time gating remains a second, independent layer under it.
-  // write + branch
-  'github_create_branch', 'github_create_or_update_file', 'github_edit_file', 'github_push_files', 'github_create_pull_request',
-  'github_pr_update', 'github_pr_update_branch', 'github_ref_delete',
-  // LAND IT: merge is the tool whose absence forced the browser fallback
-  'github_merge_pull_request', 'github_pr_create_review', 'github_comment_on_issue',
-  // trigger + observe CI directly (no browser, no human in the loop)
-  'github_dispatch_workflow', 'github_list_workflow_runs', 'github_workflow_run_get',
-  'github_workflow_run_rerun', 'github_workflow_run_list_jobs',
-  // read the state you need to decide whether landing is safe
-  'github_pr_get', 'github_pr_list_files', 'github_pr_list_commits', 'github_branch_get_protection',
-  'github_repo_list_branches', 'github_commit_get', 'github_commit_compare',
-  // issues (file + close follow-ups without leaving the seat)
-  'github_create_issue', 'github_issue_get', 'github_issue_update',
   'graph_send_email', 'graph_list_messages', 'graph_message_get', 'graph_mark_read',
   // CFO connector-only, independently lane-gated in its handler.
   'graph_relationship_query',
@@ -347,6 +321,9 @@ const CONNECTOR_SEAT_MEMORY_BASELINE: readonly string[] = [
  */
 export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  // Company GitHub operations are shared across the named internal lanes. This exact list excludes
+  // secrets/settings administration and the CTO-only receipt, failed-log, and Make broker tools.
+  ...GITHUB_OPERATOR_TOOLSET,
   'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // Keep the small read-only diagnostic reachable so the desktop connector can report
   // its own caller and registry binding when its catalog looks stale or incomplete.
@@ -400,7 +377,8 @@ export const CRO_CONNECTOR_TOOLSET: readonly string[] = [
  * restricts this lane to one reviewed source ID with explicit runtime class and assignment.
  * The broker independently enforces the Wefunder enrollment, public-read capability, public-host
  * allowlist, isolated lease, and redacted receipt contract. No login, persistence, draft/write,
- * financial, investor, KYC, tax, signature, or campaign-publish capability is exposed here.
+ * financial, investor, KYC, tax, signature, or campaign-publish capability is exposed here. Its
+ * separately governed GitHub code-operations surface does not grant browser campaign writes.
  */
 export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
   // Result-store retrieval has no caller binding; never expose it to this scoped principal.
@@ -411,6 +389,7 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
   'hyperagent_create_thread', 'hyperagent_send_message',
   'browser_broker_preflight',
   'browser_broker_inspect_public',
+  ...GITHUB_OPERATOR_TOOLSET,
 ] as const;
 
 /**
@@ -419,7 +398,8 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  * ledger, but this lane fell through to EXTERNAL_READONLY_TOOLSET, which advertises neither
  * memory_team nor any write-through verb -- so a role-elevated COO connector could not perform the
  * exact duties its instruction block names. External read baseline + the seat-memory baseline +
- * the ledger coordination verbs. No commerce, no legal, no engineering, no privileged RAG.
+ * the ledger coordination verbs and the bounded company GitHub operator surface. No broad build,
+ * release, infrastructure, finance/legal, or privileged-RAG access is implied.
  */
 /**
  * The COO ordinary-Chat Intercom surface includes support-team metadata, ticket types, tags, and
@@ -444,6 +424,7 @@ export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
 
 export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
+  ...GITHUB_OPERATOR_TOOLSET,
   ...COO_INTERCOM_CONNECTOR_TOOLSET,
   'twilio_coo_resource_counts',
   'chat_action_submit', 'chat_action_status', 'chat_action_result',

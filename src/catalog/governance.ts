@@ -9,12 +9,24 @@
  * Matching: exact tool name OR a prefix pattern ending in '*'.
  */
 import { CTO_MAKE_GITHUB_PILOT_LANE } from '../config/lane-toolsets.js';
+import {
+  COMPANY_GITHUB_OPERATOR_LANES,
+  GITHUB_OPERATOR_TOOLSET,
+} from '../config/github-operator.js';
+
+export type GovernanceRole = string | readonly string[];
 
 export interface GovRule {
   pattern: string;                 // exact name or 'prefix*'
-  requiredRole: string | string[]; // agent id(s) that may execute, e.g. 'cto' or ['cto', 'developer']
+  requiredRole: GovernanceRole;    // agent id(s) that may execute, e.g. 'cto' or ['cto', 'developer']
   reason: string;
 }
+
+const GITHUB_OPERATOR_GOVERNANCE: readonly GovRule[] = GITHUB_OPERATOR_TOOLSET.map((pattern) => ({
+  pattern,
+  requiredRole: COMPANY_GITHUB_OPERATOR_LANES,
+  reason: 'The bounded GitHub ship-cycle surface is available only to the named company GitHub operator lanes; mutations still honor repository protections, write-mode gates, high-risk gates, and dry-run defaults.',
+}));
 
 export const GOVERNANCE: GovRule[] = [
   { pattern: 'browser_cloud_profile_provision_public_trial', requiredRole: 'cto', reason: 'Provisioning an owner-bound cloud-browser profile is CTO-only infrastructure administration.' },
@@ -127,28 +139,18 @@ export const GOVERNANCE: GovRule[] = [
   { pattern: 'release_*', requiredRole: 'cto', reason: 'Release cutovers are CTO-only.' },
   // DNS / infra writes are CTO-only (charter: DNS + infra changes are CTO-owned).
   { pattern: 'cloudflare_create_dns_record', requiredRole: 'cto', reason: 'DNS changes are CTO-owned infrastructure.' },
-  // GitHub writes -- widened 2026-07-26 (Matt/CEO direct directive, same as depot_* above): the
-  // 'otchealth-dev' Copilot custom agent needs full read+write GitHub capability (push, PR, merge,
-  // dispatch) to actually ship code, not just read it. Previously CTO-only single-initiator
-  // ("code pushes are a single-initiator CTO action"); now cto OR developer for every GitHub write
-  // in this list. All agents may already read GitHub (github_list_*, get_file_contents) -- unaffected.
-  { pattern: 'github_push_files', requiredRole: ['cto', 'developer'], reason: 'Code pushes: cto/developer-only (developer widened to full write 2026-07-26 per Matt/CEO directive; previously CTO-only single-initiator).' },
-  { pattern: 'github_create_pull_request', requiredRole: ['cto', 'developer'], reason: 'Opening PRs: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
-  { pattern: 'github_pr_update', requiredRole: ['cto', 'developer'], reason: 'Updating a PR (title/body/base/state, incl. close/reopen) is a write_simple GitHub write, so the write_orchestrated default CTO gate does NOT cover it; explicit rule required. Widened 2026-07-26 per Matt/CEO directive to cto/developer.' },
-  { pattern: 'github_merge_pull_request', requiredRole: ['cto', 'developer'], reason: 'Merging PRs: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  // The bounded GitHub operator surface deliberately uses exact tool names instead of github_*.
+  // This grants the named internal lanes the existing branch/file/PR/issue/Actions ship cycle while
+  // leaving credentials, secrets, repository/org administration, destructive catalog management,
+  // releases, raw failed logs, the fixed receipt, and the isolated Make broker outside the grant.
+  ...GITHUB_OPERATOR_GOVERNANCE,
   { pattern: 'github_graphrag_observation_receipt_get', requiredRole: 'cto', reason: 'The fixed GraphRAG observation receipt is a CTO-only provenance check and never exposes source content.' },
   { pattern: 'github_workflow_run_failed_log_excerpt', requiredRole: 'cto', reason: 'CI job logs can echo environment content; the bounded, redacted failed-step excerpt is a CTO-only diagnostic read.' },
-  // ===== FULL READ+WRITE WAVE: write-tool role gates (CTO = the operator connector identity) =====
-  // GitHub writes (single-initiator, mirrors existing push/PR/merge rules) -- widened alongside them.
-  { pattern: 'github_create_branch', requiredRole: ['cto', 'developer'], reason: 'Branch creation: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   { pattern: 'github_make_broker', requiredRole: ['cto', CTO_MAKE_GITHUB_PILOT_LANE], reason: 'The Make pilot broker is available only to CTO and the isolated cto-make-github-pilot principal; it is hard-scoped to one repository and claude/make-pilot refs.' },
-  { pattern: 'github_create_or_update_file', requiredRole: ['cto', 'developer'], reason: 'Direct file commits: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
-  { pattern: 'github_edit_file', requiredRole: ['cto', 'developer'], reason: 'Surgical in-place file edits (old_str/new_str) are a direct code write, same risk class as github_create_or_update_file. It is category write_simple, so the write_orchestrated default CTO gate does NOT cover it; this explicit rule is required. Widened 2026-07-26 per Matt/CEO directive to cto/developer.' },
-  { pattern: 'github_create_issue', requiredRole: ['cto', 'developer'], reason: 'Gateway issue creation: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
-  { pattern: 'github_comment_on_issue', requiredRole: ['cto', 'developer'], reason: 'Gateway issue/PR comments: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
+  // These adjacent GitHub writes were never part of CTO_SHIP_LANE_TOOLSET and remain on their
+  // prior cto/developer governance; the fleet grant above must not grow by prefix accident.
   { pattern: 'github_add_labels', requiredRole: ['cto', 'developer'], reason: 'Label writes: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   { pattern: 'github_create_release', requiredRole: ['cto', 'developer'], reason: 'Releases (single initiator): cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
-  { pattern: 'github_dispatch_workflow', requiredRole: ['cto', 'developer'], reason: 'Workflow dispatch triggers builds/deploys: cto/developer-only (widened 2026-07-26 per Matt/CEO directive).' },
   // Netlify deploy + env + hooks are CTO-owned infra. NOT part of the 2026-07-26 directive (which
   // was scoped to GitHub + Depot specifically) -- stays CTO-only.
   { pattern: 'netlify_trigger_deploy', requiredRole: 'cto', reason: 'Production deploys are CTO-only.' },
@@ -170,7 +172,7 @@ export const GOVERNANCE: GovRule[] = [
 ];
 
 /** Return the required role(s) for a tool name, or null if unrestricted. */
-export function requiredRoleFor(toolName: string): { role: string | string[]; reason: string } | null {
+export function requiredRoleFor(toolName: string): { role: GovernanceRole; reason: string } | null {
   for (const r of GOVERNANCE) {
     if (r.pattern.endsWith('*')) {
       if (toolName.startsWith(r.pattern.slice(0, -1))) return { role: r.requiredRole, reason: r.reason };
@@ -182,6 +184,6 @@ export function requiredRoleFor(toolName: string): { role: string | string[]; re
 }
 
 /** True when callerAgent satisfies a GovRule's requiredRole (single string or a list of roles). */
-export function roleAllows(role: string | string[], callerAgent: string): boolean {
-  return Array.isArray(role) ? role.includes(callerAgent) : role === callerAgent;
+export function roleAllows(role: GovernanceRole, callerAgent: string): boolean {
+  return typeof role === 'string' ? role === callerAgent : role.includes(callerAgent);
 }

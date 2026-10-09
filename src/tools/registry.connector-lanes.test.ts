@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { connectorToolset, isShipLane, CTO_SHIP_LANE_TOOLSET, CRO_CONNECTOR_TOOLSET, COO_CONNECTOR_TOOLSET, EXTERNAL_READONLY_TOOLSET, WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET } from './registry.js';
 import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
+import { COMPANY_GITHUB_OPERATOR_LANES, GITHUB_OPERATOR_TOOLSET } from '../config/github-operator.js';
 
 // Pins the Phase 5/6 connector-ring closure (2026-07-15), layer 1: the connector toolset a caller
 // sees MUST depend on its OAuth-derived lane, not be one global set. Before this split, EVERY
@@ -182,6 +183,32 @@ test('(b) developer lane gets the full ship-lane set', () => {
   assert.ok(set.has('brain_public_kb_search'));
 });
 
+test('every named company lane advertises the exact bounded GitHub operator surface', () => {
+  const env = testEnv();
+  for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+    const set = connectorToolset(env, lane);
+    for (const tool of GITHUB_OPERATOR_TOOLSET) {
+      assert.equal(set.has(tool), true, `${lane} must advertise ${tool}`);
+    }
+    if (lane !== 'cto') {
+      for (const restricted of [
+        CTO_ONLY_GITHUB_RECEIPT_TOOL,
+        'github_workflow_run_failed_log_excerpt',
+        RESTRICTED_GITHUB_MAKE_BROKER_TOOL,
+      ]) assert.equal(set.has(restricted), false, `${lane} must not advertise ${restricted}`);
+    }
+  }
+});
+
+test('unknown and external connector lanes do not inherit the company GitHub operator surface', () => {
+  for (const lane of ['', 'unknown', 'external-read', 'totally-unknown-lane']) {
+    const set = connectorToolset(testEnv(), lane);
+    for (const tool of GITHUB_OPERATOR_TOOLSET) {
+      assert.equal(set.has(tool), false, `${lane || '(empty)'} must not advertise ${tool}`);
+    }
+  }
+});
+
 test('AWARE claims review is discoverable only on the default CTO and Developer connector lanes', () => {
   const env = testEnv();
   for (const lane of ['cto', 'developer']) {
@@ -207,7 +234,7 @@ test('(c) EXEC_RING lanes get only public-KB visibility authorized for their com
   }
 });
 
-test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus external reads', () => {
+test('(d) cro connector gets its fixed seat surface plus bounded company GitHub operations', () => {
   const set = connectorToolset(testEnv(), 'cro');
   assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.ok(set.has('brain_public_kb_search'), 'cro connector must expose fixed public-only KB retrieval');
@@ -220,7 +247,7 @@ test('(d) cro connector gets only the fixed HeyGen direct/QA surface plus extern
   ]) assert.ok(set.has(required), `cro connector must expose ${required}`);
   for (const forbidden of [
     'heygen_pairing_start', 'heygen_pairing_status', 'heygen_prompt_avatar_create',
-    'heygen_avatar_look_name_update', 'github_push_files', 'kb_search_privileged',
+    'heygen_avatar_look_name_update', 'kb_search_privileged',
     'cio_admin_write_frequency_cap_delete', 'shopify_refund_create',
   ]) assert.equal(set.has(forbidden), false, `cro connector must not expose ${forbidden}`);
 });
@@ -231,12 +258,13 @@ test('(e) Wefunder Campaign Director gets exact-source migration tools with owne
   assert.ok(set.has('browser_broker_preflight'));
   assert.ok(set.has('browser_broker_inspect_public'));
   for (const required of ['catalog_probe', 'hyperagent_list_agents', 'hyperagent_list_threads',
-    'hyperagent_get_thread', 'hyperagent_create_thread', 'hyperagent_send_message']) {
+    'hyperagent_get_thread', 'hyperagent_create_thread', 'hyperagent_send_message',
+    'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow']) {
     assert.ok(set.has(required), required);
   }
   assert.equal(isShipLane('wefunder-campaign-director'), false);
   for (const forbidden of [
-    'browser_agentcore_wefunder_preflight', 'github_push_files', 'kb_search_privileged',
+    'browser_agentcore_wefunder_preflight', 'kb_search_privileged',
     'memory_write', 'memory_remember', 'checkpoint', 'legal_blob_put', 'legal_blob_get',
     'kb_get_document', 'kb_list_documents', 'xero_manual_journals', 'heygen_pairing_start', 'gateway_fetch_result',
     'shopify_location_list', 'cio_admin_read_workspace_health',
@@ -341,25 +369,25 @@ test('synthetic company_shared typed query is advertised only to the CTO connect
 // memory_remember, checkpoint) were unfindable, and cro's surface carried HeyGen but none of the
 // commerce families its charter names. These tests lock the fixed seat surfaces AND their ceilings.
 
-test('coo lane: seat-memory + ledger coordination, and nothing privileged', () => {
+test('coo lane: seat-memory, ledger coordination, and bounded GitHub operations without unrelated privilege', () => {
   const set = connectorToolset(testEnv(), 'coo');
   assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
   assert.ok(set.has('brain_public_kb_search'), 'coo connector must expose fixed public-only KB retrieval');
-  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch', 'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get']) {
+  for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch', 'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow', 'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'github_merge_pull_request', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
     assert.equal(set.has(excluded), false, `coo connector must NOT advertise ${excluded}`);
   }
 });
 
-test('cro lane: commerce curation present, engineering/legal/finance/privileged absent, destructive commerce absent', () => {
+test('cro lane: commerce and bounded GitHub curation present; unrelated privileged/destructive tools absent', () => {
   const set = connectorToolset(testEnv(), 'cro');
   assert.deepEqual([...set].sort(), [...CRO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
-  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'task_claim', 'task_heartbeat', 'task_complete', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list']) {
+  for (const needed of ['shopify_list_products', 'shopify_create_draft_order', 'shopify_create_discount_code', 'cio_campaign_list', 'cio_track_event', 'intercom_conversation_search', 'revenuecat_list_projects', 'stripe_get_balance', 'memory_team', 'memory_remember', 'checkpoint', 'task_claim', 'task_heartbeat', 'task_complete', 'brain_graph_search', 'catalog_probe', 'heygen_videos_list', 'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow']) {
     assert.ok(set.has(needed), `cro connector must advertise ${needed} (its charter names this family)`);
   }
-  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'github_merge_pull_request', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_admin_write_frequency_cap_delete', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
+  for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'xero_orgs', 'memory_write', 'shopify_product_delete', 'shopify_order_cancel', 'shopify_refund_create', 'cio_send_transactional', 'cio_admin_write_frequency_cap_delete', 'cio_delete_customer', 'cio_suppress_customer', 'stripe_create_refund', 'stripe_payout_create', 'twilio_send_sms', 'graph_send_email']) {
     assert.equal(set.has(excluded), false, `cro connector must NOT advertise ${excluded}`);
   }
 });

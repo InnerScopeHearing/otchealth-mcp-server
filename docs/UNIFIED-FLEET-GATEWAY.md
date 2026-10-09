@@ -24,6 +24,12 @@ WIRED (registered in `src/tools/index.ts`):
 - **Stripe** (COO-25, read-only): balance, charges, customers, payment intents, products.
 - **Netlify** (Phase 3, read-only): list sites, list site deploys.
 - **Gumroad** (Phase 3, read-only): list products, list sales.
+- **GitHub App operator surface**: the named internal lanes share the exact bounded branch/file,
+  pull-request review/merge, issue/comment, Actions dispatch/rerun/inspection, protection/commit-read,
+  and ref-cleanup toolset in `src/config/github-operator.ts`. The grant does not include secrets,
+  organization/repository settings administration, releases, raw failed logs, the fixed receipt, or
+  the isolated Make broker. Every mutation still honors repository protections, gateway write/high-
+  risk switches, and the existing dry-run default.
 - **Capability Catalog** (self-describing introspection, no creds): `catalog_list_tools`,
   `catalog_service_capabilities`, `catalog_audit_unused`. Tools auto-register into the
   catalog via `registry.ts`, so the list is always truthful; `SERVICE_CATALOG` in
@@ -38,7 +44,7 @@ NOT YET BUILT (claimed elsewhere, absent here - this is the real backlog):
 - **Depot** module (FULL API: builds, cache, usage/grant-burn). Highest-value next.
 - **PostHog management** module - MUST enforce the PHI carve-out (no MedReview PHI data;
   project 468398 read-only at most) with a build-failing test.
-- **RevenueCat** (v2 read), **Twilio + ElevenLabs** (voice fleet), **GitHub passthrough**.
+- **RevenueCat** (v2 read), **Twilio + ElevenLabs** (voice fleet).
 (Capability Catalog is now BUILT - see the wired list above.)
 
 ## Security model (keys-to-the-kingdom; keep it hard)

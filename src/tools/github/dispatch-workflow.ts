@@ -5,7 +5,7 @@ import { dispatchWorkflow } from '../../github/write-client.js';
 
 /**
  * github_dispatch_workflow — fire a workflow_dispatch event on a GitHub Actions workflow.
- * write_orchestrated (triggers builds / deploys). CTO-gated; honors dry_run.
+ * write_orchestrated (triggers builds / deploys). Company-operator gated; honors dry_run.
  */
 export function registerGitHubDispatchWorkflow(
   server: McpServer,
@@ -19,7 +19,7 @@ export function registerGitHubDispatchWorkflow(
       annotations: {
         title: 'GitHub: dispatch workflow (workflow_dispatch)',
         description:
-          'Trigger a workflow_dispatch event for a GitHub Actions workflow identified by its file name or numeric ID. The workflow must have `on: workflow_dispatch` in its YAML. Defaults to dry_run. CTO-only.',
+          'Trigger a workflow_dispatch event for a GitHub Actions workflow identified by its file name or numeric ID. The workflow must have `on: workflow_dispatch` in its YAML. Defaults to dry_run. Named company GitHub operators only.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

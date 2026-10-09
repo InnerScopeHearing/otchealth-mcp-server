@@ -294,8 +294,8 @@ for (const [lane, upperBound, mustInclude] of [
   // 'checkpoint' when the 13 azure_* tools (and their CTO_M365_CURATED entries) were deleted
   // outright -- both are real, still-registered CTO_M365_CURATED members, so this proves the same
   // thing.
-  ['cto', 240, ['brain_search', 'checkpoint', 'github_branch_get', 'github_graphrag_observation_receipt_get', 'cio_admin_read_workspace_health']],
-  ['cro', 240, ['brain_search', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
+  ['cto', 300, ['brain_search', 'checkpoint', 'github_branch_get', 'github_dispatch_workflow', 'github_merge_pull_request', 'github_graphrag_observation_receipt_get', 'cio_admin_read_workspace_health']],
+  ['cro', 300, ['brain_search', 'github_dispatch_workflow', 'github_merge_pull_request', 'cio_track_event', 'revenuecat_customer_get', 'cio_admin_read_workspace_health']],
   // 2026-08-02: developer_wake_lite was silently excluded from the developer lane's M365-curated
   // registration (no wildcard/exact match in LANE_TOOLSETS.developer covered it) -- invisible to
   // catalog_probe's known_tools_present check (which reads the full unscoped catalog, not this
@@ -310,8 +310,8 @@ for (const [lane, upperBound, mustInclude] of [
     assert.ok(
       names.length <= upperBound,
       `${lane}'s M365-curated registration should stay at or under ${upperBound} tools ` +
-        `(PR #199 adds a fixed 42-tool governed Customer.io admin surface; branch CI measured 220/218 ` +
-        `for cto/cro, so 240 is a bounded ceiling, not the exact count) -- got ${names.length}. A ` +
+        `(the prior 240 ceiling plus the exact 29-tool company GitHub operator surface and its ` +
+        `bounded alias-collision effects; 300 is a ceiling, not the exact count) -- got ${names.length}. A ` +
         `count blowing past this means CTO_M365_CURATED/CRO_M365_CURATED regressed toward a wildcard ` +
         `again or the dedup fix broke.`,
     );

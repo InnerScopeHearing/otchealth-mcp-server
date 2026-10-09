@@ -1,5 +1,6 @@
 import { createSign } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
+import { isCompanyGitHubOperatorLane } from '../config/github-operator.js';
 import { fetchWithBudget } from '../util/fetch-budget.js';
 
 const env = loadEnv();
@@ -16,23 +17,23 @@ export class GitHubApiError extends Error {
  * otchealth-dev Copilot custom agent wiring / COPILOT_DEV_AGENT_TOKEN). WHY THIS EXISTS: unlike
  * the medreview PHI carve-outs baked into Sentry/PostHog/Customer.io, github_ and depot_ tools had
  * NO repo-level scoping at all -- reach was bounded only by whatever the underlying GitHub App
- * installation could see. The high-risk write_orchestrated default (registry.ts) already makes
- * every destructive github_ or depot_ tool CTO-only structurally, so this guard only matters for
- * the READ-category tools, which any non-cto caller (developer, etc.) could otherwise call
- * against ANY repo the App installation reaches.
+ * installation could see. The bounded operator writes now have explicit company-lane governance,
+ * while every other write_orchestrated tool retains registry.ts's CTO-only default. This guard is
+ * called by the READ-category tools so non-exempt callers cannot read outside a configured repo
+ * allowlist.
  *
- * 'cto' and 'exec' always have full, unrestricted reach (matches the existing "CTO is the fleet's
- * unrestricted GitHub identity" posture -- the same two lanes the write_orchestrated default and
- * the explicit CTO-only push/build tools already carve out). Every OTHER caller_agent is checked
- * against DEVELOPER_ALLOWED_REPOS -- a CSV of "owner/repo" pairs, case-insensitive, env-overridable
- * exactly like GRAPH_CS_MAILBOXES.
+ * Every named company GitHub operator lane has unrestricted repository-read reach, matching its
+ * explicit all-repository ship-cycle grant. Every other caller is checked against
+ * DEVELOPER_ALLOWED_REPOS -- a CSV of "owner/repo" pairs, case-insensitive, env-overridable exactly
+ * like GRAPH_CS_MAILBOXES. This leaves the legacy allowlist as defense in depth for unknown,
+ * external, and pilot identities without silently narrowing an approved company operator lane.
  *
  * DEFAULT (env unset/empty) IS UNRESTRICTED -- this ships as a zero-risk, inert control point
  * (Matt's explicit call, 2026-07-26: "unrestricted by default, no behavior change today"), not a
  * live restriction. Narrowing it later is a config change, not a redeploy.
  */
 export function assertRepoAllowed(callerAgent: string, owner: string, repo: string): void {
-  if (callerAgent === 'cto' || callerAgent === 'exec') return;
+  if (isCompanyGitHubOperatorLane(callerAgent)) return;
   const csv = env.DEVELOPER_ALLOWED_REPOS;
   if (!csv) return; // unrestricted by default -- see header above
   const allowed = new Set(csv.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
@@ -214,7 +215,7 @@ export async function listWorkflowRuns(owner: string, repo: string, filters: Lis
   return Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
 }
 
-// ── Writes (App installation token; CTO-gated at the tool layer) ───────────────
+// ── Writes (App installation token; company-operator-gated at the tool layer) ───────────────
 async function githubSend<T = any>(method: 'POST' | 'PATCH' | 'PUT', path: string, body: unknown): Promise<T> {
   const token = await getInstallationToken();
   // Non-idempotent write (creates/updates a branch, file, PR, comment, merge, etc.):

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { createPullRequest } from '../../github/api-client.js';
 
-/** github_create_pull_request — open a PR. CTO-gated + write-gated; honors dry_run. */
+/** github_create_pull_request — open a PR. Company-operator + write-gated; honors dry_run. */
 export function registerGitHubCreatePullRequest(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -12,7 +12,7 @@ export function registerGitHubCreatePullRequest(server: McpServer, callerHash: C
       category: 'write_simple',
       annotations: {
         title: 'GitHub: create pull request',
-        description: 'Open a pull request from head into base via the App installation token. CTO-only; honors dry_run.',
+        description: 'Open a pull request from head into base via the App installation token. Named company GitHub operators only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

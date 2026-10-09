@@ -5,7 +5,7 @@ import { pushFiles } from '../../github/api-client.js';
 
 /**
  * github_push_files — commit multiple files to a branch in ONE commit (Git Data API).
- * CTO-gated (governance) + write-gated. Creates the branch from default if missing.
+ * Company-operator governance + write gating. Creates the branch from default if missing.
  * This is the custom-gateway, governed replacement for the native GitHub MCP push.
  */
 export function registerGitHubPushFiles(server: McpServer, callerHash: CallerHashProvider): void {
@@ -16,7 +16,7 @@ export function registerGitHubPushFiles(server: McpServer, callerHash: CallerHas
       category: 'write_simple',
       annotations: {
         title: 'GitHub: push files (single commit)',
-        description: 'Commit multiple files to a branch in one commit via the App installation token. Creates the branch from the default branch if it does not exist. CTO-only; honors dry_run.',
+        description: 'Commit multiple files to a branch in one commit via the App installation token. Creates the branch from the default branch if it does not exist. Named company GitHub operators only; honors dry_run.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

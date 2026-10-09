@@ -4,6 +4,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { COMPANY_GITHUB_OPERATOR_LANES } from '../../config/github-operator.js';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Regression tests for the 2026-08-18 confirmed defect: `github_list_workflow_runs` was called
@@ -32,8 +33,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 // So the whole file runs under ONE fixed, deliberately-restrictive value; tests that want to prove
 // a filter/pipeline behavior unrelated to repo-scoping use callerAgent='cto' (which
 // assertRepoAllowed always exempts, matching every sibling github_* read tool), and the two tests
-// that specifically exercise assertRepoAllowed use 'developer' vs 'cto' against that same fixed
-// allowlist instead of toggling the env var.
+// that specifically exercise assertRepoAllowed use an external identity versus every canonical
+// company operator lane against that same fixed allowlist instead of toggling the env var.
 const RESTRICTED_TEST_REPO_ALLOWLIST = 'InnerScopeHearing/some-other-repo-not-under-test';
 
 before(() => {
@@ -97,7 +98,7 @@ async function callThroughRealMcpServer(
   args: Record<string, unknown>,
   // Defaults to 'cto', which assertRepoAllowed always exempts -- see the RESTRICTED_TEST_REPO_ALLOWLIST
   // comment above for why this file runs under a fixed, non-empty DEVELOPER_ALLOWED_REPOS for its
-  // whole lifetime. Tests that specifically exercise the allowlist pass 'developer' explicitly.
+  // whole lifetime. Tests that specifically exercise the allowlist pass their identity explicitly.
   callerAgent = 'cto',
 ): Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }>; structuredContent?: unknown }> {
   const { registerGitHubListWorkflowRuns } = await import('./list-workflow-runs.js');
@@ -200,33 +201,33 @@ test('github_list_workflow_runs: an entirely unknown extra argument does not sil
   assert.equal(new URL(runsCall!).searchParams.get('this_is_not_a_real_field'), null);
 });
 
-// ADDITIONAL finding beyond the reported defect (see the PR description): the pre-fix handler
-// never called assertRepoAllowed() at all, unlike EVERY sibling github_* read tool in this
-// codebase (list-pull-requests, issue-list, commit-list, release-list, repo-list-branches, ...
-// all call it as their first line). That meant any non-cto/exec caller could list workflow runs
-// for ANY repo the GitHub App installation reaches, bypassing DEVELOPER_ALLOWED_REPOS entirely.
-// Both tests below run against the SAME fixed, restrictive allowlist set in before() (see
-// RESTRICTED_TEST_REPO_ALLOWLIST) -- it deliberately does not include "otchealth-mcp-server".
-test('github_list_workflow_runs: a non-cto/exec caller restricted by DEVELOPER_ALLOWED_REPOS to a DIFFERENT repo is rejected before any upstream call', async () => {
+// Defense in depth: connector curation should keep this tool invisible to external identities, and
+// the canonical company-operator governance rule must still reject a direct invocation before an
+// upstream request. The test runs with a restrictive legacy repo allowlist too, but the role gate is
+// intentionally the first independent boundary.
+test('github_list_workflow_runs: an external caller is rejected before any upstream call', async () => {
   const urls: string[] = [];
   const result = await withStubbedFetch(githubStub(urls), () =>
     callThroughRealMcpServer(
       { owner: 'InnerScopeHearing', repo: 'otchealth-mcp-server' },
-      'developer',
+      'external-github-reader',
     ),
   );
-  assert.equal(result.isError, true, `a non-allowlisted repo must be refused for a non-cto/exec caller: ${JSON.stringify(result)}`);
-  assert.equal(urls.length, 0, 'assertRepoAllowed must reject BEFORE any GitHub API call, not after');
+  assert.equal(result.isError, true, `an external caller must be refused: ${JSON.stringify(result)}`);
+  assert.match(result.content?.[0]?.text ?? '', /restricted|identity|operator|forbidden/i);
+  assert.equal(urls.length, 0, 'the role gate must reject BEFORE any GitHub API call, not after');
 });
 
-test('github_list_workflow_runs: the cto lane always bypasses DEVELOPER_ALLOWED_REPOS (matches assertRepoAllowed elsewhere in the fleet)', async () => {
-  const urls: string[] = [];
-  const result = await withStubbedFetch(githubStub(urls), () =>
-    callThroughRealMcpServer(
-      { owner: 'InnerScopeHearing', repo: 'otchealth-mcp-server' },
-      'cto',
-    ),
-  );
-  assert.ok(!result.isError, `cto must bypass the repo allowlist, matching every sibling github_ read tool: ${JSON.stringify(result)}`);
-  assert.ok(urls.some((u) => u.includes('/actions/runs')));
+test('github_list_workflow_runs: every canonical company operator lane bypasses DEVELOPER_ALLOWED_REPOS', async () => {
+  for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
+    const urls: string[] = [];
+    const result = await withStubbedFetch(githubStub(urls), () =>
+      callThroughRealMcpServer(
+        { owner: 'InnerScopeHearing', repo: 'otchealth-mcp-server' },
+        lane,
+      ),
+    );
+    assert.ok(!result.isError, `${lane} must retain all-repository read access: ${JSON.stringify(result)}`);
+    assert.ok(urls.some((u) => u.includes('/actions/runs')), `${lane} must reach the Actions API`);
+  }
 });
