@@ -145,6 +145,7 @@ function auditFor(tool: typeof AWS_MCP_TOOL_LIST_NAME | typeof AWS_MCP_TOOL_CALL
     callerHash: ctx.callerHash,
     authKind: ctx.authKind,
     authGrant: ctx.authGrant,
+    authSubject: ctx.authSubject,
   });
 }
 
