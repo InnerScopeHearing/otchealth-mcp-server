@@ -65,7 +65,9 @@ const BASE = {
 const T0 = Date.parse('2026-10-08T00:00:00Z');
 const HOUR = 3_600_000;
 const CALLER_HASH = 'c0ffee'.repeat(10) + 'c0ff';
-/** The one kind of caller the bridge serves: the CTO lane over an OAuth session from an interactive sign-in. */
+/** The client id the fixture OAuth session was issued to (a public identifier, not a secret). */
+const CLIENT_ID = 'occ_fixture';
+/** The one kind of caller the bridge serves: the CTO lane over an OAuth-issued session (a token from the authorization_code grant). */
 const CTO: AwsMcpToolContext = {
   callerAgent: 'cto',
   correlationId: 'corr-1234-abcd-5678-efgh',
