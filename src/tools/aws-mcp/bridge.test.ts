@@ -1696,6 +1696,8 @@ test('wrapper: a pasted script never reaches a log line, only its hash does, and
   assert.equal(audit[0].fields.script_sha256, sha256(script));
   assert.equal(audit[0].fields.caller_hash, CALLER_HASH);
   assert.equal(audit[0].fields.auth_kind, 'oauth');
+  assert.equal(audit[0].fields.auth_grant, 'authorization_code');
+  assert.equal(audit[0].fields.auth_subject, CLIENT_ID, 'the client id travels from the request context into the audit line');
   assert.match(String(audit[0].fields.correlation_id), /^[0-9a-f-]{36}$/);
   assert.equal(audit[0].fields.correlation_id, response?.structuredContent?.correlation_id, 'the audit line carries the correlation id the caller was given');
 });
