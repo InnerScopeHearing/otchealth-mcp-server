@@ -452,7 +452,7 @@ async function assertRefusedBeforeAws(bearer: string, label: string, pattern: Re
   }
 }
 
-const MACHINE_REFUSAL = /aws_mcp_grant_refused: the AWS bridge serves interactive OAuth sessions only .* issued by the client_credentials grant, which is a machine credential/;
+const MACHINE_REFUSAL = /aws_mcp_grant_refused: the AWS bridge serves OAuth-issued sessions only .* issued by the client_credentials grant, which is a machine credential/;
 
 // ---------------------------------------------------------------------------------------------
 // Tests, in order: the accepted sessions first (they also warm the credential cache, so a wrongly
