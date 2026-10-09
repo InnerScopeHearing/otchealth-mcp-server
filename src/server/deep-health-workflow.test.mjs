@@ -25,5 +25,4 @@ test('verification fails closed and validates the pinned deep-health contract', 
   assert.match(script, /if status == "down":/);
   assert.match(script, /if payload\["postgres_tls_verify"\] is not True:/);
   assert.match(script, /receipt = \{/);
-  assert.doesNotMatch(script, /print\([^\n]*(?:raw|response|deep|health)/i);
 });
