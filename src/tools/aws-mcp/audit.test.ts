@@ -1,5 +1,6 @@
 /**
- * The audit line written for every AWS bridge call: one structured record with hashes and sizes only.
+ * The audit line written for every AWS bridge call: one structured record with hashes and sizes only,
+ * plus the client id the token was issued to (a public identifier, never a secret).
  * These tests pin its shape, the allowlist that keeps free text out of it, and the write-once behaviour.
  */
 import { test, mock } from 'node:test';
@@ -41,6 +42,7 @@ const FULL: Entry = {
   callerHash: CALLER_HASH,
   authKind: 'oauth',
   authGrant: 'authorization_code',
+  authSubject: 'occ_fixture',
   upstreamTool: 'aws___run_script',
   region: 'us-east-1',
   scriptSha256: SHA,
@@ -81,6 +83,7 @@ test('a complete entry becomes exactly the documented fields', () => {
     caller_hash: CALLER_HASH,
     auth_kind: 'oauth',
     auth_grant: 'authorization_code',
+    auth_subject: 'occ_fixture',
     outcome: 'ok',
     is_error: false,
     upstream_tool: 'aws___run_script',
@@ -110,6 +113,7 @@ test('optional fields that were not known are absent, not empty', () => {
     caller_hash: CALLER_HASH,
     auth_kind: 'm365',
     auth_grant: 'none',
+    auth_subject: 'none',
     outcome: 'refused',
     is_error: true,
     error_code: 'aws_mcp_forbidden',
@@ -123,6 +127,7 @@ test('every free-text field is validated against a strict pattern, so it can nev
     callerHash: 'caller hash with spaces',
     authKind: 'Bearer abc',
     authGrant: 'authorization_code; DROP TABLE tokens',
+    authSubject: 'client id; DROP TABLE clients',
     upstreamTool: 'aws___run_script; rm -rf /',
     region: 'us east 1',
     scriptSha256: 'import boto3\nprint("the script itself")',
@@ -134,21 +139,48 @@ test('every free-text field is validated against a strict pattern, so it can nev
   assert.equal(fields.caller_hash, 'unknown');
   assert.equal(fields.auth_kind, 'none');
   assert.equal(fields.auth_grant, 'none');
+  assert.equal(fields.auth_subject, 'invalid');
   for (const absent of ['upstream_tool', 'region', 'script_sha256', 'error_code', 'role_session_name']) {
     assert.equal(absent in fields, false, absent);
   }
   const everything = JSON.stringify(fields);
-  for (const forbidden of ['forged-line', 'with spaces', 'Bearer', 'rm -rf', 'import boto3', 'SYNTHETIC-DETAIL', 'DROP TABLE']) {
+  for (const forbidden of ['forged-line', 'with spaces', 'Bearer', 'rm -rf', 'import boto3', 'SYNTHETIC-DETAIL', 'DROP TABLE', 'client id']) {
     assert.equal(everything.includes(forbidden), false, forbidden);
   }
 });
 
-test('a missing auth kind or grant is recorded as none, and a missing correlation id or caller hash is replaced', () => {
-  const fields = bridgeCallLogFields({ ...FULL, authKind: undefined, authGrant: undefined, correlationId: '', callerHash: '' });
+test('a missing auth kind, grant or subject is recorded as none, and a missing correlation id or caller hash is replaced', () => {
+  const fields = bridgeCallLogFields({ ...FULL, authKind: undefined, authGrant: undefined, authSubject: undefined, correlationId: '', callerHash: '' });
   assert.equal(fields.auth_kind, 'none');
   assert.equal(fields.auth_grant, 'none');
+  assert.equal(fields.auth_subject, 'none');
   assert.equal(fields.correlation_id, 'invalid');
   assert.equal(fields.caller_hash, 'unknown');
+  // An empty subject (a token that names no client) is the same as none, not an invalid value.
+  assert.equal(bridgeCallLogFields({ ...FULL, authSubject: '' }).auth_subject, 'none');
+  // An entry that never sets the field at all (a static credential has no client id) is none too.
+  const { authSubject: _omitted, ...withoutSubject } = FULL;
+  void _omitted;
+  assert.equal(bridgeCallLogFields(withoutSubject).auth_subject, 'none');
+});
+
+test('the client id is kept when it is a configured name or a DCR-shaped id, and replaced with invalid when it is not', () => {
+  // A stateless DCR client id: dcr_ plus a base64url body, a dot and a base64url signature. Public, ~180 chars.
+  const base64url = (length: number): string => 'Ab3_-'.repeat(Math.ceil(length / 5)).slice(0, length);
+  const dcr = `dcr_${base64url(118)}.${base64url(43)}`;
+  assert.ok(dcr.length >= 160 && dcr.length <= 200, String(dcr.length));
+  for (const kept of ['occ_fixture', 'cto', 'cto-agent', 'client.name:1', 'seat@example', dcr, 'a'.repeat(512)]) {
+    assert.equal(bridgeCallLogFields({ ...FULL, authSubject: kept }).auth_subject, kept, kept.slice(0, 40));
+  }
+  for (const rejected of ['a'.repeat(513), 'two words', 'new\nline', 'tab\there', 'quote"x', "quote'x", 'semi;colon', 'slash/path', 'back\\slash', 'pct%41', 'emoji\u{1F600}', '<script>alert(1)</script>', 'Bearer abc def', ' occ_fixture', 'occ_fixture ']) {
+    const fields = bridgeCallLogFields({ ...FULL, authSubject: rejected });
+    assert.equal(fields.auth_subject, 'invalid', JSON.stringify(rejected).slice(0, 50));
+    assert.equal(JSON.stringify(fields).includes(rejected), false, 'the rejected text is never copied into the line');
+  }
+  // A non-string value cannot get through either.
+  for (const odd of [42, {}, ['occ_fixture'], true] as unknown[]) {
+    assert.equal(bridgeCallLogFields({ ...FULL, authSubject: odd as string }).auth_subject, 'invalid', JSON.stringify(odd));
+  }
 });
 
 test('sizes must be non-negative integers, and the script hash must be 64 lowercase hex characters', () => {
@@ -175,7 +207,7 @@ test('fields that are not in the allowlist are never copied, even when a caller 
   const fields = bridgeCallLogFields(sneaky);
   assert.deepEqual(
     Object.keys(fields).sort(),
-    ['auth_grant', 'auth_kind', 'bridge_tool', 'caller_hash', 'correlation_id', 'is_error', 'latency_ms', 'outcome', 'region', 'response_bytes', 'role_session_name', 'script_sha256', 'type', 'upstream_tool'],
+    ['auth_grant', 'auth_kind', 'auth_subject', 'bridge_tool', 'caller_hash', 'correlation_id', 'is_error', 'latency_ms', 'outcome', 'region', 'response_bytes', 'role_session_name', 'script_sha256', 'type', 'upstream_tool'],
   );
 });
 
@@ -228,7 +260,7 @@ test('logBridgeCall never throws, even when the logger does', () => {
   }
 });
 
-const BASE = { bridgeTool: 'aws_mcp_tool_call' as const, correlationId: FULL.correlationId, callerHash: CALLER_HASH, authKind: 'oauth', authGrant: 'authorization_code' };
+const BASE = { bridgeTool: 'aws_mcp_tool_call' as const, correlationId: FULL.correlationId, callerHash: CALLER_HASH, authKind: 'oauth', authGrant: 'authorization_code', authSubject: 'occ_fixture' };
 
 test('BridgeCallAudit success writes one info line with what was noted, the size, and the role session', () => {
   const cap = captureLogger();
@@ -252,6 +284,7 @@ test('BridgeCallAudit success writes one info line with what was noted, the size
     caller_hash: CALLER_HASH,
     auth_kind: 'oauth',
     auth_grant: 'authorization_code',
+    auth_subject: 'occ_fixture',
     outcome: 'ok',
     is_error: false,
     upstream_tool: 'aws___run_script',
@@ -311,7 +344,7 @@ test('BridgeCallAudit writes exactly one line however many times it is told the 
   assert.equal(cap.lines[0].fields.error_code, 'aws_mcp_tool_blocked');
 });
 
-test('every OAuth grant is recorded by name, and a refused machine token leaves a warn line naming its grant and the refusal code', () => {
+test('every OAuth grant is recorded by name, and a refused machine token leaves a warn line naming its grant, its client id and the refusal code', () => {
   const cap = captureLogger();
   try {
     for (const authGrant of ['authorization_code', 'refresh_token', 'client_credentials']) {
@@ -326,9 +359,28 @@ test('every OAuth grant is recorded by name, and a refused machine token leaves 
   }
   assert.deepEqual(cap.lines.map((l) => l.level), ['info', 'info', 'info', 'warn', 'warn']);
   assert.deepEqual(cap.lines.map((l) => l.fields.auth_grant), ['authorization_code', 'refresh_token', 'client_credentials', 'client_credentials', 'none']);
+  assert.deepEqual(cap.lines.map((l) => l.fields.auth_subject), ['occ_fixture', 'occ_fixture', 'occ_fixture', 'occ_fixture', 'occ_fixture']);
   assert.deepEqual(cap.lines.slice(3).map((l) => [l.fields.outcome, l.fields.error_code, l.fields.auth_kind]), [
     ['refused', 'aws_mcp_grant_refused', 'oauth'],
     ['refused', 'aws_mcp_grant_refused', 'oauth'],
   ]);
   assert.equal(JSON.stringify(cap.lines).includes('SYNTHETIC-MESSAGE-TEXT'), false);
+});
+
+test('a refusal of a static credential names no client id, and the audit line for one OAuth client is the same on every call it makes', () => {
+  const cap = captureLogger();
+  try {
+    new BridgeCallAudit({ ...BASE, authKind: 'm365', authGrant: undefined, authSubject: undefined }).failure(new AwsMcpRefusalError('aws_mcp_forbidden', 'x'));
+    new BridgeCallAudit({ ...BASE, authSubject: 'occ_one' }).success({ responseBytes: 1, isError: false });
+    new BridgeCallAudit({ ...BASE, authSubject: 'occ_one' }).success({ responseBytes: 2, isError: false });
+    new BridgeCallAudit({ ...BASE, authSubject: 'occ_two' }).success({ responseBytes: 3, isError: false });
+  } finally {
+    cap.restore();
+  }
+  assert.deepEqual(cap.lines.map((l) => [l.fields.auth_kind, l.fields.auth_subject]), [
+    ['m365', 'none'],
+    ['oauth', 'occ_one'],
+    ['oauth', 'occ_one'],
+    ['oauth', 'occ_two'],
+  ]);
 });
