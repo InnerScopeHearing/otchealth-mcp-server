@@ -520,8 +520,12 @@ test('a confidential connector client that signs in with authorization_code is s
   const session = await signInConfidential(CONNECTOR_CLIENT);
   assert.equal(issuedGrantType(session.access), 'authorization_code');
   assert.equal(issuedAgent(session.access), 'cto');
+  const listFrom = auditLines.length;
   assertServed(await callList(session.access), 'aws_mcp_tool_list');
+  assertAudited(listFrom, 'aws_mcp_tool_list', 'authorization_code', CONNECTOR_CLIENT.client_id);
+  const callFrom = auditLines.length;
   assertServed(await callRegions(session.access), 'aws_mcp_tool_call');
+  assertAudited(callFrom, 'aws_mcp_tool_call', 'authorization_code', CONNECTOR_CLIENT.client_id);
 
   const refreshed = await tokenRequest({ grant_type: 'refresh_token', refresh_token: session.refresh, client_id: session.clientId, client_secret: CONNECTOR_CLIENT.secret });
   assert.equal(refreshed.statusCode, 200, refreshed.payload.slice(0, 200));
