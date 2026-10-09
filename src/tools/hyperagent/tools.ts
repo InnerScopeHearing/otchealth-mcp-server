@@ -453,6 +453,8 @@ export function registerHyperagentTools(
       outputShape: {
         threadId: z.string().optional(),
         ok: z.boolean(),
+        executed: z.boolean().optional(),
+        preview: z.boolean().optional(),
         error: z.string().optional(),
         upstreamOutcome: z.literal('uncertain').optional(),
         retryable: z.literal(false).optional(),
@@ -466,6 +468,12 @@ export function registerHyperagentTools(
           return {
             data: { ok: false, error: verdict.reason },
             summary: `Refused (${verdict.reason}): lane "${caller || '(none)'}" may not address agent "${input.agentId}" (classified ${verdict.cls}).`,
+          };
+        }
+        if (ctx.dryRun) {
+          return {
+            data: { ok: true, executed: false, preview: true },
+            summary: `Dry run only: no Hyperagent thread was started for agent ${input.agentId}. To execute this action, pass dry_run=false.`,
           };
         }
         // AFTER the ring check, so a refused call never consumes budget, and BEFORE the provider
@@ -571,7 +579,7 @@ export function registerHyperagentTools(
         threadId: z.string().min(1).describe('Thread to continue.'),
         message: z.string().min(1).describe('The follow-up message.'),
       },
-      outputShape: { ok: z.boolean(), error: z.string().optional() },
+      outputShape: { ok: z.boolean(), executed: z.boolean().optional(), preview: z.boolean().optional(), error: z.string().optional() },
       handler: async (input, ctx) => {
         if (!transport.configured()) return unconfigured('sending a message');
         const caller = ctx.callerAgent || '';
@@ -592,6 +600,12 @@ export function registerHyperagentTools(
           return {
             data: { ok: false, error: verdict.reason },
             summary: `Refused (${verdict.reason}): thread ${input.threadId} belongs to agent "${ownerId}" (classified ${verdict.cls}); lane "${caller || '(none)'}" may not write to it.`,
+          };
+        }
+        if (ctx.dryRun) {
+          return {
+            data: { ok: true, executed: false, preview: true },
+            summary: `Dry run only: no message was sent to thread ${input.threadId}. To execute this action, pass dry_run=false.`,
           };
         }
         // Budgeted like create_thread: a follow-up message also makes the agent RUN, so it spends
