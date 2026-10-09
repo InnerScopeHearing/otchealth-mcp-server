@@ -455,6 +455,7 @@ export function registerHyperagentTools(
         ok: z.boolean(),
         error: z.string().optional(),
         upstreamOutcome: z.literal('uncertain').optional(),
+        retryable: z.literal(false).optional(),
       },
       handler: async (input, ctx) => {
         if (!transport.configured()) return unconfigured('starting a thread');
@@ -485,7 +486,7 @@ export function registerHyperagentTools(
         const tid = (res.data as { threadId?: string } | null)?.threadId;
         if (typeof tid !== 'string' || tid.trim().length === 0) {
           return {
-            data: { ok: false, error: 'thread_id_missing', upstreamOutcome: 'uncertain' },
+            data: { ok: false, error: 'thread_id_missing', upstreamOutcome: 'uncertain', retryable: false },
             summary: 'create_thread returned no usable thread ID; upstream outcome is uncertain. Do not retry automatically.',
           };
         }

@@ -437,7 +437,7 @@ test('create_thread missing its ID fails closed and does not retry an uncertain 
 
   const response = await invoke(tools.get('hyperagent_create_thread')!, { agentId: 'agent-general', message: 'synthetic task' });
 
-  assert.deepEqual(resultOf(response), { ok: false, error: 'thread_id_missing', upstreamOutcome: 'uncertain' });
+  assert.deepEqual(resultOf(response), { ok: false, error: 'thread_id_missing', upstreamOutcome: 'uncertain', retryable: false });
   assert.match(JSON.stringify(response), /Do not retry automatically/);
   assert.equal(calls.length, 1, 'a successful response without an ID must never replay the write');
   assert.equal(calls[0].name, 'create_thread');
