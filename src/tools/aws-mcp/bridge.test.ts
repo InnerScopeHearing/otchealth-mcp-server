@@ -479,9 +479,10 @@ test('AUTH GATE: an OAuth CTO session is served (the one accepted kind), and the
 });
 
 // ---------------------------------------------------------------------------------------------
-// Grant gate: only a token from an interactive sign-in is served. An OAuth token from the
-// client_credentials grant is a machine credential (a client id plus a secret, no human sign-in) and is
-// refused with its own code, as is a token that records no grant at all.
+// Grant gate: only an OAuth-issued session is served (a token from the authorization_code grant, or from
+// the refresh_token grant that renews it). An OAuth token from the client_credentials grant is a machine
+// credential (a client id plus a secret, no code exchange) and is refused with its own code, as is a
+// token that records no grant at all. The gate shows how a token was issued, not that a person is present.
 // ---------------------------------------------------------------------------------------------
 test('GRANT GATE: an OAuth CTO token from the client_credentials grant is refused before any credential, STS or network use', async () => {
   const w = world();
