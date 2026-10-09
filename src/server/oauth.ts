@@ -618,7 +618,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // 24h, matching the CC grant (see the refresh_token grant note above).
-        // gty: an interactive sign-in (consent plus PKCE).
+        // gty: a code exchange with PKCE. A public client was shown the consent screen; a confidential client's code was issued without one.
         access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'authorization_code'),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
