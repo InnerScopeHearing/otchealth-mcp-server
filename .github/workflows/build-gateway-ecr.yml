@@ -9,10 +9,10 @@ name: build-gateway-ecr
 # so without this workflow a merged PR could look shipped and never reach a single live replica.
 # Merged is not deployed.
 #
-# CREDENTIALS: a DEDICATED least-privilege IAM user (otchealth-ci-ecr-gateway) whose ONLY permissions
-# are ecr:GetAuthorizationToken plus push/pull on the otchealth-mcp-gateway repository. Verified at
-# provisioning time that it is correctly DENIED ssm:GetParameter, so a leak of these CI credentials
-# cannot read a single fleet secret. Deliberately NOT the broad aws-cto key.
+# CREDENTIALS: the dedicated least-privilege GitHub OIDC role
+# otchealth-github-ecr-push-gateway. Its trust policy accepts only this repository's main branch,
+# and its permissions are limited to ECR operations on otchealth-mcp-gateway. No static AWS
+# credentials are used or accepted by this workflow.
 #
 # DEPLOY IS DELIBERATELY NOT HERE. This workflow only produces an image. Registering a task
 # definition and updating the service stays with the operator, so that triggering a workflow can
@@ -62,24 +62,17 @@ jobs:
       - name: Set up isolated multi-platform Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      # OIDC role when the repo variable is configured; the pre-existing static ECR-push IAM
-      # user's key as a fallback otherwise. Exactly one of role-to-assume / access-key-id ever
-      # evaluates non-empty, never both -- see otchealth-cto/infra/oidc/README.md for why (in
-      # short: aws-actions/configure-aws-credentials treats a non-empty role-to-assume PLUS a
-      # non-empty static key as "use the static key to assume the role," which the new OIDC
-      # role's trust policy does not authorize and would fail). Until AWS_OIDC_ROLE_ARN is set as
-      # a repository variable (otchealth-cto/infra/oidc/apply-github-oidc-roles.sh prints the
-      # exact command once the role exists), this resolves to the second branch on every run,
-      # unchanged from today. This credential is verified DENIED ssm:GetParameter (see
-      # infra/oidc/permissions-gateway-ecr-push.json in otchealth-cto), matching the existing
-      # static IAM user's own least-privilege scope.
-      - name: Configure AWS credentials (OIDC role when configured, static key fallback otherwise)
+      # Use the fixed role ARN so this build cannot silently select another identity or fall back
+      # to long-lived keys when a repository variable is absent. The role trust and resource scope
+      # are checked in otchealth-cto/infra/oidc/policies/trust-gateway-ecr-push.json and
+      # permissions-gateway-ecr-push.json. Clear any runner-provided AWS credentials before
+      # exchanging this job's GitHub OIDC token; a trust/configuration failure stops the build.
+      - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
-          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          role-to-assume: arn:aws:iam::900915535335:role/otchealth-github-ecr-push-gateway
           role-session-name: gateway-ecr-push-${{ github.run_id }}
-          aws-access-key-id: ${{ vars.AWS_OIDC_ROLE_ARN == '' && secrets.ECR_AWS_ACCESS_KEY_ID || '' }}
-          aws-secret-access-key: ${{ vars.AWS_OIDC_ROLE_ARN == '' && secrets.ECR_AWS_SECRET_ACCESS_KEY || '' }}
+          unset-current-credentials: true
           aws-region: us-east-1
 
       - name: Log in to Amazon ECR
