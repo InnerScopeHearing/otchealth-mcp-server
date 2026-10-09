@@ -560,7 +560,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         // covered the CC grant; Chat/Cowork connectors (authorization_code + refresh) kept the old
         // hardcoded 1h and dropped mid-session — the recurring "brain went offline" experience.
         // gty: a refresh token is only ever issued alongside an authorization_code access token (the
-        // client_credentials grant returns no refresh token), so this session came from a human sign-in.
+        // client_credentials grant returns no refresh token), so this session descends from a code exchange.
         access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'refresh_token'),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
