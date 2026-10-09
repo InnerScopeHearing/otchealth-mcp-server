@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { getFileContents } from '../../github/api-client.js';
 
-/** github_get_file_contents — read a file's text + sha (read-only; all agents). */
+/** github_get_file_contents — read a file's text + sha (company operators; read-only). */
 export function registerGitHubGetFileContents(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(
     server,
@@ -12,7 +12,7 @@ export function registerGitHubGetFileContents(server: McpServer, callerHash: Cal
       category: 'read',
       annotations: {
         title: 'GitHub: get file contents',
-        description: 'Read a file’s decoded text and blob sha from a repo (optionally at a ref). Read-only.',
+        description: 'Read a file’s decoded text and blob sha from a repo (optionally at a ref). Named company GitHub operators only; read-only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

@@ -9,7 +9,7 @@ export function registerGitHubPrCreateReview(server: McpServer, callerHash: Call
     category: 'write_simple',
     annotations: {
       title: 'GitHub: submit pull request review',
-      description: 'Submit an APPROVE, REQUEST_CHANGES, COMMENT, or PENDING review on a pull request. Defaults to dry_run.',
+      description: 'Submit an APPROVE, REQUEST_CHANGES, COMMENT, or PENDING review on a pull request. Named company GitHub operators only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,

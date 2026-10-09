@@ -17,9 +17,9 @@ export class GitHubApiError extends Error {
  * otchealth-dev Copilot custom agent wiring / COPILOT_DEV_AGENT_TOKEN). WHY THIS EXISTS: unlike
  * the medreview PHI carve-outs baked into Sentry/PostHog/Customer.io, github_ and depot_ tools had
  * NO repo-level scoping at all -- reach was bounded only by whatever the underlying GitHub App
- * installation could see. The bounded operator writes now have explicit company-lane governance,
+ * installation could see. The bounded operator surface now has explicit company-lane governance,
  * while every other write_orchestrated tool retains registry.ts's CTO-only default. This guard is
- * called by the READ-category tools so non-exempt callers cannot read outside a configured repo
+ * called by READ-category tools so non-operator callers cannot read outside a configured repo
  * allowlist.
  *
  * Every named company GitHub operator lane has unrestricted repository-read reach, matching its

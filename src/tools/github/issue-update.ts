@@ -9,7 +9,7 @@ export function registerGitHubIssueUpdate(server: McpServer, callerHash: CallerH
     category: 'write_simple',
     annotations: {
       title: 'GitHub: update / close issue',
-      description: 'Update an issue title, body, state (close/reopen), labels, assignees, or milestone. Defaults to dry_run.',
+      description: 'Update an issue title, body, state (close/reopen), labels, assignees, or milestone. Named company GitHub operators only; defaults to dry_run.',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

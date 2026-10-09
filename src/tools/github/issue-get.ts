@@ -10,7 +10,7 @@ export function registerGitHubIssueGet(server: McpServer, callerHash: CallerHash
     category: 'read',
     annotations: {
       title: 'GitHub: get issue',
-      description: 'Retrieve full detail for a single GitHub issue. Read-only.',
+      description: 'Retrieve full detail for a single GitHub issue. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

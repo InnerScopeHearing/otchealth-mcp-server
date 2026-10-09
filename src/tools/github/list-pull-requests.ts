@@ -6,7 +6,7 @@ import { listPullRequests, assertRepoAllowed } from '../../github/api-client.js'
 export function registerGitHubListPullRequests(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
     name: 'github_list_pull_requests', category: 'read',
-    annotations: { title: 'List GitHub pull requests', description: 'List pull requests for a GitHub repository. Read-only.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { title: 'List GitHub pull requests', description: 'List pull requests for a GitHub repository. Named company GitHub operators only; read-only.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     inputShape: { owner: z.string().describe('Repository owner (user or org), e.g. "octocat".'), repo: z.string().describe('Repository name, e.g. "hello-world".'), state: z.string().optional().describe('PR state filter: "open" (default), "closed", or "all".') },
     outputShape: { prs: z.array(z.unknown()), count: z.number() },
     handler: async (input, ctx) => {

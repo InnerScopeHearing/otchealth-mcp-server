@@ -32,7 +32,7 @@ const WORKFLOW_RUN_STATUS_VALUES = [
 export function registerGitHubListWorkflowRuns(server: McpServer, callerHash: CallerHashProvider): void {
   registerTool(server, {
     name: 'github_list_workflow_runs', category: 'read',
-    annotations: { title: 'List GitHub workflow runs', description: 'List recent Actions workflow runs for a GitHub repository, optionally filtered by status, branch, event, actor, or creation date. Read-only.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { title: 'List GitHub workflow runs', description: 'List recent Actions workflow runs for a GitHub repository, optionally filtered by status, branch, event, actor, or creation date. Named company GitHub operators only; read-only.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     inputShape: {
       owner: z.string().describe('Repository owner (user or org), e.g. "octocat".'),
       repo: z.string().describe('Repository name, e.g. "hello-world".'),

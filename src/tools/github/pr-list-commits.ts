@@ -10,7 +10,7 @@ export function registerGitHubPrListCommits(server: McpServer, callerHash: Calle
     category: 'read',
     annotations: {
       title: 'GitHub: list pull request commits',
-      description: 'List commits included in a pull request. Read-only.',
+      description: 'List commits included in a pull request. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

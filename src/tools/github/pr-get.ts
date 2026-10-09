@@ -10,7 +10,7 @@ export function registerGitHubPrGet(server: McpServer, callerHash: CallerHashPro
     category: 'read',
     annotations: {
       title: 'GitHub: get pull request',
-      description: 'Retrieve full metadata for a single pull request including head/base branches, merge state, and review status. Read-only.',
+      description: 'Retrieve full metadata for a single pull request including head/base branches, merge state, and review status. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

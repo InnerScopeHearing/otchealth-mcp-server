@@ -10,7 +10,7 @@ export function registerGitHubPrListFiles(server: McpServer, callerHash: CallerH
     category: 'read',
     annotations: {
       title: 'GitHub: list pull request files',
-      description: 'List files changed in a pull request with patch stats. Read-only.',
+      description: 'List files changed in a pull request with patch stats. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

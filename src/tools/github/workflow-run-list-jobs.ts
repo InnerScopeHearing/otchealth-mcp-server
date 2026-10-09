@@ -10,7 +10,7 @@ export function registerGitHubWorkflowRunListJobs(server: McpServer, callerHash:
     category: 'read',
     annotations: {
       title: 'GitHub: list workflow run jobs',
-      description: 'List all jobs for a specific workflow run with their step-level status. Read-only.',
+      description: 'List all jobs for a specific workflow run with their step-level status. Named company GitHub operators only; read-only.',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
