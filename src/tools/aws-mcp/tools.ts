@@ -26,7 +26,7 @@
  *      (lane-toolsets.ts keeps them in the cto curated list so real CTO sessions still see them);
  *   2. execution governance: catalog/governance.ts `aws_mcp_*` requires the cto role;
  *   3. in-handler check: every core function below refuses any other caller, and any request that
- *      did not authenticate with an interactive OAuth sign-in, before touching AWS. The kill switch
+ *      did not authenticate with an OAuth-issued session, before touching AWS. The kill switch
  *      AWS_MCP_BRIDGE_DISABLED is checked in the same place.
  *
  * FAIL CLOSED. If the reader role cannot be assumed, the call fails with a clear message and no
