@@ -33,7 +33,7 @@ const CREDS = {
   secretAccessKey: 'synthetic-loopback-secret-not-real',
   sessionToken: 'synthetic-loopback-session-token',
 };
-// The only caller the bridge serves: the CTO lane over an OAuth session from an interactive sign-in.
+// The only caller the bridge serves: the CTO lane over an OAuth-issued session (a token from the authorization_code grant).
 const CTO = {
   callerAgent: 'cto',
   correlationId: 'corr-loopback-0001',
