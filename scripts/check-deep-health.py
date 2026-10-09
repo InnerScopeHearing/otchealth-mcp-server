@@ -78,6 +78,8 @@ def get_json(path: str, token: str | None = None) -> dict[str, Any]:
 
 
 def verify_revision(payload: dict[str, Any], expected_tag: str) -> None:
+    if payload.get("status") != "ok" or payload.get("readiness") != "ready":
+        raise CheckFailure("health_not_ready")
     revision = payload.get("revision")
     if not isinstance(revision, dict):
         raise CheckFailure("revision_missing")
