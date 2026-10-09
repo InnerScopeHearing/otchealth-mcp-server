@@ -606,8 +606,8 @@ test('KILL SWITCH: AWS_MCP_BRIDGE_DISABLED makes both tools refuse before any cr
   }
 });
 
-test('KILL SWITCH: only an explicit on value disables the bridge, and the switch is read on every call', async () => {
-  for (const off of [undefined, '', '   ', 'false', '0', 'no', 'off', 'enabled', 'garbage']) {
+test('KILL SWITCH: it fails closed, so only a blank, false, 0, no or off value leaves the bridge on, and it is read on every call', async () => {
+  for (const off of [undefined, '', '   ', 'false', 'FALSE', '0', 'no', 'No', 'off', ' OFF ']) {
     const w = world();
     await withBridgeSwitch(off, async () => {
       const result = await bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, CTO, w.deps);
