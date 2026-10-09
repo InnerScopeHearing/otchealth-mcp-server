@@ -353,6 +353,7 @@ function bridgeContext(ctx: ToolContext): AwsMcpToolContext {
     callerHash: ctx.callerHash,
     authKind: currentAuthKind(),
     authGrant: currentAuthGrant(),
+    authSubject: currentAuthSubject(),
   };
 }
 
