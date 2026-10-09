@@ -65,7 +65,7 @@ test('a gateway-issued OAuth access token is recorded as oauth, whatever its cli
     ['occ_fixture', true], // a manually registered confidential connector client
     ['synthetic-per-agent-client', false], // a client_credentials client: also OAuth, but not the connector surface
   ] as const) {
-    const token = issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
+    const token = issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, undefined, connectorSurface);
     const auth = await validateBearer(bearer(token), ready);
     assert.ok(auth, clientId);
     assert.equal(auth.auth_kind, 'oauth', clientId);
@@ -75,6 +75,21 @@ test('a gateway-issued OAuth access token is recorded as oauth, whatever its cli
     assert.equal(auth.auth_grant, undefined, 'a token issued without a grant records none');
     assert.equal(auth.auth_subject, clientId, 'the client id the token was issued to is recorded');
   }
+});
+
+test('OAuth surface claim is immutable per token; missing legacy claims stay curated', async () => {
+  const legacyClient = 'legacy-connector-client';
+  const issuedBeforeConfigChange = issueAccessToken(legacyClient, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, 'authorization_code', true);
+  // The current OAUTH_CLIENTS setting now includes the same id. validateBearer must honor the
+  // signed issuance decision and never reclassify the already-issued token as internal.
+  process.env.OAUTH_CLIENTS = JSON.stringify([{ client_id: legacyClient, secret: 'synthetic-secret', agent: 'cto' }]);
+  const oldAuth = await validateBearer(bearer(issuedBeforeConfigChange), ready);
+  assert.equal(oldAuth?.connector_surface, true);
+
+  const internal = issueAccessToken(legacyClient, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, 'client_credentials', false);
+  assert.equal((await validateBearer(bearer(internal), ready))?.connector_surface, false, 'new internal tokens retain the signed internal surface');
+  const preClaim = issueAccessToken(legacyClient, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');
+  assert.equal((await validateBearer(bearer(preClaim), ready))?.connector_surface, true, 'pre-claim tokens fail restrictive to curated');
 });
 
 test('the OAuth grant that issued an access token is recorded as auth_grant, whatever its client', async () => {

@@ -92,6 +92,23 @@ function resolveAnyClient(clientId: string): ResolvedAnyClient | null {
   return null;
 }
 
+/** Surface is fixed into each issued token. OAUTH_CLIENTS entries are internal unless explicitly
+ * named as occ_ connectors; the historical single client remains a connector unless shadowed by
+ * an OAUTH_CLIENTS entry (which takes resolveClient precedence). */
+function connectorSurfaceFor(clientId: string, client: ResolvedAnyClient): boolean {
+  if (client.isPublic || clientId.startsWith('dcr_') || clientId.startsWith('occ_')) return true;
+  if (!env.OAUTH_CLIENT_ID || clientId !== env.OAUTH_CLIENT_ID) return false;
+  if (!env.OAUTH_CLIENTS) return true;
+  try {
+    const configured: unknown = JSON.parse(env.OAUTH_CLIENTS);
+    if (!Array.isArray(configured)) return true;
+    return !configured.some((entry) => typeof entry === 'object' && entry !== null &&
+      'client_id' in entry && (entry as { client_id?: unknown }).client_id === clientId);
+  } catch {
+    return true;
+  }
+}
+
 /** Exported so auth/bearer.ts can point a 401's WWW-Authenticate header at the same base URL the
  * OAuth metadata endpoints use (RFC 9728 protected-resource discovery) without re-deriving it. */
 export function baseUrlOf(req: { protocol: string; hostname: string }): string {
@@ -516,11 +533,12 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       if (!oauthConfigured()) return reply.status(400).send({ error: 'unsupported_grant_type' });
       const rc = client_id ? resolveClient(client_id) : null;
       if (!rc || client_secret !== rc.secret) return reply.status(401).send({ error: 'invalid_client' });
+      const connectorSurface = connectorSurfaceFor(client_id, { ...rc, isPublic: false });
       reply.header('Cache-Control', 'no-store');
       logger.info({ type: 'oauth_client_credentials', agent: rc.agent }, 'issued client_credentials access token');
       return reply.send({
         // gty records the grant (see issuedGrantType below): a machine credential, with no code exchange and no refresh token.
-        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS, 'client_credentials'),
+        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS, 'client_credentials', connectorSurface),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
         scope: 'mcp',
@@ -554,6 +572,8 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       // an operator-driven lane reassignment taking effect on that client's next refresh is an
       // existing, deliberate, and unrelated behavior this feature must not touch.
       const agent = rc.isPublic ? claims.agent || rc.agent : rc.agent;
+      // Older refresh tokens carry no surface claim; grant them the restrictive curated surface.
+      const connectorSurface = typeof claims.cs === 'boolean' ? claims.cs : true;
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // Same 24h TTL as client_credentials (OAUTH_CC_TTL_SECONDS). The 2026-07-16 TTL fix only
@@ -561,10 +581,10 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         // hardcoded 1h and dropped mid-session — the recurring "brain went offline" experience.
         // gty: a refresh token is only ever issued alongside an authorization_code access token (the
         // client_credentials grant returns no refresh token), so this session descends from a code exchange.
-        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'refresh_token'),
+        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'refresh_token', connectorSurface),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
-        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS),
+        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS, connectorSurface),
         scope: claims.scope,
       });
     }
@@ -615,14 +635,15 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       //       DCR client) rather than granting an unvalidated string as a privileged identity.
       const agent =
         rc.isPublic && rec.elevatedAgent && isElevationRole(rec.elevatedAgent) ? rec.elevatedAgent : rc.agent;
+      const connectorSurface = connectorSurfaceFor(rec.clientId, rc);
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // 24h, matching the CC grant (see the refresh_token grant note above).
         // gty: a code exchange with PKCE. A public client was shown the consent screen; a confidential client's code was issued without one.
-        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'authorization_code'),
+        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'authorization_code', connectorSurface),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
-        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS),
+        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS, connectorSurface),
         scope: rec.scope,
       });
     }
@@ -711,4 +732,13 @@ export function issuedGrantType(token: string): OAuthGrantType | null {
   const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
   if (!claims || claims.typ !== 'access') return null;
   return isOAuthGrantType(claims.gty) ? claims.gty : null;
+}
+
+/** Signed connector/internal surface. Null means missing, malformed, or invalid; callers must
+ * interpret null as curated connector surface so pre-claim tokens can never gain internal tools. */
+export function issuedConnectorSurface(token: string): boolean | null {
+  if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
+  const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
+  if (!claims || claims.typ !== 'access' || typeof claims.cs !== 'boolean') return null;
+  return claims.cs;
 }

@@ -37,6 +37,8 @@ export interface AccessClaims {
    * accepts only the three known grant names.
    */
   gty?: OAuthGrantType;
+  /** Signed connector-surface decision, fixed when the OAuth credential is issued. */
+  cs?: boolean;
   iat: number;
   exp: number;
   jti: string;
@@ -93,17 +95,18 @@ export function issueAccessToken(
   agent = '',
   ttlSeconds = 3600,
   grantType?: OAuthGrantType,
+  connectorSurface?: boolean,
 ): string {
   const now = Math.floor(Date.now() / 1000);
   return signToken(
-    { iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds, ...(grantType ? { gty: grantType } : {}) },
+    { iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds, ...(grantType ? { gty: grantType } : {}), ...(typeof connectorSurface === 'boolean' ? { cs: connectorSurface } : {}) },
     secret,
   );
 }
 
-export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 60 * 60 * 24 * 30): string {
+export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 60 * 60 * 24 * 30, connectorSurface?: boolean): string {
   const now = Math.floor(Date.now() / 1000);
-  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'refresh', exp: now + ttlSeconds }, secret);
+  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'refresh', exp: now + ttlSeconds, ...(typeof connectorSurface === 'boolean' ? { cs: connectorSurface } : {}) }, secret);
 }
 
 // ── Authorization-code store: Cosmos-backed when configured, in-memory fallback ──

@@ -886,6 +886,8 @@ async function getPinnedObservationInstallationToken(): Promise<string> {
     },
   }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
 
+  await assertPinnedResponseUrl(response, tokenUrl);
+
   if (response.status !== 201) {
     await cancelResponseBody(response);
     throw new Error('GitHub installation token request failed');
@@ -926,6 +928,7 @@ async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unkn
     redirect: 'error',
     headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${token}` },
   }, { retries: 0, timeoutMs: PINNED_OBSERVATION_TIMEOUT_MS });
+  await assertPinnedResponseUrl(response, url);
   if (response.status !== 200) {
     await cancelResponseBody(response);
     throw new PinnedObservationHttpStatusError(response.status);
@@ -938,6 +941,27 @@ async function pinnedGitHubApiGetJson(path: string, token: string): Promise<unkn
     throw new Error('invalid GitHub API response');
   }
   return parseStrictJson(text, PINNED_OBSERVATION_MAX_METADATA_BYTES);
+}
+
+/** fetch redirect modes are defense in depth; reject followed or misdirected responses even when a
+ * custom fetch implementation ignores the requested mode. Native Response.url is empty in some
+ * test doubles, so compare it when the implementation supplies it. */
+async function assertPinnedResponseUrl(response: Response, expected: URL): Promise<void> {
+  if (response.redirected) {
+    await cancelResponseBody(response);
+    throw new Error('unexpected GitHub response redirect');
+  }
+  if (response.url) {
+    let actual: URL;
+    try { actual = new URL(response.url); } catch {
+      await cancelResponseBody(response);
+      throw new Error('invalid GitHub response URL');
+    }
+    if (actual.href !== expected.href) {
+      await cancelResponseBody(response);
+      throw new Error('unexpected GitHub response URL');
+    }
+  }
 }
 
 function verifyRepositoryMetadata(value: unknown): number {
@@ -1118,6 +1142,10 @@ export async function workflowJobLogTail(owner: string, repo: string, jobId: num
       redirect: 'error',
       headers: { 'User-Agent': GITHUB_HEADERS['User-Agent'] },
     }, { retries: 0, timeoutMs: CI_JOB_LOG_DOWNLOAD_TIMEOUT_MS });
+    if (download.redirected || (download.url && download.url !== signedUrl.href)) {
+      await cancelResponseBody(download);
+      return { status: 'failed', reason: 'untrusted_redirect' };
+    }
     if (download.status === 404 || download.status === 410) {
       await cancelResponseBody(download);
       return { status: 'unavailable' };

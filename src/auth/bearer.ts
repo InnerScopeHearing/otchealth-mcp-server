@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked, isStaticTokenAuthReady } from './revocation-store.js';
-import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, baseUrlOf } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, issuedConnectorSurface, baseUrlOf } from '../server/oauth.js';
 import type { AuthKind, OAuthGrantType } from '../server/request-context.js';
 import { agentFromDescopeToken } from './descope.js';
 
@@ -322,7 +322,7 @@ export async function validateBearer(
   // occ_ naming convention and is operator-configurable, so its connector status cannot safely be
   // inferred from a prefix. OAUTH_CLIENTS entries are intentionally excluded: those are per-lane
   // machine-to-machine clients whose existing internal-catalog behavior remains unchanged.
-  const isLegacyOAuthConnector = isLegacyOAuthConnectorClient(
+  const isLegacyOAuthConnector = issued ? false : isLegacyOAuthConnectorClient(
     clientId,
     env.OAUTH_CLIENT_ID,
     env.OAUTH_CLIENTS,
@@ -335,11 +335,12 @@ export async function validateBearer(
   // PERPLEXITY_CONNECTOR_TOKEN is a connector credential for every configured lane. Canonical
   // company mappings receive their role-specific connectorToolset; external or unrecognized
   // mappings receive EXTERNAL_READONLY_TOOLSET. Neither may inherit the full internal catalog.
-  const connector_surface =
-    Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_')))
-    || isLegacyOAuthConnector
-    || isCodexStatic
-    || isLegacyConnectorStatic;
+  const connector_surface = issued
+    ? issuedConnectorSurface(token) !== false
+    : Boolean(clientId && (clientId.startsWith('dcr_') || clientId.startsWith('occ_')))
+      || isLegacyOAuthConnector
+      || isCodexStatic
+      || isLegacyConnectorStatic;
   return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static, ...(authKind ? { auth_kind: authKind } : {}), ...(authGrant ? { auth_grant: authGrant } : {}), ...(clientId ? { auth_subject: clientId } : {}) };
 }
 
