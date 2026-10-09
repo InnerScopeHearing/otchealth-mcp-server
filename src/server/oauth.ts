@@ -519,7 +519,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       reply.header('Cache-Control', 'no-store');
       logger.info({ type: 'oauth_client_credentials', agent: rc.agent }, 'issued client_credentials access token');
       return reply.send({
-        // gty records the grant (see issuedGrantType below): a machine credential, never an interactive sign-in.
+        // gty records the grant (see issuedGrantType below): a machine credential, with no code exchange and no refresh token.
         access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS, 'client_credentials'),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
