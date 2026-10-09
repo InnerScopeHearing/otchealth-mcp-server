@@ -473,7 +473,7 @@ test('a claude.ai session signed in on the consent screen (authorization_code, e
   const call = await callRegions(session.access);
   assertServed(call, 'aws_mcp_tool_call');
   assertCalled(call);
-  assertAudited(callFrom, 'aws_mcp_tool_call', 'authorization_code');
+  assertAudited(callFrom, 'aws_mcp_tool_call', 'authorization_code', session.clientId);
 });
 
 test('the gateway reached AWS as the pinned reader role, signed with the reader credentials and never the task role credentials', () => {
