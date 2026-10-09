@@ -23,9 +23,14 @@ export interface AuthContext {
   /**
    * For an 'oauth' request, the grant that issued the access token (the signed `gty` claim, see
    * issuedGrantType in server/oauth.ts). Absent for a token minted before grant tracking and for
-   * every non-oauth kind. A consumer that needs an interactive sign-in treats absent as NOT interactive.
+   * every non-oauth kind. A consumer that serves only the accepted grants treats absent as NOT accepted.
    */
   auth_grant?: OAuthGrantType;
+  /**
+   * For an 'oauth' request, the client id the access token was issued to (its sub claim, see
+   * issuedClientId in server/oauth.ts). A public identifier, not a secret. Absent for every non-oauth kind.
+   */
+  auth_subject?: string;
   /** True when the token was issued to a Dynamic-Client-Registration (Claude Chat) connector client. */
   connector_surface: boolean;
   /**
