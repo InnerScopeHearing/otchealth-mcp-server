@@ -429,7 +429,7 @@ function assertAudited(from: number, tool: string, grant: string, clientId: stri
 }
 
 /** A refused call is stopped before any AWS request: the counters do not move, and the audit line records the refusal. */
-async function assertRefusedBeforeAws(bearer: string, label: string, pattern: RegExp, grant: string): Promise<void> {
+async function assertRefusedBeforeAws(bearer: string, label: string, pattern: RegExp, grant: string, clientId: string): Promise<void> {
   for (const [tool, call] of [
     ['aws_mcp_tool_list', callList],
     ['aws_mcp_tool_call', callRegions],
