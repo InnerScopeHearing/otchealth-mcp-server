@@ -1620,7 +1620,7 @@ test('wrapper: an OAuth CTO session from the client_credentials grant, or with n
       const response = await invoke(tools.get(name)!, { ...args }, 'cto', 'oauth', authGrant);
       assert.equal(response.isError, true, `${name} with grant ${authGrant}`);
       const text = response.content?.[0].text ?? '';
-      assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_grant_refused: the AWS bridge serves interactive OAuth sessions only`));
+      assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_grant_refused: the AWS bridge serves OAuth-issued sessions only`));
       assert.match(text, authGrant === 'none' ? /does not record how it was issued/ : /client_credentials grant, which is a machine credential/);
     }
   }
