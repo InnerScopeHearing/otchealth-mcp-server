@@ -25,6 +25,7 @@ DEEP_FIELDS = {
     "opensearch",
     "openai",
     "postgres_tls_verify",
+    "revision",
 }
 DEPENDENCY_FIELDS = ("cosmos", "search", "foundry", "postgres", "opensearch", "openai")
 REQUIRED_OK_FIELDS = ("postgres", "opensearch", "openai")
@@ -92,6 +93,12 @@ def verify_revision(
 ) -> None:
     if payload.get("status") != "ok" or payload.get("readiness") != "ready":
         raise CheckFailure("health_not_ready")
+    verify_revision_receipt(payload, expected_tag, expected_digest, expected_task_definition)
+
+
+def verify_revision_receipt(
+    payload: dict[str, Any], expected_tag: str, expected_digest: str, expected_task_definition: str
+) -> None:
     revision = payload.get("revision")
     if not isinstance(revision, dict):
         raise CheckFailure("revision_missing")
@@ -144,6 +151,9 @@ def main() -> int:
     verify_revision(health, expected_tag, expected_digest, expected_task_definition)
 
     deep = get_json("/health/deep", token=token)
+    # The authenticated endpoint carries the revision from the same process that ran these
+    # dependency probes. Reject a load balancer hop to a different task/image before accepting it.
+    verify_revision_receipt(deep, expected_tag, expected_digest, expected_task_definition)
     statuses = verify_deep_health(deep)
 
     # Deliberately emit only these allowlisted, non-secret fields. Never print either response.

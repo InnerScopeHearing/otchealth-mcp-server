@@ -14,3 +14,9 @@ token action). The workflow only builds and pushes the image; it does not deploy
 Authentication changes do not alter image identity: the default tag remains the checked-out short
 commit SHA, an explicitly requested tag is still honored, and the build embeds `GITHUB_SHA` while
 recording and verifying the resulting ECR index and platform digests.
+
+For the authenticated deep-health workflow, `expected_image_digest` is the exact serving runtime
+`ImageID` reported in the revision receipt. Before dispatch, compare that observed value with the
+retained pinned release index and record the child digest for the serving task's architecture. Pass
+the observed `ImageID` unchanged: the checker requires exact equality and does not normalize between
+an index and a child digest or accept another platform's child as a fallback.

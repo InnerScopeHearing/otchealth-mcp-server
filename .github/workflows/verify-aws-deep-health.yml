@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       expected_image_digest:
-        description: "Expected live OCI image digest (sha256 followed by 64 lowercase hex characters)"
+        description: "Exact serving ECS ImageID digest; verify against the pinned release index and platform child"
         required: true
         type: string
       expected_task_definition:

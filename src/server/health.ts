@@ -107,10 +107,20 @@ export function registerHealth(
         message: 'Missing or invalid admin token. Provide Authorization: Bearer <ADMIN_REVOKE_TOKEN>.',
       });
     }
+    // Resolve the runtime discriminator from this same process while serving the authenticated
+    // request. The checker uses this receipt to detect a load balancer sending /health and
+    // /health/deep to different replicas. Return only the immutable deployment fields; process
+    // identity, timing, and metadata error details are not part of the receipt.
+    const revision = await revisionInfo();
     const deps = await probeDependencies();
     const anyDown = Object.values(deps).some((v) => v === 'down');
     return reply.code(anyDown ? 503 : 200).send({
       ...deps,
+      revision: {
+        image_tag: revision.image_tag,
+        image_digest: revision.image_digest,
+        task_definition: revision.task_definition,
+      },
     });
   });
 }
