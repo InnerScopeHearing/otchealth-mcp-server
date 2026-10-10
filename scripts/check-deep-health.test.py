@@ -15,10 +15,12 @@ check = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = check
 spec.loader.exec_module(check)
 
-IMAGE_TAG = "0989366c4bed376f973fb79791068f02da4be101"
+IMAGE_TAG = "2432ea27dc292a34c1aea27cc94c536769284cda-fleet-20261010-0341"
+IMAGE_MERGE_SHA = "2432ea27dc292a34c1aea27cc94c536769284cda"
 TOKEN = "a" * 64
 RAW_MARKER = "RAW_RESPONSE_MUST_NOT_BE_LOGGED"
-EXPECTED_DIGEST = "sha256:5f17111e63aa99743b6f17d92d80a5c105d4d7954208f248107c3aa75fca007f"
+IMAGE_DIGEST = "sha256:" + "b" * 64
+TASK_DEFINITION = "otchealth-gateway:201"
 
 
 class FakeResponse:
@@ -49,14 +51,15 @@ class FakeOpener:
         return item
 
 
-def health_body(status="ok", readiness="ready"):
+def health_body(status="ok", readiness="ready", image_tag=IMAGE_TAG,
+                image_digest=IMAGE_DIGEST, task_definition=TASK_DEFINITION):
     return {
         "status": status,
         "readiness": readiness,
         "revision": {
-            "image_tag": IMAGE_TAG,
-            "image_digest": EXPECTED_DIGEST,
-            "task_definition": "otchealth-gateway:200",
+            "image_tag": image_tag,
+            "image_digest": image_digest,
+            "task_definition": task_definition,
         },
         "operator_detail": RAW_MARKER,
     }
@@ -75,14 +78,17 @@ def deep_body():
 
 
 class DeepHealthWorkflowBehaviorTests(unittest.TestCase):
-    def invoke(self, responses):
+    def invoke(self, responses, expected_tag=IMAGE_TAG, expected_digest=IMAGE_DIGEST,
+               expected_task_definition=TASK_DEFINITION):
         opener = FakeOpener(responses)
         stdout = io.StringIO()
         stderr = io.StringIO()
         with (
             patch.dict(os.environ, {
-                "EXPECTED_IMAGE_TAG": IMAGE_TAG,
                 "ADMIN_REVOKE_TOKEN": TOKEN,
+                "EXPECTED_IMAGE_TAG": expected_tag,
+                "EXPECTED_IMAGE_DIGEST": expected_digest,
+                "EXPECTED_TASK_DEFINITION": expected_task_definition,
             }),
             patch.object(check.urllib.request, "build_opener", return_value=opener),
             contextlib.redirect_stdout(stdout),
@@ -102,11 +108,51 @@ class DeepHealthWorkflowBehaviorTests(unittest.TestCase):
         ])
         self.assertEqual(exit_code, 0, errors)
         self.assertIn('"result": "ok"', output)
-        self.assertIn('"task_definition": "otchealth-gateway:200"', output)
+        self.assertIn(f'"image_tag": "{IMAGE_TAG}"', output)
+        self.assertIn(f'"image_digest": "{IMAGE_DIGEST}"', output)
+        self.assertIn(f'"task_definition": "{TASK_DEFINITION}"', output)
         self.assertEqual(len(opener.requests), 2)
         self.assertEqual(opener.requests[0][0].full_url, f"{check.BASE_URL}/health")
         self.assertEqual(opener.requests[1][0].full_url, f"{check.BASE_URL}/health/deep")
         self.assertEqual(opener.requests[1][0].get_header("Authorization"), f"Bearer {TOKEN}")
+
+    def test_expected_receipt_accepts_plain_merge_sha_and_safe_suffix(self):
+        check.validate_expected_receipt(IMAGE_MERGE_SHA, IMAGE_DIGEST, TASK_DEFINITION)
+        check.validate_expected_receipt(IMAGE_TAG, IMAGE_DIGEST, TASK_DEFINITION)
+
+    def test_malformed_expected_receipt_inputs_fail_before_network(self):
+        cases = (
+            ({"expected_tag": "not-a-merge-sha"}, "expected_image_tag_invalid"),
+            ({"expected_tag": IMAGE_MERGE_SHA + "-.unsafe"}, "expected_image_tag_invalid"),
+            ({"expected_digest": "sha256:" + "G" * 64}, "expected_image_digest_invalid"),
+            ({"expected_task_definition": "otchealth-gateway:0"}, "expected_task_definition_invalid"),
+            ({"expected_task_definition": "otchealth-gateway:01"}, "expected_task_definition_invalid"),
+            ({"expected_task_definition": "other-gateway:201"}, "expected_task_definition_invalid"),
+        )
+        for overrides, error_code in cases:
+            with self.subTest(error_code=error_code, overrides=overrides):
+                code, _output, errors, opener = self.invoke([], **overrides)
+                self.assertEqual(code, 1)
+                self.assertIn(error_code, errors)
+                self.assertEqual(opener.requests, [])
+
+    def test_live_receipt_must_match_all_three_expected_values_before_deep_request(self):
+        mismatches = (
+            (IMAGE_MERGE_SHA + "-different", IMAGE_DIGEST, TASK_DEFINITION, "image_tag_mismatch"),
+            (IMAGE_TAG, "sha256:" + "c" * 64, TASK_DEFINITION, "image_digest_mismatch"),
+            (IMAGE_TAG, IMAGE_DIGEST, "otchealth-gateway:202", "task_definition_mismatch"),
+        )
+        for live_tag, live_digest, live_task, error_code in mismatches:
+            with self.subTest(error_code=error_code):
+                code, output, errors, opener = self.invoke([
+                    FakeResponse(__import__("json").dumps(health_body(
+                        image_tag=live_tag, image_digest=live_digest, task_definition=live_task,
+                    ))),
+                ])
+                self.assertEqual(code, 1)
+                self.assertIn(error_code, errors)
+                self.assertEqual(len(opener.requests), 1)
+                self.assertNotIn(RAW_MARKER, output + errors)
 
     def test_degraded_or_not_ready_health_stops_before_authenticated_request(self):
         for status, readiness in (("degraded", "not_ready"), ("ok", "not_ready")):

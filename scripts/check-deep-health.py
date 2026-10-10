@@ -14,8 +14,9 @@ import urllib.request
 from typing import Any
 
 BASE_URL = "https://mcp.otchealth.app"
-EXPECTED_IMAGE_DIGEST = "sha256:5f17111e63aa99743b6f17d92d80a5c105d4d7954208f248107c3aa75fca007f"
-EXPECTED_TASK_DEFINITION = "otchealth-gateway:200"
+IMAGE_TAG_PATTERN = re.compile(r"[0-9a-f]{40}(?:-[A-Za-z0-9][A-Za-z0-9_.-]{0,86})?")
+IMAGE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+TASK_DEFINITION_PATTERN = re.compile(r"otchealth-gateway:[1-9][0-9]*")
 DEEP_FIELDS = {
     "cosmos",
     "search",
@@ -77,7 +78,18 @@ def get_json(path: str, token: str | None = None) -> dict[str, Any]:
     return value
 
 
-def verify_revision(payload: dict[str, Any], expected_tag: str) -> None:
+def validate_expected_receipt(expected_tag: str, expected_digest: str, expected_task_definition: str) -> None:
+    if IMAGE_TAG_PATTERN.fullmatch(expected_tag) is None:
+        raise CheckFailure("expected_image_tag_invalid")
+    if IMAGE_DIGEST_PATTERN.fullmatch(expected_digest) is None:
+        raise CheckFailure("expected_image_digest_invalid")
+    if TASK_DEFINITION_PATTERN.fullmatch(expected_task_definition) is None:
+        raise CheckFailure("expected_task_definition_invalid")
+
+
+def verify_revision(
+    payload: dict[str, Any], expected_tag: str, expected_digest: str, expected_task_definition: str
+) -> None:
     if payload.get("status") != "ok" or payload.get("readiness") != "ready":
         raise CheckFailure("health_not_ready")
     revision = payload.get("revision")
@@ -85,9 +97,9 @@ def verify_revision(payload: dict[str, Any], expected_tag: str) -> None:
         raise CheckFailure("revision_missing")
     if revision.get("image_tag") != expected_tag:
         raise CheckFailure("image_tag_mismatch")
-    if revision.get("image_digest") != EXPECTED_IMAGE_DIGEST:
+    if revision.get("image_digest") != expected_digest:
         raise CheckFailure("image_digest_mismatch")
-    if revision.get("task_definition") != EXPECTED_TASK_DEFINITION:
+    if revision.get("task_definition") != expected_task_definition:
         raise CheckFailure("task_definition_mismatch")
 
 
@@ -114,8 +126,9 @@ def verify_deep_health(payload: dict[str, Any]) -> dict[str, str]:
 
 def main() -> int:
     expected_tag = os.environ.get("EXPECTED_IMAGE_TAG", "")
-    if re.fullmatch(r"[0-9a-f]{40}", expected_tag) is None:
-        raise CheckFailure("expected_image_tag_invalid")
+    expected_digest = os.environ.get("EXPECTED_IMAGE_DIGEST", "")
+    expected_task_definition = os.environ.get("EXPECTED_TASK_DEFINITION", "")
+    validate_expected_receipt(expected_tag, expected_digest, expected_task_definition)
 
     token = os.environ.get("ADMIN_REVOKE_TOKEN", "")
     if not token.strip():
@@ -128,7 +141,7 @@ def main() -> int:
     print(f"::add-mask::{token}", flush=True)
 
     health = get_json("/health")
-    verify_revision(health, expected_tag)
+    verify_revision(health, expected_tag, expected_digest, expected_task_definition)
 
     deep = get_json("/health/deep", token=token)
     statuses = verify_deep_health(deep)
@@ -137,8 +150,8 @@ def main() -> int:
     receipt = {
         "result": "ok",
         "image_tag": expected_tag,
-        "image_digest": EXPECTED_IMAGE_DIGEST,
-        "task_definition": EXPECTED_TASK_DEFINITION,
+        "image_digest": expected_digest,
+        "task_definition": expected_task_definition,
         "dependencies": statuses,
         "postgres_tls_verify": True,
     }
