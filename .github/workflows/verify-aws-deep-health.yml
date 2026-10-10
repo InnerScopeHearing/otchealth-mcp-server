@@ -4,7 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       expected_image_tag:
-        description: "Expected live gateway image tag (40-character commit SHA)"
+        description: "Expected live tag: 40-character lowercase merge SHA with an optional safe suffix"
+        required: true
+        type: string
+      expected_image_digest:
+        description: "Expected live OCI image digest (sha256 followed by 64 lowercase hex characters)"
+        required: true
+        type: string
+      expected_task_definition:
+        description: "Expected live ECS task definition (otchealth-gateway:<positive revision>)"
         required: true
         type: string
 
@@ -25,4 +33,6 @@ jobs:
         env:
           ADMIN_REVOKE_TOKEN: ${{ secrets.ADMIN_REVOKE_TOKEN }}
           EXPECTED_IMAGE_TAG: ${{ inputs.expected_image_tag }}
+          EXPECTED_IMAGE_DIGEST: ${{ inputs.expected_image_digest }}
+          EXPECTED_TASK_DEFINITION: ${{ inputs.expected_task_definition }}
         run: python3 scripts/check-deep-health.py
