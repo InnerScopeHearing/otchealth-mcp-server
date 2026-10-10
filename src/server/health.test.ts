@@ -105,3 +105,50 @@ test('/health stays live while /health/ready returns 503 for unavailable static 
   assert.equal(ready.json().status, 'not_ready');
   await app.close();
 });
+
+test('/health/deep includes only its same-process revision receipt after admin authentication', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerHealth } = await import('./health.js');
+  const app = Fastify();
+  registerHealth(app);
+
+  const previousMetadataUri = process.env.ECS_CONTAINER_METADATA_URI_V4;
+  const previousFetch = globalThis.fetch;
+  let metadataReads = 0;
+  process.env.ECS_CONTAINER_METADATA_URI_V4 = 'http://metadata.test';
+  globalThis.fetch = (async () => {
+    metadataReads += 1;
+    return new Response(JSON.stringify({
+      Image: 'registry.example/otchealth-gateway:merge123',
+      ImageID: `sha256:${'d'.repeat(64)}`,
+      Labels: {
+        'com.amazonaws.ecs.task-definition-family': 'otchealth-gateway',
+        'com.amazonaws.ecs.task-definition-version': '201',
+      },
+    }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const unauthorized = await app.inject({ method: 'GET', url: '/health/deep' });
+    assert.equal(unauthorized.statusCode, 401);
+    assert.equal(metadataReads, 0, 'unauthorized request must not read task metadata');
+
+    const authorized = await app.inject({
+      method: 'GET',
+      url: '/health/deep',
+      headers: { authorization: `Bearer ${process.env.ADMIN_REVOKE_TOKEN}` },
+    });
+    assert.equal(authorized.statusCode, 200);
+    assert.deepEqual(authorized.json().revision, {
+      image_tag: 'merge123',
+      image_digest: `sha256:${'d'.repeat(64)}`,
+      task_definition: 'otchealth-gateway:201',
+    });
+    assert.equal(metadataReads, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousMetadataUri === undefined) delete process.env.ECS_CONTAINER_METADATA_URI_V4;
+    else process.env.ECS_CONTAINER_METADATA_URI_V4 = previousMetadataUri;
+    await app.close();
+  }
+});

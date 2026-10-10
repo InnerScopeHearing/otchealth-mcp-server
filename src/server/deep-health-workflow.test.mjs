@@ -11,6 +11,7 @@ test('manual gateway verification is dispatch-only and least-privileged', () => 
     assert.match(workflow, new RegExp(`${input}:[\\s\\S]*?required: true[\\s\\S]*?type: string`));
     assert.match(workflow, new RegExp(`${input.toUpperCase()}: \\$\\{\\{ inputs\\.${input} \\}\\}`));
   }
+  assert.match(workflow, /expected_image_digest:[\s\S]*description: "Exact serving ECS ImageID digest/);
   assert.match(workflow, /permissions:\n  contents: read/);
   assert.ok(workflow.includes("if: github.repository == 'InnerScopeHearing/otchealth-mcp-server' && github.ref == 'refs/heads/main'"));
   assert.doesNotMatch(workflow, /(^|\n)\s*(push|pull_request|schedule):/);
@@ -36,11 +37,20 @@ test('verification validates and compares each caller-provided receipt before au
   assert.match(script, /revision\.get\("image_tag"\) != expected_tag/);
   assert.match(script, /revision\.get\("image_digest"\) != expected_digest/);
   assert.match(script, /revision\.get\("task_definition"\) != expected_task_definition/);
-  assert.match(script, /health = get_json\("\/health"\)[\s\S]*verify_revision\(health,[\s\S]*deep = get_json\("\/health\/deep", token=token\)/);
+  assert.match(script, /health = get_json\("\/health"\)[\s\S]*verify_revision\(health,[\s\S]*deep = get_json\("\/health\/deep", token=token\)[\s\S]*verify_revision_receipt\(deep,/);
   assert.match(script, /if set\(payload\) != DEEP_FIELDS:/);
+  assert.match(script, /"revision",/);
   assert.match(script, /if status == "down":/);
   assert.match(script, /if not isinstance\(status, str\) or status not in VALID_STATUSES:/);
   assert.match(script, /for field in REQUIRED_OK_FIELDS:/);
   assert.match(script, /if payload\["postgres_tls_verify"\] is not True:/);
   assert.match(script, /receipt = \{/);
+});
+
+test('authenticated deep health returns a same-process immutable revision receipt after authorization', async () => {
+  const route = await readFile('src/server/health.ts', 'utf8');
+  const deepRoute = route.slice(route.indexOf("app.get('/health/deep'"));
+  assert.match(deepRoute, /if \(!validateAdminToken[\s\S]*return reply\.code\(401\)/);
+  assert.match(deepRoute, /const revision = await revisionInfo\(\);[\s\S]*const deps = await probeDependencies\(\)/);
+  assert.match(deepRoute, /revision: \{[\s\S]*image_tag: revision\.image_tag,[\s\S]*image_digest: revision\.image_digest,[\s\S]*task_definition: revision\.task_definition/);
 });

@@ -74,6 +74,11 @@ def deep_body():
         "opensearch": "ok",
         "openai": "ok",
         "postgres_tls_verify": True,
+        "revision": {
+            "image_tag": IMAGE_TAG,
+            "image_digest": IMAGE_DIGEST,
+            "task_definition": TASK_DEFINITION,
+        },
     }
 
 
@@ -152,6 +157,35 @@ class DeepHealthWorkflowBehaviorTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn(error_code, errors)
                 self.assertEqual(len(opener.requests), 1)
+                self.assertNotIn(RAW_MARKER, output + errors)
+
+    def test_authenticated_deep_receipt_rejects_a_different_replica(self):
+        mismatches = (
+            {"image_tag": IMAGE_MERGE_SHA + "-other-replica"},
+            {"image_digest": "sha256:" + "c" * 64},
+            {"task_definition": "otchealth-gateway:202"},
+        )
+        for mismatch in mismatches:
+            with self.subTest(mismatch=mismatch):
+                revision = {
+                    "image_tag": IMAGE_TAG,
+                    "image_digest": IMAGE_DIGEST,
+                    "task_definition": TASK_DEFINITION,
+                    **mismatch,
+                }
+                deep = {**deep_body(), "revision": revision, "operator_detail": RAW_MARKER}
+                code, output, errors, opener = self.invoke([
+                    FakeResponse(__import__("json").dumps(health_body())),
+                    FakeResponse(__import__("json").dumps(deep)),
+                ])
+                self.assertEqual(code, 1)
+                mismatch_field = next(iter(mismatch))
+                self.assertIn({
+                    "image_tag": "image_tag_mismatch",
+                    "image_digest": "image_digest_mismatch",
+                    "task_definition": "task_definition_mismatch",
+                }[mismatch_field], errors)
+                self.assertEqual(len(opener.requests), 2)
                 self.assertNotIn(RAW_MARKER, output + errors)
 
     def test_degraded_or_not_ready_health_stops_before_authenticated_request(self):
