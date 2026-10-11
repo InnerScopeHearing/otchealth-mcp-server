@@ -49,7 +49,7 @@ const FULL: Entry = {
   responseBytes: 1234,
   isError: false,
   outcome: 'ok',
-  roleSessionName: 'gw-cto-b3f4b1c20d5e',
+  roleSessionName: 'gw-aws-b3f4b1c20d5e',
   latencyMs: 42,
 };
 
@@ -90,7 +90,7 @@ test('a complete entry becomes exactly the documented fields', () => {
     region: 'us-east-1',
     script_sha256: SHA,
     response_bytes: 1234,
-    role_session_name: 'gw-cto-b3f4b1c20d5e',
+    role_session_name: 'gw-aws-b3f4b1c20d5e',
     latency_ms: 42,
   });
   assert.equal(AWS_MCP_AUDIT_LOG_TYPE, 'aws_mcp_bridge_call');
@@ -269,7 +269,7 @@ test('BridgeCallAudit success writes one info line with what was noted, the size
     audit.note({ upstreamTool: 'aws___run_script', region: 'us-west-2' });
     audit.note({ scriptSha256: SHA });
     audit.note({}); // noting nothing changes nothing
-    audit.success({ responseBytes: 77, isError: false, roleSessionName: 'gw-cto-abc' });
+    audit.success({ responseBytes: 77, isError: false, roleSessionName: 'gw-aws-abc' });
   } finally {
     cap.restore();
   }
@@ -291,7 +291,7 @@ test('BridgeCallAudit success writes one info line with what was noted, the size
     region: 'us-west-2',
     script_sha256: SHA,
     response_bytes: 77,
-    role_session_name: 'gw-cto-abc',
+    role_session_name: 'gw-aws-abc',
   });
 });
 

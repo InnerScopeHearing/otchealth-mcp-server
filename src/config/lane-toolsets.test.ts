@@ -7,6 +7,7 @@ import {
   isToolInLaneAllowlist,
 } from './lane-toolsets.js';
 import { GITHUB_OPERATOR_TOOLSET } from './github-operator.js';
+import { AWS_OPERATOR_LANES } from './aws-operators.js';
 
 test('KNOWN_INTERNAL_LANES lists exactly the 10 documented internal client_credentials lanes', () => {
   assert.deepEqual(
@@ -37,6 +38,16 @@ test('every internal lane seed preserves the bounded GitHub operator surface und
     for (const tool of GITHUB_OPERATOR_TOOLSET) {
       assert.equal(isToolInLaneAllowlist(lane, tool), true, `${lane} must retain ${tool}`);
     }
+  }
+});
+
+test('AWS bridge wrappers are seeded only for the five named AWS operator lanes', () => {
+  const awsTools = ['aws_mcp_tool_list', 'aws_mcp_tool_call'];
+  for (const lane of AWS_OPERATOR_LANES) {
+    for (const name of awsTools) assert.equal(isToolInLaneAllowlist(lane, name), true, `${lane} ${name}`);
+  }
+  for (const lane of ['clo', 'clo-personal', 'cpo', 'cco', 'exec'] as const) {
+    for (const name of awsTools) assert.equal(isToolInLaneAllowlist(lane, name), false, `${lane} ${name}`);
   }
 });
 

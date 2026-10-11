@@ -1,9 +1,9 @@
 /**
- * CTO-lane bridge to the AWS MCP Server (https://aws-mcp.us-east-1.api.aws/mcp).
+ * Named company operator bridge to the AWS MCP Server (https://aws-mcp.us-east-1.api.aws/mcp).
  *
  * Why this exists: Claude reaches AWS through the claude.ai "AWS MCP" connector, whose OAuth session
  * lasts at most 12 hours and was historically signed in as the account root user. This bridge gives
- * the CTO lane durable, read-only AWS access through the gateway instead: the gateway assumes a
+ * five named company lanes durable, read-only AWS access through the gateway: the gateway assumes a
  * dedicated read-only IAM role with STS (credentials.ts) and calls the AWS MCP Server server-side
  * with SigV4 (signed-fetch.ts, upstream.ts).
  *
@@ -16,15 +16,14 @@
  * only read metadata. The bridge adds an upstream-tool allowlist on top, and blocks
  * `aws___get_presigned_url` outright so the bridge never mints data upload or download links.
  *
- * WHO MAY CALL (see access.ts): the CTO lane over an OAuth-issued session only: a token the gateway's
+ * WHO MAY CALL (see access.ts): the CTO, Developer, CFO, COO, and CRO lanes over an OAuth-issued session only: a token the gateway's
  * OAuth endpoints issued through the authorization_code grant (the claude.ai connector flow), or through
- * the refresh_token grant that renews it. Static credentials that resolve to the CTO lane (the connector
+ * the refresh_token grant that renews it. Static credentials that resolve to an approved lane (the connector
  * token, the M365 and Codex tokens) are refused, whatever lane they carry. So is an OAuth token from the
  * client_credentials grant (a machine credential). That shows how the token was issued, not that a
- * person is present; access.ts says what it leaves open. Three independent layers, all CTO only:
- *   1. connector visibility: registry.ts connectorToolset advertises these names to the cto lane only
- *      (lane-toolsets.ts keeps them in the cto curated list so real CTO sessions still see them);
- *   2. execution governance: catalog/governance.ts `aws_mcp_*` requires the cto role;
+ * person is present; access.ts says what it leaves open. Three independent layers:
+ *   1. connector visibility: registry.ts connectorToolset binds these names to the five approved lanes;
+ *   2. execution governance: catalog/governance.ts `aws_mcp_*` requires one of those same roles;
  *   3. in-handler check: every core function below refuses any other caller, and any request that
  *      did not authenticate with an OAuth-issued session, before touching AWS. The kill switch
  *      AWS_MCP_BRIDGE_DISABLED is checked in the same place.
@@ -373,7 +372,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: list upstream tools',
         description:
-          'CTO lane only, OAuth-issued sessions only (static credentials and client_credentials tokens are refused). List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
+          'CTO, Developer, CFO, COO, and CRO lanes only; OAuth-issued sessions only (static credentials and client_credentials tokens are refused). List the tools the AWS MCP Server advertises, with descriptions and input schemas, each marked ' +
           'allowed, blocked or not_allowlisted by this bridge. Read-only: access runs as the dedicated read-only AWS role ' +
           `${AWS_AI_READER_ROLE_NAME}, assumed by the gateway with STS, so it does not depend on a claude.ai connector sign-in. ` +
           'If the role has not been created yet the call fails closed and says what the owner must run. ' +
@@ -409,7 +408,7 @@ export function registerAwsMcpTools(server: McpServer, callerHash: CallerHashPro
       annotations: {
         title: 'AWS MCP bridge: call an upstream tool',
         description:
-          'CTO lane only, OAuth-issued sessions only (static credentials and client_credentials tokens are refused). Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
+          'CTO, Developer, CFO, COO, and CRO lanes only; OAuth-issued sessions only (static credentials and client_credentials tokens are refused). Call one AWS MCP Server tool by name: aws___run_script (Python in an AWS-hosted sandbox with boto3, ' +
           'for listing resources and checking their properties), aws___search_documentation, aws___read_documentation, ' +
           'aws___retrieve_skill, aws___list_regions, aws___get_regional_availability, aws___get_tasks. ' +
           'aws___get_presigned_url is blocked. Read-only: the call runs as the dedicated read-only AWS role ' +

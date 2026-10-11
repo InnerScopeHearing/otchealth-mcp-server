@@ -46,8 +46,8 @@ function assumeXml(opts: { expiresAtMs: number; roleName?: string; key?: string;
     `<AccessKeyId>${key}</AccessKeyId><SecretAccessKey>synthetic/reader+secret==</SecretAccessKey>` +
     (opts.omitToken ? '' : '<SessionToken>synthetic-reader-session-token</SessionToken>') +
     `<Expiration>${new Date(opts.expiresAtMs).toISOString()}</Expiration></Credentials>` +
-    `<AssumedRoleUser><AssumedRoleId>AROASYNTHETIC:gw-cto-x</AssumedRoleId>` +
-    `<Arn>arn:aws:sts::${opts.account ?? ACCOUNT}:assumed-role/${opts.roleName ?? AWS_AI_READER_ROLE_NAME}/gw-cto-x</Arn></AssumedRoleUser>` +
+    `<AssumedRoleUser><AssumedRoleId>AROASYNTHETIC:gw-aws-x</AssumedRoleId>` +
+    `<Arn>arn:aws:sts::${opts.account ?? ACCOUNT}:assumed-role/${opts.roleName ?? AWS_AI_READER_ROLE_NAME}/gw-aws-x</Arn></AssumedRoleUser>` +
     `</AssumeRoleResult></AssumeRoleResponse>`;
 }
 
@@ -119,7 +119,7 @@ test('assumes the reader role with the documented request shape and signs the ST
   }
   const assume = sts.calls[1].params;
   assert.equal(assume.get('RoleArn'), ROLE_ARN);
-  assert.equal(assume.get('RoleSessionName'), 'gw-cto-4f1c2a9b77de');
+  assert.equal(assume.get('RoleSessionName'), 'gw-aws-4f1c2a9b77de');
   assert.equal(assume.get('DurationSeconds'), '3600');
 
   assert.equal(creds.accessKeyId, 'ASIA' + 'SYNTHETICREAD001');
@@ -128,7 +128,7 @@ test('assumes the reader role with the documented request shape and signs the ST
   assert.notEqual(creds.accessKeyId, BASE.accessKeyId, 'the base credentials are never handed out');
   assert.notEqual(creds.secretAccessKey, BASE.secretAccessKey);
   assert.equal(creds.roleArn, ROLE_ARN, 'the credentials report the role that was actually assumed');
-  assert.equal(creds.roleSessionName, 'gw-cto-4f1c2a9b77de', 'and the session name sent to STS');
+  assert.equal(creds.roleSessionName, 'gw-aws-4f1c2a9b77de', 'and the session name sent to STS');
 });
 
 test('session names stay valid for STS even for an empty or unusual request id', async () => {
@@ -142,7 +142,50 @@ test('session names stay valid for STS even for an empty or unusual request id',
     await p.get(hint);
     names.push(sts.calls[sts.calls.length - 1].params.get('RoleSessionName') ?? '');
   }
-  for (const name of names) assert.match(name, /^gw-cto-[A-Za-z0-9]{1,12}$/);
+  for (const name of names) assert.match(name, /^gw-aws-[A-Za-z0-9]{1,12}$/);
+});
+
+test('rotates assumed-role credentials continuously for more than 18 hours and resolves fresh ECS base credentials on each refresh', async () => {
+  let clock = T0;
+  let baseRefreshes = 0;
+  let assumeCalls = 0;
+  const baseKey = (n: number) => 'ASIA' + 'SYNTHETICBASE' + String(n).padStart(3, '0');
+  const sts = fakeSts({
+    GetCallerIdentity: () => xml(identityXml()),
+    AssumeRole: () => {
+      assumeCalls += 1;
+      return xml(assumeXml({ expiresAtMs: clock + HOUR, key: 'ASIA' + 'SYNTHETICREAD' + String(assumeCalls).padStart(3, '0') }));
+    },
+  });
+  const p = createReaderCredentialProvider({
+    // Models the ECS container credential provider rotating its short-lived task-role credentials.
+    baseCredentials: async () => ({ ...BASE, accessKeyId: baseKey(++baseRefreshes) }),
+    fetchImpl: sts.fetchImpl,
+    now: () => clock,
+  });
+
+  const startedAt = clock;
+  for (let session = 0; session < 21; session += 1) {
+    if (session > 0) clock += 55 * 60_000; // refresh inside the five-minute expiry margin
+    // Every rotation is concurrent-call safe: both callers share one AssumeRole and one cache value.
+    const pair = await Promise.all([p.get(`req-${session}-a`), p.get(`req-${session}-b`)]);
+    assert.equal(pair[0].accessKeyId, pair[1].accessKeyId);
+    assert.equal(pair[0].expiresAtMs, clock + HOUR);
+    assert.equal(pair[0].roleArn, ROLE_ARN, 'each returned session remains on the pinned read-only role');
+  }
+
+  const elapsed = clock - startedAt;
+  assert.ok(elapsed > 18 * HOUR, `simulated ${elapsed / HOUR} hours`);
+  assert.equal(assumeCalls, 21, 'one role assumption for each of 21 simulated sessions');
+  assert.equal(baseRefreshes, 21, 'the base credential resolver is called again for every role refresh');
+  assert.equal(sts.calls.filter((c) => c.params.get('Action') === 'GetCallerIdentity').length, 1, 'the task account is cached');
+  const assumed = sts.calls.filter((c) => c.params.get('Action') === 'AssumeRole');
+  assert.equal(assumed.length, 21);
+  for (let i = 0; i < assumed.length; i += 1) {
+    assert.equal(assumed[i].params.get('DurationSeconds'), '3600');
+    assert.match(assumed[i].headers.Authorization, new RegExp(`Credential=${baseKey(i + 1)}/`), 'each refresh is signed with the current task-role credentials');
+    assert.equal(assumed[i].params.get('RoleArn'), ROLE_ARN, 'every renewal remains pinned to the same reader role');
+  }
 });
 
 test('credentials are cached until five minutes before expiry, then refreshed without a second identity lookup', async () => {
@@ -194,7 +237,7 @@ test('FAIL CLOSED: an AssumeRole denial raises a safe message that names the own
     assert.equal(err.reason, 'assume_role_failed');
     assert.equal(err.stsCode, 'AccessDenied');
     assert.match(err.message, /^aws_mcp_unavailable \(assume_role_failed, STS AccessDenied\)/);
-    assert.ok(err.message.includes(AWS_AI_ACCESS_SETUP_SCRIPT), 'tells the CTO which script the owner must run');
+    assert.ok(err.message.includes(AWS_AI_ACCESS_SETUP_SCRIPT), 'tells the operator which script the owner must run');
     assert.ok(
       err.message.includes('InnerScopeHearing/otchealth-claude-tools setup/iam/aws-ai-access-2026-10-07.sh (owner-run CloudShell step)'),
       'names the repository, the script and that it is an owner-run CloudShell step',
@@ -473,6 +516,46 @@ test('a transient refresh failure reuses still-valid reader credentials, but nev
   assert.equal(assumeCalls, 3, 'the window ended, so STS was asked once more');
 });
 
+test('an expired role session fails closed without an upstream credential and recovers using newly resolved task-role credentials', async () => {
+  let clock = T0;
+  let baseCalls = 0;
+  let assumeCalls = 0;
+  let refreshAvailable = false;
+  const baseKey = (n: number) => 'ASIA' + 'SYNTHETICBASE' + String(n).padStart(3, '0');
+  const sts = fakeSts({
+    GetCallerIdentity: () => xml(identityXml()),
+    AssumeRole: () => {
+      assumeCalls += 1;
+      if (assumeCalls > 1 && !refreshAvailable) return new TypeError('synthetic STS outage');
+      return xml(assumeXml({ expiresAtMs: clock + HOUR, key: 'ASIA' + 'SYNTHETICREAD' + String(assumeCalls).padStart(3, '0') }));
+    },
+  });
+  const p = createReaderCredentialProvider({
+    baseCredentials: async () => ({ ...BASE, accessKeyId: baseKey(++baseCalls) }),
+    fetchImpl: sts.fetchImpl,
+    now: () => clock,
+  });
+
+  const first = await p.get('initial');
+  clock += 55 * 60_000;
+  const reused = await p.get('refresh-outage');
+  assert.equal(reused.accessKeyId, first.accessKeyId, 'the cached credential still belongs to the pinned reader role and remains valid');
+  assert.equal(reused.roleArn, ROLE_ARN);
+
+  clock += 6 * 60_000; // past the first session's real expiry and beyond the negative-cache window
+  await assert.rejects(p.get('expired'), (err: unknown) => err instanceof AwsReaderUnavailableError && err.reason === 'sts_unreachable');
+  assert.equal(baseCalls, 3);
+  assert.ok(sts.calls.every((call) => call.url === 'https://sts.us-east-1.amazonaws.com/'), 'only the mocked STS endpoint was contacted; no AWS MCP request can receive expired credentials');
+
+  clock += READER_FAILURE_CACHE_MS;
+  refreshAvailable = true;
+  const recovered = await p.get('recovered');
+  assert.equal(baseCalls, 4, 'recovery resolves a fresh ECS task-role credential set');
+  assert.equal(recovered.accessKeyId, 'ASIA' + 'SYNTHETICREAD004');
+  assert.equal(recovered.roleArn, ROLE_ARN);
+  assert.match(sts.calls.at(-1)?.headers.Authorization ?? '', new RegExp(`Credential=${baseKey(4)}/`), 'the recovery AssumeRole uses the newly resolved base credentials');
+});
+
 test('reset drops the cache', async () => {
   let assumed = 0;
   const sts = fakeSts({
@@ -512,7 +595,7 @@ test('each AssumeRole logs its RoleSessionName, and nothing secret', async () =>
   assert.deepEqual(assumeLines[0].fields, {
     type: 'aws_mcp_assume_role',
     role_name: AWS_AI_READER_ROLE_NAME,
-    role_session_name: 'gw-cto-4f1c2a9b77de',
+    role_session_name: 'gw-aws-4f1c2a9b77de',
     duration_seconds: 3600,
   });
   assert.equal(assumeLines[0].fields.role_session_name, sts.calls[1].params.get('RoleSessionName'), 'the logged name is the one STS received');

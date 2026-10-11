@@ -67,7 +67,7 @@ const HOUR = 3_600_000;
 const CALLER_HASH = 'c0ffee'.repeat(10) + 'c0ff';
 /** The client id the fixture OAuth session was issued to (a public identifier, not a secret). */
 const CLIENT_ID = 'occ_fixture';
-/** The one kind of caller the bridge serves: the CTO lane over an OAuth-issued session (a token from the authorization_code grant). */
+/** Accepted example caller: an approved company lane over an OAuth-issued session. */
 const CTO: AwsMcpToolContext = {
   callerAgent: 'cto',
   correlationId: 'corr-1234-abcd-5678-efgh',
@@ -379,10 +379,10 @@ test('Semaphore refuses with aws_mcp_busy after a bounded wait and leaves the qu
 // ---------------------------------------------------------------------------------------------
 // Lane gate and input policy: all refused before any credential or network use
 // ---------------------------------------------------------------------------------------------
-test('LANE GATE: every non-CTO caller is refused by both tools before STS or the AWS MCP Server is touched', async () => {
-  for (const callerAgent of ['developer', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'external-read', 'wefunder', '', 'CTO', 'cto ']) {
+test('LANE GATE: every unapproved caller is refused by both tools before STS or the AWS MCP Server is touched', async () => {
+  for (const callerAgent of ['clo', 'clo-personal', 'cpo', 'cco', 'exec', 'external-read', 'wefunder', '', 'CTO', 'cto ']) {
     const w = world();
-    // An OAuth session on a lane other than cto: the lane check alone must refuse it.
+    // An OAuth session on a lane outside the explicit AWS allowlist must be refused.
     const ctx: AwsMcpToolContext = { ...CTO, callerAgent };
     await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, ctx, w.deps), /aws_mcp_forbidden/, `call as "${callerAgent}"`);
     await assert.rejects(bridge.listAwsMcpTools({}, ctx, w.deps), /aws_mcp_forbidden/, `list as "${callerAgent}"`);
@@ -392,32 +392,32 @@ test('LANE GATE: every non-CTO caller is refused by both tools before STS or the
   }
 });
 
-test('LANE GATE: the in-handler check comes first, so a non-CTO caller learns nothing from input validation either', async () => {
+test('LANE GATE: the in-handler check comes first, so an unapproved caller learns nothing from input validation either', async () => {
   const w = world();
-  const ctx: AwsMcpToolContext = { ...CTO, callerAgent: 'cfo' };
+  const ctx: AwsMcpToolContext = { ...CTO, callerAgent: 'clo-personal' };
   for (const input of [{ tool_name: 'aws___get_presigned_url' }, { tool_name: 'not a tool!!' }, null, { bogus: true }]) {
     await assert.rejects(bridge.callAwsMcpTool(input, ctx, w.deps), /aws_mcp_forbidden/);
   }
 });
 
-test('GOVERNANCE: the execution rule makes both tools CTO-only', () => {
+test('GOVERNANCE: the execution rule makes both tools available to approved roles', () => {
   for (const name of [bridge.AWS_MCP_TOOL_LIST_NAME, bridge.AWS_MCP_TOOL_CALL_NAME]) {
     const rule = requiredRoleFor(name);
     assert.ok(rule, `${name} has a governance rule`);
-    assert.equal(rule.role, 'cto');
+    assert.deepEqual(rule.role, ['cto', 'developer', 'cfo', 'coo', 'cro']);
   }
 });
 
 // ---------------------------------------------------------------------------------------------
-// Authentication gate: the bridge serves OAuth-authenticated CTO sessions only. The CTO lane is also
-// reachable with static credentials (the connector token bound to the default agent, the M365
+// Authentication gate: the bridge serves OAuth-authenticated approved-lane sessions only. Those lanes may
+// also be reachable with static credentials (the connector token bound to the default agent, the M365
 // declarative-agent token, the Codex seat tokens, the Copilot and eval tokens); none of them may
 // reach an AWS identity.
 // ---------------------------------------------------------------------------------------------
-test('AUTH GATE: the CTO lane over every static or non-OAuth credential kind is refused before any credential, STS or network use', async () => {
-  for (const authKind of NON_OAUTH_KINDS) {
+test('AUTH GATE: every approved lane over static or non-OAuth credentials is refused before AWS use', async () => {
+  for (const callerAgent of ['cto', 'developer', 'cfo', 'coo', 'cro']) for (const authKind of NON_OAUTH_KINDS) {
     const w = world();
-    const ctx: AwsMcpToolContext = { ...CTO, authKind, authGrant: undefined };
+    const ctx: AwsMcpToolContext = { ...CTO, callerAgent, authKind, authGrant: undefined };
     for (const [label, run] of [
       ['call', () => bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, ctx, w.deps)],
       ['list', () => bridge.listAwsMcpTools({}, ctx, w.deps)],
@@ -425,13 +425,13 @@ test('AUTH GATE: the CTO lane over every static or non-OAuth credential kind is 
       await assert.rejects(run(), (err: unknown) => {
         assert.ok(err instanceof AwsMcpRefusalError, `${label} as ${authKind}: ${String(err)}`);
         assert.equal(err.code, 'aws_mcp_forbidden');
-        assert.match(err.message, /^aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only/);
+        assert.match(err.message, /^aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated approved AWS operator sessions only/);
         assert.ok(err.message.includes(`"${authKind}" credential`), `the message names the kind ${authKind}`);
         assert.match(err.message, /Static tokens and other credential types are refused\. No AWS request was made\./);
         return true;
       });
     }
-    assert.equal(w.credentialRequests(), 0, `credentials requested for kind ${authKind}`);
+    assert.equal(w.credentialRequests(), 0, `credentials requested for ${callerAgent} / ${authKind}`);
     assert.equal(w.sts.calls.length, 0, `STS reached for kind ${authKind}`);
     assert.equal(w.mcp.requests.length, 0, `AWS MCP Server reached for kind ${authKind}`);
   }
@@ -629,10 +629,10 @@ test('KILL SWITCH: it fails closed, so only a blank, false, 0, no or off value l
   assert.ok(w.mcp.requests.length > before, 'calls work again as soon as the switch is cleared');
 });
 
-test('KILL SWITCH: the caller checks come first, so a non-CTO or static caller is told forbidden, not disabled', async () => {
+test('KILL SWITCH: the caller checks come first, so a denied or static caller is told forbidden, not disabled', async () => {
   await withBridgeSwitch('true', async () => {
     const w = world();
-    await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent: 'cfo' }, w.deps), /aws_mcp_forbidden/);
+    await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent: 'clo-personal' }, w.deps), /aws_mcp_forbidden/);
     await assert.rejects(bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, authKind: 'codex' }, w.deps), /aws_mcp_forbidden/);
     assert.equal(w.credentialRequests(), 0);
   });
@@ -758,7 +758,7 @@ test('an AWS MCP Server request is never sent with anything but reader-role cred
   assertSignedAsReader(w.mcp.requests, readerKey(1), readerToken(1));
   const assume = w.sts.calls.find((c) => c.action === 'AssumeRole');
   assert.equal(assume?.params.get('RoleArn'), `arn:aws:iam::${ACCOUNT}:role/${AWS_AI_READER_ROLE_NAME}`);
-  assert.match(assume?.params.get('RoleSessionName') ?? '', /^gw-cto-corr1234abcd$/);
+  assert.match(assume?.params.get('RoleSessionName') ?? '', /^gw-aws-corr1234abcd$/);
   assert.equal(assume?.params.get('DurationSeconds'), '3600');
 });
 
@@ -1115,7 +1115,7 @@ test('AUDIT: a successful call writes one line with the hashed caller, auth kind
     region: 'us-west-2',
     script_sha256: sha256(script),
     response_bytes: Buffer.byteLength(reply, 'utf8'),
-    role_session_name: 'gw-cto-corr1234abcd',
+    role_session_name: 'gw-aws-corr1234abcd',
   });
 
   const assume = lines.filter((l) => l.fields.type === 'aws_mcp_assume_role');
@@ -1123,7 +1123,7 @@ test('AUDIT: a successful call writes one line with the hashed caller, auth kind
   assert.deepEqual(assume[0].fields, {
     type: 'aws_mcp_assume_role',
     role_name: AWS_AI_READER_ROLE_NAME,
-    role_session_name: 'gw-cto-corr1234abcd',
+    role_session_name: 'gw-aws-corr1234abcd',
     duration_seconds: 3600,
   });
   const stsRequest = w.sts.calls.find((c) => c.action === 'AssumeRole');
@@ -1172,7 +1172,7 @@ test('AUDIT: the tool list call writes its own line with the upstream response s
   assert.equal(fields.caller_hash, CALLER_HASH);
   assert.equal(fields.is_error, false);
   assert.ok(Number.isInteger(fields.response_bytes) && (fields.response_bytes as number) > 0);
-  assert.equal(fields.role_session_name, 'gw-cto-corr1234abcd');
+  assert.equal(fields.role_session_name, 'gw-aws-corr1234abcd');
   for (const absent of ['upstream_tool', 'script_sha256', 'region', 'error_code']) assert.equal(absent in fields, false, absent);
 });
 
@@ -1256,10 +1256,13 @@ test('AUDIT: refusals by lane, kill switch, blocked tool, allowlist and input va
     assert.equal('response_bytes' in fields, false);
     assert.equal('role_session_name' in fields, false);
   };
-  await run({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent: 'cfo' }, 'aws_mcp_forbidden');
+  await run({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent: 'clo-personal' }, 'aws_mcp_forbidden');
   await run({ tool_name: 'aws___list_regions' }, CTO, 'aws_mcp_disabled', undefined, 'true');
   await run({ tool_name: 'aws___get_presigned_url' }, CTO, 'aws_mcp_tool_blocked', 'aws___get_presigned_url');
   await run({ tool_name: 'aws___brand_new_tool' }, CTO, 'aws_mcp_tool_not_allowed', 'aws___brand_new_tool');
+  for (const writeTool of ['aws___iam_create_user', 'aws___iam_attach_role_policy', 'aws___s3_put_object', 'aws___ec2_run_instances']) {
+    await run({ tool_name: writeTool }, CTO, 'aws_mcp_tool_not_allowed', writeTool);
+  }
   await run({ tool_name: 'aws___list_regions', extra: 1 }, CTO, 'aws_mcp_invalid_input');
   await run({ tool_name: 'aws___run_script', arguments: { script: 'x'.repeat(100_001) } }, CTO, 'aws_mcp_invalid_input', 'aws___run_script');
   assert.equal(w.credentialRequests(), 0);
@@ -1534,7 +1537,7 @@ test('registration: both tools are registered read-only with an honest descripti
   for (const tool of tools.values()) {
     assert.equal(tool.config.annotations?.readOnlyHint, true);
     assert.equal(tool.config.annotations?.destructiveHint, false);
-    assert.match(String(tool.config.description), /CTO lane only/);
+    assert.match(String(tool.config.description), /CTO, Developer, CFO, COO, and CRO lanes only/);
     assert.match(String(tool.config.description), /OAuth-issued sessions only \(static credentials and client_credentials tokens are refused\)/);
     assert.equal(/interactive|a person is present|human/i.test(String(tool.config.description)), false, 'the description makes no claim about a person being present');
     assert.match(String(tool.config.description), /untrusted external data/i);
@@ -1557,7 +1560,7 @@ test('wrapper: a non-CTO caller is stopped by the execution governance rule befo
   const w = world();
   const { server, tools } = fakeServer();
   bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
-  for (const callerAgent of ['developer', 'cfo', 'coo', 'cro', 'clo', 'exec', '']) {
+  for (const callerAgent of ['clo', 'clo-personal', 'cpo', 'cco', 'exec', 'external-read', '']) {
     for (const [name, args] of [['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }], ['aws_mcp_tool_list', {}]] as const) {
       const response = await invoke(tools.get(name)!, { ...args }, callerAgent);
       assert.equal(response.isError, true, `${name} as "${callerAgent}"`);
@@ -1566,6 +1569,21 @@ test('wrapper: a non-CTO caller is stopped by the execution governance rule befo
   }
   assert.equal(w.credentialRequests(), 0);
   assert.equal(w.mcp.requests.length, 0);
+});
+
+test('wrapper: both bridge operations execute for every explicitly approved AWS operator lane', async () => {
+  for (const callerAgent of ['cto', 'developer', 'cfo', 'coo', 'cro']) {
+    for (const [name, args] of [['aws_mcp_tool_list', {}], ['aws_mcp_tool_call', { tool_name: 'aws___list_regions' }]] as const) {
+      const w = world();
+      const { server, tools } = fakeServer();
+      bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
+      const response = await invoke(tools.get(name)!, { ...args }, callerAgent);
+      assert.equal(response.isError, undefined, `${name} as ${callerAgent}`);
+      assert.ok(w.credentialRequests() > 0, `${name} as ${callerAgent} reaches reader credentials`);
+      assert.ok(w.sts.calls.length > 0, `${name} as ${callerAgent} reaches reader-role STS`);
+      assert.ok(w.mcp.requests.length > 0, `${name} as ${callerAgent} reaches AWS MCP`);
+    }
+  }
 });
 
 test('wrapper: the presigned-URL tool is blocked for the CTO lane with a clear error', async () => {
@@ -1593,7 +1611,7 @@ test('wrapper: the fail-closed message reaches the CTO and names the owner scrip
   }
 });
 
-test('wrapper: the CTO lane over any static credential kind, or with no recorded kind, is refused by the handler before any AWS use', async () => {
+test('wrapper: approved lanes over any static credential kind, or with no recorded kind, are refused before AWS use', async () => {
   const w = world();
   const { server, tools } = fakeServer();
   bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);
@@ -1602,7 +1620,7 @@ test('wrapper: the CTO lane over any static credential kind, or with no recorded
       const response = await invoke(tools.get(name)!, { ...args }, 'cto', authKind, 'none');
       assert.equal(response.isError, true, `${name} as ${authKind}`);
       const text = response.content?.[0].text ?? '';
-      assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only`));
+      assert.match(text, new RegExp(`^Tool ${name} failed: aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated approved AWS operator sessions only`));
       assert.match(text, authKind === 'none' ? /does not record how it authenticated/ : new RegExp(`"${authKind}" credential`));
     }
   }
@@ -1611,7 +1629,7 @@ test('wrapper: the CTO lane over any static credential kind, or with no recorded
   assert.equal(w.mcp.requests.length, 0);
 });
 
-test('wrapper: an OAuth CTO session from the client_credentials grant, or with no recorded grant, is refused by the handler before any AWS use', async () => {
+test('wrapper: an approved OAuth session from client_credentials, or with no recorded grant, is refused before AWS use', async () => {
   const w = world();
   const { server, tools } = fakeServer();
   bridge.registerAwsMcpTools(server, () => CALLER_HASH, w.deps);

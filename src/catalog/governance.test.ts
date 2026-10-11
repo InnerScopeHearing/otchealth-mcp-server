@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { requiredRoleFor, roleAllows } from './governance.js';
+import { AWS_OPERATOR_LANES } from '../config/aws-operators.js';
 import {
   COMPANY_GITHUB_OPERATOR_LANES,
   GITHUB_CTO_DEVELOPER_ADJACENT_WRITE_TOOLS,
@@ -136,13 +137,15 @@ test('failed-step CI log excerpt reader is CTO-only', () => {
   }
 });
 
-test('the AWS MCP bridge tools (the whole aws_mcp_* family) are CTO-only', () => {
+test('the AWS MCP bridge family allows exactly the named AWS operator lanes', () => {
   // The prefix rule means a future aws_mcp_* tool inherits the gate without a new governance entry.
   for (const name of ['aws_mcp_tool_list', 'aws_mcp_tool_call', 'aws_mcp_future_tool']) {
     const gov = requiredRoleFor(name);
     assert.ok(gov, `${name} must have an explicit role gate`);
-    assert.ok(roleAllows(gov!.role, 'cto'), `${name} must allow cto`);
-    for (const other of [...COMPANY_GITHUB_OPERATOR_LANES.filter((lane) => lane !== 'cto'), ...NON_OPERATOR_LANES]) {
+    assert.deepEqual(gov!.role, AWS_OPERATOR_LANES);
+    for (const lane of AWS_OPERATOR_LANES) assert.ok(roleAllows(gov!.role, lane), `${name} must allow ${lane}`);
+    for (const other of [...COMPANY_GITHUB_OPERATOR_LANES, ...NON_OPERATOR_LANES, 'unknown', 'external-read']) {
+      if ((AWS_OPERATOR_LANES as readonly string[]).includes(other)) continue;
       assert.ok(!roleAllows(gov!.role, other), `${name} must refuse lane "${other}"`);
     }
   }
