@@ -105,7 +105,7 @@ const READER = {
   secretAccessKey: 'synthetic-reader-secret-1',
   sessionToken: 'synthetic-reader-session-token-1',
   roleArn: 'arn:aws:iam::111122223333:role/otchealth-ai-reader-role',
-  roleSessionName: 'gw-cto-nooffload',
+  roleSessionName: 'gw-aws-nooffload',
 };
 
 /** Storage as the registry would reach it: every request to the synthetic storage host is counted. */

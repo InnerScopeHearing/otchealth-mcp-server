@@ -18,6 +18,7 @@
  */
 import { createHash } from 'node:crypto';
 import { logger } from '../../audit/logger.js';
+import { isAwsOperatorLane } from '../../config/aws-operators.js';
 import { AwsMcpRefusalError } from './access.js';
 import { AwsReaderUnavailableError } from './credentials.js';
 import { AwsMcpBridgeError } from './upstream.js';
@@ -34,6 +35,8 @@ export interface BridgeCallAuditEntry {
   bridgeTool: BridgeToolName;
   correlationId: string;
   callerHash: string;
+  /** Validated company lane that invoked the gateway, or a fixed sentinel for unknown lanes. */
+  callerAgent: string;
   /** How the caller authenticated, or undefined when none was recorded. */
   authKind: string | undefined;
   /** For an OAuth caller, the grant that issued its token (authorization_code, refresh_token, client_credentials). */
@@ -100,6 +103,7 @@ export function bridgeCallLogFields(entry: BridgeCallAuditEntry): Record<string,
     bridge_tool: entry.bridgeTool,
     correlation_id: matching(entry.correlationId, ID_PATTERN) ?? 'invalid',
     caller_hash: matching(entry.callerHash, ID_PATTERN) ?? 'unknown',
+    caller_agent: isAwsOperatorLane(entry.callerAgent) ? entry.callerAgent : 'unapproved',
     auth_kind: matching(entry.authKind, KIND_PATTERN) ?? 'none',
     auth_grant: matching(entry.authGrant, GRANT_PATTERN) ?? 'none',
     auth_subject: subjectField(entry.authSubject),
@@ -137,6 +141,7 @@ export interface BridgeCallAuditBase {
   bridgeTool: BridgeToolName;
   correlationId: string;
   callerHash: string;
+  callerAgent: string;
   authKind: string | undefined;
   authGrant?: string | undefined;
   authSubject?: string | undefined;

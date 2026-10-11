@@ -147,6 +147,7 @@ delete process.env.AWS_AI_READER_ROLE_ARN;
 const { default: Fastify } = await import('fastify');
 const { registerMcpRoutes } = await import('../server/mcp.js');
 const { issueAccessToken } = await import('./oauth-tokens.js');
+const { AWS_OPERATOR_LANES } = await import('../config/aws-operators.js');
 
 const realFetch = globalThis.fetch;
 const app = Fastify();
@@ -160,8 +161,8 @@ after(async () => {
 
 type Grant = 'authorization_code' | 'refresh_token' | 'client_credentials' | undefined;
 const GRANTS: readonly Grant[] = ['authorization_code', 'refresh_token', 'client_credentials', undefined];
-const mint = (clientId: string, grant: Grant): string =>
-  issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto', 3600, grant);
+const mint = (clientId: string, grant: Grant, lane = 'cto'): string =>
+  issueAccessToken(clientId, 'mcp', SIGNING_SECRET, 'https://fixture.invalid', lane, 3600, grant);
 
 interface Reply {
   status: number;
@@ -281,4 +282,19 @@ test('DIFFERENTIAL: the bridge tools are listed for the lane whatever the creden
   }
   assert.equal(names.size, 1, 'every CTO credential sees the same bridge tools in the list');
   assert.deepEqual(JSON.parse([...names][0]), ['aws_mcp_tool_call', 'aws_mcp_tool_list']);
+});
+
+test('tools/list exposes both AWS wrappers for every approved OAuth lane and never for protected or unknown lanes', async () => {
+  for (const lane of AWS_OPERATOR_LANES) {
+    const token = mint(`dcr_${lane}_fixture`, 'authorization_code', lane);
+    const listed = await listTools(token);
+    assert.equal(listed.status, 200, lane);
+    assert.deepEqual(toolNames(listed).filter((name) => name.startsWith('aws_mcp_')).sort(), ['aws_mcp_tool_call', 'aws_mcp_tool_list'], lane);
+  }
+  for (const lane of ['clo-personal', 'clo', 'cpo', 'cco', 'exec', 'external-read', 'unknown']) {
+    const token = mint(`dcr_denied_${lane}_fixture`, 'authorization_code', lane);
+    const listed = await listTools(token);
+    assert.equal(listed.status, 200, lane);
+    assert.deepEqual(toolNames(listed).filter((name) => name.startsWith('aws_mcp_')), [], lane);
+  }
 });

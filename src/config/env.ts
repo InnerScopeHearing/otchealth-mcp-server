@@ -239,18 +239,18 @@ const EnvSchema = z.object({
   // outlives a 1h token 401s mid-turn until the next prompt re-mints. These tokens are lane-scoped,
   // revocable, and re-minted every prompt, so a longer lifetime is a safe mid-turn margin, not new
   // exposure. Default 24h (operator-chosen 2026-07-16) covers any autonomous turn; tune without a
-  // redeploy. The human authorization_code/refresh path is deliberately left at 1h (it has silent
-  // refresh). Bounded 60s..24h so a typo cannot mint an effectively-permanent token.
+  // redeploy. The authorization_code and refresh_token grants use this same lifetime.
+  // Bounded 60s..24h so a typo cannot mint an effectively-permanent token.
   OAUTH_CC_TTL_SECONDS: z
     .string()
     .default('86400')
     .transform((v) => Number.parseInt(v, 10))
     .refine((n) => Number.isFinite(n) && n >= 60 && n <= 86400, 'OAUTH_CC_TTL_SECONDS must be 60..86400'),
   // Refresh-token lifetime, in seconds, for the human authorization_code/refresh path (the Claude Chat
-  // executive connectors). The refresh token rotates on every use, so an actively-used connector renews
-  // itself forever; this ceiling only bites a connector left IDLE past it, which then needs a manual
-  // reconnect. Default 90d (was a hardcoded 30d) so executives reconnect far less often. Bounded
-  // 1 day..1 year. Does not affect the access-token lifetime (still 1h; silent refresh covers it).
+  // executive connectors). Every successful refresh issues a new stateless refresh JWT; the previous
+  // token is not invalidated by that issuance. Each token expires after this lifetime. Active clients
+  // can continue renewing while they hold a valid refresh token. Default 90d; bounded 1 day..1 year.
+  // Does not affect the access-token lifetime, which uses OAUTH_CC_TTL_SECONDS for every grant.
   OAUTH_REFRESH_TTL_SECONDS: z
     .string()
     .default('7776000')

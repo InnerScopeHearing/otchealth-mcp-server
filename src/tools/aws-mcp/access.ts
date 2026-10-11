@@ -4,9 +4,9 @@
  * Every check here runs BEFORE any credential, STS or network use, and each failure is a typed
  * AwsMcpRefusalError whose message is safe to show the caller.
  *
- * ACCEPTED CALLER: the CTO lane, over an OAuth-issued session only: a token the gateway's own OAuth
+ * ACCEPTED CALLER: one of the named AWS operator lanes (CTO, Developer, CFO, COO, CRO), over an OAuth-issued session only: a token the gateway's own OAuth
  * endpoints issued through the authorization_code grant (the claude.ai connector flow), or through the
- * refresh_token grant that renews one. The CTO lane is also reachable with static credentials, and the
+ * refresh_token grant that renews one. These lanes may also be reachable with static credentials, and the
  * bridge refuses every one of them directly: the connector token bound to the default agent, the CTO's
  * M365 declarative-agent token (it is part of a published manifest URL), the Codex per-seat tokens, and
  * the Copilot and eval tokens. Static secrets get copied into manifests, config files and shell
@@ -22,7 +22,7 @@
  * to come from an accepted grant).
  *
  * WHAT THIS PROVES, AND WHAT IT DOES NOT. The check proves how the token was ISSUED. It does not prove
- * that a person is present. A holder of a static CTO-lane credential can still reach the bridge through
+ * that a person is present. A holder of a static approved-lane credential can still reach the bridge through
  * an authorization_code session: connector_setup_code_create mints a setup code, a DCR client registers
  * anonymously, and the consent endpoint redeems the code with plain HTTP and no browser; and a
  * confidential client's authorization code is issued with no consent screen at all. Those paths belong
@@ -37,6 +37,7 @@
  * restarts with the new environment.
  */
 import type { AuthKind, OAuthGrantType } from '../../server/request-context.js';
+import { isAwsOperatorLane } from '../../config/aws-operators.js';
 
 export const AWS_MCP_BRIDGE_DISABLED_ENV = 'AWS_MCP_BRIDGE_DISABLED';
 /** The one authentication kind the bridge serves. */
@@ -94,13 +95,13 @@ function grantLabel(grant: string): string {
 }
 
 /**
- * Refuse unless the caller is the CTO lane on an OAuth-issued session (a token from the
+ * Refuse unless the caller is an approved AWS operator lane on an OAuth-issued session (a token from the
  * authorization_code or refresh_token grant) and the kill switch is not on.
  * Order: lane, authentication kind, OAuth grant, kill switch. Throws AwsMcpRefusalError.
  */
 export function assertBridgeAccess(caller: AwsMcpCaller, env: Record<string, string | undefined> = process.env): void {
-  if (caller.callerAgent !== 'cto') {
-    throw new AwsMcpRefusalError('aws_mcp_forbidden', 'the AWS bridge is available to the CTO lane only.');
+  if (!isAwsOperatorLane(caller.callerAgent)) {
+    throw new AwsMcpRefusalError('aws_mcp_forbidden', 'the AWS bridge is available to approved company AWS operator lanes only.');
   }
   if (caller.authKind !== AWS_MCP_ACCEPTED_AUTH_KIND) {
     const how =
@@ -109,7 +110,7 @@ export function assertBridgeAccess(caller: AwsMcpCaller, env: Record<string, str
         : `this session authenticated with a "${kindLabel(caller.authKind)}" credential, which is not an OAuth session`;
     throw new AwsMcpRefusalError(
       'aws_mcp_forbidden',
-      `the AWS bridge serves OAuth-authenticated CTO sessions only (the claude.ai connector), and ${how}. ` +
+      `the AWS bridge serves OAuth-authenticated approved AWS operator sessions only, and ${how}. ` +
         'Static tokens and other credential types are refused. No AWS request was made.',
     );
   }

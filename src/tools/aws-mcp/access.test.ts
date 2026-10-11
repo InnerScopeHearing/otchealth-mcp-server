@@ -1,5 +1,5 @@
 /**
- * Who may use the AWS MCP bridge: the CTO lane over an OAuth-issued session only (a token from the
+ * Who may use the AWS MCP bridge: the five named operator lanes over an OAuth-issued session only (a token from the
  * authorization_code grant or its refresh_token), with a fail-closed operator kill switch. These are the
  * unit tests for the access check itself; bridge.test.ts proves it runs before any AWS use. The grant
  * shows how the token was issued, not that a person is present, and nothing here claims otherwise.
@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OAUTH_GRANT_TYPES, type AuthKind, type OAuthGrantType } from '../../server/request-context.js';
+import { AWS_OPERATOR_LANES } from '../../config/aws-operators.js';
 import {
   AWS_MCP_ACCEPTED_AUTH_GRANTS,
   AWS_MCP_ACCEPTED_AUTH_KIND,
@@ -18,10 +19,10 @@ import {
 } from './access.js';
 
 const ALL_KINDS: readonly AuthKind[] = ['oauth', 'descope', 'connector', 'copilot', 'copilot-dev', 'eval', 'm365', 'codex'];
-const LANES = ['developer', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec', 'copilot-agent', 'external-read', 'wefunder-campaign-director', '', 'CTO', 'Cto', 'cto ', ' cto'];
+const LANES = ['clo', 'clo-personal', 'cpo', 'cco', 'exec', 'copilot-agent', 'external-read', 'wefunder-campaign-director', '', 'CTO', 'Cto', 'cto ', ' cto'];
 const ACCEPTED_GRANTS: readonly OAuthGrantType[] = ['authorization_code', 'refresh_token'];
 const MACHINE_GRANT: OAuthGrantType = 'client_credentials';
-/** An accepted caller: the CTO lane, an OAuth session, a token from the authorization_code grant. */
+/** An accepted example caller: an approved lane, OAuth session, authorization_code grant. */
 const ACCEPTED = { callerAgent: 'cto', authKind: 'oauth', authGrant: 'authorization_code' } as const;
 
 function refusal(run: () => void): AwsMcpRefusalError {
@@ -34,13 +35,15 @@ function refusal(run: () => void): AwsMcpRefusalError {
   assert.fail('expected a refusal');
 }
 
-test('the accepted authentication kind is oauth, and only the cto lane over oauth with an accepted grant passes (switch off)', () => {
+test('only the five approved AWS operator lanes over OAuth with an accepted grant pass (switch off)', () => {
   assert.equal(AWS_MCP_ACCEPTED_AUTH_KIND, 'oauth');
-  assert.doesNotThrow(() => assertBridgeAccess(ACCEPTED, {}));
+  for (const lane of AWS_OPERATOR_LANES) {
+    for (const grant of ACCEPTED_GRANTS) assert.doesNotThrow(() => assertBridgeAccess({ callerAgent: lane, authKind: 'oauth', authGrant: grant }, {}));
+  }
   for (const kind of ALL_KINDS) {
-    for (const lane of ['cto', ...LANES]) {
+    for (const lane of [...AWS_OPERATOR_LANES, ...LANES]) {
       for (const grant of [...OAUTH_GRANT_TYPES, undefined]) {
-        const passes = lane === 'cto' && kind === 'oauth' && grant !== undefined && ACCEPTED_GRANTS.includes(grant);
+        const passes = (AWS_OPERATOR_LANES as readonly string[]).includes(lane) && kind === 'oauth' && grant !== undefined && ACCEPTED_GRANTS.includes(grant);
         if (passes) continue;
         assert.throws(
           () => assertBridgeAccess({ callerAgent: lane, authKind: kind, authGrant: grant }, {}),
@@ -52,43 +55,43 @@ test('the accepted authentication kind is oauth, and only the cto lane over oaut
   }
 });
 
-test('a lane other than cto is refused as forbidden whatever the kind or grant, and the message does not mention the credential', () => {
+test('every unapproved lane is refused as forbidden whatever the kind or grant', () => {
   for (const lane of LANES) {
     for (const kind of [...ALL_KINDS, undefined]) {
       for (const grant of [...OAUTH_GRANT_TYPES, undefined]) {
         const err = refusal(() => assertBridgeAccess({ callerAgent: lane, authKind: kind, authGrant: grant }, {}));
         assert.equal(err.code, 'aws_mcp_forbidden');
-        assert.equal(err.message, 'aws_mcp_forbidden: the AWS bridge is available to the CTO lane only.');
+        assert.equal(err.message, 'aws_mcp_forbidden: the AWS bridge is available to approved company AWS operator lanes only.');
       }
     }
   }
 });
 
-test('the cto lane over any credential kind but oauth is refused, and the message names the kind and says no AWS request was made', () => {
+test('approved lanes over any credential kind but oauth are refused before AWS access', () => {
   for (const kind of ALL_KINDS.filter((k) => k !== 'oauth')) {
     // A static credential has no OAuth grant, but a recorded grant must not rescue a non-oauth kind either.
     for (const grant of [undefined, 'authorization_code' as const]) {
-      const err = refusal(() => assertBridgeAccess({ callerAgent: 'cto', authKind: kind, authGrant: grant }, {}));
+      const err = refusal(() => assertBridgeAccess({ callerAgent: 'developer', authKind: kind, authGrant: grant }, {}));
       assert.equal(err.code, 'aws_mcp_forbidden');
       assert.equal(err.name, 'AwsMcpRefusalError');
       assert.equal(
         err.message,
-        `aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only (the claude.ai connector), and this session authenticated with a "${kind}" credential, which is not an OAuth session. ` +
+        `aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated approved AWS operator sessions only, and this session authenticated with a "${kind}" credential, which is not an OAuth session. ` +
           'Static tokens and other credential types are refused. No AWS request was made.',
       );
     }
   }
 });
 
-test('the cto lane with no recorded authentication kind is refused as not oauth', () => {
-  const err = refusal(() => assertBridgeAccess({ callerAgent: 'cto' }, {}));
+test('an approved lane with no recorded authentication kind is refused as not oauth', () => {
+  const err = refusal(() => assertBridgeAccess({ callerAgent: 'coo' }, {}));
   assert.equal(err.code, 'aws_mcp_forbidden');
   assert.match(err.message, /this session does not record how it authenticated/);
   assert.match(err.message, /No AWS request was made\.$/);
-  const explicit = refusal(() => assertBridgeAccess({ callerAgent: 'cto', authKind: undefined }, {}));
+  const explicit = refusal(() => assertBridgeAccess({ callerAgent: 'coo', authKind: undefined }, {}));
   assert.equal(explicit.message, err.message);
   // Even with an accepted grant recorded, a request that never recorded its kind is refused.
-  const withGrant = refusal(() => assertBridgeAccess({ callerAgent: 'cto', authGrant: 'authorization_code' }, {}));
+  const withGrant = refusal(() => assertBridgeAccess({ callerAgent: 'coo', authGrant: 'authorization_code' }, {}));
   assert.equal(withGrant.message, err.message);
 });
 
@@ -109,12 +112,12 @@ test('the accepted OAuth grants are authorization_code and refresh_token, and ne
   // Every grant the gateway can stamp is either accepted or deliberately refused: none is left undecided.
   assert.deepEqual([...OAUTH_GRANT_TYPES].sort(), ['authorization_code', 'client_credentials', 'refresh_token']);
   for (const grant of ACCEPTED_GRANTS) {
-    assert.doesNotThrow(() => assertBridgeAccess({ callerAgent: 'cto', authKind: 'oauth', authGrant: grant }, {}), grant);
+      for (const lane of AWS_OPERATOR_LANES) assert.doesNotThrow(() => assertBridgeAccess({ callerAgent: lane, authKind: 'oauth', authGrant: grant }, {}), `${lane} ${grant}`);
   }
 });
 
 test('an OAuth token from the client_credentials grant is refused as a machine credential, with its own code', () => {
-  const err = refusal(() => assertBridgeAccess({ callerAgent: 'cto', authKind: 'oauth', authGrant: 'client_credentials' }, {}));
+  const err = refusal(() => assertBridgeAccess({ callerAgent: 'developer', authKind: 'oauth', authGrant: 'client_credentials' }, {}));
   assert.equal(err.code, 'aws_mcp_grant_refused');
   assert.equal(err.name, 'AwsMcpRefusalError');
   assert.equal(
@@ -126,7 +129,7 @@ test('an OAuth token from the client_credentials grant is refused as a machine c
 });
 
 test('an OAuth token that records no grant is refused, with advice to reconnect', () => {
-  for (const request of [{ callerAgent: 'cto', authKind: 'oauth' as const }, { callerAgent: 'cto', authKind: 'oauth' as const, authGrant: undefined }]) {
+  for (const request of [{ callerAgent: 'coo', authKind: 'oauth' as const }, { callerAgent: 'coo', authKind: 'oauth' as const, authGrant: undefined }]) {
     const err = refusal(() => assertBridgeAccess(request, {}));
     assert.equal(err.code, 'aws_mcp_grant_refused');
     assert.equal(
@@ -200,8 +203,8 @@ test('with the kill switch on, an accepted caller is refused as disabled', () =>
 
 test('the order is lane, then authentication kind, then OAuth grant, then kill switch', () => {
   const on = { [AWS_MCP_BRIDGE_DISABLED_ENV]: 'true' };
-  assert.equal(refusal(() => assertBridgeAccess({ callerAgent: 'cfo', authKind: 'oauth', authGrant: 'client_credentials' }, on)).code, 'aws_mcp_forbidden');
-  assert.match(refusal(() => assertBridgeAccess({ callerAgent: 'cfo', authKind: 'm365' }, on)).message, /CTO lane only/);
+  assert.equal(refusal(() => assertBridgeAccess({ callerAgent: 'cfo', authKind: 'oauth', authGrant: 'client_credentials' }, on)).code, 'aws_mcp_grant_refused');
+  assert.match(refusal(() => assertBridgeAccess({ callerAgent: 'clo-personal', authKind: 'oauth', authGrant: 'authorization_code' }, on)).message, /approved company AWS operator lanes only/);
   assert.match(refusal(() => assertBridgeAccess({ callerAgent: 'cto', authKind: 'm365', authGrant: 'client_credentials' }, on)).message, /"m365" credential/);
   assert.equal(refusal(() => assertBridgeAccess({ callerAgent: 'cto', authKind: 'oauth', authGrant: 'client_credentials' }, on)).code, 'aws_mcp_grant_refused');
   assert.equal(refusal(() => assertBridgeAccess({ callerAgent: 'cto', authKind: 'oauth' }, on)).code, 'aws_mcp_grant_refused');

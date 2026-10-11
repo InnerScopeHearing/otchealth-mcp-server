@@ -21,6 +21,7 @@ const { logger } = await import('../../audit/logger.js');
 const { AwsMcpRefusalError } = await import('./access.js');
 const { AwsReaderUnavailableError } = await import('./credentials.js');
 const { AwsMcpBridgeError } = await import('./upstream.js');
+const { AWS_OPERATOR_LANES } = await import('../../config/aws-operators.js');
 const {
   AWS_MCP_AUDIT_LOG_TYPE,
   BridgeCallAudit,
@@ -40,6 +41,7 @@ const FULL: Entry = {
   bridgeTool: 'aws_mcp_tool_call',
   correlationId: 'b3f4b1c2-0d5e-4d3a-9a7f-1234567890ab',
   callerHash: CALLER_HASH,
+  callerAgent: 'cto',
   authKind: 'oauth',
   authGrant: 'authorization_code',
   authSubject: 'occ_fixture',
@@ -49,7 +51,7 @@ const FULL: Entry = {
   responseBytes: 1234,
   isError: false,
   outcome: 'ok',
-  roleSessionName: 'gw-cto-b3f4b1c20d5e',
+  roleSessionName: 'gw-aws-b3f4b1c20d5e',
   latencyMs: 42,
 };
 
@@ -81,6 +83,7 @@ test('a complete entry becomes exactly the documented fields', () => {
     bridge_tool: 'aws_mcp_tool_call',
     correlation_id: FULL.correlationId,
     caller_hash: CALLER_HASH,
+    caller_agent: 'cto',
     auth_kind: 'oauth',
     auth_grant: 'authorization_code',
     auth_subject: 'occ_fixture',
@@ -90,7 +93,7 @@ test('a complete entry becomes exactly the documented fields', () => {
     region: 'us-east-1',
     script_sha256: SHA,
     response_bytes: 1234,
-    role_session_name: 'gw-cto-b3f4b1c20d5e',
+    role_session_name: 'gw-aws-b3f4b1c20d5e',
     latency_ms: 42,
   });
   assert.equal(AWS_MCP_AUDIT_LOG_TYPE, 'aws_mcp_bridge_call');
@@ -101,6 +104,7 @@ test('optional fields that were not known are absent, not empty', () => {
     bridgeTool: 'aws_mcp_tool_list',
     correlationId: FULL.correlationId,
     callerHash: CALLER_HASH,
+    callerAgent: 'not-a-lane',
     authKind: 'm365',
     isError: true,
     outcome: 'refused',
@@ -111,6 +115,7 @@ test('optional fields that were not known are absent, not empty', () => {
     bridge_tool: 'aws_mcp_tool_list',
     correlation_id: FULL.correlationId,
     caller_hash: CALLER_HASH,
+    caller_agent: 'unapproved',
     auth_kind: 'm365',
     auth_grant: 'none',
     auth_subject: 'none',
@@ -123,6 +128,7 @@ test('optional fields that were not known are absent, not empty', () => {
 test('every free-text field is validated against a strict pattern, so it can never carry text', () => {
   const hostile: Entry = {
     ...FULL,
+    callerAgent: 'developer\nSYNTHETIC-RAW-LANE-SECRET',
     correlationId: 'corr\nforged-line',
     callerHash: 'caller hash with spaces',
     authKind: 'Bearer abc',
@@ -137,6 +143,8 @@ test('every free-text field is validated against a strict pattern, so it can nev
   const fields = bridgeCallLogFields(hostile);
   assert.equal(fields.correlation_id, 'invalid');
   assert.equal(fields.caller_hash, 'unknown');
+  assert.equal(fields.caller_agent, 'unapproved');
+  assert.equal(JSON.stringify(fields).includes('SYNTHETIC-RAW-LANE-SECRET'), false);
   assert.equal(fields.auth_kind, 'none');
   assert.equal(fields.auth_grant, 'none');
   assert.equal(fields.auth_subject, 'invalid');
@@ -207,7 +215,7 @@ test('fields that are not in the allowlist are never copied, even when a caller 
   const fields = bridgeCallLogFields(sneaky);
   assert.deepEqual(
     Object.keys(fields).sort(),
-    ['auth_grant', 'auth_kind', 'auth_subject', 'bridge_tool', 'caller_hash', 'correlation_id', 'is_error', 'latency_ms', 'outcome', 'region', 'response_bytes', 'role_session_name', 'script_sha256', 'type', 'upstream_tool'],
+    ['auth_grant', 'auth_kind', 'auth_subject', 'bridge_tool', 'caller_agent', 'caller_hash', 'correlation_id', 'is_error', 'latency_ms', 'outcome', 'region', 'response_bytes', 'role_session_name', 'script_sha256', 'type', 'upstream_tool'],
   );
 });
 
@@ -260,7 +268,7 @@ test('logBridgeCall never throws, even when the logger does', () => {
   }
 });
 
-const BASE = { bridgeTool: 'aws_mcp_tool_call' as const, correlationId: FULL.correlationId, callerHash: CALLER_HASH, authKind: 'oauth', authGrant: 'authorization_code', authSubject: 'occ_fixture' };
+const BASE = { bridgeTool: 'aws_mcp_tool_call' as const, correlationId: FULL.correlationId, callerHash: CALLER_HASH, callerAgent: 'cto', authKind: 'oauth', authGrant: 'authorization_code', authSubject: 'occ_fixture' };
 
 test('BridgeCallAudit success writes one info line with what was noted, the size, and the role session', () => {
   const cap = captureLogger();
@@ -269,7 +277,7 @@ test('BridgeCallAudit success writes one info line with what was noted, the size
     audit.note({ upstreamTool: 'aws___run_script', region: 'us-west-2' });
     audit.note({ scriptSha256: SHA });
     audit.note({}); // noting nothing changes nothing
-    audit.success({ responseBytes: 77, isError: false, roleSessionName: 'gw-cto-abc' });
+    audit.success({ responseBytes: 77, isError: false, roleSessionName: 'gw-aws-abc' });
   } finally {
     cap.restore();
   }
@@ -282,6 +290,7 @@ test('BridgeCallAudit success writes one info line with what was noted, the size
     bridge_tool: 'aws_mcp_tool_call',
     correlation_id: FULL.correlationId,
     caller_hash: CALLER_HASH,
+    caller_agent: 'cto',
     auth_kind: 'oauth',
     auth_grant: 'authorization_code',
     auth_subject: 'occ_fixture',
@@ -291,7 +300,7 @@ test('BridgeCallAudit success writes one info line with what was noted, the size
     region: 'us-west-2',
     script_sha256: SHA,
     response_bytes: 77,
-    role_session_name: 'gw-cto-abc',
+    role_session_name: 'gw-aws-abc',
   });
 });
 
@@ -365,6 +374,18 @@ test('every OAuth grant is recorded by name, and a refused machine token leaves 
     ['refused', 'aws_mcp_grant_refused', 'oauth'],
   ]);
   assert.equal(JSON.stringify(cap.lines).includes('SYNTHETIC-MESSAGE-TEXT'), false);
+});
+
+test('only the five approved AWS operator lanes are recorded verbatim; arbitrary values collapse to the sentinel', () => {
+  for (const lane of AWS_OPERATOR_LANES) {
+    assert.equal(bridgeCallLogFields({ ...FULL, callerAgent: lane }).caller_agent, lane);
+  }
+  for (const lane of ['clo', 'external-read', '', 'developer\nforged', 'cto SYNTHETIC-RAW-LANE-SECRET', 'Bearer synthetic-token']) {
+    const fields = bridgeCallLogFields({ ...FULL, callerAgent: lane });
+    assert.equal(fields.caller_agent, 'unapproved', lane);
+    if (lane) assert.equal(JSON.stringify(fields).includes(lane), false, 'unapproved caller lane text is not emitted');
+    assert.equal(JSON.stringify(fields).includes('SYNTHETIC-RAW-LANE-SECRET'), false);
+  }
 });
 
 test('a refusal of a static credential names no client id, and the audit line for one OAuth client is the same on every call it makes', () => {

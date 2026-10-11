@@ -36,6 +36,9 @@
  */
 
 import { GITHUB_OPERATOR_TOOLSET } from './github-operator.js';
+import { AWS_OPERATOR_LANES } from './aws-operators.js';
+
+const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 
 /** A dedicated setup-code principal for the inactive Make GitHub broker pilot. It is intentionally
  * not a general internal lane and is not part of KNOWN_INTERNAL_LANES, EXEC_RING, or any ship set.
@@ -220,7 +223,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // auth caller); a Claude Code/Hyperagent cto session is unaffected either way today. If universal
   // 'curate' mode is ever armed for the cto lane specifically, this same narrower list would then also
   // apply there -- a deliberate call to make at that time, not implied by this change.
-  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...GITHUB_OPERATOR_TOOLSET, ...HEYGEN, 'agent_persona', 'hyperagent_discover_capabilities', 'aws_mcp_tool_list', 'aws_mcp_tool_call'],
+  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...GITHUB_OPERATOR_TOOLSET, ...HEYGEN, 'agent_persona', 'hyperagent_discover_capabilities'],
   // Engineering IC: its OWN app-repo ship cycle (branch/commit/PR/CI/dispatch) plus the shared
   // read/memory/task surface. No Azure control plane, no finance, no legal -- infra and the two
   // genuinely sensitive corpora (MNPI finance, privileged legal) are CTO/EXEC_RING-owned, not
@@ -306,6 +309,12 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // legitimately needs.
   exec: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...GITHUB_OPERATOR_TOOLSET, ...CTO_INFRA],
 };
+
+// Curated internal client_credentials catalogs must retain the same AWS capability binding as
+// connector surfaces. This is only visibility; the handler still refuses machine credentials.
+for (const lane of AWS_OPERATOR_LANES) {
+  LANE_TOOLSETS[lane] = [...LANE_TOOLSETS[lane], ...AWS_MCP_TOOLS];
+}
 
 /**
  * Pure matcher: true if `toolName` is covered by `lane`'s seed allowlist -- an EXACT match, or a

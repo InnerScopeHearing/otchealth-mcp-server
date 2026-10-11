@@ -4,7 +4,7 @@
  * The unit tests set the authentication kind, grant and client id by hand. This file proves the plumbing
  * that produces them: validateBearer records how the request authenticated (which OAuth grant issued the
  * token, and the client id it was issued to), mcp.ts puts them into the request context, and the bridge
- * handler refuses anything but an OAuth-issued session on the CTO lane. The grant shows how the token was
+ * handler refuses anything but an OAuth-issued session on an approved AWS operator lane. The grant shows how the token was
  * issued, not that a person is present.
  *
  * AWS_MCP_BRIDGE_DISABLED is set for the whole file, so no request can reach STS or the AWS MCP Server
@@ -197,7 +197,7 @@ test('the static connector token bound to the CTO lane is refused as a connector
   for (const tool of BOTH) {
     const outcome = await callBridge(tool, { bearer: TOKENS.connector });
     assert.equal(outcome.isError, true, tool);
-    assert.match(outcome.text, /aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only/, `${tool}: ${outcome.text.slice(0, 200)}`);
+  assert.match(outcome.text, /aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated approved AWS operator sessions only/, `${tool}: ${outcome.text.slice(0, 200)}`);
     assert.match(outcome.text, /"connector" credential/);
     assert.doesNotMatch(outcome.text, /aws_mcp_disabled/);
   }
@@ -208,7 +208,7 @@ test('the M365 token for the CTO lane is refused as an m365 credential, from a h
     for (const tool of BOTH) {
       const outcome = await callBridge(tool, auth);
       assert.equal(outcome.isError, true, `${tool} via ${Object.keys(auth)[0]}`);
-      assert.match(outcome.text, /aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only/, `${tool}: ${outcome.text.slice(0, 200)}`);
+      assert.match(outcome.text, /aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated approved AWS operator sessions only/, `${tool}: ${outcome.text.slice(0, 200)}`);
       assert.match(outcome.text, /"m365" credential/);
       assert.doesNotMatch(outcome.text, /aws_mcp_disabled/);
     }
@@ -219,13 +219,13 @@ test('the Codex per-seat token for the CTO lane is refused as a codex credential
   for (const tool of BOTH) {
     const outcome = await callBridge(tool, { bearer: TOKENS.codexCto });
     assert.equal(outcome.isError, true, tool);
-    assert.match(outcome.text, /aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated CTO sessions only/, `${tool}: ${outcome.text.slice(0, 200)}`);
+  assert.match(outcome.text, /aws_mcp_forbidden: the AWS bridge serves OAuth-authenticated approved AWS operator sessions only/, `${tool}: ${outcome.text.slice(0, 200)}`);
     assert.match(outcome.text, /"codex" credential/);
   }
 });
 
 test('an OAuth-issued session on any other lane never reaches the bridge', async () => {
-  const token = mint('synthetic-per-agent-client', 'cfo', 'authorization_code');
+  const token = mint('synthetic-per-agent-client', 'clo-personal', 'authorization_code');
   for (const tool of BOTH) {
     const args = tool === 'aws_mcp_tool_call' ? { tool_name: 'aws___list_regions' } : {};
     const outcome = await callTool(tool, args, { bearer: token });

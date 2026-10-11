@@ -1,5 +1,5 @@
 /**
- * Durable, read-only AWS identity for the CTO-lane AWS MCP bridge.
+ * Durable, read-only AWS identity for approved company lanes using the AWS MCP bridge.
  *
  * The bridge never signs a request to the AWS MCP Server with the gateway's own task-role
  * credentials. It signs only with short-lived credentials from STS AssumeRole into a dedicated
@@ -21,7 +21,7 @@
  * as a substitute. A failed refresh is remembered for READER_FAILURE_CACHE_MS, and calls inside that
  * window get the same answer without another round trip to STS.
  *
- * The error message is written to be shown to the CTO: it carries only an enumerated reason and the
+ * The error message is written to be shown to an operator: it carries only an enumerated reason and the
  * STS error code (a short token such as AccessDenied). STS error message text, ARNs, account ids,
  * credentials and session tokens are never placed in it, and nothing here logs them. Each AssumeRole
  * logs its RoleSessionName (the join key to CloudTrail) and nothing secret.
@@ -104,7 +104,7 @@ export interface ReaderCredentialProviderOptions {
   roleArn?: string;
 }
 
-/** Thrown for every reason the reader identity is unavailable. The message is safe to show the CTO. */
+/** Thrown for every reason the reader identity is unavailable. The message is safe to show an operator. */
 export class AwsReaderUnavailableError extends Error {
   readonly code = 'aws_mcp_unavailable';
   readonly reason: ReaderUnavailableReason;
@@ -263,7 +263,9 @@ async function stsCall(
 
 function sessionNameFor(hint: string): string {
   const short = hint.replace(/[^A-Za-z0-9]/g, '').slice(0, 12) || randomBytes(4).toString('hex');
-  return `gw-cto-${short}`;
+  // This role is shared by approved lanes with the same read-only permission set. The session name
+  // identifies a gateway AWS session for CloudTrail, not a human or an application lane.
+  return `gw-aws-${short}`;
 }
 
 interface ParsedRoleArn {
