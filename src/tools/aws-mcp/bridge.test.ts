@@ -1106,6 +1106,7 @@ test('AUDIT: a successful call writes one line with the hashed caller, auth kind
     bridge_tool: 'aws_mcp_tool_call',
     correlation_id: CTO.correlationId,
     caller_hash: CALLER_HASH,
+    caller_agent: 'cto',
     auth_kind: 'oauth',
     auth_grant: 'authorization_code',
     auth_subject: CLIENT_ID,
@@ -1129,6 +1130,33 @@ test('AUDIT: a successful call writes one line with the hashed caller, auth kind
   const stsRequest = w.sts.calls.find((c) => c.action === 'AssumeRole');
   assert.equal(assume[0].fields.role_session_name, stsRequest?.params.get('RoleSessionName'), 'the logged session name is the one sent to STS');
   assert.equal(audit[0].fields.role_session_name, assume[0].fields.role_session_name, 'the audit line joins to the AssumeRole line');
+});
+
+test('AUDIT: approved operator lane is recorded, while an unapproved lane and its raw text never enter the log', async () => {
+  for (const callerAgent of ['cto', 'developer', 'cfo', 'coo', 'cro']) {
+    const w = world();
+    const { lines, error } = await captureLogs(() =>
+      bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent }, w.deps),
+    );
+    assert.equal(error, undefined, callerAgent);
+    assert.equal(auditLines(lines).length, 1, callerAgent);
+    assert.equal(auditLines(lines)[0].fields.caller_agent, callerAgent);
+  }
+
+  const hostileLane = 'developer\nSYNTHETIC-RAW-LANE-SECRET';
+  const w = world();
+  const { lines, error } = await captureLogs(() =>
+    bridge.callAwsMcpTool({ tool_name: 'aws___list_regions' }, { ...CTO, callerAgent: hostileLane }, w.deps),
+  );
+  assert.ok(error instanceof AwsMcpRefusalError);
+  const audits = auditLines(lines);
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].fields.caller_agent, 'unapproved');
+  assert.equal(JSON.stringify(lines).includes(hostileLane), false);
+  assert.equal(JSON.stringify(lines).includes('SYNTHETIC-RAW-LANE-SECRET'), false);
+  assert.equal(w.credentialRequests(), 0);
+  assert.equal(w.sts.calls.length, 0);
+  assert.equal(w.mcp.requests.length, 0);
 });
 
 test('AUDIT: no credential, signature, token, script text or account id appears in any log line written during a call', async () => {
@@ -1204,6 +1232,7 @@ test('AUDIT: a refused static credential is logged at warn level with its kind, 
       bridge_tool: 'aws_mcp_tool_call',
       correlation_id: CTO.correlationId,
       caller_hash: CALLER_HASH,
+      caller_agent: 'cto',
       auth_kind: authKind,
       auth_grant: 'none',
       auth_subject: 'none',
@@ -1230,6 +1259,7 @@ test('AUDIT: a refused machine token is logged at warn level with its grant, its
       bridge_tool: 'aws_mcp_tool_call',
       correlation_id: CTO.correlationId,
       caller_hash: CALLER_HASH,
+      caller_agent: 'cto',
       auth_kind: 'oauth',
       auth_grant: expected,
       auth_subject: CLIENT_ID,

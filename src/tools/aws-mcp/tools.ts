@@ -142,6 +142,7 @@ function auditFor(tool: typeof AWS_MCP_TOOL_LIST_NAME | typeof AWS_MCP_TOOL_CALL
     bridgeTool: tool,
     correlationId: ctx.correlationId,
     callerHash: ctx.callerHash,
+    callerAgent: ctx.callerAgent,
     authKind: ctx.authKind,
     authGrant: ctx.authGrant,
     authSubject: ctx.authSubject,
