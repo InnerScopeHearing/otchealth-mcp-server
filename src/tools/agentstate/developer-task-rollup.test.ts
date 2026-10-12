@@ -96,6 +96,8 @@ test('configured empty page is a complete zero distinct from an unavailable ledg
     isConfigured: () => false, listTasks: async () => [],
   });
   assert.deepEqual(missing.data, { available: false, error: 'ledger_not_configured' });
+  assert.equal(missing.compactJsonText, true);
+  assert.equal(missing.summary, 'Task ledger is not configured.');
 });
 
 test('provider failures fail closed without leaking error details or fabricating zero counts', async () => {

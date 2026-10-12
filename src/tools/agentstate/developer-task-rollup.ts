@@ -31,7 +31,7 @@ function unavailable(error: UnavailableError): ToolResultPayload {
     invalid_input: 'Task rollup input is invalid.',
     provider_read_failed: 'Task ledger read failed.',
   }[error];
-  return { data: { available: false, error }, summary };
+  return { data: { available: false, error }, summary, compactJsonText: true };
 }
 
 function validTaskRow(value: unknown): value is Task {
