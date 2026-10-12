@@ -117,6 +117,45 @@ test('controller context_need selects metadata only for coordination and full de
   assert.deepEqual(coordinationDeps.calls, { task: 1, events: 0 });
 });
 
+test('matching explicit view and context_need are accepted; mismatches fail before any provider access', async () => {
+  const row = task();
+  const matchingMetadataDeps = provider(row);
+  const matchingMetadata = await handleTaskGet(
+    { task_id: row.id, view: 'metadata', context_need: 'coordination' },
+    { callerAgent: 'developer' },
+    matchingMetadataDeps,
+  );
+  assert.equal((matchingMetadata.data as any).view, 'metadata');
+  assert.deepEqual(matchingMetadataDeps.calls, { task: 1, events: 0 });
+
+  const matchingFullDeps = provider(row);
+  const matchingFull = await handleTaskGet(
+    { task_id: row.id, view: 'full', context_need: 'approval' },
+    { callerAgent: 'developer' },
+    matchingFullDeps,
+  );
+  assert.equal((matchingFull.data as any).found, true);
+  assert.equal('view' in (matchingFull.data as any), false);
+  assert.deepEqual(matchingFullDeps.calls, { task: 1, events: 1 });
+
+  for (const input of [
+    { task_id: row.id, view: 'metadata' as const, context_need: 'approval' as const },
+    { task_id: row.id, view: 'full' as const, context_need: 'coordination' as const },
+  ]) {
+    const calls = { configuration: 0, task: 0, events: 0 };
+    const deps = {
+      isConfigured: () => { calls.configuration++; return false; },
+      getTask: async () => { calls.task++; return row; },
+      listEvents: async () => { calls.events++; return []; },
+    };
+    await assert.rejects(
+      handleTaskGet(input, { callerAgent: 'developer' }, deps),
+      /Conflicting task_get view and context_need/,
+    );
+    assert.deepEqual(calls, { configuration: 0, task: 0, events: 0 });
+  }
+});
+
 test('personal task denial remains indistinguishable from missing task in metadata view', async () => {
   const hiddenDeps = provider(task({ owner_agent: 'developer', created_by: 'clo-personal' }));
   const missingDeps = provider(null);

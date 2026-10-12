@@ -31,15 +31,19 @@ export async function handleTaskGet(
   deps: TaskGetDeps = DEFAULT_DEPS,
 ): Promise<ToolResultPayload> {
   const contextNeed = input.context_need;
+  const contextNeedView = contextNeed === undefined
+    ? undefined
+    : contextNeed === 'coordination' ? 'metadata' : 'full';
+  if (contextNeedView !== undefined && input.view !== undefined && input.view !== contextNeedView) {
+    throw new Error('Conflicting task_get view and context_need.');
+  }
   if (contextNeed && (ctx.callerAgent || '').trim().toLowerCase() !== 'developer') {
     throw new Error('Unsupported task_get context need.');
   }
   // Resolve the controller-known question class before returning anything to a model. Questions
   // limited to coordination facts use the compact view; note, history, approval, and correction
   // questions receive the existing full response. This routing does not infer gates from metadata.
-  const responseView = contextNeed
-    ? (contextNeed === 'coordination' ? 'metadata' : 'full')
-    : (input.view ?? 'full');
+  const responseView = contextNeedView ?? input.view ?? 'full';
   const needsHistory = contextNeed === 'history' || contextNeed === 'approval' || contextNeed === 'correction';
 
   // Metadata is an explicit Developer-only response view. Reject unsupported callers before

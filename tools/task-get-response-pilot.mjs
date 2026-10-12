@@ -7,7 +7,8 @@ import { handleTaskGet } from '../src/tools/agentstate/task-get.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const output = '/workspace/token-six-pilots-20261012/02-tool-responses/task-get-response-pilot.json';
+const outputIndex = process.argv.indexOf('--output');
+const output = path.resolve(outputIndex >= 0 ? process.argv[outputIndex + 1] : path.join(process.cwd(), 'artifacts', 'task-get-response-pilot.json'));
 const startup = { startup_phase: 'identical-synthetic-startup-v1', lane: 'developer', policy: 'fixed' };
 
 function eventRows(count, long = false) {
