@@ -34,14 +34,15 @@ interface Response {
 }
 interface CapturedTool {
   handler: (args: unknown) => Promise<Response>;
+  config: unknown;
 }
 
 function fakeServer(): { server: McpServer; tools: Map<string, CapturedTool> } {
   const tools = new Map<string, CapturedTool>();
   return {
     server: {
-      registerTool(name: string, _config: unknown, handler: CapturedTool['handler']) {
-        tools.set(name, { handler });
+      registerTool(name: string, config: unknown, handler: CapturedTool['handler']) {
+        tools.set(name, { handler, config });
         return { remove: () => tools.delete(name) };
       },
     } as unknown as McpServer,
