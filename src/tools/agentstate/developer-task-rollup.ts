@@ -84,7 +84,7 @@ export async function handleDeveloperTaskRollup(
     );
     const seenIds = new Map<string, string>();
     const ambiguousIds = new Set<string>();
-    let latestUpdatedAt: string | null = null;
+    let latestUpdatedAt: string | undefined;
     let latestUpdatedMs = Number.NEGATIVE_INFINITY;
     let invalidRows = 0;
     let duplicateIds = 0;
@@ -151,15 +151,14 @@ export async function handleDeveloperTaskRollup(
     ];
     const possiblyTruncated = sourcePageCount >= requestedLimit || sourceAnomalies.length > 0;
     const countsAreComplete = !possiblyTruncated;
-    const statusCounts = [...groups.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([status, value]) => ({ status, ...value }));
+    const sortedGroups = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const statusCounts = Object.fromEntries(sortedGroups.map(([status, value]) => [status, value.count]));
+    const sourceTaskIds = Object.fromEntries(sortedGroups.map(([status, value]) => [status, value.task_ids]));
 
     return {
       data: {
         available: true,
-        observed_at: (deps.now?.() ?? new Date()).toISOString(),
-        max_observed_updated_at: latestUpdatedAt,
+        ...(latestUpdatedAt ? { max_observed_updated_at: latestUpdatedAt } : {}),
         scope: {
           board: requestedBoard,
           owner_agent: owner,
@@ -173,8 +172,9 @@ export async function handleDeveloperTaskRollup(
           source_anomalies: sourceAnomalies,
         },
         status_counts: statusCounts,
+        source_task_ids: sourceTaskIds,
       },
-      summary: `${seenIds.size} caller-owned task(s) summarized${possiblyTruncated ? ' (bounded page may be partial)' : ''}.`,
+      compactJsonText: true,
     };
   } catch {
     // Provider exceptions often contain endpoint details, query text, or data. Never forward them.
@@ -204,9 +204,10 @@ export function registerDeveloperTaskRollup(server: McpServer, callerHash: Calle
         available: z.boolean(),
         error: z.string().optional(),
         observed_at: z.string().optional(),
-        max_observed_updated_at: z.string().nullable().optional(),
+        max_observed_updated_at: z.string().optional(),
         scope: z.unknown().optional(),
-        status_counts: z.unknown().optional(),
+        status_counts: z.record(z.number()).optional(),
+        source_task_ids: z.record(z.array(z.string())).optional(),
       },
       handler: handleDeveloperTaskRollup,
     },

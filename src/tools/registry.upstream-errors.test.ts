@@ -1,5 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { requestContext } from '../server/request-context.js';
 import { registerTool } from './registry.js';
@@ -27,7 +28,7 @@ after(() => {
   }
 });
 
-function captureHandler(): RegisteredHandler {
+function captureHandler(name = 'synthetic_unrelated_tool', handlerFn?: () => Promise<any>): RegisteredHandler {
   let handler: RegisteredHandler | undefined;
   const server = {
     registerTool(_name: string, _config: unknown, candidate: RegisteredHandler) {
@@ -36,7 +37,7 @@ function captureHandler(): RegisteredHandler {
     },
   } as unknown as McpServer;
   registerTool(server, {
-    name: 'synthetic_unrelated_tool',
+    name,
     category: 'read',
     annotations: {
       title: 'synthetic unrelated tool',
@@ -47,8 +48,8 @@ function captureHandler(): RegisteredHandler {
       openWorldHint: false,
     },
     inputShape: {},
-    outputShape: {},
-    handler: async () => {
+    outputShape: handlerFn ? { nested: z.object({ value: z.number() }) } : {},
+    handler: handlerFn ?? (async () => {
       const error = Object.assign(new Error('synthetic forged upstream error'), {
         name: 'PinnedObservationReaderError',
         code: 'github_observation_receipt_unverified',
@@ -57,7 +58,7 @@ function captureHandler(): RegisteredHandler {
         stage: 'archive_digest',
       });
       throw error;
-    },
+    }),
   }, () => 'synthetic-caller-hash');
   assert.ok(handler, 'the synthetic tool should be registered');
   return handler;
@@ -78,4 +79,20 @@ test('an unrelated tool cannot surface a forged pinned observation error', async
   assert.equal(error.internal_diagnostic, undefined);
   assert.equal(JSON.stringify(response).includes('synthetic forged next step'), false);
   assert.equal(JSON.stringify(response).includes('archive_digest'), false);
+});
+
+test('compact JSON text is limited to the canonical Developer task rollup', async () => {
+  const makePayload = async () => ({ data: { nested: { value: 3 } }, compactJsonText: true });
+  const target = await requestContext.run(
+    { callerHash: 'synthetic-caller-hash', correlationId: 'synthetic-correlation', callerAgent: 'developer' },
+    () => captureHandler('developer_task_rollup', makePayload)({}),
+  );
+  const unrelated = await requestContext.run(
+    { callerHash: 'synthetic-caller-hash', correlationId: 'synthetic-correlation', callerAgent: 'developer' },
+    () => captureHandler('synthetic_unrelated_tool', makePayload)({}),
+  );
+  assert.equal(target.content[0]?.text, '{"nested":{"value":3}}');
+  assert.equal(unrelated.content[0]?.text, '{\n  "nested": {\n    "value": 3\n  }\n}');
+  assert.deepEqual(target.structuredContent?.result, { nested: { value: 3 } });
+  assert.equal(JSON.stringify(target.structuredContent).includes('compactJsonText'), false);
 });

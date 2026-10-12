@@ -662,6 +662,8 @@ export interface ToolContext {
 export interface ToolResultPayload {
   /** Machine-readable result. Surfaced via structuredContent. */
   data: unknown;
+  /** Internal text rendering hint, honored only by the Developer task rollup. */
+  compactJsonText?: boolean;
   /** Optional human-readable summary. Appended after the JSON text block. */
   summary?: string;
   /** Optional before/after pair for audit log on writes. */
@@ -759,6 +761,7 @@ function buildTextContent(
   payload: ToolResultPayload,
   warning: ComplianceWarning | null,
   coldStartWarning?: string,
+  compactJsonText = false,
 ): string {
   const lines: string[] = [];
   if (coldStartWarning) {
@@ -769,7 +772,7 @@ function buildTextContent(
     lines.push(JSON.stringify(warning, null, 2));
   }
   if (payload.data !== null && payload.data !== undefined) {
-    lines.push(JSON.stringify(payload.data, null, 2));
+    lines.push(compactJsonText ? JSON.stringify(payload.data) : JSON.stringify(payload.data, null, 2));
   }
   if (payload.summary) {
     lines.push('');
@@ -1575,6 +1578,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           { ...payload, data: result },
           warning,
           capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
+          canonicalName === 'developer_task_rollup' && payload.compactJsonText === true,
         );
 
         // Check the complete inline envelope before JIT handling. A constrained tool must fail

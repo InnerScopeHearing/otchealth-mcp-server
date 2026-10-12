@@ -58,9 +58,8 @@ test('queries only Developer page and returns aggregate source IDs without task 
     completeness_reason: 'source_exhausted', source_anomalies: [],
   });
   assert.deepEqual((result.data as any).max_observed_updated_at, '2026-10-12T00:00:00.000Z');
-  assert.deepEqual((result.data as any).status_counts.find((row: any) => row.status === 'paused_by_source'), {
-    status: 'paused_by_source', count: 1, task_ids: ['task_unknown'],
-  });
+  assert.equal((result.data as any).status_counts.paused_by_source, 1);
+  assert.deepEqual((result.data as any).source_task_ids.paused_by_source, ['task_unknown']);
   const serialized = JSON.stringify(result);
   for (const privateText of ['private title', 'private description', 'private note', 'private artifact']) {
     assert.equal(serialized.includes(privateText), false);
@@ -76,9 +75,8 @@ test('full page reports exact observed counts and explicit uncertainty, never bo
     requested_limit: 2, possibly_truncated: true, counts_are_complete: false,
     completeness_reason: 'limit_reached', source_anomalies: [],
   });
-  assert.deepEqual((result.data as any).status_counts.find((row: any) => row.status === 'done'), {
-    status: 'done', count: 1, task_ids: ['task_b'],
-  });
+  assert.equal((result.data as any).status_counts.done, 1);
+  assert.deepEqual((result.data as any).source_task_ids.done, ['task_b']);
 });
 
 test('configured empty page is a complete zero distinct from an unavailable ledger', async () => {
@@ -89,7 +87,9 @@ test('configured empty page is a complete zero distinct from an unavailable ledg
     requested_limit: 50, possibly_truncated: false, counts_are_complete: true,
     completeness_reason: 'source_exhausted', source_anomalies: [],
   });
-  assert.ok((empty.data as any).status_counts.every((row: any) => row.count === 0 && row.task_ids.length === 0));
+  assert.ok(Object.values((empty.data as any).status_counts).every((count) => count === 0));
+  assert.ok(Object.values((empty.data as any).source_task_ids).every((ids: any) => ids.length === 0));
+  assert.equal(Object.hasOwn(empty.data as object, 'max_observed_updated_at'), false);
   const missing = await handleDeveloperTaskRollup({}, { callerAgent: 'developer' }, {
     isConfigured: () => false, listTasks: async () => [],
   });
@@ -135,9 +135,8 @@ test('foreign owner, board, or personal rows are omitted and make page completen
   assert.equal((result.data as any).scope.possibly_truncated, true);
   assert.equal((result.data as any).scope.counts_are_complete, false);
   assert.deepEqual((result.data as any).scope.source_anomalies, ['out_of_scope_rows_filtered']);
-  assert.deepEqual((result.data as any).status_counts.find((row: any) => row.status === 'open'), {
-    status: 'open', count: 1, task_ids: ['own'],
-  });
+  assert.equal((result.data as any).status_counts.open, 1);
+  assert.deepEqual((result.data as any).source_task_ids.open, ['own']);
   assert.equal(JSON.stringify(result).includes('foreign_owner'), false);
 });
 
@@ -149,9 +148,8 @@ test('duplicate task IDs are counted once and flagged as source anomaly', async 
   assert.equal((result.data as any).scope.returned_count, 1);
   assert.deepEqual((result.data as any).scope.source_anomalies, ['duplicate_source_ids']);
   assert.equal((result.data as any).scope.counts_are_complete, false);
-  assert.deepEqual((result.data as any).status_counts.find((row: any) => row.status === 'open'), {
-    status: 'open', count: 1, task_ids: ['same_id'],
-  });
+  assert.equal((result.data as any).status_counts.open, 1);
+  assert.deepEqual((result.data as any).source_task_ids.open, ['same_id']);
   assert.equal((result.data as any).max_observed_updated_at, '2026-10-12T00:00:00.000Z');
 });
 
@@ -166,13 +164,19 @@ test('conflicting duplicate statuses are excluded from both counts and invalid t
     'duplicate_source_ids', 'conflicting_duplicate_statuses', 'invalid_source_timestamps',
   ]);
   assert.equal((result.data as any).scope.counts_are_complete, false);
-  assert.deepEqual((result.data as any).status_counts.find((row: any) => row.status === 'open'), {
-    status: 'open', count: 0, task_ids: [],
-  });
-  assert.deepEqual((result.data as any).status_counts.find((row: any) => row.status === 'done'), {
-    status: 'done', count: 0, task_ids: [],
-  });
+  assert.equal((result.data as any).status_counts.open, 0);
+  assert.deepEqual((result.data as any).source_task_ids.open, []);
+  assert.equal((result.data as any).status_counts.done, 0);
+  assert.deepEqual((result.data as any).source_task_ids.done, []);
   assert.equal((result.data as any).max_observed_updated_at, '2026-10-11T00:00:00.000Z');
+});
+
+test('invalid-only timestamp observations are omitted rather than reported as null', async () => {
+  const result = await handleDeveloperTaskRollup({}, { callerAgent: 'developer' }, deps([
+    task({ id: 'bad_time', updated_at: 'not-a-date' }),
+  ]));
+  assert.deepEqual((result.data as any).scope.source_anomalies, ['invalid_source_timestamps']);
+  assert.equal(Object.hasOwn(result.data as object, 'max_observed_updated_at'), false);
 });
 
 test('malformed rows and source over-return are capped and flagged without returning row data', async () => {
