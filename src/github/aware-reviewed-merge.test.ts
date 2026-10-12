@@ -7,9 +7,12 @@ Object.assign(process.env, {
   CIO_SITE_ID: 'synthetic-site', CIO_TRACK_KEY: 'synthetic-track', CIO_APP_API_BEARER: 'synthetic-bearer',
   PERPLEXITY_CONNECTOR_TOKEN: `synthetic-${'a'.repeat(40)}`, ADMIN_REVOKE_TOKEN: `synthetic-${'b'.repeat(40)}`,
   N8N_WEBHOOK_SECRET: `synthetic-${'c'.repeat(40)}`, GITHUB_APP_ID: '15368', GITHUB_APP_INSTALLATION_ID: '789', GITHUB_APP_PRIVATE_KEY: privateKey,
+  ENABLE_WRITE_TOOLS: 'true', READ_ONLY_MODE: 'false', SHIELD_MODE: 'off', COLD_START_MODE: 'off', TOOL_CATALOG_CURATION_MODE: 'off',
 });
 
 const { mergePullRequest } = await import('./api-client.js');
+const { registerGitHubMergePullRequest } = await import('../tools/github/merge-pull-request.js');
+const { requestContext } = await import('../server/request-context.js');
 const owner = 'InnerScopeHearing';
 const repo = 'aware-aural-rehab';
 const head = '25ee4f3f5f379c1822dec234549f4559778cf8a4';
@@ -20,7 +23,7 @@ function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 }
 
-function fixture(options: { number?: number; reviewedHead?: string; draft?: boolean; head?: string; failed?: string; includeChecks?: boolean; readyMismatch?: boolean; postReadyHead?: string; wrongApp?: boolean; duplicateCheck?: boolean; closed?: boolean; wrongBase?: boolean; wrongNode?: boolean; wrongGraphQLNode?: boolean; wrongRepository?: boolean; wrongNumber?: boolean; graphqlFailure?: boolean; protectionMissing?: boolean; protectionWrongApp?: boolean; wrongCheckHead?: boolean; totalCount?: number } = {}) {
+function fixture(options: { number?: number; reviewedHead?: string; draft?: boolean; head?: string; failed?: string; includeChecks?: boolean; readyMismatch?: boolean; postReadyHead?: string; wrongApp?: boolean; duplicateCheck?: boolean; closed?: boolean; wrongBase?: boolean; wrongNode?: boolean; emptyNode?: boolean; wrongGraphQLNode?: boolean; wrongRepository?: boolean; wrongNumber?: boolean; graphqlFailure?: boolean; protectionMissing?: boolean; protectionWrongApp?: boolean; protectionExtra?: boolean; malformedReadyDraft?: boolean; wrongCheckHead?: boolean; totalCount?: number } = {}) {
   const events: string[] = [];
   const urls: string[] = [];
   const mergeBodies: unknown[] = [];
@@ -34,7 +37,7 @@ function fixture(options: { number?: number; reviewedHead?: string; draft?: bool
     if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return response({ token: 'ghs_fake', expires_at: new Date(Date.now() + 3600_000).toISOString() }, 201);
     if (url.includes(`/pulls/${prNumber}`) && !url.endsWith('/merge') && init?.method === 'GET') {
       events.push('pr'); prReads++;
-      return response({ number: options.wrongNumber ? prNumber + 1 : prNumber, state: options.closed ? 'closed' : 'open', merged: false, draft: prReads === 1 ? (options.draft ?? true) : (options.readyMismatch ?? false), base: { ref: options.wrongBase ? 'release' : 'main', repo: { full_name: options.wrongRepository ? 'other/repo' : `${owner}/${repo}` } }, head: { sha: prReads > 1 ? (options.postReadyHead ?? options.head ?? reviewedHead) : (options.head ?? reviewedHead) }, node_id: options.wrongNode ? 'OTHER_PR' : 'PR_node' });
+      return response({ number: options.wrongNumber ? prNumber + 1 : prNumber, state: options.closed ? 'closed' : 'open', merged: false, draft: prReads === 1 ? (options.draft ?? true) : (options.malformedReadyDraft ? null : (options.readyMismatch ?? false)), base: { ref: options.wrongBase ? 'release' : 'main', repo: { full_name: options.wrongRepository ? 'other/repo' : `${owner}/${repo}` } }, head: { sha: prReads > 1 ? (options.postReadyHead ?? options.head ?? reviewedHead) : (options.head ?? reviewedHead) }, node_id: options.emptyNode ? '' : (options.wrongNode ? 'OTHER_PR' : 'PR_node') });
     }
     if (url.includes('/check-runs')) {
       events.push('checks');
@@ -44,7 +47,8 @@ function fixture(options: { number?: number; reviewedHead?: string; draft?: bool
     }
     if (url.endsWith('/branches/main/protection')) {
       events.push('protection');
-      return response({ required_status_checks: { strict: false, contexts: options.protectionMissing ? required.slice(1) : required, checks: options.protectionWrongApp ? [{ context: required[0], app_id: 9 }] : [] } });
+      const contexts = options.protectionMissing ? required.slice(1) : [...required, ...(options.protectionExtra ? ['unexpected check'] : [])];
+      return response({ required_status_checks: { strict: false, contexts, checks: (options.protectionWrongApp ? required.map((context) => ({ context, app_id: 9 })) : contexts.map((context) => ({ context, app_id: 15368 }))) } });
     }
     if (url.endsWith('/graphql')) {
       events.push('ready');
@@ -104,6 +108,32 @@ test('non-approved repository keeps the existing generic merge attempt', async (
   assert.deepEqual(f.events, ['merge']);
 });
 
+test('registered tool passes CTO identity only, and dry-run remains network-free', async () => {
+  type Handler = (args: any) => Promise<any>;
+  let handler: Handler | undefined;
+  const server = { registerTool(_name: string, _config: unknown, candidate: Handler) { handler = candidate; return { remove() {} }; } } as any;
+  registerGitHubMergePullRequest(server, () => 'synthetic-caller');
+  assert.ok(handler);
+  const dry = fixture();
+  await withFetch(dry.fetchStub, async () => {
+    await requestContext.run({ callerHash: 'synthetic-caller', correlationId: 'synthetic-dry-run', callerAgent: 'cto' } as any, () => handler!({ owner, repo, number: 165, method: 'squash', dry_run: true }));
+  });
+  assert.deepEqual(dry.events, []);
+
+  const cto = fixture();
+  await withFetch(cto.fetchStub, async () => {
+    await requestContext.run({ callerHash: 'synthetic-caller', correlationId: 'synthetic-cto', callerAgent: 'cto' } as any, () => handler!({ owner, repo, number: 165, method: 'squash', dry_run: false }));
+  });
+  assert.ok(cto.events.includes('ready'));
+
+  const nonCto = fixture();
+  await withFetch(nonCto.fetchStub, async () => {
+    const result = await requestContext.run({ callerHash: 'synthetic-caller', correlationId: 'synthetic-noncto', callerAgent: 'inner_scope_hearing' } as any, () => handler!({ owner, repo, number: 165, method: 'squash', dry_run: false }));
+    assert.match(JSON.stringify(result), /forbidden_role|not authorized/i);
+  });
+  assert.deepEqual(nonCto.events, []);
+});
+
 for (const [label, options] of [
   ['wrong reviewed head', { head: 'stale-sha' }],
   ['failed required check', { failed: 'a11y' }],
@@ -115,6 +145,7 @@ for (const [label, options] of [
   ['closed pull request', { closed: true }],
   ['wrong base branch', { wrongBase: true }],
   ['wrong PR node identity', { wrongNode: true }],
+  ['empty PR node identity', { emptyNode: true }],
   ['wrong GraphQL PR identity', { wrongGraphQLNode: true }],
   ['wrong returned PR number', { wrongNumber: true }],
   ['wrong returned repository identity', { wrongRepository: true }],
@@ -122,6 +153,8 @@ for (const [label, options] of [
   ['incomplete paginated checks', { totalCount: 7 }],
   ['missing protected context', { protectionMissing: true }],
   ['wrong protected-check App', { protectionWrongApp: true }],
+  ['extra protected context', { protectionExtra: true }],
+  ['malformed ready draft state', { malformedReadyDraft: true }],
   ['GraphQL readiness failure', { graphqlFailure: true }],
 ] as const) {
   test(`reviewed merge fails closed on ${label}`, async () => {
