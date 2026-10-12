@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setupCallTimeoutMs, AgentCoreBrowserTransportError, cdpCommandEnvelope, evaluatedResult } from './transport.js';
+import { setupCallTimeoutMs, AgentCoreBrowserTransportError, agentCoreRuntimeConfig, AwsAgentCorePublicReadOnlyTransport, cdpCommandEnvelope, evaluatedResult } from './transport.js';
 
 // FND-20260829-e454: browser_broker_inspect_public's transport had ~75s of independent setup-step
 // timeouts (session start 20s + CDP connect 15s + Target.getTargets 20s + Target.attachToTarget
@@ -24,6 +24,16 @@ test('setupCallTimeoutMs: throws provider_timeout immediately (no doomed call at
       `remaining=${remaining} must throw provider_timeout, not attempt a call with a non-positive timeout`,
     );
   }
+});
+
+test('transport rejects unsupported initial targets before provider configuration or session setup', async () => {
+  const transport = new AwsAgentCorePublicReadOnlyTransport(agentCoreRuntimeConfig({
+    ENABLE_AGENTCORE_WEFUNDER_PUBLIC_READONLY: 'false',
+  }));
+  await assert.rejects(
+    transport.inspect([new URL('https://docs.aws.amazon.com/')], 5),
+    (error: unknown) => error instanceof AgentCoreBrowserTransportError && error.code === 'target_not_allowed',
+  );
 });
 
 test('setupCallTimeoutMs: this is the SAME policy for every setup step -- a caller composes it identically for the 20s/15s/20s/20s ceilings (session start/connect/getTargets/attachToTarget)', () => {

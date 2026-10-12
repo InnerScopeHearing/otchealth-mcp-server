@@ -79,7 +79,7 @@ export function registerAgentCoreBrowserBrokerTools(server: McpServer, callerHas
         return { data: { mode: 'busy', error: 'profile_in_use' }, summary: 'Refused: this enrolled browser identity already has an active lease.' };
       }
       try {
-        const result = await transport.inspect(targets.urls, input.max_seconds ?? DEFAULT_INSPECT_SECONDS);
+        const result = await transport.inspect(targets.urls, input.max_seconds ?? DEFAULT_INSPECT_SECONDS, enrollment.allowedHosts);
         const data: Record<string, unknown> = { mode: 'public_read', receipts: result.receipts };
         if (result.partial) {
           data.partial = true;

@@ -19,7 +19,7 @@ export interface InspectResult {
 }
 
 export interface AgentCoreBrowserTransport {
-  inspect(targets: URL[], maxSeconds: number): Promise<InspectResult>;
+  inspect(targets: URL[], maxSeconds: number, allowedHosts?: readonly string[]): Promise<InspectResult>;
 }
 
 export class AgentCoreBrowserTransportError extends Error {
@@ -375,7 +375,12 @@ export class AwsAgentCorePublicReadOnlyTransport implements AgentCoreBrowserTran
    * and returns what it already has, `partial:true`, and the untouched targets named in
    * `skipped_targets`.
    */
-  async inspect(targets: URL[], maxSeconds: number): Promise<InspectResult> {
+  async inspect(targets: URL[], maxSeconds: number, allowedHosts?: readonly string[]): Promise<InspectResult> {
+    const initialTargets = validatePublicTargets(targets.map((target) => target.toString()), allowedHosts);
+    if (!initialTargets.ok) {
+      throw new AgentCoreBrowserTransportError('target_not_allowed', 'An initial public target is outside the strict browser allowlist.', 'No browser session was created.');
+    }
+    targets = initialTargets.urls;
     assertAgentCoreConfigured(this.config);
     const started = Date.now();
     const deadline = started + Math.max(1, maxSeconds) * 1000;
@@ -414,7 +419,7 @@ export class AwsAgentCorePublicReadOnlyTransport implements AgentCoreBrowserTran
         await socket.request('Page.navigate', { url: target.toString() }, Math.min(remaining, 20_000), pageSessionId);
         await sleep(Math.min(750, Math.max(1, remainingMs())));
         const inspected = evaluatedResult(await socket.request('Runtime.evaluate', { expression: "JSON.stringify({title:document.title,url:location.href,status:performance.getEntriesByType('navigation')[0]?.responseStatus ?? null})", returnByValue: true }, Math.min(Math.max(1, remainingMs()), 20_000), pageSessionId));
-        if (!inspected.url || !validatePublicTargets([inspected.url]).ok) {
+        if (!inspected.url || !validatePublicTargets([inspected.url], allowedHosts).ok) {
           throw new AgentCoreBrowserTransportError('redirect_outside_allowlist', 'A public target redirected outside the strict browser allowlist.', 'No page content or external destination was returned.');
         }
         receipts.push(redactedReceipt(target, inspected.status, inspected.title, inspected.url, false));
@@ -439,7 +444,7 @@ export class AwsAgentCorePublicReadOnlyTransport implements AgentCoreBrowserTran
 
 /** Retained for deterministic disabled-runtime tests only; production registration uses AwsAgentCorePublicReadOnlyTransport. */
 export class UnconfiguredAgentCoreBrowserTransport implements AgentCoreBrowserTransport {
-  async inspect(_targets: URL[], _maxSeconds: number): Promise<InspectResult> {
+  async inspect(_targets: URL[], _maxSeconds: number, _allowedHosts?: readonly string[]): Promise<InspectResult> {
     throw new AgentCoreBrowserTransportError('runtime_adapter_unconfigured', 'AgentCore policy passed, but the session transport is intentionally not configured.', 'Complete the reviewed transport deployment before enabling public inspection; no browser session was created.');
   }
 }

@@ -50,7 +50,7 @@ function withCaller<T>(callerAgent: string, fn: () => T): T {
   return requestContext.run({ callerHash: 'test-hash', correlationId: 'test-corr', callerAgent }, fn);
 }
 
-function fakeTransport(inspect: (targets: URL[], maxSeconds: number) => Promise<InspectResult>): AgentCoreBrowserTransport {
+function fakeTransport(inspect: (targets: URL[], maxSeconds: number, allowedHosts?: readonly string[]) => Promise<InspectResult>): AgentCoreBrowserTransport {
   return { inspect };
 }
 
@@ -152,9 +152,11 @@ test('browser_broker_inspect_public: Developer docs.aws target reaches transport
   const { server, handlers } = fakeServer();
   let transportCalls = 0;
   let receivedTargets: URL[] = [];
-  registerAgentCoreBrowserBrokerTools(server, () => 'caller-hash', fakeTransport(async (targets) => {
+  let receivedAllowedHosts: readonly string[] | undefined;
+  registerAgentCoreBrowserBrokerTools(server, () => 'caller-hash', fakeTransport(async (targets, _maxSeconds, allowedHosts) => {
     transportCalls += 1;
     receivedTargets = targets;
+    receivedAllowedHosts = allowedHosts;
     return { receipts: [], partial: false };
   }));
   const handler = handlers.get('browser_broker_inspect_public')!;
@@ -164,6 +166,12 @@ test('browser_broker_inspect_public: Developer docs.aws target reaches transport
   assert.equal(transportCalls, 1);
   assert.equal(receivedTargets.length, 1);
   assert.equal(receivedTargets[0]?.hostname, 'docs.aws.amazon.com');
+  assert.deepEqual(receivedAllowedHosts, [
+    'docs.aws.amazon.com',
+    'docs.github.com',
+    'developers.openai.com',
+    'example.com',
+  ]);
 
   const unsupported = await withCaller('developer', () => handler({ targets: ['https://aws.amazon.com/'] }));
   assert.equal((unsupported.structuredContent?.result as Record<string, unknown>).error, 'target_not_enrolled');
