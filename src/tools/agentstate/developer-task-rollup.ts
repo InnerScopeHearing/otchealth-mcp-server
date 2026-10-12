@@ -104,6 +104,15 @@ export async function handleDeveloperTaskRollup(
         filteredRows++;
         continue;
       }
+      // Timestamp observation describes valid rows present on the page, including duplicates that
+      // are excluded from count membership. Otherwise a later duplicate could be silently missed.
+      const updatedMs = Date.parse(task.updated_at);
+      if (Number.isFinite(updatedMs) && updatedMs > latestUpdatedMs) {
+        latestUpdatedMs = updatedMs;
+        latestUpdatedAt = task.updated_at;
+      } else if (!Number.isFinite(updatedMs)) {
+        invalidTimestamps++;
+      }
       if (seenIds.has(task.id)) {
         duplicateIds++;
         if (seenIds.get(task.id) !== task.status) {
@@ -130,13 +139,6 @@ export async function handleDeveloperTaskRollup(
       group.task_ids.push(task.id);
       groups.set(status, group);
 
-      const updatedMs = Date.parse(task.updated_at);
-      if (Number.isFinite(updatedMs) && updatedMs > latestUpdatedMs) {
-        latestUpdatedMs = updatedMs;
-        latestUpdatedAt = task.updated_at;
-      } else if (!Number.isFinite(updatedMs)) {
-        invalidTimestamps++;
-      }
     }
 
     const sourceAnomalies = [

@@ -143,7 +143,8 @@ test('foreign owner, board, or personal rows are omitted and make page completen
 
 test('duplicate task IDs are counted once and flagged as source anomaly', async () => {
   const result = await handleDeveloperTaskRollup({}, { callerAgent: 'developer' }, deps([
-    task({ id: 'same_id', status: 'open' }), task({ id: 'same_id', status: 'open' }),
+    task({ id: 'same_id', status: 'open', updated_at: '2026-10-11T00:00:00.000Z' }),
+    task({ id: 'same_id', status: 'open', updated_at: '2026-10-12T00:00:00.000Z' }),
   ]));
   assert.equal((result.data as any).scope.returned_count, 1);
   assert.deepEqual((result.data as any).scope.source_anomalies, ['duplicate_source_ids']);
@@ -151,6 +152,7 @@ test('duplicate task IDs are counted once and flagged as source anomaly', async 
   assert.deepEqual((result.data as any).status_counts.find((row: any) => row.status === 'open'), {
     status: 'open', count: 1, task_ids: ['same_id'],
   });
+  assert.equal((result.data as any).max_observed_updated_at, '2026-10-12T00:00:00.000Z');
 });
 
 test('conflicting duplicate statuses are excluded from both counts and invalid timestamps are flagged', async () => {
