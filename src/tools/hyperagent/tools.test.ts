@@ -605,6 +605,8 @@ test('list_threads omits denied, conflicting, and ownerless title and content', 
   assert.equal(result.count, 1);
   assert.equal(result.total_upstream, 4);
   assert.equal(result.omitted, 3);
+  assert.equal(result.page_scope, 'observed_page');
+  assert.equal(result.continuation_metadata_verified, false);
   assert.deepEqual(calls.map((call) => call.name), ['list_threads']);
   const visible = JSON.stringify(response);
   for (const marker of [
@@ -615,6 +617,79 @@ test('list_threads omits denied, conflicting, and ownerless title and content', 
     'ownerless-title-9d2',
     'ownerless-content-9d2',
   ]) assert.equal(visible.includes(marker), false, marker);
+});
+
+test('list_threads forwards one bounded cursor page and labels it as observed only', async () => {
+  const page = [{ id: 'thread-page-1', namedAgentId: 'agent-general' }];
+  const { transport, calls } = fakeTransport(async (name, args) => {
+    assert.equal(name, 'list_threads');
+    assert.deepEqual(args, { cursor: 'opaque-synthetic-cursor', limit: 37 });
+    return { ok: true, status: 200, data: { threads: page, nextCursor: 'synthetic-next-cursor' } };
+  });
+  const { server, tools } = fakeServer();
+  registerHyperagentTools(server, () => 'synthetic-hash', transport);
+
+  const response = await invoke(tools.get('hyperagent_list_threads')!, {
+    cursor: 'opaque-synthetic-cursor',
+    limit: 37,
+  });
+
+  const result = resultOf(response);
+  assert.deepEqual(result.threads, page);
+  assert.equal(result.count, 1);
+  assert.equal(result.total_upstream, 1);
+  assert.equal(result.omitted, 0);
+  assert.equal(result.page_scope, 'observed_page');
+  assert.equal(result.continuation_metadata_verified, false);
+  assert.equal(Object.hasOwn(result, 'nextCursor'), false);
+  assert.deepEqual(calls, [{ name: 'list_threads', args: { cursor: 'opaque-synthetic-cursor', limit: 37 } }]);
+});
+
+test('list_threads defaults to the bounded page size and refuses invalid paging inputs before dispatch', async () => {
+  const { transport, calls } = fakeTransport(async () => ({ ok: true, status: 200, data: [] }));
+  const { server, tools } = fakeServer();
+  registerHyperagentTools(server, () => 'synthetic-hash', transport);
+
+  const defaultPage = await invoke(tools.get('hyperagent_list_threads')!, {});
+  assert.equal(resultOf(defaultPage).page_scope, 'observed_page');
+  assert.equal(resultOf(defaultPage).continuation_metadata_verified, false);
+  assert.deepEqual(calls, [{ name: 'list_threads', args: { limit: 100 } }]);
+
+  for (const invalid of [
+    { cursor: '   ' },
+    { cursor: 'x'.repeat(513) },
+    { limit: 0 },
+    { limit: 101 },
+    { limit: 1.5 },
+  ]) {
+    const response = await invoke(tools.get('hyperagent_list_threads')!, invalid);
+    assert.notEqual(resultOf(response).error, undefined, JSON.stringify(invalid));
+    assert.equal(calls.length, 1, JSON.stringify(invalid));
+  }
+});
+
+test('list_threads fails closed on malformed provider collections instead of reporting an empty page', async () => {
+  for (const malformed of [
+    { unexpected: [] },
+    { threads: 'not-an-array', privateMarker: 'synthetic-provider-detail' },
+    { threads: [{ id: 'thread-without-owner', privateMarker: 'synthetic-ownerless-detail' }] },
+  ]) {
+    const { transport, calls } = fakeTransport(async () => ({ ok: true, status: 200, data: malformed }));
+    const { server, tools } = fakeServer();
+    registerHyperagentTools(server, () => 'synthetic-hash', transport);
+
+    const response = await invoke(tools.get('hyperagent_list_threads')!, {});
+    const result = resultOf(response);
+
+    assert.deepEqual(result.threads, []);
+    assert.equal(result.count, 0);
+    assert.equal(result.error, 'malformed_provider_response');
+    assert.equal(Object.hasOwn(result, 'page_scope'), false);
+    assert.equal(Object.hasOwn(result, 'continuation_metadata_verified'), false);
+    assert.deepEqual(calls.map(call => call.name), ['list_threads']);
+    assert.equal(JSON.stringify(response).includes('synthetic-provider-detail'), false);
+    assert.equal(JSON.stringify(response).includes('synthetic-ownerless-detail'), false);
+  }
 });
 
 test('dedicated source read is allowed while CTO read of identical payload stays denied', async () => {
