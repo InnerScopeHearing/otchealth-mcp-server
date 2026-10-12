@@ -643,21 +643,39 @@ export function registerHyperagentTools(
         idempotentHint: true,
         openWorldHint: true,
       },
-      inputShape: {},
+      inputShape: {
+        cursor: z.string().min(1).max(512).refine(value => value.trim().length > 0).optional()
+          .describe('Opaque provider cursor for the requested page, when available.'),
+        limit: z.number().int().min(1).max(100).default(100)
+          .describe('Maximum threads requested for this page (1-100).'),
+      },
       outputShape: {
         threads: z.array(z.unknown()),
         count: z.number(),
         total_upstream: z.number().optional(),
         omitted: z.number().optional(),
         error: z.string().optional(),
+        page_scope: z.literal('observed_page').optional(),
+        continuation_metadata_verified: z.literal(false).optional(),
       },
-      handler: async (_input, ctx) => {
+      handler: async (input, ctx) => {
         if (!transport.configured()) return unconfigured('listing threads');
         const caller = ctx.callerAgent || '';
-        const res = await transport.call('list_threads', {});
+        const upstreamArgs: Record<string, unknown> = { limit: input.limit };
+        if (input.cursor !== undefined) upstreamArgs.cursor = input.cursor;
+        const res = await transport.call('list_threads', upstreamArgs);
         if (!res.ok) return { data: { threads: [], count: 0, error: res.error ?? 'provider_error' }, summary: `list_threads failed: ${res.error}.` };
 
-        const raw = Array.isArray(res.data) ? res.data : ((res.data as { threads?: unknown[] } | null)?.threads ?? []);
+        const envelope = plainRecord(res.data);
+        const raw = Array.isArray(res.data)
+          ? res.data
+          : envelope && Object.hasOwn(envelope, 'threads') ? envelope.threads : undefined;
+        if (!Array.isArray(raw)) {
+          return {
+            data: { threads: [], count: 0, error: 'malformed_provider_response' },
+            summary: 'list_threads returned an unsupported response shape.',
+          };
+        }
         const { laneMap, classMap } = maps();
         const visible = (raw as unknown[]).filter((t) => {
           const ownerId = ownerAgentIdOf(t);
@@ -670,6 +688,8 @@ export function registerHyperagentTools(
             count: visible.length,
             total_upstream: (raw as unknown[]).length,
             omitted: (raw as unknown[]).length - visible.length,
+            page_scope: 'observed_page' as const,
+            continuation_metadata_verified: false as const,
           },
           summary: `${visible.length} of ${(raw as unknown[]).length} thread(s) visible to lane "${caller || '(none)'}".`,
         };
