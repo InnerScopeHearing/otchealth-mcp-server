@@ -111,6 +111,7 @@ const PUBLIC_KB_COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'dev
 
 /** Exact read-only project/build and subscription-configuration metadata needed by Developer. */
 export const DEVELOPER_SETUP_TOOLSET: readonly string[] = [
+  'developer_task_rollup',
   'depot_list_projects', 'depot_project_get', 'depot_workflow_list',
   'depot_run_list', 'depot_run_get', 'depot_run_status_get', 'depot_run_metrics_get',
   'revenuecat_list_projects', 'revenuecat_project_get',

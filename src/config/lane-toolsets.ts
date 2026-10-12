@@ -230,6 +230,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // developer's (see kb/search-privileged.ts's ring model).
   developer: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    'developer_task_rollup',
     ...GITHUB_OPERATOR_TOOLSET,
     'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', '!github_workflow_run_failed_log_excerpt', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
     ...HEYGEN,

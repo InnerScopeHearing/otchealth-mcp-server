@@ -223,6 +223,14 @@ test('(b) developer lane gets the full ship-lane set', () => {
   assert.ok(set.has('brain_public_kb_search'));
 });
 
+test('developer_task_rollup is bound only to the Developer connector', () => {
+  const env = { ...testEnv(), CONNECTOR_TOOLSET: undefined };
+  assert.equal(connectorToolset(env, 'developer').has('developer_task_rollup'), true);
+  for (const lane of ['cto', 'cfo', 'clo', 'clo-personal', 'coo', 'cro', 'exec', 'external-readonly']) {
+    assert.equal(connectorToolset(env, lane).has('developer_task_rollup'), false, lane);
+  }
+});
+
 test('every named company lane advertises the exact bounded GitHub operator surface', () => {
   const env = testEnv();
   for (const lane of COMPANY_GITHUB_OPERATOR_LANES) {
