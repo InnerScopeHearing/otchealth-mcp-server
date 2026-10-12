@@ -36,8 +36,8 @@ function defaultConnectorEnv(): Env {
   return { ...loadEnv(), CONNECTOR_TOOLSET: '' };
 }
 
-test('default Developer connector exposes the exact Depot and RevenueCat setup metadata tools', () => {
-  assert.deepEqual(DEVELOPER_SETUP_TOOLSET, [...DEPOT_SETUP_TOOLS, ...REVENUECAT_SETUP_TOOLS]);
+test('default Developer connector exposes the exact task rollup, Depot and RevenueCat metadata tools', () => {
+  assert.deepEqual(DEVELOPER_SETUP_TOOLSET, ['developer_task_rollup', ...DEPOT_SETUP_TOOLS, ...REVENUECAT_SETUP_TOOLS]);
   const tools = connectorToolset(defaultConnectorEnv(), 'developer');
   for (const name of DEVELOPER_SETUP_TOOLSET) assert.equal(tools.has(name), true, name);
 

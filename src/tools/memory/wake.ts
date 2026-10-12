@@ -227,10 +227,11 @@ export function buildStartupCompactWake(full: WakeFullData): Record<string, unkn
   );
   const projectTask = (record: Record<string, unknown>) => {
     const authorized = projectTaskForCaller(record as never, full.agent) as unknown as Record<string, unknown>;
-    const out = { ...authorized };
+    const out = projectMemory(authorized);
+    const source = projectMemory(record);
     // Preserve every field task_get already authorizes. Only label detail withheld by the
     // immutable-reader projection; compact mode never silently omits authorized task content.
-    if (Object.keys(record).some((key) => !Object.hasOwn(authorized, key))) {
+    if (Object.keys(source).some((key) => !Object.hasOwn(out, key))) {
       out.details_omitted = true;
       out.full_fetch_required_before_action = true;
     }
@@ -793,6 +794,9 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         }
         if (compact && isM365StaticAuth()) {
           return { data: { agent: 'developer', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['unsupported_view: developer_compact is unavailable for M365 static-auth callers.'], doctrine: buildDoctrine() }, summary: 'wake: developer_compact is unsupported for M365 static-auth callers; use the existing M365 wake view.', compactText: true };
+        }
+        if (compact && input.brief === true) {
+          return { data: { agent: 'developer', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['invalid_view: developer_compact and brief cannot be combined.'], doctrine: buildDoctrine() }, summary: 'wake: choose developer_compact or brief, not both.', compactText: true };
         }
         const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
         if (!scope) {

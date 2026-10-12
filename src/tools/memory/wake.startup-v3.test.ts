@@ -84,6 +84,9 @@ test('registered compact view rejects non-Developer and M365 callers before read
   assert.match(JSON.stringify(forbidden), /authenticated Developer identity required/);
   const staticAuth = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer', m365StaticAuth: true }, () => handler!({ view: 'developer_compact' }));
   assert.match(JSON.stringify(staticAuth), /unsupported_view/);
+  const combined = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'developer' }, () => handler!({ view: 'developer_compact', brief: true }));
+  assert.match(JSON.stringify(combined), /invalid_view/);
+  assert.match(JSON.stringify(combined), /cannot be combined/);
 });
 
 test('compact text serialization is opt-in and keeps structured data unchanged', () => {
@@ -93,4 +96,16 @@ test('compact text serialization is opt-in and keeps structured data unchanged',
   assert.match(standard, /\n  "field"/);
   assert.equal(compact, '{"field":"a value","nested":{"item":1}}\n\nsummary');
   assert.deepEqual(JSON.parse(compact.split('\n\n')[0]), value.data);
+});
+
+
+test('compact tasks remove only bookkeeping and do not label storage-key removal as hidden detail', () => {
+  const full = make();
+  Object.assign(full.tasks.active[0], { _rid: 'synthetic-task-rid', _self: 'synthetic-self', _etag: 'synthetic-etag', _attachments: 'synthetic-attachments', _ts: 123 });
+  const task = (buildStartupCompactWake(full) as any).tasks.active[0];
+  for (const key of ['_rid', '_self', '_etag', '_attachments', '_ts']) assert.equal(Object.hasOwn(task, key), false);
+  assert.equal(Object.hasOwn(task, 'details_omitted'), false);
+  assert.equal(Object.hasOwn(task, 'full_fetch_required_before_action'), false);
+  assert.equal(task.description, full.tasks.active[0].description);
+  assert.deepEqual(task.notes, full.tasks.active[0].notes);
 });

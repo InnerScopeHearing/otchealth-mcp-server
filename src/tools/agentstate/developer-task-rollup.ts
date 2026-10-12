@@ -55,10 +55,9 @@ export async function handleDeveloperTaskRollup(
   deps: DeveloperTaskRollupDeps = DEFAULT_DEPS,
 ): Promise<ToolResultPayload> {
   try {
-    if (!deps.isConfigured()) return unavailable('ledger_not_configured');
-
     const owner = (ctx.callerAgent || '').trim().toLowerCase();
     if (owner !== 'developer') return unavailable('caller_not_authorized');
+    if (!deps.isConfigured()) return unavailable('ledger_not_configured');
     const requestedLimit = input.limit ?? DEFAULT_LIMIT;
     const requestedBoard = input.board === undefined ? 'fleet' : input.board.trim().toLowerCase();
     if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_LIMIT ||

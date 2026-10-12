@@ -194,3 +194,16 @@ test('malformed rows and source over-return are capped and flagged without retur
   });
   assert.equal(JSON.stringify(result).includes('bad row'), false);
 });
+
+
+test('unauthorized callers cannot inspect or execute provider configuration', async () => {
+  for (const configured of [false, true]) {
+    let calls = 0;
+    const result = await handleDeveloperTaskRollup({}, { callerAgent: 'cfo' }, {
+      isConfigured: () => { calls++; return configured; },
+      listTasks: async () => { throw new Error('must not query'); },
+    });
+    assert.deepEqual(result.data, { available: false, error: 'caller_not_authorized' });
+    assert.equal(calls, 0);
+  }
+});
