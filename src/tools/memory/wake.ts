@@ -6,11 +6,12 @@ import {
   readSharedAll,
   readInbound,
   readReconcileMarker,
+  normalizeAgent,
   type MemoryEntry,
 } from '../../memory/store.js';
 import { searchMemory } from '../../agentstate/memory.js';
-import { listTasks } from '../../agentstate/ledger.js';
-import { canReadPersonalTasks, taskVisibleToCaller } from '../agentstate/task-read-access.js';
+import { listTasks, type Task } from '../../agentstate/ledger.js';
+import { canReadPersonalTasks, projectTaskForCaller, taskVisibleToCaller } from '../agentstate/task-read-access.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
 type TaskStatus = (typeof TASK_STATUSES)[number];
 import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
@@ -199,6 +200,59 @@ export interface WakeFullData {
   inbound: WakeInbound;
   errors: string[];
   doctrine: Doctrine;
+}
+
+/** Developer-only compact view. Operative text remains complete; task detail fields already
+ * available through task_get are omitted with an explicit fetch-before-action marker. */
+export function buildDeveloperCompactWake(full: WakeFullData): Record<string, unknown> {
+  const sharedIds = new Set<string>();
+  for (const rec of [full.pack.status, ...full.pack.corrections, ...full.pack.decisions]) {
+    const id = rec?.['id'];
+    if (typeof id === 'string') sharedIds.add(id);
+  }
+
+  const projectMemory = (rec: Record<string, unknown>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const key of [
+      'id', 'kind', 'text', 'source', 'agent', 'date', 'timestamp', 'created_at', 'updated_at',
+      'supersedes', 'truncated', '_text_truncated', 'text_truncated',
+    ]) {
+      if (Object.hasOwn(rec, key)) out[key] = rec[key];
+    }
+    return out;
+  };
+  const projectTask = (rec: Record<string, unknown>): Record<string, unknown> => {
+    const authorized = projectTaskForCaller(rec as unknown as Task, full.agent) as unknown as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of [
+      'id', 'board', 'type', 'owner_agent', 'status', 'priority', 'created_at', 'updated_at',
+      'claim_ts', 'lease_until', 'lease_version', 'done_ts', 'attempt_count',
+      'blocked_by', 'blocker', 'dependencies', 'title', 'artifact_uri',
+    ]) {
+      if (Object.hasOwn(authorized, key)) out[key] = authorized[key];
+    }
+    out.details_omitted = true;
+    out.full_fetch_required_before_action = true;
+    return out;
+  };
+
+  return {
+    agent: full.agent,
+    view: 'developer_compact',
+    pack: {
+      ...full.pack,
+      status: full.pack.status,
+      corrections: full.pack.corrections,
+      decisions: full.pack.decisions,
+      recent: full.pack.recent.filter((rec) => typeof rec['id'] !== 'string' || !sharedIds.has(rec['id'])),
+    },
+    memory_records: full.memory_records.map(projectMemory),
+    tasks: { ...full.tasks, active: full.tasks.active.map(projectTask) },
+    inbox: { ...full.inbox, preview: full.inbox.preview },
+    inbound: { ...full.inbound, notes: full.inbound.notes },
+    errors: full.errors,
+    doctrine: full.doctrine,
+  };
 }
 
 /** Cosmos/CosmosDB internal bookkeeping fields (_rid/_self/_etag/_attachments/_ts) that ride along
@@ -708,6 +762,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       },
       inputShape: {
         agent: z.string().optional().describe('Agent lane to wake. Authenticated calls default to and may select only their token identity (lowercase id, e.g. "cto").'),
+        view: z.enum(['developer_compact']).optional().describe('Opt into the compact startup response. Available only to an authenticated Developer lane caller; unsupported for M365 static-auth clients.'),
         recent_limit: z.number().int().min(1).max(40).optional().describe('Max recent shared-feed entries (default 10).'),
         memory_limit: z.number().int().min(1).max(40).optional().describe('Max agent-state memory-of-record entries (default 12).'),
         task_limit: z.number().int().min(1).max(50).optional().describe('Max active tasks (default 15).'),
@@ -720,6 +775,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       },
       outputShape: {
         agent: z.string(),
+        view: z.string().optional(),
         pack: z.unknown(),
         memory_records: z.array(z.unknown()),
         tasks: z.unknown(),
@@ -729,6 +785,22 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         doctrine: z.unknown(),
       },
       handler: async (input, ctx) => {
+        const developerCompact = input.view === 'developer_compact';
+        if (developerCompact) {
+          let authenticatedDeveloper = false;
+          try {
+            authenticatedDeveloper = Boolean(ctx.callerAgent) && normalizeAgent(ctx.callerAgent) === 'developer';
+          } catch {
+            authenticatedDeveloper = false;
+          }
+          if (!authenticatedDeveloper) {
+            return {
+              data: { agent: '', view: 'developer_compact', pack: null, memory_records: [], tasks: null,
+                inbox: null, inbound: null, errors: ['forbidden_view: authenticated Developer identity required.'], doctrine: buildDoctrine() },
+              summary: 'wake: developer_compact requires an authenticated Developer caller.',
+            };
+          }
+        }
         const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
         if (!scope) {
           return {
@@ -753,6 +825,13 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           };
         }
         const agent = scope.agent;
+        if (developerCompact && isM365StaticAuth()) {
+          return {
+            data: { agent, view: 'developer_compact', pack: null, memory_records: [], tasks: null,
+              inbox: null, inbound: null, errors: ['unsupported_view: developer_compact is unavailable for M365 static-auth callers.'], doctrine: buildDoctrine() },
+            summary: 'wake: developer_compact is unsupported for M365 static-auth callers; use the existing M365 wake view.',
+          };
+        }
         const recentLimit = input.recent_limit ?? 10;
         const memoryLimit = input.memory_limit ?? 12;
         const taskLimit = input.task_limit ?? 15;
@@ -763,7 +842,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         // reads (isM365StaticAuth() + input.brief), no async dependency, so moving them earlier has
         // no cost and no behavior change for non-brief/non-M365-lite callers.
         const m365Lite = isM365StaticAuth();
-        const brief = !m365Lite && (input.brief ?? false);
+        const brief = !developerCompact && !m365Lite && (input.brief ?? false);
 
         // Fetched ONCE and shared by packP + the doctrine pitfall digest below, so doctrine never
         // doubles the shared-feed network fetch.
@@ -778,10 +857,10 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           const recent = mine.slice(0, recentLimit);
           return {
             configured: true,
-            status: status ? capText(status as unknown as Record<string, unknown>) : null,
-            corrections: corrections.map((c) => capText(c as unknown as Record<string, unknown>)),
-            decisions: decisions.map((d) => capText(d as unknown as Record<string, unknown>)),
-            recent: recent.map((r) => capText(r as unknown as Record<string, unknown>)),
+            status: status ? (developerCompact ? status : capText(status as unknown as Record<string, unknown>)) : null,
+            corrections: corrections.map((c) => developerCompact ? c : capText(c as unknown as Record<string, unknown>)),
+            decisions: decisions.map((d) => developerCompact ? d : capText(d as unknown as Record<string, unknown>)),
+            recent: recent.map((r) => developerCompact ? r : capText(r as unknown as Record<string, unknown>)),
             count: mine.length,
           };
         })();
@@ -800,7 +879,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           const records = await searchMemory({ agent, limit: memoryFetchLimit });
           return { configured: true, records: records
             .filter((r) => wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent))
-            .map((r) => capText(r as unknown as Record<string, unknown>)) };
+            .map((r) => developerCompact ? r as unknown as Record<string, unknown> : capText(r as unknown as Record<string, unknown>)) };
         })();
 
         const tasksP = (async () => {
@@ -812,7 +891,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           if (!inboxConfigured()) return { configured: false, count: 0, preview: [] as unknown[] };
           const msgs = await readMessages(agent, { max: 8, ack: false }); // PEEK - wake never drains
           const visible = msgs.filter((m) => wakeRecordVisibleToAgent(m as unknown as Record<string, unknown>, agent));
-          return { configured: true, count: visible.length, preview: visible.slice(0, 5).map((m) => capText(m as unknown as Record<string, unknown>, 400)) };
+          return { configured: true, count: visible.length, preview: visible.slice(0, 5).map((m) => developerCompact ? m as unknown as Record<string, unknown> : capText(m as unknown as Record<string, unknown>, 400)) };
         })();
 
         const inboundP = (async () => {
@@ -820,7 +899,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           const marker = await readReconcileMarker(agent);
           const notes = await readInbound(agent, marker);
           const visible = notes.filter((n) => wakeRecordVisibleToAgent(n as unknown as Record<string, unknown>, agent));
-          return { configured: true, count: visible.length, sinceMarker: marker, notes: visible.map((n) => capText(n as unknown as Record<string, unknown>)) };
+          return { configured: true, count: visible.length, sinceMarker: marker, notes: visible.map((n) => developerCompact ? n as unknown as Record<string, unknown> : capText(n as unknown as Record<string, unknown>)) };
         })();
 
         // Doctrine pitfalls (shared-feed half): the shared feed's own type='pitfall' rows,
@@ -911,12 +990,14 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           errors.push(`retracted_ids: ${e instanceof Error ? e.message : String(e)}`);
         }
         const currentData = filterSupersededWakeData(fullData, rawMine, externalRetractedIds);
-        const data = m365Lite
+        const data = developerCompact
+          ? buildDeveloperCompactWake(currentData)
+          : m365Lite
           ? buildM365LiteWake(currentData)
           : brief
             ? buildBriefWake(currentData, rawMine, externalRetractedIds, recentLimit)
             : currentData;
-        const modeTag = m365Lite ? ' [M365-lite]' : brief ? ' [brief]' : '';
+        const modeTag = developerCompact ? ' [developer_compact]' : m365Lite ? ' [M365-lite]' : brief ? ' [brief]' : '';
         const returnedActive = (data as { tasks?: { active?: unknown[] } }).tasks?.active;
         const activeCount = Array.isArray(returnedActive) ? returnedActive.length : 0;
         const summaryBits = [
