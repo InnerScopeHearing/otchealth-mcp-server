@@ -376,11 +376,75 @@ export async function createPullRequest(
 
 export async function mergePullRequest(
   owner: string, repo: string, number: unknown, method: 'merge' | 'squash' | 'rebase' = 'squash', title?: string,
+  allowReviewedDraftPromotion = false,
 ): Promise<{ merged: boolean; sha: string; message: string }> {
   assertCompanyOwner(owner);
   assertNotPhi(repo);
   assertProtectedContent('github_merge_pull_request', { owner, repo, number, method, title });
   const pullRequestNumber = githubPullRequestPathNumber(number);
-  const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+  const reviewedHeads: Record<number, string> = {
+    165: '25ee4f3f5f379c1822dec234549f4559778cf8a4',
+    166: '80441e7fbac340ece059342d78aba2ce5ab57f27',
+  };
+  const expectedHead = owner.toLowerCase() === 'innerscopehearing' && repo.toLowerCase() === 'aware-aural-rehab'
+    ? reviewedHeads[Number(pullRequestNumber)] : undefined;
+  if (!expectedHead) {
+    const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+    return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
+  }
+  if (!allowReviewedDraftPromotion) {
+    // Preserve the pre-existing caller behavior: non-CTO callers make the ordinary
+    // merge attempt, but can never trigger the reviewed draft-to-ready transition.
+    const r = await githubSend<any>('PUT', `/repos/${S(owner)}/${S(repo)}/pulls/${pullRequestNumber}/merge`, { merge_method: method, ...(title ? { commit_title: title } : {}) });
+    return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
+  }
+  const base = `/repos/${S(owner)}/${S(repo)}`;
+  const prPath = `${base}/pulls/${pullRequestNumber}`;
+  const assertReviewed = (pr: any, requireReady: boolean) => {
+    if (pr?.number !== Number(pullRequestNumber) || pr?.state !== 'open' || pr?.merged !== false || pr?.base?.ref !== 'main' || pr?.base?.repo?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase() || pr?.head?.sha !== expectedHead || typeof pr?.node_id !== 'string' || pr.node_id.length === 0 || (requireReady && pr?.draft !== false)) {
+      throw new GitHubApiError({ code: 'github_reviewed_merge_guard', status: 0, message: 'The reviewed AWARE pull request identity, state, base, draft status, or exact head does not match the authorized merge target.', nextStep: 'Recheck the exact reviewed PR and its current state before retrying.' });
+    }
+  };
+  let pr = await githubGet<any>(prPath);
+  assertReviewed(pr, false);
+  const originalNodeId = pr.node_id;
+  if (pr.draft !== true && pr.draft !== false) throw new GitHubApiError({ code: 'github_reviewed_merge_guard', status: 0, message: 'GitHub did not return a valid draft state for the reviewed pull request.', nextStep: 'Recheck the PR response before retrying.' });
+  if (pr.draft && !allowReviewedDraftPromotion) throw new GitHubApiError({ code: 'github_reviewed_merge_guard', status: 0, message: 'Draft promotion requires explicit CTO caller context.', nextStep: 'Use the approved CTO operation after confirming the reviewed PR target.' });
+
+  const required = ['syntax', 'unit', 'a11y', 'gitleaks secret scan', 'Required web release gates', 'trufflehog verified-secret scan'];
+  const checkRuns: any[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const result = await githubGet<any>(`${base}/commits/${O(expectedHead)}/check-runs?filter=latest&per_page=100&page=${page}`);
+    const rows = Array.isArray(result?.check_runs) ? result.check_runs : [];
+    checkRuns.push(...rows);
+    if (rows.length < 100) {
+      if (Number(result?.total_count) !== checkRuns.length) throw new GitHubApiError({ code: 'github_reviewed_checks_incomplete', status: 0, message: 'The check-run list is incomplete or paginated ambiguously.', nextStep: 'Wait for GitHub checks to settle and retry the reviewed merge.' });
+      break;
+    }
+    if (page === 10) throw new GitHubApiError({ code: 'github_reviewed_checks_incomplete', status: 0, message: 'The check-run list exceeds the bounded verification window.', nextStep: 'Resolve check-run pagination before retrying.' });
+  }
+  for (const name of required) {
+    const matching = checkRuns.filter((run) => run?.name === name);
+    if (matching.length !== 1 || matching[0]?.head_sha !== expectedHead || matching[0]?.app?.id !== 15368 || matching[0]?.status !== 'completed' || matching[0]?.conclusion !== 'success') {
+      throw new GitHubApiError({ code: 'github_reviewed_checks_incomplete', status: 0, message: `Required check "${name}" is missing, ambiguous, stale, from an unexpected App, or unsuccessful.`, nextStep: 'Wait for all six required checks on the exact reviewed SHA, then retry.' });
+    }
+  }
+  const protection = await githubGet<any>(`${base}/branches/main/protection`);
+  const protectedContexts = protection?.required_status_checks?.contexts;
+  const protectedChecks = protection?.required_status_checks?.checks;
+  const exactContexts = Array.isArray(protectedContexts) && protectedContexts.length === required.length && required.every((name) => protectedContexts.filter((context: unknown) => context === name).length === 1);
+  const exactChecks = Array.isArray(protectedChecks) && protectedChecks.length === required.length && required.every((name) => protectedChecks.filter((check: any) => check?.context === name && check?.app_id === 15368).length === 1);
+  if (!exactContexts || !exactChecks) {
+    throw new GitHubApiError({ code: 'github_reviewed_protection_missing', status: 0, message: 'The current main-branch protection does not enforce the reviewed six-check App/context set.', nextStep: 'Restore the approved protection policy through its owner-controlled process before retrying.' });
+  }
+  if (pr.draft) {
+    const ready = await githubSend<any>('POST', '/graphql', { query: 'mutation MarkPullRequestReady($pullRequestId: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) { pullRequest { id isDraft } } }', variables: { pullRequestId: pr.node_id } });
+    const readyPr = ready?.data?.markPullRequestReadyForReview?.pullRequest;
+    if (ready?.errors?.length || readyPr?.id !== originalNodeId || readyPr?.isDraft !== false) throw new GitHubApiError({ code: 'github_reviewed_promotion_failed', status: 0, message: 'GitHub did not confirm readiness for the exact reviewed pull request.', nextStep: 'Inspect the PR state before retrying; no merge was attempted.' });
+  }
+  pr = await githubGet<any>(prPath);
+  assertReviewed(pr, true);
+  if (pr.node_id !== originalNodeId) throw new GitHubApiError({ code: 'github_reviewed_merge_guard', status: 0, message: 'The pull-request identity changed during readiness verification.', nextStep: 'Recheck the reviewed PR identity before retrying.' });
+  const r = await githubSend<any>('PUT', `${base}/pulls/${pullRequestNumber}/merge`, { merge_method: method, sha: expectedHead, ...(title ? { commit_title: title } : {}) });
   return { merged: r.merged === true, sha: r.sha ?? '', message: r.message ?? '' };
 }
