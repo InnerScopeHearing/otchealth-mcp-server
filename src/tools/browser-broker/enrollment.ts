@@ -28,6 +28,12 @@ const ENROLLMENTS: readonly BrowserAgentEnrollment[] = [
     allowedHosts: ['wefunder.com', 'help.wefunder.com', 'otchealth.app'],
     capabilities: ['public_read'],
   },
+  {
+    callerAgent: 'developer',
+    profileLabel: 'developer_cloud_public_read',
+    allowedHosts: ['docs.aws.amazon.com', 'docs.github.com', 'developers.openai.com', 'example.com'],
+    capabilities: ['public_read'],
+  },
 ];
 
 export function resolveBrowserEnrollment(callerAgent: string | undefined | null): BrowserAgentEnrollment | null {

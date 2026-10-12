@@ -8,6 +8,7 @@ import {
   CTO_SHIP_LANE_TOOLSET,
   CRO_CONNECTOR_TOOLSET,
   COO_CONNECTOR_TOOLSET,
+  DEVELOPER_SETUP_TOOLSET,
   EXTERNAL_READONLY_TOOLSET,
   WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET,
   type ToolDefinition,
@@ -216,7 +217,7 @@ test('the Make pilot identity gets exactly the broker and catalog probe even und
 
 test('(b) developer lane gets the full ship-lane set', () => {
   const set = connectorToolset(testEnv(), 'developer');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...DEVELOPER_SETUP_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check'].sort());
   assert.equal(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), false);
   assert.ok(set.has('brain_graph_search'));
   assert.ok(set.has('brain_public_kb_search'));

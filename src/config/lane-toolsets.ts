@@ -244,6 +244,15 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
     // found" because the primary was never registered for this caller, so no alias was ever
     // collected either.
     'developer_wake_lite',
+    // Developer setup needs only exact RevenueCat project and catalog metadata. Keep the M365
+    // seed explicit so curate-m365-only does not require broadening to revenuecat_* (which would
+    // also admit customer, subscriber, token, admin, and mutation surfaces).
+    'revenuecat_list_projects', 'revenuecat_project_get',
+    'revenuecat_app_list', 'revenuecat_app_get',
+    'revenuecat_offering_list', 'revenuecat_offering_get',
+    'revenuecat_product_list', 'revenuecat_product_get',
+    'revenuecat_package_list', 'revenuecat_package_get',
+    'revenuecat_entitlement_list', 'revenuecat_entitlement_get',
   ],
   // Finance / MNPI: Xero (accounting of record), the finance kb rooms, invoice document intelligence,
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.

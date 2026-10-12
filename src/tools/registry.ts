@@ -109,6 +109,18 @@ const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
 const RESTRICTED_GITHUB_MAKE_BROKER_TOOL = 'github_make_broker';
 const PUBLIC_KB_COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'developer']);
 
+/** Exact read-only project/build and subscription-configuration metadata needed by Developer. */
+export const DEVELOPER_SETUP_TOOLSET: readonly string[] = [
+  'depot_list_projects', 'depot_project_get', 'depot_workflow_list',
+  'depot_run_list', 'depot_run_get', 'depot_run_status_get', 'depot_run_metrics_get',
+  'revenuecat_list_projects', 'revenuecat_project_get',
+  'revenuecat_app_list', 'revenuecat_app_get',
+  'revenuecat_offering_list', 'revenuecat_offering_get',
+  'revenuecat_product_list', 'revenuecat_product_get',
+  'revenuecat_package_list', 'revenuecat_package_get',
+  'revenuecat_entitlement_list', 'revenuecat_entitlement_get',
+] as const;
+
 export const CTO_SHIP_LANE_TOOLSET: readonly string[] = [
   'brain_search', 'brain_graph_search', 'brain_public_kb_search', 'web_search', 'kb_search', 'kb_search_privileged',
   // n8n control-plane visibility is required for the CTO and Developer ship lanes to
@@ -495,6 +507,12 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // Developer setup needs only exact Depot project/run metadata and RevenueCat project/catalog
+  // metadata. Keep this additive on the built-in Developer connector only; an explicit shared
+  // CONNECTOR_TOOLSET remains an exact override, and no other role inherits these names here.
+  if (lane === 'developer' && !env.CONNECTOR_TOOLSET) {
+    for (const name of DEVELOPER_SETUP_TOOLSET) tools.add(name);
+  }
   // AWARE release review needs the registered claims gate on its shipping
   // connectors. Preserve explicit overrides and all other default lane sets;
   // execution keeps the existing handler, provider and governance checks.

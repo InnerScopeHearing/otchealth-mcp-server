@@ -101,3 +101,71 @@ test('browser_broker_inspect_public: a partial transport result (bounded deadlin
   assert.match(text, /before the bounded time budget was reached/);
   assert.match(text, /1 target\(s\) were not inspected/);
 });
+
+test('browser_broker_preflight: Developer public-read docs.aws target passes with its own profile and never calls transport', async () => {
+  const { server, handlers } = fakeServer();
+  let transportCalls = 0;
+  registerAgentCoreBrowserBrokerTools(server, () => 'caller-hash', fakeTransport(async () => {
+    transportCalls += 1;
+    return { receipts: [], partial: false };
+  }));
+  const handler = handlers.get('browser_broker_preflight')!;
+  const res = await withCaller('developer', () => handler({
+    capability: 'public_read',
+    targets: ['https://docs.aws.amazon.com/'],
+  }));
+  const data = res.structuredContent?.result as Record<string, unknown>;
+  assert.equal(data.ok, true);
+  assert.equal(data.mode, 'preflight');
+  assert.deepEqual(data.enrollment, {
+    caller_agent: 'developer',
+    profile: 'developer_cloud_public_read',
+    capabilities: ['public_read'],
+  });
+  assert.equal(transportCalls, 0);
+});
+
+test('browser_broker_preflight: Developer authenticated-read and unsupported targets are refused without transport calls', async () => {
+  const { server, handlers } = fakeServer();
+  let transportCalls = 0;
+  registerAgentCoreBrowserBrokerTools(server, () => 'caller-hash', fakeTransport(async () => {
+    transportCalls += 1;
+    return { receipts: [], partial: false };
+  }));
+  const handler = handlers.get('browser_broker_preflight')!;
+
+  const authenticated = await withCaller('developer', () => handler({
+    capability: 'authenticated_read',
+    targets: ['https://docs.aws.amazon.com/'],
+  }));
+  assert.equal((authenticated.structuredContent?.result as Record<string, unknown>).error, 'capability_not_enrolled');
+
+  const unsupported = await withCaller('developer', () => handler({
+    capability: 'public_read',
+    targets: ['https://aws.amazon.com/'],
+  }));
+  assert.equal((unsupported.structuredContent?.result as Record<string, unknown>).error, 'target_not_enrolled');
+  assert.equal(transportCalls, 0);
+});
+
+test('browser_broker_inspect_public: Developer docs.aws target reaches transport once while unsupported host is blocked first', async () => {
+  const { server, handlers } = fakeServer();
+  let transportCalls = 0;
+  let receivedTargets: URL[] = [];
+  registerAgentCoreBrowserBrokerTools(server, () => 'caller-hash', fakeTransport(async (targets) => {
+    transportCalls += 1;
+    receivedTargets = targets;
+    return { receipts: [], partial: false };
+  }));
+  const handler = handlers.get('browser_broker_inspect_public')!;
+
+  const accepted = await withCaller('developer', () => handler({ targets: ['https://docs.aws.amazon.com/'] }));
+  assert.equal((accepted.structuredContent?.result as Record<string, unknown>).mode, 'public_read');
+  assert.equal(transportCalls, 1);
+  assert.equal(receivedTargets.length, 1);
+  assert.equal(receivedTargets[0]?.hostname, 'docs.aws.amazon.com');
+
+  const unsupported = await withCaller('developer', () => handler({ targets: ['https://aws.amazon.com/'] }));
+  assert.equal((unsupported.structuredContent?.result as Record<string, unknown>).error, 'target_not_enrolled');
+  assert.equal(transportCalls, 1, 'an unsupported target must be refused before the fake transport is called');
+});

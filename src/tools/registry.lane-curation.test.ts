@@ -303,7 +303,12 @@ for (const [lane, upperBound, mustInclude] of [
   // developer caller. Locks the fix at the real registration layer, not just the seed-list layer.
   // The AWS always-on binding adds exactly its two named wrappers after M365 curation. Keep the
   // concrete bound and both representatives in sync so this intentional exposure cannot hide drift.
-  ['developer', 202, ['brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call']],
+  // Twelve exact RevenueCat configuration reads are added for Developer setup. Assert every
+  // real registration here; customer/subscriber and mutation names remain outside this seed.
+  ['developer', 214, ['brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call',
+    'revenuecat_list_projects', 'revenuecat_project_get', 'revenuecat_app_list', 'revenuecat_app_get',
+    'revenuecat_offering_list', 'revenuecat_offering_get', 'revenuecat_product_list', 'revenuecat_product_get',
+    'revenuecat_package_list', 'revenuecat_package_get', 'revenuecat_entitlement_list', 'revenuecat_entitlement_get']],
 ] as const) {
   test(`TOOL_CATALOG_CURATION_MODE=curate-m365-only -- an M365 '${lane}' caller is narrowed to a concrete bound and keeps its representative tools (2026-08-02 Bug-2 fix)`, async () => {
     process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
@@ -344,5 +349,10 @@ test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Dev
   assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
   assert.equal(developerNames.includes(receiptTool), false, 'Developer M365 must exclude the canonical reader despite github_*');
   assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
-  assert.ok(developerNames.length <= 202, `Developer M365 catalog must stay at or under 202 tools after the two AWS bridge bindings, got ${developerNames.length}`);
+  assert.ok(developerNames.length <= 214, `Developer M365 catalog must stay at or under 214 tools after the two AWS bindings and twelve exact RevenueCat configuration reads, got ${developerNames.length}`);
+  for (const name of ['revenuecat_customer_get', 'revenuecat_subscriber_get_v1', 'revenuecat_entitlement_create']) {
+    const alias = /^[^_]+_(.+)$/.exec(name)![1]!;
+    assert.equal(developerNames.includes(name), false, name);
+    assert.equal(developerNames.includes(alias), false, alias);
+  }
 });
