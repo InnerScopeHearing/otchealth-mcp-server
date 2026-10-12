@@ -359,7 +359,7 @@ interface ChatCompletionResponse {
     finish_reason?: string;
     message?: { content?: string; refusal?: string | null };
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
   model?: string;
   service_tier?: string;
 }
@@ -369,6 +369,8 @@ export interface ChatResult {
   text: string;
   usage?: unknown;
   model: string;
+  /** Raw provider echo, kept separate from the configured-label fallback in `model`. */
+  providerModel?: string;
   finishReason?: string;
   refusal?: string;
 }
@@ -416,6 +418,8 @@ export async function chat(
     deadlineAtMs?: number;
     /** Caller cancellation signal, composed with the provider timeout. */
     signal?: AbortSignal;
+    /** For approved measurement calls, limit this completion to one physical provider attempt. */
+    singleAttempt?: boolean;
   },
 ): Promise<ChatResult> {
   const target = chatTarget(opts?.tier, opts?.deployment);
@@ -462,7 +466,7 @@ export async function chat(
   // this one IS provider-gated (unlike prompt_cache_key/`user`). `target.model` is non-null only on
   // the OpenAI-direct branch of chatTarget() (see ProviderTarget's own doc comment), the same
   // discriminator this function already uses below to gate recordOpenAIUsage.
-  if (opts?.serviceTier === 'flex' && target.model) body.service_tier = 'flex';
+  if (!opts?.singleAttempt && opts?.serviceTier === 'flex' && target.model) body.service_tier = 'flex';
   // Keep the legacy user identifier for API bucketing. Cache routing is supplied explicitly via
   // prompt_cache_key when provided; this field alone does not promise a cache hit.
   body.user = opts?.cacheKey || promptCacheKey(target.resolvedLabel, messages);
@@ -489,6 +493,7 @@ export async function chat(
   try {
     j = await postToTarget<ChatCompletionResponse>(target, body, {
       ...chatRequestBudget(),
+      ...(opts?.singleAttempt ? { retries: 0 } : {}),
       deadlineAtMs: opts?.deadlineAtMs,
       signal: opts?.signal,
     });
@@ -498,7 +503,7 @@ export async function chat(
     // -- AND (b) the failure text itself says flex has no capacity (isFlexCapacityError). Anything
     // else (a different 429 reason on a flex request, a 4xx/5xx, a network error) rethrows unchanged
     // so the real error/status is never swallowed or misreported as a fallback success.
-    if (body.service_tier === 'flex' && err instanceof FoundryError && isFlexCapacityError(err.status, err.message)) {
+    if (!opts?.singleAttempt && body.service_tier === 'flex' && err instanceof FoundryError && isFlexCapacityError(err.status, err.message)) {
       const fallbackBody: Record<string, unknown> = { ...body };
       delete fallbackBody.service_tier;
       // ONE extra attempt, not wrapped in another try/catch: if the fallback ALSO fails, that error
@@ -518,6 +523,17 @@ export async function chat(
     } else {
       throw err;
     }
+  }
+  if (opts?.singleAttempt && (
+    typeof j.model !== 'string' || !j.model.trim() ||
+    !j.usage || !Number.isInteger(j.usage.prompt_tokens) || j.usage.prompt_tokens! < 0 ||
+    !Number.isInteger(j.usage.completion_tokens) || j.usage.completion_tokens! < 0 ||
+    !Number.isInteger(j.usage.total_tokens) || j.usage.total_tokens! < 0 ||
+    j.usage.total_tokens !== j.usage.prompt_tokens! + j.usage.completion_tokens!
+  )) {
+    // Do not record guessed zero usage or claim a completed receipt when the provider omitted
+    // billing fields. This mode is specifically for auditable, successful measurements.
+    throw new FoundryError(502, 'Single-attempt response omitted provider model or usage fields');
   }
   const resolvedModel = j.model || target.resolvedLabel;
   // service_tier for cost + telemetry: prefer what the API actually ECHOED BACK (the ground truth
@@ -559,6 +575,7 @@ export async function chat(
     text: choice?.message?.content ?? '',
     usage: j.usage,
     model: resolvedModel,
+    ...(opts?.singleAttempt ? { providerModel: j.model } : {}),
     finishReason: choice?.finish_reason,
     refusal: choice?.message?.refusal ?? undefined,
   };

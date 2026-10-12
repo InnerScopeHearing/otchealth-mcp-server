@@ -119,6 +119,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
           .describe(
             'Telemetry tag for p95-by-class dashboards: "hot" for a user-blocking interactive call, "background" for a fire-and-forget/best-effort call, "normal" (default) otherwise. Does not change execution, only how the call is bucketed.',
           ),
+        singleAttempt: z.boolean().optional().describe('Approved CTO/Developer measurement mode: make one physical provider request and return a complete retry receipt only on a successful response with usage and model. Bypasses FAQ and semantic-cache handling.'),
       },
       outputShape: {
         task: z.string(),
@@ -129,12 +130,22 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         error: z.string().optional(),
         cache_hit: z.boolean().optional(),
         deflected: z.boolean().optional(),
+        actual_single_attempt: z.boolean().optional(),
+        provider_attempt_count: z.number().int().optional(),
+        retry_accounting: z.literal('complete').optional(),
       },
       handler: async (input, ctx) => {
         const tier = input.tier ?? 'standard';
         // W1-6 SPEED INSTRUMENTATION: caller-passed telemetry bucket (see buildLatencyFields in
         // telemetry/gateway-ops.ts). Purely a dashboard tag -- never changes execution.
         const latencyClass: LatencyClass = input.latencyClass ?? 'normal';
+        const singleAttempt = input.singleAttempt === true;
+        if (singleAttempt && ctx.callerAgent !== 'cto' && ctx.callerAgent !== 'developer') {
+          return {
+            data: { task: input.task, tier, output: '', model: '', error: 'single_attempt_not_authorized' },
+            summary: 'llm_azure single-attempt measurement mode is available only to CTO and Developer callers.',
+          };
+        }
         if (!chatConfigured()) {
           const provider = loadEnv().LLM_PROVIDER;
           return {
@@ -157,7 +168,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         // fail-open, mirrors LLM_CACHE_MODE/SHIELD_MODE/GROUNDEDNESS_MODE: any failure (Cosmos
         // down, embed() throws) silently falls through to the normal chat() call below. See
         // faq-deflect.ts for the store choice and its embedding-backed similarity match contract.
-        const faqHit = await checkFaqDeflect(input.input, input.task);
+        const faqHit = singleAttempt ? { hit: false as const } : await checkFaqDeflect(input.input, input.task);
         if (faqHit.hit && faqHit.answer) {
           captureGatewayEvent('gateway_faq_deflect_hit', {
             task: input.task,
@@ -175,7 +186,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         }
         // Best-effort self-heal of the curated store; cheap no-op once entries already exist with
         // a live vector. Fire-and-forget so a seed failure never delays or affects this call.
-        if (input.task === 'complete' && faqDeflectOn()) void seedFaqStore().catch(() => undefined);
+        if (!singleAttempt && input.task === 'complete' && faqDeflectOn()) void seedFaqStore().catch(() => undefined);
 
         const sys = TASK_PROMPTS[input.task] ?? TASK_PROMPTS.complete;
         const parts: string[] = [];
@@ -203,7 +214,7 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
         // cache failure (Cosmos down, embed() throws) silently falls through to a normal chat()
         // call below. See semantic-cache.ts for the store choice + why.
         const cacheCheckStarted = Date.now();
-        const cacheLookup = await checkLlmCache(cachePrompt, ctx.callerAgent, input.task, tier);
+        const cacheLookup = singleAttempt ? { hit: false as const } : await checkLlmCache(cachePrompt, ctx.callerAgent, input.task, tier);
         if (cacheLookup.hit && cacheLookup.entry) {
           // W1-6: same latency+cache shape as the real-call path below (buildLatencyFields), tagged
           // cache_hit:true, so p95 latency is directly comparable across cache_hit in PostHog --
@@ -250,9 +261,15 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
             maxTokens: input.maxTokens ?? 1500,
             jsonMode: input.jsonMode ?? input.task === 'extract',
             tier,
-            ...backgroundChatOpts(latencyClass, ctx.callerAgent, input.task, tier),
+            ...(singleAttempt ? { singleAttempt: true } : backgroundChatOpts(latencyClass, ctx.callerAgent, input.task, tier)),
           });
           const modelEnded = Date.now();
+          if (singleAttempt && (!res.providerModel?.trim() || !res.usage || typeof res.usage !== 'object')) {
+            return {
+              data: { task: input.task, tier, output: '', model: '', error: 'single_attempt_receipt_incomplete' },
+              summary: 'llm_azure single-attempt call returned without provider usage and model; retry accounting is incomplete.',
+            };
+          }
           // Observe-only per-call cost/usage event -> Gateway Ops project (fire-and-forget,
           // inert unless POSTHOG_GATEWAYOPS_KEY is set; never affects the response). Enriched with
           // the flattened usage summary (incl. cached_tokens / cached_pct so the automatic-prompt-cache
@@ -285,17 +302,28 @@ export function registerLlmAzure(server: McpServer, callerHash: CallerHashProvid
 
           // Best-effort write-back into the semantic cache (fire-and-forget; a write failure must
           // never affect the response, mirrors memory/hot-cache.ts's writeCache pattern).
-          void writeLlmCache(cachePrompt, ctx.callerAgent, input.task, tier, {
-            output: res.text,
-            model: res.model,
-            usage: res.usage,
-          }).catch(() => undefined);
+          if (!singleAttempt) {
+            void writeLlmCache(cachePrompt, ctx.callerAgent, input.task, tier, {
+              output: res.text,
+              model: res.model,
+              usage: res.usage,
+            }).catch(() => undefined);
+          }
 
           return {
-            data: { task: input.task, tier, output: res.text, model: res.model, usage: res.usage, cache_hit: false },
+            data: {
+              task: input.task, tier, output: res.text, model: res.model, usage: res.usage, cache_hit: false,
+              ...(singleAttempt ? { actual_single_attempt: true, provider_attempt_count: 1, retry_accounting: 'complete' as const } : {}),
+            },
             summary: `llm_azure ${input.task} on ${res.model} (tier=${tier}, ${res.text.length} chars). OpenAI-direct gateway LLM call completed.`,
           };
         } catch (e) {
+          if (singleAttempt) {
+            return {
+              data: { task: input.task, tier, output: '', model: '', error: 'single_attempt_provider_error' },
+              summary: 'llm_azure single-attempt provider call failed; billing and retry accounting are incomplete.',
+            };
+          }
           const msg = e instanceof Error ? e.message : String(e);
           return { data: { task: input.task, tier, output: '', model: '', error: msg }, summary: `llm_azure failed: ${msg}` };
         }
