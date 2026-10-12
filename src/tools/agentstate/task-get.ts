@@ -76,7 +76,8 @@ export async function handleTaskGet(
       lease_until: projected.lease_until,
       lease_version: projected.lease_version,
       done_ts: projected.done_ts,
-      attempt_count: projected.attempt_count,
+      // Legacy task documents may predate this field; match the established coordination projection.
+      attempt_count: projected.attempt_count ?? 0,
     };
     // Detail fields use the existing immutable grant. This handler receives a materialized task,
     // so omitting these fields limits response context, not storage reads. Never return note bodies.

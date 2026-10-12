@@ -67,6 +67,16 @@ test('metadata returns a bounded allowlist and never queries event history or em
   assert.deepEqual(deps.calls, { task: 1, events: 0 });
 });
 
+test('metadata preserves the legacy attempt_count default for old task documents', async () => {
+  const legacy = task();
+  delete legacy.attempt_count;
+  const deps = provider(legacy);
+  const result = await handleTaskGet({ task_id: legacy.id, context_need: 'coordination' }, { callerAgent: 'developer' }, deps);
+  assert.equal((result.data as any).task.attempt_count, 0);
+  assert.equal(legacy.attempt_count, undefined);
+  assert.deepEqual(deps.calls, { task: 1, events: 0 });
+});
+
 test('metadata cannot widen immutable detail grants or cross-seat status-only projection', async () => {
   const row = task({ owner_agent: 'coo', created_by: 'cfo', detail_readers: ['cfo'] });
   const deps = provider(row);

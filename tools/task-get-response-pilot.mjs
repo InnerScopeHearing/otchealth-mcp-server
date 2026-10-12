@@ -101,8 +101,9 @@ for (const spec of cases) {
   assert.equal(candidateDeps.counts.task_reads, 1);
   assert.equal(candidateDeps.counts.event_reads, requiredPhase === 'fullread' ? 1 : 0);
 
-  // This pilot selects only cases whose requested facts are present in metadata, or explicitly
-  // labels a required full read. Approval questions stay unknown even after full reads.
+  // Coordination questions use metadata. Approval/correction/history questions are routed directly
+  // to full reads and checked against their source evidence; approval/gate facts absent from
+  // metadata-only context remain unknown rather than being inferred.
   for (const fact of expected) {
     const source = candidate.tool_response.data;
     const actual = fact.field === 'latest_event'
