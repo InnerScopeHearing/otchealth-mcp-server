@@ -158,6 +158,7 @@ export async function handleDeveloperTaskRollup(
     return {
       data: {
         available: true,
+        observed_at: (deps.now?.() ?? new Date()).toISOString(),
         ...(latestUpdatedAt ? { max_observed_updated_at: latestUpdatedAt } : {}),
         scope: {
           board: requestedBoard,

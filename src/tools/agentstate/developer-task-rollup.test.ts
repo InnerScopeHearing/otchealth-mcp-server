@@ -52,6 +52,7 @@ test('queries only Developer page and returns aggregate source IDs without task 
   assert.deepEqual(seen, {
     owner_agent: 'developer', board: 'fleet', limit: 50, exclude_personal_legal: true,
   });
+  assert.equal((result.data as any).observed_at, '2026-10-12T01:00:00.000Z');
   assert.deepEqual((result.data as any).scope, {
     board: 'fleet', owner_agent: 'developer', returned_count: 3, source_page_count: 3,
     requested_limit: 50, possibly_truncated: false, counts_are_complete: true,
@@ -90,6 +91,7 @@ test('configured empty page is a complete zero distinct from an unavailable ledg
   assert.ok(Object.values((empty.data as any).status_counts).every((count) => count === 0));
   assert.ok(Object.values((empty.data as any).source_task_ids).every((ids: any) => ids.length === 0));
   assert.equal(Object.hasOwn(empty.data as object, 'max_observed_updated_at'), false);
+  assert.equal((empty.data as any).observed_at, '2026-10-12T01:00:00.000Z');
   const missing = await handleDeveloperTaskRollup({}, { callerAgent: 'developer' }, {
     isConfigured: () => false, listTasks: async () => [],
   });
