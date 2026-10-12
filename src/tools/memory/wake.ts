@@ -10,7 +10,7 @@ import {
 } from '../../memory/store.js';
 import { searchMemory } from '../../agentstate/memory.js';
 import { listTasks } from '../../agentstate/ledger.js';
-import { canReadPersonalTasks, taskVisibleToCaller } from '../agentstate/task-read-access.js';
+import { canReadPersonalTasks, projectTaskForCaller, taskVisibleToCaller } from '../agentstate/task-read-access.js';
 import { TASK_STATUSES } from '../../agentstate/agents.js';
 type TaskStatus = (typeof TASK_STATUSES)[number];
 import { isConfigured as cosmosConfigured } from '../../agentstate/store.js';
@@ -199,6 +199,63 @@ export interface WakeFullData {
   inbound: WakeInbound;
   errors: string[];
   doctrine: Doctrine;
+}
+
+/** Compact startup is an opt-in view for the authenticated Developer lane. It retains every
+ * operative field and provenance value, removes only known Cosmos bookkeeping, and suppresses
+ * exact duplicate records in pack.recent. Equality requires both id and canonical full content;
+ * matching ids with different text are retained. Task detail is projected through the existing
+ * immutable-reader policy before detail fields are omitted. */
+export function buildStartupCompactWake(full: WakeFullData): Record<string, unknown> {
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (value && typeof value === 'object') {
+      return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'undefined';
+  };
+  const exactKeys = new Set<string>();
+  const remember = (record: Record<string, unknown> | null | undefined) => {
+    if (!record || typeof record.id !== 'string') return;
+    exactKeys.add(`${record.id}\u0000${canonical(record)}`);
+  };
+  remember(full.pack.status);
+  full.pack.corrections.forEach(remember);
+  full.pack.decisions.forEach(remember);
+  const projectMemory = (record: Record<string, unknown>) => Object.fromEntries(
+    Object.entries(record).filter(([key]) => !['_rid', '_self', '_etag', '_attachments', '_ts'].includes(key)),
+  );
+  const projectTask = (record: Record<string, unknown>) => {
+    const authorized = projectTaskForCaller(record as never, full.agent) as unknown as Record<string, unknown>;
+    const out = projectMemory(authorized);
+    const source = projectMemory(record);
+    // Preserve every field task_get already authorizes. Only label detail withheld by the
+    // immutable-reader projection; compact mode never silently omits authorized task content.
+    if (Object.keys(source).some((key) => !Object.hasOwn(out, key))) {
+      out.details_omitted = true;
+      out.full_fetch_required_before_action = true;
+    }
+    return out;
+  };
+  const recent: Record<string, unknown>[] = [];
+  const seenRecent = new Set<string>();
+  for (const record of full.pack.recent) {
+    const key = typeof record.id === 'string' ? `${record.id}\u0000${canonical(record)}` : '';
+    if (key && (exactKeys.has(key) || seenRecent.has(key))) continue;
+    if (key) seenRecent.add(key);
+    recent.push(record);
+  }
+  return {
+    agent: full.agent,
+    view: 'developer_compact',
+    pack: { ...full.pack, recent },
+    memory_records: full.memory_records.map(projectMemory),
+    tasks: { ...full.tasks, active: full.tasks.active.map(projectTask) },
+    inbox: full.inbox,
+    inbound: full.inbound,
+    errors: full.errors,
+    doctrine: full.doctrine,
+  };
 }
 
 /** Cosmos/CosmosDB internal bookkeeping fields (_rid/_self/_etag/_attachments/_ts) that ride along
@@ -700,7 +757,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       annotations: {
         title: 'Federated agent wake (one-call boot)',
         description:
-          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your agent-state memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Pass brief:true on a long-lived session (large ledger) to get only current-truth entries (retracted/superseded entries filtered out across ALL sections, not just within one), hard-capped for size, so the response stays inline instead of JIT-offloading. DRILL-DOWN CAVEAT: task_get resolves a truncated task by id; memory_search resolves a truncated agent-state memory_record by id. Neither resolves a truncated shared-feed correction/decision/pack.recent entry, or a truncated inbox/inbound entry -- for those, re-call wake(brief:false) or memory_pack(brief:false) to see the untruncated version. Ring-safe: shared feed + your own lane only.',
+          'Call this FIRST on wake, on any platform: one call returns your shared-feed pack (latest status, superseded-collapsed corrections, recent decisions), your agent-state memory-of-record, your ACTIVE work-ledger tasks, an inbox PEEK (nothing is drained), and unreconciled cross-agent inbound notes. Replaces the 5-call boot sequence (memory_pack + memory_search + task_list + inbox_read + memory_inbound) whose steps were routinely skipped. Sections are error-isolated; long texts are capped with ids retained. Authenticated Developer callers may opt into view:"developer_compact" for exact duplicate removal, known Cosmos bookkeeping removal and minified JSON text; all authorized task details stay intact, and immutable-reader task details remain hidden. Pass brief:true on a long-lived session (large ledger) to get only current-truth entries (retracted/superseded entries filtered out across ALL sections, not just within one), hard-capped for size, so the response stays inline instead of JIT-offloading. DRILL-DOWN CAVEAT: task_get resolves a truncated task by id; memory_search resolves a truncated agent-state memory_record by id. Neither resolves a truncated shared-feed correction/decision/pack.recent entry, or a truncated inbox/inbound entry -- for those, re-call wake(brief:false) or memory_pack(brief:false) to see the untruncated version. Ring-safe: shared feed + your own lane only.',
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -708,6 +765,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
       },
       inputShape: {
         agent: z.string().optional().describe('Agent lane to wake. Authenticated calls default to and may select only their token identity (lowercase id, e.g. "cto").'),
+        view: z.enum(['developer_compact']).optional().describe('Opt into the Developer compact startup view; requires authenticated Developer identity and is unavailable to M365 static-auth callers.'),
         recent_limit: z.number().int().min(1).max(40).optional().describe('Max recent shared-feed entries (default 10).'),
         memory_limit: z.number().int().min(1).max(40).optional().describe('Max agent-state memory-of-record entries (default 12).'),
         task_limit: z.number().int().min(1).max(50).optional().describe('Max active tasks (default 15).'),
@@ -727,8 +785,19 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         inbound: z.unknown(),
         errors: z.array(z.string()),
         doctrine: z.unknown(),
+        view: z.string().optional(),
       },
       handler: async (input, ctx) => {
+        const compact = input.view === 'developer_compact';
+        if (compact && ctx.callerAgent?.trim().toLowerCase() !== 'developer') {
+          return { data: { agent: '', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['forbidden_view: authenticated Developer identity required.'], doctrine: buildDoctrine() }, summary: 'wake: developer_compact requires an authenticated Developer caller.', compactText: true };
+        }
+        if (compact && isM365StaticAuth()) {
+          return { data: { agent: 'developer', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['unsupported_view: developer_compact is unavailable for M365 static-auth callers.'], doctrine: buildDoctrine() }, summary: 'wake: developer_compact is unsupported for M365 static-auth callers; use the existing M365 wake view.', compactText: true };
+        }
+        if (compact && input.brief === true) {
+          return { data: { agent: 'developer', view: 'developer_compact', pack: null, memory_records: [], tasks: null, inbox: null, inbound: null, errors: ['invalid_view: developer_compact and brief cannot be combined.'], doctrine: buildDoctrine() }, summary: 'wake: choose developer_compact or brief, not both.', compactText: true };
+        }
         const scope = resolveAgentReadScope(input.agent, ctx.callerAgent);
         if (!scope) {
           return {
@@ -911,12 +980,14 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
           errors.push(`retracted_ids: ${e instanceof Error ? e.message : String(e)}`);
         }
         const currentData = filterSupersededWakeData(fullData, rawMine, externalRetractedIds);
-        const data = m365Lite
+        const data = compact
+          ? buildStartupCompactWake(currentData)
+          : m365Lite
           ? buildM365LiteWake(currentData)
           : brief
             ? buildBriefWake(currentData, rawMine, externalRetractedIds, recentLimit)
             : currentData;
-        const modeTag = m365Lite ? ' [M365-lite]' : brief ? ' [brief]' : '';
+        const modeTag = compact ? ' [developer_compact]' : m365Lite ? ' [M365-lite]' : brief ? ' [brief]' : '';
         const returnedActive = (data as { tasks?: { active?: unknown[] } }).tasks?.active;
         const activeCount = Array.isArray(returnedActive) ? returnedActive.length : 0;
         const summaryBits = [
@@ -930,6 +1001,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         return {
           data,
           summary: `wake(${agent})${modeTag}: ${summaryBits.join(' � ')} � counts are bounded active-status samples${errors.length ? ` � ${errors.length} section error(s)` : ''}.${activeCount ? ` ? showing ${activeCount} active task(s) awaiting you.` : ''}`,
+          compactText: compact,
         };
       },
     },

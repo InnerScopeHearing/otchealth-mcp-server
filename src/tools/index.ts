@@ -951,6 +951,7 @@ import { registerTaskComplete } from './agentstate/task-complete.js';
 import { registerTaskHeartbeat } from './agentstate/task-heartbeat.js';
 import { registerTaskList } from './agentstate/task-list.js';
 import { registerTaskGet } from './agentstate/task-get.js';
+import { registerDeveloperTaskRollup } from './agentstate/developer-task-rollup.js';
 import { registerMemoryWrite } from './agentstate/memory-write.js';
 import { registerMemorySearch } from './agentstate/memory-search.js';
 import { registerAgentDispatch } from './agentstate/agent-dispatch.js';
@@ -1931,6 +1932,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // Reads always live; writes gated by ENABLE_WRITE_TOOLS + DRY_RUN_DEFAULT (pass dry_run=false).
   registerTaskList(server, callerHash);
   registerTaskGet(server, callerHash);
+  registerDeveloperTaskRollup(server, callerHash);
   registerTaskCreate(server, callerHash);
   registerTaskClaim(server, callerHash);
   registerTaskUpdate(server, callerHash);

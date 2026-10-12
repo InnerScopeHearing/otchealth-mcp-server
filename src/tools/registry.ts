@@ -111,6 +111,7 @@ const PUBLIC_KB_COMPANY_SEATS = new Set(['cto', 'cfo', 'clo', 'coo', 'cro', 'dev
 
 /** Exact read-only project/build and subscription-configuration metadata needed by Developer. */
 export const DEVELOPER_SETUP_TOOLSET: readonly string[] = [
+  'developer_task_rollup',
   'depot_list_projects', 'depot_project_get', 'depot_workflow_list',
   'depot_run_list', 'depot_run_get', 'depot_run_status_get', 'depot_run_metrics_get',
   'revenuecat_list_projects', 'revenuecat_project_get',
@@ -661,8 +662,12 @@ export interface ToolContext {
 export interface ToolResultPayload {
   /** Machine-readable result. Surfaced via structuredContent. */
   data: unknown;
+  /** Internal text rendering hint, honored only by the Developer task rollup. */
+  compactJsonText?: boolean;
   /** Optional human-readable summary. Appended after the JSON text block. */
   summary?: string;
+  /** Opt in to minified JSON in this tool's human-readable text block. Structured data is unchanged. */
+  compactText?: boolean;
   /** Optional before/after pair for audit log on writes. */
   audit?: { before?: unknown; after?: unknown };
   /**
@@ -754,10 +759,11 @@ const CONNECTOR_COMMON_INPUT: ZodRawShape = {
   acknowledge_warning: z.boolean().optional(),
 };
 
-function buildTextContent(
+export function buildTextContent(
   payload: ToolResultPayload,
   warning: ComplianceWarning | null,
   coldStartWarning?: string,
+  compactJsonText = false,
 ): string {
   const lines: string[] = [];
   if (coldStartWarning) {
@@ -768,7 +774,7 @@ function buildTextContent(
     lines.push(JSON.stringify(warning, null, 2));
   }
   if (payload.data !== null && payload.data !== undefined) {
-    lines.push(JSON.stringify(payload.data, null, 2));
+    lines.push(compactJsonText || payload.compactText ? JSON.stringify(payload.data) : JSON.stringify(payload.data, null, 2));
   }
   if (payload.summary) {
     lines.push('');
@@ -1574,6 +1580,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           { ...payload, data: result },
           warning,
           capturePlanePrelude.length ? capturePlanePrelude.join('\n') : undefined,
+          canonicalName === 'developer_task_rollup' && payload.compactJsonText === true,
         );
 
         // Check the complete inline envelope before JIT handling. A constrained tool must fail

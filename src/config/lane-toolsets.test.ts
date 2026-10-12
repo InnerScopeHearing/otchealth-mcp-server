@@ -114,6 +114,14 @@ test('isToolInLaneAllowlist: developer_wake_lite is reachable for the developer 
   assert.equal(isToolInLaneAllowlist('developer', 'developer_wake_lite'), true);
 });
 
+test('developer_task_rollup is visible only in the Developer internal lane curation', () => {
+  assert.equal(isToolInLaneAllowlist('developer', 'developer_task_rollup'), true);
+  for (const lane of KNOWN_INTERNAL_LANES) {
+    if (lane === 'developer') continue;
+    assert.equal(isToolInLaneAllowlist(lane, 'developer_task_rollup'), false, lane);
+  }
+});
+
 test('isToolInLaneAllowlist: a tool outside the lane list is rejected', () => {
   assert.equal(isToolInLaneAllowlist('developer', 'legal_blob_get'), false, 'developer has no privileged legal access');
   assert.equal(isToolInLaneAllowlist('clo-personal', 'graph_send_email'), false, 'clo-personal excludes fleet comms');
