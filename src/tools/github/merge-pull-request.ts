@@ -30,7 +30,7 @@ export function registerGitHubMergePullRequest(server: McpServer, callerHash: Ca
         if (ctx.dryRun) {
           return { data: { planned: true }, summary: `DRY RUN: would ${input.method ?? 'squash'}-merge PR #${input.number} in ${input.owner}/${input.repo}. Pass dry_run=false to execute.` };
         }
-        const r = await mergePullRequest(input.owner, input.repo, input.number, input.method ?? 'squash', input.title);
+        const r = await mergePullRequest(input.owner, input.repo, input.number, input.method ?? 'squash', input.title, ctx.callerAgent === 'cto');
         return { data: r, summary: `PR #${input.number} merge: merged=${r.merged} ${r.sha ? '(' + r.sha.slice(0, 12) + ')' : ''} ${r.message}`, audit: { after: r } };
       },
     },
