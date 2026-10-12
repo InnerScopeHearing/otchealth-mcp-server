@@ -666,6 +666,8 @@ export interface ToolResultPayload {
   compactJsonText?: boolean;
   /** Optional human-readable summary. Appended after the JSON text block. */
   summary?: string;
+  /** Opt in to minified JSON in this tool's human-readable text block. Structured data is unchanged. */
+  compactText?: boolean;
   /** Optional before/after pair for audit log on writes. */
   audit?: { before?: unknown; after?: unknown };
   /**
@@ -757,7 +759,7 @@ const CONNECTOR_COMMON_INPUT: ZodRawShape = {
   acknowledge_warning: z.boolean().optional(),
 };
 
-function buildTextContent(
+export function buildTextContent(
   payload: ToolResultPayload,
   warning: ComplianceWarning | null,
   coldStartWarning?: string,
@@ -772,7 +774,7 @@ function buildTextContent(
     lines.push(JSON.stringify(warning, null, 2));
   }
   if (payload.data !== null && payload.data !== undefined) {
-    lines.push(compactJsonText ? JSON.stringify(payload.data) : JSON.stringify(payload.data, null, 2));
+    lines.push(compactJsonText || payload.compactText ? JSON.stringify(payload.data) : JSON.stringify(payload.data, null, 2));
   }
   if (payload.summary) {
     lines.push('');
