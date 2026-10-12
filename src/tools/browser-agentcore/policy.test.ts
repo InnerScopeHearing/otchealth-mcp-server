@@ -13,6 +13,21 @@ test('allows only exact HTTPS public hosts', () => {
   assert.equal(validatePublicTargets(['http://wefunder.com']).ok, false);
 });
 
+test('an enrollment host list scopes both initial targets and redirect destinations without widening the default lane', () => {
+  const developerHosts = ['docs.aws.amazon.com', 'docs.github.com', 'developers.openai.com', 'example.com'];
+  for (const host of developerHosts) {
+    assert.equal(validatePublicTargets([`https://${host}/`], developerHosts).ok, true);
+  }
+  // These model final URLs after navigation: a Developer page cannot redirect to another lane or
+  // an unlisted host, even though those hosts may be enrolled in a different browser profile.
+  assert.equal(validatePublicTargets(['https://wefunder.com/'], developerHosts).ok, false);
+  assert.equal(validatePublicTargets(['https://github.com/'], developerHosts).ok, false);
+  assert.equal(validatePublicTargets(['https://evil.example/'], developerHosts).ok, false);
+  // Existing callers that omit a profile scope retain the original Wefunder-only policy.
+  assert.equal(validatePublicTargets(['https://wefunder.com/']).ok, true);
+  assert.equal(validatePublicTargets(['https://docs.aws.amazon.com/']).ok, false);
+});
+
 test('rejects sensitive intent before provider use', () => {
   assert.ok(rejectSensitiveIntent({ intent: 'log in and publish the campaign' }));
   assert.ok(rejectSensitiveIntent({ intent: 'save session profile' }));

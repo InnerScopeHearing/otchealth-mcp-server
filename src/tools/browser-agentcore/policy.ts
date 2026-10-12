@@ -6,7 +6,7 @@ export const MAX_SECONDS = 300;
 
 export type TargetValidation = { ok: true; urls: URL[] } | { ok: false; reason: string };
 
-export function validatePublicTargets(targets: unknown): TargetValidation {
+export function validatePublicTargets(targets: unknown, allowedHosts: readonly string[] = [...ALLOWED_HOSTS]): TargetValidation {
   if (!Array.isArray(targets) || targets.length === 0 || targets.length > MAX_TARGETS) {
     return { ok: false, reason: `targets must contain 1-${MAX_TARGETS} HTTPS URLs` };
   }
@@ -21,7 +21,7 @@ export function validatePublicTargets(targets: unknown): TargetValidation {
     }
     let url: URL;
     try { url = new URL(raw); } catch { return { ok: false, reason: 'target is not a valid URL' }; }
-    if (url.protocol !== 'https:' || url.username || url.password || url.port || !ALLOWED_HOSTS.has(url.hostname.toLowerCase())) {
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || !allowedHosts.includes(url.hostname.toLowerCase())) {
       return { ok: false, reason: 'target host is not in the strict public allowlist' };
     }
     urls.push(url);
