@@ -87,7 +87,17 @@ export function createTrustedBrowserBinaryValidator(options: TrustedBrowserBinar
         await writeFile(filePath, body, { flag: 'wx', mode: 0o600 });
 
         if (input.contentType === 'application/pdf') {
-          const result = await runTool('qpdf', ['--check', '--show-npages', filePath], TOOL_TIMEOUT_MS, MAX_STDOUT_BYTES);
+          // prlimit applies address-space and CPU ceilings to qpdf and all of its descendants.
+          // Keep this wrapper and its options fixed; neither executable nor args are caller input.
+          const result = await runTool('prlimit', [
+            '--as=536870912:536870912',
+            '--cpu=4:4',
+            '--',
+            'qpdf',
+            '--check',
+            '--show-npages',
+            filePath,
+          ], TOOL_TIMEOUT_MS, MAX_STDOUT_BYTES);
           const lines = result.stdout.trim().split(/\r?\n/);
           const pageCount = Number(lines.at(-1));
           if (!/No syntax or stream encoding errors found/i.test(result.stdout) ||
