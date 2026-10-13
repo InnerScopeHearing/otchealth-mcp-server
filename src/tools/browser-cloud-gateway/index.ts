@@ -4,6 +4,7 @@ import { z } from "zod";
 import { registerTool, type CallerHashProvider, type ToolResultPayload } from "../registry.js";
 import { CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, type CloudBrowserAction } from "../browser-cloud/contract.js";
 import { cloudBrowserActionSchema } from "../browser-cloud/actions.js";
+import type { BrowserCaptureMetadata } from '../browser-cloud/contract.js';
 import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from "../browser-cloud/service.js";
 import { CloudBrowserJobs, type CloudBrowserArtifactStore, type CloudBrowserWorkerQueue } from "../browser-cloud-jobs/contracts.js";
 import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from "../browser-cloud-jobs/worker.js";
@@ -444,6 +445,11 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       },
       outputShape: {
         ok: z.boolean().optional(),
+        capture_id: z.string().optional(),
+        content_type: z.string().optional(),
+        byte_length: z.number().optional(),
+        sha256: z.string().optional(),
+        page_count: z.number().optional(),
         created_target_id: z.string().optional(),
         closed_target_id: z.string().optional(),
         selected_target_id: z.string().nullable().optional(),
@@ -459,17 +465,23 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             summary: "Browser action was not executed.",
           };
         try {
-          const result = (await runtime.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds)) as {
+          const result = await runtime.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds) as {
             createdTargetId?: string;
             closedTargetId?: string;
             selectedTargetId?: string | null;
-          } | null;
+          } | BrowserCaptureMetadata | null;
+          if (input.action.type === 'capture') {
+            const capture = result as BrowserCaptureMetadata | null;
+            if (!capture || typeof capture.id !== 'string' || capture.owner !== ctx.callerAgent) throw new Error('capture_result_invalid');
+            return { data: { ok: true, capture_id: capture.id, content_type: capture.contentType, byte_length: capture.byteLength, sha256: capture.sha256, ...(capture.pageCount === undefined ? {} : { page_count: capture.pageCount }) }, summary: 'Validated browser capture stored as an owner-bound immutable artifact; capture bytes are not returned inline.' };
+          }
+          const actionResult = result as { createdTargetId?: string; closedTargetId?: string; selectedTargetId?: string | null } | null;
           return {
             data: {
               ok: true,
-              ...(result?.createdTargetId ? { created_target_id: result.createdTargetId } : {}),
-              ...(result?.closedTargetId ? { closed_target_id: result.closedTargetId } : {}),
-              ...(result && "selectedTargetId" in result ? { selected_target_id: result.selectedTargetId } : {}),
+              ...(actionResult?.createdTargetId ? { created_target_id: actionResult.createdTargetId } : {}),
+              ...(actionResult?.closedTargetId ? { closed_target_id: actionResult.closedTargetId } : {}),
+              ...(actionResult && "selectedTargetId" in actionResult ? { selected_target_id: actionResult.selectedTargetId } : {}),
             },
             summary: "Bounded browser action completed.",
           };

@@ -113,6 +113,17 @@ function fakeServer(): {
     handlers,
   };
 }
+test('gateway accepts only typed capture requests and returns metadata without capture bytes', async () => {
+  const old = [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS];
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 'synthetic-table', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'synthetic-bucket', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
+  const runtime = { browser: { execute: async () => ({ id: 'bca_123e4567-e89b-42d3-a456-426614174000', owner: 'cto', sessionId: 's', contentType: 'image/png', byteLength: 42, sha256: 'a'.repeat(64), createdAt: 1, body: Buffer.from('must-not-leak') }) }, jobs: {} as never, queue: {} as never, artifacts: {} as never } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer(); registerCloudBrowserTools(server, () => 'hash', runtime);
+  try {
+    const good = await requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cto', dryRun: false }, () => handlers.get('browser_cloud_session_action')!({ session_id: 's', action: { type: 'capture', request: { type: 'screenshot', format: 'png' } }, timeout_seconds: 5, dry_run: false }));
+    assert.deepEqual(good.structuredContent?.result, { ok: true, capture_id: 'bca_123e4567-e89b-42d3-a456-426614174000', content_type: 'image/png', byte_length: 42, sha256: 'a'.repeat(64) });
+    assert.equal(JSON.stringify(good.structuredContent).includes('must-not-leak'), false);
+  } finally { [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS] = old; }
+});
 test("gateway redaction and shield never retain nested typed text, URL, selector, or plan", () => {
   const raw = {
     action: { type: "type", selector: "#password", text: "typed-secret" },

@@ -6,6 +6,8 @@ import type { CloudBrowserAction, CloudBrowserObservation, CloudBrowserProfile, 
 import { CloudBrowserError } from "./contract.js";
 import { executeCloudBrowserInteraction } from "./actions.js";
 import { BrowserPageController } from "./page-controls.js";
+import { captureBrowserArtifact, type BrowserCaptureValidator } from './captures.js';
+import { createTrustedBrowserBinaryValidator } from './binary-validation.js';
 
 const BROWSER_ID = "aws.browser.v1";
 type FrameMessage = { id?: unknown; result?: unknown; error?: unknown };
@@ -23,20 +25,27 @@ export function isAllowedBrowserUrl(raw: unknown, allowedHosts: readonly string[
 /** Minimal bounded CDP client. It offers no Runtime.evaluate or arbitrary command entrypoint. */
 type Ws = Pick<WebSocket, "send" | "close" | "addEventListener">;
 type WsFactory = (url: string, options: { headers: Record<string, string> }) => Ws;
-const MAX_MESSAGE_BYTES = 65_536;
+const MAX_MESSAGE_BYTES = 5_600_000; // 4 MiB artifact as base64 plus bounded CDP envelope.
+const MAX_QUEUED_MESSAGE_BYTES = MAX_MESSAGE_BYTES + 128 * 1024;
+const MAX_QUEUED_FRAMES = 32;
+const trustedBinaryValidator = createTrustedBrowserBinaryValidator();
+const defaultCaptureValidator: BrowserCaptureValidator = input => trustedBinaryValidator.validate(input);
 class Cdp {
   private readonly frames: string[] = [];
+  private queuedBytes = 0;
   private wake?: () => void;
   private closed = false;
   private id = 1;
   private constructor(private readonly socket: Ws) {
     socket.addEventListener("message", (event) => {
       const text = typeof event.data === "string" ? event.data : "";
-      if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) {
+      const bytes = Buffer.byteLength(text);
+      if (bytes > MAX_MESSAGE_BYTES || this.frames.length >= MAX_QUEUED_FRAMES || this.queuedBytes + bytes > MAX_QUEUED_MESSAGE_BYTES) {
         this.closed = true;
         socket.close();
       } else {
         this.frames.push(text);
+        this.queuedBytes += bytes;
         this.notify();
       }
     });
@@ -95,9 +104,11 @@ class Cdp {
     const until = Date.now() + timeout;
     for (;;) {
       while (this.frames.length) {
-        let msg: FrameMessage;
+          const frame = this.frames.shift() as string;
+          this.queuedBytes -= Buffer.byteLength(frame);
+          let msg: FrameMessage;
         try {
-          msg = JSON.parse(this.frames.shift() as string) as FrameMessage;
+            msg = JSON.parse(frame) as FrameMessage;
         } catch {
           continue;
         }
@@ -128,6 +139,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
     private readonly region = process.env.AWS_REGION || "us-east-1",
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly webSocketFactory: WsFactory = (url, options) => new WebSocket(url, options),
+    private readonly captureValidator: BrowserCaptureValidator = defaultCaptureValidator,
   ) {}
   private async request(method: string, path: string, body: unknown, credentials: AwsCredentials): Promise<unknown> {
     const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
@@ -264,6 +276,19 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
         }
       }
       const page = await attach(selected());
+      if (action.type === 'capture') {
+        const tree = await cdp.command('Accessibility.getFullAXTree', {}, remaining(), page);
+        const nodes = tree.nodes as Array<{ role?: { value?: unknown }; name?: { value?: unknown } }> | undefined;
+        const sensitiveControl = nodes?.some(node => {
+          const role = typeof node.role?.value === 'string' ? node.role.value.toLowerCase() : '';
+          const name = typeof node.name?.value === 'string' ? node.name.value : '';
+          return role === 'password' || /\b(?:captcha|one[- ]time (?:password|code)|verification code|security code|authenticator code)\b/i.test(name);
+        }) ?? false;
+        if (sensitiveControl) throw new CloudBrowserError('sensitive_output_denied', 'Browser capture is unavailable while a password or verification control is present.');
+        const capture = await captureBrowserArtifact(cdp, page, action.request, remaining, this.captureValidator);
+        sync();
+        return { observation: null, capture };
+      }
       if (action.type === "snapshot") {
         const history = await cdp.command("Page.getNavigationHistory", {}, remaining(), page);
         const entries = history.entries as Array<{ url?: unknown; title?: unknown }> | undefined;

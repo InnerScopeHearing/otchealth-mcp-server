@@ -276,6 +276,43 @@ test("selected owned tab is reused after a new provider stream connection", asyn
   assert.equal(calls.filter((call) => call.method === "Target.attachToTarget").at(-1)?.params.targetId, "second");
 });
 
+test('CDP accepts a bounded complete 4 MiB screenshot and denies password controls before capture', async (t) => {
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const body = Buffer.alloc(4 * 1024 * 1024);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(body);
+  Buffer.from([73, 69, 78, 68, 174, 66, 96, 130]).copy(body, body.length - 8);
+  const commands: string[] = [];
+  let passwordControl = false;
+  class Socket extends EventTarget {
+    send(raw: string) {
+      const cmd = JSON.parse(raw) as { id: number; method: string };
+      commands.push(cmd.method);
+      const result: Record<string, unknown> = cmd.method === 'Target.getTargets' ? { targetInfos: [{ type: 'page', targetId: 'target' }] } :
+        cmd.method === 'Target.attachToTarget' ? { sessionId: 'page' } :
+        cmd.method === 'Accessibility.getFullAXTree' ? { nodes: passwordControl ? [{ role: { value: 'password' } }] : [] } :
+        cmd.method === 'Page.captureScreenshot' ? { data: body.toString('base64') } : {};
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ id: cmd.id, result }) })));
+    }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  const factory = () => { const socket = new Socket(); queueMicrotask(() => socket.dispatchEvent(new Event('open'))); return socket as unknown as WebSocket; };
+  const validator = async ({ body: captured }: { contentType: string; body: Uint8Array }) => ({ complete: captured.byteLength === 4 * 1024 * 1024 });
+  const transport = new AgentCoreCloudBrowserTransport('us-east-1', fetch, factory, validator);
+  const result = await transport.execute(session, { type: 'capture', request: { type: 'screenshot', format: 'png' } }, 5) as { capture?: { body: Uint8Array; contentType: string } };
+  assert.equal(result.capture?.body.byteLength, 4 * 1024 * 1024);
+  assert.equal(result.capture?.contentType, 'image/png');
+  assert.ok(commands.includes('Page.captureScreenshot'));
+  assert.equal(commands.includes('Runtime.evaluate'), false);
+
+  passwordControl = true;
+  commands.length = 0;
+  await assert.rejects(transport.execute(session, { type: 'capture', request: { type: 'screenshot' } }, 5), (error: unknown) => (error as { code?: unknown }).code === 'sensitive_output_denied');
+  assert.equal(commands.includes('Page.captureScreenshot'), false);
+});
+
 test("creating a tab with no selection activates it for the required post-action observation", async (t) => {
   const saved = { ...process.env };
   t.after(() => {

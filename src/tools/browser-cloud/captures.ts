@@ -67,7 +67,9 @@ function validateRequest(input: BrowserCaptureRequest): BrowserCaptureRequest {
 
 function decodeBase64(value: unknown): Uint8Array {
   if (typeof value !== 'string' || value.length === 0 || value.length > Math.ceil(MAX_CAPTURE_BYTES / 3) * 4) throw invalidCapture();
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw invalidCapture();
+  // Keep validation linear for multi-megabyte CDP payloads; a grouped regex can
+  // overflow the JS regex engine's backtracking stack on a valid 4 MiB capture.
+  if (value.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(value) || /={3,}$/.test(value) || (value.includes('=') && !/=+$/.test(value))) throw invalidCapture();
 
   const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
   const decodedLength = value.length / 4 * 3 - padding;

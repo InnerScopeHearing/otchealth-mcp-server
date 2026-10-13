@@ -9,6 +9,7 @@ export const CLOUD_BROWSER_DAILY_SESSION_LIMIT = 10;
 export const CLOUD_BROWSER_MAX_ACTIONS = 20;
 export const CLOUD_BROWSER_MAX_ACTION_SECONDS = 20;
 export const CLOUD_BROWSER_KEYS = ["Enter", "Tab", "Escape", "Backspace", "Delete", "Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "KeyA", "KeyC", "KeyV", "KeyP", "KeyS", "KeyF", "KeyZ", "F5"] as const;
+export type BrowserCaptureRequest = import('./captures.js').BrowserCaptureRequest;
 
 export type CloudBrowserAction =
   | import("./page-controls.js").BrowserPageAction
@@ -22,6 +23,7 @@ export type CloudBrowserAction =
   | { type: "type"; selector: string; text: string }
   | { type: "wait_for"; selector: string }
   | { type: "snapshot" }
+  | { type: "capture"; request: BrowserCaptureRequest }
   | {
       type: "press_key";
       key: (typeof CLOUD_BROWSER_KEYS)[number];
@@ -90,11 +92,30 @@ export interface CloudBrowserSession {
   selectedTargetId?: string | null;
   /** Blocks further effects after an acknowledgement loss until owner reconciliation. */
   effectUnknown?: boolean;
+  /** Trusted auth runtime sets this fail-closed output suppression state; no caller tool can clear it. */
+  sensitiveOutputSuppressed?: boolean;
 }
 
 export interface CloudBrowserExecutionResult {
   observation: CloudBrowserObservation | null;
   pageReceipt?: import("./page-controls.js").BrowserPageReceipt;
+  capture?: import('./captures.js').BrowserCapturedArtifact;
+}
+
+export interface BrowserCaptureMetadata {
+  id: string;
+  owner: string;
+  sessionId: string;
+  contentType: 'image/png' | 'image/jpeg' | 'application/pdf';
+  byteLength: number;
+  sha256: string;
+  createdAt: number;
+  pageCount?: number;
+}
+
+export interface BrowserCaptureRecord extends BrowserCaptureMetadata {
+  storageKey: string;
+  storageVersion: string;
 }
 
 export interface CloudBrowserStore {
@@ -109,6 +130,8 @@ export interface CloudBrowserStore {
   acquireProfileLock(profileId: string, owner: string, until: number): Promise<boolean>;
   releaseProfileLock(profileId: string, owner: string): Promise<void>;
   reserveDailySession(owner: string, day: string, limit: number): Promise<boolean>;
+  createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number): Promise<BrowserCaptureMetadata>;
+  loadCapture(owner: string, captureId: string): Promise<{ metadata: BrowserCaptureMetadata; body: Uint8Array } | null>;
 }
 
 export interface CloudBrowserTransport {

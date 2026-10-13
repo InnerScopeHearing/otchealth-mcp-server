@@ -164,3 +164,56 @@ test("public profile and provider browser binding survive durable round-trip", a
   assert.equal(restored?.actionBudget, 250);
   assert.equal(restored?.mode, "public_web");
 });
+
+test('sensitive-output suppression is backward-compatible durable session state', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  let item: Record<string, any> = {};
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (request.Item) { item = request.Item; return new Response('{}'); }
+    if (request.UpdateExpression) { item.sensitiveOutputSuppressed = request.ExpressionAttributeValues[':sensitive']; return new Response('{}'); }
+    return new Response(JSON.stringify({ Item: item }));
+  });
+  await store.saveSession({ ...ownedSession, sensitiveOutputSuppressed: true });
+  assert.deepEqual(item.sensitiveOutputSuppressed, { BOOL: true });
+  assert.equal((await store.loadSession(ownedSession.sessionId))?.sensitiveOutputSuppressed, true);
+  await store.saveSessionUnderLock({ ...ownedSession, sensitiveOutputSuppressed: false }, 'writer');
+  assert.deepEqual(item.sensitiveOutputSuppressed, { BOOL: false });
+});
+
+test('capture bytes use immutable versioned browser-cloud S3 keys and owner-checked Dynamo metadata', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret'; process.env.CLOUD_BROWSER_ARTIFACT_BUCKET = 'synthetic-browser-artifacts';
+  const bytes = Buffer.from([0, 255, 1, 2, 3]);
+  const sha256 = (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex');
+  let item: Record<string, any> | undefined;
+  const calls: Array<{ url: string; method: string; request?: Record<string, any>; headers?: Headers }> = [];
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (url, init) => {
+    const method = init?.method ?? '';
+    const call = { url: String(url), method, headers: new Headers(init?.headers), ...(String(url).includes('dynamodb.') ? { request: JSON.parse(String(init?.body)) } : {}) };
+    calls.push(call);
+    if (call.request?.Item) { item = call.request.Item; return new Response('{}'); }
+    if (call.request?.ConsistentRead) return new Response(JSON.stringify({ Item: item }));
+    if (method === 'PUT') return new Response('', { headers: { 'x-amz-version-id': 's3-version-1' } });
+    if (method === 'GET') return new Response(bytes, { headers: { 'x-amz-version-id': 's3-version-1', 'content-type': 'image/jpeg', 'content-length': String(bytes.length) } });
+    return new Response('{}');
+  });
+  const metadata = await store.createCapture('cto', '123e4567-e89b-42d3-a456-426614174000', { contentType: 'image/jpeg', body: bytes, sha256 }, 1000);
+  assert.match(metadata.id, /^bca_[0-9a-f-]{36}$/);
+  assert.equal(item?.pk.S, `CAPTURE#${metadata.id}`);
+  assert.equal(item?.owner.S, 'cto');
+  assert.equal(item?.storageKey.S, `browser-cloud/captures/cto/${metadata.id}`);
+  assert.equal(item?.storageVersion.S, 's3-version-1');
+  const s3Put = calls.find(call => call.method === 'PUT')!;
+  assert.equal(s3Put.headers?.get('if-none-match'), '*');
+  assert.equal(s3Put.headers?.get('x-amz-server-side-encryption'), 'AES256');
+  const s3CallCount = calls.filter(call => call.method === 'GET').length;
+  assert.equal(await store.loadCapture('cfo', metadata.id), null);
+  assert.equal(calls.filter(call => call.method === 'GET').length, s3CallCount);
+  const loaded = await store.loadCapture('cto', metadata.id);
+  assert.deepEqual(loaded?.body, bytes);
+  assert.equal(loaded?.metadata.sha256, sha256);
+});

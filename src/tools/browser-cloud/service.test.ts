@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CloudBrowserError, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport } from "./contract.js";
+import { CloudBrowserError, type BrowserCaptureMetadata, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport } from "./contract.js";
 import { CloudBrowserService } from "./service.js";
 
 class MemoryStore implements CloudBrowserStore {
@@ -8,6 +8,7 @@ class MemoryStore implements CloudBrowserStore {
   readonly sessions = new Map<string, CloudBrowserSession>();
   dailyReservations = 0;
   readonly locks = new Map<string, string>();
+  readonly captures = new Map<string, { metadata: BrowserCaptureMetadata; body: Uint8Array }>();
   async loadProfile(id: string): Promise<CloudBrowserProfile | null> {
     return this.profiles.get(id) ?? null;
   }
@@ -45,6 +46,15 @@ class MemoryStore implements CloudBrowserStore {
   async reserveDailySession(_owner: string, _day: string, _limit: number): Promise<boolean> {
     this.dailyReservations += 1;
     return true;
+  }
+  async createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number): Promise<BrowserCaptureMetadata> {
+    const metadata: BrowserCaptureMetadata = { id: 'bca_123e4567-e89b-42d3-a456-426614174000', owner, sessionId, contentType: artifact.contentType, byteLength: artifact.body.byteLength, sha256: artifact.sha256, createdAt, ...(artifact.pageCount === undefined ? {} : { pageCount: artifact.pageCount }) };
+    this.captures.set(metadata.id, { metadata, body: artifact.body });
+    return metadata;
+  }
+  async loadCapture(owner: string, id: string) {
+    const value = this.captures.get(id);
+    return value?.metadata.owner === owner ? value : null;
   }
 }
 class FakeTransport implements CloudBrowserTransport {
@@ -87,6 +97,7 @@ class FakeTransport implements CloudBrowserTransport {
         visibleText: "",
       };
     }
+    if (a.type === 'capture') return { observation: null, capture: { contentType: 'image/png', body: Buffer.from([137,80,78,71,13,10,26,10,0,0,0,0,73,69,78,68,174,66,96,130]), sha256: 'a'.repeat(64) } };
     if (a.type === "tab_create") {
       if (this.uncertainCreate) {
         s.effectUnknown = true;
@@ -159,7 +170,7 @@ test("typed keys, pointer and scroll controls retain session owner and host guar
   await assert.rejects(service.execute("cto", sessionId, { type: "press_key", key: "Enter" }, 2), (error: unknown) => error instanceof CloudBrowserError && error.code === "redirect_outside_allowlist");
 });
 
-test("verified public-web profiles accept any HTTPS host without pilot caps and keep explicit mission budgets", async () => {
+test("verified public-web profiles default omitted native-client budgets to the server cap and bound explicit budgets", async () => {
   const store = new MemoryStore();
   const transport = new FakeTransport();
   const service = new CloudBrowserService(store, transport);
@@ -182,6 +193,9 @@ test("verified public-web profiles accept any HTTPS host without pilot caps and 
   const discovered = await service.publicWebProfile("cto");
   assert.equal(discovered.mode, "public_web");
   assert.deepEqual(discovered.allowedHosts, []);
+  const legacyClient = await service.start('cto', 'cto-public-web', 28_800);
+  assert.equal(store.sessions.get(legacyClient.sessionId)?.actionBudget, 500);
+  await assert.rejects(service.start('cto', 'cto-public-web', 60, 501), (error: unknown) => error instanceof CloudBrowserError && error.code === 'invalid_action_budget');
   const { sessionId } = await service.start("cto", "cto-public-web", 28_800, 450);
   assert.equal(store.dailyReservations, 0, "public mode is not subject to the legacy daily trial limit");
   assert.equal(store.sessions.get(sessionId)?.actionBudget, 450);
@@ -460,4 +474,38 @@ test("session action lease fences concurrent gateway copies and preserves action
   release();
   await first;
   assert.equal(store.sessions.get(sessionId)?.actionsUsed, 1);
+});
+
+test('capture is a locked budgeted action and returns only an owner-bound opaque reference', async () => {
+  const store = new MemoryStore();
+  const service = new CloudBrowserService(store, new FakeTransport(), () => 1234);
+  await service.saveProfile('cto', { profileId: 'cto-capture', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-capture', 60);
+  const result = await service.execute('cto', sessionId, { type: 'capture', request: { type: 'screenshot', format: 'png' } }, 5) as BrowserCaptureMetadata;
+  assert.equal(result.id, 'bca_123e4567-e89b-42d3-a456-426614174000');
+  assert.equal(result.owner, 'cto');
+  assert.equal(result.contentType, 'image/png');
+  assert.equal('body' in result, false);
+  assert.equal(store.sessions.get(sessionId)?.actionsUsed, 1);
+  assert.equal((await service.getCapture('cto', result.id)).body.byteLength, result.byteLength);
+  await assert.rejects(service.getCapture('cfo', result.id), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+});
+
+test('capture fails closed for persisted profiles, sensitive suppression, and exhausted action budgets', async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-persist', owner: 'cto', allowedHosts: ['example.test'], persistent: true, providerProfileId: 'provider-profile' });
+  const persisted = await service.start('cto', 'cto-persist', 60);
+  const before = transport.actions.length;
+  await assert.rejects(service.execute('cto', persisted.sessionId, { type: 'capture', request: { type: 'pdf' } }, 5), (e: unknown) => e instanceof CloudBrowserError && e.code === 'sensitive_output_denied');
+  assert.equal(transport.actions.length, before);
+
+  await service.saveProfile('cto', { profileId: 'cto-public-capture', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const fresh = await service.start('cto', 'cto-public-capture', 60);
+  await service.beginSensitiveOutputSuppression('cto', fresh.sessionId);
+  await assert.rejects(service.execute('cto', fresh.sessionId, { type: 'capture', request: { type: 'screenshot' } }, 5), (e: unknown) => e instanceof CloudBrowserError && e.code === 'sensitive_output_denied');
+  await service.endSensitiveOutputSuppression('cto', fresh.sessionId);
+  store.sessions.set(fresh.sessionId, { ...store.sessions.get(fresh.sessionId)!, actionsUsed: 20 });
+  await assert.rejects(service.execute('cto', fresh.sessionId, { type: 'capture', request: { type: 'screenshot' } }, 5), (e: unknown) => e instanceof CloudBrowserError && e.code === 'action_limit');
 });

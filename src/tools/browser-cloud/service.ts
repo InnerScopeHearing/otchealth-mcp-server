@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { validateCloudBrowserAction } from "./actions.js";
-import { CLOUD_BROWSER_DAILY_SESSION_LIMIT, CLOUD_BROWSER_MAX_ACTIONS, CLOUD_BROWSER_MAX_ACTION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, type CloudBrowserAction, type CloudBrowserObservation, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport, CloudBrowserError } from "./contract.js";
+import { CLOUD_BROWSER_DAILY_SESSION_LIMIT, CLOUD_BROWSER_MAX_ACTIONS, CLOUD_BROWSER_MAX_ACTION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, type BrowserCaptureMetadata, type CloudBrowserAction, type CloudBrowserObservation, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport, CloudBrowserError } from "./contract.js";
 
 function validHost(host: string): boolean {
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host);
@@ -152,7 +152,8 @@ export class CloudBrowserService {
     if (profile.mode === "public_web") assertProfile(profile);
     const maxDuration = profile.mode === "public_web" ? profile.maxSessionSeconds! : CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS;
     if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > maxDuration) throw new CloudBrowserError("invalid_duration", "Session duration exceeds the configured profile bound.");
-    if (profile.mode === "public_web" && (!Number.isSafeInteger(actionBudget) || actionBudget! < 1 || actionBudget! > profile.actionBudget!)) throw new CloudBrowserError("invalid_action_budget", "Public session requires an explicit action budget within the server configured mission budget.");
+    const selectedActionBudget = profile.mode === 'public_web' ? (actionBudget ?? profile.actionBudget) : CLOUD_BROWSER_MAX_ACTIONS;
+    if (profile.mode === "public_web" && (!Number.isSafeInteger(selectedActionBudget) || selectedActionBudget! < 1 || selectedActionBudget! > profile.actionBudget!)) throw new CloudBrowserError("invalid_action_budget", "Public session action budget must be within the server configured mission budget.");
     const lockOwner = `${caller}:${randomUUID()}`;
     if (!(await this.store.acquireProfileLock(profileId, lockOwner, this.now() + 30_000))) throw new CloudBrowserError("profile_busy", "Another browser session operation is in progress for this profile.");
     if (profile.mode !== "public_web" && !(await this.store.reserveDailySession(caller, new Date(this.now()).toISOString().slice(0, 10), CLOUD_BROWSER_DAILY_SESSION_LIMIT))) {
@@ -175,7 +176,7 @@ export class CloudBrowserService {
       profileId: profile.profileId,
       allowedHosts: profile.allowedHosts,
       mode: profile.mode ?? "enrolled_hosts",
-      actionBudget: profile.mode === "public_web" ? actionBudget : CLOUD_BROWSER_MAX_ACTIONS,
+      actionBudget: selectedActionBudget,
       expiresAt: this.now() + maxSeconds * 1_000,
       actionsUsed: 0,
       ...remote,
@@ -189,7 +190,7 @@ export class CloudBrowserService {
     return { sessionId: session.sessionId, expiresAt: session.expiresAt };
   }
 
-  async execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | import("./page-controls.js").BrowserPageReceipt | null> {
+  async execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | import("./page-controls.js").BrowserPageReceipt | BrowserCaptureMetadata | null> {
     const session = await this.sessionFor(caller, sessionId);
     const profile = await this.loadProfile(caller, session.profileId);
     const maxActionSeconds = session.mode === "public_web" ? profile.maxActionSeconds! : CLOUD_BROWSER_MAX_ACTION_SECONDS;
@@ -201,6 +202,9 @@ export class CloudBrowserService {
     try {
       const current = await this.sessionFor(caller, sessionId);
       if (current.effectUnknown) throw new CloudBrowserError("effect_unknown", "A previous browser tab operation has an unknown result; reconcile the session before continuing.");
+      if (action.type === 'capture' && (profile.persistent || Boolean(profile.providerProfileId) || current.sensitiveOutputSuppressed)) {
+        throw new CloudBrowserError('sensitive_output_denied', 'Browser capture is unavailable for persistent or output-suppressed sessions.');
+      }
       if (current.actionsUsed >= (current.actionBudget ?? CLOUD_BROWSER_MAX_ACTIONS)) throw new CloudBrowserError("action_limit", "Session action budget reached.");
       const deadline = this.now() + Math.min(timeoutSeconds, Math.max(1, Math.ceil((current.expiresAt - this.now()) / 1_000))) * 1_000;
       const remainingSeconds = (): number => Math.max(0, Math.ceil((deadline - this.now()) / 1_000));
@@ -216,8 +220,13 @@ export class CloudBrowserService {
       const mayRunWithoutSelection = (action.type === "tab_create" || action.type === "tab_select") && current.selectedTargetId === null;
       if (action.type !== "navigate" && !mayRunWithoutSelection) await checkCurrentPage();
       const effectIntent = action.type === "tab_create" || action.type === "tab_close";
+      const captureIntent = action.type === 'capture';
       if (effectIntent) {
         current.effectUnknown = true;
+        current.actionsUsed += 1;
+        await this.store.saveSessionUnderLock(current, lockOwner);
+      } else if (captureIntent) {
+        // Captures are read-only, but consume budget before contacting the provider.
         current.actionsUsed += 1;
         await this.store.saveSessionUnderLock(current, lockOwner);
       }
@@ -227,6 +236,7 @@ export class CloudBrowserService {
         | {
             observation: CloudBrowserObservation | null;
             pageReceipt?: import("./page-controls.js").BrowserPageReceipt;
+            capture?: import('./captures.js').BrowserCapturedArtifact;
           };
       try {
         if (action.type !== "wait_for") result = await this.transport.execute(current, action, remainingSeconds());
@@ -252,6 +262,7 @@ export class CloudBrowserService {
       }
       const execution = result && typeof result === "object" && "observation" in result ? result : { observation: result };
       const observation = execution.observation;
+      let captureMetadata: BrowserCaptureMetadata | undefined;
       let currentPage: CloudBrowserObservation | null = action.type === "snapshot" ? observation : null;
       try {
         if (!(action.type === "tab_close" && execution.pageReceipt?.selectedTargetId === null)) currentPage = action.type === "snapshot" ? observation : await checkCurrentPage();
@@ -264,17 +275,22 @@ export class CloudBrowserService {
         throw error;
       }
       if (currentPage) assertObservationHost(currentPage, current.allowedHosts, current.mode);
+      if (action.type === 'capture') {
+        if (!execution.capture) throw new CloudBrowserError('capture_failed', 'The browser capture could not be completed.');
+        try { captureMetadata = await this.store.createCapture(caller, sessionId, execution.capture, this.now()); }
+        catch { throw new CloudBrowserError('capture_storage_failed', 'The browser capture could not be stored safely.'); }
+      }
       if (effectIntent) current.effectUnknown = false;
       await this.store.saveSessionUnderLock(
         {
           ...current,
           ownedTargetIds: current.ownedTargetIds,
           selectedTargetId: current.selectedTargetId,
-          actionsUsed: current.actionsUsed + (effectIntent ? 0 : 1),
+          actionsUsed: current.actionsUsed + (effectIntent || captureIntent ? 0 : 1),
         },
         lockOwner,
       );
-      return execution.pageReceipt ?? (action.type === "snapshot" ? currentPage : observation);
+      return captureMetadata ?? execution.pageReceipt ?? (action.type === "snapshot" ? currentPage : observation);
     } finally {
       await this.store.releaseSessionLock(sessionId, lockOwner);
     }
@@ -310,6 +326,31 @@ export class CloudBrowserService {
     } finally {
       await this.store.releaseProfileLock(profile.profileId, lockOwner);
     }
+  }
+
+  /** Trusted authentication-runtime hook. There is intentionally no MCP route for either transition. */
+  async beginSensitiveOutputSuppression(caller: string, sessionId: string): Promise<void> {
+    await this.updateSensitiveOutputSuppression(caller, sessionId, true);
+  }
+
+  async endSensitiveOutputSuppression(caller: string, sessionId: string): Promise<void> {
+    await this.updateSensitiveOutputSuppression(caller, sessionId, false);
+  }
+
+  private async updateSensitiveOutputSuppression(caller: string, sessionId: string, suppressed: boolean): Promise<void> {
+    await this.sessionFor(caller, sessionId);
+    const lockOwner = `${caller}:${randomUUID()}`;
+    if (!(await this.store.acquireSessionLock(sessionId, lockOwner, this.now() + 5_000))) throw new CloudBrowserError('session_busy', 'Another browser action is in progress for this session.');
+    try {
+      const current = await this.sessionFor(caller, sessionId);
+      await this.store.saveSessionUnderLock({ ...current, sensitiveOutputSuppressed: suppressed }, lockOwner);
+    } finally { await this.store.releaseSessionLock(sessionId, lockOwner); }
+  }
+
+  async getCapture(caller: string, captureId: string): Promise<{ metadata: BrowserCaptureMetadata; body: Uint8Array }> {
+    const value = await this.store.loadCapture(caller, captureId);
+    if (!value || value.metadata.owner !== caller) throw new CloudBrowserError('owner_forbidden', 'Capture is unavailable to this caller.');
+    return value;
   }
 
   private async sessionFor(caller: string, sessionId: string, allowExpired = false): Promise<CloudBrowserSession> {
