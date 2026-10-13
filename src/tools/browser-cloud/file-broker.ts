@@ -27,6 +27,11 @@ export interface BrowserFileScanner {
   scan(input: { filename: string; contentType: string; body: Uint8Array }): Promise<'clean' | 'infected' | 'error'>;
 }
 
+/** Trusted in-process adapter. Synthetic implementations belong in tests only. */
+interface BrowserFileValidator {
+  validate(input: { contentType: string; body: Uint8Array }): Promise<{ complete: boolean }>;
+}
+
 export type BrowserFileUploadEvidence = { sha256: string; byteLength: number; completed: boolean };
 
 export class BrowserFileBrokerError extends Error {
@@ -72,7 +77,7 @@ function textContent(body: Uint8Array): string | null {
   }
 }
 
-function pngIsComplete(body: Uint8Array): boolean {
+function pngHasBasicStructure(body: Uint8Array): boolean {
   if (body.length < 8 || !PNG_SIGNATURE.every((byte, index) => body[index] === byte)) return false;
   let offset = 8;
   let sawHeader = false;
@@ -84,7 +89,8 @@ function pngIsComplete(body: Uint8Array): boolean {
     const next = dataOffset + length + 4;
     if (next > body.length) return false;
     const type = String.fromCharCode(body[typeOffset]!, body[typeOffset + 1]!, body[typeOffset + 2]!, body[typeOffset + 3]!);
-    if (!/^[A-Z]{4}$/.test(type)) return false;
+    // PNG chunk names contain ASCII letters; ancillary chunks use lowercase.
+    if (!/^[A-Za-z]{4}$/.test(type)) return false;
     if (!sawHeader) {
       if (type !== 'IHDR' || length !== 13) return false;
       sawHeader = true;
@@ -96,7 +102,7 @@ function pngIsComplete(body: Uint8Array): boolean {
   return false;
 }
 
-function jpegIsComplete(body: Uint8Array): boolean {
+function jpegHasBasicStructure(body: Uint8Array): boolean {
   if (body.length < 12 || body[0] !== 0xff || body[1] !== 0xd8 || body.at(-2) !== 0xff || body.at(-1) !== 0xd9) return false;
   let offset = 2;
   let sawFrame = false;
@@ -128,11 +134,15 @@ function supportedContent(contentType: string, body: Uint8Array): boolean {
   if (contentType === 'text/csv' || contentType === 'text/plain') return textContent(body) !== null;
   if (contentType === 'application/pdf') {
     const text = new TextDecoder('latin1').decode(body);
-    return body.length >= 12 && text.startsWith('%PDF-') && text.trimEnd().endsWith('%%EOF') && !text.includes('\0');
+    return body.length >= 12 && /^%PDF-(?:1\.[0-7]|2\.0)(?:\r?\n|$)/.test(text) && text.trimEnd().endsWith('%%EOF');
   }
-  if (contentType === 'image/png') return pngIsComplete(body);
-  if (contentType === 'image/jpeg') return jpegIsComplete(body);
+  if (contentType === 'image/png') return pngHasBasicStructure(body);
+  if (contentType === 'image/jpeg') return jpegHasBasicStructure(body);
   return false;
+}
+
+function isBinaryContent(contentType: string): boolean {
+  return contentType === 'application/pdf' || contentType === 'image/png' || contentType === 'image/jpeg';
 }
 
 function cloneRecord(record: BrowserFileRecord): BrowserFileRecord {
@@ -146,7 +156,7 @@ function cloneRecord(record: BrowserFileRecord): BrowserFileRecord {
 export class BrowserFileBroker {
   constructor(
     private readonly store: BrowserFileStore,
-    private readonly options: { scanner?: BrowserFileScanner; now?: () => number } = {},
+    private readonly options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; now?: () => number } = {},
   ) {}
 
   async stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }): Promise<BrowserFileRecord> {
@@ -169,12 +179,22 @@ export class BrowserFileBroker {
     const expiresAt = createdAt + BROWSER_FILE_TTL_MS;
     if (!Number.isSafeInteger(expiresAt)) fail('invalid_clock', 'File expiration is invalid.');
     let status: BrowserFileStatus = 'quarantined';
+    let scanClean = false;
     if (this.options.scanner) {
       try {
         const verdict = await this.options.scanner.scan({ filename, contentType, body: new Uint8Array(bytes) });
-        if (verdict === 'clean') status = 'ready';
+        scanClean = verdict === 'clean';
       } catch {
         // Scanner errors fail closed to quarantine.
+      }
+    }
+    if (scanClean && !isBinaryContent(contentType)) status = 'ready';
+    if (scanClean && isBinaryContent(contentType) && this.options.validator) {
+      try {
+        const verdict = await this.options.validator.validate({ contentType, body: new Uint8Array(bytes) });
+        if (verdict?.complete === true) status = 'ready';
+      } catch {
+        // Validation errors fail closed to quarantine.
       }
     }
     const record: BrowserFileRecord = { id, owner, filename, contentType, byteLength: bytes.byteLength, sha256, status, expiresAt };

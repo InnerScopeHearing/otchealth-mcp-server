@@ -18,12 +18,13 @@ type BrowserFileStore = {
   get(key: string): Promise<{ record: BrowserFileRecord; body: Uint8Array } | null>;
 };
 type BrowserFileScanner = { scan: (...args: never[]) => Promise<'clean' | 'infected' | 'error'> };
+type BrowserFileValidator = { validate(input: { contentType: string; body: Uint8Array }): Promise<{ complete: boolean }> };
 type BrokerApi = {
   stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }): Promise<BrowserFileRecord>;
   get(owner: string, fileId: string): Promise<BrowserFileRecord>;
   verifyUpload(owner: string, fileId: string, evidence: { sha256: string; byteLength: number; completed: boolean }): Promise<{ verified: true }>;
 };
-type BrokerConstructor = new (store: BrowserFileStore, options: { scanner?: BrowserFileScanner; now?: () => number }) => BrokerApi;
+type BrokerConstructor = new (store: BrowserFileStore, options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; now?: () => number }) => BrokerApi;
 
 const brokerPath = new URL('./file-broker.js', import.meta.url).href;
 const fileBrokerApi = await import('./file-broker.js').catch((error: unknown) => {
@@ -54,10 +55,10 @@ class MemoryFileStore implements BrowserFileStore {
 
 const cleanScanner: BrowserFileScanner = { scan: async () => 'clean' };
 const NO_SCANNER = Symbol('no scanner');
-function broker(store = new MemoryFileStore(), scanner: BrowserFileScanner | undefined | typeof NO_SCANNER = cleanScanner, now: number | (() => number) = 1_800_000_000_000) {
+function broker(store = new MemoryFileStore(), scanner: BrowserFileScanner | undefined | typeof NO_SCANNER = cleanScanner, now: number | (() => number) = 1_800_000_000_000, validator?: BrowserFileValidator) {
   assert.ok(BrowserFileBroker, 'file broker capability missing');
   const nowFn = typeof now === 'function' ? now : () => now;
-  const options = scanner === NO_SCANNER ? { now: nowFn } : { scanner, now: nowFn };
+  const options = { ...(scanner === NO_SCANNER ? {} : { scanner }), ...(validator ? { validator } : {}), now: nowFn };
   return { store, broker: new BrowserFileBroker(store, options) };
 }
 
@@ -122,7 +123,7 @@ test('rejects MIME and content mismatches plus embedded NUL in otherwise plain t
   await assert.rejects(files.stage('cfo', { filename: 'data.csv', contentType: 'text/csv', body: new Uint8Array([0x61, 0, 0x62]) }));
 });
 
-test('accepts supported PDF, PNG, and JPEG signatures and rejects an oversized body', async () => {
+test('binary signatures and a clean scanner alone remain quarantined', async () => {
   const { broker: files } = broker();
   const pdf = new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF');
   const png = Uint8Array.from([
@@ -135,11 +136,39 @@ test('accepts supported PDF, PNG, and JPEG signatures and rejects an oversized b
     0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0,
     0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0, 0xff, 0xd9,
   ]);
-  assert.equal((await files.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'ready');
-  assert.equal((await files.stage('cfo', { filename: 'image.png', contentType: 'image/png', body: png })).status, 'ready');
-  assert.equal((await files.stage('cfo', { filename: 'image.jpg', contentType: 'image/jpeg', body: jpeg })).status, 'ready');
+  assert.equal((await files.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'quarantined');
+  assert.equal((await files.stage('cfo', { filename: 'image.png', contentType: 'image/png', body: png })).status, 'quarantined');
+  assert.equal((await files.stage('cfo', { filename: 'image.jpg', contentType: 'image/jpeg', body: jpeg })).status, 'quarantined');
   await assert.rejects(files.stage('cfo', { filename: 'partial.jpg', contentType: 'image/jpeg', body: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]) }));
   await assert.rejects(files.stage('cfo', { filename: 'large.txt', contentType: 'text/plain', body: new Uint8Array(10 * 1024 * 1024 + 1).fill(0x61) }));
+});
+
+test('binary readiness requires positive validator completion and preserves valid binary bytes', async () => {
+  const pdf = new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n\0%%EOF');
+  const png = Uint8Array.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ...pngChunk('IHDR', [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]),
+    ...pngChunk('gAMA', [0, 0, 0, 1]),
+    ...pngChunk('IDAT', [0x78]),
+    ...pngChunk('IEND', []),
+  ]);
+  const seen: Uint8Array[] = [];
+  // Synthetic completion stub: exercises the trusted adapter contract in tests only.
+  const validator: BrowserFileValidator = { validate: async ({ body }) => { seen.push(new Uint8Array(body)); return { complete: true }; } };
+  const { broker: files } = broker(new MemoryFileStore(), cleanScanner, 1_800_000_000_000, validator);
+  assert.equal((await files.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'ready');
+  assert.equal((await files.stage('cfo', { filename: 'image.png', contentType: 'image/png', body: png })).status, 'ready');
+  assert.deepEqual(seen, [pdf, png]);
+});
+
+test('missing, throwing, or negative binary validation stays quarantined', async () => {
+  const pdf = new TextEncoder().encode('%PDF-1.7\n%%EOF');
+  const missing = broker();
+  assert.equal((await missing.broker.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'quarantined');
+  const throwing = broker(new MemoryFileStore(), cleanScanner, 1_800_000_000_000, { validate: async () => { throw new Error('validator down'); } });
+  assert.equal((await throwing.broker.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'quarantined');
+  const negative = broker(new MemoryFileStore(), cleanScanner, 1_800_000_000_000, { validate: async () => ({ complete: false }) });
+  assert.equal((await negative.broker.stage('cfo', { filename: 'doc.pdf', contentType: 'application/pdf', body: pdf })).status, 'quarantined');
 });
 
 test('get is owner-bound and returns metadata without file bytes', async () => {
