@@ -103,7 +103,7 @@ export class CloudBrowserService {
       // Keep the existing discovery response contract for cached clients. The
       // public-web boundary is represented by an empty host list; callers do
       // not get a new tool or a way to enroll/convert profiles.
-      return { profileId: publicWebProfile.profileId, allowedHosts: [], persistent: false };
+      return { profileId: publicWebProfile.profileId, allowedHosts: [], persistent: publicWebProfile.persistent };
     }
     const profile = await this.loadProfile(caller, publicTrialProfileId(caller));
     if (profile.mode === "public_web") throw new CloudBrowserError("profile_not_enrolled", "This caller has no legacy enrolled-host profile.");

@@ -533,6 +533,13 @@ test("legacy trial discovery and explicit starts fall back when no public-web en
   assert.equal(store.dailyReservations, 1);
 });
 
+test("legacy discovery preserves actual persistence metadata of an enrolled public-web profile", async () => {
+  const store = new MemoryStore();
+  const service = new CloudBrowserService(store, new FakeTransport(), Date.now, TEST_PUBLIC_WEB_POLICY);
+  store.profiles.set("coo-public-web", serverPublicWebProfile("coo", { persistent: true, providerProfileId: "approved-opaque-profile" }));
+  assert.deepEqual(await service.publicTrialProfile("coo"), { profileId: "coo-public-web", allowedHosts: [], persistent: true });
+});
+
 test("public-web resolution is owner-scoped and ignores unrelated profiles", async () => {
   const store = new MemoryStore();
   const transport = new FakeTransport();
