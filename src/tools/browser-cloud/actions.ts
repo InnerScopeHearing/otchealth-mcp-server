@@ -11,6 +11,7 @@ const selector = z
 export const cloudBrowserActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("navigate"), url: z.string().url().max(2048) }).strict(),
   z.object({ type: z.literal("snapshot") }).strict(),
+  z.object({ type: z.literal("upload"), selector, fileId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("capture"), request: z.discriminatedUnion("type", [
     z.object({ type: z.literal("screenshot"), format: z.enum(["png", "jpeg"]).optional() }).strict(),
     z.object({ type: z.literal("pdf"), landscape: z.boolean().optional(), printBackground: z.boolean().optional() }).strict(),

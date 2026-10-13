@@ -9,6 +9,7 @@ import { BrowserPageController } from "./page-controls.js";
 import { captureBrowserArtifact, type BrowserCaptureValidator } from './captures.js';
 import { createTrustedBrowserBinaryValidator } from './binary-validation.js';
 import { assertTrustedPublicWebProfile, type TrustedPublicWebPolicy } from './public-web-policy.js';
+import { attachStagedFileToOwnedInput, type BrowserFileResolver } from './provider-files.js';
 
 const BROWSER_ID = "aws.browser.v1";
 type FrameMessage = { id?: unknown; result?: unknown; error?: unknown };
@@ -142,6 +143,8 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
     private readonly webSocketFactory: WsFactory = (url, options) => new WebSocket(url, options),
     private readonly captureValidator: BrowserCaptureValidator = defaultCaptureValidator,
     private readonly trustedPublicWebPolicy?: TrustedPublicWebPolicy,
+    /** Server-only owner-scoped port; never sourced from an MCP caller. */
+    private readonly uploadFileResolver?: BrowserFileResolver,
   ) {}
   private async request(method: string, path: string, body: unknown, credentials: AwsCredentials): Promise<unknown> {
     const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
@@ -278,6 +281,37 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
         }
       }
       const page = await attach(selected());
+      if (action.type === 'upload') {
+        if (!this.uploadFileResolver) {
+          session.effectUnknown = false;
+          throw new CloudBrowserError('file_transfer_unavailable', 'Browser file upload is unavailable.');
+        }
+        let file: Awaited<ReturnType<BrowserFileResolver>>;
+        try {
+          file = await this.uploadFileResolver(session.owner, action.fileId);
+        } catch {
+          // The trusted resolver failed before any file was assigned or input event dispatched.
+          session.effectUnknown = false;
+          throw new CloudBrowserError('file_unavailable', 'Staged file is unavailable for browser transfer.');
+        }
+        try {
+          const fileReceipt = await attachStagedFileToOwnedInput({
+            caller: session.owner,
+            session,
+            targetId: selected(),
+            pageSessionId: page,
+            selector: action.selector,
+            file,
+            cdp,
+            timeoutMs: remaining(),
+          });
+          return { observation: null, fileReceipt };
+        } catch (error) {
+          if (error instanceof CloudBrowserError && error.code === 'file_transfer_uncertain') session.effectUnknown = true;
+          else if (error instanceof CloudBrowserError) session.effectUnknown = false;
+          throw error;
+        }
+      }
       if (action.type === 'capture') {
         const tree = await cdp.command('Accessibility.getFullAXTree', {}, remaining(), page);
         const nodes = tree.nodes as Array<{ role?: { value?: unknown }; name?: { value?: unknown } }> | undefined;

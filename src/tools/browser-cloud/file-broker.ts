@@ -156,7 +156,7 @@ function cloneRecord(record: BrowserFileRecord): BrowserFileRecord {
 export class BrowserFileBroker {
   constructor(
     private readonly store: BrowserFileStore,
-    private readonly options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; now?: () => number } = {},
+    private readonly options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; allowValidatedText?: boolean; now?: () => number } = {},
   ) {}
 
   async stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }): Promise<BrowserFileRecord> {
@@ -189,6 +189,9 @@ export class BrowserFileBroker {
       }
     }
     if (scanClean && !isBinaryContent(contentType)) status = 'ready';
+    // This opts in only for strictly validated plain text when no scanner is configured; it is
+    // not an antivirus verdict. A configured scanner's infected/error result can never be bypassed.
+    if (!this.options.scanner && this.options.allowValidatedText === true && !isBinaryContent(contentType)) status = 'ready';
     if (scanClean && isBinaryContent(contentType) && this.options.validator) {
       try {
         const verdict = await this.options.validator.validate({ contentType, body: new Uint8Array(bytes) });
@@ -211,6 +214,14 @@ export class BrowserFileBroker {
     const stored = await this.load(owner, fileId);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     return cloneRecord(stored.record);
+  }
+
+  /** Trusted server-only provider port. This method must never be exposed as an MCP response. */
+  async forUpload(owner: string, fileId: string): Promise<{ record: BrowserFileRecord; body: Uint8Array }> {
+    const stored = await this.load(owner, fileId);
+    if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
+    if (stored.record.status !== 'ready') fail('file_not_ready', 'File is not cleared for browser transfer.');
+    return { record: cloneRecord(stored.record), body: new Uint8Array(stored.body) };
   }
 
   async verifyUpload(owner: string, fileId: string, evidence: BrowserFileUploadEvidence): Promise<{ verified: true }> {

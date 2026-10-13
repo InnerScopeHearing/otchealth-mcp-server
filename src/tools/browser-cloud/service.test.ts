@@ -156,6 +156,98 @@ class FakeTransport implements CloudBrowserTransport {
   }
 }
 
+test('unknown provider start retains a durable profile fence and does not start twice', async () => {
+  const store = new MemoryStore();
+  let starts = 0;
+  const transport = new FakeTransport();
+  transport.start = async () => { starts++; throw new CloudBrowserError('provider_timeout', 'Provider acknowledgement was lost.'); };
+  const service = new CloudBrowserService(store, transport, () => 1_000);
+  await service.saveProfile('cto', { profileId: 'cto-start-fence', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  await assert.rejects(service.start('cto', 'cto-start-fence', 60));
+  await assert.rejects(service.start('cto', 'cto-start-fence', 60), (e: unknown) => e instanceof CloudBrowserError && e.code === 'profile_busy');
+  assert.equal(starts, 1);
+});
+
+test('session persistence remains fenced until a failed start is positively stopped', async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  store.saveSession = async () => { throw new Error('store failure'); };
+  transport.stop = async () => { throw new Error('stop outcome unknown'); };
+  const service = new CloudBrowserService(store, transport, () => 1_000);
+  await service.saveProfile('cto', { profileId: 'cto-save-fence', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  await assert.rejects(service.start('cto', 'cto-save-fence', 60));
+  await assert.rejects(service.start('cto', 'cto-save-fence', 60), (e: unknown) => e instanceof CloudBrowserError && e.code === 'profile_busy');
+  assert.equal(transport.startedProfileIds.length, 1);
+});
+
+test('sensitive mode blocks snapshots and ordinary browser actions before provider dispatch', async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-suppressed', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-suppressed', 60);
+  await service.beginSensitiveOutputSuppression('cto', sessionId);
+  await assert.rejects(service.snapshot('cto', sessionId), (e: unknown) => e instanceof CloudBrowserError && e.code === 'sensitive_output_denied');
+  await assert.rejects(service.execute('cto', sessionId, { type: 'click', selector: '#ordinary' }, 2), (e: unknown) => e instanceof CloudBrowserError && e.code === 'sensitive_output_denied');
+  assert.equal(transport.actions.length, 0);
+  await service.endSensitiveOutputSuppression('cto', sessionId);
+  assert.equal((await service.snapshot('cto', sessionId)).url, 'https://example.test/');
+});
+
+test('expired session read invokes its owned cleanup adapter without scanning', async () => {
+  const store = new MemoryStore() as MemoryStore & { claimExpiredSessionCleanup: () => Promise<boolean>; deleteExpiredSessionUnderLock: (id: string) => Promise<boolean> };
+  store.claimExpiredSessionCleanup = async () => true;
+  store.deleteExpiredSessionUnderLock = async (id) => { store.sessions.delete(id); return true; };
+  const transport = new FakeTransport();
+  let now = 1_000;
+  const service = new CloudBrowserService(store, transport, () => now);
+  await service.saveProfile('cto', { profileId: 'cto-expiry-cleanup', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-expiry-cleanup', 1);
+  now = 3_000;
+  await assert.rejects(service.snapshot('cto', sessionId), (e: unknown) => e instanceof CloudBrowserError && e.code === 'session_expired');
+  assert.equal(transport.stopped, 1);
+  assert.equal(store.sessions.has(sessionId), false);
+});
+
+test('file attachment consumes its durable intent once and returns only verified receipt metadata', async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const original = transport.execute.bind(transport);
+  transport.execute = async (session, action) => {
+    if ((action as { type: string }).type !== 'upload') return original(session, action);
+    assert.equal(store.sessions.get(session.sessionId)?.effectUnknown, true);
+    assert.equal(store.sessions.get(session.sessionId)?.actionsUsed, 1);
+    return { observation: null, fileReceipt: { status: 'attached', filename: 'check.txt', contentType: 'text/plain', byteLength: 3, sha256: 'a'.repeat(64) } } as never;
+  };
+  const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-upload', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-upload', 60);
+  const result = await service.execute('cto', sessionId, { type: 'upload', selector: '#file', fileId: '123e4567-e89b-42d3-a456-426614174000' }, 5);
+  assert.equal((result as { status: string }).status, 'attached');
+  assert.equal(store.sessions.get(sessionId)?.effectUnknown, false);
+  assert.equal(store.sessions.get(sessionId)?.actionsUsed, 1);
+});
+
+test('uncertain file assignment cannot be repeated automatically', async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const original = transport.execute.bind(transport);
+  let attachments = 0;
+  transport.execute = async (session, action) => {
+    if ((action as { type: string }).type !== 'upload') return original(session, action);
+    attachments++;
+    session.effectUnknown = true;
+    throw new CloudBrowserError('file_transfer_uncertain', 'File assignment could not be confirmed.');
+  };
+  const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-upload-unknown', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-upload-unknown', 60);
+  const action = { type: 'upload' as const, selector: '#file', fileId: '123e4567-e89b-42d3-a456-426614174000' };
+  await assert.rejects(service.execute('cto', sessionId, action, 5));
+  await assert.rejects(service.execute('cto', sessionId, action, 5), (e: unknown) => e instanceof CloudBrowserError && e.code === 'effect_unknown');
+  assert.equal(attachments, 1);
+});
+
 function serverPublicWebProfile(owner: string, overrides: Partial<CloudBrowserProfile> = {}): CloudBrowserProfile {
   return {
     profileId: `${owner}-public-web`,

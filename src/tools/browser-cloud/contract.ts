@@ -24,6 +24,7 @@ export type CloudBrowserAction =
   | { type: "wait_for"; selector: string }
   | { type: "snapshot" }
   | { type: "capture"; request: BrowserCaptureRequest }
+  | { type: "upload"; selector: string; fileId: string }
   | {
       type: "press_key";
       key: (typeof CLOUD_BROWSER_KEYS)[number];
@@ -100,6 +101,7 @@ export interface CloudBrowserExecutionResult {
   observation: CloudBrowserObservation | null;
   pageReceipt?: import("./page-controls.js").BrowserPageReceipt;
   capture?: import('./captures.js').BrowserCapturedArtifact;
+  fileReceipt?: import('./provider-files.js').BrowserFileTransferReceipt;
 }
 
 export interface BrowserCaptureMetadata {

@@ -85,7 +85,6 @@ export class BrowserPageController {
       return success();
     }
 
-    if (action.type === 'select') return fail('select_unsupported', 'Native select values cannot be verified through the supported browser protocol.');
     const page = await this.selectedPage(command);
     const currentUrl = await this.currentUrl(page, command);
     this.assertAllowed(currentUrl);
@@ -126,6 +125,66 @@ export class BrowserPageController {
       await command('DOM.focus', { nodeId }, page);
       return success();
     }
+    if (action.type === 'select') {
+      const described = await command('DOM.describeNode', { nodeId, depth: 1 }, page);
+      const node = described.node as { nodeName?: unknown; backendNodeId?: unknown; attributes?: unknown; children?: unknown } | undefined;
+      if (typeof node?.nodeName !== 'string' || node.nodeName.toUpperCase() !== 'SELECT') return fail('wrong_control', 'The selector did not resolve to a native select control.');
+      if (!Number.isSafeInteger(node.backendNodeId) || !Array.isArray(node.children)) return fail('select_state_unknown', 'The native select options could not be verified.');
+      const attributes = Array.isArray(node.attributes) ? node.attributes : [];
+      if (attributes.some((value, index) => index % 2 === 0 && value === 'multiple')) return fail('unsupported_select', 'Multiple select controls are not supported.');
+      const options = node.children as Array<{ nodeName?: unknown; attributes?: unknown }>;
+      if (options.some(option => option.nodeName === 'OPTGROUP')) return fail('unsupported_select', 'Grouped native select options are not supported.');
+      if (options.some(option => {
+        if (typeof option.nodeName !== 'string' || option.nodeName.toUpperCase() !== 'OPTION') return false;
+        const attrs = Array.isArray(option.attributes) ? option.attributes : [];
+        return attrs.some((value, index) => index % 2 === 0 && value === 'disabled');
+      })) return fail('unsupported_select', 'Disabled native select options are not supported.');
+      const values = options.filter(option => typeof option.nodeName === 'string' && option.nodeName.toUpperCase() === 'OPTION').map(option => {
+        const attrs = Array.isArray(option.attributes) ? option.attributes : [];
+        const valueIndex = attrs.findIndex((value, index) => index % 2 === 0 && value === 'value');
+        return valueIndex >= 0 && typeof attrs[valueIndex + 1] === 'string' ? attrs[valueIndex + 1] as string : undefined;
+      });
+      const optionIndex = values.findIndex(value => value === action.value);
+      if (optionIndex < 0) return fail('option_not_found', 'The requested value is not an option in the native select.');
+      await command('DOM.focus', { nodeId }, page);
+      const key = async (name: string, code: number): Promise<void> => {
+        const params = { key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
+        await command('Input.dispatchKeyEvent', { ...params, type: 'keyDown' }, page);
+        await command('Input.dispatchKeyEvent', { ...params, type: 'keyUp' }, page);
+      };
+      await key('Home', 36);
+      for (let index = 0; index < optionIndex; index += 1) await key('ArrowDown', 40);
+      const snapshot = await command('DOMSnapshot.captureSnapshot', { computedStyles: [], includeDOMRects: false, includePaintOrder: false }, page);
+      const strings = Array.isArray(snapshot.strings) ? snapshot.strings : [];
+      const documents = Array.isArray(snapshot.documents) ? snapshot.documents as Array<{ nodes?: Record<string, unknown> }> : [];
+      const actual = documents.flatMap(document => {
+        const nodes = document.nodes;
+        const selected = nodes?.optionSelected as { index?: unknown } | undefined;
+        if (!nodes || !Array.isArray(nodes.backendNodeId) || !Array.isArray(nodes.parentIndex) || !Array.isArray(nodes.attributes) || !Array.isArray(selected?.index)) return [];
+        const selectIndex = nodes.backendNodeId.findIndex(value => value === node.backendNodeId);
+        if (selectIndex < 0) return [];
+        const parentIndices = nodes.parentIndex as number[];
+        const selectedIndices = selected.index as number[];
+        const nodeAttributes = nodes.attributes as unknown[];
+        return parentIndices.flatMap((parent, index) => {
+          if (parent !== selectIndex || !selectedIndices.includes(index)) return [];
+          const attrs = nodeAttributes[index];
+          if (!Array.isArray(attrs)) return [];
+          for (let attrIndex = 0; attrIndex + 1 < attrs.length; attrIndex += 2) {
+            const nameIndex = attrs[attrIndex];
+            const valueIndex = attrs[attrIndex + 1];
+            if (!Number.isSafeInteger(nameIndex) || !Number.isSafeInteger(valueIndex)) return [];
+            if (strings[nameIndex as number] === 'value') {
+              const value = strings[valueIndex as number];
+              return typeof value === 'string' ? [value] : [];
+            }
+          }
+          return [];
+        });
+      });
+      if (actual.length !== 1 || actual[0] !== action.value) return fail('select_verification_failed', 'The native select did not confirm the requested value.');
+      return success();
+    }
     return fail('invalid_action', 'Browser page action is invalid.');
   }
 
@@ -143,7 +202,7 @@ export class BrowserPageController {
       if (!checkedString(action.url, 2048)) return fail('invalid_action', 'Browser page action is invalid.');
       let url: URL;
       try { url = new URL(action.url); } catch { return fail('invalid_action', 'Browser page action is invalid.'); }
-      if (url.protocol !== 'https:' || url.username || url.password) return fail('url_not_allowed', 'Only allowlisted HTTPS pages can be opened.');
+      if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) return fail('url_not_allowed', 'Only allowlisted HTTP or HTTPS pages can be opened.');
     } else if (action.type === 'tab_select' || action.type === 'tab_close') {
       if (!checkedString(action.targetId, 256)) return fail('invalid_action', 'Browser page action is invalid.');
     } else if (action.type === 'focus' || action.type === 'select') {
@@ -158,7 +217,7 @@ export class BrowserPageController {
     let valid = false;
     try {
       const parsed = new URL(url);
-      valid = parsed.protocol === 'https:' && !parsed.username && !parsed.password && this.context.allowUrl(url);
+      valid = (parsed.protocol === 'https:' || parsed.protocol === 'http:') && !parsed.username && !parsed.password && this.context.allowUrl(url);
     } catch { /* fail closed */ }
     if (!valid) return fail('navigation_not_allowed', 'The current or requested browser URL is not allowed.');
   }

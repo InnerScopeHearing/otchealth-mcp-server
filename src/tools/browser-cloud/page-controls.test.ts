@@ -60,6 +60,47 @@ test('legacy fixture host policy rejects attacker-controlled suffixes and userin
   assert.equal(cdp.calls.length, 0);
 });
 
+test('trusted HTTP policy permits and reads back an HTTP page while HTTPS-only policy denies it', async () => {
+  assert.ok(BrowserPageController);
+  const { cdp } = make();
+  cdp.response = (method) => method === 'Target.getTargets'
+    ? { targetInfos: [{ type: 'page', targetId: 'owned-1', url: 'http://example.test/' }] }
+    : method === 'Target.attachToTarget' ? { sessionId: 'session-1' }
+      : method === 'Page.getFrameTree' ? { frameTree: { frame: { url: 'http://example.test/current' } } }
+        : method === 'DOM.performSearch' ? { resultCount: 1, searchId: 'search-1' }
+          : method === 'DOM.getSearchResults' ? { nodeIds: [41] } : {};
+  const httpPolicy = new BrowserPageController(cdp, {
+    ownedTargetIds: new Set(['owned-1']), selectedTargetId: 'owned-1',
+    allowUrl: url => new URL(url).origin === 'http://example.test', dialogAcceptanceAuthorized: false,
+  });
+  await httpPolicy.execute({ type: 'focus', selector: '#search' }, remaining);
+  assert.equal(cdp.calls.some(call => call.method === 'DOM.focus' && call.page === 'session-1'), true);
+  const httpsOnlyPolicy = new BrowserPageController(cdp, {
+    ownedTargetIds: new Set(['owned-1']), selectedTargetId: 'owned-1',
+    allowUrl: url => new URL(url).origin === 'https://example.test', dialogAcceptanceAuthorized: false,
+  });
+  const before = cdp.calls.length;
+  await assert.rejects(httpsOnlyPolicy.execute({ type: 'focus', selector: '#search' }, remaining), (error: Error & { code?: string }) => error.code === 'navigation_not_allowed');
+  assert.equal(cdp.calls.slice(before).some(call => call.method === 'DOM.focus'), false);
+});
+
+test('HTTP tab creation follows the trusted URL policy and legacy HTTPS-only policy still denies it', async () => {
+  assert.ok(BrowserPageController);
+  const allowedCdp = new RecordingCdp();
+  allowedCdp.response = (method) => method === 'Target.createTarget' ? { targetId: 'http-new' } : {};
+  const allowed = new BrowserPageController(allowedCdp, {
+    ownedTargetIds: new Set(['owned-1']), selectedTargetId: 'owned-1',
+    allowUrl: url => new URL(url).origin === 'http://example.test', dialogAcceptanceAuthorized: false,
+  });
+  const receipt = await allowed.execute({ type: 'tab_create', url: 'http://example.test/new' }, remaining);
+  assert.equal(receipt.createdTargetId, 'http-new');
+  assert.equal(allowedCdp.calls.some(call => call.method === 'Target.createTarget'), true);
+
+  const legacy = make();
+  await assert.rejects(legacy.controller!.execute({ type: 'tab_create', url: 'http://example.test/new' }, remaining), (error: Error & { code?: string }) => error.code === 'navigation_not_allowed');
+  assert.equal(legacy.cdp.calls.length, 0);
+});
+
 test('rejects unsafe intended/history/current URLs before action', async () => {
   assert.ok(BrowserPageController);
   const { cdp, controller } = make();
@@ -117,12 +158,56 @@ test('back, forward, reload and focus use only typed commands on attached owned 
   assert.equal(cdp.calls.every(call => !call.method.includes('Runtime.evaluate') && !call.method.includes('callFunctionOn')), true);
 });
 
-test('select fails closed when selected value cannot be verified through native CDP', async () => {
+test('select rejects unknown values and wrong controls before keyboard input', async () => {
   assert.ok(BrowserPageController);
   const { cdp, controller } = make();
-  await assert.rejects(controller!.execute({ type: 'select', selector: 'select#choice', value: 'chosen' }, remaining), (error: Error & { code?: string }) => error.code === 'select_unsupported');
-  assert.equal(cdp.calls.some(call => call.method === 'DOM.focus'), false);
+  cdp.response = (method) => method === 'Target.getTargets'
+    ? { targetInfos: [{ type: 'page', targetId: 'owned-1', url: 'https://example.test/' }] }
+    : method === 'Target.attachToTarget' ? { sessionId: 'session-1' }
+      : method === 'Page.getFrameTree' ? { frameTree: { frame: { url: 'https://example.test/' } } }
+        : method === 'DOM.performSearch' ? { resultCount: 1, searchId: 'search-1' }
+          : method === 'DOM.getSearchResults' ? { nodeIds: [41] }
+            : method === 'DOM.describeNode' ? { node: { nodeName: 'SELECT', backendNodeId: 501, children: [{ nodeName: 'OPTION', attributes: ['value', 'first'] }] } } : {};
+  await assert.rejects(controller!.execute({ type: 'select', selector: 'select#choice', value: 'missing' }, remaining), (error: Error & { code?: string }) => error.code === 'option_not_found');
+  cdp.response = (method) => method === 'Target.getTargets'
+    ? { targetInfos: [{ type: 'page', targetId: 'owned-1', url: 'https://example.test/' }] }
+    : method === 'Target.attachToTarget' ? { sessionId: 'session-1' }
+      : method === 'Page.getFrameTree' ? { frameTree: { frame: { url: 'https://example.test/' } } }
+        : method === 'DOM.performSearch' ? { resultCount: 1, searchId: 'search-1' }
+          : method === 'DOM.getSearchResults' ? { nodeIds: [41] }
+            : method === 'DOM.describeNode' ? { node: { nodeName: 'INPUT' } } : {};
+  await assert.rejects(controller!.execute({ type: 'select', selector: 'input#choice', value: 'first' }, remaining), (error: Error & { code?: string }) => error.code === 'wrong_control');
   assert.equal(cdp.calls.some(call => call.method === 'Input.dispatchKeyEvent'), false);
+  assert.equal(cdp.calls.some(call => call.method === 'Runtime.evaluate' || call.method === 'Runtime.callFunctionOn'), false);
+});
+
+test('native select uses keyboard input and verifies the selected option through a snapshot', async () => {
+  assert.ok(BrowserPageController);
+  const { cdp, controller } = make();
+  let selectedIndex = 0;
+  cdp.response = (method, params) => {
+    if (method === 'Target.getTargets') return { targetInfos: [{ type: 'page', targetId: 'owned-1', url: 'https://example.test/' }] };
+    if (method === 'Target.attachToTarget') return { sessionId: 'session-1' };
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { url: 'https://example.test/' } } };
+    if (method === 'DOM.performSearch') return { resultCount: 1, searchId: 'select-search' };
+    if (method === 'DOM.getSearchResults') return { nodeIds: [41] };
+    if (method === 'DOM.describeNode') return { node: { nodeName: 'SELECT', backendNodeId: 501, children: [
+      { nodeName: 'OPTION', attributes: ['value', 'first'] },
+      { nodeName: 'OPTION', attributes: ['value', 'chosen'] },
+    ] } };
+    if (method === 'Input.dispatchKeyEvent' && params.type === 'keyDown') {
+      if (params.key === 'Home') selectedIndex = 0;
+      if (params.key === 'ArrowDown') selectedIndex = Math.min(1, selectedIndex + 1);
+    }
+    if (method === 'DOMSnapshot.captureSnapshot') return { strings: ['SELECT', 'OPTION', 'value', 'first', 'chosen'], documents: [{ nodes: {
+      nodeName: [0, 1, 1], backendNodeId: [501, 502, 503], parentIndex: [-1, 0, 0],
+      attributes: [[], [2, 3], [2, 4]], optionSelected: { index: [selectedIndex + 1] },
+    } }] };
+    return {};
+  };
+  await controller!.execute({ type: 'select', selector: 'select#choice', value: 'chosen' }, remaining);
+  assert.deepEqual(cdp.calls.filter(call => call.method === 'Input.dispatchKeyEvent' && call.params.type === 'keyDown').map(call => call.params.key), ['Home', 'ArrowDown']);
+  assert.equal(cdp.calls.some(call => call.method === 'DOMSnapshot.captureSnapshot'), true);
   assert.equal(cdp.calls.some(call => call.method === 'Runtime.evaluate' || call.method === 'Runtime.callFunctionOn'), false);
 });
 
