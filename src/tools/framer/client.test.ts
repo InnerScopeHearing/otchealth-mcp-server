@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { connectFramerProject, ENLIGHTENED_LILY_PROJECT_ID, type FramerSdkClient } from "./client.js";
+import { connectFramerProject, ENLIGHTENED_LILY_PROJECT_ID, ENLIGHTENED_LILY_PROJECT_URL, type FramerSdkClient } from "./client.js";
 
-const projectUrl = `https://framer.com/projects/Enlightened-Lily--${ENLIGHTENED_LILY_PROJECT_ID}`;
+const projectUrl = ENLIGHTENED_LILY_PROJECT_URL;
 
 function fakeSdk(overrides: Partial<FramerSdkClient> = {}) {
   const calls: string[] = [];
@@ -42,8 +42,33 @@ test("refuses a project URL outside the approved project before connecting", asy
   assert.equal(connected, false);
 });
 
+test("accepts only the exact owner URL while parsing its SDK canonical project ID", async () => {
+  let connected = false;
+  const adapter = await connectFramerProject({
+    projectUrl,
+    apiKey: "opaque-test-key",
+    connect: async (url) => {
+      connected = url === projectUrl;
+      return fakeSdk().sdk;
+    },
+  });
+  assert.equal(connected, true);
+  assert.equal((await adapter.getProjectInfo()).id, "bdTiiIITB77TCuMA3XFs");
+  await adapter.close();
+});
+
+test("rejects a different project URL even when its slug resembles the approved URL", async () => {
+  let connected = false;
+  await assert.rejects(connectFramerProject({
+    projectUrl: "https://framer.com/projects/Other--bdTiiIITB77TCuMA3XFs-9ssTK",
+    apiKey: "opaque-test-key",
+    connect: async () => { connected = true; return fakeSdk().sdk; },
+  }), { code: "invalid_configuration" });
+  assert.equal(connected, false);
+});
+
 test("fails closed and disconnects when Framer reports a different connected project", async () => {
-  const { sdk, calls } = fakeSdk({ getProjectInfo: async () => { calls.push("info"); return { id: "other-id", name: "Other" }; } });
+  const { sdk, calls } = fakeSdk({ getProjectInfo: async () => { calls.push("info"); return { id: "other-id-9ssTK", name: "Other" }; } });
   await assert.rejects(connectFramerProject({ projectUrl, apiKey: "opaque-test-key", connect: async () => sdk }), { code: "project_mismatch" });
   assert.deepEqual(calls, ["info", "disconnect"]);
 });

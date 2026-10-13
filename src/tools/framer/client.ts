@@ -5,7 +5,12 @@
  * until their exact method shapes and target safety are wired and reviewed.
  */
 
-export const ENLIGHTENED_LILY_PROJECT_ID = "bdTiiIITB77TCuMA3XFs-9ssTK";
+export const ENLIGHTENED_LILY_PROJECT_URL = "https://framer.com/projects/Enlightened-Lily--bdTiiIITB77TCuMA3XFs-9ssTK";
+// The owner URL includes a trailing share suffix. framer-api@5.1.0's published
+// project-ID parser captures the alphanumeric run after `--` and validates 20
+// characters (see /workspace/browser-completion-2026-10-13-1647/framer/sdk-research.md).
+export const ENLIGHTENED_LILY_PROJECT_ID = "bdTiiIITB77TCuMA3XFs";
+/** `isAllowedTo` availability checks only; these are not a list of all SDK features. */
 export const FRAMER_READ_METHODS = ["getProjectInfo", "getChangedPaths"] as const;
 export type FramerReadMethod = (typeof FRAMER_READ_METHODS)[number];
 
@@ -25,6 +30,7 @@ export type FramerSdkConnect = (projectUrl: string, apiKey: string) => Promise<F
 
 export interface FramerProjectAdapter {
   getProjectInfo(): Promise<FramerProjectInfo>;
+  /** Reports only these two read-method permissions; it does not imply write/publish readiness. */
   getCapabilities(): Promise<{ project: FramerProjectInfo; methods: Record<FramerReadMethod, boolean> }>;
   close(): Promise<void>;
 }
@@ -47,8 +53,10 @@ function projectIdFromUrl(projectUrl: string): string {
     throw new FramerAdapterError("invalid_configuration", "Framer project URL must be an HTTPS framer.com project URL.");
   }
   if (parsed.search || parsed.hash) throw new FramerAdapterError("invalid_configuration", "Framer project URL must not include query or fragment data.");
-  const match = /^\/projects\/(?:[^/]+--)?([^/]+)$/.exec(parsed.pathname);
-  if (!match?.[1]) throw new FramerAdapterError("invalid_configuration", "Framer project URL must identify one project.");
+  const approvedPath = new URL(ENLIGHTENED_LILY_PROJECT_URL).pathname;
+  if (parsed.pathname !== approvedPath) throw new FramerAdapterError("invalid_configuration", "Configured Framer project does not match the approved project URL.");
+  const match = /^.+--([A-Za-z0-9]+)/.exec(parsed.pathname.slice("/projects/".length));
+  if (!match?.[1] || match[1].length !== 20) throw new FramerAdapterError("invalid_configuration", "Framer project URL has an invalid project ID.");
   return match[1];
 }
 
@@ -66,12 +74,10 @@ export async function connectFramerProject(input: {
   projectUrl: string;
   apiKey: string;
   connect: FramerSdkConnect;
-  expectedProjectId?: string;
 }): Promise<FramerProjectAdapter> {
   const urlProjectId = projectIdFromUrl(input.projectUrl);
   if (!input.apiKey.trim()) throw new FramerAdapterError("invalid_configuration", "Framer API key is not configured.");
-  const expectedId = input.expectedProjectId ?? ENLIGHTENED_LILY_PROJECT_ID;
-  if (urlProjectId !== expectedId) throw new FramerAdapterError("invalid_configuration", "Configured Framer project does not match the approved project.");
+  if (urlProjectId !== ENLIGHTENED_LILY_PROJECT_ID) throw new FramerAdapterError("invalid_configuration", "Configured Framer project does not match the approved project.");
 
   let sdk: FramerSdkClient;
   try {
@@ -90,7 +96,7 @@ export async function connectFramerProject(input: {
 
   try {
     cachedInfo = parseProjectInfo(await sdk.getProjectInfo());
-    if (cachedInfo.id !== expectedId) throw new FramerAdapterError("project_mismatch", "Connected Framer project does not match the approved project.");
+    if (cachedInfo.id !== ENLIGHTENED_LILY_PROJECT_ID) throw new FramerAdapterError("project_mismatch", "Connected Framer project does not match the approved project.");
   } catch (error) {
     await sdk.disconnect().catch(() => undefined);
     if (error instanceof FramerAdapterError) throw error;
