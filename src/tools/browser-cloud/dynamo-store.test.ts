@@ -190,6 +190,7 @@ test('capture bytes use immutable versioned browser-cloud S3 keys and owner-chec
   const bytes = Buffer.from([0, 255, 1, 2, 3]);
   const sha256 = (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex');
   let item: Record<string, any> | undefined;
+  let nowMs = 1_000;
   const calls: Array<{ url: string; method: string; request?: Record<string, any>; headers?: Headers }> = [];
   const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (url, init) => {
     const method = init?.method ?? '';
@@ -200,7 +201,7 @@ test('capture bytes use immutable versioned browser-cloud S3 keys and owner-chec
     if (method === 'PUT') return new Response('', { headers: { 'x-amz-version-id': 's3-version-1' } });
     if (method === 'GET') return new Response(bytes, { headers: { 'x-amz-version-id': 's3-version-1', 'content-type': 'image/jpeg', 'content-length': String(bytes.length) } });
     return new Response('{}');
-  });
+  }, () => nowMs);
   const metadata = await store.createCapture('cto', '123e4567-e89b-42d3-a456-426614174000', { contentType: 'image/jpeg', body: bytes, sha256 }, 1000);
   assert.match(metadata.id, /^bca_[0-9a-f-]{36}$/);
   assert.equal(item?.pk.S, `CAPTURE#${metadata.id}`);
@@ -216,4 +217,8 @@ test('capture bytes use immutable versioned browser-cloud S3 keys and owner-chec
   const loaded = await store.loadCapture('cto', metadata.id);
   assert.deepEqual(loaded?.body, bytes);
   assert.equal(loaded?.metadata.sha256, sha256);
+  const s3ReadsBeforeExpiry = calls.filter(call => call.method === 'GET').length;
+  nowMs = Number(item?.expiresAtEpoch.N) * 1_000;
+  assert.equal(await store.loadCapture('cto', metadata.id), null, 'capture must expire at its TTL boundary even before DynamoDB TTL cleanup');
+  assert.equal(calls.filter(call => call.method === 'GET').length, s3ReadsBeforeExpiry, 'expired capture must be rejected before fetching S3 bytes');
 });

@@ -146,6 +146,7 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     private readonly tableName = process.env.CLOUD_BROWSER_DDB_TABLE || "otchealth-browser-cloud",
     private readonly region = process.env.AWS_REGION || "us-east-1",
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly now: () => number = Date.now,
   ) {}
   private async call(target: string, payload: unknown): Promise<unknown> {
     const credentials = await resolveAwsCredentials();
@@ -355,6 +356,8 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
   async loadCapture(owner: string, captureId: string): Promise<{ metadata: BrowserCaptureMetadata; body: Uint8Array } | null> {
     if (!/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(owner) || !/^bca_[0-9a-f-]{36}$/.test(captureId)) return null;
     const response = await this.call('GetItem', { TableName: this.tableName, Key: { pk: { S: `CAPTURE#${captureId}` } }, ConsistentRead: true }) as { Item?: DynamoItem };
+    const expiresAtEpoch = Number(response.Item?.expiresAtEpoch?.N);
+    if (!Number.isSafeInteger(expiresAtEpoch) || expiresAtEpoch <= Math.floor(this.now() / 1_000)) return null;
     const metadata = readCapture(response.Item);
     if (!metadata || metadata.id !== captureId || metadata.owner !== owner) return null;
     const bucket = process.env.CLOUD_BROWSER_ARTIFACT_BUCKET;

@@ -1432,7 +1432,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         const validatedData = enforceStrictOutput
           ? strictResultSchema.parse(payload.data)
           : payload.data;
-        const { result, warning } = applyGuardrail(validatedData, acknowledged);
+        const { result, warning } = applyGuardrail(validatedData, acknowledged, (payload.nativeContent?.length ?? 0) > 0);
         // A native attachment must not outlive a compliance refusal of its associated data.
         // Attachments remain outside JSON/audit/cache paths and are emitted only on an allowed result.
         const nativeContent = result === null ? [] : (payload.nativeContent ?? []);

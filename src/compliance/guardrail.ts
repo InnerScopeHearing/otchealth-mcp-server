@@ -138,12 +138,32 @@ export function scanForCompliance(payload: unknown): ComplianceWarning | null {
 export function applyGuardrail<T>(
   result: T,
   acknowledged: boolean,
+  requireAcknowledgement = false,
 ): { result: T | null; warning: ComplianceWarning | null } {
   const mode = (process.env.COMPLIANCE_MODE || 'report').toLowerCase();
   if (mode === 'off') return { result, warning: null };
   if (mode !== 'enforce') return { result, warning: null }; // report/default: never gate, never warn
   // enforce (opt-in only):
-  const warning = scanForCompliance(result);
+  const scannedWarning = scanForCompliance(result);
+  const attachmentWarning: ComplianceWarning | null = requireAcknowledgement
+    ? {
+        triggers: ['native_attachment_requires_acknowledgement'],
+        reason: 'Native binary content may contain regulated or investor-sensitive material. Pass acknowledge_warning=true to render the attachment.',
+        requires_acknowledge: true,
+        details: [{
+          trigger_id: 'native_attachment_requires_acknowledgement',
+          matched_excerpt: '[native binary attachment]',
+          explanation: 'The attachment is not decoded or scanned as text. Review the native content and acknowledge before rendering it.',
+        }],
+      }
+    : null;
+  const warning: ComplianceWarning | null = scannedWarning && attachmentWarning
+    ? {
+        ...scannedWarning,
+        triggers: [...new Set([...scannedWarning.triggers, ...attachmentWarning.triggers])],
+        details: [...scannedWarning.details, ...attachmentWarning.details],
+      }
+    : scannedWarning ?? attachmentWarning;
   if (!warning) return { result, warning: null };
   if (acknowledged) return { result, warning };
   return { result: null, warning };

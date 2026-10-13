@@ -186,6 +186,29 @@ test('capture retrieval rejects session mismatch and hash failure before emittin
     assert.equal(badHash.content?.length, 1);
   } finally { [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS] = old; }
 });
+
+test('COMPLIANCE_MODE=enforce warns and withholds native captures until acknowledged', async () => {
+  const old = [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS, process.env.COMPLIANCE_MODE];
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 't', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'b', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true', COMPLIANCE_MODE: 'enforce' });
+  const body = Buffer.from('binary content with clean metadata');
+  const id = 'bca_123e4567-e89b-42d3-a456-426614174000';
+  const sessionId = '123e4567-e89b-42d3-a456-426614174001';
+  const metadata = { id, owner: 'cto', sessionId, contentType: 'image/png' as const, byteLength: body.byteLength, sha256: createHash('sha256').update(body).digest('hex'), createdAt: 1 };
+  const runtime = { browser: { getCapture: async () => ({ metadata, body }) } as never, jobs: {} as never, queue: {} as never, artifacts: {} as never } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer(); registerCloudBrowserTools(server, () => 'hash', runtime);
+  const call = (acknowledge_warning: boolean) => requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cto', dryRun: false }, () => handlers.get('browser_cloud_artifact_get')!({ job_id: sessionId, artifact_id: id, acknowledge_warning, dry_run: false }));
+  try {
+    const refused = await call(false);
+    assert.equal(refused.structuredContent?.result, null);
+    assert.equal((refused.structuredContent?.compliance_warning as { triggers: string[] }).triggers.includes('native_attachment_requires_acknowledgement'), true);
+    assert.equal(refused.content?.some((block) => block.type === 'image' || block.type === 'resource'), false);
+    const acknowledged = await call(true);
+    assert.equal((acknowledged.structuredContent?.result as { artifact?: { id: string } }).artifact?.id, id);
+    assert.equal(acknowledged.content?.some((block) => block.type === 'image'), true);
+    assert.equal((acknowledged.structuredContent?.compliance_warning as { triggers: string[] }).triggers.includes('native_attachment_requires_acknowledgement'), true);
+  } finally { [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS, process.env.COMPLIANCE_MODE] = old; }
+});
+
 test("gateway redaction and shield never retain nested typed text, URL, selector, or plan", () => {
   const raw = {
     action: { type: "type", selector: "#password", text: "typed-secret" },
