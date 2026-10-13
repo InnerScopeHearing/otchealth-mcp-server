@@ -67,6 +67,10 @@ export interface BrowserChallengeStore {
 
 export interface BrowserCredentialRuntime {
   verifyOwnedSession(owner: string, sessionId: string): Promise<boolean>;
+  /**
+   * Starts a session-bound, fail-closed output suppression lease. The lease must
+   * never auto-expire or unmask output; only explicit endSensitiveMode may release it.
+   */
   beginSensitiveMode(owner: string, sessionId: string): Promise<{ suppressed: boolean; leaseId: string }>;
   injectReference(input: {
     owner: string;
@@ -76,6 +80,9 @@ export interface BrowserCredentialRuntime {
     providerProfileId?: string;
   }): Promise<{ authenticated: boolean; challengeRequired: boolean; runHandle?: string }>;
   verifyChallenge(challenge: BrowserAuthChallenge): Promise<boolean>;
+  /** Must be idempotent and confirm all sensitive form state has been cleared. */
+  sanitizeSensitiveState(leaseId: string): Promise<{ cleared: boolean }>;
+  /** Releases the fail-closed suppression lease only after positive sanitation confirmation. */
   endSensitiveMode(leaseId: string): Promise<void>;
 }
 
@@ -137,9 +144,7 @@ export class BrowserAuthBroker {
       } catch {
         await this.ports.challenges.saveOperation({ key, owner, bindingId: binding.bindingId, bindingVersion: binding.version, sessionId: input.sessionId, state: 'unknown' }, claim).catch(() => undefined);
         throw safeRuntimeError();
-      } finally {
-        await this.endSuppressed(leaseId);
-      }
+      } finally { await this.finishSensitiveMode(leaseId); }
       if (result.challengeRequired) {
         if (!result.runHandle) {
           await this.ports.challenges.saveOperation({ key, owner, bindingId: binding.bindingId, bindingVersion: binding.version, sessionId: input.sessionId, state: 'unknown' }, claim);
@@ -182,7 +187,7 @@ export class BrowserAuthBroker {
       let complete: boolean;
       try { complete = await this.ports.runtime.verifyChallenge(current); }
       catch { throw safeRuntimeError(); }
-      finally { await this.endSuppressed(leaseId); }
+      finally { await this.finishSensitiveMode(leaseId); }
       if (!complete) return { status: 'challenge_required', challengeId };
       if (!await this.ports.challenges.completeChallenge(challengeId, owner, current.runHandle)) fail('challenge_unavailable', 'The browser authentication challenge is unavailable.');
       const operation = await this.ports.challenges.loadOperation(operationKey);
@@ -220,20 +225,29 @@ export class BrowserAuthBroker {
     try { lease = await this.ports.runtime.beginSensitiveMode(owner, sessionId); }
     catch { throw safeRuntimeError(); }
     if (!lease.suppressed || !lease.leaseId) {
-      if (lease.leaseId) await this.endSuppressed(lease.leaseId);
+      if (lease.leaseId) await this.finishSensitiveMode(lease.leaseId);
       fail('sensitive_mode_unavailable', 'Sensitive browser output could not be suppressed.');
     }
     return lease.leaseId;
   }
 
-  private async endSuppressed(leaseId: string): Promise<void> {
+  private async boundedCleanup<T>(operation: () => Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        this.ports.runtime.endSensitiveMode(leaseId),
+      return await Promise.race([
+        operation(),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('cleanup_timeout')), CLEANUP_TIMEOUT_MS); }),
       ]);
     } catch { throw safeRuntimeError(); }
     finally { if (timer) clearTimeout(timer); }
+  }
+
+  private async finishSensitiveMode(leaseId: string): Promise<void> {
+    let sanitation: { cleared: boolean };
+    try { sanitation = await this.boundedCleanup(() => this.ports.runtime.sanitizeSensitiveState(leaseId)); }
+    catch { throw safeRuntimeError(); }
+    if (!sanitation?.cleared) throw safeRuntimeError();
+    try { await this.boundedCleanup(() => this.ports.runtime.endSensitiveMode(leaseId)); }
+    catch { throw safeRuntimeError(); }
   }
 }

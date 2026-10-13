@@ -9,12 +9,12 @@ const BASE_BINDING: BrowserCredentialBinding = {
   credentialReference: 'opaque:secret-reference', version: 7, revoked: false,
 };
 
-function harness(overrides: { binding?: BrowserCredentialBinding | null; suppressed?: boolean; inject?: { authenticated: boolean; challengeRequired: boolean; runHandle?: string }; verify?: boolean; injectError?: Error; injectGate?: Promise<void> } = {}) {
+function harness(overrides: { binding?: BrowserCredentialBinding | null; suppressed?: boolean; inject?: { authenticated: boolean; challengeRequired: boolean; runHandle?: string }; verify?: boolean; injectError?: Error; injectGate?: Promise<void>; sanitizeCleared?: boolean; sanitizeClearedSequence?: boolean[]; sanitizeError?: Error; sanitizeGate?: Promise<unknown> } = {}) {
   const state: { binding: BrowserCredentialBinding | null; challenge: BrowserAuthChallenge | null; operation: BrowserAuthOperation | null } = {
     binding: overrides.binding === undefined ? BASE_BINDING : overrides.binding,
     challenge: null, operation: null,
   };
-  const calls = { verifySession: 0, begin: 0, inject: 0, end: 0, verifyChallenge: 0 };
+  const calls = { verifySession: 0, begin: 0, inject: 0, sanitize: 0, end: 0, verifyChallenge: 0 };
   let claimed = false;
   const broker = new BrowserAuthBroker({
     bindings: { async loadBinding() { return state.binding; } },
@@ -23,6 +23,7 @@ function harness(overrides: { binding?: BrowserCredentialBinding | null; suppres
       async beginSensitiveMode() { calls.begin++; return overrides.suppressed === false ? { suppressed: false, leaseId: 'lease-a' } : { suppressed: true, leaseId: 'lease-a' }; },
       async injectReference() { calls.inject++; if (overrides.injectGate) await overrides.injectGate; if (overrides.injectError) throw overrides.injectError; return overrides.inject ?? { authenticated: true, challengeRequired: false }; },
       async verifyChallenge() { calls.verifyChallenge++; return overrides.verify ?? true; },
+      async sanitizeSensitiveState() { calls.sanitize++; if (overrides.sanitizeGate) await overrides.sanitizeGate; if (overrides.sanitizeError) throw overrides.sanitizeError; return { cleared: overrides.sanitizeClearedSequence?.[calls.sanitize - 1] ?? overrides.sanitizeCleared ?? true }; },
       async endSensitiveMode() { calls.end++; },
     },
     challenges: {
@@ -47,6 +48,7 @@ test('authenticates through an owner-bound opaque reference and always ends sens
   const { broker, calls } = harness();
   assert.deepEqual(await broker.authenticate(OWNER, { sessionId: 'session-a', bindingId: 'binding-a', origin: 'https://example.com', accountId: 'account-a' }), { status: 'authenticated' });
   assert.equal(calls.inject, 1);
+  assert.equal(calls.sanitize, 1);
   assert.equal(calls.end, 1);
 });
 
@@ -93,9 +95,11 @@ test('stores and resumes a challenge only through provider verification, preserv
   if (first.status !== 'challenge_required') return;
   assert.equal(state.challenge?.sessionId, 'session-a');
   assert.equal(state.challenge?.bindingId, 'binding-a');
+  assert.equal(calls.sanitize, 1);
   assert.deepEqual(await broker.resume(OWNER, first.challengeId), { status: 'authenticated' });
   assert.equal(calls.inject, 1);
   assert.equal(calls.verifyChallenge, 1);
+  assert.equal(calls.sanitize, 2);
   await assert.rejects(broker.resume(OWNER, first.challengeId));
 });
 
@@ -135,7 +139,54 @@ test('normalizes runtime failures to fixed safe errors and attempts cleanup', as
     return true;
   });
   assert.equal(calls.end, 1);
+  assert.equal(calls.sanitize, 1);
   assert.equal(state.operation?.state, 'unknown');
   await assert.rejects(broker.authenticate(OWNER, { sessionId: 'session-a', bindingId: 'binding-a', origin: 'https://example.com', accountId: 'account-a' }));
   assert.equal(calls.inject, 1);
+});
+
+test('retains sensitive mode unless sanitation positively confirms the form state was cleared', async () => {
+  for (const overrides of [
+    { sanitizeCleared: false },
+    { sanitizeError: new Error('provider cleanup failed; password was present') },
+    { sanitizeGate: new Promise<never>(() => undefined) },
+  ]) {
+    const { broker, calls } = harness(overrides);
+    await assert.rejects(broker.authenticate(OWNER, { sessionId: 'session-a', bindingId: 'binding-a', origin: 'https://example.com', accountId: 'account-a' }), (error: unknown) => {
+      assert.equal((error as Error).message, 'The browser authentication operation could not be confirmed. Reconcile the existing session before retrying.');
+      assert.equal((error as Error).message.includes('password'), false);
+      return true;
+    });
+    assert.equal(calls.sanitize, 1);
+    assert.equal(calls.end, 0);
+  }
+});
+
+test('sanitizes after provider errors and pending challenges before releasing the lease', async () => {
+  const cases = [
+    { injectError: new Error('private provider detail'), sanitizeCleared: false },
+    { inject: { authenticated: false, challengeRequired: true, runHandle: 'provider-run' }, sanitizeCleared: false },
+  ];
+  for (const overrides of cases) {
+    const { broker, calls } = harness(overrides);
+    await assert.rejects(broker.authenticate(OWNER, { sessionId: 'session-a', bindingId: 'binding-a', origin: 'https://example.com', accountId: 'account-a' }));
+    assert.equal(calls.inject, 1);
+    assert.equal(calls.sanitize, 1);
+    assert.equal(calls.end, 0);
+  }
+});
+
+test('retains sensitive mode when provider challenge verification cannot confirm sanitation', async () => {
+  const { broker, calls, state } = harness({
+    inject: { authenticated: false, challengeRequired: true, runHandle: 'provider-run' },
+    sanitizeClearedSequence: [true, false],
+  });
+  const first = await broker.authenticate(OWNER, { sessionId: 'session-a', bindingId: 'binding-a', origin: 'https://example.com', accountId: 'account-a' });
+  assert.equal(first.status, 'challenge_required');
+  if (first.status !== 'challenge_required') return;
+  await assert.rejects(broker.resume(OWNER, first.challengeId));
+  assert.equal(calls.verifyChallenge, 1);
+  assert.equal(calls.sanitize, 2);
+  assert.equal(calls.end, 1);
+  assert.equal(state.challenge?.completed, false);
 });
