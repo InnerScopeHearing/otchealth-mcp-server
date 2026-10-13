@@ -46,8 +46,10 @@ WORKDIR /app
 # node:22-slim has no system CA bundle and serverless-init drops every payload with
 # "x509: certificate signed by unknown authority" (Node's own fetch bundles CAs, so direct API
 # calls still work, which is why only serverless-init forwarding failed).
+# Browser binary validation uses real format parsers, not header-only checks.
+# prlimit (util-linux) confines qpdf CPU/address space; Python/Pillow decodes images.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates qpdf python3 python3-pil util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # ── RDS TLS verification (2026-08-28) ─────────────────────────────────────────
