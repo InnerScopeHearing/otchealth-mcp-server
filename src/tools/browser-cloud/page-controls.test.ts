@@ -34,7 +34,7 @@ class RecordingCdp implements CloudBrowserCdp {
 
 const remaining = () => 2_000;
 const make = (cdp = new RecordingCdp(), overrides: Partial<{ selectedTargetId: string | null; dialogAcceptanceAuthorized: boolean }> = {}) => {
-  const context = { ownedTargetIds: new Set(['owned-1']), selectedTargetId: overrides.selectedTargetId ?? 'owned-1', allowUrl: (url: string) => url.startsWith('https://example.test'), dialogAcceptanceAuthorized: overrides.dialogAcceptanceAuthorized ?? false };
+  const context = { ownedTargetIds: new Set(['owned-1']), selectedTargetId: overrides.selectedTargetId ?? 'owned-1', allowUrl: (url: string) => new URL(url).origin === 'https://example.test', dialogAcceptanceAuthorized: overrides.dialogAcceptanceAuthorized ?? false };
   return { cdp, context, controller: BrowserPageController && new BrowserPageController(cdp, context) };
 };
 
@@ -50,6 +50,14 @@ test('creates only allowlisted HTTPS tabs and records acknowledged target', asyn
   assert.equal(context.selectedTargetId, 'owned-1');
   assert.equal(context.ownedTargetIds.has('new-1'), true);
   assert.equal(cdp.calls.some(call => call.method === 'Target.createTarget'), true);
+});
+
+test('legacy fixture host policy rejects attacker-controlled suffixes and userinfo', async () => {
+  const { cdp, controller } = make();
+  for (const url of ['https://example.test.attacker.test/', 'https://example.test@attacker.test/']) {
+    await assert.rejects(controller!.execute({ type: 'tab_create', url }, remaining));
+  }
+  assert.equal(cdp.calls.length, 0);
 });
 
 test('rejects unsafe intended/history/current URLs before action', async () => {
