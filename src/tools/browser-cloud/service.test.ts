@@ -483,7 +483,7 @@ test("CTO can provision one deterministic public profile per ordinary Chat lane,
 test("legacy discovery and old trial starts prefer this owner's verified public-web enrollment", async () => {
   const store = new MemoryStore();
   const transport = new FakeTransport();
-  const service = new CloudBrowserService(store, transport);
+  const service = new CloudBrowserService(store, transport, Date.now, TEST_PUBLIC_WEB_POLICY);
   const legacy: CloudBrowserProfile = {
     profileId: "cfo-public-trial",
     owner: "cfo",
@@ -536,7 +536,7 @@ test("legacy trial discovery and explicit starts fall back when no public-web en
 test("public-web resolution is owner-scoped and ignores unrelated profiles", async () => {
   const store = new MemoryStore();
   const transport = new FakeTransport();
-  const service = new CloudBrowserService(store, transport);
+  const service = new CloudBrowserService(store, transport, Date.now, TEST_PUBLIC_WEB_POLICY);
   const ctoPublicWeb = serverPublicWebProfile("cto");
   const cfoLegacy: CloudBrowserProfile = {
     profileId: "cfo-public-trial",
@@ -570,7 +570,7 @@ test("public-web resolution is owner-scoped and ignores unrelated profiles", asy
 test("an invalid server-enrolled public-web record fails closed instead of downgrading to the old trial", async () => {
   const store = new MemoryStore();
   const transport = new FakeTransport();
-  const service = new CloudBrowserService(store, transport);
+  const service = new CloudBrowserService(store, transport, Date.now, TEST_PUBLIC_WEB_POLICY);
   store.profiles.set("developer-public-trial", {
     profileId: "developer-public-trial",
     owner: "developer",
@@ -581,11 +581,11 @@ test("an invalid server-enrolled public-web record fails closed instead of downg
 
   await assert.rejects(
     service.publicTrialProfile("developer"),
-    (error: unknown) => error instanceof CloudBrowserError && error.code === "invalid_profile",
+    (error: unknown) => error instanceof CloudBrowserError && error.code === "public_network_policy_unverified",
   );
   await assert.rejects(
     service.start("developer", "developer-public-trial", 60),
-    (error: unknown) => error instanceof CloudBrowserError && error.code === "invalid_profile",
+    (error: unknown) => error instanceof CloudBrowserError && error.code === "public_network_policy_unverified",
   );
   assert.equal(store.dailyReservations, 0);
   assert.equal(store.sessions.size, 0);
