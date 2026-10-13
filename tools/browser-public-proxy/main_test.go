@@ -176,6 +176,44 @@ func TestHTTPForwardingAndWebSocketUpgradeRoute(t *testing.T) {
 		up.Close()
 	}
 }
+func TestHTTPForwardingDoesNotExposeForwardedClientMetadata(t *testing.T) {
+	seen := make(chan http.Header, 1)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer up.Close()
+	r := &fakeResolver{answers: []net.IPAddr{{IP: net.ParseIP("1.1.1.1")}}}
+	p := NewProxy(r, func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, up.Listener.Addr().String())
+	})
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	req, _ := http.NewRequest(http.MethodGet, "http://public.example:9443/page", nil)
+	for key, value := range map[string]string{
+		"Forwarded":         "for=10.1.2.3;host=internal",
+		"X-Forwarded-For":   "10.1.2.3",
+		"X-Forwarded-Host":  "internal.local",
+		"X-Forwarded-Proto": "http",
+		"X-Real-Ip":         "10.1.2.3",
+		"Cf-Connecting-Ip":  "10.1.2.3",
+	} {
+		req.Header.Set(key, value)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	got := <-seen
+	for _, key := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Cf-Connecting-Ip"} {
+		if values := got.Values(key); len(values) != 0 {
+			t.Errorf("upstream received %s: %q", key, values)
+		}
+	}
+}
 func TestCONNECTUsesPublicNumericPinAndTunnelsBytes(t *testing.T) {
 	r := &fakeResolver{answers: []net.IPAddr{{IP: net.ParseIP("1.1.1.1")}}}
 	pin := make(chan string, 1)

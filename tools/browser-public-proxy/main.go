@@ -210,6 +210,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Header.Del("Proxy-Authorization")
 	r.Header.Del("Proxy-Connection")
+	for key := range r.Header {
+		lower := strings.ToLower(key)
+		if lower == "forwarded" || strings.HasPrefix(lower, "x-forwarded-") || lower == "x-real-ip" || lower == "x-client-ip" || lower == "client-ip" || lower == "true-client-ip" || lower == "cf-connecting-ip" || lower == "cf-pseudo-ipv4" || lower == "x-cluster-client-ip" {
+			r.Header.Del(key)
+		}
+	}
+	// ReverseProxy otherwise adds the socket peer to X-Forwarded-For. A nil
+	// map entry explicitly disables that behavior after untrusted values above
+	// have been removed.
+	r.Header["X-Forwarded-For"] = nil
 	proxy.ServeHTTP(w, r)
 }
 
