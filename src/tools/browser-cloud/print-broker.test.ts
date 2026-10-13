@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import {
   BrowserPrintBroker,
@@ -74,7 +75,7 @@ test('prints only a clean, immutable owner-bound PDF within copy and page bounds
   const result = await h.broker.print('owner-1', request);
   assert.deepEqual(result, { jobId: 'job-1', status: 'accepted', printerId: 'printer-1', documentSha256: document.sha256, copies: 1 });
   assert.equal(h.effectMarked, 1);
-  assert.deepEqual(h.bridgeInputs, [{ binding, document: { fileId: 'file-1', sha256: document.sha256 }, copies: 1 }]);
+  assert.deepEqual(h.bridgeInputs, [{ brokerJobId: 'job-1', binding, document: { fileId: 'file-1', sha256: document.sha256 }, copies: 1 }]);
 
   await expectCode(harness().broker.print('owner-1', { ...request, copies: 0 }), 'INVALID_COPIES');
   await expectCode(harness().broker.print('owner-1', { ...request, copies: 6 }), 'INVALID_COPIES');
@@ -132,4 +133,11 @@ test('lost acknowledgment remains unknown and a retry with the same key is never
   assert.equal(second.status, 'needs_reconciliation');
   assert.equal(h.bridgeInputs.length, 1);
   assert.equal(h.effectMarked, 1);
+});
+
+test('a malformed foreign existing job cannot become a same-owner print receipt', async () => {
+  const argsDigest = createHash('sha256').update(JSON.stringify([request.printerId, request.fileId, document.sha256, request.copies])).digest('hex');
+  const h = harness({ claim: { kind: 'existing', job: job({ owner: 'owner-2', status: 'accepted', argsDigest, deviceJobId: 'device-job-1' }) } });
+  await expectCode(h.broker.print('owner-1', request), 'JOB_STORE_CONFLICT');
+  assert.equal(h.bridgeInputs.length, 0);
 });

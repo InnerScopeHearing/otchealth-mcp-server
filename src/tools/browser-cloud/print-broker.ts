@@ -79,6 +79,8 @@ export interface BrowserPrinterReceipt {
 export interface BrowserPrinterBridge {
   /** The bridge resolves and authenticates this registered binding itself. */
   submit(input: {
+    /** Stable correlation/idempotency reference; bridge retains it before device submission. */
+    brokerJobId: string;
     binding: BrowserPrinterBinding;
     document: { fileId: string; sha256: string };
     copies: number;
@@ -162,6 +164,12 @@ export class BrowserPrintBroker {
       printerId: input.printerId, fileId: input.fileId, documentSha256: document.sha256, copies: input.copies,
     });
     if (claim.kind === 'conflict') fail('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used for different print arguments');
+    const resolvedJob = claim.job;
+    if (!resolvedJob || resolvedJob.owner !== owner || resolvedJob.idempotencyKey !== input.idempotencyKey
+      || !opaqueId.test(resolvedJob.jobId) || resolvedJob.printerId !== input.printerId || resolvedJob.fileId !== input.fileId
+      || resolvedJob.documentSha256 !== document.sha256 || resolvedJob.copies !== input.copies) {
+      fail('JOB_STORE_CONFLICT', 'Print intent could not be claimed safely');
+    }
     if (claim.kind === 'existing') {
       if (claim.job.argsDigest !== digest) fail('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used for different print arguments');
       return {
@@ -184,6 +192,7 @@ export class BrowserPrintBroker {
 
     try {
       const receipt = await this.ports.bridge.submit({
+        brokerJobId: job.jobId,
         binding,
         document: { fileId: document.fileId, sha256: document.sha256 },
         copies: input.copies,
