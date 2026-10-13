@@ -80,7 +80,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check', 'framer_project_inspect'].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
@@ -97,6 +97,7 @@ test('(a) cto lane gets the full ship-lane set, including the privileged tools',
   // Regression guard (2026-07-17): the CFO reported kb_get_document was invisible on its DCR
   // connector because #130 shipped the tool into the catalog but never added it to this ship set.
   assert.ok(set.has('kb_get_document'), 'ship lane must expose whole-doc retrieval (the CFO census gap)');
+  assert.ok(set.has('framer_project_inspect'), 'CTO connector must expose the owner-bound read-only Framer metadata inspector');
   // Regression guard (2026-07-30, P0-1): the CFO reported xero_attachment_upload was invisible on
   // its connector even though it was fully built, registered, and reachable via a direct minted-
   // token MCP call -- it was simply never added to this ship set (its read-side sibling
@@ -226,10 +227,11 @@ test('the Make pilot identity gets exactly the broker and catalog probe even und
 
 test('(b) developer lane gets the full ship-lane set', () => {
   const set = connectorToolset(testEnv(), 'developer');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...DEVELOPER_SETUP_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...DEVELOPER_SETUP_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'claims_check', 'framer_project_inspect'].sort());
   assert.equal(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), false);
   assert.ok(set.has('brain_graph_search'));
   assert.ok(set.has('brain_public_kb_search'));
+  assert.ok(set.has('framer_project_inspect'), 'Developer connector must expose the owner-bound read-only Framer metadata inspector');
 });
 
 test('developer_task_rollup is bound only to the Developer connector', () => {
@@ -468,7 +470,7 @@ test('isShipLane: exact predicate matches the routing above', () => {
 test('CONNECTOR_TOOLSET env override still controls the non-GitHub ship set (back-compat)', () => {
   const env = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search,web_search' } as Env;
   const set = connectorToolset(env, 'cto');
-  assert.deepEqual([...set].sort(), ['brain_search', 'web_search', ...GITHUB_OPERATOR_TOOLSET, ...AWS_MCP_TOOLS].sort());
+  assert.deepEqual([...set].sort(), ['brain_search', 'web_search', 'framer_project_inspect', ...GITHUB_OPERATOR_TOOLSET, ...AWS_MCP_TOOLS].sort());
 });
 
 test('CONNECTOR_TOOLSET override cannot expose public KB retrieval to denied ship lanes', () => {

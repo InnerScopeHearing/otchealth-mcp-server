@@ -307,8 +307,8 @@ for (const [lane, upperBound, mustInclude] of [
   // real registration here; customer/subscriber and mutation names remain outside this seed.
   // The Developer-only task rollup adds exactly one explicit read; preserve the existing buffer.
   // Public browser capture reuses the existing artifact reader, so only the separately-added
-  // public-web discovery registration increases the curated tool count by one.
-  ['developer', 216, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call',
+  // public-web discovery and exact Framer inspector each add one curated registration.
+  ['developer', 217, ['developer_task_rollup', 'brain_search', 'developer_wake_lite', 'catalog_probe', 'aws_mcp_tool_list', 'aws_mcp_tool_call',
     'revenuecat_list_projects', 'revenuecat_project_get', 'revenuecat_app_list', 'revenuecat_app_get',
     'revenuecat_offering_list', 'revenuecat_offering_get', 'revenuecat_product_list', 'revenuecat_product_get',
     'revenuecat_package_list', 'revenuecat_package_get', 'revenuecat_entitlement_list', 'revenuecat_entitlement_get']],
@@ -352,10 +352,33 @@ test('curate-m365-only exposes the fixed receipt to CTO but excludes it from Dev
   assert.ok(ctoNames.includes(receiptTool) || ctoNames.includes(receiptAlias), 'CTO M365 must retain visibility of the fixed receipt reader');
   assert.equal(developerNames.includes(receiptTool), false, 'Developer M365 must exclude the canonical reader despite github_*');
   assert.equal(developerNames.includes(receiptAlias), false, 'the generated M365 alias must not bypass the exact exclusion');
-  assert.ok(developerNames.length <= 216, `Developer M365 catalog must stay at or under 216 tools after the two AWS bindings, twelve exact RevenueCat configuration reads, one Developer task rollup, and public-web profile discovery, got ${developerNames.length}`);
+  assert.ok(developerNames.length <= 217, `Developer M365 catalog must stay at or under 217 tools after the two AWS bindings, twelve exact RevenueCat configuration reads, one Developer task rollup, public-web discovery and the exact read-only Framer inspector, got ${developerNames.length}`);
   for (const name of ['revenuecat_customer_get', 'revenuecat_subscriber_get_v1', 'revenuecat_entitlement_create']) {
     const alias = /^[^_]+_(.+)$/.exec(name)![1]!;
     assert.equal(developerNames.includes(name), false, name);
     assert.equal(developerNames.includes(alias), false, alias);
   }
+});
+
+test('Framer project inspection is visible only to CTO and Developer, including M365 short alias', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  const m365Cto = await registeredToolNames('cto', true);
+  const m365Developer = await registeredToolNames('developer', true);
+  const m365Cfo = await registeredToolNames('cfo', true);
+  const m365Exec = await registeredToolNames('exec', true);
+  const regularDeveloper = await registeredToolNames('developer', false);
+  const regularCto = await registeredToolNames('cto', false);
+
+  // M365 prefix aliasing strips `framer_`; the registration layer must expose exactly one spelling.
+  assert.ok(m365Cto.includes('project_inspect'));
+  assert.ok(m365Developer.includes('project_inspect'));
+  assert.equal(m365Cto.includes('framer_project_inspect'), false);
+  assert.equal(m365Developer.includes('framer_project_inspect'), false);
+  for (const names of [m365Cfo, m365Exec]) {
+    assert.equal(names.includes('framer_project_inspect'), false);
+    assert.equal(names.includes('project_inspect'), false);
+  }
+  // Non-M365 clients are not subject to the special aliasing/culling path.
+  assert.ok(regularDeveloper.includes('framer_project_inspect'));
+  assert.ok(regularCto.includes('framer_project_inspect'));
 });

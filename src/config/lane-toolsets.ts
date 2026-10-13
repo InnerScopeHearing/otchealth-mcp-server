@@ -151,6 +151,7 @@ const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_message_ge
 // refresh removes the same names there too.
 const CTO_M365_CURATED = [
   'agent_dispatch',
+  'framer_project_inspect',
   'brain_search', 'catalog_audit_unused', 'catalog_list_tools', 'catalog_master', 'catalog_probe',
   'cio_admin_read_*', 'cio_admin_write_*',
   'catalog_service_capabilities', 'catalog_skill', 'checkpoint', 'cloudflare_add_email_destination',
@@ -248,6 +249,8 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
     // found" because the primary was never registered for this caller, so no alias was ever
     // collected either.
     'developer_wake_lite',
+    // Read-only, project-bound metadata inspection; keep this exact rather than admitting all Framer APIs.
+    'framer_project_inspect',
     // Developer setup needs only exact RevenueCat project and catalog metadata. Keep the M365
     // seed explicit so curate-m365-only does not require broadening to revenuecat_* (which would
     // also admit customer, subscriber, token, admin, and mutation surfaces).
