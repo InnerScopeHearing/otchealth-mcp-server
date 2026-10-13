@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+/** Maximum safe executions before a pre-effect failure becomes terminal. */
+export const CLOUD_BROWSER_JOB_MAX_ATTEMPTS = 3;
+
 export type BrowserJobStatus = 'queued' | 'running' | 'cancelling' | 'cancelled' | 'succeeded' | 'failed' | 'needs_reconciliation';
 export type ExternalEffectState = 'none' | 'unknown' | 'not_started' | 'succeeded' | 'failed';
 
@@ -124,6 +127,14 @@ export class CloudBrowserJobs {
       job.status = 'needs_reconciliation'; job.errorCode = 'effect_reconciliation_required'; job.leaseOwner = null; job.leaseUntil = null;
       job.updatedAt = new Date(now).toISOString(); await this.replace(job, hit.version);
       throw new BrowserJobError('effect_reconciliation_required');
+    }
+    if (job.attempts >= CLOUD_BROWSER_JOB_MAX_ATTEMPTS) {
+      const hasEffect = job.externalEffect === 'succeeded' || Object.values(job.actionEffects).some(state => state === 'unknown' || state === 'succeeded');
+      job.status = hasEffect ? 'needs_reconciliation' : 'failed';
+      job.errorCode = hasEffect ? 'effect_reconciliation_required' : 'retry_limit_reached';
+      job.leaseOwner = null; job.leaseUntil = null; job.updatedAt = new Date(now).toISOString();
+      await this.replace(job, hit.version);
+      throw new BrowserJobError(hasEffect ? 'effect_reconciliation_required' : 'job_terminal');
     }
     job.status = job.cancellationRequestedAt ? 'cancelling' : 'running'; job.leaseOwner = agent; job.leaseUntil = new Date(now + leaseMs).toISOString(); job.leaseToken++; job.attempts++; job.updatedAt = new Date(now).toISOString();
     await this.replace(job, hit.version); return job;

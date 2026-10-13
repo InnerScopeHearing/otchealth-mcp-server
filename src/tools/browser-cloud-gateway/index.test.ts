@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { validateDeterministicPlan } from './index.js';
+test('durable plans reject durations beyond the session service bound before dispatch', () => {
+  const plan = { profile_id: 'cto-public', max_seconds: 180, actions: [{ type: 'navigate', url: 'https://example.com/' }] };
+  assert.equal(validateDeterministicPlan(plan).max_seconds, 180);
+  for (const max_seconds of [181, 300]) assert.throws(() => validateDeterministicPlan({ ...plan, max_seconds }));
+});
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { requestContext } from '../../server/request-context.js';
 import { redactCloudBrowserInputForLog, registerCloudBrowserTools, shieldCloudBrowserInput, type CloudBrowserGatewayRuntime } from './index.js';
