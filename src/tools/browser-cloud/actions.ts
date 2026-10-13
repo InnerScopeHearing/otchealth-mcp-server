@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { CLOUD_BROWSER_KEYS, CloudBrowserError, type CloudBrowserAction } from './contract.js';
+import type { BrowserPageAction } from './page-controls.js';
 
 const coordinate = z.number().finite().min(0).max(10_000);
 const selector = z.string().min(1).max(256).refine(value => !/[\r\n]/.test(value));
@@ -13,6 +14,15 @@ export const cloudBrowserActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('scroll'), x: coordinate, y: coordinate, deltaX: z.number().finite().min(-10_000).max(10_000), deltaY: z.number().finite().min(-10_000).max(10_000) }).strict(),
   z.object({ type: z.literal('mouse_move'), x: coordinate, y: coordinate }).strict(),
   z.object({ type: z.literal('drag'), fromX: coordinate, fromY: coordinate, toX: coordinate, toY: coordinate, steps: z.number().int().min(1).max(20).optional() }).strict(),
+  z.object({ type: z.literal('tab_create'), url: z.string().url().max(2048).regex(/^https:\/\//i) }).strict(),
+  z.object({ type: z.literal('tab_select'), targetId: z.string().min(1).max(256).refine(value => !/[\u0000-\u001f\u007f]/.test(value)) }).strict(),
+  z.object({ type: z.literal('tab_close'), targetId: z.string().min(1).max(256).refine(value => !/[\u0000-\u001f\u007f]/.test(value)) }).strict(),
+  z.object({ type: z.literal('navigate_back') }).strict(),
+  z.object({ type: z.literal('navigate_forward') }).strict(),
+  z.object({ type: z.literal('reload') }).strict(),
+  z.object({ type: z.literal('focus'), selector }).strict(),
+  z.object({ type: z.literal('select'), selector, value: z.string().max(1024).refine(value => !/[\u0000-\u001f\u007f]/.test(value)) }).strict(),
+  z.object({ type: z.literal('dialog'), accept: z.boolean(), promptText: z.string().max(1024).refine(value => !/[\u0000-\u001f\u007f]/.test(value)).optional() }).strict(),
 ]);
 
 export function validateCloudBrowserAction(value: unknown): CloudBrowserAction {
@@ -20,6 +30,8 @@ export function validateCloudBrowserAction(value: unknown): CloudBrowserAction {
   if (!parsed.success) throw new CloudBrowserError('invalid_action', 'Browser action is invalid or exceeds its typed bounds.');
   return parsed.data;
 }
+
+export type { BrowserPageAction };
 
 export interface CloudBrowserCdp {
   command(method: string, params: Record<string, unknown>, timeout: number, page?: string): Promise<Record<string, unknown>>;

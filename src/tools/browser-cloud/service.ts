@@ -33,7 +33,7 @@ function assertProfile(profile: CloudBrowserProfile): void {
 
 function assertAction(action: CloudBrowserAction, hosts: readonly string[]): void {
   validateCloudBrowserAction(action);
-  if (action.type === 'navigate') {
+  if (action.type === 'navigate' || action.type === 'tab_create') {
     let url: URL;
     try { url = new URL(action.url); } catch { throw new CloudBrowserError('invalid_action', 'Navigation URL is invalid.'); }
     if (url.protocol !== 'https:' || url.username || url.password || url.port || !hosts.includes(url.hostname.toLowerCase())) throw new CloudBrowserError('host_forbidden', 'Navigation host is not allowed for this profile.');
@@ -107,7 +107,7 @@ export class CloudBrowserService {
     return { sessionId: session.sessionId, expiresAt: session.expiresAt };
   }
 
-  async execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null> {
+  async execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | import('./page-controls.js').BrowserPageReceipt | null> {
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > CLOUD_BROWSER_MAX_ACTION_SECONDS) throw new CloudBrowserError('invalid_duration', 'Action duration exceeds the cloud-browser bound.');
     const session = await this.sessionFor(caller, sessionId);
     if (session.actionsUsed >= CLOUD_BROWSER_MAX_ACTIONS) throw new CloudBrowserError('action_limit', 'Session action limit reached.');
@@ -116,37 +116,56 @@ export class CloudBrowserService {
     if (!await this.store.acquireSessionLock(sessionId, lockOwner, this.now() + (timeoutSeconds + 5) * 1_000)) throw new CloudBrowserError('session_busy', 'Another bounded browser action is in progress for this session.');
     try {
       const current = await this.sessionFor(caller, sessionId);
+      if (current.effectUnknown) throw new CloudBrowserError('effect_unknown', 'A previous browser tab operation has an unknown result; reconcile the session before continuing.');
       if (current.actionsUsed >= CLOUD_BROWSER_MAX_ACTIONS) throw new CloudBrowserError('action_limit', 'Session action limit reached.');
       const deadline = this.now() + Math.min(timeoutSeconds, Math.max(1, Math.ceil((current.expiresAt - this.now()) / 1_000))) * 1_000;
       const remainingSeconds = (): number => Math.max(0, Math.ceil((deadline - this.now()) / 1_000));
       const checkCurrentPage = async (): Promise<CloudBrowserObservation> => {
         const remaining = remainingSeconds();
         if (remaining <= 0) throw new CloudBrowserError('provider_timeout', 'Browser action exceeded its bounded deadline.');
-        const page = await this.transport.execute(current, { type: 'snapshot' }, remaining);
+        const value = await this.transport.execute(current, { type: 'snapshot' }, remaining);
+        const page = value && typeof value === 'object' && 'observation' in value ? value.observation : value;
+        if (!page) throw new CloudBrowserError('provider_observation_invalid', 'Browser provider did not return an observation.');
         assertObservationHost(page, current.allowedHosts);
         return page as CloudBrowserObservation;
       };
       if (action.type !== 'navigate') await checkCurrentPage();
-      let observation: CloudBrowserObservation | null;
-      if (action.type !== 'wait_for') observation = await this.transport.execute(current, action, remainingSeconds());
-      else {
-        for (;;) {
-          if (remainingSeconds() <= 0) throw new CloudBrowserError('provider_timeout', 'Browser wait action exceeded its bounded deadline.');
-          try { observation = await this.transport.execute(current, action, remainingSeconds()); break; }
-          catch (error) { if (!(error instanceof CloudBrowserError) || error.code !== 'selector_not_found') throw error; await new Promise<void>((resolve) => setTimeout(resolve, Math.min(200, Math.max(1, deadline - this.now())))); }
+      let result: CloudBrowserObservation | null | { observation: CloudBrowserObservation | null; pageReceipt?: import('./page-controls.js').BrowserPageReceipt };
+      try {
+        if (action.type !== 'wait_for') result = await this.transport.execute(current, action, remainingSeconds());
+        else {
+          for (;;) {
+            if (remainingSeconds() <= 0) throw new CloudBrowserError('provider_timeout', 'Browser wait action exceeded its bounded deadline.');
+            try { result = await this.transport.execute(current, action, remainingSeconds()); break; }
+            catch (error) { if (!(error instanceof CloudBrowserError) || error.code !== 'selector_not_found') throw error; await new Promise<void>((resolve) => setTimeout(resolve, Math.min(200, Math.max(1, deadline - this.now())))); }
+          }
         }
+      } catch (error) {
+        if (current.effectUnknown) await this.store.saveSessionUnderLock({ ...current, actionsUsed: current.actionsUsed + 1 }, lockOwner);
+        throw error;
       }
-      const currentPage = action.type === 'snapshot' ? observation : await checkCurrentPage();
-      assertObservationHost(currentPage, current.allowedHosts);
-      await this.store.saveSessionUnderLock({ ...current, actionsUsed: current.actionsUsed + 1 }, lockOwner);
-      return action.type === 'snapshot' ? currentPage : observation;
+      const execution = result && typeof result === 'object' && 'observation' in result ? result : { observation: result };
+      const observation = execution.observation;
+      let currentPage: CloudBrowserObservation | null = action.type === 'snapshot' ? observation : null;
+      try {
+        if (!(action.type === 'tab_close' && execution.pageReceipt?.selectedTargetId === null)) currentPage = action.type === 'snapshot' ? observation : await checkCurrentPage();
+      } catch (error) {
+        if (action.type === 'tab_create' || action.type === 'tab_close') {
+          current.effectUnknown = true;
+          await this.store.saveSessionUnderLock({ ...current, actionsUsed: current.actionsUsed + 1 }, lockOwner);
+        }
+        throw error;
+      }
+      if (currentPage) assertObservationHost(currentPage, current.allowedHosts);
+      await this.store.saveSessionUnderLock({ ...current, ownedTargetIds: current.ownedTargetIds, selectedTargetId: current.selectedTargetId, actionsUsed: current.actionsUsed + 1 }, lockOwner);
+      return execution.pageReceipt ?? (action.type === 'snapshot' ? currentPage : observation);
     } finally { await this.store.releaseSessionLock(sessionId, lockOwner); }
   }
 
   /** Returns only a bounded accessibility observation, never DOM, screenshot, cookies, or endpoint. */
   async snapshot(caller: string, sessionId: string): Promise<CloudBrowserObservation> {
     const result = await this.execute(caller, sessionId, { type: 'snapshot' }, 10);
-    if (!result) throw new CloudBrowserError('provider_observation_invalid', 'Browser provider did not return an observation.');
+    if (!result || !('url' in result)) throw new CloudBrowserError('provider_observation_invalid', 'Browser provider did not return an observation.');
     return result;
   }
 

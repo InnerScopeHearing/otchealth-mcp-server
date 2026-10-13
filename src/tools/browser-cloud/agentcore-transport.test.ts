@@ -51,3 +51,30 @@ test('CDP initializes DOM and clicks center through signed injected WebSocket', 
   assert.deepEqual([press?.params.x, press?.params.y], [20, 40]);
   assert.equal(closed, true);
 });
+
+test('selected owned tab is reused after a new provider stream connection', async t => {
+  const saved = { ...process.env }; t.after(() => { process.env = saved; }); process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  class Socket extends EventTarget {
+    send(raw: string) {
+      const cmd = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown> }; calls.push(cmd);
+      const replies: Record<string, unknown> = {
+        'Target.getTargets': { targetInfos: [{ type: 'page', targetId: 'first', url: 'https://example.test/one' }, { type: 'page', targetId: 'second', url: 'https://example.test/two' }] },
+        'Target.attachToTarget': { sessionId: String(cmd.params.targetId) },
+        'Target.activateTarget': {},
+        'Page.getNavigationHistory': { currentIndex: 0, entries: [{ url: 'https://example.test/two', title: 'Two' }] },
+        'Accessibility.getFullAXTree': { nodes: [] },
+      };
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ id: cmd.id, result: replies[cmd.method] ?? {} }) })));
+    }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  const factory = () => { const socket = new Socket(); queueMicrotask(() => socket.dispatchEvent(new Event('open'))); return socket as unknown as WebSocket; };
+  const ownedSession = { ...session, allowedHosts: ['example.test'], ownedTargetIds: ['first', 'second'], selectedTargetId: 'first' } as CloudBrowserSession;
+  const transport = new AgentCoreCloudBrowserTransport('us-east-1', fetch, factory);
+  await transport.execute(ownedSession, { type: 'tab_select', targetId: 'second' }, 2);
+  const observation = await transport.execute(ownedSession, { type: 'snapshot' }, 2);
+  assert.equal(ownedSession.selectedTargetId, 'second');
+  assert.equal((observation as { url?: string }).url, 'https://example.test/two');
+  assert.equal(calls.filter(call => call.method === 'Target.attachToTarget').at(-1)?.params.targetId, 'second');
+});

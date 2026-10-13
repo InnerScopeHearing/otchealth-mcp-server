@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { validateDeterministicPlan } from './index.js';
+import { cloudBrowserActionSchema } from '../browser-cloud/actions.js';
 test('durable plans reject durations beyond the session service bound before dispatch', () => {
   const plan = { profile_id: 'cto-public', max_seconds: 180, actions: [{ type: 'navigate', url: 'https://example.com/' }] };
   assert.equal(validateDeterministicPlan(plan).max_seconds, 180);
   for (const max_seconds of [181, 300]) assert.throws(() => validateDeterministicPlan({ ...plan, max_seconds }));
+});
+
+test('gateway page actions enforce strict typed bounds and HTTPS tab creation', () => {
+  assert.equal(cloudBrowserActionSchema.safeParse({ type: 'tab_create', url: 'https://example.com/' }).success, true);
+  for (const action of [
+    { type: 'tab_create', url: 'http://example.com/' },
+    { type: 'tab_select', targetId: `x${'a'.repeat(256)}` },
+    { type: 'tab_close', targetId: 'tab', arbitrary: true },
+    { type: 'dialog', accept: false, promptText: 'bad\u0001value' },
+  ]) assert.equal(cloudBrowserActionSchema.safeParse(action).success, false);
 });
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { requestContext } from '../../server/request-context.js';

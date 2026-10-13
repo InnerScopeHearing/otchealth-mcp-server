@@ -9,6 +9,7 @@ export const CLOUD_BROWSER_MAX_ACTION_SECONDS = 20;
 export const CLOUD_BROWSER_KEYS = ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'KeyA', 'KeyC', 'KeyV', 'KeyP', 'KeyS', 'KeyF', 'KeyZ', 'F5'] as const;
 
 export type CloudBrowserAction =
+  | import('./page-controls.js').BrowserPageAction
   | { type: 'navigate'; url: string }
   | { type: 'click'; selector: string; button?: 'left' | 'right'; clickCount?: 1 | 2 }
   | { type: 'type'; selector: string; text: string }
@@ -46,6 +47,16 @@ export interface CloudBrowserSession {
   providerSessionId: string;
   /** Opaque provider endpoint, never return this to MCP callers. */
   automationEndpoint: string;
+  /** Optional additive page ownership state; absent in legacy records. */
+  ownedTargetIds?: string[];
+  selectedTargetId?: string | null;
+  /** Blocks further effects after an acknowledgement loss until owner reconciliation. */
+  effectUnknown?: boolean;
+}
+
+export interface CloudBrowserExecutionResult {
+  observation: CloudBrowserObservation | null;
+  pageReceipt?: import('./page-controls.js').BrowserPageReceipt;
 }
 
 export interface CloudBrowserStore {
@@ -64,7 +75,7 @@ export interface CloudBrowserStore {
 
 export interface CloudBrowserTransport {
   start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, 'providerSessionId' | 'automationEndpoint'>>;
-  execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null>;
+  execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null | CloudBrowserExecutionResult>;
   stop(session: CloudBrowserSession): Promise<void>;
   /** Persist the active remote browser state (cookies/local storage) at the provider, never locally. */
   saveProfile?(session: CloudBrowserSession, profile: CloudBrowserProfile): Promise<void>;
