@@ -335,13 +335,17 @@ export async function readMessages(agent: string, opts: ReadMessagesOptions = {}
 
   // PEEK: read-only. Same liveness predicate as the drain, no lock and no write, so it can never
   // consume, hide or count anything.
-  const r = await p.query<{ message_id: string; payload: unknown; dequeue_count: number }>(
-    `SELECT message_id, payload, dequeue_count
-       FROM ${TABLE}
-      WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
-      ORDER BY seq ${newestFirst ? 'DESC' : 'ASC'}
-      LIMIT $2`,
-    [q, n],
-  );
+  const peekSql = newestFirst
+    ? `SELECT message_id, payload, dequeue_count
+         FROM ${TABLE}
+        WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
+        ORDER BY seq DESC
+        LIMIT $2`
+    : `SELECT message_id, payload, dequeue_count
+         FROM ${TABLE}
+        WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
+        ORDER BY seq ASC
+        LIMIT $2`;
+  const r = await p.query<{ message_id: string; payload: unknown; dequeue_count: number }>(peekSql, [q, n]);
   return r.rows.map((row) => toReadMessage(agent, row, false));
 }
