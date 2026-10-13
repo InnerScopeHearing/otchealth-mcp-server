@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from 'node:crypto';
 import test from "node:test";
 import { validateDeterministicPlan } from "./index.js";
 import { cloudBrowserActionSchema } from "../browser-cloud/actions.js";
@@ -100,12 +101,12 @@ for (const [key, value] of Object.entries({
 
 function fakeServer(): {
   server: McpServer;
-  handlers: Map<string, (args: unknown) => Promise<{ structuredContent?: Record<string, unknown> }>>;
+  handlers: Map<string, (args: unknown) => Promise<{ structuredContent?: Record<string, unknown>; content?: Array<Record<string, unknown>> }>>;
 } {
-  const handlers = new Map<string, (args: unknown) => Promise<{ structuredContent?: Record<string, unknown> }>>();
+  const handlers = new Map<string, (args: unknown) => Promise<{ structuredContent?: Record<string, unknown>; content?: Array<Record<string, unknown>> }>>();
   return {
     server: {
-      registerTool: (name: string, _config: unknown, handler: (args: unknown) => Promise<{ structuredContent?: Record<string, unknown> }>) => {
+      registerTool: (name: string, _config: unknown, handler: (args: unknown) => Promise<{ structuredContent?: Record<string, unknown>; content?: Array<Record<string, unknown>> }>) => {
         handlers.set(name, handler);
         return { remove: () => handlers.delete(name) };
       },
@@ -113,7 +114,7 @@ function fakeServer(): {
     handlers,
   };
 }
-test('gateway accepts only typed capture requests and returns metadata without capture bytes', async () => {
+test('gateway capture action returns only metadata and an opaque ID, not capture bytes', async () => {
   const old = [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS];
   Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 'synthetic-table', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'synthetic-bucket', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
   const runtime = { browser: { execute: async () => ({ id: 'bca_123e4567-e89b-42d3-a456-426614174000', owner: 'cto', sessionId: 's', contentType: 'image/png', byteLength: 42, sha256: 'a'.repeat(64), createdAt: 1, body: Buffer.from('must-not-leak') }) }, jobs: {} as never, queue: {} as never, artifacts: {} as never } satisfies CloudBrowserGatewayRuntime;
@@ -122,6 +123,67 @@ test('gateway accepts only typed capture requests and returns metadata without c
     const good = await requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cto', dryRun: false }, () => handlers.get('browser_cloud_session_action')!({ session_id: 's', action: { type: 'capture', request: { type: 'screenshot', format: 'png' } }, timeout_seconds: 5, dry_run: false }));
     assert.deepEqual(good.structuredContent?.result, { ok: true, capture_id: 'bca_123e4567-e89b-42d3-a456-426614174000', content_type: 'image/png', byte_length: 42, sha256: 'a'.repeat(64) });
     assert.equal(JSON.stringify(good.structuredContent).includes('must-not-leak'), false);
+  } finally { [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS] = old; }
+});
+
+test('artifact get returns owner-bound captures as native MCP images and PDFs', async () => {
+  const old = [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS];
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 't', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'b', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
+  const imageBody = Buffer.from('verified image bytes');
+  const pdfBody = Buffer.from('verified pdf bytes');
+  const sha256 = (body: Buffer) => createHash('sha256').update(body).digest('hex');
+  const captures = new Map([
+    ['bca_123e4567-e89b-42d3-a456-426614174000', { metadata: { id: 'bca_123e4567-e89b-42d3-a456-426614174000', owner: 'cto', sessionId: '123e4567-e89b-42d3-a456-426614174001', contentType: 'image/png' as const, byteLength: imageBody.byteLength, sha256: sha256(imageBody), createdAt: 1 }, body: imageBody }],
+    ['bca_123e4567-e89b-42d3-a456-426614174002', { metadata: { id: 'bca_123e4567-e89b-42d3-a456-426614174002', owner: 'cto', sessionId: '123e4567-e89b-42d3-a456-426614174003', contentType: 'application/pdf' as const, byteLength: pdfBody.byteLength, sha256: sha256(pdfBody), createdAt: 1, pageCount: 1 }, body: pdfBody }],
+  ]);
+  const captureCalls: string[] = [];
+  const runtime = {
+    browser: {
+      getCapture: async (caller: string, id: string) => {
+        captureCalls.push(`${caller}:${id}`);
+        const value = captures.get(id);
+        if (!value || value.metadata.owner !== caller) throw Object.assign(new Error('denied'), { code: 'owner_forbidden' });
+        return value;
+      },
+    } as never,
+    jobs: {} as never, queue: {} as never, artifacts: {} as never,
+  } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer();
+  registerCloudBrowserTools(server, () => 'hash', runtime);
+  try {
+    const imageId = 'bca_123e4567-e89b-42d3-a456-426614174000';
+    const imageResult = await requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cto', dryRun: false }, () => handlers.get('browser_cloud_artifact_get')!({ job_id: '123e4567-e89b-42d3-a456-426614174001', artifact_id: imageId, dry_run: false }));
+    assert.equal((imageResult.structuredContent?.result as { artifact?: { id: string } }).artifact?.id, imageId);
+    assert.deepEqual(imageResult.content?.at(-1), { type: 'image', mimeType: 'image/png', data: imageBody.toString('base64') });
+    assert.equal(JSON.stringify(imageResult.structuredContent).includes(imageBody.toString()), false);
+
+    const pdfId = 'bca_123e4567-e89b-42d3-a456-426614174002';
+    const pdfResult = await requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cto', dryRun: false }, () => handlers.get('browser_cloud_artifact_get')!({ job_id: '123e4567-e89b-42d3-a456-426614174003', artifact_id: pdfId, dry_run: false }));
+    assert.deepEqual(pdfResult.content?.at(-1), { type: 'resource', resource: { uri: `browser-capture://${pdfId}`, mimeType: 'application/pdf', blob: pdfBody.toString('base64') } });
+
+    const denied = await requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cfo', dryRun: false }, () => handlers.get('browser_cloud_artifact_get')!({ job_id: '123e4567-e89b-42d3-a456-426614174001', artifact_id: imageId, dry_run: false }));
+    assert.equal((denied.structuredContent?.result as { error?: string }).error, 'owner_forbidden');
+    assert.equal(denied.content?.some((block) => block.type === 'image' || block.type === 'resource'), false);
+    assert.equal(captureCalls.length, 3);
+  } finally { [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS] = old; }
+});
+
+test('capture retrieval rejects session mismatch and hash failure before emitting native content', async () => {
+  const old = [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS];
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 't', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'b', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
+  const body = Buffer.from('bytes');
+  let metadata = { id: 'bca_123e4567-e89b-42d3-a456-426614174000', owner: 'cto', sessionId: '123e4567-e89b-42d3-a456-426614174001', contentType: 'image/png' as const, byteLength: body.byteLength, sha256: createHash('sha256').update(body).digest('hex'), createdAt: 1 };
+  const runtime = { browser: { getCapture: async () => ({ metadata, body }) } as never, jobs: {} as never, queue: {} as never, artifacts: {} as never } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer(); registerCloudBrowserTools(server, () => 'hash', runtime);
+  try {
+    const call = (job_id: string) => requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cto', dryRun: false }, () => handlers.get('browser_cloud_artifact_get')!({ job_id, artifact_id: metadata.id, dry_run: false }));
+    const mismatch = await call('123e4567-e89b-42d3-a456-426614174099');
+    assert.equal((mismatch.structuredContent?.result as { error?: string }).error, 'capture_integrity_failed');
+    assert.equal(mismatch.content?.length, 1);
+    metadata = { ...metadata, sha256: '0'.repeat(64) };
+    const badHash = await call(metadata.sessionId);
+    assert.equal((badHash.structuredContent?.result as { error?: string }).error, 'capture_integrity_failed');
+    assert.equal(badHash.content?.length, 1);
   } finally { [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS] = old; }
 });
 test("gateway redaction and shield never retain nested typed text, URL, selector, or plan", () => {

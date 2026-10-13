@@ -85,6 +85,10 @@ export interface CloudBrowserGatewayService {
   stop(caller: string, sessionId: string): Promise<void>;
   savePersistentProfile(caller: string, sessionId: string): Promise<void>;
   snapshot(caller: string, sessionId: string): Promise<unknown>;
+  getCapture?(caller: string, captureId: string): Promise<{
+    metadata: BrowserCaptureMetadata;
+    body: Uint8Array;
+  }>;
   publicTrialProfile(caller: string): Promise<{
     profileId: string;
     allowedHosts: readonly string[];
@@ -292,8 +296,8 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       name: "browser_cloud_artifact_get",
       category: "read",
       annotations: {
-        title: "Cloud browser: get job artifact",
-        description: "Reads one bounded immutable artifact recorded on the authenticated caller’s job.",
+        title: "Cloud browser: get artifact",
+        description: "Reads an authenticated caller’s bounded immutable job artifact or browser capture. For a capture, job_id is the original session_id and artifact_id is its capture_id.",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -307,9 +311,58 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         artifact: z.unknown().optional(),
         error: z.string().optional(),
       },
+      maxResponseBytes: 6_000_000,
       handler: async (input, ctx) => {
         if (!live()) return unavailable();
         try {
+          if (input.artifact_id.startsWith('bca_')) {
+            if (!runtime.browser.getCapture) throw Object.assign(new Error('capture_unavailable'), { code: 'capture_unavailable' });
+            const capture = await runtime.browser.getCapture(ctx.callerAgent, input.artifact_id);
+            const metadata = capture.metadata;
+            if (
+              metadata.id !== input.artifact_id ||
+              metadata.owner !== ctx.callerAgent ||
+              metadata.sessionId !== input.job_id ||
+              !Number.isSafeInteger(metadata.byteLength) ||
+              metadata.byteLength < 1 ||
+              metadata.byteLength > 4 * 1024 * 1024 ||
+              capture.body.byteLength !== metadata.byteLength ||
+              !/^[a-f0-9]{64}$/.test(metadata.sha256) ||
+              createHash('sha256').update(capture.body).digest('hex') !== metadata.sha256
+            ) {
+              return {
+                data: { error: 'capture_integrity_failed' },
+                summary: 'Capture integrity or session binding validation failed.',
+              };
+            }
+            const base64 = Buffer.from(capture.body).toString('base64');
+            const nativeContent = metadata.contentType === 'image/png' || metadata.contentType === 'image/jpeg'
+              ? [{ type: 'image' as const, data: base64, mimeType: metadata.contentType }]
+              : metadata.contentType === 'application/pdf'
+                ? [{ type: 'resource' as const, resource: {
+                    uri: `browser-capture://${metadata.id}`,
+                    mimeType: 'application/pdf',
+                    blob: base64,
+                  } }]
+                : null;
+            if (!nativeContent) {
+              return { data: { error: 'capture_integrity_failed' }, summary: 'Capture content type is unsupported.' };
+            }
+            return {
+              data: {
+                artifact: {
+                  id: metadata.id,
+                  session_id: metadata.sessionId,
+                  content_type: metadata.contentType,
+                  byte_length: metadata.byteLength,
+                  sha256: metadata.sha256,
+                  ...(metadata.pageCount === undefined ? {} : { page_count: metadata.pageCount }),
+                },
+              },
+              nativeContent,
+              summary: 'Owner-bound browser capture returned as native MCP image or PDF content.',
+            };
+          }
           const job = await runtime.jobs.get(input.job_id, ctx.callerAgent);
           const artifact = job.artifacts.find((item) => item.id === input.artifact_id);
           if (!artifact)

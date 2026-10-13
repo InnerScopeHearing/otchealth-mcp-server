@@ -677,6 +677,14 @@ export interface ToolResultPayload {
    * (e.g. a synthesized recall answer). Omit for tools where groundedness is undefined.
    */
   groundedness?: GroundingHint;
+  /**
+   * Trusted tool-owned native MCP content. Appended only after compliance and outbound safety
+   * gates, and never included in structured results, audit text, or the shared result cache.
+   */
+  nativeContent?: Array<
+    | { type: 'image'; data: string; mimeType: string }
+    | { type: 'resource'; resource: { uri: string; mimeType: string; blob: string } }
+  >;
 }
 
 export type ToolHandler<Input> = (
@@ -1425,6 +1433,9 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
           ? strictResultSchema.parse(payload.data)
           : payload.data;
         const { result, warning } = applyGuardrail(validatedData, acknowledged);
+        // A native attachment must not outlive a compliance refusal of its associated data.
+        // Attachments remain outside JSON/audit/cache paths and are emitted only on an allowed result.
+        const nativeContent = result === null ? [] : (payload.nativeContent ?? []);
 
         // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
         // (query + text + sources). enforce-blocking is limited to READ tools — a write already ran, so
@@ -1587,7 +1598,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // closed instead of persisting an oversized response and returning an offload reference.
         if (def.maxResponseBytes !== undefined) {
           const serializedResponse = JSON.stringify({
-            content: [{ type: 'text', text }],
+            content: [{ type: 'text', text }, ...nativeContent],
             structuredContent: structured,
           });
           if (serializedResponse === undefined) {
@@ -1638,7 +1649,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         }
 
         return {
-          content: [{ type: 'text', text }],
+          content: [{ type: 'text', text }, ...nativeContent],
           structuredContent: structured,
         };
       } catch (err) {

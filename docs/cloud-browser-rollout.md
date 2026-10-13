@@ -56,11 +56,14 @@ Interaction input uses a strict typed schema, with finite key names, modifier bo
 | Exact HTTPS host and session-owner checks | Preserved for legacy profiles; public-web profiles also retain session-owner checks | Existing example-only trial is not broad-web proof |
 | HTTP/HTTPS public-web navigation | Public mode accepts both schemes without per-domain host enrollment; legacy profiles retain exact host policy | Requires a root-enrolled profile and verified isolated-egress policy |
 | Saved account credentials / sign-in UI | Existing opaque profile references only; no credential broker or enrollment | Pending authorized account binding and reconnect tests |
-| Tabs; screenshots; upload/download; PDF/export | Not implemented in this foundation | Pending implementation and synthetic acceptance |
+| Tabs; screenshot/PDF capture | Typed capture, structural validation, owner-bound immutable storage and native MCP retrieval are implemented in source | Pending immutable-image, isolated-network, provider and actual-client acceptance; capture remains unavailable for persistent or output-suppressed sessions |
+| File upload/download; PDF export from external applications | Not implemented | Pending separate implementation and synthetic acceptance |
 | Physical printing | Not implemented | Pending actual printer binding and output receipt |
 | All-agent distribution / recovery | Not established by this candidate | Pending independent same-seat/client receipts |
 
 Do not replace legacy exact host lists with a wildcard. Public-web mode intentionally has no per-domain allowlist; its containment boundary is the verified isolated-egress proxy/VPC policy. Full-session enforcement must block private IPv4/IPv6, loopback, link-local/metadata and rebinding destinations before connections, including redirects, background requests and new tabs. Provider metadata and post-navigation URL checks do not establish this boundary. Monitor cost; neither the public-mode provider timeout nor its configured mission budgets are an account-wide dollar cap.
+
+For source-backed browser captures, call `browser_cloud_artifact_get` with `job_id` set to the original session ID and `artifact_id` set to the returned capture ID. PNG/JPEG captures are returned as MCP image content; PDFs are returned as an embedded binary resource. This path remains pending immutable-image, isolated-network, provider and actual-client acceptance.
 
 The existing ECS task definition and pinned image digest must be captured immediately before any release and retained as rollback targets. At the read-only preflight the queue had no redrive policy; an empty approximate queue does not prove pending outbox dispatch is empty. Reconcile those recovery facts independently, and do not treat local build or PR CI as deployment.
 
