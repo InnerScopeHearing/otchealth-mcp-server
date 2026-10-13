@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { INTERCOM_OPERATIONS_TOOLSET } from '../config/intercom-operations.js';
 
 const COO_INTERCOM_TOOL_NAMES = [
+  ...INTERCOM_OPERATIONS_TOOLSET,
   'intercom_admin_set_away',
   'intercom_team_get',
   'intercom_team_list',

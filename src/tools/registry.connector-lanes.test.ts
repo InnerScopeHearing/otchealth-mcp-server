@@ -17,6 +17,7 @@ import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
 import { COMPANY_GITHUB_OPERATOR_LANES, GITHUB_OPERATOR_TOOLSET } from '../config/github-operator.js';
 import { AWS_OPERATOR_LANES } from '../config/aws-operators.js';
+import { INTERCOM_OPERATIONS_TOOLSET } from '../config/intercom-operations.js';
 import { LANE_TOOLSETS } from '../config/lane-toolsets.js';
 import { requestContext } from '../server/request-context.js';
 
@@ -80,7 +81,7 @@ test('CTO_SHIP_LANE_TOOLSET and EXTERNAL_READONLY_TOOLSET are disjoint from each
 
 test('(a) cto lane gets the full ship-lane set, including the privileged tools', () => {
   const set = connectorToolset(testEnv(), 'cto');
-  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check', 'framer_project_inspect'].sort());
+  assert.deepEqual([...set].sort(), [...CTO_SHIP_LANE_TOOLSET, ...INTERCOM_OPERATIONS_TOOLSET, ...CLOUD_BROWSER_TOOLS, CTO_CLOUD_BROWSER_PROVISIONING_TOOL, 'hyperagent_discover_capabilities', CTO_ONLY_GITHUB_RECEIPT_TOOL, 'github_workflow_run_failed_log_excerpt', CTO_ONLY_N8N_EXECUTION_LIST_TOOL, ...AWS_MCP_TOOLS, RESTRICTED_GITHUB_MAKE_BROKER_TOOL, 'graph_company_shared_relationship_query', 'claims_check', 'framer_project_inspect'].sort());
   assert.ok(set.has(CTO_CLOUD_BROWSER_PROVISIONING_TOOL), 'CTO connector must expose the protected public-profile provisioner');
   assert.ok(set.has('kb_search_privileged'));
   assert.ok(set.has('memory_write'));
@@ -467,10 +468,16 @@ test('isShipLane: exact predicate matches the routing above', () => {
   assert.equal(isShipLane('CTO'), false);
 });
 
-test('CONNECTOR_TOOLSET env override still controls the non-GitHub ship set (back-compat)', () => {
+test('CONNECTOR_TOOLSET override preserves mandatory scoped operator front doors', () => {
   const env = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search,web_search' } as Env;
   const set = connectorToolset(env, 'cto');
-  assert.deepEqual([...set].sort(), ['brain_search', 'web_search', 'framer_project_inspect', ...GITHUB_OPERATOR_TOOLSET, ...AWS_MCP_TOOLS].sort());
+  assert.deepEqual([...set].sort(), ['brain_search', 'web_search', 'framer_project_inspect', ...GITHUB_OPERATOR_TOOLSET, ...AWS_MCP_TOOLS, ...INTERCOM_OPERATIONS_TOOLSET].sort());
+});
+
+test('Intercom/Fin operations stay on the CTO and COO identities even under injected overrides', () => {
+  const env = { ...testEnv(), CONNECTOR_TOOLSET: INTERCOM_OPERATIONS_TOOLSET.join(','), EXTERNAL_READONLY_TOOLSET: INTERCOM_OPERATIONS_TOOLSET.join(',') } as Env;
+  for (const lane of ['cto', 'coo']) for (const tool of INTERCOM_OPERATIONS_TOOLSET) assert.equal(connectorToolset(env, lane).has(tool), true);
+  for (const lane of ['cro', 'developer', 'cfo', 'clo', 'clo-personal', 'exec', 'unknown']) for (const tool of INTERCOM_OPERATIONS_TOOLSET) assert.equal(connectorToolset(env, lane).has(tool), false, `${lane}:${tool}`);
 });
 
 test('CONNECTOR_TOOLSET override cannot expose public KB retrieval to denied ship lanes', () => {

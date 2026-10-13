@@ -15,6 +15,11 @@ on:
         description: "Expected live ECS task definition (otchealth-gateway:<positive revision>)"
         required: true
         type: string
+      verify_intercom:
+        description: "Run seven bounded Intercom2.17 configuration GET canaries (no customer reads or writes)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,3 +41,8 @@ jobs:
           EXPECTED_IMAGE_DIGEST: ${{ inputs.expected_image_digest }}
           EXPECTED_TASK_DEFINITION: ${{ inputs.expected_task_definition }}
         run: python3 scripts/check-deep-health.py
+      - name: Verify Intercom configuration access
+        if: inputs.verify_intercom
+        env:
+          ADMIN_REVOKE_TOKEN: ${{ secrets.ADMIN_REVOKE_TOKEN }}
+        run: python3 scripts/check-intercom-health.py

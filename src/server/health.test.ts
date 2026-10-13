@@ -131,6 +131,8 @@ test('/health/deep includes only its same-process revision receipt after admin a
   try {
     const unauthorized = await app.inject({ method: 'GET', url: '/health/deep' });
     assert.equal(unauthorized.statusCode, 401);
+    const intercomUnauthorized = await app.inject({ method: 'GET', url: '/health/intercom' });
+    assert.equal(intercomUnauthorized.statusCode, 401);
     assert.equal(metadataReads, 0, 'unauthorized request must not read task metadata');
 
     const authorized = await app.inject({

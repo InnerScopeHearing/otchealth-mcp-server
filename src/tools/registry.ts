@@ -12,6 +12,7 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
 import { isAwsOperatorLane } from '../config/aws-operators.js';
+import { INTERCOM_OPERATIONS_TOOLSET, isIntercomOperationsLane } from '../config/intercom-operations.js';
 import { CTO_MAKE_GITHUB_PILOT_LANE, CTO_MAKE_GITHUB_PILOT_TOOLSET } from '../config/lane-toolsets.js';
 import {
   COMPANY_GITHUB_ALLOWED_OWNERS,
@@ -442,6 +443,7 @@ export const WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET: readonly string[] = [
  * gateway on that lane.
  */
 export const COO_INTERCOM_CONNECTOR_TOOLSET: readonly string[] = [
+  ...INTERCOM_OPERATIONS_TOOLSET,
   'intercom_admin_set_away',
   'intercom_team_get', 'intercom_team_list',
   'intercom_ticket_type_get', 'intercom_ticket_type_list',
@@ -456,6 +458,7 @@ export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
   ...GITHUB_OPERATOR_TOOLSET,
   ...COO_INTERCOM_CONNECTOR_TOOLSET,
+  'catalog_skill',
   'twilio_coo_resource_counts',
   'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // This diagnostic is intentionally safe on the constrained coordination surface.
@@ -557,6 +560,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // Synthetic-only typed GraphRAG acceptance stays discoverable on the CTO connector only.
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('graph_company_shared_relationship_query');
   // Visibility is not enrollment: cloud handlers still require an owned, provisioned profile.
+  // Matthew's Intercom/Fin launch grants this compact control plane to its CTO and COO owners.
+  // Keep it caller-bound even under connector overrides; no other service or ring is widened.
+  if (isIntercomOperationsLane(lane)) for (const name of INTERCOM_OPERATIONS_TOOLSET) tools.add(name);
+  else for (const name of INTERCOM_OPERATIONS_TOOLSET) tools.delete(name);
   if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane) && !(isShipLane(lane) && env.CONNECTOR_TOOLSET)) {
     for (const name of ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
       'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get']) tools.add(name);

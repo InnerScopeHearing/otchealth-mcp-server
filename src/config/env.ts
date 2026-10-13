@@ -706,6 +706,8 @@ const EnvSchema = z.object({
 
   // Phase 2: Intercom
   INTERCOM_ACCESS_TOKEN: z.string().optional().default(''),
+  INTERCOM_API_BASE_URL: z.enum(['https://api.intercom.io', 'https://api.eu.intercom.io', 'https://api.au.intercom.io']).default('https://api.intercom.io'),
+  INTERCOM_FIN_ACCESS_TOKEN: z.string().optional().default(''),
 
   // Hyperagent broker. ONE account-wide delegated credential, brokered per lane by
   // src/tools/hyperagent/ring.ts, because Hyperagent's own MCP has no per-agent authorization
