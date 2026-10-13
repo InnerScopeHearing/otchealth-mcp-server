@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeResolver struct {
@@ -211,6 +212,51 @@ func TestCONNECTUsesPublicNumericPinAndTunnelsBytes(t *testing.T) {
 	_ = c.Close()
 	if got := <-received; got != "TLS bytes" {
 		t.Fatalf("tunnel bytes %q", got)
+	}
+}
+func TestCONNECTForwardsOnlyAlreadyBufferedPipelinedTLSBytes(t *testing.T) {
+	r := &fakeResolver{answers: []net.IPAddr{{IP: net.ParseIP("1.1.1.1")}}}
+	const hello, reply = "TLS hello", "TLS reply"
+	p := NewProxy(r, func(_ context.Context, _, _ string) (net.Conn, error) {
+		proxySide, serverSide := net.Pipe()
+		go func() {
+			defer serverSide.Close()
+			got := make([]byte, len(hello))
+			if _, err := io.ReadFull(serverSide, got); err != nil || string(got) != hello {
+				return
+			}
+			_, _ = io.WriteString(serverSide, reply)
+		}()
+		return proxySide, nil
+	})
+	s := httptest.NewServer(p)
+	defer s.Close()
+	c, err := net.Dial("tcp", strings.TrimPrefix(s.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+	// A browser may pipeline the beginning of TLS with CONNECT in one write;
+	// net/http then leaves these bytes in the hijacked bufio.Reader.
+	_, err = io.WriteString(c, "CONNECT arbitrary.example:443 HTTP/1.1\r\nHost: arbitrary.example:443\r\n\r\n"+hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status %d", resp.StatusCode)
+	}
+	got := make([]byte, len(reply))
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("tunnel response after pipelined hello: %v", err)
+	}
+	if string(got) != reply {
+		t.Fatalf("tunnel reply %q", got)
 	}
 }
 func TestHealthIsLocal(t *testing.T) {

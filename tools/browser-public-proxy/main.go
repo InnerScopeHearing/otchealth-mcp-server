@@ -254,8 +254,12 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
 		upstream.Close()
 		return
 	}
-	if rw.Reader.Buffered() > 0 {
-		_, _ = io.Copy(upstream, rw.Reader)
+	if buffered := rw.Reader.Buffered(); buffered > 0 {
+		if _, e = io.CopyN(upstream, rw.Reader, int64(buffered)); e != nil {
+			_ = client.Close()
+			_ = upstream.Close()
+			return
+		}
 	}
 	go func() {
 		_, _ = io.Copy(upstream, client)

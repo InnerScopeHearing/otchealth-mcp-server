@@ -4,8 +4,10 @@ This small Go service provides HTTP forward proxying, HTTPS `CONNECT`, and
 WebSocket upgrades to browser workers in a private VPC. It has no domain
 allowlist and imposes no destination-port allowlist. The listener must remain
 private: security groups are the access control boundary. The default address
-is `10.0.0.10:3128`; set `PROXY_LISTEN_ADDR` to the private interface address
-when deploying. `/health` is a local, metadata-free readiness response.
+is `10.0.0.10:3128`; set `PROXY_LISTEN_ADDR` explicitly when deploying. For
+example, `0.0.0.0:3128` listens on all interfaces and is safe only when network
+rules restrict access to the intended private browser workers. `/health` is a
+local, metadata-free readiness response.
 
 Every destination is resolved before forwarding. Every A and AAAA result is
 checked, and a single non-public result rejects the request. Each upstream
@@ -36,7 +38,8 @@ access to private services and cloud metadata from browser workers. In
 particular, WebRTC may use direct UDP paths and is not proven to traverse this
 TCP proxy; prevent that at the worker/VPC network boundary if required.
 
-Build and run tests with Go 1.24 or later:
+Build and run tests with Go 1.27.2 (the version used for the verified ARM64
+artifact) or later:
 
 ```sh
 go test ./...
