@@ -237,10 +237,12 @@ test("registered session start derives owner from authenticated context", async 
   process.env.READ_ONLY_MODE = "false";
   process.env.ENABLE_WRITE_TOOLS = "true";
   const owners: string[] = [];
+  const startArguments: unknown[][] = [];
   const runtime = {
     browser: {
-      start: async (owner: string) => {
+      start: async (owner: string, profileId: string, maxSeconds: number, actionBudget?: number) => {
         owners.push(owner);
+        startArguments.push([profileId, maxSeconds, actionBudget]);
         return { sessionId: "s", expiresAt: 1 };
       },
       execute: async () => undefined,
@@ -274,6 +276,9 @@ test("registered session start derives owner from authenticated context", async 
       }),
     );
     assert.deepEqual(owners, ["cto"]);
+    // Older cached clients send only profile_id and max_seconds; the newly optional mission budget
+    // must remain source/schema-compatible and default in the service layer.
+    assert.deepEqual(startArguments, [["cto-profile", 60, undefined]]);
   } finally {
     process.env.CLOUD_BROWSER_ENABLED = oldEnabled;
     process.env.CLOUD_BROWSER_DDB_TABLE = oldTable;

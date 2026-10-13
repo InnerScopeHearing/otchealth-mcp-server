@@ -36,7 +36,7 @@ async function registeredToolCount(lane: string, isM365 = false): Promise<number
   return (await registeredToolNames(lane, isM365)).length;
 }
 
-async function registeredToolNames(lane: string, isM365 = false): Promise<string[]> {
+async function registeredToolNames(lane: string, isM365 = false, connectorSurface = false): Promise<string[]> {
   const { registerAllTools } = await import('./index.js');
   const { currentCallerHash, requestContext } = await import('../server/request-context.js');
   const mcp = new McpServer(
@@ -48,7 +48,7 @@ async function registeredToolNames(lane: string, isM365 = false): Promise<string
       callerHash: 'test-hash',
       correlationId: 'test-corr',
       callerAgent: lane,
-      connectorSurface: false,
+      connectorSurface,
       m365StaticAuth: isM365,
     },
     async () => {
@@ -61,6 +61,37 @@ async function registeredToolNames(lane: string, isM365 = false): Promise<string
   // registerAllTools() call in the process and would not isolate one invocation's result).
   return Object.keys((mcp as unknown as { _registeredTools: Record<string, unknown> })._registeredTools);
 }
+
+test('all seven company connector lanes register browser tools; public-web discovery is advertised on each eligible connector', async () => {
+  const expected = [
+    'browser_cloud_profile_discover',
+    'browser_cloud_public_web_profile_discover',
+    'browser_cloud_session_start',
+    'browser_cloud_session_action',
+    'browser_cloud_session_snapshot',
+    'browser_cloud_profile_save',
+    'browser_cloud_session_stop',
+    'browser_cloud_job_submit',
+    'browser_cloud_job_get',
+    'browser_cloud_job_cancel',
+    'browser_cloud_artifact_get',
+  ];
+  const lanes = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'];
+  for (const lane of lanes) {
+    const names = await registeredToolNames(lane, false, true);
+    for (const name of expected) assert.ok(names.includes(name), `${lane} connector must advertise ${name}`);
+  }
+});
+
+test('native M365 registration adds the unambiguous public-web discovery compatibility alias for eligible lanes', async () => {
+  process.env.TOOL_CATALOG_CURATION_MODE = 'curate-m365-only';
+  const lanes = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer'];
+  for (const lane of lanes) {
+    const names = await registeredToolNames(lane, true, false);
+    assert.ok(names.includes('cloud_public_web_profile_discover'), `${lane} M365 caller should get the prefix-stripped alias`);
+    assert.equal(names.includes('browser_cloud_public_web_profile_discover'), false, `${lane} M365 should advertise only the alias`);
+  }
+});
 
 test('DEFAULT (TOOL_CATALOG_CURATION_MODE unset) -- every known internal lane gets the FULL, uncurated catalog', async () => {
   delete process.env.TOOL_CATALOG_CURATION_MODE;
