@@ -30,6 +30,7 @@ import { registerShopifyListAbandonedCheckouts } from './shopify/list-abandoned-
 
 // Phase 2 — Intercom
 import { registerIntercomListArticles } from './intercom/list-articles.js';
+import { registerIntercomOperations } from './intercom/operations.js';
 import { registerIntercomGetArticle } from './intercom/get-article.js';
 
 // Phase 2 — n8n meta-tools
@@ -1513,6 +1514,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerIntercomConversationTagAttach(server, callerHash);
   registerIntercomConversationTagDetach(server, callerHash);
   registerIntercomDataAttributeCreate(server, callerHash);
+  registerIntercomOperations(server, callerHash);
   registerIntercomDataAttributeList(server, callerHash);
   registerIntercomDataAttributeUpdate(server, callerHash);
   registerIntercomEventList(server, callerHash);

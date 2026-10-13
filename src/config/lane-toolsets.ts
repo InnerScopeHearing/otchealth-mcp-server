@@ -36,6 +36,7 @@
  */
 
 import { GITHUB_OPERATOR_TOOLSET } from './github-operator.js';
+import { INTERCOM_OPERATIONS_TOOLSET } from './intercom-operations.js';
 import { AWS_OPERATOR_LANES } from './aws-operators.js';
 
 const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
@@ -150,6 +151,7 @@ const GRAPH_MAIL = ['graph_send_email', 'graph_list_messages', 'graph_message_ge
 // build-agents.mjs export, so it is no longer byte-identical to that generated file until the next
 // refresh removes the same names there too.
 const CTO_M365_CURATED = [
+  ...INTERCOM_OPERATIONS_TOOLSET,
   'agent_dispatch',
   'framer_project_inspect',
   'brain_search', 'catalog_audit_unused', 'catalog_list_tools', 'catalog_master', 'catalog_probe',
@@ -288,6 +290,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // in-handler, this list keeps the advertised set honest with that reality.
   coo: [
     ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...PUBLIC_WEB_BROWSER_DISCOVERY,
+    ...INTERCOM_OPERATIONS_TOOLSET,
     ...GITHUB_OPERATOR_TOOLSET,
     ...GRAPH_MAIL, 'cio_*', ...HEYGEN,
   ],

@@ -6,6 +6,7 @@ import { getRevocationState, getRevocationStoreStatus } from '../auth/revocation
 import { toolCount } from '../catalog/catalog.js';
 import { validateAdminToken } from '../auth/bearer.js';
 import { probeDependencies } from './deep-health.js';
+import { cachedIntercomOperationsProbe } from '../intercom/operations-readiness.js';
 import { heyGenApprovalCompatibilityFingerprints } from '../tools/heygen/approval-fingerprint.js';
 import { HEYGEN_CRO_DIRECT_TOOLS } from '../tools/heygen/access.js';
 
@@ -100,6 +101,14 @@ export function registerHealth(
   // /admin/* already uses) rather than left open to public polling, which would let an outside
   // caller hammer any of these dependencies for free. It is NOT in the /health rate-limit
   // allowList, so it stays subject to the global inbound limit too.
+  app.get('/health/intercom', async (request, reply) => {
+    if (!validateAdminToken(request.headers['authorization'])) return reply.code(401).send({ error: 'unauthorized' });
+    const revision = await revisionInfo();
+    const state = await cachedIntercomOperationsProbe();
+    return reply.code(state.ready ? 200 : 503).send({ ...state, revision: {
+      image_tag: revision.image_tag, image_digest: revision.image_digest, task_definition: revision.task_definition,
+    } });
+  });
   app.get('/health/deep', async (request, reply) => {
     if (!validateAdminToken(request.headers['authorization'])) {
       return reply.code(401).send({

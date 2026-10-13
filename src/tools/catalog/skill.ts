@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
 import { SKILLS } from '../../catalog/catalog.js';
+import { INTERCOM_OPERATIONS_SKILL } from '../../intercom/operations-skill.js';
 
 /**
  * catalog_skill — fetch a fleet skill's how-to (its SKILL.md) so any agent on any platform can
@@ -39,6 +40,9 @@ export function registerCatalogSkill(server: McpServer, callerHash: CallerHashPr
           return { data: { skills: SKILLS }, summary: `${SKILLS.length} skills. Call catalog_skill with a name to load its how-to.` };
         }
         const name = input.name.trim().toLowerCase();
+        if (name === 'intercom-fin-operations') {
+          return { data: { name, doc: INTERCOM_OPERATIONS_SKILL }, summary: 'Loaded Intercom/Fin operating instructions packaged with this gateway revision.' };
+        }
         if (!/^[a-z0-9][a-z0-9_-]{0,60}$/.test(name)) {
           return { data: { name, error: 'invalid skill name' }, summary: `invalid skill name "${input.name}".` };
         }

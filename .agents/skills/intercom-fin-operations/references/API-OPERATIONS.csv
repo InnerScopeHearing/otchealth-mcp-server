@@ -1,0 +1,259 @@
+method,path,operation_id,summary,tags
+GET,/me,identifyAdmin,Identify an admin,Admins
+GET,/macros/{id},getMacro,Retrieve a macro,Macros
+GET,/macros,listMacros,List all macros,Macros
+PUT,/admins/{admin_id}/away,setAwayAdmin,Set an admin to away,Admins
+GET,/admins/activity_logs,listActivityLogs,List all activity logs,Admins
+POST,/admins/activity_logs/search,searchActivityLogs,Search activity logs,Admins
+GET,/admins/activity_log_event_types,listActivityLogEventTypes,List all activity log event types,Admins
+GET,/admins,listAdmins,List all admins,Admins
+GET,/office_hours_schedules/{office_hours_schedule_id}/office_hours_exceptions/{id},getOfficeHoursException,Retrieve an office hours exception,Office Hours
+PUT,/office_hours_schedules/{office_hours_schedule_id}/office_hours_exceptions/{id},updateOfficeHoursException,Update an office hours exception,Office Hours
+DELETE,/office_hours_schedules/{office_hours_schedule_id}/office_hours_exceptions/{id},deleteOfficeHoursException,Delete an office hours exception,Office Hours
+GET,/office_hours_schedules/{office_hours_schedule_id}/office_hours_exceptions,listOfficeHoursExceptions,List all office hours exceptions,Office Hours
+POST,/office_hours_schedules/{office_hours_schedule_id}/office_hours_exceptions,createOfficeHoursException,Create an office hours exception,Office Hours
+GET,/office_hours_schedules/{id},getOfficeHoursSchedule,Retrieve an office hours schedule,Office Hours
+PUT,/office_hours_schedules/{id},updateOfficeHoursSchedule,Update an office hours schedule,Office Hours
+DELETE,/office_hours_schedules/{id},deleteOfficeHoursSchedule,Delete an office hours schedule,Office Hours
+GET,/office_hours_schedules,listOfficeHoursSchedules,List all office hours schedules,Office Hours
+POST,/office_hours_schedules,createOfficeHoursSchedule,Create an office hours schedule,Office Hours
+GET,/admins/{admin_id},retrieveAdmin,Retrieve an admin,Admins
+GET,/ai/content_import_sources,listContentImportSources,List content import sources,AI Content
+POST,/ai/content_import_sources,createContentImportSource,Create a content import source,AI Content
+DELETE,/ai/content_import_sources/{source_id},deleteContentImportSource,Delete a content import source,AI Content
+GET,/ai/content_import_sources/{source_id},getContentImportSource,Retrieve a content import source,AI Content
+PUT,/ai/content_import_sources/{source_id},updateContentImportSource,Update a content import source,AI Content
+GET,/ai/external_pages,listExternalPages,List external pages,AI Content
+POST,/ai/external_pages,createExternalPage,Create an external page (or update an external page by external ID),AI Content
+DELETE,/ai/external_pages/{page_id},deleteExternalPage,Delete an external page,AI Content
+GET,/ai/external_pages/{page_id},getExternalPage,Retrieve an external page,AI Content
+PUT,/ai/external_pages/{page_id},updateExternalPage,Update an external page,AI Content
+GET,/articles,listArticles,List all articles,Articles
+POST,/articles,createArticle,Create an article,Articles
+GET,/articles/{article_id},retrieveArticle,Retrieve an article,Articles
+PUT,/articles/{article_id},updateArticle,Update an article,Articles
+DELETE,/articles/{article_id},deleteArticle,Delete an article,Articles
+GET,/articles/{id}/draft,retrieveArticleDraft,Retrieve an article draft,Articles
+PUT,/articles/{id}/draft,stageArticleDraft,Stage an article draft,Articles
+POST,/articles/{id}/draft/publish,publishArticleDraft,Publish an article draft,Articles
+POST,/articles/{article_id}/tags,attachTagToArticle,Add a tag to an article,Articles;Tags
+DELETE,/articles/{article_id}/tags/{id},detachTagFromArticle,Remove a tag from an article,Articles;Tags
+GET,/articles/{article_id}/versions,listArticleVersions,List article versions,Articles
+GET,/articles/{article_id}/versions/{id},retrieveArticleVersion,Retrieve an article version,Articles
+GET,/articles/search,searchArticles,Search for articles,Articles
+GET,/away_status_reasons,listAwayStatusReasons,List all away status reasons,Away Status Reasons
+GET,/audiences,listAudiences,List all audiences,Audiences
+POST,/audiences,createAudience,Create an audience,Audiences
+GET,/audiences/{id},retrieveAudience,Retrieve an audience,Audiences
+PUT,/audiences/{id},updateAudience,Update an audience,Audiences
+DELETE,/audiences/{id},deleteAudience,Delete an audience,Audiences
+POST,/export/reporting_data/enqueue,,Enqueue a new reporting data export job,Reporting Data Export
+GET,/export/reporting_data/{job_identifier},,Get export job status,Reporting Data Export
+GET,/export/reporting_data/get_datasets,,List available datasets and attributes,Reporting Data Export
+GET,/download/reporting_data/{job_identifier},,Download completed export job data,Reporting Data Export
+POST,/fin/start,startFinConversation,Start a conversation with Fin,Fin Agent
+POST,/fin/reply,replyToFin,Reply to Fin,Fin Agent
+POST,/fin/csat,submitFinCsat,Submit a CSAT rating,Fin Agent
+POST,/fin/capabilities,listFinCapabilities,Discover Fin's capabilities,Fin Agent
+POST,/fin/ask,askFin,Ask Fin,Fin Agent
+POST,/fin/procedures/{procedure_id}/run,runFinProcedure,Run a Fin procedure,Fin Agent
+POST,/fin/escalate,escalateFinConversation,Escalate to a human,Fin Agent
+GET,/help_center/help_centers/{help_center_id}/redirects,listHelpCenterRedirects,List all redirects for a help center,Help Center
+POST,/help_center/help_centers/{help_center_id}/redirects,createHelpCenterRedirect,Create a redirect,Help Center
+GET,/help_center/help_centers/{help_center_id}/redirects/{id},retrieveHelpCenterRedirect,Retrieve a redirect,Help Center
+DELETE,/help_center/help_centers/{help_center_id}/redirects/{id},deleteHelpCenterRedirect,Delete a redirect,Help Center
+GET,/help_center/collections,listAllCollections,List all collections,Help Center
+POST,/help_center/collections,createCollection,Create a collection,Help Center
+GET,/help_center/collections/{collection_id},retrieveCollection,Retrieve a collection,Help Center
+PUT,/help_center/collections/{collection_id},updateCollection,Update a collection,Help Center
+DELETE,/help_center/collections/{collection_id},deleteCollection,Delete a collection,Help Center
+GET,/help_center/help_centers/{help_center_id},retrieveHelpCenter,Retrieve a Help Center,Help Center
+GET,/help_center/help_centers,listHelpCenters,List all Help Centers,Help Center
+GET,/internal_articles,listInternalArticles,List all articles,Internal Articles
+POST,/internal_articles,createInternalArticle,Create an internal article,Internal Articles
+GET,/internal_articles/{internal_article_id},retrieveInternalArticle,Retrieve an internal article,Internal Articles
+PUT,/internal_articles/{internal_article_id},updateInternalArticle,Update an internal article,Internal Articles
+DELETE,/internal_articles/{internal_article_id},deleteInternalArticle,Delete an internal article,Internal Articles
+POST,/internal_articles/{internal_article_id}/tags,attachTagToInternalArticle,Add a tag to an internal article,Internal Articles;Tags
+DELETE,/internal_articles/{internal_article_id}/tags/{id},detachTagFromInternalArticle,Remove a tag from an internal article,Internal Articles;Tags
+GET,/internal_articles/search,searchInternalArticles,Search for internal articles,Internal Articles
+GET,/folders,listFolders,List all folders,Folders
+POST,/folders,createFolder,Create a folder,Folders
+GET,/folders/{id},retrieveFolder,Retrieve a folder,Folders
+PUT,/folders/{id},updateFolder,Update a folder,Folders
+DELETE,/folders/{id},deleteFolder,Delete a folder,Folders
+GET,/ip_allowlist,getIpAllowlist,Get IP allowlist settings,IP Allowlist
+PUT,/ip_allowlist,updateIpAllowlist,Update IP allowlist settings,IP Allowlist
+POST,/companies,createOrUpdateCompany,Create or Update a company,Companies
+GET,/companies,retrieveCompany,Retrieve companies,Companies
+GET,/companies/{company_id},RetrieveACompanyById,Retrieve a company by ID,Companies
+PUT,/companies/{company_id},UpdateCompany,Update a company,Companies
+DELETE,/companies/{company_id},deleteCompany,Delete a company,Companies
+GET,/companies/{company_id}/contacts,ListAttachedContacts,List attached contacts,Companies;Contacts
+GET,/companies/{company_id}/segments,ListAttachedSegmentsForCompanies,List attached segments for companies,Companies
+GET,/companies/{company_id}/notes,listCompanyNotes,List all company notes,Notes;Companies
+POST,/companies/{company_id}/notes,createCompanyNote,Create a company note,Notes;Companies
+POST,/companies/search,searchCompanies,Search companies,Companies
+POST,/companies/list,listAllCompanies,List all companies,Companies
+GET,/companies/scroll,scrollOverAllCompanies,Scroll over all companies,Companies
+POST,/contacts/{contact_id}/companies,attachContactToACompany,Attach a Contact to a Company,Companies;Contacts
+GET,/contacts/{contact_id}/companies,listCompaniesForAContact,List attached companies for contact,Contacts;Companies
+DELETE,/contacts/{contact_id}/companies/{company_id},detachContactFromACompany,Detach a contact from a company,Companies;Contacts
+GET,/contacts/{contact_id}/notes,listNotes,List all notes,Notes;Contacts
+POST,/contacts/{contact_id}/notes,createNote,Create a note,Notes;Contacts
+GET,/contacts/{contact_id}/segments,listSegmentsForAContact,List attached segments for contact,Contacts;Segments
+GET,/contacts/{contact_id}/subscriptions,listSubscriptionsForAContact,List subscriptions for a contact,Contacts;Subscription Types
+POST,/contacts/{contact_id}/subscriptions,attachSubscriptionTypeToContact,Add subscription to a contact,Subscription Types;Contacts
+DELETE,/contacts/{contact_id}/subscriptions/{subscription_id},detachSubscriptionTypeToContact,Remove subscription from a contact,Subscription Types;Contacts
+GET,/contacts/{contact_id}/tags,listTagsForAContact,List tags attached to a contact,Contacts;Tags
+POST,/contacts/{contact_id}/tags,attachTagToContact,Add tag to a contact,Tags;Contacts
+DELETE,/contacts/{contact_id}/tags/{tag_id},detachTagFromContact,Remove tag from a contact,Tags;Contacts
+GET,/contacts/deleted,listDeletedContacts,List deleted contacts,Contacts
+PUT,/contacts/{contact_id},UpdateContact,Update a contact,Contacts;Custom Object Instances
+GET,/contacts/{contact_id},ShowContact,Get a contact,Contacts
+DELETE,/contacts/{contact_id},DeleteContact,Delete a contact,Contacts
+POST,/contacts/merge,MergeContact,Merge a lead and a user,Contacts
+POST,/contacts/merge/preview,PreviewMergeContact,Preview a contact merge,Contacts
+POST,/contacts/search,SearchContacts,Search contacts,Contacts
+GET,/contacts/activities,ListContactActivities,List all contact activities,Contacts
+GET,/contacts,ListContacts,List all contacts,Contacts
+POST,/contacts,CreateContact,Create contact,Contacts
+GET,/contacts/find_by_external_id/{external_id},ShowContactByExternalId,Get a contact by External ID,Contacts
+POST,/contacts/{contact_id}/archive,ArchiveContact,Archive contact,Contacts
+POST,/contacts/{contact_id}/unarchive,UnarchiveContact,Unarchive contact,Contacts
+GET,/contacts/{id}/banners,listContactBanners,List banners for a contact,Banners;Contacts
+POST,/contacts/{id}/banners/{view_id}/dismiss,dismissContactBanner,Dismiss a banner for a contact,Banners;Contacts
+POST,/contacts/{contact_id}/block,BlockContact,Block contact,Contacts
+GET,/contacts/{id}/merge_history,ListContactMergeHistory,Get contact merge history,Contacts
+POST,/contacts/bulk,BulkCreateContacts,Bulk create contacts,Contacts
+PUT,/contacts/bulk,BulkUpdateContacts,Bulk update contacts,Contacts
+POST,/contacts/bulk/delete,BulkDeleteContacts,Bulk delete contacts,Contacts
+GET,/contacts/bulk/{id},ShowBulkUpdateContactsJob,Get a bulk update job,Contacts
+POST,/content/bulk_actions,bulkContentActions,Run a bulk action on Knowledge Hub content,Content
+GET,/content/search,searchContent,Search knowledge base contents,Content
+GET,/content_snippets,listContentSnippets,List all content snippets,Content Snippets
+POST,/content_snippets,createContentSnippet,Create a content snippet,Content Snippets
+GET,/content_snippets/{id},getContentSnippet,Retrieve a content snippet,Content Snippets
+PUT,/content_snippets/{id},updateContentSnippet,Update a content snippet,Content Snippets
+DELETE,/content_snippets/{id},deleteContentSnippet,Delete a content snippet,Content Snippets
+POST,/content_snippets/{content_snippet_id}/tags,attachTagToContentSnippet,Add a tag to a content snippet,Content Snippets;Tags
+DELETE,/content_snippets/{content_snippet_id}/tags/{id},detachTagFromContentSnippet,Remove a tag from a content snippet,Content Snippets;Tags
+GET,/dynamic_contents,listDynamicContents,List all dynamic content,Dynamic Content
+POST,/dynamic_contents,createDynamicContent,Create dynamic content,Dynamic Content
+GET,/dynamic_contents/{id},getDynamicContent,Retrieve dynamic content,Dynamic Content
+PUT,/dynamic_contents/{id},updateDynamicContent,Update dynamic content,Dynamic Content
+DELETE,/dynamic_contents/{id},deleteDynamicContent,Delete dynamic content,Dynamic Content
+POST,/conversations/{conversation_id}/tags,attachTagToConversation,Add tag to a conversation,Tags;Conversations
+DELETE,/conversations/{conversation_id}/tags/{tag_id},detachTagFromConversation,Remove tag from a conversation,Tags;Conversations
+GET,/conversations,listConversations,List all conversations,Conversations
+POST,/conversations,createConversation,Creates a conversation,Conversations
+GET,/conversations/{conversation_id},retrieveConversation,Retrieve a conversation,Conversations
+PUT,/conversations/{conversation_id},updateConversation,Update a conversation,Conversations;Custom Object Instances
+DELETE,/conversations/{conversation_id},deleteConversation,Delete a conversation,Conversations
+POST,/conversations/search,searchConversations,Search conversations,Conversations
+POST,/conversations/{conversation_id}/reply,replyConversation,Reply to a conversation,Conversations
+POST,/conversations/{conversation_id}/parts,manageConversation,Manage a conversation,Conversations
+POST,/conversations/{conversation_id}/customers,attachContactToConversation,Attach a contact to a conversation,Conversations
+DELETE,/conversations/{conversation_id}/customers/{contact_id},detachContactFromConversation,Detach a contact from a group conversation,Conversations
+GET,/conversations/{id}/handling_events,listHandlingEvents,List handling events,Conversations
+GET,/conversations/{id}/hitl_events,listHitlEvents,List HITL events,Conversations
+GET,/conversations/{id}/side_conversations,listSideConversations,List side conversations,Conversations
+POST,/conversations/redact,redactConversation,Redact a conversation part,Conversations
+POST,/conversations/{id}/merge,mergeConversation,Merge a conversation,Conversations
+POST,/conversations/{conversation_id}/convert,convertConversationToTicket,Convert a conversation to a ticket,Conversations
+GET,/conversations/deleted,listDeletedConversationIds,List all deleted conversation IDs,Conversations
+GET,/conversations/attributes,listConversationAttributes,List all conversation attributes,Conversations Attributes
+POST,/conversations/attributes,createConversationAttribute,Create a conversation attribute,Conversations Attributes
+GET,/conversations/attributes/{id},getConversationAttribute,Get a conversation attribute,Conversations Attributes
+PUT,/conversations/attributes/{id},updateConversationAttribute,Update a conversation attribute,Conversations Attributes
+DELETE,/conversations/attributes/{id},deleteConversationAttribute,Delete (archive) a conversation attribute,Conversations Attributes
+POST,/conversations/attributes/{id}/options,createConversationAttributeOption,Add an option to a list conversation attribute,Conversations Attributes
+PUT,/conversations/attributes/{id}/options/{option_id},updateConversationAttributeOption,Update an option on a list conversation attribute,Conversations Attributes
+DELETE,/conversations/attributes/{id}/options/{option_id},deleteConversationAttributeOption,Archive an option on a list conversation attribute,Conversations Attributes
+POST,/custom_object_instances/{custom_object_type_identifier},createCustomObjectInstances,Create or Update a Custom Object Instance,Custom Object Instances
+GET,/custom_object_instances/{custom_object_type_identifier},listCustomObjectInstances,List Custom Object Instances,Custom Object Instances
+DELETE,/custom_object_instances/{custom_object_type_identifier},deleteCustomObjectInstancesById,Delete a Custom Object Instance by External ID,Custom Object Instances
+GET,/custom_object_instances/{custom_object_type_identifier}/{custom_object_instance_id},getCustomObjectInstancesById,Get Custom Object Instance by ID,Custom Object Instances
+DELETE,/custom_object_instances/{custom_object_type_identifier}/{custom_object_instance_id},deleteCustomObjectInstancesByExternalId,Delete a Custom Object Instance by ID,Custom Object Instances
+GET,/data_attributes,lisDataAttributes,List all data attributes,Data Attributes
+POST,/data_attributes,createDataAttribute,Create a data attribute,Data Attributes
+PUT,/data_attributes/{data_attribute_id},updateDataAttribute,Update a data attribute,Data Attributes
+GET,/data_connectors,listDataConnectors,List all data connectors,Data Connectors
+POST,/data_connectors,createDataConnector,Create a data connector,Data Connectors
+GET,/data_connectors/{id},RetrieveDataConnector,Retrieve a data connector,Data Connectors
+DELETE,/data_connectors/{id},deleteDataConnector,Delete a data connector,Data Connectors
+PATCH,/data_connectors/{id},updateDataConnector,Update a data connector,Data Connectors
+GET,/data_connectors/{data_connector_id}/execution_results,listDataConnectorExecutionResults,List execution results for a data connector,Data Connectors
+GET,/data_connectors/{data_connector_id}/execution_results/{id},showDataConnectorExecutionResult,Retrieve an execution result,Data Connectors
+GET,/data_connectors/{id}/versions,listDataConnectorVersions,List versions of a data connector,Data Connectors
+GET,/data_connectors/{id}/versions/{version_id},retrieveDataConnectorVersion,Retrieve a version of a data connector,Data Connectors
+PATCH,/data_connectors/{id}/versions/{version_id},updateDataConnectorVersion,Update the note on a data connector version,Data Connectors
+POST,/events,createDataEvent,Submit a data event,Data Events
+GET,/events,lisDataEvents,List all data events,Data Events
+POST,/events/summaries,dataEventSummaries,Create event summaries,Data Events
+POST,/export/content/data,createDataExport,Create content data export,Data Export
+GET,/export/content/data/{job_identifier},getDataExport,Show content data export,Data Export
+POST,/export/cancel/{job_identifier},cancelDataExport,Cancel content data export,Data Export
+GET,/download/content/data/{job_identifier},downloadDataExport,Download content data export,Data Export
+GET,/jobs/status/{job_id},jobsStatus,Retrieve job status,Jobs
+POST,/messages,createMessage,Create a message,Messages
+GET,/messages/whatsapp/status,RetrieveWhatsAppMessageStatus,Retrieve WhatsApp message delivery status,Messages;WhatsApp
+GET,/messages/status,getWhatsAppMessageStatus,Get statuses of all messages sent based on the specified ruleset_id,Messages;WhatsApp
+GET,/news/news_items,listNewsItems,List all news items,News
+POST,/news/news_items,createNewsItem,Create a news item,News
+GET,/news/news_items/{news_item_id},retrieveNewsItem,Retrieve a news item,News
+PUT,/news/news_items/{news_item_id},updateNewsItem,Update a news item,News
+DELETE,/news/news_items/{news_item_id},deleteNewsItem,Delete a news item,News
+GET,/news/newsfeeds/{newsfeed_id}/items,listLiveNewsfeedItems,List all live newsfeed items,News
+GET,/news/newsfeeds,listNewsfeeds,List all newsfeeds,News
+GET,/news/newsfeeds/{newsfeed_id},retrieveNewsfeed,Retrieve a newsfeed,News
+GET,/notes/{note_id},retrieveNote,Retrieve a note,Notes
+DELETE,/notes/{note_id},deleteNote,Delete a note,Notes
+GET,/segments,listSegments,List all segments,Segments
+GET,/segments/{segment_id},retrieveSegment,Retrieve a segment,Segments
+GET,/subscription_types,listSubscriptionTypes,List subscription types,Subscription Types
+POST,/phone_call_redirects,createPhoneSwitch,Create a phone Switch,Switch
+GET,/calls,listCalls,List all calls,Calls
+GET,/calls/{call_id},showCall,Get a call,Calls
+GET,/calls/{call_id}/recording,showCallRecording,Get call recording by call id,Calls
+GET,/calls/{call_id}/transcript,showCallTranscript,Get call transcript by call id,Calls
+POST,/calls/search,listCallsWithTranscripts,List calls with transcripts,Calls
+GET,/tags,listTags,List all tags,Tags
+POST,/tags,createTag,"Create or update a tag, Tag or untag companies, Tag contacts",Tags
+GET,/tags/{tag_id},findTag,Find a specific tag,Tags
+DELETE,/tags/{tag_id},deleteTag,Delete tag,Tags
+GET,/teams,listTeams,List all teams,Teams
+GET,/teams/{team_id},retrieveTeam,Retrieve a team,Teams
+GET,/teams/{team_id}/metrics,getTeamMetrics,Retrieve team metrics,Teams
+GET,/ticket_states,listTicketStates,List all ticket states,Ticket States
+POST,/ticket_types/{ticket_type_id}/attributes,createTicketTypeAttribute,Create a new attribute for a ticket type,Ticket Type Attributes
+PUT,/ticket_types/{ticket_type_id}/attributes/{attribute_id},updateTicketTypeAttribute,Update an existing attribute for a ticket type,Ticket Type Attributes
+GET,/ticket_types,listTicketTypes,List all ticket types,Ticket Types
+POST,/ticket_types,createTicketType,Create a ticket type,Ticket Types
+GET,/ticket_types/{ticket_type_id},getTicketType,Retrieve a ticket type,Ticket Types
+PUT,/ticket_types/{ticket_type_id},updateTicketType,Update a ticket type,Ticket Types
+POST,/tickets/{ticket_id}/reply,replyTicket,Reply to a ticket,Tickets
+POST,/tickets/{ticket_id}/tags,attachTagToTicket,Add tag to a ticket,Tags;Tickets
+DELETE,/tickets/{ticket_id}/tags/{tag_id},detachTagFromTicket,Remove tag from a ticket,Tags;Tickets
+POST,/tickets/{ticket_id}/linked_conversations,linkConversationToTicket,Link a conversation to a ticket,Tickets
+DELETE,/tickets/{ticket_id}/linked_conversations/{id},unlinkConversationFromTicket,Unlink a conversation from a ticket,Tickets
+POST,/tickets,createTicket,Create a ticket,Tickets
+POST,/tickets/enqueue,enqueueCreateTicket,Enqueue create ticket,Tickets
+PUT,/tickets/{ticket_id},updateTicket,Update a ticket,Tickets
+GET,/tickets/{ticket_id},getTicket,Retrieve a ticket,Tickets
+DELETE,/tickets/{ticket_id},deleteTicket,Delete a ticket,Tickets
+POST,/tickets/{ticket_id}/change_type,changeTicketType,Change ticket type,Tickets
+POST,/tickets/search,searchTickets,Search tickets,Tickets
+PUT,/visitors,updateVisitor,Update a visitor,Visitors
+GET,/visitors,retrieveVisitorWithUserId,Retrieve a visitor with User ID,Visitors
+POST,/visitors/convert,convertVisitor,Convert a visitor,Visitors
+GET,/brands,listBrands,List all brands,Brands
+GET,/brands/{id},retrieveBrand,Retrieve a brand,Brands
+GET,/emails,listEmails,List all email settings,Emails
+GET,/emails/{id},retrieveEmail,Retrieve an email setting,Emails
+POST,/fin_voice/register,registerFinVoiceCall,Register a Fin Voice call,Calls
+GET,/fin_voice/collect/{id},collectFinVoiceCallById,Collect Fin Voice call by ID,Calls
+GET,/fin_voice/external_id/{external_id},collectFinVoiceCallByExternalId,Collect Fin Voice call by external ID,Calls
+GET,/fin_voice/phone_number/{phone_number},collectFinVoiceCallByPhoneNumber,Collect Fin Voice call by phone number,Calls
+GET,/fin_voice/conversation/{conversation_id},collectFinVoiceCallsByConversationId,Collect Fin Voice calls by conversation ID,Calls
+GET,/export/workflows/{id},exportWorkflow,Export a workflow,Workflows
