@@ -25,6 +25,21 @@ class FakeTransport implements CloudBrowserTransport {
   async stop(): Promise<void> { this.stopped += 1; }
 }
 
+test('typed keys, pointer and scroll controls retain session owner and host guards', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60);
+  await service.execute('cto', sessionId, { type: 'press_key', key: 'Enter' }, 2);
+  await service.execute('cto', sessionId, { type: 'scroll', x: 0, y: 0, deltaX: 0, deltaY: 100 }, 2);
+  assert.equal(store.sessions.get(sessionId)?.actionsUsed, 2);
+  const before = transport.actions.length;
+  await assert.rejects(service.execute('cfo', sessionId, { type: 'press_key', key: 'Enter' }, 2), /unavailable/);
+  await assert.rejects(service.execute('cto', sessionId, { type: 'mouse_move', x: -1, y: 0 }, 2), (error: unknown) => error instanceof CloudBrowserError && error.code === 'invalid_action');
+  assert.equal(transport.actions.length, before);
+  transport.execute = async () => ({ url: 'https://offpolicy.test/', title: '', visibleText: '' });
+  await assert.rejects(service.execute('cto', sessionId, { type: 'press_key', key: 'Enter' }, 2), (error: unknown) => error instanceof CloudBrowserError && error.code === 'redirect_outside_allowlist');
+});
+
 test('cloud browser persists an opaque session and binds every operation to its caller', async () => {
   let now = 1_000_000; const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport, () => now);
   await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: true });
