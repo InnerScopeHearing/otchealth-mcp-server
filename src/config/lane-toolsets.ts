@@ -78,6 +78,9 @@ export function isKnownInternalLane(lane: string): lane is KnownInternalLane {
 const MEMORY = ['wake', 'checkpoint', 'memory_*'] as const;
 const WORK_LEDGER = ['task_*', 'inbox_read', 'agent_dispatch'] as const;
 const CATALOG = ['catalog_*', 'gateway_fetch_result'] as const;
+// Read-only discovery for the root-enrolled public-web browser profile. The browser session tools
+// remain separately role-bound by registry.ts, and discovery never enrolls a profile.
+const PUBLIC_WEB_BROWSER_DISCOVERY = ['browser_cloud_public_web_profile_discover'] as const;
 // web_research / web_extract (Task G-3, 2026-09-03): web_search's own deeper-research and
 // fetch-a-known-URL siblings, seeded into the SAME open-RAG group so every internal lane's
 // allowlist gains them the moment web_search is present -- consistent with how this group already
@@ -223,13 +226,13 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // auth caller); a Claude Code/Hyperagent cto session is unaffected either way today. If universal
   // 'curate' mode is ever armed for the cto lane specifically, this same narrower list would then also
   // apply there -- a deliberate call to make at that time, not implied by this change.
-  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...GITHUB_OPERATOR_TOOLSET, ...HEYGEN, 'agent_persona', 'hyperagent_discover_capabilities'],
+  cto: [...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...CTO_M365_CURATED, ...GITHUB_OPERATOR_TOOLSET, ...HEYGEN, ...PUBLIC_WEB_BROWSER_DISCOVERY, 'agent_persona', 'hyperagent_discover_capabilities'],
   // Engineering IC: its OWN app-repo ship cycle (branch/commit/PR/CI/dispatch) plus the shared
   // read/memory/task surface. No Azure control plane, no finance, no legal -- infra and the two
   // genuinely sensitive corpora (MNPI finance, privileged legal) are CTO/EXEC_RING-owned, not
   // developer's (see kb/search-privileged.ts's ring model).
   developer: [
-    ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...PUBLIC_WEB_BROWSER_DISCOVERY,
     'developer_task_rollup',
     ...GITHUB_OPERATOR_TOOLSET,
     'github_*', '!github_graphrag_observation_receipt_get', '!github_make_broker', '!github_workflow_run_failed_log_excerpt', 'depot_*', 'posthog_query_hogql', 'posthog_insight_list', 'sentry_list_issues',
@@ -258,14 +261,14 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // Finance / MNPI: Xero (accounting of record), the finance kb rooms, invoice document intelligence,
   // the CFO OneDrive/Graph exchange, plus the shared read/memory/task surface.
   cfo: [
-    ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...PUBLIC_WEB_BROWSER_DISCOVERY,
     ...GITHUB_OPERATOR_TOOLSET,
     'xero_*', 'stripe_*', 'docintel_*', 'graph_drive_*', 'graph_relationship_query', ...GRAPH_MAIL,
   ],
   // Company legal: legal_blob_* (company ring), contract/document intelligence, comms, plus the
   // shared read/memory/task surface.
   clo: [
-    ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS,
+    ...RAG_OPEN, ...RAG_PRIVILEGED, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...SAFETY_CHECKS, ...PUBLIC_WEB_BROWSER_DISCOVERY,
     ...GITHUB_OPERATOR_TOOLSET,
     'legal_blob_*', 'docintel_*', ...GRAPH_MAIL,
   ],
@@ -281,7 +284,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // (least-privilege) -- no finance/legal privileged rooms; the ring gate already enforces this
   // in-handler, this list keeps the advertised set honest with that reality.
   coo: [
-    ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...PUBLIC_WEB_BROWSER_DISCOVERY,
     ...GITHUB_OPERATOR_TOOLSET,
     ...GRAPH_MAIL, 'cio_*', ...HEYGEN,
   ],
@@ -294,7 +297,7 @@ export const LANE_TOOLSETS: Record<KnownInternalLane, readonly string[]> = {
   // canonical tools (53%, live-measured), the second-worst offender after cto. Same scope caveat as
   // cto's CTO_M365_CURATED note above: only matters under curate-m365-only today.
   cro: [
-    ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM,
+    ...RAG_OPEN, ...MEMORY, ...WORK_LEDGER, ...CATALOG, ...LLM, ...PUBLIC_WEB_BROWSER_DISCOVERY,
     ...GITHUB_OPERATOR_TOOLSET,
     ...CRO_M365_CURATED, ...GRAPH_MAIL, ...HEYGEN,
   ],

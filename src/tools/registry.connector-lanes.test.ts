@@ -17,6 +17,7 @@ import { EXEC_RING } from './kb/search-privileged.js';
 import { loadEnv, type Env } from '../config/env.js';
 import { COMPANY_GITHUB_OPERATOR_LANES, GITHUB_OPERATOR_TOOLSET } from '../config/github-operator.js';
 import { AWS_OPERATOR_LANES } from '../config/aws-operators.js';
+import { LANE_TOOLSETS } from '../config/lane-toolsets.js';
 import { requestContext } from '../server/request-context.js';
 
 // Pins the Phase 5/6 connector-ring closure (2026-07-15), layer 1: the connector toolset a caller
@@ -43,9 +44,17 @@ before(() => {
   for (const [k, v] of Object.entries(required)) process.env[k] ??= v;
 });
 
-const CLOUD_BROWSER_TOOLS = ['browser_cloud_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action',
+const CLOUD_BROWSER_TOOLS = ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action',
   'browser_cloud_session_snapshot', 'browser_cloud_profile_save', 'browser_cloud_session_stop',
   'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get'];
+test('public-web discovery is in curated seeds for only the existing eligible internal browser lanes', () => {
+  const eligible = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer'];
+  for (const lane of eligible) {
+    assert.ok(LANE_TOOLSETS[lane as keyof typeof LANE_TOOLSETS].includes('browser_cloud_public_web_profile_discover'), `${lane} must discover its root-enrolled public-web profile`);
+  }
+  assert.ok(!LANE_TOOLSETS['clo-personal'].includes('browser_cloud_public_web_profile_discover'), 'personal legal lane remains excluded');
+  assert.ok(!LANE_TOOLSETS.exec.includes('browser_cloud_public_web_profile_discover'), 'do not expand beyond the existing eligible owner set');
+});
 const CTO_CLOUD_BROWSER_PROVISIONING_TOOL = 'browser_cloud_profile_provision_public_trial';
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';

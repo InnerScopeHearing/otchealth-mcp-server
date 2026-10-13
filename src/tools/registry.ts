@@ -553,7 +553,7 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('graph_company_shared_relationship_query');
   // Visibility is not enrollment: cloud handlers still require an owned, provisioned profile.
   if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane) && !(isShipLane(lane) && env.CONNECTOR_TOOLSET)) {
-    for (const name of ['browser_cloud_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
+    for (const name of ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
       'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get']) tools.add(name);
   }
   // CONNECTOR_TOOLSET may curate the surrounding ship catalog, but it cannot remove the bounded
