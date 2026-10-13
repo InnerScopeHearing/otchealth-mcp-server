@@ -19,9 +19,16 @@ class MemoryStore implements CloudBrowserStore {
   async reserveDailySession(_owner: string, _day: string, _limit: number): Promise<boolean> { return true; }
 }
 class FakeTransport implements CloudBrowserTransport {
-  readonly actions: unknown[] = []; stopped = 0;
+  readonly actions: unknown[] = []; stopped = 0; uncertainCreate = false;
   async start(): Promise<Pick<CloudBrowserSession, 'providerSessionId' | 'automationEndpoint'>> { return { providerSessionId: 'remote-session', automationEndpoint: 'wss://example.test/automation' }; }
-  async execute(_s: CloudBrowserSession, action: unknown): Promise<{ url: string; title: string; visibleText: string } | null> { this.actions.push(action); return typeof action === 'object' && action !== null && (action as { type?: unknown }).type === 'snapshot' ? { url: 'https://example.test/', title: 'Example', visibleText: '' } : null; }
+  async execute(s: CloudBrowserSession, action: unknown): Promise<{ url: string; title: string; visibleText: string } | null | { observation: null; pageReceipt: { selectedTargetId: string | null; createdTargetId?: string; closedTargetId?: string; completed: true } }> {
+    this.actions.push(action); const a = action as { type?: string; targetId?: string };
+    if (a.type === 'snapshot') { if (!s.ownedTargetIds) { s.ownedTargetIds = ['initial-owned']; s.selectedTargetId = 'initial-owned'; } if (s.selectedTargetId === null) throw new CloudBrowserError('target_not_selected', 'no selected target'); return { url: 'https://example.test/', title: 'Example', visibleText: '' }; }
+    if (a.type === 'tab_create') { if (this.uncertainCreate) { s.effectUnknown = true; throw new CloudBrowserError('target_create_uncertain', 'uncertain'); } s.ownedTargetIds ??= ['initial-owned']; if (s.selectedTargetId === null) s.selectedTargetId = 'new-owned'; s.selectedTargetId ??= 'initial-owned'; s.ownedTargetIds.push('new-owned'); return { observation: null, pageReceipt: { selectedTargetId: s.selectedTargetId, createdTargetId: 'new-owned', completed: true } }; }
+    if (a.type === 'tab_select') { s.ownedTargetIds ??= ['initial-owned']; s.selectedTargetId = a.targetId!; return { observation: null, pageReceipt: { selectedTargetId: a.targetId!, completed: true } }; }
+    if (a.type === 'tab_close') { s.ownedTargetIds ??= ['initial-owned']; s.ownedTargetIds = s.ownedTargetIds.filter(id => id !== a.targetId); if (s.selectedTargetId === a.targetId) s.selectedTargetId = null; return { observation: null, pageReceipt: { selectedTargetId: s.selectedTargetId ?? null, closedTargetId: a.targetId!, completed: true } }; }
+    return null;
+  }
   async stop(): Promise<void> { this.stopped += 1; }
 }
 
@@ -63,6 +70,85 @@ test('cloud browser rejects hosts, uncontrolled selectors and over-budget action
   await assert.rejects(() => service.execute('cto', sessionId, { type: 'click', selector: 'a\n#bad' }, 1), (e: unknown) => e instanceof CloudBrowserError && e.code === 'invalid_action');
   await assert.rejects(() => service.execute('cto', sessionId, { type: 'wait_for', selector: '#ok' }, 21), (e: unknown) => e instanceof CloudBrowserError && e.code === 'invalid_duration');
   assert.equal(transport.actions.length, 0);
+});
+
+test('page actions return owned tab receipts and persist selection under the session lock', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60);
+  const created = await service.execute('cto', sessionId, { type: 'tab_create', url: 'https://example.test/new' } as never, 2) as { createdTargetId?: string };
+  assert.equal(created.createdTargetId, 'new-owned');
+  const selected = await service.execute('cto', sessionId, { type: 'tab_select', targetId: 'new-owned' } as never, 2) as { selectedTargetId?: string };
+  assert.equal(selected.selectedTargetId, 'new-owned');
+  assert.deepEqual(store.sessions.get(sessionId)?.ownedTargetIds, ['initial-owned', 'new-owned']);
+  assert.equal(store.sessions.get(sessionId)?.selectedTargetId, 'new-owned');
+});
+
+test('unknown tab creation acknowledgement is persisted and blocks later effects', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60); transport.uncertainCreate = true;
+  await assert.rejects(service.execute('cto', sessionId, { type: 'tab_create', url: 'https://example.test/new' } as never, 2), (error: unknown) => error instanceof CloudBrowserError && error.code === 'target_create_uncertain');
+  assert.equal(store.sessions.get(sessionId)?.effectUnknown, true);
+  transport.uncertainCreate = false; const count = transport.actions.length;
+  await assert.rejects(service.execute('cto', sessionId, { type: 'press_key', key: 'Enter' }, 2), (error: unknown) => error instanceof CloudBrowserError && error.code === 'effect_unknown');
+  assert.equal(transport.actions.length, count);
+});
+
+test('selecting a remaining owned tab works after the selected tab was closed', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60);
+  const session = store.sessions.get(sessionId)!; session.ownedTargetIds = ['remaining-owned']; session.selectedTargetId = null;
+  const result = await service.execute('cto', sessionId, { type: 'tab_select', targetId: 'remaining-owned' } as never, 2) as { selectedTargetId?: string };
+  assert.equal(result.selectedTargetId, 'remaining-owned');
+});
+
+test('closing the last selected tab allows creating and selecting a replacement tab', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60);
+  await service.execute('cto', sessionId, { type: 'snapshot' }, 2);
+  const closed = await service.execute('cto', sessionId, { type: 'tab_close', targetId: 'initial-owned' } as never, 2) as { selectedTargetId?: string | null };
+  assert.equal(closed.selectedTargetId, null);
+  const created = await service.execute('cto', sessionId, { type: 'tab_create', url: 'https://example.test/new' } as never, 2) as { selectedTargetId?: string };
+  assert.equal(created.selectedTargetId, 'new-owned');
+  const selected = await service.execute('cto', sessionId, { type: 'tab_select', targetId: 'new-owned' } as never, 2) as { selectedTargetId?: string };
+  assert.equal(selected.selectedTargetId, 'new-owned');
+  assert.equal(store.sessions.get(sessionId)?.effectUnknown, false);
+});
+
+test('tab create intent and consumed action are durable before provider invocation', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60);
+  const original = transport.execute.bind(transport); let sawIntent = false;
+  transport.execute = async (session, action, timeout) => {
+    if ((action as { type?: string }).type === 'tab_create') {
+      const durable = store.sessions.get(sessionId)!;
+      sawIntent = durable.effectUnknown === true && durable.actionsUsed === 1;
+    }
+    return original(session, action, timeout);
+  };
+  await service.execute('cto', sessionId, { type: 'tab_create', url: 'https://example.test/new' } as never, 2);
+  assert.equal(sawIntent, true);
+  assert.equal(store.sessions.get(sessionId)?.effectUnknown, false);
+  assert.equal(store.sessions.get(sessionId)?.actionsUsed, 1);
+});
+
+test('failed durable effect intent prevents tab creation from reaching the provider', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60);
+  const save = store.saveSessionUnderLock.bind(store);
+  store.saveSessionUnderLock = async (session, owner) => {
+    if (session.effectUnknown) throw new Error('durable write failed');
+    return save(session, owner);
+  };
+  const before = transport.actions.length;
+  await assert.rejects(service.execute('cto', sessionId, { type: 'tab_create', url: 'https://example.test/new' } as never, 2), /durable write failed/);
+  assert.equal(transport.actions.some(action => (action as { type?: string }).type === 'tab_create'), false);
+  assert.equal(transport.actions.length, before + 1, 'only the safe preflight snapshot reached the provider');
 });
 
 test('CTO can provision one deterministic public profile per ordinary Chat lane, while callers discover only their own', async () => {

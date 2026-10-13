@@ -1,10 +1,32 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { validateDeterministicPlan } from './index.js';
+import { cloudBrowserActionSchema } from '../browser-cloud/actions.js';
 test('durable plans reject durations beyond the session service bound before dispatch', () => {
   const plan = { profile_id: 'cto-public', max_seconds: 180, actions: [{ type: 'navigate', url: 'https://example.com/' }] };
   assert.equal(validateDeterministicPlan(plan).max_seconds, 180);
   for (const max_seconds of [181, 300]) assert.throws(() => validateDeterministicPlan({ ...plan, max_seconds }));
+});
+
+test('gateway page actions enforce strict typed bounds and HTTPS tab creation', () => {
+  assert.equal(cloudBrowserActionSchema.safeParse({ type: 'tab_create', url: 'https://example.com/' }).success, true);
+  for (const action of [
+    { type: 'tab_create', url: 'http://example.com/' },
+    { type: 'tab_select', targetId: `x${'a'.repeat(256)}` },
+    { type: 'tab_close', targetId: 'tab', arbitrary: true },
+    { type: 'dialog', accept: false, promptText: 'bad\u0001value' },
+  ]) assert.equal(cloudBrowserActionSchema.safeParse(action).success, false);
+});
+
+test('session action returns opaque target receipts to the authenticated caller', async () => {
+  const old = [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS];
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 't', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'b', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
+  const runtime = { browser: { execute: async () => ({ selectedTargetId: 'opaque-tab-2', createdTargetId: 'opaque-tab-2', completed: true }) } as never, jobs: {} as never, queue: {} as never, artifacts: {} as never } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer(); registerCloudBrowserTools(server, () => 'hash', runtime);
+  try {
+    const result = await requestContext.run({ callerHash: 'h', correlationId: 'c', callerAgent: 'cto', dryRun: false }, () => handlers.get('browser_cloud_session_action')!({ session_id: 's', action: { type: 'tab_create', url: 'https://example.test/' }, timeout_seconds: 2, dry_run: false }));
+    assert.deepEqual(result.structuredContent?.result, { ok: true, created_target_id: 'opaque-tab-2', selected_target_id: 'opaque-tab-2' });
+  } finally { [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS] = old; }
 });
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { requestContext } from '../../server/request-context.js';
