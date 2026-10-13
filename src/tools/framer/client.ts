@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Narrow adapter over Framer's official Server API. This first version exposes
  * only project identity and the explicitly implemented read surface. Mutating
@@ -9,8 +11,13 @@ export const ENLIGHTENED_LILY_PROJECT_URL = "https://framer.com/projects/Enlight
 // The owner URL includes a trailing share suffix. framer-api@5.1.0's published
 // project-ID parser captures the alphanumeric run after `--` and validates 20
 // characters (see /workspace/browser-completion-2026-10-13-1647/framer/sdk-research.md).
-export const ENLIGHTENED_LILY_PROJECT_ID = "bdTiiIITB77TCuMA3XFs";
+export const ENLIGHTENED_LILY_PROJECT_ROUTE_ID = "bdTiiIITB77TCuMA3XFs";
+// The SDK exposes a hashed project ID in getProjectInfo(), not the route ID.
+// SHA-256(route ID) is verified against the authorized live read; the URL remains exact-bound.
+export const ENLIGHTENED_LILY_PROJECT_ID = createHash("sha256").update(ENLIGHTENED_LILY_PROJECT_ROUTE_ID).digest("hex");
 export const FRAMER_READ_METHODS = ["getProjectInfo"] as const;
+export interface FramerAdapterTimeouts { connectMs: number; readMs: number; disconnectMs: number }
+export const FRAMER_ADAPTER_TIMEOUTS: FramerAdapterTimeouts = { connectMs: 12_000, readMs: 12_000, disconnectMs: 3_000 };
 
 export interface FramerProjectInfo {
   id: string;
@@ -35,10 +42,36 @@ export interface FramerProjectAdapter {
 }
 
 export class FramerAdapterError extends Error {
-  constructor(readonly code: "invalid_configuration" | "connection_failed" | "project_mismatch" | "read_failed" | "close_failed", message: string) {
+  constructor(readonly code: "invalid_configuration" | "connection_failed" | "project_mismatch" | "read_failed" | "close_failed" | "forbidden_role", message: string) {
     super(message);
     this.name = "FramerAdapterError";
   }
+}
+
+function withDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  code: FramerAdapterError["code"],
+  message: string,
+  onLate?: (value: T) => void,
+): Promise<T> {
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const observed = promise.then((value) => {
+    if (expired && onLate) {
+      try { onLate(value); } catch { /* cleanup is best-effort after the caller has timed out */ }
+    }
+    return value;
+  });
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      reject(new FramerAdapterError(code, message));
+    }, timeoutMs);
+  });
+  return Promise.race([observed, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function projectIdFromUrl(projectUrl: string): string {
@@ -73,14 +106,23 @@ export async function connectFramerProject(input: {
   projectUrl: string;
   apiKey: string;
   connect: FramerSdkConnect;
+  timeouts?: FramerAdapterTimeouts;
 }): Promise<FramerProjectAdapter> {
   const urlProjectId = projectIdFromUrl(input.projectUrl);
   if (!input.apiKey.trim()) throw new FramerAdapterError("invalid_configuration", "Framer API key is not configured.");
-  if (urlProjectId !== ENLIGHTENED_LILY_PROJECT_ID) throw new FramerAdapterError("invalid_configuration", "Configured Framer project does not match the approved project.");
+  if (urlProjectId !== ENLIGHTENED_LILY_PROJECT_ROUTE_ID) throw new FramerAdapterError("invalid_configuration", "Configured Framer project does not match the approved project.");
 
+  const timeouts = input.timeouts ?? FRAMER_ADAPTER_TIMEOUTS;
   let sdk: FramerSdkClient;
+  const connectPromise = Promise.resolve().then(() => input.connect(input.projectUrl, input.apiKey));
   try {
-    sdk = await input.connect(input.projectUrl, input.apiKey);
+    sdk = await withDeadline(
+      connectPromise,
+      timeouts.connectMs,
+      "connection_failed",
+      "Framer project connection timed out.",
+      (lateSdk) => { void withDeadline(lateSdk.disconnect(), timeouts.disconnectMs, "close_failed", "Framer project connection could not be closed cleanly.").catch(() => undefined); },
+    );
   } catch {
     // SDK errors may contain URLs or request details. Never return them to a caller.
     throw new FramerAdapterError("connection_failed", "Framer project connection failed.");
@@ -94,10 +136,15 @@ export async function connectFramerProject(input: {
   };
 
   try {
-    cachedInfo = parseProjectInfo(await sdk.getProjectInfo());
+    cachedInfo = parseProjectInfo(await withDeadline(
+      Promise.resolve().then(() => sdk.getProjectInfo()),
+      timeouts.readMs,
+      "read_failed",
+      "Framer project metadata read timed out.",
+    ));
     if (cachedInfo.id !== ENLIGHTENED_LILY_PROJECT_ID) throw new FramerAdapterError("project_mismatch", "Connected Framer project does not match the approved project.");
   } catch (error) {
-    await sdk.disconnect().catch(() => undefined);
+    await withDeadline(Promise.resolve().then(() => sdk.disconnect()), timeouts.disconnectMs, "close_failed", "Framer project connection could not be closed cleanly.").catch(() => undefined);
     if (error instanceof FramerAdapterError) throw error;
     throw new FramerAdapterError("read_failed", "Framer project metadata could not be read.");
   }
@@ -116,7 +163,7 @@ export async function connectFramerProject(input: {
       if (closed) return;
       closed = true;
       try {
-        await sdk.disconnect();
+        await withDeadline(Promise.resolve().then(() => sdk.disconnect()), timeouts.disconnectMs, "close_failed", "Framer project connection could not be closed cleanly.");
       } catch {
         throw new FramerAdapterError("close_failed", "Framer project connection could not be closed cleanly.");
       }

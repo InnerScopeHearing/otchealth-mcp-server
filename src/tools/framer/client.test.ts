@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { connectFramerProject, ENLIGHTENED_LILY_PROJECT_ID, ENLIGHTENED_LILY_PROJECT_URL, type FramerSdkClient } from "./client.js";
+import { connectFramerProject, ENLIGHTENED_LILY_PROJECT_ID, ENLIGHTENED_LILY_PROJECT_ROUTE_ID, ENLIGHTENED_LILY_PROJECT_URL, type FramerSdkClient } from "./client.js";
 
 const projectUrl = ENLIGHTENED_LILY_PROJECT_URL;
 
@@ -55,7 +55,8 @@ test("accepts only the exact owner URL while parsing its SDK canonical project I
     },
   });
   assert.equal(connected, true);
-  assert.equal((await adapter.getProjectInfo()).id, "bdTiiIITB77TCuMA3XFs");
+  assert.equal((await adapter.getProjectInfo()).id, ENLIGHTENED_LILY_PROJECT_ID);
+  assert.equal(ENLIGHTENED_LILY_PROJECT_ROUTE_ID, "bdTiiIITB77TCuMA3XFs");
   await adapter.close();
 });
 
@@ -86,4 +87,42 @@ test("sanitizes SDK connection errors and disconnects once", async () => {
   await adapter.close();
   assert.deepEqual(calls, ["info", "disconnect"]);
   await assert.rejects(adapter.getProjectInfo(), { code: "read_failed" });
+});
+
+test("bounds a stalled metadata read and closes the SDK connection", async () => {
+  const { sdk, calls } = fakeSdk({ getProjectInfo: async () => { calls.push("info"); return new Promise(() => undefined); } });
+  await assert.rejects(connectFramerProject({
+    projectUrl,
+    apiKey: "opaque-test-key",
+    connect: async () => sdk,
+    timeouts: { connectMs: 100, readMs: 10, disconnectMs: 10 },
+  }), { code: "read_failed" });
+  assert.deepEqual(calls, ["info", "disconnect"]);
+});
+
+test("disconnects a connection that resolves after the connect deadline", async () => {
+  const { sdk, calls } = fakeSdk();
+  let resolveSdk!: (value: FramerSdkClient) => void;
+  const delayedConnect = new Promise<FramerSdkClient>((resolve) => { resolveSdk = resolve; });
+  const pending = connectFramerProject({
+    projectUrl,
+    apiKey: "opaque-test-key",
+    connect: async () => delayedConnect,
+    timeouts: { connectMs: 10, readMs: 100, disconnectMs: 100 },
+  });
+  setTimeout(() => resolveSdk(sdk), 25);
+  await assert.rejects(pending, { code: "connection_failed" });
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.deepEqual(calls, ["disconnect"]);
+});
+
+test("bounds SDK disconnect", async () => {
+  const { sdk } = fakeSdk({ disconnect: async () => new Promise(() => undefined) });
+  const adapter = await connectFramerProject({
+    projectUrl,
+    apiKey: "opaque-test-key",
+    connect: async () => sdk,
+    timeouts: { connectMs: 100, readMs: 100, disconnectMs: 10 },
+  });
+  await assert.rejects(adapter.close(), { code: "close_failed" });
 });

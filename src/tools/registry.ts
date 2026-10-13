@@ -103,6 +103,7 @@ import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
+const FRAMER_PROJECT_INSPECT_TOOL = 'framer_project_inspect';
 // AWS MCP bridge: durable read-only AWS access for five named operator lanes. Visibility, the
 // aws_mcp_* governance rule and the in-handler lane check are independent matching gates.
 const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
@@ -508,6 +509,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // The owner-bound Framer metadata reader is exposed only to CTO and Developer,
+  // even when a shared CONNECTOR_TOOLSET override names additional tools.
+  if (lane === 'cto' || lane === 'developer') tools.add(FRAMER_PROJECT_INSPECT_TOOL);
+  else tools.delete(FRAMER_PROJECT_INSPECT_TOOL);
   // Developer setup needs only exact Depot project/run metadata and RevenueCat project/catalog
   // metadata. Keep this additive on the built-in Developer connector only; an explicit shared
   // CONNECTOR_TOOLSET remains an exact override, and no other role inherits these names here.
