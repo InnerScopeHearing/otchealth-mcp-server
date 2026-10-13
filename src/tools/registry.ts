@@ -103,6 +103,7 @@ import { parseUpstreamToolError } from '../audit/upstream-tool-error.js';
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 const CTO_ONLY_GITHUB_RECEIPT_TOOL = 'github_graphrag_observation_receipt_get';
 const CTO_ONLY_N8N_EXECUTION_LIST_TOOL = 'n8n_execution_list';
+const FRAMER_PROJECT_INSPECT_TOOL = 'framer_project_inspect';
 // AWS MCP bridge: durable read-only AWS access for five named operator lanes. Visibility, the
 // aws_mcp_* governance rule and the in-handler lane check are independent matching gates.
 const AWS_MCP_TOOLS = ['aws_mcp_tool_list', 'aws_mcp_tool_call'] as const;
@@ -508,6 +509,10 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
           ? WEFUNDER_CAMPAIGN_DIRECTOR_CONNECTOR_TOOLSET.join(',')
           : env.EXTERNAL_READONLY_TOOLSET || EXTERNAL_READONLY_TOOLSET.join(',');
   const tools = new Set<string>(csv.split(',').map((s) => s.trim()).filter(Boolean));
+  // The owner-bound Framer metadata reader is exposed only to CTO and Developer,
+  // even when a shared CONNECTOR_TOOLSET override names additional tools.
+  if (lane === 'cto' || lane === 'developer') tools.add(FRAMER_PROJECT_INSPECT_TOOL);
+  else tools.delete(FRAMER_PROJECT_INSPECT_TOOL);
   // Developer setup needs only exact Depot project/run metadata and RevenueCat project/catalog
   // metadata. Keep this additive on the built-in Developer connector only; an explicit shared
   // CONNECTOR_TOOLSET remains an exact override, and no other role inherits these names here.
@@ -553,7 +558,7 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   if (lane === 'cto' && !env.CONNECTOR_TOOLSET) tools.add('graph_company_shared_relationship_query');
   // Visibility is not enrollment: cloud handlers still require an owned, provisioned profile.
   if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane) && !(isShipLane(lane) && env.CONNECTOR_TOOLSET)) {
-    for (const name of ['browser_cloud_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
+    for (const name of ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
       'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get']) tools.add(name);
   }
   // CONNECTOR_TOOLSET may curate the surrounding ship catalog, but it cannot remove the bounded
@@ -677,6 +682,14 @@ export interface ToolResultPayload {
    * (e.g. a synthesized recall answer). Omit for tools where groundedness is undefined.
    */
   groundedness?: GroundingHint;
+  /**
+   * Trusted tool-owned native MCP content. Appended only after compliance and outbound safety
+   * gates, and never included in structured results, audit text, or the shared result cache.
+   */
+  nativeContent?: Array<
+    | { type: 'image'; data: string; mimeType: string }
+    | { type: 'resource'; resource: { uri: string; mimeType: string; blob: string } }
+  >;
 }
 
 export type ToolHandler<Input> = (
@@ -1424,7 +1437,10 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         const validatedData = enforceStrictOutput
           ? strictResultSchema.parse(payload.data)
           : payload.data;
-        const { result, warning } = applyGuardrail(validatedData, acknowledged);
+        const { result, warning } = applyGuardrail(validatedData, acknowledged, (payload.nativeContent?.length ?? 0) > 0);
+        // A native attachment must not outlive a compliance refusal of its associated data.
+        // Attachments remain outside JSON/audit/cache paths and are emitted only on an allowed result.
+        const nativeContent = result === null ? [] : (payload.nativeContent ?? []);
 
         // AUTO-GUARD (outbound): groundedness on the result, only when the tool surfaced a grounding hint
         // (query + text + sources). enforce-blocking is limited to READ tools — a write already ran, so
@@ -1587,7 +1603,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // closed instead of persisting an oversized response and returning an offload reference.
         if (def.maxResponseBytes !== undefined) {
           const serializedResponse = JSON.stringify({
-            content: [{ type: 'text', text }],
+            content: [{ type: 'text', text }, ...nativeContent],
             structuredContent: structured,
           });
           if (serializedResponse === undefined) {
@@ -1638,7 +1654,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         }
 
         return {
-          content: [{ type: 'text', text }],
+          content: [{ type: 'text', text }, ...nativeContent],
           structuredContent: structured,
         };
       } catch (err) {

@@ -79,6 +79,17 @@ test('unbounded, malformed and arbitrary commands are rejected before the provid
   ]) assert.throws(() => validateCloudBrowserAction(action));
 });
 
+test('capture is a strict typed screenshot or PDF request', () => {
+  assert.ok(validateCloudBrowserAction);
+  assert.deepEqual(validateCloudBrowserAction({ type: 'capture', request: { type: 'screenshot', format: 'jpeg' } }), { type: 'capture', request: { type: 'screenshot', format: 'jpeg' } });
+  assert.deepEqual(validateCloudBrowserAction({ type: 'capture', request: { type: 'pdf', landscape: true } }), { type: 'capture', request: { type: 'pdf', landscape: true } });
+  for (const input of [
+    { type: 'capture', request: { type: 'pdf', filePath: '/tmp/x' } },
+    { type: 'capture', request: { type: 'screenshot', format: 'svg' } },
+    { type: 'capture', request: { type: 'screenshot' }, method: 'Runtime.evaluate' },
+  ]) assert.throws(() => validateCloudBrowserAction(input));
+});
+
 test('keyboard release is attempted when the action deadline expires after keydown', async () => {
   assert.ok(executeCloudBrowserInteraction && validateCloudBrowserAction);
   const cdp = new RecordingCdp();

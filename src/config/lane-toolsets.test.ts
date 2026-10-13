@@ -72,6 +72,14 @@ test('isToolInLaneAllowlist: exact-name match', () => {
   assert.equal(isToolInLaneAllowlist('cto', 'wake'), true);
 });
 
+test('Framer metadata inspection is seeded only for CTO and Developer curation', () => {
+  assert.equal(isToolInLaneAllowlist('cto', 'framer_project_inspect'), true);
+  assert.equal(isToolInLaneAllowlist('developer', 'framer_project_inspect'), true);
+  for (const lane of ['cfo', 'clo', 'clo-personal', 'coo', 'cro', 'cpo', 'cco', 'exec'] as const) {
+    assert.equal(isToolInLaneAllowlist(lane, 'framer_project_inspect'), false, lane);
+  }
+});
+
 test('isToolInLaneAllowlist: prefix* match', () => {
   assert.equal(isToolInLaneAllowlist('developer', 'github_create_branch'), true);
   // exec still carries the broad CTO_INFRA wildcards (unaffected by the 2026-08-02 M365 curation

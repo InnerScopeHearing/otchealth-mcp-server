@@ -1,58 +1,628 @@
-import { createHash } from 'node:crypto';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
-import { registerTool, type CallerHashProvider, type ToolResultPayload } from '../registry.js';
-import { CLOUD_BROWSER_MAX_SESSION_SECONDS, type CloudBrowserAction } from '../browser-cloud/contract.js';
-import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from '../browser-cloud/service.js';
-import { cloudBrowserActionSchema } from '../browser-cloud/actions.js';
-import { CloudBrowserJobs, type CloudBrowserArtifactStore, type CloudBrowserWorkerQueue } from '../browser-cloud-jobs/contracts.js';
-import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from '../browser-cloud-jobs/worker.js';
+import { createHash } from "node:crypto";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { registerTool, type CallerHashProvider, type ToolResultPayload } from "../registry.js";
+import { CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, type CloudBrowserAction } from "../browser-cloud/contract.js";
+import { cloudBrowserActionSchema } from "../browser-cloud/actions.js";
+import type { BrowserCaptureMetadata } from '../browser-cloud/contract.js';
+import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from "../browser-cloud/service.js";
+import { CloudBrowserJobs, type CloudBrowserArtifactStore, type CloudBrowserWorkerQueue } from "../browser-cloud-jobs/contracts.js";
+import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from "../browser-cloud-jobs/worker.js";
 
 const actionSchema = cloudBrowserActionSchema;
-const planSchema = z.object({ profile_id: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/), max_seconds: z.number().int().min(1).max(CLOUD_BROWSER_MAX_SESSION_SECONDS), actions: z.array(z.discriminatedUnion('type', [z.object({ type: z.literal('navigate'), url: z.string().url().max(2048) }), z.object({ type: z.literal('wait_for'), selector: z.string().min(1).max(256) })])).min(1).max(20) }).strict();
+const planSchema = z
+  .object({
+    profile_id: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/),
+    max_seconds: z.number().int().min(1).max(CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS),
+    actions: z
+      .array(
+        z.discriminatedUnion("type", [
+          z.object({
+            type: z.literal("navigate"),
+            url: z.string().url().max(2048),
+          }),
+          z.object({
+            type: z.literal("wait_for"),
+            selector: z.string().min(1).max(256),
+          }),
+        ]),
+      )
+      .min(1)
+      .max(10_000),
+  })
+  .strict();
 type DeterministicPlan = z.infer<typeof planSchema>;
 
 export function redactCloudBrowserInputForLog(input: Record<string, unknown>): unknown {
   const copy = { ...input };
-  if (copy.action !== undefined) copy.action = '[redacted browser action]';
-  if (copy.plan !== undefined) copy.plan = '[redacted browser plan]';
-  if (copy.text !== undefined || copy.url !== undefined || copy.selector !== undefined) return { operation: 'browser_cloud', input: '[redacted browser input]' };
+  if (copy.action !== undefined) copy.action = "[redacted browser action]";
+  if (copy.plan !== undefined) copy.plan = "[redacted browser plan]";
+  if (copy.text !== undefined || copy.url !== undefined || copy.selector !== undefined) return { operation: "browser_cloud", input: "[redacted browser input]" };
   return copy;
 }
 /** Shield scans may inspect operation metadata only. Typed text, URLs and selectors are never sent. */
-export function shieldCloudBrowserInput(input: Record<string, unknown>): unknown { return { operation: 'browser_cloud', fields: Object.keys(input).filter(key => !['action', 'plan', 'text', 'url', 'selector'].includes(key)).sort() }; }
-export function validateDeterministicPlan(value: unknown): DeterministicPlan { return planSchema.parse(value); }
-export function cloudBrowserRuntimeStatus(): { enabled: boolean; reason?: string } { return process.env.CLOUD_BROWSER_ENABLED === 'true' && !!process.env.CLOUD_BROWSER_DDB_TABLE && !!process.env.CLOUD_BROWSER_QUEUE_URL && !!process.env.CLOUD_BROWSER_ARTIFACT_BUCKET ? { enabled: true } : { enabled: false, reason: 'Cloud browser is disabled or its durable DynamoDB table, SQS queue, and S3 artifact bucket are not configured.' }; }
-function unavailable(): ToolResultPayload { const state = cloudBrowserRuntimeStatus(); return { data: { error: 'cloud_browser_not_configured' }, summary: state.reason ?? 'Cloud browser runtime is unavailable.' }; }
-function error(error: unknown): ToolResultPayload { const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'cloud_browser_failed'; return { data: { error: code }, summary: `Cloud browser request was not completed: ${code}.` }; }
+export function shieldCloudBrowserInput(input: Record<string, unknown>): unknown {
+  return {
+    operation: "browser_cloud",
+    fields: Object.keys(input)
+      .filter((key) => !["action", "plan", "text", "url", "selector"].includes(key))
+      .sort(),
+  };
+}
+export function validateDeterministicPlan(value: unknown): DeterministicPlan {
+  return planSchema.parse(value);
+}
+export function cloudBrowserRuntimeStatus(): {
+  enabled: boolean;
+  reason?: string;
+} {
+  return process.env.CLOUD_BROWSER_ENABLED === "true" && !!process.env.CLOUD_BROWSER_DDB_TABLE && !!process.env.CLOUD_BROWSER_QUEUE_URL && !!process.env.CLOUD_BROWSER_ARTIFACT_BUCKET
+    ? { enabled: true }
+    : {
+        enabled: false,
+        reason: "Cloud browser is disabled or its durable DynamoDB table, SQS queue, and S3 artifact bucket are not configured.",
+      };
+}
+function unavailable(): ToolResultPayload {
+  const state = cloudBrowserRuntimeStatus();
+  return {
+    data: { error: "cloud_browser_not_configured" },
+    summary: state.reason ?? "Cloud browser runtime is unavailable.",
+  };
+}
+function error(error: unknown): ToolResultPayload {
+  const code = error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "cloud_browser_failed";
+  return {
+    data: { error: code },
+    summary: `Cloud browser request was not completed: ${code}.`,
+  };
+}
 
 /** `snapshot` is intentionally metadata-only and is supplied by the session-core owner. */
 export interface CloudBrowserGatewayService {
-  start(caller: string, profileId: string, maxSeconds: number): Promise<{ sessionId: string; expiresAt: number }>;
+  start(caller: string, profileId: string, maxSeconds: number, actionBudget?: number): Promise<{ sessionId: string; expiresAt: number }>;
   execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<unknown>;
   stop(caller: string, sessionId: string): Promise<void>;
   savePersistentProfile(caller: string, sessionId: string): Promise<void>;
   snapshot(caller: string, sessionId: string): Promise<unknown>;
-  publicTrialProfile(caller: string): Promise<{ profileId: string; allowedHosts: readonly string[]; persistent: boolean }>;
+  getCapture?(caller: string, captureId: string): Promise<{
+    metadata: BrowserCaptureMetadata;
+    body: Uint8Array;
+  }>;
+  publicTrialProfile(caller: string): Promise<{
+    profileId: string;
+    allowedHosts: readonly string[];
+    persistent: boolean;
+  }>;
+  publicWebProfile(caller: string): Promise<{
+    profileId: string;
+    allowedHosts: readonly string[];
+    persistent: boolean;
+    mode?: string;
+    actionBudget?: number;
+    maxSessionSeconds?: number;
+    maxActionSeconds?: number;
+  }>;
   provisionPublicTrialProfile(caller: string, owner: string, allowedHosts: readonly string[]): Promise<{ profileId: string; owner: string; allowedHosts: readonly string[]; persistent: boolean }>;
 }
-export interface CloudBrowserGatewayRuntime { browser: CloudBrowserGatewayService; jobs: CloudBrowserJobs; queue: CloudBrowserWorkerQueue; artifacts: CloudBrowserArtifactStore; }
+export interface CloudBrowserGatewayRuntime {
+  browser: CloudBrowserGatewayService;
+  jobs: CloudBrowserJobs;
+  queue: CloudBrowserWorkerQueue;
+  artifacts: CloudBrowserArtifactStore;
+}
 /** Register narrow MCP tools. Owner identity always comes from ToolContext.callerAgent. */
 export function registerCloudBrowserTools(server: McpServer, callerHash: CallerHashProvider, runtime: CloudBrowserGatewayRuntime): void {
   const live = () => cloudBrowserRuntimeStatus().enabled;
-  registerTool(server, { name: 'browser_cloud_profile_discover', category: 'read', annotations: { title: 'Cloud browser: discover my public profile', description: 'Returns only the calling lane\'s deterministic public trial profile identifier and host policy. It never lists another lane\'s profile.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, inputShape: {}, outputShape: { profile_id: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), error: z.string().optional() }, handler: async (_input, ctx) => { if (!live()) return unavailable(); try { const profile = await runtime.browser.publicTrialProfile(ctx.callerAgent); return { data: { profile_id: profile.profileId, allowed_hosts: profile.allowedHosts, persistent: profile.persistent }, summary: 'Returned this caller\'s cloud-browser public trial profile.' }; } catch (e) { return error(e); } } }, callerHash);
-  registerTool(server, { name: 'browser_cloud_profile_provision_public_trial', category: 'write_simple', annotations: { title: 'Cloud browser: provision public trial profile', description: 'CTO-only. Creates or updates one ordinary company Chat lane\'s deterministic, non-persistent public browser profile. The protected personal-legal lane is never eligible.', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }, inputShape: { owner_agent: z.enum(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS), allowed_hosts: z.array(z.string().min(1).max(253)).min(1).max(24) }, outputShape: { profile_id: z.string().optional(), owner_agent: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), dry_run: z.boolean().optional(), error: z.string().optional() }, handler: async (input, ctx) => { if (!live()) return unavailable(); if (ctx.dryRun) return { data: { dry_run: true }, summary: 'Public trial profile provisioning was not executed.' }; try { const profile = await runtime.browser.provisionPublicTrialProfile(ctx.callerAgent, input.owner_agent, input.allowed_hosts); return { data: { profile_id: profile.profileId, owner_agent: profile.owner, allowed_hosts: profile.allowedHosts, persistent: profile.persistent }, summary: 'Public trial profile provisioned with owner isolation.' }; } catch (e) { return error(e); } } }, callerHash);
-  registerTool(server, { name: 'browser_cloud_job_submit', category: 'write_simple', annotations: { title: 'Cloud browser: submit bounded job', description: 'Persists a deterministic read-only cloud browser plan. Owner identity is the authenticated caller.', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }, inputShape: { idempotency_key: z.string().min(8).max(255), plan: z.unknown() }, outputShape: { job_id: z.string().optional(), replayed: z.boolean().optional(), error: z.string().optional() }, redactInputForLog: redactCloudBrowserInputForLog, shieldInputForScan: shieldCloudBrowserInput, handler: async (input, ctx) => { if (!live()) return unavailable(); if (ctx.dryRun) { validateDeterministicPlan(input.plan); return { data: { dry_run: true }, summary: 'Validated deterministic plan. No job was created.' }; } try { const out = await runtime.jobs.submit({ agent: ctx.callerAgent, idempotencyKey: input.idempotency_key, request: validateDeterministicPlan(input.plan) }); return { data: { job_id: out.job.id, replayed: out.replayed, status: out.job.status }, summary: out.replayed ? 'Returned the existing durable browser job.' : 'Created a durable browser job.' }; } catch (e) { return error(e); } } }, callerHash);
-  registerTool(server, { name: 'browser_cloud_job_get', category: 'read', annotations: { title: 'Cloud browser: get job', description: 'Reads an authenticated caller’s durable browser job without request text.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, inputShape: { job_id: z.string().max(128) }, outputShape: { job: z.unknown().optional(), error: z.string().optional() }, handler: async (input, ctx) => { if (!live()) return unavailable(); try { const job = await runtime.jobs.get(input.job_id, ctx.callerAgent); const { request: _request, ...safe } = job; return { data: { job: safe }, summary: `Browser job ${job.id} is ${job.status}.` }; } catch (e) { return error(e); } } }, callerHash);
-  registerTool(server, { name: 'browser_cloud_artifact_get', category: 'read', annotations: { title: 'Cloud browser: get job artifact', description: 'Reads one bounded immutable artifact recorded on the authenticated caller’s job.', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, inputShape: { job_id: z.string().max(128), artifact_id: z.string().max(128) }, outputShape: { artifact: z.unknown().optional(), error: z.string().optional() }, handler: async (input, ctx) => { if (!live()) return unavailable(); try { const job = await runtime.jobs.get(input.job_id, ctx.callerAgent); const artifact = job.artifacts.find(item => item.id === input.artifact_id); if (!artifact) return { data: { error: 'artifact_not_found' }, summary: 'Artifact is unavailable to this caller.' }; const value = await runtime.artifacts.getVersion({ key: artifact.storageKey, version: artifact.storageVersion, maxBytes: 1_000_000 }); const actual = createHash('sha256').update(value.body).digest('hex'); if (actual !== artifact.sha256) return { data: { error: 'artifact_integrity_failed' }, summary: 'Artifact integrity validation failed.' }; return { data: { artifact: { id: artifact.id, content_type: value.contentType, text: value.body.toString('utf8') } }, summary: 'Immutable job artifact returned.' }; } catch (e) { return error(e); } } }, callerHash);
-  registerTool(server, { name: 'browser_cloud_job_cancel', category: 'write_simple', annotations: { title: 'Cloud browser: cancel job', description: 'Requests cancellation of the authenticated caller’s queued or running job.', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }, inputShape: { job_id: z.string().max(128) }, outputShape: { status: z.string().optional(), error: z.string().optional() }, handler: async (input, ctx) => { if (!live()) return unavailable(); if (ctx.dryRun) return { data: { dry_run: true }, summary: 'Cancellation was not requested.' }; try { const job = await runtime.jobs.requestCancellation(input.job_id, ctx.callerAgent); return { data: { status: job.status }, summary: 'Cancellation state was saved.' }; } catch (e) { return error(e); } } }, callerHash);
-  registerTool(server, { name: 'browser_cloud_session_start', category: 'write_simple', annotations: { title: 'Cloud browser: start session', description: 'Starts an authenticated caller’s bounded cloud browser session.', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, inputShape: { profile_id: z.string().max(64), max_seconds: z.number().int().min(1).max(180) }, outputShape: { sessionId: z.string().optional(), expiresAt: z.number().optional(), error: z.string().optional() }, handler: async (input, ctx) => { if (!live()) return unavailable(); if (ctx.dryRun) return { data: { dry_run: true }, summary: 'Session start was not executed.' }; try { return { data: await runtime.browser.start(ctx.callerAgent, input.profile_id, input.max_seconds), summary: 'Cloud browser session started.' }; } catch (e) { return error(e); } } }, callerHash);
-  registerTool(server, { name: 'browser_cloud_session_action', category: 'write_simple', annotations: { title: 'Cloud browser: bounded session action', description: 'Executes one bounded browser action. It accepts no arbitrary JavaScript.', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, inputShape: { session_id: z.string().max(128), action: actionSchema, timeout_seconds: z.number().int().min(1).max(20) }, outputShape: { ok: z.boolean().optional(), created_target_id: z.string().optional(), closed_target_id: z.string().optional(), selected_target_id: z.string().nullable().optional(), error: z.string().optional() }, redactInputForLog: redactCloudBrowserInputForLog, shieldInputForScan: shieldCloudBrowserInput, handler: async (input, ctx) => { if (!live()) return unavailable(); if (ctx.dryRun) return { data: { dry_run: true }, summary: 'Browser action was not executed.' }; try { const result = await runtime.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds) as { createdTargetId?: string; closedTargetId?: string; selectedTargetId?: string | null } | null; return { data: { ok: true, ...(result?.createdTargetId ? { created_target_id: result.createdTargetId } : {}), ...(result?.closedTargetId ? { closed_target_id: result.closedTargetId } : {}), ...(result && 'selectedTargetId' in result ? { selected_target_id: result.selectedTargetId } : {}) }, summary: 'Bounded browser action completed.' }; } catch (e) { return error(e); } } }, callerHash);
-  for (const [name, method, title] of [['browser_cloud_session_snapshot', 'snapshot', 'Cloud browser: session snapshot'], ['browser_cloud_profile_save', 'save', 'Cloud browser: save persistent profile'], ['browser_cloud_session_stop', 'stop', 'Cloud browser: stop session']] as const) registerTool(server, { name, category: method === 'snapshot' ? 'read' : 'write_simple', annotations: { title, description: method === 'snapshot' ? 'Returns a bounded page observation for the authenticated session.' : 'Performs a bounded cloud browser lifecycle operation.', readOnlyHint: method === 'snapshot', destructiveHint: false, idempotentHint: method !== 'save', openWorldHint: false }, inputShape: { session_id: z.string().max(128) }, outputShape: { ok: z.boolean().optional(), session: z.unknown().optional(), error: z.string().optional() }, handler: async (input, ctx) => { if (!live()) return unavailable(); try { if (method === 'snapshot') { const session = await runtime.browser.snapshot(ctx.callerAgent, input.session_id); return { data: { session }, summary: 'Bounded cloud browser page observation returned.' }; } if (ctx.dryRun) return { data: { dry_run: true }, summary: 'Lifecycle action was not executed.' }; if (method === 'save') await runtime.browser.savePersistentProfile(ctx.callerAgent, input.session_id); else await runtime.browser.stop(ctx.callerAgent, input.session_id); return { data: { ok: true }, summary: 'Cloud browser lifecycle action completed.' }; } catch (e) { return error(e); } } }, callerHash);
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_profile_discover",
+      category: "read",
+      annotations: { title: "Cloud browser: discover my browser profile", description: "Returns only the authenticated caller's profile using the existing response shape. When that caller has a valid root-enrolled public-web profile, its ID and an empty host list are returned for cached clients; otherwise the legacy host-enrolled trial is returned. This does not enroll or convert profiles.", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputShape: {},
+      outputShape: { profile_id: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), error: z.string().optional() },
+      handler: async (_input, ctx) => {
+        if (!live()) return unavailable();
+        try {
+          const profile = await runtime.browser.publicTrialProfile(ctx.callerAgent);
+          return { data: { profile_id: profile.profileId, allowed_hosts: profile.allowedHosts, persistent: profile.persistent }, summary: "Returned this caller's legacy enrolled-host profile." };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_profile_provision_public_trial",
+      category: "write_simple",
+      annotations: { title: "Cloud browser: provision legacy public trial profile", description: "CTO-only. Creates or updates a non-persistent, per-host legacy profile for one eligible company lane. It cannot enroll a public-web profile.", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputShape: { owner_agent: z.enum(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS), allowed_hosts: z.array(z.string().min(1).max(253)).min(1).max(24) },
+      outputShape: { profile_id: z.string().optional(), owner_agent: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), dry_run: z.boolean().optional(), error: z.string().optional() },
+      handler: async (input, ctx) => {
+        if (!live()) return unavailable();
+        if (ctx.dryRun) return { data: { dry_run: true }, summary: "Legacy public trial profile provisioning was not executed." };
+        try {
+          const profile = await runtime.browser.provisionPublicTrialProfile(ctx.callerAgent, input.owner_agent, input.allowed_hosts);
+          return { data: { profile_id: profile.profileId, owner_agent: profile.owner, allowed_hosts: profile.allowedHosts, persistent: profile.persistent }, summary: "Legacy enrolled-host profile provisioned with owner isolation." };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_public_web_profile_discover",
+      category: "read",
+      annotations: {
+        title: "Cloud browser: discover my public-web profile",
+        description: "Returns the authenticated caller's root-enrolled public-web profile for HTTP and HTTPS destinations without per-domain enrollment. Traffic uses its isolated egress policy, and session/mission budgets remain server configured.",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputShape: {},
+      outputShape: {
+        profile_id: z.string().optional(),
+        mode: z.string().optional(),
+        allowed_hosts: z.array(z.string()).optional(),
+        persistent: z.boolean().optional(),
+        action_budget_limit: z.number().optional(),
+        max_session_seconds: z.number().optional(),
+        max_action_seconds: z.number().optional(),
+        error: z.string().optional(),
+      },
+      handler: async (_input, ctx) => {
+        if (!live()) return unavailable();
+        try {
+          const profile = await runtime.browser.publicWebProfile(ctx.callerAgent);
+          return {
+            data: {
+              profile_id: profile.profileId,
+              mode: profile.mode,
+              allowed_hosts: profile.allowedHosts,
+              persistent: profile.persistent,
+              action_budget_limit: profile.actionBudget,
+              max_session_seconds: profile.maxSessionSeconds,
+              max_action_seconds: profile.maxActionSeconds,
+            },
+            summary: "Returned this caller's server-enrolled public-web profile.",
+          };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_job_submit",
+      category: "write_simple",
+      annotations: {
+        title: "Cloud browser: submit bounded job",
+        description: "Persists a deterministic read-only cloud browser plan. Owner identity is the authenticated caller.",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputShape: {
+        idempotency_key: z.string().min(8).max(255),
+        plan: z.unknown(),
+      },
+      outputShape: {
+        job_id: z.string().optional(),
+        replayed: z.boolean().optional(),
+        error: z.string().optional(),
+      },
+      redactInputForLog: redactCloudBrowserInputForLog,
+      shieldInputForScan: shieldCloudBrowserInput,
+      handler: async (input, ctx) => {
+        if (!live()) return unavailable();
+        if (ctx.dryRun) {
+          validateDeterministicPlan(input.plan);
+          return {
+            data: { dry_run: true },
+            summary: "Validated deterministic plan. No job was created.",
+          };
+        }
+        try {
+          const out = await runtime.jobs.submit({
+            agent: ctx.callerAgent,
+            idempotencyKey: input.idempotency_key,
+            request: validateDeterministicPlan(input.plan),
+          });
+          return {
+            data: {
+              job_id: out.job.id,
+              replayed: out.replayed,
+              status: out.job.status,
+            },
+            summary: out.replayed ? "Returned the existing durable browser job." : "Created a durable browser job.",
+          };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_job_get",
+      category: "read",
+      annotations: {
+        title: "Cloud browser: get job",
+        description: "Reads an authenticated caller’s durable browser job without request text.",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputShape: { job_id: z.string().max(128) },
+      outputShape: {
+        job: z.unknown().optional(),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!live()) return unavailable();
+        try {
+          const job = await runtime.jobs.get(input.job_id, ctx.callerAgent);
+          const { request: _request, ...safe } = job;
+          return {
+            data: { job: safe },
+            summary: `Browser job ${job.id} is ${job.status}.`,
+          };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_artifact_get",
+      category: "read",
+      annotations: {
+        title: "Cloud browser: get artifact",
+        description: "Reads an authenticated caller’s bounded immutable job artifact or browser capture. For a capture, job_id is the original session_id and artifact_id is its capture_id.",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputShape: {
+        job_id: z.string().max(128),
+        artifact_id: z.string().max(128),
+      },
+      outputShape: {
+        artifact: z.unknown().optional(),
+        error: z.string().optional(),
+      },
+      maxResponseBytes: 6_000_000,
+      handler: async (input, ctx) => {
+        if (!live()) return unavailable();
+        try {
+          if (input.artifact_id.startsWith('bca_')) {
+            if (!runtime.browser.getCapture) throw Object.assign(new Error('capture_unavailable'), { code: 'capture_unavailable' });
+            const capture = await runtime.browser.getCapture(ctx.callerAgent, input.artifact_id);
+            const metadata = capture.metadata;
+            if (
+              metadata.id !== input.artifact_id ||
+              metadata.owner !== ctx.callerAgent ||
+              metadata.sessionId !== input.job_id ||
+              !Number.isSafeInteger(metadata.byteLength) ||
+              metadata.byteLength < 1 ||
+              metadata.byteLength > 4 * 1024 * 1024 ||
+              capture.body.byteLength !== metadata.byteLength ||
+              !/^[a-f0-9]{64}$/.test(metadata.sha256) ||
+              createHash('sha256').update(capture.body).digest('hex') !== metadata.sha256
+            ) {
+              return {
+                data: { error: 'capture_integrity_failed' },
+                summary: 'Capture integrity or session binding validation failed.',
+              };
+            }
+            const base64 = Buffer.from(capture.body).toString('base64');
+            const nativeContent = metadata.contentType === 'image/png' || metadata.contentType === 'image/jpeg'
+              ? [{ type: 'image' as const, data: base64, mimeType: metadata.contentType }]
+              : metadata.contentType === 'application/pdf'
+                ? [{ type: 'resource' as const, resource: {
+                    uri: `browser-capture://${metadata.id}`,
+                    mimeType: 'application/pdf',
+                    blob: base64,
+                  } }]
+                : null;
+            if (!nativeContent) {
+              return { data: { error: 'capture_integrity_failed' }, summary: 'Capture content type is unsupported.' };
+            }
+            return {
+              data: {
+                artifact: {
+                  id: metadata.id,
+                  session_id: metadata.sessionId,
+                  content_type: metadata.contentType,
+                  byte_length: metadata.byteLength,
+                  sha256: metadata.sha256,
+                  ...(metadata.pageCount === undefined ? {} : { page_count: metadata.pageCount }),
+                },
+              },
+              nativeContent,
+              summary: 'Owner-bound browser capture returned as native MCP image or PDF content.',
+            };
+          }
+          const job = await runtime.jobs.get(input.job_id, ctx.callerAgent);
+          const artifact = job.artifacts.find((item) => item.id === input.artifact_id);
+          if (!artifact)
+            return {
+              data: { error: "artifact_not_found" },
+              summary: "Artifact is unavailable to this caller.",
+            };
+          const value = await runtime.artifacts.getVersion({
+            key: artifact.storageKey,
+            version: artifact.storageVersion,
+            maxBytes: 1_000_000,
+          });
+          const actual = createHash("sha256").update(value.body).digest("hex");
+          if (actual !== artifact.sha256)
+            return {
+              data: { error: "artifact_integrity_failed" },
+              summary: "Artifact integrity validation failed.",
+            };
+          return {
+            data: {
+              artifact: {
+                id: artifact.id,
+                content_type: value.contentType,
+                text: value.body.toString("utf8"),
+              },
+            },
+            summary: "Immutable job artifact returned.",
+          };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_job_cancel",
+      category: "write_simple",
+      annotations: {
+        title: "Cloud browser: cancel job",
+        description: "Requests cancellation of the authenticated caller’s queued or running job.",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputShape: { job_id: z.string().max(128) },
+      outputShape: {
+        status: z.string().optional(),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!live()) return unavailable();
+        if (ctx.dryRun)
+          return {
+            data: { dry_run: true },
+            summary: "Cancellation was not requested.",
+          };
+        try {
+          const job = await runtime.jobs.requestCancellation(input.job_id, ctx.callerAgent);
+          return {
+            data: { status: job.status },
+            summary: "Cancellation state was saved.",
+          };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_session_start",
+      category: "write_simple",
+      annotations: {
+        title: "Cloud browser: start session",
+        description: "Starts an authenticated caller’s session within server-configured budgets. A caller’s legacy public-trial ID resolves to their verified root-enrolled public-web profile when present; otherwise the legacy profile is used.",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      inputShape: {
+        profile_id: z.string().max(64),
+        max_seconds: z.number().int().min(1).max(CLOUD_BROWSER_MAX_SESSION_SECONDS),
+        action_budget: z.number().int().positive().optional(),
+      },
+      outputShape: {
+        sessionId: z.string().optional(),
+        expiresAt: z.number().optional(),
+        error: z.string().optional(),
+      },
+      handler: async (input, ctx) => {
+        if (!live()) return unavailable();
+        if (ctx.dryRun)
+          return {
+            data: { dry_run: true },
+            summary: "Session start was not executed.",
+          };
+        try {
+          return {
+            data: await runtime.browser.start(ctx.callerAgent, input.profile_id, input.max_seconds, input.action_budget),
+            summary: "Cloud browser session started.",
+          };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  registerTool(
+    server,
+    {
+      name: "browser_cloud_session_action",
+      category: "write_simple",
+      annotations: {
+        title: "Cloud browser: bounded session action",
+        description: "Executes one browser action within the session profile's server-configured time and action budgets. It accepts no arbitrary JavaScript.",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      inputShape: {
+        session_id: z.string().max(128),
+        action: actionSchema,
+        timeout_seconds: z.number().int().min(1).max(CLOUD_BROWSER_MAX_SESSION_SECONDS),
+      },
+      outputShape: {
+        ok: z.boolean().optional(),
+        capture_id: z.string().optional(),
+        content_type: z.string().optional(),
+        byte_length: z.number().optional(),
+        sha256: z.string().optional(),
+        page_count: z.number().optional(),
+        created_target_id: z.string().optional(),
+        closed_target_id: z.string().optional(),
+        selected_target_id: z.string().nullable().optional(),
+        error: z.string().optional(),
+      },
+      redactInputForLog: redactCloudBrowserInputForLog,
+      shieldInputForScan: shieldCloudBrowserInput,
+      handler: async (input, ctx) => {
+        if (!live()) return unavailable();
+        if (ctx.dryRun)
+          return {
+            data: { dry_run: true },
+            summary: "Browser action was not executed.",
+          };
+        try {
+          const result = await runtime.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds) as {
+            createdTargetId?: string;
+            closedTargetId?: string;
+            selectedTargetId?: string | null;
+          } | BrowserCaptureMetadata | null;
+          if (input.action.type === 'capture') {
+            const capture = result as BrowserCaptureMetadata | null;
+            if (!capture || typeof capture.id !== 'string' || capture.owner !== ctx.callerAgent) throw new Error('capture_result_invalid');
+            return { data: { ok: true, capture_id: capture.id, content_type: capture.contentType, byte_length: capture.byteLength, sha256: capture.sha256, ...(capture.pageCount === undefined ? {} : { page_count: capture.pageCount }) }, summary: 'Validated browser capture stored as an owner-bound immutable artifact; capture bytes are not returned inline.' };
+          }
+          const actionResult = result as { createdTargetId?: string; closedTargetId?: string; selectedTargetId?: string | null } | null;
+          return {
+            data: {
+              ok: true,
+              ...(actionResult?.createdTargetId ? { created_target_id: actionResult.createdTargetId } : {}),
+              ...(actionResult?.closedTargetId ? { closed_target_id: actionResult.closedTargetId } : {}),
+              ...(actionResult && "selectedTargetId" in actionResult ? { selected_target_id: actionResult.selectedTargetId } : {}),
+            },
+            summary: "Bounded browser action completed.",
+          };
+        } catch (e) {
+          return error(e);
+        }
+      },
+    },
+    callerHash,
+  );
+  for (const [name, method, title] of [
+    ["browser_cloud_session_snapshot", "snapshot", "Cloud browser: session snapshot"],
+    ["browser_cloud_profile_save", "save", "Cloud browser: save persistent profile"],
+    ["browser_cloud_session_stop", "stop", "Cloud browser: stop session"],
+  ] as const)
+    registerTool(
+      server,
+      {
+        name,
+        category: method === "snapshot" ? "read" : "write_simple",
+        annotations: {
+          title,
+          description: method === "snapshot" ? "Returns a bounded page observation for the authenticated session." : "Performs a bounded cloud browser lifecycle operation.",
+          readOnlyHint: method === "snapshot",
+          destructiveHint: false,
+          idempotentHint: method !== "save",
+          openWorldHint: false,
+        },
+        inputShape: { session_id: z.string().max(128) },
+        outputShape: {
+          ok: z.boolean().optional(),
+          session: z.unknown().optional(),
+          error: z.string().optional(),
+        },
+        handler: async (input, ctx) => {
+          if (!live()) return unavailable();
+          try {
+            if (method === "snapshot") {
+              const session = await runtime.browser.snapshot(ctx.callerAgent, input.session_id);
+              return {
+                data: { session },
+                summary: "Bounded cloud browser page observation returned.",
+              };
+            }
+            if (ctx.dryRun)
+              return {
+                data: { dry_run: true },
+                summary: "Lifecycle action was not executed.",
+              };
+            if (method === "save") await runtime.browser.savePersistentProfile(ctx.callerAgent, input.session_id);
+            else await runtime.browser.stop(ctx.callerAgent, input.session_id);
+            return {
+              data: { ok: true },
+              summary: "Cloud browser lifecycle action completed.",
+            };
+          } catch (e) {
+            return error(e);
+          }
+        },
+      },
+      callerHash,
+    );
 }
 
 export function startCloudBrowserWorker(runtime: CloudBrowserGatewayRuntime): CloudBrowserJobWorker | null {
   if (!cloudBrowserRuntimeStatus().enabled) return null;
-  const executor: CloudBrowserPlanExecutor = { execute: async (job, control) => { const plan = validateDeterministicPlan(job.request); const started = await runtime.browser.start(job.agent, plan.profile_id, plan.max_seconds); try { for (let index = 0; index < plan.actions.length; index++) { if (control.cancellationRequested()) return; const action = plan.actions[index]!; const step = `action:${index}`; if (await control.heartbeat()) return; await control.beginExternalEffect(step); await runtime.browser.execute(job.agent, started.sessionId, action, 20); await runtime.jobs.recordExternalEffectSucceeded(job.id, job.agent, job.leaseToken, step); } const observation = await runtime.browser.snapshot(job.agent, started.sessionId); const body = Buffer.from(JSON.stringify(observation)); await runtime.jobs.attachArtifact(job.id, job.agent, job.leaseToken, body, 'application/json', createHash('sha256').update(body).digest('hex')); return observation; } finally { await runtime.browser.stop(job.agent, started.sessionId); } } };
+  const executor: CloudBrowserPlanExecutor = {
+    execute: async (job, control) => {
+      const plan = validateDeterministicPlan(job.request);
+      const started = await runtime.browser.start(job.agent, plan.profile_id, plan.max_seconds, plan.actions.length);
+      try {
+        for (let index = 0; index < plan.actions.length; index++) {
+          if (control.cancellationRequested()) return;
+          const action = plan.actions[index]!;
+          const step = `action:${index}`;
+          if (await control.heartbeat()) return;
+          await control.beginExternalEffect(step);
+          await runtime.browser.execute(job.agent, started.sessionId, action, 20);
+          await runtime.jobs.recordExternalEffectSucceeded(job.id, job.agent, job.leaseToken, step);
+        }
+        const observation = await runtime.browser.snapshot(job.agent, started.sessionId);
+        const body = Buffer.from(JSON.stringify(observation));
+        await runtime.jobs.attachArtifact(job.id, job.agent, job.leaseToken, body, "application/json", createHash("sha256").update(body).digest("hex"));
+        return observation;
+      } finally {
+        await runtime.browser.stop(job.agent, started.sessionId);
+      }
+    },
+  };
   return new CloudBrowserJobWorker(runtime.jobs, runtime.queue, executor);
 }

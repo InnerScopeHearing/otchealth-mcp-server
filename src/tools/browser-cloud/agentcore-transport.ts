@@ -1,38 +1,377 @@
-import { randomUUID } from 'node:crypto';
-import { WebSocket } from 'undici';
-import { signRequest, resolveAwsCredentials, type AwsCredentials } from '../../search/sigv4.js';
-import { signAgentCoreAutomationStream } from '../browser-agentcore/transport.js';
-import type { CloudBrowserAction, CloudBrowserObservation, CloudBrowserProfile, CloudBrowserSession, CloudBrowserTransport } from './contract.js';
-import { CloudBrowserError } from './contract.js';
-import { executeCloudBrowserInteraction } from './actions.js';
-import { BrowserPageController } from './page-controls.js';
+import { randomUUID } from "node:crypto";
+import { WebSocket } from "undici";
+import { signRequest, resolveAwsCredentials, type AwsCredentials } from "../../search/sigv4.js";
+import { signAgentCoreAutomationStream } from "../browser-agentcore/transport.js";
+import type { CloudBrowserAction, CloudBrowserObservation, CloudBrowserProfile, CloudBrowserSession, CloudBrowserTransport } from "./contract.js";
+import { CloudBrowserError } from "./contract.js";
+import { executeCloudBrowserInteraction } from "./actions.js";
+import { BrowserPageController } from "./page-controls.js";
+import { captureBrowserArtifact, type BrowserCaptureValidator } from './captures.js';
+import { createTrustedBrowserBinaryValidator } from './binary-validation.js';
+import { assertTrustedPublicWebProfile, type TrustedPublicWebPolicy } from './public-web-policy.js';
 
-const BROWSER_ID = 'aws.browser.v1';
+const BROWSER_ID = "aws.browser.v1";
 type FrameMessage = { id?: unknown; result?: unknown; error?: unknown };
 
-export function isAllowedBrowserUrl(raw: unknown, allowedHosts: readonly string[]): raw is string {
-  if (typeof raw !== 'string') return false;
-  try { const url = new URL(raw); return url.protocol === 'https:' && !url.username && !url.password && !url.port && allowedHosts.includes(url.hostname.toLowerCase()); } catch { return false; }
+export function isAllowedBrowserUrl(raw: unknown, allowedHosts: readonly string[], allowHttp = false): raw is string {
+  if (typeof raw !== "string") return false;
+  try {
+    const url = new URL(raw);
+    return (url.protocol === "https:" || (allowHttp && url.protocol === "http:")) && !url.username && !url.password && (allowHttp || (!url.port && allowedHosts.includes(url.hostname.toLowerCase())));
+  } catch {
+    return false;
+  }
 }
 
 /** Minimal bounded CDP client. It offers no Runtime.evaluate or arbitrary command entrypoint. */
-type Ws = Pick<WebSocket, 'send' | 'close' | 'addEventListener'>;
+type Ws = Pick<WebSocket, "send" | "close" | "addEventListener">;
 type WsFactory = (url: string, options: { headers: Record<string, string> }) => Ws;
-const MAX_MESSAGE_BYTES = 65_536;
+const MAX_MESSAGE_BYTES = 5_600_000; // 4 MiB artifact as base64 plus bounded CDP envelope.
+const MAX_QUEUED_MESSAGE_BYTES = MAX_MESSAGE_BYTES + 128 * 1024;
+const MAX_QUEUED_FRAMES = 32;
+const trustedBinaryValidator = createTrustedBrowserBinaryValidator();
+const defaultCaptureValidator: BrowserCaptureValidator = input => trustedBinaryValidator.validate(input);
 class Cdp {
-  private readonly frames: string[] = []; private wake?: () => void; private closed = false; private id = 1;
-  private constructor(private readonly socket: Ws) { socket.addEventListener('message', event => { const text = typeof event.data === 'string' ? event.data : ''; if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) { this.closed = true; socket.close(); } else { this.frames.push(text); this.notify(); } }); socket.addEventListener('close', () => { this.closed = true; this.notify(); }); socket.addEventListener('error', () => { this.closed = true; this.notify(); }); }
-  static async open(endpoint: string, headers: Record<string, string>, timeout: number, factory: WsFactory = (url, options) => new WebSocket(url, options)): Promise<Cdp> { if (new URL(endpoint).protocol !== 'wss:') throw new CloudBrowserError('provider_stream_invalid', 'AgentCore returned a non-secure browser stream.'); const socket = factory(endpoint, { headers }); const cdp = new Cdp(socket); await new Promise<void>((resolve, reject) => { const timer = setTimeout(() => { socket.close(); reject(new CloudBrowserError('provider_timeout', 'Browser stream connection timed out.')); }, timeout); socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true }); socket.addEventListener('error', () => { clearTimeout(timer); reject(new CloudBrowserError('provider_stream_failed', 'Browser stream connection failed.')); }, { once: true }); }); return cdp; }
-  private notify(): void { const wake = this.wake; this.wake = undefined; wake?.(); }
-  async command(method: string, params: Record<string, unknown>, timeout: number, sessionId?: string): Promise<Record<string, unknown>> { const id = this.id++; const text = JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }); if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) throw new CloudBrowserError('provider_stream_invalid', 'Browser command exceeded the bound.'); this.socket.send(text); const until = Date.now() + timeout; for (;;) { while (this.frames.length) { let msg: FrameMessage; try { msg = JSON.parse(this.frames.shift() as string) as FrameMessage; } catch { continue; } if (msg.id !== id) continue; if (msg.error) throw new CloudBrowserError('provider_action_failed', 'AgentCore rejected the browser action.'); return (msg.result ?? {}) as Record<string, unknown>; } const remain = until - Date.now(); if (remain <= 0 || this.closed) throw new CloudBrowserError('provider_timeout', 'Browser action timed out.'); await new Promise<void>(resolve => { const done = () => { clearTimeout(timer); resolve(); }; const timer = setTimeout(done, remain); this.wake = done; }); } }
-  close(): void { this.socket.close(); this.closed = true; }
+  private readonly frames: string[] = [];
+  private queuedBytes = 0;
+  private wake?: () => void;
+  private closed = false;
+  private id = 1;
+  private constructor(private readonly socket: Ws) {
+    socket.addEventListener("message", (event) => {
+      const text = typeof event.data === "string" ? event.data : "";
+      const bytes = Buffer.byteLength(text);
+      if (bytes > MAX_MESSAGE_BYTES || this.frames.length >= MAX_QUEUED_FRAMES || this.queuedBytes + bytes > MAX_QUEUED_MESSAGE_BYTES) {
+        this.closed = true;
+        socket.close();
+      } else {
+        this.frames.push(text);
+        this.queuedBytes += bytes;
+        this.notify();
+      }
+    });
+    socket.addEventListener("close", () => {
+      this.closed = true;
+      this.notify();
+    });
+    socket.addEventListener("error", () => {
+      this.closed = true;
+      this.notify();
+    });
+  }
+  static async open(endpoint: string, headers: Record<string, string>, timeout: number, factory: WsFactory = (url, options) => new WebSocket(url, options)): Promise<Cdp> {
+    if (new URL(endpoint).protocol !== "wss:") throw new CloudBrowserError("provider_stream_invalid", "AgentCore returned a non-secure browser stream.");
+    const socket = factory(endpoint, { headers });
+    const cdp = new Cdp(socket);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        socket.close();
+        reject(new CloudBrowserError("provider_timeout", "Browser stream connection timed out."));
+      }, timeout);
+      socket.addEventListener(
+        "open",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+      socket.addEventListener(
+        "error",
+        () => {
+          clearTimeout(timer);
+          reject(new CloudBrowserError("provider_stream_failed", "Browser stream connection failed."));
+        },
+        { once: true },
+      );
+    });
+    return cdp;
+  }
+  private notify(): void {
+    const wake = this.wake;
+    this.wake = undefined;
+    wake?.();
+  }
+  async command(method: string, params: Record<string, unknown>, timeout: number, sessionId?: string): Promise<Record<string, unknown>> {
+    const id = this.id++;
+    const text = JSON.stringify({
+      id,
+      method,
+      params,
+      ...(sessionId ? { sessionId } : {}),
+    });
+    if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) throw new CloudBrowserError("provider_stream_invalid", "Browser command exceeded the bound.");
+    this.socket.send(text);
+    const until = Date.now() + timeout;
+    for (;;) {
+      while (this.frames.length) {
+          const frame = this.frames.shift() as string;
+          this.queuedBytes -= Buffer.byteLength(frame);
+          let msg: FrameMessage;
+        try {
+            msg = JSON.parse(frame) as FrameMessage;
+        } catch {
+          continue;
+        }
+        if (msg.id !== id) continue;
+        if (msg.error) throw new CloudBrowserError("provider_action_failed", "AgentCore rejected the browser action.");
+        return (msg.result ?? {}) as Record<string, unknown>;
+      }
+      const remain = until - Date.now();
+      if (remain <= 0 || this.closed) throw new CloudBrowserError("provider_timeout", "Browser action timed out.");
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, remain);
+        this.wake = done;
+      });
+    }
+  }
+  close(): void {
+    this.socket.close();
+    this.closed = true;
+  }
 }
 
 export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
-  constructor(private readonly region = process.env.AWS_REGION || 'us-east-1', private readonly fetchImpl: typeof fetch = fetch, private readonly webSocketFactory: WsFactory = (url, options) => new WebSocket(url, options)) {}
-  private async request(method: string, path: string, body: unknown, credentials: AwsCredentials): Promise<unknown> { const host = `bedrock-agentcore.${this.region}.amazonaws.com`; const text = body === undefined ? '' : JSON.stringify(body); const signed = signRequest({ method, host, path, body: text, region: this.region, service: 'bedrock-agentcore', credentials, extraHeaders: { 'content-type': 'application/json' } }); const response = await this.fetchImpl(`https://${host}${path}`, { method, headers: signed.headers, body: text || undefined, signal: AbortSignal.timeout(15_000) }); if (!response.ok) { const raw = await response.text().catch(() => ''); const type = /(?:__type|code|Code)"?\s*[:=]\s*"?([A-Za-z]+(?:Exception|Error))/.exec(raw)?.[1]; throw new CloudBrowserError(`provider_request_${response.status}${type ? `_${type}` : ''}`, `AgentCore request failed with HTTP ${response.status}${type ? ` (${type})` : ''}.`); } return response.json(); }
-  async start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, 'providerSessionId' | 'automationEndpoint'>> { const credentials = await resolveAwsCredentials(); if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Cloud browser runtime credentials are unavailable.'); const value = await this.request('PUT', `/browsers/${BROWSER_ID}/sessions/start`, { name: `cloud-${input.profile.profileId}`, sessionTimeoutSeconds: Math.max(60, input.maxSeconds), clientToken: randomUUID(), ...(input.profile.persistent && input.profile.providerProfileId ? { profileConfiguration: { profileIdentifier: input.profile.providerProfileId } } : {}) }, credentials) as { sessionId?: unknown; streams?: { automationStream?: { streamEndpoint?: unknown } } }; if (typeof value.sessionId !== 'string' || typeof value.streams?.automationStream?.streamEndpoint !== 'string') throw new CloudBrowserError('provider_session_invalid', 'AgentCore did not return a usable browser session.'); return { providerSessionId: value.sessionId, automationEndpoint: value.streams.automationStream.streamEndpoint }; }
-  async execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null | import('./contract.js').CloudBrowserExecutionResult> { const credentials = await resolveAwsCredentials(); if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Cloud browser runtime credentials are unavailable.'); const signingCredentials = { ...credentials, sessionToken: credentials.sessionToken ?? '', region: this.region }; const deadline = Date.now() + timeoutSeconds * 1_000; const remaining = (): number => { const value = deadline - Date.now(); if (value <= 0) throw new CloudBrowserError('provider_timeout', 'Browser action exceeded its total deadline.'); return value; }; const cdp = await Cdp.open(session.automationEndpoint, signAgentCoreAutomationStream(signingCredentials, session.automationEndpoint), Math.min(remaining(), 10_000), this.webSocketFactory); try { const targets = await cdp.command('Target.getTargets', {}, remaining()); const pages = (targets.targetInfos as Array<{ type?: string; targetId?: string }> | undefined)?.filter((x) => x.type === 'page' && typeof x.targetId === 'string') ?? []; if (!session.ownedTargetIds) session.ownedTargetIds = pages[0]?.targetId ? [pages[0].targetId] : []; if (!session.selectedTargetId && session.selectedTargetId !== null) session.selectedTargetId = session.ownedTargetIds[0] ?? null; const allowUrl = (url: string): boolean => isAllowedBrowserUrl(url, session.allowedHosts); const context = { ownedTargetIds: new Set(session.ownedTargetIds), selectedTargetId: session.selectedTargetId ?? null, allowUrl, dialogAcceptanceAuthorized: false }; const controller = new BrowserPageController(cdp, context); const selected = (): string => { const id = context.selectedTargetId; if (!id || !context.ownedTargetIds.has(id)) throw new CloudBrowserError('target_not_selected', 'No owned browser tab is selected.'); return id; }; const attach = async (id: string): Promise<string> => { const info = pages.find(x => x.targetId === id); if (!context.ownedTargetIds.has(id) || (!info && !session.ownedTargetIds?.includes(id))) throw new CloudBrowserError('target_not_owned', 'The browser tab is not owned by this session.'); const result = await cdp.command('Target.attachToTarget', { targetId: id, flatten: true }, remaining()); if (typeof result.sessionId !== 'string') throw new CloudBrowserError('provider_page_missing', 'AgentCore did not expose a page session.'); return result.sessionId; }; const sync = (): void => { session.ownedTargetIds = [...context.ownedTargetIds]; session.selectedTargetId = context.selectedTargetId; }; if (action.type === 'tab_create' || action.type === 'tab_select' || action.type === 'tab_close' || action.type === 'navigate_back' || action.type === 'navigate_forward' || action.type === 'reload' || action.type === 'focus' || action.type === 'select' || action.type === 'dialog') { try { const receipt = await controller.execute(action, remaining); let finalReceipt = receipt; if (action.type === 'tab_create' && context.selectedTargetId === null && receipt.createdTargetId) { try { await cdp.command('Target.activateTarget', { targetId: receipt.createdTargetId }, remaining()); context.selectedTargetId = receipt.createdTargetId; finalReceipt = { ...receipt, selectedTargetId: receipt.createdTargetId }; } catch { session.effectUnknown = true; throw new CloudBrowserError('target_select_uncertain', 'The new tab was created, but its selection result is uncertain; reconcile before continuing.'); } } sync(); return { observation: null, pageReceipt: finalReceipt }; } catch (error) { if (action.type === 'tab_create' && error instanceof CloudBrowserError && error.code === 'target_create_uncertain') session.effectUnknown = true; if (action.type === 'tab_close') session.effectUnknown = !(error instanceof CloudBrowserError && error.code === 'target_operation_failed'); if (action.type === 'tab_select' && error instanceof CloudBrowserError && ['provider_action_failed', 'provider_timeout'].includes(error.code)) { session.effectUnknown = true; throw new CloudBrowserError('target_select_uncertain', 'The tab selection result is uncertain; reconcile before continuing.'); } throw error; } } const page = await attach(selected()); if (action.type === 'snapshot') { const history = await cdp.command('Page.getNavigationHistory', {}, remaining(), page); const entries = history.entries as Array<{ url?: unknown; title?: unknown }> | undefined; const current = entries?.[typeof history.currentIndex === 'number' ? history.currentIndex : -1]; const tree = await cdp.command('Accessibility.getFullAXTree', {}, remaining(), page); const names = (tree.nodes as Array<{ name?: { value?: unknown }; role?: { value?: unknown } }> | undefined)?.filter((node) => node.role?.value !== 'password').map((node) => node.name?.value).filter((x): x is string => typeof x === 'string' && x.trim().length > 0).join(' ').slice(0, 4_000) ?? ''; sync(); return { url: typeof current?.url === 'string' ? current.url : null, title: typeof current?.title === 'string' ? current.title.slice(0, 300) : null, visibleText: names }; } if (action.type === 'navigate') { await cdp.command('Page.navigate', { url: action.url }, remaining(), page); sync(); return null; } await executeCloudBrowserInteraction(cdp, page, action, remaining); sync(); return null; } finally { cdp.close(); } }
-  async stop(session: CloudBrowserSession): Promise<void> { const credentials = await resolveAwsCredentials(); if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Cloud browser runtime credentials are unavailable.'); const host = `bedrock-agentcore.${this.region}.amazonaws.com`; const path = `/browsers/${BROWSER_ID}/sessions/stop`; const query = { sessionId: session.providerSessionId }; const body = JSON.stringify({ clientToken: randomUUID() }); const signed = signRequest({ method: 'PUT', host, path, query, body, region: this.region, service: 'bedrock-agentcore', credentials, extraHeaders: { 'content-type': 'application/json' } }); const response = await this.fetchImpl(`https://${host}${path}?sessionId=${encodeURIComponent(session.providerSessionId)}`, { method: 'PUT', headers: signed.headers, body, signal: AbortSignal.timeout(15_000) }); if (!response.ok) throw new CloudBrowserError(`provider_stop_${response.status}`, `AgentCore stop request failed with HTTP ${response.status}.`); }
-  async saveProfile(session: CloudBrowserSession, profile: CloudBrowserProfile): Promise<void> { if (!profile.providerProfileId) throw new CloudBrowserError('profile_not_persistent', 'No provider profile is configured.'); const credentials = await resolveAwsCredentials(); if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Cloud browser runtime credentials are unavailable.'); await this.request('PUT', `/browser-profiles/${encodeURIComponent(profile.providerProfileId)}/save`, { browserIdentifier: BROWSER_ID, sessionId: session.providerSessionId, clientToken: randomUUID() }, credentials); }
+  constructor(
+    private readonly region = process.env.AWS_REGION || "us-east-1",
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly webSocketFactory: WsFactory = (url, options) => new WebSocket(url, options),
+    private readonly captureValidator: BrowserCaptureValidator = defaultCaptureValidator,
+    private readonly trustedPublicWebPolicy?: TrustedPublicWebPolicy,
+  ) {}
+  private async request(method: string, path: string, body: unknown, credentials: AwsCredentials): Promise<unknown> {
+    const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
+    const text = body === undefined ? "" : JSON.stringify(body);
+    const signed = signRequest({
+      method,
+      host,
+      path,
+      body: text,
+      region: this.region,
+      service: "bedrock-agentcore",
+      credentials,
+      extraHeaders: { "content-type": "application/json" },
+    });
+    const response = await this.fetchImpl(`https://${host}${path}`, {
+      method,
+      headers: signed.headers,
+      body: text || undefined,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      const raw = await response.text().catch(() => "");
+      const type = /(?:__type|code|Code)"?\s*[:=]\s*"?([A-Za-z]+(?:Exception|Error))/.exec(raw)?.[1];
+      throw new CloudBrowserError(`provider_request_${response.status}${type ? `_${type}` : ""}`, `AgentCore request failed with HTTP ${response.status}${type ? ` (${type})` : ""}.`);
+    }
+    return response.json();
+  }
+  async start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint" | "providerBrowserId">> {
+    const profile = input.profile;
+    const publicWeb = profile.mode === "public_web";
+    if (publicWeb) assertTrustedPublicWebProfile(profile, this.trustedPublicWebPolicy, this.region);
+    const browserId = publicWeb ? profile.customBrowserIdentifier! : BROWSER_ID;
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
+    const value = (await this.request(
+      "PUT",
+      `/browsers/${encodeURIComponent(browserId)}/sessions/start`,
+      {
+        name: `cloud-${profile.profileId}`,
+        sessionTimeoutSeconds: input.maxSeconds,
+        clientToken: randomUUID(),
+        ...(publicWeb ? { proxyConfiguration: profile.proxyConfiguration } : {}),
+        ...(profile.persistent && profile.providerProfileId
+          ? {
+              profileConfiguration: {
+                profileIdentifier: profile.providerProfileId,
+              },
+            }
+          : {}),
+      },
+      credentials,
+    )) as {
+      sessionId?: unknown;
+      streams?: { automationStream?: { streamEndpoint?: unknown } };
+    };
+    if (typeof value.sessionId !== "string" || typeof value.streams?.automationStream?.streamEndpoint !== "string") throw new CloudBrowserError("provider_session_invalid", "AgentCore did not return a usable browser session.");
+    return {
+      providerSessionId: value.sessionId,
+      automationEndpoint: value.streams.automationStream.streamEndpoint,
+      providerBrowserId: browserId,
+    };
+  }
+  async execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null | import("./contract.js").CloudBrowserExecutionResult> {
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
+    const signingCredentials = {
+      ...credentials,
+      sessionToken: credentials.sessionToken ?? "",
+      region: this.region,
+    };
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    const remaining = (): number => {
+      const value = deadline - Date.now();
+      if (value <= 0) throw new CloudBrowserError("provider_timeout", "Browser action exceeded its total deadline.");
+      return value;
+    };
+    const cdp = await Cdp.open(session.automationEndpoint, signAgentCoreAutomationStream(signingCredentials, session.automationEndpoint), Math.min(remaining(), 10_000), this.webSocketFactory);
+    try {
+      const targets = await cdp.command("Target.getTargets", {}, remaining());
+      const pages = (targets.targetInfos as Array<{ type?: string; targetId?: string }> | undefined)?.filter((x) => x.type === "page" && typeof x.targetId === "string") ?? [];
+      if (!session.ownedTargetIds) session.ownedTargetIds = pages[0]?.targetId ? [pages[0].targetId] : [];
+      if (!session.selectedTargetId && session.selectedTargetId !== null) session.selectedTargetId = session.ownedTargetIds[0] ?? null;
+      const allowUrl = (url: string): boolean => isAllowedBrowserUrl(url, session.allowedHosts, session.mode === "public_web");
+      const context = {
+        ownedTargetIds: new Set(session.ownedTargetIds),
+        selectedTargetId: session.selectedTargetId ?? null,
+        allowUrl,
+        dialogAcceptanceAuthorized: false,
+      };
+      const controller = new BrowserPageController(cdp, context);
+      const selected = (): string => {
+        const id = context.selectedTargetId;
+        if (!id || !context.ownedTargetIds.has(id)) throw new CloudBrowserError("target_not_selected", "No owned browser tab is selected.");
+        return id;
+      };
+      const attach = async (id: string): Promise<string> => {
+        const info = pages.find((x) => x.targetId === id);
+        if (!context.ownedTargetIds.has(id) || (!info && !session.ownedTargetIds?.includes(id))) throw new CloudBrowserError("target_not_owned", "The browser tab is not owned by this session.");
+        const result = await cdp.command("Target.attachToTarget", { targetId: id, flatten: true }, remaining());
+        if (typeof result.sessionId !== "string") throw new CloudBrowserError("provider_page_missing", "AgentCore did not expose a page session.");
+        return result.sessionId;
+      };
+      const sync = (): void => {
+        session.ownedTargetIds = [...context.ownedTargetIds];
+        session.selectedTargetId = context.selectedTargetId;
+      };
+      if (action.type === "tab_create" || action.type === "tab_select" || action.type === "tab_close" || action.type === "navigate_back" || action.type === "navigate_forward" || action.type === "reload" || action.type === "focus" || action.type === "select" || action.type === "dialog") {
+        try {
+          const receipt = await controller.execute(action, remaining);
+          let finalReceipt = receipt;
+          if (action.type === "tab_create" && context.selectedTargetId === null && receipt.createdTargetId) {
+            try {
+              await cdp.command("Target.activateTarget", { targetId: receipt.createdTargetId }, remaining());
+              context.selectedTargetId = receipt.createdTargetId;
+              finalReceipt = {
+                ...receipt,
+                selectedTargetId: receipt.createdTargetId,
+              };
+            } catch {
+              session.effectUnknown = true;
+              throw new CloudBrowserError("target_select_uncertain", "The new tab was created, but its selection result is uncertain; reconcile before continuing.");
+            }
+          }
+          sync();
+          return { observation: null, pageReceipt: finalReceipt };
+        } catch (error) {
+          if (action.type === "tab_create" && error instanceof CloudBrowserError && error.code === "target_create_uncertain") session.effectUnknown = true;
+          if (action.type === "tab_close") session.effectUnknown = !(error instanceof CloudBrowserError && error.code === "target_operation_failed");
+          if (action.type === "tab_select" && error instanceof CloudBrowserError && ["provider_action_failed", "provider_timeout"].includes(error.code)) {
+            session.effectUnknown = true;
+            throw new CloudBrowserError("target_select_uncertain", "The tab selection result is uncertain; reconcile before continuing.");
+          }
+          throw error;
+        }
+      }
+      const page = await attach(selected());
+      if (action.type === 'capture') {
+        const tree = await cdp.command('Accessibility.getFullAXTree', {}, remaining(), page);
+        const nodes = tree.nodes as Array<{ role?: { value?: unknown }; name?: { value?: unknown } }> | undefined;
+        const sensitiveControl = nodes?.some(node => {
+          const role = typeof node.role?.value === 'string' ? node.role.value.toLowerCase() : '';
+          const name = typeof node.name?.value === 'string' ? node.name.value : '';
+          return role === 'password' || /\b(?:captcha|one[- ]time (?:password|code)|verification code|security code|authenticator code)\b/i.test(name);
+        }) ?? false;
+        if (sensitiveControl) throw new CloudBrowserError('sensitive_output_denied', 'Browser capture is unavailable while a password or verification control is present.');
+        const capture = await captureBrowserArtifact(cdp, page, action.request, remaining, this.captureValidator);
+        sync();
+        return { observation: null, capture };
+      }
+      if (action.type === "snapshot") {
+        const history = await cdp.command("Page.getNavigationHistory", {}, remaining(), page);
+        const entries = history.entries as Array<{ url?: unknown; title?: unknown }> | undefined;
+        const current = entries?.[typeof history.currentIndex === "number" ? history.currentIndex : -1];
+        const tree = await cdp.command("Accessibility.getFullAXTree", {}, remaining(), page);
+        const names =
+          (
+            tree.nodes as
+              | Array<{
+                  name?: { value?: unknown };
+                  role?: { value?: unknown };
+                }>
+              | undefined
+          )
+            ?.filter((node) => node.role?.value !== "password")
+            .map((node) => node.name?.value)
+            .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+            .join(" ")
+            .slice(0, 4_000) ?? "";
+        sync();
+        return {
+          url: typeof current?.url === "string" ? current.url : null,
+          title: typeof current?.title === "string" ? current.title.slice(0, 300) : null,
+          visibleText: names,
+        };
+      }
+      if (action.type === "navigate") {
+        await cdp.command("Page.navigate", { url: action.url }, remaining(), page);
+        sync();
+        return null;
+      }
+      await executeCloudBrowserInteraction(cdp, page, action, remaining);
+      sync();
+      return null;
+    } finally {
+      cdp.close();
+    }
+  }
+  async stop(session: CloudBrowserSession): Promise<void> {
+    const browserId = session.providerBrowserId ?? (session.mode === "public_web" ? undefined : BROWSER_ID);
+    if (!browserId) throw new CloudBrowserError("provider_browser_id_missing", "Public session is missing its original browser resource identifier.");
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
+    const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
+    const path = `/browsers/${encodeURIComponent(browserId)}/sessions/stop`;
+    const query = { sessionId: session.providerSessionId };
+    const body = JSON.stringify({ clientToken: randomUUID() });
+    const signed = signRequest({
+      method: "PUT",
+      host,
+      path,
+      query,
+      body,
+      region: this.region,
+      service: "bedrock-agentcore",
+      credentials,
+      extraHeaders: { "content-type": "application/json" },
+    });
+    const response = await this.fetchImpl(`https://${host}${path}?sessionId=${encodeURIComponent(session.providerSessionId)}`, {
+      method: "PUT",
+      headers: signed.headers,
+      body,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new CloudBrowserError(`provider_stop_${response.status}`, `AgentCore stop request failed with HTTP ${response.status}.`);
+  }
+  async saveProfile(session: CloudBrowserSession, profile: CloudBrowserProfile): Promise<void> {
+    if (!profile.providerProfileId) throw new CloudBrowserError("profile_not_persistent", "No provider profile is configured.");
+    const browserId = session.providerBrowserId ?? (session.mode === "public_web" ? undefined : BROWSER_ID);
+    if (!browserId) throw new CloudBrowserError("provider_browser_id_missing", "Public session is missing its original browser resource identifier.");
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
+    await this.request(
+      "PUT",
+      `/browser-profiles/${encodeURIComponent(profile.providerProfileId)}/save`,
+      {
+        browserIdentifier: browserId,
+        sessionId: session.providerSessionId,
+        clientToken: randomUUID(),
+      },
+      credentials,
+    );
+  }
 }

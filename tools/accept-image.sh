@@ -59,6 +59,11 @@ timeout 90s docker run --rm --platform "$PLATFORM" --network none \
 timeout 45s docker run --rm --platform "$PLATFORM" --network none \
   --entrypoint node "$IMAGE_REF" tools/brain-runtime-check.mjs
 
+# Exercise the real compiled browser binary validator against synthetic valid and malformed
+# fixtures. This requires the runtime qpdf/prlimit/Pillow dependencies; missing tools fail acceptance.
+timeout 45s docker run --rm --platform "$PLATFORM" --network none \
+  --entrypoint node "$IMAGE_REF" tools/browser-capture-runtime-check.mjs
+
 # Full app boot + /health check in an isolated network namespace. Placeholder tokens satisfy
 # config validation; all connector/provider actions remain dark, memory revocations are local,
 # and the request is only the built-in health endpoint. Neither body nor env contains customer data.
