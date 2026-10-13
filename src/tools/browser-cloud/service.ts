@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { validateCloudBrowserAction } from "./actions.js";
 import { CLOUD_BROWSER_DAILY_SESSION_LIMIT, CLOUD_BROWSER_MAX_ACTIONS, CLOUD_BROWSER_MAX_ACTION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, type BrowserCaptureMetadata, type CloudBrowserAction, type CloudBrowserObservation, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport, CloudBrowserError } from "./contract.js";
+import { assertTrustedPublicWebProfile, type TrustedPublicWebPolicy } from './public-web-policy.js';
 
 function validHost(host: string): boolean {
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host);
@@ -22,13 +23,11 @@ function isPublicTrialOwner(owner: string): owner is CloudBrowserPublicTrialOwne
   return (CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(owner);
 }
 
-function assertProfile(profile: CloudBrowserProfile): void {
+function assertProfile(profile: CloudBrowserProfile, publicWebPolicy?: TrustedPublicWebPolicy): void {
   if (!/^[a-z0-9][a-z0-9_-]{2,63}$/i.test(profile.profileId) || !/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(profile.owner)) throw new CloudBrowserError("invalid_profile", "Profile identity is invalid.");
   if (profile.mode === "public_web") {
-    const proxyConfig = profile.proxyConfiguration;
-    const proxyEntry = proxyConfig?.proxies?.length === 1 ? (proxyConfig.proxies[0]?.externalProxy as Record<string, unknown> | undefined) : undefined;
-    if (!profile.customBrowserIdentifier || !/^[A-Za-z0-9._-]{1,128}$/.test(profile.customBrowserIdentifier) || !profile.networkPolicyVersion || !profile.privateHostPolicy || !profile.proxyConfiguration?.proxies?.length || !Number.isSafeInteger(profile.actionBudget) || profile.actionBudget! < 1 || !Number.isSafeInteger(profile.maxSessionSeconds) || profile.maxSessionSeconds! < 1 || profile.maxSessionSeconds! > CLOUD_BROWSER_MAX_SESSION_SECONDS || !Number.isSafeInteger(profile.maxActionSeconds) || profile.maxActionSeconds! < 1 || profile.allowedHosts.length !== 0) throw new CloudBrowserError("invalid_profile", "Public browser profile is not backed by a complete server-verified network policy.");
-    if (profile.proxyConfiguration!.bypass !== undefined || profile.proxyConfiguration!.proxies.length !== 1 || !proxyEntry || Object.hasOwn(proxyEntry, "domainPatterns")) throw new CloudBrowserError("invalid_profile", "Public browser proxy must route all domains through the isolated default proxy without bypass rules.");
+    assertTrustedPublicWebProfile(profile, publicWebPolicy);
+    if (!profile.customBrowserIdentifier || !/^[A-Za-z0-9._-]{1,128}$/.test(profile.customBrowserIdentifier) || !Number.isSafeInteger(profile.actionBudget) || profile.actionBudget! < 1 || !Number.isSafeInteger(profile.maxSessionSeconds) || profile.maxSessionSeconds! < 1 || profile.maxSessionSeconds! > CLOUD_BROWSER_MAX_SESSION_SECONDS || !Number.isSafeInteger(profile.maxActionSeconds) || profile.maxActionSeconds! < 1) throw new CloudBrowserError("invalid_profile", "Public browser profile budgets are invalid.");
     return;
   }
   if (profile.allowedHosts.length === 0 || profile.allowedHosts.length > 24 || profile.allowedHosts.some((host) => !validHost(host))) throw new CloudBrowserError("invalid_profile", "Profile hosts are invalid.");
@@ -74,6 +73,7 @@ export class CloudBrowserService {
     private readonly store: CloudBrowserStore,
     private readonly transport: CloudBrowserTransport,
     private readonly now: () => number = Date.now,
+    private readonly publicWebPolicy?: TrustedPublicWebPolicy,
   ) {}
 
   async saveProfile(caller: string, profile: CloudBrowserProfile): Promise<void> {
@@ -166,7 +166,7 @@ export class CloudBrowserService {
     if (resolvedProfileId === publicWebProfileId && profile.mode !== "public_web") {
       throw new CloudBrowserError("invalid_profile", "The server-enrolled public-web profile is invalid.");
     }
-    if (profile.mode === "public_web") assertProfile(profile);
+    if (profile.mode === "public_web") assertProfile(profile, this.publicWebPolicy);
     const maxDuration = profile.mode === "public_web" ? profile.maxSessionSeconds! : CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS;
     if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > maxDuration) throw new CloudBrowserError("invalid_duration", "Session duration exceeds the configured profile bound.");
     const selectedActionBudget = profile.mode === 'public_web' ? (actionBudget ?? profile.actionBudget) : CLOUD_BROWSER_MAX_ACTIONS;
@@ -210,6 +210,8 @@ export class CloudBrowserService {
   async execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | import("./page-controls.js").BrowserPageReceipt | BrowserCaptureMetadata | null> {
     const session = await this.sessionFor(caller, sessionId);
     const profile = await this.loadProfile(caller, session.profileId);
+    if ((profile.mode ?? "enrolled_hosts") !== (session.mode ?? "enrolled_hosts")) throw new CloudBrowserError("invalid_profile", "Browser session mode no longer matches its owner profile.");
+    if (profile.mode === "public_web") assertProfile(profile, this.publicWebPolicy);
     const maxActionSeconds = session.mode === "public_web" ? profile.maxActionSeconds! : CLOUD_BROWSER_MAX_ACTION_SECONDS;
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > maxActionSeconds) throw new CloudBrowserError("invalid_duration", "Action duration exceeds the configured profile bound.");
     if (session.actionsUsed >= (session.actionBudget ?? CLOUD_BROWSER_MAX_ACTIONS)) throw new CloudBrowserError("action_limit", "Session action budget reached.");
@@ -388,7 +390,7 @@ export class CloudBrowserService {
     if (!profile) return null;
     if (profile.owner !== caller) throw new CloudBrowserError("owner_forbidden", "Profile is unavailable to this caller.");
     if (profile.profileId !== profileId || profile.mode !== "public_web") throw new CloudBrowserError("invalid_profile", "The server-enrolled public-web profile is invalid.");
-    assertProfile(profile);
+    assertProfile(profile, this.publicWebPolicy);
     return profile;
   }
 }

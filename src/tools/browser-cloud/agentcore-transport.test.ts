@@ -5,6 +5,16 @@ import { AgentCoreCloudBrowserTransport, isAllowedBrowserUrl } from "./agentcore
 import type { CloudBrowserSession } from "./contract.js";
 import type { CloudBrowserProfile, CloudBrowserStore } from "./contract.js";
 import { CloudBrowserService } from "./service.js";
+import { parseTrustedPublicWebPolicy } from './public-web-policy.js';
+
+const TEST_PUBLIC_WEB_POLICY = parseTrustedPublicWebPolicy({
+  AWS_REGION: 'us-east-1',
+  CLOUD_BROWSER_PUBLIC_WEB_CUSTOM_BROWSER_IDENTIFIER: 'browser-isolated-public',
+  CLOUD_BROWSER_PUBLIC_WEB_NETWORK_POLICY_VERSION: 'egress-v3',
+  CLOUD_BROWSER_PUBLIC_WEB_PRIVATE_HOST_POLICY: 'proxy-acl-v2',
+  CLOUD_BROWSER_PUBLIC_WEB_PROXY_SERVER: 'proxy.example.net',
+  CLOUD_BROWSER_PUBLIC_WEB_PROXY_PORT: '8080',
+});
 
 const session = {
   providerSessionId: "publicsession123",
@@ -83,7 +93,7 @@ test("public mode starts only on its custom browser with the isolated default pr
       }),
     );
   }) as typeof fetch;
-  const transport = new AgentCoreCloudBrowserTransport("us-east-1", fetcher);
+  const transport = new AgentCoreCloudBrowserTransport("us-east-1", fetcher, undefined, undefined, TEST_PUBLIC_WEB_POLICY);
   const profile: CloudBrowserProfile = {
     owner: "cto",
     profileId: "cto-public-web",
@@ -141,7 +151,7 @@ test("public mode refuses to fall back to the default browser when its network m
       },
       maxSeconds: 60,
     }),
-    /network policy is not verified/,
+    /trusted runtime configuration/,
   );
   assert.equal(called, false);
 });

@@ -2,6 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { CloudBrowserError, type BrowserCaptureMetadata, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport } from "./contract.js";
 import { CloudBrowserService } from "./service.js";
+import { parseTrustedPublicWebPolicy } from './public-web-policy.js';
+
+const TEST_PUBLIC_WEB_POLICY = parseTrustedPublicWebPolicy({
+  AWS_REGION: 'us-east-1',
+  CLOUD_BROWSER_PUBLIC_WEB_CUSTOM_BROWSER_IDENTIFIER: 'browser-public-1',
+  CLOUD_BROWSER_PUBLIC_WEB_NETWORK_POLICY_VERSION: 'egress-v3',
+  CLOUD_BROWSER_PUBLIC_WEB_PRIVATE_HOST_POLICY: 'verified-proxy-acl-v2',
+  CLOUD_BROWSER_PUBLIC_WEB_PROXY_SERVER: 'proxy.internal',
+  CLOUD_BROWSER_PUBLIC_WEB_PROXY_PORT: '8080',
+});
 
 class MemoryStore implements CloudBrowserStore {
   readonly profiles = new Map<string, CloudBrowserProfile>();
@@ -193,7 +203,7 @@ test("typed keys, pointer and scroll controls retain session owner and host guar
 test("verified public-web profiles default omitted native-client budgets to the server cap and bound explicit budgets", async () => {
   const store = new MemoryStore();
   const transport = new FakeTransport();
-  const service = new CloudBrowserService(store, transport);
+  const service = new CloudBrowserService(store, transport, Date.now, TEST_PUBLIC_WEB_POLICY);
   store.profiles.set("cto-public-web", {
     profileId: "cto-public-web",
     owner: "cto",
@@ -223,11 +233,16 @@ test("verified public-web profiles default omitted native-client budgets to the 
   assert.equal(store.sessions.get(sessionId)?.actionsUsed, 1);
   await assert.rejects(service.execute("cto", sessionId, { type: "navigate", url: "https://user:pass@example.org/" }, 1), (e: unknown) => e instanceof CloudBrowserError && e.code === "host_forbidden");
   await assert.rejects(service.execute("cto", sessionId, { type: "navigate", url: "javascript:alert(1)" }, 1), (e: unknown) => e instanceof CloudBrowserError && e.code === "host_forbidden");
+  const profileBeforeTamper = store.profiles.get('cto-public-web')!;
+  store.profiles.set('cto-public-web', { ...profileBeforeTamper, privateHostPolicy: 'unverified' });
+  const actionsBeforeTamper = transport.actions.length;
+  await assert.rejects(service.execute('cto', sessionId, { type: 'navigate', url: 'https://news.example.org/' }, 1), (e: unknown) => e instanceof CloudBrowserError && e.code === 'public_network_policy_unverified');
+  assert.equal(transport.actions.length, actionsBeforeTamper, 'a stale or changed policy must be rejected before provider use');
 });
 
 test("public mode fails closed unless trusted provisioning supplied the complete network boundary", async () => {
   const store = new MemoryStore();
-  const service = new CloudBrowserService(store, new FakeTransport());
+  const service = new CloudBrowserService(store, new FakeTransport(), Date.now, TEST_PUBLIC_WEB_POLICY);
   store.profiles.set("cto-public-web", {
     profileId: "cto-public-web",
     owner: "cto",
@@ -235,7 +250,7 @@ test("public mode fails closed unless trusted provisioning supplied the complete
     persistent: false,
     mode: "public_web",
   });
-  await assert.rejects(service.start("cto", "cto-public-web", 60, 10), (e: unknown) => e instanceof CloudBrowserError && e.code === "invalid_profile");
+  await assert.rejects(service.start("cto", "cto-public-web", 60, 10), (e: unknown) => e instanceof CloudBrowserError && e.code === "public_network_policy_unverified");
   await assert.rejects(service.saveProfile("cto", { profileId: "cto-public-web", owner: "cto", allowedHosts: [], persistent: false, mode: "public_web", customBrowserIdentifier: "browser-public", networkPolicyVersion: "egress-v3", privateHostPolicy: "proxy-acl-v2", proxyConfiguration: { proxies: [{ externalProxy: { server: "proxy.example.net", port: 8080 } }], bypass: { domainPatterns: [".example.net"] } }, actionBudget: 100, maxSessionSeconds: 180, maxActionSeconds: 30 }), (e: unknown) => e instanceof CloudBrowserError && e.code === "profile_provisioning_forbidden");
 });
 

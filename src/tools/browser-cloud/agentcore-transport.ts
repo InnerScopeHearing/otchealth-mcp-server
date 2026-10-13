@@ -8,6 +8,7 @@ import { executeCloudBrowserInteraction } from "./actions.js";
 import { BrowserPageController } from "./page-controls.js";
 import { captureBrowserArtifact, type BrowserCaptureValidator } from './captures.js';
 import { createTrustedBrowserBinaryValidator } from './binary-validation.js';
+import { assertTrustedPublicWebProfile, type TrustedPublicWebPolicy } from './public-web-policy.js';
 
 const BROWSER_ID = "aws.browser.v1";
 type FrameMessage = { id?: unknown; result?: unknown; error?: unknown };
@@ -140,6 +141,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly webSocketFactory: WsFactory = (url, options) => new WebSocket(url, options),
     private readonly captureValidator: BrowserCaptureValidator = defaultCaptureValidator,
+    private readonly trustedPublicWebPolicy?: TrustedPublicWebPolicy,
   ) {}
   private async request(method: string, path: string, body: unknown, credentials: AwsCredentials): Promise<unknown> {
     const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
@@ -170,7 +172,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
   async start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint" | "providerBrowserId">> {
     const profile = input.profile;
     const publicWeb = profile.mode === "public_web";
-    if (publicWeb && (!profile.customBrowserIdentifier || !profile.networkPolicyVersion || !profile.privateHostPolicy || !profile.proxyConfiguration?.proxies?.length)) throw new CloudBrowserError("public_network_policy_unverified", "Public browser network policy is not verified.");
+    if (publicWeb) assertTrustedPublicWebProfile(profile, this.trustedPublicWebPolicy, this.region);
     const browserId = publicWeb ? profile.customBrowserIdentifier! : BROWSER_ID;
     const credentials = await resolveAwsCredentials();
     if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
