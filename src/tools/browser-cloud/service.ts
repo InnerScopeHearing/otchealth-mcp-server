@@ -129,7 +129,14 @@ export class CloudBrowserService {
         assertObservationHost(page, current.allowedHosts);
         return page as CloudBrowserObservation;
       };
-      if (action.type !== 'navigate') await checkCurrentPage();
+      const mayRunWithoutSelection = (action.type === 'tab_create' || action.type === 'tab_select') && current.selectedTargetId === null;
+      if (action.type !== 'navigate' && !mayRunWithoutSelection) await checkCurrentPage();
+      const effectIntent = action.type === 'tab_create' || action.type === 'tab_close';
+      if (effectIntent) {
+        current.effectUnknown = true;
+        current.actionsUsed += 1;
+        await this.store.saveSessionUnderLock(current, lockOwner);
+      }
       let result: CloudBrowserObservation | null | { observation: CloudBrowserObservation | null; pageReceipt?: import('./page-controls.js').BrowserPageReceipt };
       try {
         if (action.type !== 'wait_for') result = await this.transport.execute(current, action, remainingSeconds());
@@ -141,7 +148,11 @@ export class CloudBrowserService {
           }
         }
       } catch (error) {
-        if (current.effectUnknown) await this.store.saveSessionUnderLock({ ...current, actionsUsed: current.actionsUsed + 1 }, lockOwner);
+        if (effectIntent && current.effectUnknown === false) await this.store.saveSessionUnderLock(current, lockOwner);
+        else if (!effectIntent && current.effectUnknown) {
+          current.actionsUsed += 1;
+          await this.store.saveSessionUnderLock(current, lockOwner);
+        }
         throw error;
       }
       const execution = result && typeof result === 'object' && 'observation' in result ? result : { observation: result };
@@ -152,12 +163,14 @@ export class CloudBrowserService {
       } catch (error) {
         if (action.type === 'tab_create' || action.type === 'tab_close') {
           current.effectUnknown = true;
-          await this.store.saveSessionUnderLock({ ...current, actionsUsed: current.actionsUsed + 1 }, lockOwner);
+          if (!effectIntent) current.actionsUsed += 1;
+          await this.store.saveSessionUnderLock(current, lockOwner);
         }
         throw error;
       }
       if (currentPage) assertObservationHost(currentPage, current.allowedHosts);
-      await this.store.saveSessionUnderLock({ ...current, ownedTargetIds: current.ownedTargetIds, selectedTargetId: current.selectedTargetId, actionsUsed: current.actionsUsed + 1 }, lockOwner);
+      if (effectIntent) current.effectUnknown = false;
+      await this.store.saveSessionUnderLock({ ...current, ownedTargetIds: current.ownedTargetIds, selectedTargetId: current.selectedTargetId, actionsUsed: current.actionsUsed + (effectIntent ? 0 : 1) }, lockOwner);
       return execution.pageReceipt ?? (action.type === 'snapshot' ? currentPage : observation);
     } finally { await this.store.releaseSessionLock(sessionId, lockOwner); }
   }
