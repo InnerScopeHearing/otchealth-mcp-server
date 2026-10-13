@@ -78,3 +78,32 @@ test('selected owned tab is reused after a new provider stream connection', asyn
   assert.equal((observation as { url?: string }).url, 'https://example.test/two');
   assert.equal(calls.filter(call => call.method === 'Target.attachToTarget').at(-1)?.params.targetId, 'second');
 });
+
+test('creating a tab with no selection activates it for the required post-action observation', async t => {
+  const saved = { ...process.env }; t.after(() => { process.env = saved; }); process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = []; let created = false;
+  class Socket extends EventTarget {
+    send(raw: string) {
+      const cmd = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown> }; calls.push(cmd);
+      let result: Record<string, unknown> = {};
+      if (cmd.method === 'Target.getTargets') result = { targetInfos: [...(created ? [{ type: 'page', targetId: 'created-tab', url: 'https://example.test/new' }] : [{ type: 'page', targetId: 'unowned-popup', url: 'https://example.test/popup' }])] };
+      if (cmd.method === 'Target.createTarget') { created = true; result = { targetId: 'created-tab' }; }
+      if (cmd.method === 'Target.activateTarget') result = {};
+      if (cmd.method === 'Target.attachToTarget') result = { sessionId: 'created-page' };
+      if (cmd.method === 'Page.getNavigationHistory') result = { currentIndex: 0, entries: [{ url: 'https://example.test/new', title: 'New' }] };
+      if (cmd.method === 'Accessibility.getFullAXTree') result = { nodes: [] };
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ id: cmd.id, result }) })));
+    }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  const factory = () => { const socket = new Socket(); queueMicrotask(() => socket.dispatchEvent(new Event('open'))); return socket as unknown as WebSocket; };
+  const noSelection = { ...session, allowedHosts: ['example.test'], ownedTargetIds: [], selectedTargetId: null } as CloudBrowserSession;
+  const transport = new AgentCoreCloudBrowserTransport('us-east-1', fetch, factory);
+  const createdResult = await transport.execute(noSelection, { type: 'tab_create', url: 'https://example.test/new' }, 2) as { pageReceipt?: { selectedTargetId?: string | null } };
+  assert.equal(createdResult.pageReceipt?.selectedTargetId, 'created-tab');
+  const observation = await transport.execute(noSelection, { type: 'snapshot' }, 2) as { url?: string };
+  assert.equal(observation.url, 'https://example.test/new');
+  assert.equal(noSelection.selectedTargetId, 'created-tab');
+  assert.equal(calls.some(call => call.method === 'Target.activateTarget' && call.params.targetId === 'created-tab'), true);
+  assert.equal(calls.some(call => call.method === 'Target.attachToTarget' && call.params.targetId === 'unowned-popup'), false);
+});

@@ -24,8 +24,9 @@ class FakeTransport implements CloudBrowserTransport {
   async execute(s: CloudBrowserSession, action: unknown): Promise<{ url: string; title: string; visibleText: string } | null | { observation: null; pageReceipt: { selectedTargetId: string | null; createdTargetId?: string; closedTargetId?: string; completed: true } }> {
     this.actions.push(action); const a = action as { type?: string; targetId?: string };
     if (a.type === 'snapshot') { if (!s.ownedTargetIds) { s.ownedTargetIds = ['initial-owned']; s.selectedTargetId = 'initial-owned'; } if (s.selectedTargetId === null) throw new CloudBrowserError('target_not_selected', 'no selected target'); return { url: 'https://example.test/', title: 'Example', visibleText: '' }; }
-    if (a.type === 'tab_create') { if (this.uncertainCreate) { s.effectUnknown = true; throw new CloudBrowserError('target_create_uncertain', 'uncertain'); } s.ownedTargetIds ??= ['initial-owned']; s.selectedTargetId ??= 'initial-owned'; s.ownedTargetIds.push('new-owned'); return { observation: null, pageReceipt: { selectedTargetId: s.selectedTargetId ?? null, createdTargetId: 'new-owned', completed: true } }; }
+    if (a.type === 'tab_create') { if (this.uncertainCreate) { s.effectUnknown = true; throw new CloudBrowserError('target_create_uncertain', 'uncertain'); } s.ownedTargetIds ??= ['initial-owned']; if (s.selectedTargetId === null) s.selectedTargetId = 'new-owned'; s.selectedTargetId ??= 'initial-owned'; s.ownedTargetIds.push('new-owned'); return { observation: null, pageReceipt: { selectedTargetId: s.selectedTargetId, createdTargetId: 'new-owned', completed: true } }; }
     if (a.type === 'tab_select') { s.ownedTargetIds ??= ['initial-owned']; s.selectedTargetId = a.targetId!; return { observation: null, pageReceipt: { selectedTargetId: a.targetId!, completed: true } }; }
+    if (a.type === 'tab_close') { s.ownedTargetIds ??= ['initial-owned']; s.ownedTargetIds = s.ownedTargetIds.filter(id => id !== a.targetId); if (s.selectedTargetId === a.targetId) s.selectedTargetId = null; return { observation: null, pageReceipt: { selectedTargetId: s.selectedTargetId ?? null, closedTargetId: a.targetId!, completed: true } }; }
     return null;
   }
   async stop(): Promise<void> { this.stopped += 1; }
@@ -101,6 +102,20 @@ test('selecting a remaining owned tab works after the selected tab was closed', 
   const session = store.sessions.get(sessionId)!; session.ownedTargetIds = ['remaining-owned']; session.selectedTargetId = null;
   const result = await service.execute('cto', sessionId, { type: 'tab_select', targetId: 'remaining-owned' } as never, 2) as { selectedTargetId?: string };
   assert.equal(result.selectedTargetId, 'remaining-owned');
+});
+
+test('closing the last selected tab allows creating and selecting a replacement tab', async () => {
+  const store = new MemoryStore(); const transport = new FakeTransport(); const service = new CloudBrowserService(store, transport);
+  await service.saveProfile('cto', { profileId: 'cto-public', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
+  const { sessionId } = await service.start('cto', 'cto-public', 60);
+  await service.execute('cto', sessionId, { type: 'snapshot' }, 2);
+  const closed = await service.execute('cto', sessionId, { type: 'tab_close', targetId: 'initial-owned' } as never, 2) as { selectedTargetId?: string | null };
+  assert.equal(closed.selectedTargetId, null);
+  const created = await service.execute('cto', sessionId, { type: 'tab_create', url: 'https://example.test/new' } as never, 2) as { selectedTargetId?: string };
+  assert.equal(created.selectedTargetId, 'new-owned');
+  const selected = await service.execute('cto', sessionId, { type: 'tab_select', targetId: 'new-owned' } as never, 2) as { selectedTargetId?: string };
+  assert.equal(selected.selectedTargetId, 'new-owned');
+  assert.equal(store.sessions.get(sessionId)?.effectUnknown, false);
 });
 
 test('tab create intent and consumed action are durable before provider invocation', async () => {
