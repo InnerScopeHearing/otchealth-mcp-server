@@ -36,25 +36,43 @@ const keyCodes: Record<(typeof CLOUD_BROWSER_KEYS)[number], number> = {
 export async function executeCloudBrowserInteraction(cdp: CloudBrowserCdp, page: string, input: CloudBrowserAction, remaining: () => number): Promise<void> {
   const action = validateCloudBrowserAction(input);
   const command = (method: string, params: Record<string, unknown>) => cdp.command(method, params, remaining(), page);
+  const cleanupCommand = (method: string, params: Record<string, unknown>) => {
+    let timeout = 1;
+    try { timeout = Math.min(1000, Math.max(1, remaining())); } catch { /* one bounded cleanup attempt even at an expired deadline */ }
+    return cdp.command(method, params, timeout, page);
+  };
+  const withCleanup = async <T>(operation: () => Promise<T>, cleanup: () => Promise<unknown>): Promise<T> => {
+    let failed = false;
+    try { return await operation(); }
+    catch (error) { failed = true; throw error; }
+    finally { try { await cleanup(); } catch (error) { if (!failed) throw error; } }
+  };
   if (action.type === 'press_key') {
-    const key = action.key === 'Space' ? ' ' : action.key.startsWith('Key') ? action.key.slice(3).toLowerCase() : action.key;
-    const params = { key, code: action.key, windowsVirtualKeyCode: keyCodes[action.key], modifiers: action.modifiers ?? 0 };
-    await command('Input.dispatchKeyEvent', { type: 'keyDown', ...params });
-    await command('Input.dispatchKeyEvent', { type: 'keyUp', ...params });
+    const modifiers = action.modifiers ?? 0;
+    const letter = action.key.startsWith('Key') ? action.key.slice(3) : undefined;
+    const key = action.key === 'Space' ? ' ' : letter ? (modifiers & 8 ? letter : letter.toLowerCase()) : action.key;
+    const text = modifiers & 7 ? undefined : action.key === 'Enter' ? '\r' : action.key === 'Space' || letter ? key : undefined;
+    const params = { key, code: action.key, windowsVirtualKeyCode: keyCodes[action.key], modifiers };
+    await withCleanup(
+      () => command('Input.dispatchKeyEvent', { type: 'keyDown', ...params, ...(text === undefined ? {} : { text }) }),
+      () => cleanupCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...params }),
+    );
     return;
   }
   if (action.type === 'scroll') { await command('Input.dispatchMouseEvent', { type: 'mouseWheel', x: action.x, y: action.y, deltaX: action.deltaX, deltaY: action.deltaY }); return; }
   if (action.type === 'mouse_move') { await command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: action.x, y: action.y }); return; }
   if (action.type === 'drag') {
+    let x = action.fromX; let y = action.fromY;
     await command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: action.fromX, y: action.fromY });
-    await command('Input.dispatchMouseEvent', { type: 'mousePressed', x: action.fromX, y: action.fromY, button: 'left', clickCount: 1 });
-    try {
+    await withCleanup(async () => {
+      await command('Input.dispatchMouseEvent', { type: 'mousePressed', x: action.fromX, y: action.fromY, button: 'left', clickCount: 1 });
       const steps = action.steps ?? 5;
-      for (let step = 1; step <= steps; step++) await command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: action.fromX + (action.toX - action.fromX) * step / steps, y: action.fromY + (action.toY - action.fromY) * step / steps, buttons: 1 });
-    } finally {
-      let timeout = 1; try { timeout = remaining(); } catch { /* one bounded release attempt even at an expired deadline */ }
-      await cdp.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: action.toX, y: action.toY, button: 'left', clickCount: 1 }, timeout, page);
-    }
+      for (let step = 1; step <= steps; step++) {
+        x = action.fromX + (action.toX - action.fromX) * step / steps;
+        y = action.fromY + (action.toY - action.fromY) * step / steps;
+        await command('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 1 });
+      }
+    }, () => cleanupCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }));
     return;
   }
   if (action.type !== 'click' && action.type !== 'type' && action.type !== 'wait_for') throw new CloudBrowserError('invalid_action', 'This operation is handled by browser navigation or observation.');
@@ -63,9 +81,11 @@ export async function executeCloudBrowserInteraction(cdp: CloudBrowserCdp, page:
   const search = await command('DOM.performSearch', { query: action.selector });
   const count = typeof search.resultCount === 'number' ? search.resultCount : 0;
   const searchId = typeof search.searchId === 'string' ? search.searchId : '';
-  if (count < 1 || !searchId) throw new CloudBrowserError('selector_not_found', 'The browser action selector did not match a page element.');
-  const matches = await command('DOM.getSearchResults', { searchId, fromIndex: 0, toIndex: 1 });
-  await command('DOM.discardSearchResults', { searchId });
+  if (!searchId) throw new CloudBrowserError('selector_not_found', 'The browser action selector did not match a page element.');
+  const matches = await withCleanup(async () => {
+    if (count < 1) throw new CloudBrowserError('selector_not_found', 'The browser action selector did not match a page element.');
+    return command('DOM.getSearchResults', { searchId, fromIndex: 0, toIndex: 1 });
+  }, () => cleanupCommand('DOM.discardSearchResults', { searchId }));
   const nodeId = (matches.nodeIds as unknown[] | undefined)?.[0];
   if (typeof nodeId !== 'number') throw new CloudBrowserError('selector_not_found', 'The browser selector did not resolve to an element.');
   if (action.type === 'wait_for') return;
@@ -75,6 +95,8 @@ export async function executeCloudBrowserInteraction(cdp: CloudBrowserCdp, page:
   if (!Array.isArray(quad) || quad.length !== 8 || !quad.every(value => typeof value === 'number' && Number.isFinite(value))) throw new CloudBrowserError('selector_not_interactable', 'The selected element is not interactable.');
   const q = quad as number[]; const x = (q[0] + q[2] + q[4] + q[6]) / 4; const y = (q[1] + q[3] + q[5] + q[7]) / 4;
   const button = action.button ?? 'left'; const clickCount = action.clickCount ?? 1;
-  await command('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount });
-  await command('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount });
+  for (let count = 1; count <= clickCount; count++) await withCleanup(
+    () => command('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount: count }),
+    () => cleanupCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount: count }),
+  );
 }
