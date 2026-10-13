@@ -1,6 +1,6 @@
 /**
  * Narrow adapter over Framer's official Server API. This first version exposes
- * only project identity and documented read-method permission checks. Mutating
+ * only project identity and the explicitly implemented read surface. Mutating
  * canvas, CMS, code, preview, and deploy operations are intentionally absent
  * until their exact method shapes and target safety are wired and reviewed.
  */
@@ -10,9 +10,7 @@ export const ENLIGHTENED_LILY_PROJECT_URL = "https://framer.com/projects/Enlight
 // project-ID parser captures the alphanumeric run after `--` and validates 20
 // characters (see /workspace/browser-completion-2026-10-13-1647/framer/sdk-research.md).
 export const ENLIGHTENED_LILY_PROJECT_ID = "bdTiiIITB77TCuMA3XFs";
-/** `isAllowedTo` availability checks only; these are not a list of all SDK features. */
-export const FRAMER_READ_METHODS = ["getProjectInfo", "getChangedPaths"] as const;
-export type FramerReadMethod = (typeof FRAMER_READ_METHODS)[number];
+export const FRAMER_READ_METHODS = ["getProjectInfo"] as const;
 
 export interface FramerProjectInfo {
   id: string;
@@ -22,7 +20,8 @@ export interface FramerProjectInfo {
 export interface FramerSdkClient {
   getProjectInfo(): Promise<unknown>;
   getChangedPaths(): Promise<unknown>;
-  isAllowedTo(method: FramerReadMethod): boolean;
+  /** SDK permission-map checks are undefined for unprotected methods such as metadata reads. */
+  isAllowedTo(method: string): boolean | undefined;
   disconnect(): Promise<void>;
 }
 
@@ -30,8 +29,8 @@ export type FramerSdkConnect = (projectUrl: string, apiKey: string) => Promise<F
 
 export interface FramerProjectAdapter {
   getProjectInfo(): Promise<FramerProjectInfo>;
-  /** Reports only these two read-method permissions; it does not imply write/publish readiness. */
-  getCapabilities(): Promise<{ project: FramerProjectInfo; methods: Record<FramerReadMethod, boolean> }>;
+  /** Adapter surface only; does not imply permission to edit or publish. */
+  getCapabilities(): Promise<{ project: FramerProjectInfo; readMethods: readonly string[]; writeMethods: readonly string[] }>;
   close(): Promise<void>;
 }
 
@@ -107,17 +106,11 @@ export async function connectFramerProject(input: {
     getProjectInfo: projectInfo,
     async getCapabilities() {
       const project = await projectInfo();
-      try {
-        return {
-          project,
-          methods: {
-            getProjectInfo: sdk.isAllowedTo("getProjectInfo"),
-            getChangedPaths: sdk.isAllowedTo("getChangedPaths"),
-          },
-        };
-      } catch {
-        throw new FramerAdapterError("read_failed", "Framer read capabilities could not be checked.");
-      }
+      // These are the adapter's implemented operations, not SDK permission-map results.
+      // In framer-api@5.1.0, getProjectInfo/getChangedPaths are unprotected and absent
+      // from that map; isAllowedTo() can return undefined/false for them and must not
+      // be used to gate (or misreport) a valid read.
+      return { project, readMethods: FRAMER_READ_METHODS, writeMethods: [] };
     },
     async close() {
       if (closed) return;

@@ -9,14 +9,15 @@ function fakeSdk(overrides: Partial<FramerSdkClient> = {}) {
   const sdk: FramerSdkClient = {
     getProjectInfo: async () => { calls.push("info"); return { id: ENLIGHTENED_LILY_PROJECT_ID, name: "Enlightened Lily" }; },
     getChangedPaths: async () => [],
-    isAllowedTo: (method) => method === "getProjectInfo",
+    // In framer-api 5.1.0, unprotected read methods are absent from this map.
+    isAllowedTo: (_method) => undefined,
     disconnect: async () => { calls.push("disconnect"); },
     ...overrides,
   };
   return { sdk, calls };
 }
 
-test("connects to the allow-bound project and returns only read capabilities", async () => {
+test("connects to the allow-bound project and reports only implemented read capabilities", async () => {
   const { sdk, calls } = fakeSdk();
   let url = "";
   let key = "";
@@ -26,7 +27,8 @@ test("connects to the allow-bound project and returns only read capabilities", a
   assert.deepEqual(await adapter.getProjectInfo(), { id: ENLIGHTENED_LILY_PROJECT_ID, name: "Enlightened Lily" });
   assert.deepEqual(await adapter.getCapabilities(), {
     project: { id: ENLIGHTENED_LILY_PROJECT_ID, name: "Enlightened Lily" },
-    methods: { getProjectInfo: true, getChangedPaths: false },
+    readMethods: ["getProjectInfo"],
+    writeMethods: [],
   });
   await adapter.close();
   assert.deepEqual(calls, ["info", "disconnect"]);
