@@ -14,9 +14,9 @@ const DEFAULT_FIELDS = new Set([
   'last_admin_reply_at', 'count_conversation_parts', 'correlation_id', 'entity_version_id',
   'away_mode_enabled', 'away_mode_reassign', 'away_status_reason_id',
   'time_zone_name', 'time_intervals', 'twenty_four_seven', 'office_hours_schedule_id',
-  'exception_date', 'recurring_annually', 'type', 'ip_allowlist', 'allowed_ips', 'allowlist',
+  'exception_date', 'exception_type', 'recurring_annually', 'type', 'ip_allowlist', 'allowed_ips', 'allowlist',
   'default_time_attribute_id', 'attribute_ids', 'attributeIDs', 'attribute_id', 'attributes',
-  'role_predicates', 'definition', 'app', 'state',
+  'predicates', 'role_predicates', 'definition', 'app', 'state',
 ]);
 
 // These fields can help operators understand configuration state. Free-form content,
@@ -29,11 +29,11 @@ const OPTIONAL_CONFIG_FIELDS = new Set([
   'end_time', 'field', 'operator', 'conditions', 'filters', 'rules', 'days',
   'audiences', 'audience_ids', 'data_inputs', 'http_method', 'direct_fin_usage',
   'time_zone_name', 'time_intervals', 'start_minute', 'end_minute', 'day_of_week',
-  'twenty_four_seven', 'office_hours_schedule_id', 'exception_date', 'recurring_annually',
+  'twenty_four_seven', 'office_hours_schedule_id', 'exception_date', 'exception_type', 'recurring_annually',
   'entity_version_id', 'definition', 'state', 'value_redacted', 'value_type', 'comparison',
   'attribute', 'attributes', 'attribute_id', 'attribute_ids', 'default_time_attribute_id', 'method',
   'attributeIDs', 'ip_allowlist', 'allowed_ips', 'allowlist', 'away_mode_enabled',
-  'away_mode_reassign', 'away_status_reason_id', 'app',
+  'away_mode_reassign', 'away_status_reason_id', 'app', 'predicates',
 ]);
 
 const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,47}$/;
@@ -44,7 +44,7 @@ const MAX_STRING = 180;
 const MAX_SCHEMA_DEPTH = 32;
 const MAX_SCHEMA_NODES = 4000;
 const MAX_SCHEMA_FIELDS = 512;
-const PREDICATE_FIELDS = new Set(['conditions', 'filters', 'rules', 'role_predicates']);
+const PREDICATE_FIELDS = new Set(['conditions', 'filters', 'rules', 'predicates', 'role_predicates']);
 const SAFE_ROLE_VALUES = new Set(['admin', 'user', 'owner', 'member', 'manager', 'teammate', 'contact', 'lead', 'visitor']);
 
 function safeScalar(value: unknown): unknown {
@@ -327,7 +327,7 @@ function projectValue(value: unknown, fields: ReadonlySet<string>, operationId?:
       projected[objectKey] = projectRecord(nested as Record<string, unknown>, fields);
     }
   }
-  for (const listKey of ['data', 'items', 'results', 'segments', 'audiences', 'articles', 'connectors', 'data_connectors', 'reports', 'datasets', 'conversations', 'ticket_types', 'office_hours_schedules', 'office_hours_exceptions', 'tags', 'admins', 'macros', 'data_attributes', 'folders', 'collections', 'internal_articles', 'external_pages']) {
+  for (const listKey of ['data', 'items', 'results', 'teams', 'segments', 'audiences', 'articles', 'connectors', 'data_connectors', 'reports', 'datasets', 'conversations', 'ticket_types', 'office_hours_schedules', 'office_hours_exceptions', 'tags', 'admins', 'macros', 'data_attributes', 'folders', 'collections', 'internal_articles', 'external_pages']) {
     const list = record[listKey];
     if (Array.isArray(list)) {
       const returned = list.slice(0, MAX_ITEMS);

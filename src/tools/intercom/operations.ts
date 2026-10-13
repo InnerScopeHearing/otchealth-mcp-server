@@ -270,6 +270,8 @@ function responseForOperation(operation: IntercomOperation, result: { status: nu
 }
 
 function isReportingOperation(operationId: string): boolean {
+  // Dataset/attribute discovery is configuration metadata, not exported customer report rows.
+  if (operationId === 'get__export_reporting_data_get_datasets') return false;
   return operationId.includes('reporting_data') || operationId.startsWith('get__download_reporting_data');
 }
 
