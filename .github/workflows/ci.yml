@@ -27,6 +27,20 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
+      # Captures are verified by real Pillow/qpdf parsers, just as in the release image.
+      # Pin only Python's executable in a tiny PATH directory: hosted Python installations
+      # do not see apt's Pillow, and prepending all of /usr/bin would replace setup-node.
+      - name: Install browser binary parser dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf python3-pil util-linux
+          browser_tool_bin="$(mktemp -d "$RUNNER_TEMP/browser-parser-bin.XXXXXX")"
+          ln -s /usr/bin/python3 "$browser_tool_bin/python3"
+          printf '%s\n' "$browser_tool_bin" >> "$GITHUB_PATH"
+          "$browser_tool_bin/python3" -c 'from PIL import Image; print(Image.__version__)'
+          qpdf --version
+          prlimit --version
       - name: Install (frozen lockfile)
         run: npm ci --include=dev
       # The agentstate Postgres inbox tests (src/agentstate/queue-postgres*.test.ts) exercise a REAL
