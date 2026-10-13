@@ -19,6 +19,8 @@ export type BrowserPendingDispatch = {
 export interface BrowserRecoveryStore {
   listPending(now: number, limit: number): Promise<BrowserPendingDispatch[]>;
   claimDispatch(id: string, version: number, until: number): Promise<string | null>;
+  /** Persist the uncertain dispatch intent before calling the queue adapter. */
+  markDispatchEffectUnknown(id: string, token: string): Promise<boolean>;
   markDispatched(id: string, token: string): Promise<boolean>;
   markReconciliation(id: string, token: string): Promise<boolean>;
 }
@@ -65,23 +67,42 @@ function validate(now: number, limit: number): number {
   return Math.min(limit, BROWSER_RECOVERY_MAX_LIMIT);
 }
 
-function validDispatch(row: BrowserPendingDispatch, now: number): boolean {
-  return row.id.length > 0 && row.owner.length > 0
-    && Number.isSafeInteger(row.version) && row.version >= 0
-    && row.status === 'pending'
-    && (row.effect === 'none' || row.effect === 'unknown' || row.effect === 'succeeded')
-    && Number.isSafeInteger(row.dueAt) && row.dueAt <= now
-    && Number.isSafeInteger(row.attempts) && row.attempts >= 0;
+function validDispatch(row: unknown, now: number): row is BrowserPendingDispatch {
+  if (typeof row !== 'object' || row === null) return false;
+  const value = row as Partial<BrowserPendingDispatch>;
+  return typeof value.id === 'string' && value.id.length > 0
+    && typeof value.owner === 'string' && value.owner.length > 0
+    && Number.isSafeInteger(value.version) && value.version! >= 0
+    && value.status === 'pending'
+    && (value.effect === 'none' || value.effect === 'unknown' || value.effect === 'succeeded')
+    && Number.isSafeInteger(value.dueAt) && value.dueAt! <= now
+    && Number.isSafeInteger(value.attempts) && value.attempts! >= 0;
+}
+
+function validExpired(row: unknown, now: number): row is BrowserExpiredSession {
+  if (typeof row !== 'object' || row === null) return false;
+  const value = row as Partial<BrowserExpiredSession>;
+  return typeof value.id === 'string' && value.id.length > 0
+    && typeof value.owner === 'string' && value.owner.length > 0
+    && typeof value.providerSessionId === 'string' && value.providerSessionId.length > 0
+    && value.ownership === 'confirmed'
+    && Number.isSafeInteger(value.version) && value.version! >= 0
+    && value.status === 'cleanup_pending'
+    && typeof value.expiresAt === 'number' && Number.isSafeInteger(value.expiresAt) && value.expiresAt <= now;
 }
 
 async function markUncertainDispatch(store: BrowserRecoveryStore, id: string, token: string): Promise<boolean> {
   try { return await store.markReconciliation(id, token); } catch { return false; }
 }
 
-/** Redispatch only safe, due outbox rows, under a finite claim fence. */
+/** Recover a bounded set of safe outbox deliveries without replaying effects. */
 export async function recoverBrowserDispatches(input: {
   store: BrowserRecoveryStore;
-  dispatch: (jobId: string, owner: string) => Promise<void>;
+  /**
+   * The adapter receives the claim fence. It must enforce that fence when it
+   * can and deduplicate delivery by the same durable jobId across retries.
+   */
+  dispatch: (jobId: string, owner: string, token: string) => Promise<void>;
   now: number;
   limit: number;
 }): Promise<BrowserRecoverySummary> {
@@ -89,9 +110,12 @@ export async function recoverBrowserDispatches(input: {
   const rows = limit === 0 ? [] : (await input.store.listPending(input.now, limit)).slice(0, limit);
   const result: BrowserRecoverySummary = { scanned: rows.length, dispatched: 0, reconciliation: 0, skipped: 0, failed: 0 };
 
-  for (const row of rows) {
-    if (!validDispatch(row, input.now)) { result.skipped++; continue; }
-    const token = await input.store.claimDispatch(row.id, row.version, input.now + CLAIM_LEASE_MS);
+  for (const candidate of rows as unknown[]) {
+    if (!validDispatch(candidate, input.now)) { result.skipped++; continue; }
+    const row = candidate;
+    let token: string | null;
+    try { token = await input.store.claimDispatch(row.id, row.version, input.now + CLAIM_LEASE_MS); }
+    catch { result.failed++; continue; }
     if (token === null) { result.skipped++; continue; }
 
     if (row.effect !== 'none' || row.attempts >= BROWSER_RECOVERY_MAX_ATTEMPTS) {
@@ -100,8 +124,16 @@ export async function recoverBrowserDispatches(input: {
       continue;
     }
 
+    let intentRecorded = false;
+    try { intentRecorded = await input.store.markDispatchEffectUnknown(row.id, token); } catch { /* intent acknowledgement may be lost */ }
+    if (!intentRecorded) {
+      if (await markUncertainDispatch(input.store, row.id, token)) result.reconciliation++;
+      else result.failed++;
+      continue;
+    }
+
     try {
-      await input.dispatch(row.id, row.owner);
+      await input.dispatch(row.id, row.owner, token);
     } catch {
       if (await markUncertainDispatch(input.store, row.id, token)) result.reconciliation++;
       else result.failed++;
@@ -117,14 +149,6 @@ export async function recoverBrowserDispatches(input: {
   return result;
 }
 
-function validExpired(row: BrowserExpiredSession, now: number): boolean {
-  return row.id.length > 0 && row.owner.length > 0 && row.providerSessionId.length > 0
-    && row.ownership === 'confirmed'
-    && Number.isSafeInteger(row.version) && row.version >= 0
-    && row.status === 'cleanup_pending'
-    && typeof row.expiresAt === 'number' && Number.isSafeInteger(row.expiresAt) && row.expiresAt <= now;
-}
-
 /** Stop only a positively owned session with a recorded expiry in the past. */
 export async function cleanupExpiredBrowserSessions(input: {
   store: BrowserExpiredSessionStore;
@@ -136,9 +160,12 @@ export async function cleanupExpiredBrowserSessions(input: {
   const rows = limit === 0 ? [] : (await input.store.listExpired(input.now, limit)).slice(0, limit);
   const result: BrowserCleanupSummary = { scanned: rows.length, stopped: 0, failed: 0, skipped: 0 };
 
-  for (const row of rows) {
-    if (!validExpired(row, input.now)) { result.skipped++; continue; }
-    const token = await input.store.claimCleanup(row.id, row.version, input.now + CLAIM_LEASE_MS);
+  for (const candidate of rows as unknown[]) {
+    if (!validExpired(candidate, input.now)) { result.skipped++; continue; }
+    const row = candidate;
+    let token: string | null;
+    try { token = await input.store.claimCleanup(row.id, row.version, input.now + CLAIM_LEASE_MS); }
+    catch { result.failed++; continue; }
     if (token === null) { result.skipped++; continue; }
 
     try {
@@ -155,7 +182,7 @@ export async function cleanupExpiredBrowserSessions(input: {
     try { recorded = await input.store.markStopped(row.id, token); } catch { /* acknowledgement can be lost after commit */ }
     if (recorded) result.stopped++;
     else {
-      try { await input.store.markCleanupFailed(row.id, token); } catch { /* leave outcome visible as failed below */ }
+      try { await input.store.markCleanupFailed(row.id, token); } catch { /* preserve failed outcome */ }
       result.failed++;
     }
   }

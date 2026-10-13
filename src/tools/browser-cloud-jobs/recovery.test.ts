@@ -8,6 +8,7 @@ type BrowserExpiredSession = { id: string; owner: string; providerSessionId: str
 type BrowserRecoveryStore = {
   listPending(now: number, limit: number): Promise<BrowserPendingDispatch[]>;
   claimDispatch(id: string, version: number, until: number): Promise<string | null>;
+  markDispatchEffectUnknown(id: string, token: string): Promise<boolean>;
   markDispatched(id: string, token: string): Promise<boolean>;
   markReconciliation(id: string, token: string): Promise<boolean>;
 };
@@ -45,6 +46,12 @@ function recoveryHarness(seed: BrowserPendingDispatch[]) {
       leases.set(id, { token, until });
       return token;
     },
+    async markDispatchEffectUnknown(id, token) {
+      const row = rows.get(id);
+      if (!row || leases.get(id)?.token !== token || row.status !== 'pending') return false;
+      rows.set(id, { ...row, effect: 'unknown' });
+      return true;
+    },
     async markDispatched(id, token) {
       const row = rows.get(id);
       if (!row || leases.get(id)?.token !== token) return false;
@@ -60,7 +67,7 @@ function recoveryHarness(seed: BrowserPendingDispatch[]) {
       return true;
     },
   };
-  return { store, rows, leases, queryLimits };
+  return { store, rows, leases, queryLimits, expireLease: (id: string) => { leases.delete(id); } };
 }
 
 function pending(id: string, patch: Partial<BrowserPendingDispatch> = {}): BrowserPendingDispatch {
@@ -72,11 +79,78 @@ test('recover dispatches only due, pre-effect jobs and persists their dispatched
   assert.ok(api && typeof api.recoverBrowserDispatches === 'function', 'recovery module must export recoverBrowserDispatches');
   const h = recoveryHarness([pending('ready'), pending('future', { dueAt: NOW + 1 })]);
   const called: string[] = [];
-  const summary = await api.recoverBrowserDispatches({ store: h.store, dispatch: async (id) => { called.push(id); }, now: NOW, limit: 10 });
+  const summary = await api.recoverBrowserDispatches({ store: h.store, dispatch: async (id, _owner, token) => {
+    assert.equal(h.rows.get(id)?.effect, 'unknown', 'intent must be durable before dispatch callback');
+    assert.equal(h.leases.get(id)?.token, token, 'dispatch receives the current fence');
+    called.push(id);
+  }, now: NOW, limit: 10 });
   assert.deepEqual(called, ['ready']);
   assert.equal(h.rows.get('ready')?.status, 'dispatched');
   assert.equal(h.rows.get('future')?.status, 'pending');
   assert.deepEqual(summary, { scanned: 1, dispatched: 1, reconciliation: 0, skipped: 0, failed: 0 });
+});
+
+test('crash after queue dispatch leaves a durable unknown intent that a later lease never redispatches', async () => {
+  const api = await optionalRecoveryModule();
+  assert.ok(api && typeof api.recoverBrowserDispatches === 'function', 'recovery module must export recoverBrowserDispatches');
+  const h = recoveryHarness([pending('crash-window')]);
+  const token = await h.store.claimDispatch('crash-window', 1, NOW + 30_000);
+  assert.ok(token);
+  assert.equal(await h.store.markDispatchEffectUnknown('crash-window', token), true);
+  let deliveries = 1; // A queue accepted the initial fenced delivery; process dies before markDispatched.
+  h.expireLease('crash-window');
+  const summary = await api.recoverBrowserDispatches({ store: h.store, dispatch: async () => { deliveries++; }, now: NOW, limit: 1 });
+  assert.equal(deliveries, 1);
+  assert.equal(h.rows.get('crash-window')?.status, 'needs_reconciliation');
+  assert.equal(h.rows.get('crash-window')?.effect, 'unknown');
+  assert.equal(summary.reconciliation, 1);
+});
+
+test('lost intent acknowledgement prevents dispatch and fences the row into reconciliation', async () => {
+  const api = await optionalRecoveryModule();
+  assert.ok(api && typeof api.recoverBrowserDispatches === 'function', 'recovery module must export recoverBrowserDispatches');
+  const h = recoveryHarness([pending('lost-intent-ack')]);
+  const markIntent = h.store.markDispatchEffectUnknown;
+  h.store.markDispatchEffectUnknown = async (id, token) => {
+    const persisted = await markIntent(id, token);
+    return persisted && false;
+  };
+  let dispatches = 0;
+  const summary = await api.recoverBrowserDispatches({ store: h.store, dispatch: async () => { dispatches++; }, now: NOW, limit: 1 });
+  assert.equal(dispatches, 0);
+  assert.equal(h.rows.get('lost-intent-ack')?.status, 'needs_reconciliation');
+  assert.equal(h.rows.get('lost-intent-ack')?.effect, 'unknown');
+  assert.equal(summary.dispatched, 0);
+  assert.equal(summary.reconciliation, 1);
+});
+
+test('malformed outbox rows are skipped without aborting the bounded batch', async () => {
+  const api = await optionalRecoveryModule();
+  assert.ok(api && typeof api.recoverBrowserDispatches === 'function', 'recovery module must export recoverBrowserDispatches');
+  const h = recoveryHarness([pending('valid-after-invalid')]);
+  h.store.listPending = async () => [null, { owner: 'cto' }, { ...pending('bad-id'), id: 4 }, pending('valid-after-invalid')] as unknown as BrowserPendingDispatch[];
+  let dispatches = 0;
+  const summary = await api.recoverBrowserDispatches({ store: h.store, dispatch: async () => { dispatches++; }, now: NOW, limit: 10 });
+  assert.equal(dispatches, 1);
+  assert.equal(summary.scanned, 4);
+  assert.equal(summary.skipped, 3);
+  assert.equal(summary.dispatched, 1);
+});
+
+test('a per-row claim exception is counted and later rows still recover', async () => {
+  const api = await optionalRecoveryModule();
+  assert.ok(api && typeof api.recoverBrowserDispatches === 'function', 'recovery module must export recoverBrowserDispatches');
+  const h = recoveryHarness([pending('claim-error'), pending('claim-next')]);
+  const claim = h.store.claimDispatch;
+  h.store.claimDispatch = async (id, version, until) => {
+    if (id === 'claim-error') throw new Error('store unavailable for this row');
+    return claim(id, version, until);
+  };
+  let dispatches = 0;
+  const summary = await api.recoverBrowserDispatches({ store: h.store, dispatch: async () => { dispatches++; }, now: NOW, limit: 10 });
+  assert.equal(dispatches, 1);
+  assert.equal(summary.failed, 1);
+  assert.equal(summary.dispatched, 1);
 });
 
 test('unknown and succeeded effects are fenced into reconciliation without redispatch', async () => {
@@ -214,6 +288,35 @@ test('unknown ownership and absent expiry never trigger provider stop', async ()
   assert.equal(stops, 0);
   assert.equal(h.rows.get('unknown-owner')?.status, 'cleanup_pending');
   assert.equal(h.rows.get('no-expiry')?.status, 'cleanup_pending');
+});
+
+test('malformed cleanup rows are skipped without aborting the bounded batch', async () => {
+  const api = await optionalRecoveryModule();
+  assert.ok(api && typeof api.cleanupExpiredBrowserSessions === 'function', 'recovery module must export cleanupExpiredBrowserSessions');
+  const h = cleanupHarness([expired('valid-after-invalid')]);
+  h.store.listExpired = async () => [null, { owner: 'cto' }, { ...expired('bad-session'), providerSessionId: 3 }, expired('valid-after-invalid')] as unknown as BrowserExpiredSession[];
+  let stops = 0;
+  const summary = await api.cleanupExpiredBrowserSessions({ store: h.store, stop: async () => { stops++; }, now: NOW, limit: 10 });
+  assert.equal(stops, 1);
+  assert.equal(summary.scanned, 4);
+  assert.equal(summary.skipped, 3);
+  assert.equal(summary.stopped, 1);
+});
+
+test('a per-row cleanup claim exception is counted and later sessions still stop', async () => {
+  const api = await optionalRecoveryModule();
+  assert.ok(api && typeof api.cleanupExpiredBrowserSessions === 'function', 'recovery module must export cleanupExpiredBrowserSessions');
+  const h = cleanupHarness([expired('cleanup-claim-error'), expired('cleanup-claim-next')]);
+  const claim = h.store.claimCleanup;
+  h.store.claimCleanup = async (id, version, until) => {
+    if (id === 'cleanup-claim-error') throw new Error('store unavailable for this session');
+    return claim(id, version, until);
+  };
+  let stops = 0;
+  const summary = await api.cleanupExpiredBrowserSessions({ store: h.store, stop: async () => { stops++; }, now: NOW, limit: 10 });
+  assert.equal(stops, 1);
+  assert.equal(summary.failed, 1);
+  assert.equal(summary.stopped, 1);
 });
 
 test('stop failure remains a failed cleanup receipt and cannot be reported stopped', async () => {
