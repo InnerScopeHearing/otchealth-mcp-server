@@ -41,10 +41,10 @@ function serial(result: unknown): string { return JSON.stringify(result); }
 
 test('admin reads project connector results and conversation operations to bounded metadata', async () => {
   const originalFetch = globalThis.fetch;
-  const requests: Array<{ method: string; path: string }> = [];
+  const requests: Array<{ method: string; path: string; per_page: string | null }> = [];
   globalThis.fetch = async (input, init) => {
     const url = input instanceof URL ? input : new URL(String(input));
-    requests.push({ method: init?.method ?? 'GET', path: url.pathname });
+    requests.push({ method: init?.method ?? 'GET', path: url.pathname, per_page: url.searchParams.get('per_page') });
     return new Response(JSON.stringify({
       data_connectors: [{ id: 'connector-1', name: 'Safe connector', status: 'active', http_method: 'get', direct_fin_usage: true, audiences: ['users'], data_inputs: [{ name: 'order_id', type: 'string', required: true, description: 'private detail' }], headers: [{ name: 'Authorization', value: 'Bearer secret' }], url: 'https://api.example.invalid?token=secret', api_token: 'do-not-return', config: { password: 'do-not-return' }, body: 'raw connector payload' }],
       pages: { type: 'next', next: { starting_after: 'cursor-2' } },
@@ -62,7 +62,7 @@ test('admin reads project connector results and conversation operations to bound
     assert.match(payload, /users/);
     assert.match(payload, /cursor-2/);
     assert.doesNotMatch(payload, /do-not-return|raw connector|private detail|Authorization|https:\/\/api\.example/);
-    assert.deepEqual(requests, [{ method: 'GET', path: '/data_connectors' }]);
+    assert.deepEqual(requests, [{ method: 'GET', path: '/data_connectors', per_page: '20' }]);
   } finally {
     await harness.close();
     globalThis.fetch = originalFetch;
@@ -83,6 +83,7 @@ test('conversation search returns operational metadata only; assignment and stat
     assert.equal(search.isError, undefined, serial(search));
     assert.match(serial(search.structuredContent), /conversation-1|admin-8/);
     assert.doesNotMatch(serial(search.structuredContent), /private customer name|private customer PHI|customer@example.invalid|contact-1/);
+    assert.equal((requests[0]?.body as any)?.pagination?.per_page, 20);
 
     const preview = await harness.call('intercom_operation_write', { operation_id: 'manageConversation', path_params: { conversation_id: 'conversation-1' }, body: { message_type: 'close', type: 'admin', admin_id: 'admin-8' } });
     assert.equal(preview.isError, undefined, serial(preview));
@@ -185,6 +186,26 @@ test('generic contact operations, unsafe conversation search, and non-owning rol
     assert.equal(calls, 0);
   } finally {
     await external.close();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('oversized read pages and held custom-record or SMS writes are rejected before provider access', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; return new Response('{}'); };
+  const harness = await boot('coo');
+  try {
+    const oversized = await harness.call('intercom_operation_read', { operation_id: 'listDataConnectors', query: { per_page: 21 } });
+    assert.equal(oversized.isError, true);
+    for (const operation_id of ['createCustomObjectInstances', 'deleteCustomObjectInstancesById', 'deleteCustomObjectInstancesByExternalId', 'createPhoneSwitch']) {
+      const result = await harness.call('intercom_operation_write', { operation_id, dry_run: false, acknowledge_warning: true });
+      assert.equal(result.isError, true, operation_id);
+      assert.match(serial(result), /customer_record_or_customer_facing_write_held|not enabled/i);
+    }
+    assert.equal(calls, 0);
+  } finally {
+    await harness.close();
     globalThis.fetch = originalFetch;
   }
 });

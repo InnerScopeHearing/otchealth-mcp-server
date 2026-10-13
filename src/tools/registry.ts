@@ -458,6 +458,7 @@ export const COO_CONNECTOR_TOOLSET: readonly string[] = [
   ...EXTERNAL_READONLY_TOOLSET,
   ...GITHUB_OPERATOR_TOOLSET,
   ...COO_INTERCOM_CONNECTOR_TOOLSET,
+  'catalog_skill',
   'twilio_coo_resource_counts',
   'chat_action_submit', 'chat_action_status', 'chat_action_result',
   // This diagnostic is intentionally safe on the constrained coordination surface.

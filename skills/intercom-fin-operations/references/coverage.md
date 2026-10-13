@@ -43,4 +43,4 @@ The planned names are intercom_operation_catalog, intercom_operation_schema, int
 
 ## Current dispatch boundaries
 
-The launch maps all258 operations:153 administration operations enabled,98 customer/identity/bulk or other operations held behind their owning scoped tools, and7 Fin runtime operations enabled as explicit writes. Verify current catalog before use. An enabled schema is not tenant entitlement or proof of a live write. All Fin POSTs can have effects, including capabilities creating/updating a supplied user. Existing Intercom token_ids are opaque references; vault/env strings are not a credential loader.
+The launch maps all258 operations:149 administration operations enabled,102 customer/identity/bulk or other operations held behind their owning scoped tools, and7 Fin runtime operations enabled as explicit writes. Verify current catalog before use. An enabled schema is not tenant entitlement or proof of a live write. All Fin POSTs can have effects, including capabilities creating/updating a supplied user. Existing Intercom token_ids are opaque references; vault/env strings are not a credential loader.

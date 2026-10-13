@@ -93,8 +93,9 @@ const allowedKeywords = new Set([
   'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minLength', 'maxLength', 'pattern',
   'minItems', 'maxItems', 'minProperties', 'maxProperties', 'allOf', 'anyOf', 'oneOf', 'nullable',
   'format', 'description', 'title', 'default', 'example', 'examples', 'deprecated', 'readOnly', 'writeOnly',
+  'discriminator',
 ]);
-const metadataKeys = new Set(['description', 'title', 'default', 'example', 'examples', 'deprecated', 'readOnly', 'writeOnly']);
+const metadataKeys = new Set(['description', 'title', 'default', 'example', 'examples', 'deprecated', 'readOnly', 'writeOnly', 'discriminator']);
 
 function refSchema(ref: string): JsonSchema | undefined {
   const match = /^#\/components\/schemas\/([^/]+)$/.exec(ref);
@@ -164,11 +165,12 @@ function validateValue(value: unknown, schema: JsonSchema, path: string, issues:
             : schema.format === 'date-time' ? !Number.isNaN(Date.parse(value))
               : schema.format === 'uri' ? (() => { try { return new URL(value).protocol.length > 0; } catch { return false; } })()
                 : schema.format === 'uuid' ? /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
-                  : false;
+                  : schema.format === 'byte' ? /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+                    : false;
         if (!valid) issues.push(`${path}: value does not match required format`);
       }
     }
-    if (typeof schema.format === 'string' && !['email', 'date', 'date-time', 'uri', 'uuid', 'int64', 'int32', 'float', 'double'].includes(schema.format)) {
+    if (typeof schema.format === 'string' && !['email', 'date', 'date-time', 'uri', 'uuid', 'int64', 'int32', 'float', 'double', 'timestamp', 'byte'].includes(schema.format)) {
       issues.push(`${path}: schema format is unsupported`);
     }
     if (Array.isArray(value)) {

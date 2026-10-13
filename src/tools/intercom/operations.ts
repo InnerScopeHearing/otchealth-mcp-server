@@ -48,13 +48,13 @@ const ADMIN_WRITE_ALLOWLIST = new Set([
   'updateIpAllowlist',
   'createContentSnippet', 'updateContentSnippet', 'deleteContentSnippet',
   'attachTagToContentSnippet', 'detachTagFromContentSnippet',
-  'createCustomObjectInstances', 'deleteCustomObjectInstancesById', 'deleteCustomObjectInstancesByExternalId',
   'createDynamicContent', 'updateDynamicContent', 'deleteDynamicContent',
-  'createNewsItem', 'updateNewsItem', 'deleteNewsItem', 'createPhoneSwitch',
+  'createNewsItem', 'updateNewsItem', 'deleteNewsItem',
 ]);
 
 const CONVERSATION_OPERATIONAL_READS = new Set(['listConversations', 'retrieveConversation', 'searchConversations']);
-const CUSTOMER_VISIBLE_WRITES = new Set(['publishArticleDraft', 'createDynamicContent', 'updateDynamicContent', 'deleteDynamicContent', 'createNewsItem', 'updateNewsItem', 'deleteNewsItem', 'createPhoneSwitch']);
+const CUSTOMER_VISIBLE_WRITES = new Set(['publishArticleDraft', 'createDynamicContent', 'updateDynamicContent', 'deleteDynamicContent', 'createNewsItem', 'updateNewsItem', 'deleteNewsItem']);
+const HELD_CUSTOMER_RECORD_WRITES = new Set(['createCustomObjectInstances', 'deleteCustomObjectInstancesById', 'deleteCustomObjectInstancesByExternalId', 'createPhoneSwitch']);
 
 const CUSTOMER_ID_KEYS = new Set(['contact_id', 'external_id', 'customer_id', 'company_id', 'ticket_id']);
 const MAX_PAGE = 25;
@@ -88,7 +88,7 @@ function isProtectedCustomerPath(path: string): boolean {
 function operationWriteAllowed(operation: IntercomOperation): boolean {
   if (operation.domain !== 'admin') return false;
   if (operation.operation_id === 'manageConversation') return operation.path === '/conversations/{conversation_id}/parts';
-  if (isProtectedCustomerPath(operation.path) || !ADMIN_WRITE_ALLOWLIST.has(operation.operation_id)) return false;
+  if (isProtectedCustomerPath(operation.path) || HELD_CUSTOMER_RECORD_WRITES.has(operation.operation_id) || !ADMIN_WRITE_ALLOWLIST.has(operation.operation_id)) return false;
   return true;
 }
 
@@ -103,6 +103,7 @@ function availability(operation: IntercomOperation, fin = false): { available: b
   if (operationReadAllowed(operation)) return { available: true, gate: null, access: 'read', projection: 'metadata_only' };
   if (operationWriteAllowed(operation)) return { available: true, gate: requiresExplicitWarning(operation) ? 'explicit_acknowledgement_required' : 'write_defaults_to_dry_run', access: 'write', projection: 'metadata_only' };
   if (operation.operation_id === 'searchConversations') return { available: true, gate: null, access: 'read_only_documented_post_search', projection: 'metadata_only' };
+  if (HELD_CUSTOMER_RECORD_WRITES.has(operation.operation_id)) return { available: false, gate: 'customer_record_or_customer_facing_write_held', access: 'catalog_and_schema_only', projection: 'metadata_only' };
   return { available: false, gate: metadataGate ?? (isProtectedCustomerPath(operation.path) ? 'customer_identity_or_phi_protected' : 'operation_not_enabled_for_generic_dispatch'), access: 'catalog_and_schema_only', projection: 'metadata_only' };
 }
 
@@ -170,6 +171,31 @@ function validateInput(input: OperationInput, operation: IntercomOperation): voi
   if (operation.domain === 'fin_runtime' && input.query && Object.keys(input.query).length > 10) {
     throw new Error('Fin runtime request exceeds the bounded parameter limit.');
   }
+}
+
+function normalizeAdminReadPagination(input: OperationInput, operation: IntercomOperation): OperationInput {
+  let query = input.query;
+  const declaresQueryPerPage = operation.parameters?.some((parameter) => parameter.name === 'per_page' && parameter.in === 'query') ?? false;
+  if (declaresQueryPerPage) {
+    query = { ...(query ?? {}) };
+    const requested = query.per_page;
+    if (requested !== undefined && (typeof requested !== 'number' || !Number.isInteger(requested) || requested < 1 || requested > 20)) {
+      throw new Error('per_page must be an integer from 1 through 20 for bounded Intercom reads.');
+    }
+    query.per_page = requested ?? 20;
+  }
+  if (operation.operation_id === 'searchConversations') {
+    const body = { ...(asRecord(input.body) ?? {}) };
+    const pagination = { ...(asRecord(body.pagination) ?? {}) };
+    const requested = pagination.per_page;
+    if (requested !== undefined && (typeof requested !== 'number' || !Number.isInteger(requested) || requested < 1 || requested > 20)) {
+      throw new Error('Conversation pagination per_page must be an integer from 1 through 20.');
+    }
+    pagination.per_page = requested ?? 20;
+    body.pagination = pagination;
+    return { ...input, query, body };
+  }
+  return { ...input, query };
 }
 
 function assertNoInlineCredentials(value: unknown, key = ''): void {
@@ -328,7 +354,9 @@ export function registerIntercomOperations(server: McpServer, callerHash: Caller
       if (!operation || !operationReadAllowed(operation)) throw new Error('This operation is catalog-only or must use its existing scoped Intercom tool.');
       const request: OperationInput = { operation_id: input.operation_id, path_params: input.path_params, query: input.query, body: input.body };
       validateInput(request, operation);
-      const result = await executeOperation(request);
+      const boundedRequest = normalizeAdminReadPagination(request, operation);
+      validateInput(boundedRequest, operation);
+      const result = await executeOperation(boundedRequest);
       return { data: responseForOperation(operation, result, input.requested_config_fields), summary: `Completed documented Intercom read ${operation.operation_id}; response fields were projected.` };
     },
     redactInputForLog: redactInput,

@@ -53,3 +53,9 @@ test('reporting job identifiers follow their documented path rather than the err
   assert.equal(validateOperationRequest(request).valid, true);
   assert.equal(validateOperationRequest({ operation_id: request.operation_id, query: { job_identifier: 'job-123' } }).valid, false);
 });
+
+test('documented conversation attribute variants and Unix snooze timestamps remain usable', () => {
+  assert.equal(validateOperationRequest({ operation_id: 'createConversationAttribute', body: { name: 'Review_attribute', data_type: 'string' } }).valid, true);
+  assert.equal(validateOperationRequest({ operation_id: 'createConversationAttribute', body: { name: 'Review_attribute', data_type: 'unsupported' } }).valid, false);
+  assert.equal(validateOperationRequest({ operation_id: 'manageConversation', path_params: { conversation_id: 'conversation-1' }, body: { message_type: 'snoozed', admin_id: 'admin-1', snoozed_until: 1800000000 } }).valid, true);
+});
