@@ -45,7 +45,13 @@ export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604
 }
 
 export async function readMessages(agent: string, opts: ReadMessagesOptions = {}): Promise<ReadMessage[]> {
+  if (opts.newestFirst && opts.ack !== false) {
+    throw new Error('newest_first is supported only for ack=false read-only inbox peeks.');
+  }
   if (activeBackend() === 'postgres') return postgres.readMessages(agent, opts);
+  if (opts.newestFirst) {
+    throw new Error('newest_first inbox peeks are unsupported by the active Azure Queue backend.');
+  }
   // The dead-letter audit exists only on the Postgres backend. Never let the flag fall through to a
   // live Azure read: with the default ack=true that would DRAIN real messages instead of auditing.
   if (opts.deadLetter) return [];

@@ -67,9 +67,10 @@
  * (the same one SELECT ... FOR UPDATE SKIP LOCKED job-queue recipes use), not read-then-write in
  * two statements, which is exactly the shape that would race.
  *
- * ORDERING: rows are claimed oldest-`seq`-first (an auto-incrementing bigserial), which is FIFO
- * within a queue and at least as strong an ordering guarantee as Azure Queue Storage's own
- * "generally FIFO, not guaranteed" delivery order.
+ * ORDERING: drains and ordinary peeks are oldest-`seq`-first (an auto-incrementing bigserial),
+ * which is FIFO within a queue and at least as strong an ordering guarantee as Azure Queue
+ * Storage's own "generally FIFO, not guaranteed" delivery order. The opt-in newestFirst peek reads
+ * the same bounded live set in descending seq order; it does not affect default delivery order.
  *
  * TTL / EXPIRY: `expires_at` is set once at enqueue time (`enqueued_at + ttlSeconds`) and both the
  * drain and peek claim queries exclude any row past it, so an expired message is never delivered
@@ -257,10 +258,14 @@ export async function readMessages(agent: string, opts: ReadMessagesOptions = {}
   const {
     max = 16,
     ack = true,
+    newestFirst = false,
     deadLetter = false,
     maxAgeSec = INBOX_MAX_AGE_SECONDS,
     maxDeliveries = INBOX_MAX_DELIVERIES,
   } = opts;
+  if (newestFirst && (ack || deadLetter)) {
+    throw new Error('newest_first is supported only for live ack=false read-only inbox peeks.');
+  }
   if (!isConfigured()) throw new Error('Postgres agent inbox not configured (PG_HOST unset).');
   const q = queueName(agent);
   await ensureSchema();
@@ -334,7 +339,7 @@ export async function readMessages(agent: string, opts: ReadMessagesOptions = {}
     `SELECT message_id, payload, dequeue_count
        FROM ${TABLE}
       WHERE queue = $1 AND visible_at <= now() AND expires_at > now()
-      ORDER BY seq
+      ORDER BY seq ${newestFirst ? 'DESC' : 'ASC'}
       LIMIT $2`,
     [q, n],
   );

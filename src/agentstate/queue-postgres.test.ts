@@ -167,6 +167,31 @@ test('ordering is FIFO within a queue', async () => {
   assert.deepEqual(msgs.map((m) => m.body), ['0', '1', '2', '3', '4']);
 });
 
+test('newest-first peek is bounded, read-only, and does not change default FIFO drains', async () => {
+  const agent = uniqueAgent('newest');
+  for (let i = 0; i < 5; i++) {
+    await enqueue(agent, { to: agent, from: 'cto', subject: `n${i}`, body: `${i}`, ts: new Date().toISOString() });
+  }
+
+  await assert.rejects(
+    () => readMessages(agent, { max: 3, ack: true, newestFirst: true }),
+    /only for live ack=false/,
+  );
+  await assert.rejects(
+    () => readMessages(agent, { max: 3, newestFirst: true }),
+    /only for live ack=false/,
+  );
+
+  const newest = await readMessages(agent, { max: 3, ack: false, newestFirst: true });
+  assert.deepEqual(newest.map((m) => m.body), ['4', '3', '2']);
+  assert.ok(newest.every((m) => !m.acked && m.dequeue_count === 0));
+
+  const fifoPeek = await readMessages(agent, { max: 3, ack: false });
+  assert.deepEqual(fifoPeek.map((m) => m.body), ['0', '1', '2']);
+  const drained = await readMessages(agent, { max: 32, ack: true });
+  assert.deepEqual(drained.map((m) => m.body), ['0', '1', '2', '3', '4']);
+});
+
 test('a queue is isolated from another agent\'s queue', async () => {
   const a = uniqueAgent('iso-a');
   const b = uniqueAgent('iso-b');

@@ -52,6 +52,8 @@ export function queueName(agent: string): string {
 export interface ReadMessagesOptions {
   max?: number;
   ack?: boolean;
+  /** Return the newest live messages first. Supported for read-only peeks only. */
+  newestFirst?: boolean;
   /** Azure-only: how long a peeked message stays hidden. The Postgres peek is side-effect free and ignores it. */
   visibilitySec?: number;
   /** AUDIT: return the dead-lettered messages (newest first). Read-only -- never drains, hides or counts a
