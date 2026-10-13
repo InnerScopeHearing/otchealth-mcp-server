@@ -3,6 +3,9 @@ import { parseTrustedPublicWebPolicy } from '../tools/browser-cloud/public-web-p
 import { CloudBrowserJobs } from '../tools/browser-cloud-jobs/contracts.js';
 import { createDynamoBrowserJobStore, createS3BrowserArtifactStore, createSqsBrowserQueue } from '../tools/browser-cloud-jobs/aws-adapters.js';
 import { cloudBrowserRuntimeStatus, startCloudBrowserWorker, type CloudBrowserGatewayRuntime } from '../tools/browser-cloud-gateway/index.js';
+import { BrowserFileBroker } from '../tools/browser-cloud/file-broker.js';
+import { createAwsBrowserFileStore } from '../tools/browser-cloud/aws-file-store.js';
+import { createTrustedBrowserBinaryValidator } from '../tools/browser-cloud/binary-validation.js';
 
 let instance: CloudBrowserGatewayRuntime | undefined;
 function configured(): CloudBrowserGatewayRuntime {
@@ -13,8 +16,11 @@ function configured(): CloudBrowserGatewayRuntime {
       bucket: process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, queueUrl: process.env.CLOUD_BROWSER_QUEUE_URL };
     const queue = createSqsBrowserQueue(config);
     const artifacts = createS3BrowserArtifactStore(config);
-    instance = { browser: new CloudBrowserService(new DynamoCloudBrowserSessionStore(config.table, config.region), new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy), Date.now, publicWebPolicy),
-      jobs: new CloudBrowserJobs(createDynamoBrowserJobStore(config), queue, artifacts), queue, artifacts };
+    const files = new BrowserFileBroker(createAwsBrowserFileStore(config), {
+      allowValidatedText: true, validator: createTrustedBrowserBinaryValidator(),
+    });
+    instance = { browser: new CloudBrowserService(new DynamoCloudBrowserSessionStore(config.table, config.region), new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId) => files.forUpload(owner, fileId)), Date.now, publicWebPolicy),
+      jobs: new CloudBrowserJobs(createDynamoBrowserJobStore(config), queue, artifacts), queue, artifacts, files };
   }
   return instance!;
 }
@@ -22,6 +28,7 @@ function configured(): CloudBrowserGatewayRuntime {
 // Lazy properties let disabled tools explain configuration gaps without making AWS calls at registration.
 export const cloudBrowserRuntime: CloudBrowserGatewayRuntime = {
   get browser() { return configured().browser; }, get jobs() { return configured().jobs; }, get queue() { return configured().queue; }, get artifacts() { return configured().artifacts; },
+  get files() { return configured().files; },
 };
 
 /** Runs in the existing ECS gateway, never on the user's desktop. Durable claims fence replicas. */

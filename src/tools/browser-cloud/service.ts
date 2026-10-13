@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { validateCloudBrowserAction } from "./actions.js";
 import { CLOUD_BROWSER_DAILY_SESSION_LIMIT, CLOUD_BROWSER_MAX_ACTIONS, CLOUD_BROWSER_MAX_ACTION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, type BrowserCaptureMetadata, type CloudBrowserAction, type CloudBrowserObservation, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport, CloudBrowserError } from "./contract.js";
 import { assertTrustedPublicWebProfile, type TrustedPublicWebPolicy } from './public-web-policy.js';
+import { cleanupExpiredBrowserSession } from './session-recovery.js';
 
 function validHost(host: string): boolean {
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host);
@@ -171,43 +172,49 @@ export class CloudBrowserService {
     if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > maxDuration) throw new CloudBrowserError("invalid_duration", "Session duration exceeds the configured profile bound.");
     const selectedActionBudget = profile.mode === 'public_web' ? (actionBudget ?? profile.actionBudget) : CLOUD_BROWSER_MAX_ACTIONS;
     if (profile.mode === "public_web" && (!Number.isSafeInteger(selectedActionBudget) || selectedActionBudget! < 1 || selectedActionBudget! > profile.actionBudget!)) throw new CloudBrowserError("invalid_action_budget", "Public session action budget must be within the server configured mission budget.");
+    const startedAt = this.now();
     const lockOwner = `${caller}:${randomUUID()}`;
-    if (!(await this.store.acquireProfileLock(resolvedProfileId, lockOwner, this.now() + 30_000))) throw new CloudBrowserError("profile_busy", "Another browser session operation is in progress for this profile.");
+    // A lost start acknowledgement must not permit another start. The durable
+    // fence outlives the longest possible remote session plus request latency.
+    const startFenceUntil = startedAt + maxSeconds * 1_000 + 30_000;
+    if (!(await this.store.acquireProfileLock(resolvedProfileId, lockOwner, startFenceUntil))) throw new CloudBrowserError("profile_busy", "A browser start is in progress or requires reconciliation for this profile.");
     if (profile.mode !== "public_web" && !(await this.store.reserveDailySession(caller, new Date(this.now()).toISOString().slice(0, 10), CLOUD_BROWSER_DAILY_SESSION_LIMIT))) {
       await this.store.releaseProfileLock(resolvedProfileId, lockOwner);
       throw new CloudBrowserError("daily_session_limit", "The daily cloud-browser session limit has been reached.");
     }
-    let remote: Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint" | "providerBrowserId">;
+    let safeToRelease = false;
     try {
-      remote = await this.transport.start({
+      const remote = await this.transport.start({
         owner: caller,
         profile,
         maxSeconds,
       });
-    } finally {
-      await this.store.releaseProfileLock(resolvedProfileId, lockOwner);
-    }
-    const session: CloudBrowserSession = {
+      const session: CloudBrowserSession = {
       sessionId: randomUUID(),
       owner: caller,
       profileId: profile.profileId,
       allowedHosts: profile.allowedHosts,
       mode: profile.mode ?? "enrolled_hosts",
       actionBudget: selectedActionBudget,
-      expiresAt: this.now() + maxSeconds * 1_000,
+      expiresAt: startedAt + maxSeconds * 1_000,
       actionsUsed: 0,
       ...remote,
-    };
-    try {
-      await this.store.saveSession(session);
-    } catch (error) {
-      await this.transport.stop(session).catch(() => undefined);
-      throw error;
+      };
+      try {
+        await this.store.saveSession(session);
+        safeToRelease = true;
+      } catch (error) {
+        // Release only if the known remote effect is positively stopped.
+        try { await this.transport.stop(session); safeToRelease = true; } catch { /* Durable fence remains until remote TTL. */ }
+        throw error;
+      }
+      return { sessionId: session.sessionId, expiresAt: session.expiresAt };
+    } finally {
+      if (safeToRelease) await this.store.releaseProfileLock(resolvedProfileId, lockOwner).catch(() => undefined);
     }
-    return { sessionId: session.sessionId, expiresAt: session.expiresAt };
   }
 
-  async execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | import("./page-controls.js").BrowserPageReceipt | BrowserCaptureMetadata | null> {
+  async execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | import("./page-controls.js").BrowserPageReceipt | import('./provider-files.js').BrowserFileTransferReceipt | BrowserCaptureMetadata | null> {
     const session = await this.sessionFor(caller, sessionId);
     const profile = await this.loadProfile(caller, session.profileId);
     if ((profile.mode ?? "enrolled_hosts") !== (session.mode ?? "enrolled_hosts")) throw new CloudBrowserError("invalid_profile", "Browser session mode no longer matches its owner profile.");
@@ -221,6 +228,7 @@ export class CloudBrowserService {
     try {
       const current = await this.sessionFor(caller, sessionId);
       if (current.effectUnknown) throw new CloudBrowserError("effect_unknown", "A previous browser tab operation has an unknown result; reconcile the session before continuing.");
+      if (current.sensitiveOutputSuppressed) throw new CloudBrowserError('sensitive_output_denied', 'Ordinary browser output and actions are unavailable during sensitive authentication.');
       if (action.type === 'capture' && (profile.persistent || Boolean(profile.providerProfileId) || current.sensitiveOutputSuppressed)) {
         throw new CloudBrowserError('sensitive_output_denied', 'Browser capture is unavailable for persistent or output-suppressed sessions.');
       }
@@ -238,7 +246,7 @@ export class CloudBrowserService {
       };
       const mayRunWithoutSelection = (action.type === "tab_create" || action.type === "tab_select") && current.selectedTargetId === null;
       if (action.type !== "navigate" && !mayRunWithoutSelection) await checkCurrentPage();
-      const effectIntent = action.type === "tab_create" || action.type === "tab_close";
+      const effectIntent = action.type === "tab_create" || action.type === "tab_close" || action.type === 'upload';
       const captureIntent = action.type === 'capture';
       if (effectIntent) {
         current.effectUnknown = true;
@@ -256,6 +264,7 @@ export class CloudBrowserService {
             observation: CloudBrowserObservation | null;
             pageReceipt?: import("./page-controls.js").BrowserPageReceipt;
             capture?: import('./captures.js').BrowserCapturedArtifact;
+            fileReceipt?: import('./provider-files.js').BrowserFileTransferReceipt;
           };
       try {
         if (action.type !== "wait_for") result = await this.transport.execute(current, action, remainingSeconds());
@@ -286,7 +295,7 @@ export class CloudBrowserService {
       try {
         if (!(action.type === "tab_close" && execution.pageReceipt?.selectedTargetId === null)) currentPage = action.type === "snapshot" ? observation : await checkCurrentPage();
       } catch (error) {
-        if (action.type === "tab_create" || action.type === "tab_close") {
+        if (effectIntent) {
           current.effectUnknown = true;
           if (!effectIntent) current.actionsUsed += 1;
           await this.store.saveSessionUnderLock(current, lockOwner);
@@ -294,6 +303,9 @@ export class CloudBrowserService {
         throw error;
       }
       if (currentPage) assertObservationHost(currentPage, current.allowedHosts, current.mode);
+      if (action.type === 'upload' && (!execution.fileReceipt || execution.fileReceipt.status !== 'attached')) {
+        throw new CloudBrowserError('file_transfer_uncertain', 'Browser file attachment did not return verified evidence.');
+      }
       if (action.type === 'capture') {
         if (!execution.capture) throw new CloudBrowserError('capture_failed', 'The browser capture could not be completed.');
         try { captureMetadata = await this.store.createCapture(caller, sessionId, execution.capture, this.now()); }
@@ -309,7 +321,7 @@ export class CloudBrowserService {
         },
         lockOwner,
       );
-      return captureMetadata ?? execution.pageReceipt ?? (action.type === "snapshot" ? currentPage : observation);
+      return captureMetadata ?? execution.fileReceipt ?? execution.pageReceipt ?? (action.type === "snapshot" ? currentPage : observation);
     } finally {
       await this.store.releaseSessionLock(sessionId, lockOwner);
     }
@@ -375,7 +387,13 @@ export class CloudBrowserService {
   private async sessionFor(caller: string, sessionId: string, allowExpired = false): Promise<CloudBrowserSession> {
     const session = await this.store.loadSession(sessionId);
     if (!session || session.owner !== caller) throw new CloudBrowserError("owner_forbidden", "Session is unavailable to this caller.");
-    if (!allowExpired && session.expiresAt <= this.now()) throw new CloudBrowserError("session_expired", "Session expired and must be stopped before a new session starts.");
+    if (!allowExpired && session.expiresAt <= this.now()) {
+      const store = this.store as Parameters<typeof cleanupExpiredBrowserSession>[0]['store'];
+      if (typeof store.claimExpiredSessionCleanup === 'function' && typeof store.deleteExpiredSessionUnderLock === 'function') {
+        await cleanupExpiredBrowserSession({ store, transport: this.transport, sessionId, owner: caller, now: this.now() }).catch(() => undefined);
+      }
+      throw new CloudBrowserError("session_expired", "Session expired; owned cleanup was attempted when supported. Start a new session.");
+    }
     return session;
   }
 

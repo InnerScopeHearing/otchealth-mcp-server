@@ -187,9 +187,10 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     await this.call("PutItem", {
       TableName: this.tableName,
       Item: profileItem(profile),
-      ConditionExpression: "attribute_not_exists(pk) OR #owner = :owner",
+      // PutItem replaces the whole item, so same-owner rewrites must not erase a live profile lease.
+      ConditionExpression: "attribute_not_exists(pk) OR (#owner = :owner AND (attribute_not_exists(lockUntil) OR lockUntil < :now))",
       ExpressionAttributeNames: { "#owner": "owner" },
-      ExpressionAttributeValues: { ":owner": { S: profile.owner } },
+      ExpressionAttributeValues: { ":owner": { S: profile.owner }, ":now": { N: String(this.now()) } },
     });
   }
   async loadSession(sessionId: string): Promise<CloudBrowserSession | null> {
@@ -239,6 +240,38 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
       TableName: this.tableName,
       Key: { pk: { S: `SESSION#${sessionId}` } },
     });
+  }
+  /** Atomically claim a known expired session only while its owner and expiry still match. */
+  async claimExpiredSessionCleanup(sessionId: string, owner: string, now: number, lockOwner: string, until: number): Promise<boolean> {
+    try {
+      await this.call("UpdateItem", {
+        TableName: this.tableName,
+        Key: { pk: { S: `SESSION#${sessionId}` } },
+        UpdateExpression: "SET lockOwner = :lockOwner, lockUntil = :until",
+        ConditionExpression: "attribute_exists(pk) AND #owner = :owner AND expiresAt <= :now AND (attribute_not_exists(lockUntil) OR lockUntil < :now)",
+        ExpressionAttributeNames: { "#owner": "owner" },
+        ExpressionAttributeValues: {
+          ":owner": { S: owner }, ":now": { N: String(now) },
+          ":lockOwner": { S: lockOwner }, ":until": { N: String(until) },
+        },
+      });
+      return true;
+    } catch { return false; }
+  }
+  /** Delete only the exact expired session still fenced by this cleanup lease. */
+  async deleteExpiredSessionUnderLock(sessionId: string, owner: string, lockOwner: string, now: number): Promise<boolean> {
+    try {
+      await this.call("DeleteItem", {
+        TableName: this.tableName,
+        Key: { pk: { S: `SESSION#${sessionId}` } },
+        ConditionExpression: "#owner = :owner AND lockOwner = :lockOwner AND expiresAt <= :now",
+        ExpressionAttributeNames: { "#owner": "owner" },
+        ExpressionAttributeValues: {
+          ":owner": { S: owner }, ":lockOwner": { S: lockOwner }, ":now": { N: String(now) },
+        },
+      });
+      return true;
+    } catch { return false; }
   }
   async acquireSessionLock(sessionId: string, owner: string, until: number): Promise<boolean> {
     try {

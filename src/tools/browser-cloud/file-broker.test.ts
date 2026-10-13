@@ -23,8 +23,9 @@ type BrokerApi = {
   stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }): Promise<BrowserFileRecord>;
   get(owner: string, fileId: string): Promise<BrowserFileRecord>;
   verifyUpload(owner: string, fileId: string, evidence: { sha256: string; byteLength: number; completed: boolean }): Promise<{ verified: true }>;
+  forUpload(owner: string, fileId: string): Promise<{ record: BrowserFileRecord; body: Uint8Array }>;
 };
-type BrokerConstructor = new (store: BrowserFileStore, options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; now?: () => number }) => BrokerApi;
+type BrokerConstructor = new (store: BrowserFileStore, options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; allowValidatedText?: boolean; now?: () => number }) => BrokerApi;
 
 const brokerPath = new URL('./file-broker.js', import.meta.url).href;
 const fileBrokerApi = await import('./file-broker.js').catch((error: unknown) => {
@@ -100,6 +101,22 @@ test('fails closed to quarantine when no scanner is configured', async () => {
   const result = await files.stage('cfo', { filename: 'upload.txt', contentType: 'text/plain', body: textBody });
   assert.equal(result.status, 'quarantined');
   assert.equal(store.rows.size, 1);
+});
+
+test('opt-in validated text is ready without claiming a scan; defaults, invalid text, and scanner denials stay fail-closed', async () => {
+  const store = new MemoryFileStore();
+  assert.ok(BrowserFileBroker, 'file broker capability missing');
+  const files = new BrowserFileBroker(store, { allowValidatedText: true, now: () => 1_800_000_000_000 });
+  const staged = await files.stage('cfo', { filename: 'quarterly.csv', contentType: 'text/csv', body: textBody });
+  assert.equal(staged.status, 'ready');
+  assert.equal((await files.forUpload('cfo', staged.id)).record.sha256, sha(textBody));
+  await assert.rejects(files.stage('cfo', { filename: 'malformed.txt', contentType: 'text/plain', body: new Uint8Array([0xc3, 0x28]) }));
+  await assert.rejects(files.stage('cfo', { filename: 'active.txt', contentType: 'text/plain', body: new TextEncoder().encode('<!doctype html>') }));
+
+  const infected = new BrowserFileBroker(new MemoryFileStore(), { allowValidatedText: true, scanner: { scan: async () => 'infected' }, now: () => 1_800_000_000_000 });
+  const quarantined = await infected.stage('cfo', { filename: 'infected.csv', contentType: 'text/csv', body: textBody });
+  assert.equal(quarantined.status, 'quarantined');
+  await assert.rejects(infected.forUpload('cfo', quarantined.id));
 });
 
 test('rejects traversal, hidden path components, NUL, executable and active or archive MIME types', async () => {
@@ -201,4 +218,22 @@ test('verifies only a complete receipt with matching owner, hash, and byte lengt
   await assert.rejects(files.verifyUpload('cfo', staged.id, { sha256: staged.sha256, byteLength: staged.byteLength, completed: false }), /partial|complete/i);
   await assert.rejects(files.verifyUpload('cfo', staged.id, { sha256: '0'.repeat(64), byteLength: staged.byteLength, completed: true }), /hash|digest/i);
   await assert.rejects(files.verifyUpload('cfo', staged.id, { sha256: staged.sha256, byteLength: staged.byteLength - 1, completed: true }), /length|size|byte/i);
+});
+
+test('provider upload read returns an owner-bound verified copy only for an unexpired ready file', async () => {
+  let now = 1_800_000_000_000;
+  const { store, broker: files } = broker(new MemoryFileStore(), cleanScanner, () => now);
+  const staged = await files.stage('cfo', { filename: 'quarterly.csv', contentType: 'text/csv', body: textBody });
+  const resolved = await files.forUpload('cfo', staged.id);
+  assert.deepEqual(resolved.record, staged);
+  assert.deepEqual(resolved.body, textBody);
+  resolved.body[0] ^= 0xff;
+  assert.deepEqual((await files.forUpload('cfo', staged.id)).body, textBody, 'caller cannot mutate stored bytes through the provider port');
+  await assert.rejects(files.forUpload('coo', staged.id), /owner/i);
+
+  const quarantined = await broker(new MemoryFileStore(), { scan: async () => 'infected' }, () => now).broker.stage('cfo', { filename: 'quarantine.csv', contentType: 'text/csv', body: textBody });
+  await assert.rejects(files.forUpload('cfo', quarantined.id));
+
+  now = staged.expiresAt;
+  await assert.rejects(files.forUpload('cfo', staged.id), /expired/i);
 });

@@ -323,6 +323,80 @@ test('CDP accepts a bounded complete 4 MiB screenshot and denies password contro
   assert.equal(commands.includes('Page.captureScreenshot'), false);
 });
 
+test('provider upload action resolves owner bytes and attaches them through fixed CDP file-input calls', async (t) => {
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const body = new TextEncoder().encode('name,value\nexample,1\n');
+  const { createHash } = await import('node:crypto');
+  const record = { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', owner: 'cfo', filename: 'report.csv', contentType: 'text/csv', byteLength: body.byteLength, sha256: createHash('sha256').update(body).digest('hex'), status: 'ready' as const, expiresAt: Date.now() + 60_000 };
+  const commands: Array<{ method: string; params: Record<string, unknown>; sessionId?: string }> = [];
+  let corruptFileReadback = false;
+  let rejectFileInputType = false;
+  class Socket extends EventTarget {
+    send(raw: string) {
+      const cmd = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown>; sessionId?: string };
+      commands.push(cmd);
+      let result: Record<string, unknown> = {};
+      if (cmd.method === 'Target.getTargets') result = { targetInfos: [{ type: 'page', targetId: 'owned-target' }] };
+      if (cmd.method === 'Target.attachToTarget') result = { sessionId: 'page-session' };
+      if (cmd.method === 'DOM.enable' || cmd.method === 'DOM.getDocument') result = {};
+      if (cmd.method === 'DOM.performSearch') result = { searchId: 'search', resultCount: 1 };
+      if (cmd.method === 'DOM.getSearchResults') result = { nodeIds: [7] };
+      if (cmd.method === 'DOM.describeNode') result = { node: { nodeName: 'INPUT', attributes: ['type', 'file', 'accept', rejectFileInputType ? '.pdf' : '.csv'] } };
+      if (cmd.method === 'DOM.resolveNode') result = { object: { objectId: 'input-object' } };
+      if (cmd.method === 'Runtime.callFunctionOn') {
+        const declaration = String(cmd.params.functionDeclaration);
+        if (declaration.includes('this instanceof HTMLInputElement') && declaration.includes('this.isConnected')) result = { result: { value: true } };
+        else if (declaration.includes('return []')) result = { result: { objectId: 'parts-object' } };
+        else if (declaration.includes('this.push(bytes)')) result = { result: { value: 1 } };
+        else if (declaration.includes('this.files = transfer.files')) result = { result: { value: true } };
+        else if (declaration.includes('this.files && this.files[0]')) result = { result: { objectId: 'file-object' } };
+        else if (declaration.includes('return { name:this.name, size:this.size, type:this.type }')) result = { result: { value: { name: record.filename, size: record.byteLength, type: record.contentType } } };
+        else if (declaration.includes('function(offset,length)')) {
+          const returned = Buffer.from(body);
+          if (corruptFileReadback) returned[0] = returned[0]! ^ 0xff;
+          result = { result: { value: { offset: Number((cmd.params.arguments as Array<{ value: number }>)[0]!.value), base64: returned.toString('base64') } } };
+        }
+      }
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ id: cmd.id, result }) })));
+    }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  const factory = () => { const socket = new Socket(); queueMicrotask(() => socket.dispatchEvent(new Event('open'))); return socket as unknown as WebSocket; };
+  const resolvedOwners: string[] = [];
+  let resolverUnavailable = false;
+  const resolver = async (owner: string, fileId: string) => {
+    resolvedOwners.push(owner);
+    assert.equal(fileId, record.id);
+    if (resolverUnavailable) throw new Error('private storage detail must not escape');
+    return { record, body };
+  };
+  const transport = new AgentCoreCloudBrowserTransport('us-east-1', fetch, factory, undefined, undefined, resolver);
+  const owned = { ...session, owner: 'cfo', sessionId: 'local', expiresAt: Date.now() + 60_000, ownedTargetIds: ['owned-target'], selectedTargetId: 'owned-target' } as CloudBrowserSession;
+  owned.effectUnknown = true; // Simulate the durable pre-dispatch intent persisted by CloudBrowserService.
+  resolverUnavailable = true;
+  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10), (error: unknown) => (error as { code?: unknown }).code === 'file_unavailable');
+  assert.equal(owned.effectUnknown, false, 'known pre-assignment resolver failure clears the upload intent');
+  resolverUnavailable = false;
+  const result = await transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10) as { fileReceipt?: { status: string; sha256: string } };
+  assert.deepEqual(result.fileReceipt, { status: 'attached', filename: record.filename, contentType: record.contentType, byteLength: record.byteLength, sha256: record.sha256 });
+  assert.deepEqual(resolvedOwners, ['cfo', 'cfo']);
+  assert.ok(commands.some((command) => command.method === 'Runtime.callFunctionOn' && String(command.params.functionDeclaration).includes('this.files = transfer.files')));
+  assert.equal(commands.some((command) => command.method === 'Runtime.evaluate'), false);
+  assert.ok(commands.filter((command) => command.method === 'Runtime.callFunctionOn').every((command) => command.sessionId === 'page-session'));
+  owned.effectUnknown = true;
+  rejectFileInputType = true;
+  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10), (error: unknown) => (error as { code?: unknown }).code === 'file_input_type_rejected');
+  assert.equal(owned.effectUnknown, false, 'known pre-assignment rejection clears the upload intent');
+  rejectFileInputType = false;
+  owned.effectUnknown = true;
+  corruptFileReadback = true;
+  await assert.rejects(transport.execute(owned, { type: 'upload', selector: 'input[type=file]', fileId: record.id }, 10), (error: unknown) => (error as { code?: unknown }).code === 'file_transfer_uncertain');
+  assert.equal(owned.effectUnknown, true, 'a post-dispatch readback failure preserves the uncertainty fence');
+});
+
 test("creating a tab with no selection activates it for the required post-action observation", async (t) => {
   const saved = { ...process.env };
   t.after(() => {

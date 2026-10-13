@@ -96,7 +96,7 @@ test("profile persistence aliases the DynamoDB reserved owner attribute in its c
   const store = new DynamoCloudBrowserSessionStore("synthetic-browser-state", "us-east-1", async (_url, init) => {
     body = String(init?.body);
     return new Response("{}", { status: 200 });
-  });
+  }, () => 42_000);
 
   await store.saveProfile({
     profileId: "cfo-public-trial",
@@ -110,11 +110,37 @@ test("profile persistence aliases the DynamoDB reserved owner attribute in its c
     ExpressionAttributeNames?: unknown;
     ExpressionAttributeValues?: unknown;
   };
-  assert.equal(request.ConditionExpression, "attribute_not_exists(pk) OR #owner = :owner");
+  assert.equal(request.ConditionExpression, "attribute_not_exists(pk) OR (#owner = :owner AND (attribute_not_exists(lockUntil) OR lockUntil < :now))");
   assert.deepEqual(request.ExpressionAttributeNames, { "#owner": "owner" });
   assert.deepEqual(request.ExpressionAttributeValues, {
     ":owner": { S: "cfo" },
+    ":now": { N: "42000" },
   });
+});
+
+test('expired-session cleanup claim and delete are owner, expiry, and lease fenced', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const requests: Record<string, any>[] = [];
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return new Response('{}');
+  });
+
+  assert.equal(await store.claimExpiredSessionCleanup('session-1', 'developer', 100_000, 'recovery-token', 130_000), true);
+  const claim = requests.at(-1)!;
+  assert.equal(claim.UpdateExpression, 'SET lockOwner = :lockOwner, lockUntil = :until');
+  assert.match(claim.ConditionExpression, /#owner = :owner/);
+  assert.match(claim.ConditionExpression, /expiresAt <= :now/);
+  assert.match(claim.ConditionExpression, /lockUntil < :now/);
+  assert.deepEqual(claim.Key, { pk: { S: 'SESSION#session-1' } });
+
+  assert.equal(await store.deleteExpiredSessionUnderLock('session-1', 'developer', 'recovery-token', 100_000), true);
+  const deletion = requests.at(-1)!;
+  assert.equal(deletion.ConditionExpression, '#owner = :owner AND lockOwner = :lockOwner AND expiresAt <= :now');
+  assert.deepEqual(deletion.Key, { pk: { S: 'SESSION#session-1' } });
 });
 
 test("public profile and provider browser binding survive durable round-trip", async (t) => {

@@ -8,6 +8,8 @@ import type { BrowserCaptureMetadata } from '../browser-cloud/contract.js';
 import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from "../browser-cloud/service.js";
 import { CloudBrowserJobs, type CloudBrowserArtifactStore, type CloudBrowserWorkerQueue } from "../browser-cloud-jobs/contracts.js";
 import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from "../browser-cloud-jobs/worker.js";
+import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
+import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 
 const actionSchema = cloudBrowserActionSchema;
 const planSchema = z
@@ -110,10 +112,30 @@ export interface CloudBrowserGatewayRuntime {
   jobs: CloudBrowserJobs;
   queue: CloudBrowserWorkerQueue;
   artifacts: CloudBrowserArtifactStore;
+  files?: Pick<BrowserFileBroker, 'stage' | 'get'>;
 }
 /** Register narrow MCP tools. Owner identity always comes from ToolContext.callerAgent. */
 export function registerCloudBrowserTools(server: McpServer, callerHash: CallerHashProvider, runtime: CloudBrowserGatewayRuntime): void {
   const live = () => cloudBrowserRuntimeStatus().enabled;
+  registerTool(server, {
+    name: 'browser_cloud_file_stage', category: 'write_simple',
+    annotations: { title: 'Cloud browser: stage an owned upload file', description: 'Stages bounded file bytes privately for this caller. Validated UTF-8 text can be attached to a file input; binary files remain quarantined without a configured scanner. Staging is not a completed website upload.', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    inputShape: { filename: z.string().min(1).max(128), content_type: z.enum(['text/plain', 'text/csv', 'application/pdf', 'image/png', 'image/jpeg']), body_base64: z.string().min(4).max(4_000_000).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/) },
+    outputShape: { file_id: z.string().optional(), status: z.enum(['ready', 'quarantined', 'partial']).optional(), content_type: z.string().optional(), byte_length: z.number().optional(), sha256: z.string().optional(), expires_at: z.number().optional(), error: z.string().optional() },
+    redactInputForLog: () => ({ operation: 'browser_cloud_file_stage', input: '[redacted file bytes and metadata]' }),
+    shieldInputForScan: () => ({ operation: 'browser_cloud_file_stage' }),
+    handler: async (input, ctx) => {
+      if (!live()) return unavailable();
+      if (ctx.dryRun) return { data: { dry_run: true }, summary: 'File staging was not executed.' };
+      if (!runtime.files) return { data: { error: 'file_store_unavailable' }, summary: 'Browser file storage is not configured.' };
+      try {
+        const body = Buffer.from(input.body_base64, 'base64');
+        if (body.toString('base64') !== input.body_base64) return { data: { error: 'invalid_file_encoding' }, summary: 'File bytes must have a canonical encoding.' };
+        const record = await runtime.files.stage(ctx.callerAgent, { filename: input.filename, contentType: input.content_type, body });
+        return { data: { file_id: record.id, status: record.status, content_type: record.contentType, byte_length: record.byteLength, sha256: record.sha256, expires_at: record.expiresAt }, summary: record.status === 'ready' ? 'Owner-bound validated text file staged for browser attachment. No antivirus or completed website upload is claimed.' : 'File staged privately in quarantine; it is not cleared for browser attachment.' };
+      } catch (e) { return error(e); }
+    },
+  }, callerHash);
   registerTool(
     server,
     {
@@ -506,6 +528,8 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         created_target_id: z.string().optional(),
         closed_target_id: z.string().optional(),
         selected_target_id: z.string().nullable().optional(),
+        file_id: z.string().optional(),
+        file_status: z.literal('attached').optional(),
         error: z.string().optional(),
       },
       redactInputForLog: redactCloudBrowserInputForLog,
@@ -527,6 +551,11 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             const capture = result as BrowserCaptureMetadata | null;
             if (!capture || typeof capture.id !== 'string' || capture.owner !== ctx.callerAgent) throw new Error('capture_result_invalid');
             return { data: { ok: true, capture_id: capture.id, content_type: capture.contentType, byte_length: capture.byteLength, sha256: capture.sha256, ...(capture.pageCount === undefined ? {} : { page_count: capture.pageCount }) }, summary: 'Validated browser capture stored as an owner-bound immutable artifact; capture bytes are not returned inline.' };
+          }
+          if (input.action.type === 'upload') {
+            const file = result as BrowserFileTransferReceipt | null;
+            if (!file || file.status !== 'attached' || !Number.isSafeInteger(file.byteLength) || file.byteLength < 1 || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('file_result_invalid');
+            return { data: { ok: true, file_id: input.action.fileId, file_status: 'attached', content_type: file.contentType, byte_length: file.byteLength, sha256: file.sha256 }, summary: 'Staged file attached to the owned browser input and its bytes verified. The website’s final upload completion must be verified separately.' };
           }
           const actionResult = result as { createdTargetId?: string; closedTargetId?: string; selectedTargetId?: string | null } | null;
           return {
