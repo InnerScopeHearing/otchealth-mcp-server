@@ -4,6 +4,8 @@ import test from 'node:test';
 import type { CloudBrowserCdp } from './actions.js';
 
 type BrowserCaptureRequest = { type: 'screenshot'; format?: 'png' | 'jpeg' } | { type: 'pdf'; landscape?: boolean; printBackground?: boolean };
+type CaptureContentType = 'image/png' | 'image/jpeg' | 'application/pdf';
+type BrowserCaptureValidator = (input: { contentType: CaptureContentType; body: Uint8Array }) => { complete: boolean; pageCount?: number } | Promise<{ complete: boolean; pageCount?: number }>;
 let captureModule: typeof import('./captures.js') | undefined;
 try {
   captureModule = await import('./captures.js');
@@ -11,9 +13,9 @@ try {
   if ((error as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw error;
 }
 
-function captureBrowserArtifact(...args: Parameters<NonNullable<typeof captureModule>['captureBrowserArtifact']>) {
+function captureBrowserArtifact(cdp: CloudBrowserCdp, page: string, input: BrowserCaptureRequest, remaining: () => number, validator: BrowserCaptureValidator | undefined = syntheticFixtureValidator) {
   assert.ok(captureModule?.captureBrowserArtifact, 'capture capability missing');
-  return captureModule.captureBrowserArtifact(...args);
+  return captureModule.captureBrowserArtifact(cdp, page, input, remaining, validator);
 }
 
 class RecordingCdp implements CloudBrowserCdp {
@@ -31,7 +33,16 @@ class RecordingCdp implements CloudBrowserCdp {
 const base64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/WZkAAAAASUVORK5CYII=', 'base64'));
+const markerPng = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44]);
+const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]);
 const pdf = new TextEncoder().encode('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n');
+
+// Synthetic test stub only: production must inject an independently trusted parser.
+const syntheticFixtureValidator: BrowserCaptureValidator = ({ contentType, body }) => {
+  const expected = contentType === 'image/png' ? png : contentType === 'image/jpeg' ? jpeg : contentType === 'application/pdf' ? pdf : undefined;
+  const complete = expected !== undefined && Buffer.from(body).equals(Buffer.from(expected));
+  return { complete, ...(contentType === 'application/pdf' && complete ? { pageCount: 1 } : {}) };
+};
 
 test('screenshot capture returns the verified PNG bytes, MIME type and SHA-256', async () => {
   const cdp = new RecordingCdp();
@@ -52,7 +63,6 @@ test('screenshot capture returns the verified PNG bytes, MIME type and SHA-256',
 
 test('JPEG screenshot uses only the typed JPEG protocol parameters', async () => {
   const cdp = new RecordingCdp();
-  const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]);
   cdp.result = { data: base64(jpeg) };
 
   const artifact = await captureBrowserArtifact(cdp, 'tab-1', { type: 'screenshot', format: 'jpeg' }, () => 3);
@@ -70,7 +80,7 @@ test('PDF capture requests a base64 print result and returns verified complete P
   assert.equal(artifact.contentType, 'application/pdf');
   assert.deepEqual(artifact.body, pdf);
   assert.equal(artifact.sha256, hash(pdf));
-  assert.equal(artifact.pageCount, undefined);
+  assert.equal(artifact.pageCount, 1);
   assert.equal(cdp.calls[0]?.method, 'Page.printToPDF');
   assert.deepEqual(cdp.calls[0]?.params, { landscape: true, printBackground: true, transferMode: 'ReturnAsBase64' });
 });
@@ -127,4 +137,51 @@ test('rejects unknown request properties instead of passing arbitrary CDP parame
   const malicious = { type: 'screenshot', method: 'Runtime.evaluate', expression: '1' } as unknown as BrowserCaptureRequest;
   await assert.rejects(captureBrowserArtifact(cdp, 'tab', malicious, () => 1), /capture/i);
   assert.equal(cdp.calls.length, 0);
+});
+
+test('fails closed before invoking CDP when the trusted structural validator is missing', async () => {
+  assert.ok(captureModule?.captureBrowserArtifact, 'capture capability missing');
+  const cdp = new RecordingCdp();
+  cdp.result = { data: base64(png) };
+
+  await assert.rejects(captureModule.captureBrowserArtifact(cdp, 'tab', { type: 'screenshot' }, () => 1), error => {
+    assert.equal((error as { code?: string }).code, 'capture_verifier_unavailable');
+    assert.doesNotMatch(String(error), /validator|provider|secret/i);
+    return true;
+  });
+  assert.equal(cdp.calls.length, 0);
+});
+
+test('marker-only JPEG and PDF bytes are rejected by a negative independent validator', async () => {
+  for (const [input, bytes] of [
+    [{ type: 'screenshot', format: 'png' }, markerPng],
+    [{ type: 'screenshot', format: 'jpeg' }, jpeg],
+    [{ type: 'pdf' }, pdf],
+  ] as const) {
+    const cdp = new RecordingCdp();
+    cdp.result = { data: base64(bytes) };
+    const negativeValidator: BrowserCaptureValidator = () => ({ complete: false });
+
+    await assert.rejects(captureBrowserArtifact(cdp, 'tab', input, () => 1, negativeValidator), /capture/i);
+    assert.equal(cdp.calls.length, 1);
+  }
+});
+
+test('redacts validator exceptions and rejects PDF page counts outside 1..100', async () => {
+  const cdp = new RecordingCdp();
+  cdp.result = { data: base64(png) };
+  const throwingValidator: BrowserCaptureValidator = () => { throw new Error('validator leaked private parser detail'); };
+  await assert.rejects(captureBrowserArtifact(cdp, 'tab', { type: 'screenshot' }, () => 1, throwingValidator), error => {
+    assert.equal((error as { code?: string }).code, 'capture_verification_failed');
+    assert.doesNotMatch(String(error), /private parser detail/);
+    assert.doesNotMatch(String(error), /secret-session-token/);
+    return true;
+  });
+
+  for (const pageCount of [undefined, 0, 101, 1.5, Number.NaN]) {
+    const pdfCdp = new RecordingCdp();
+    pdfCdp.result = { data: base64(pdf) };
+    const invalidCountValidator: BrowserCaptureValidator = () => ({ complete: true, ...(pageCount === undefined ? {} : { pageCount }) });
+    await assert.rejects(captureBrowserArtifact(pdfCdp, 'tab', { type: 'pdf' }, () => 1, invalidCountValidator), /capture/i);
+  }
 });

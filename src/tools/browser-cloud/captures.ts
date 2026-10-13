@@ -15,9 +15,19 @@ export interface BrowserCapturedArtifact {
   contentType: 'image/png' | 'image/jpeg' | 'application/pdf';
   body: Uint8Array;
   sha256: string;
-  /** Omitted unless a future parser can verify the PDF page tree structurally. */
+  /** Present only when the trusted PDF validator has verified the page tree. */
   pageCount?: number;
 }
+
+export interface BrowserCaptureValidationResult {
+  complete: boolean;
+  /** Required for PDFs and must come from structural page-tree validation. */
+  pageCount?: number;
+}
+
+/** Trusted internal adapter, never a caller supplied browser/tool parameter. */
+export type BrowserCaptureValidator = (input: Pick<BrowserCapturedArtifact, 'contentType' | 'body'>) =>
+  BrowserCaptureValidationResult | Promise<BrowserCaptureValidationResult>;
 
 function invalidCapture(): CloudBrowserError {
   return new CloudBrowserError('invalid_capture', 'Browser capture request or response is invalid.');
@@ -25,6 +35,10 @@ function invalidCapture(): CloudBrowserError {
 
 function captureFailed(): CloudBrowserError {
   return new CloudBrowserError('capture_failed', 'The browser capture could not be completed.');
+}
+
+function verificationFailed(): CloudBrowserError {
+  return new CloudBrowserError('capture_verification_failed', 'The browser capture could not be verified as complete.');
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -99,9 +113,11 @@ export async function captureBrowserArtifact(
   page: string,
   input: BrowserCaptureRequest,
   remaining: () => number,
+  validator?: BrowserCaptureValidator,
 ): Promise<BrowserCapturedArtifact> {
   const request = validateRequest(input);
   if (typeof page !== 'string' || page.length === 0 || page.length > MAX_PAGE_ID_LENGTH || /[\u0000-\u001f]/.test(page)) throw invalidCapture();
+  if (typeof validator !== 'function') throw new CloudBrowserError('capture_verifier_unavailable', 'Browser capture validation is unavailable.');
 
   let timeout: number;
   try { timeout = remaining(); } catch { throw captureFailed(); }
@@ -120,6 +136,17 @@ export async function captureBrowserArtifact(
   try { body = decodeBase64(response.data); }
   catch { throw invalidCapture(); }
   const contentType = verifyFormat(body, request);
+  let pageCount: number | undefined;
+  try {
+    const validation = await validator({ contentType, body: Uint8Array.from(body) });
+    if (validation === null || typeof validation !== 'object' || !hasOnlyKeys(validation as unknown as Record<string, unknown>, ['complete', 'pageCount']) || validation.complete !== true) throw verificationFailed();
+    if (contentType === 'application/pdf') {
+      if (!Number.isSafeInteger(validation.pageCount) || validation.pageCount! < 1 || validation.pageCount! > 100) throw verificationFailed();
+      pageCount = validation.pageCount;
+    } else if (validation.pageCount !== undefined) {
+      throw verificationFailed();
+    }
+  } catch { throw verificationFailed(); }
   const sha256 = createHash('sha256').update(body).digest('hex');
-  return { contentType, body, sha256 };
+  return { contentType, body, sha256, ...(pageCount === undefined ? {} : { pageCount }) };
 }
