@@ -33,9 +33,30 @@ Acceptance requires: discover tools, start owned session, navigate, read, perfor
 
 ## Limits and remaining scope
 
-This initial provider supports bounded navigate/click/type/wait/observation operations. It is not yet full desktop control. File upload/download, image screenshots, a user-facing sign-in/live-view flow, broader background plans, and Daytona transport require separate implementation and acceptance. The existing Daytona Linux desktop trial does not prove Chat MCP integration. No 64 GiB Windows desktop or vendor capacity request is part of this rollout.
+The browser foundation adds typed right-click, double-click, keyboard/shortcut, scroll, pointer-move and bounded drag operations to navigate/click/type/wait/observation. These are source capabilities, not proof of live provider or client support. It is not yet full desktop control. File upload/download, image screenshots, a user-facing sign-in/live-view flow, broader background plans, and Daytona transport require separate implementation and acceptance. The existing Daytona Linux desktop trial does not prove Chat MCP integration. No 64 GiB Windows desktop or vendor capacity request is part of this rollout.
 
 Runtime limits are 180 seconds per session, 20 actions and 10 sessions per owner per UTC day. These are initial trial limits, not a promise of unlimited access or an account-wide dollar cap. Monitor actual gross AWS usage before increasing them. Disable the worker and browser feature flags to stop new dispatch, reconcile active sessions, and restore the prior ECS task definition if acceptance fails.
 
 Trial budget note: the ten daily session slots count start attempts, including provider failures. Reservation occurs before the provider call so concurrent attempts cannot bypass the cost bound. This is an attempt limit, not a guarantee of ten successful sessions. Durable job errors after possible external effects are recorded as needs_reconciliation before queue acknowledgement; pre-effect expiry retains its delivery for retry.
+
+## Foundation candidate — 2026-10-13
+
+Job submission now shares the 180-second session ceiling. A job may be claimed at most three times. An exhausted pre-effect job is terminally failed and its duplicate queue delivery performs no browser work; unknown or already-succeeded effects retain reconciliation status rather than becoming replayable failures.
+
+Interaction input uses a strict typed schema, with finite key names, modifier bounds, bounded coordinates/deltas and at most 20 drag steps. Callers cannot supply JavaScript or arbitrary CDP methods. Each double-click emits the initial click and then the second click; Enter/printable keys include text unless a command modifier suppresses it. A single cleanup attempt releases held input even after a lost acknowledgement or expired action deadline, is capped at one second, and preserves any primary failure. A failed drag releases at its last attempted position, not automatically at the intended destination. Cleanup is not proof that an uncertain external effect did not occur.
+
+| Capability | Source / local verification | Candidate live acceptance |
+|---|---|---|
+| Duration consistency; finite retry ceiling | Implemented; gateway/job/worker regression tests | Pending immutable-image and ECS acceptance |
+| Right/double click; keyboard; scroll; move; drag | Implemented; typed input and failure-cleanup tests | Pending AgentCore and each actual client |
+| Exact HTTPS host and session-owner checks | Preserved; regression tests | Existing example-only trial is not broad-web proof |
+| General public-web access | Not activated | Blocked on full-session network containment proof |
+| Saved account credentials / sign-in UI | Existing opaque profile references only; no credential broker or enrollment | Pending authorized account binding and reconnect tests |
+| Tabs; screenshots; upload/download; PDF/export | Not implemented in this foundation | Pending implementation and synthetic acceptance |
+| Physical printing | Not implemented | Pending actual printer binding and output receipt |
+| All-agent distribution / recovery | Not established by this candidate | Pending independent same-seat/client receipts |
+
+Do not replace exact host lists with a wildcard or claim general public access from a successful navigation alone. Full-session enforcement must block private IPv4/IPv6, loopback, link-local/metadata and rebinding destinations before connections, including redirects, background requests and new tabs. Provider metadata and post-navigation URL checks do not establish this boundary. A separate isolated-egress implementation and cost review is required if the managed provider cannot establish it.
+
+The existing ECS task definition and pinned image digest must be captured immediately before any release and retained as rollback targets. At the read-only preflight the queue had no redrive policy; an empty approximate queue does not prove pending outbox dispatch is empty. Reconcile those recovery facts independently, and do not treat local build or PR CI as deployment.
 

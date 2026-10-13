@@ -17,6 +17,58 @@ function harness() {
   return { api, queued, tick: (ms: number) => { now += ms; } };
 }
 
+test('safe pre-effect failures cannot consume browser attempts indefinitely', async () => {
+  const h = harness();
+  const { job } = await h.api.submit({ agent: 'cto', idempotencyKey: 'bounded:attempts', request: {} });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    assert.equal((await h.api.claim(job.id, 'cto', 1_000)).attempts, attempt);
+    h.tick(1_001);
+  }
+  await assert.rejects(h.api.claim(job.id, 'cto', 1_000), /job_terminal/);
+  const exhausted = await h.api.get(job.id, 'cto');
+  assert.equal(exhausted.status, 'failed');
+  assert.equal(exhausted.errorCode, 'retry_limit_reached');
+  assert.equal(exhausted.attempts, 3);
+  assert.equal(exhausted.leaseOwner, null);
+  await assert.rejects(h.api.claim(job.id, 'cfo', 1_000), /job_owner_mismatch/);
+});
+
+test('an uncertain final attempt remains reconciliation work, never a safe failed retry', async () => {
+  const h = harness();
+  const { job } = await h.api.submit({ agent: 'cto', idempotencyKey: 'bounded:uncertain', request: {} });
+  for (let attempt = 1; attempt <= 2; attempt++) { await h.api.claim(job.id, 'cto', 1_000); h.tick(1_001); }
+  const run = await h.api.claim(job.id, 'cto', 1_000);
+  await h.api.beginExternalEffect(job.id, 'cto', run.leaseToken, 'navigate:final');
+  h.tick(1_001);
+  await assert.rejects(h.api.claim(job.id, 'cto', 1_000), /effect_reconciliation_required/);
+  assert.equal((await h.api.get(job.id, 'cto')).status, 'needs_reconciliation');
+});
+
+test('a completed final action is not discarded as a safe exhausted retry', async () => {
+  const h = harness();
+  const { job } = await h.api.submit({ agent: 'cto', idempotencyKey: 'bounded:succeeded', request: {} });
+  for (let attempt = 1; attempt <= 2; attempt++) { await h.api.claim(job.id, 'cto', 1_000); h.tick(1_001); }
+  const run = await h.api.claim(job.id, 'cto', 1_000);
+  await h.api.beginExternalEffect(job.id, 'cto', run.leaseToken, 'navigate:final');
+  await h.api.recordExternalEffectSucceeded(job.id, 'cto', run.leaseToken, 'navigate:final');
+  h.tick(1_001);
+  await assert.rejects(h.api.claim(job.id, 'cto', 1_000), /effect_reconciliation_required/);
+  assert.equal((await h.api.get(job.id, 'cto')).status, 'needs_reconciliation');
+});
+
+test('worker acknowledges an exhausted safe job without a fourth provider execution', async () => {
+  const h = harness();
+  const { job } = await h.api.submit({ agent: 'cto', idempotencyKey: 'bounded:worker', request: {} });
+  let executions = 0; let deletions = 0;
+  const queue = { enqueue: async () => undefined, receive: async () => [{ id: 'm', receipt: 'r', jobId: job.id, agent: 'cto' }], changeVisibility: async () => undefined, delete: async () => { deletions++; } };
+  const worker = new CloudBrowserJobWorker(h.api, queue, { execute: async () => { executions++; throw new Error('synthetic pre-effect failure'); } }, 1_000);
+  for (let attempt = 1; attempt <= 3; attempt++) { await worker.pollOnce(); h.tick(1_001); }
+  await worker.pollOnce();
+  assert.equal(executions, 3);
+  assert.equal(deletions, 1);
+  assert.equal((await h.api.get(job.id, 'cto')).status, 'failed');
+});
+
 test('worker retains pre-effect expired delivery and persists uncertain outcome before deletion', async () => {
   for (const effect of [false, true]) {
     const h = harness(); const { job } = await h.api.submit({ agent: 'cto', idempotencyKey: 'worker:expiry', request: {} });

@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider, type ToolResultPayload } from '../registry.js';
-import type { CloudBrowserAction } from '../browser-cloud/index.js';
+import { CLOUD_BROWSER_MAX_SESSION_SECONDS, type CloudBrowserAction } from '../browser-cloud/contract.js';
 import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from '../browser-cloud/service.js';
+import { cloudBrowserActionSchema } from '../browser-cloud/actions.js';
 import { CloudBrowserJobs, type CloudBrowserArtifactStore, type CloudBrowserWorkerQueue } from '../browser-cloud-jobs/contracts.js';
 import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from '../browser-cloud-jobs/worker.js';
 
-const actionSchema = z.discriminatedUnion('type', [z.object({ type: z.literal('navigate'), url: z.string().url().max(2048) }), z.object({ type: z.literal('click'), selector: z.string().min(1).max(256) }), z.object({ type: z.literal('type'), selector: z.string().min(1).max(256), text: z.string().min(1).max(1024) }), z.object({ type: z.literal('wait_for'), selector: z.string().min(1).max(256) })]);
-const planSchema = z.object({ profile_id: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/), max_seconds: z.number().int().min(1).max(300), actions: z.array(z.discriminatedUnion('type', [z.object({ type: z.literal('navigate'), url: z.string().url().max(2048) }), z.object({ type: z.literal('wait_for'), selector: z.string().min(1).max(256) })])).min(1).max(20) }).strict();
+const actionSchema = cloudBrowserActionSchema;
+const planSchema = z.object({ profile_id: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/), max_seconds: z.number().int().min(1).max(CLOUD_BROWSER_MAX_SESSION_SECONDS), actions: z.array(z.discriminatedUnion('type', [z.object({ type: z.literal('navigate'), url: z.string().url().max(2048) }), z.object({ type: z.literal('wait_for'), selector: z.string().min(1).max(256) })])).min(1).max(20) }).strict();
 type DeterministicPlan = z.infer<typeof planSchema>;
 
 export function redactCloudBrowserInputForLog(input: Record<string, unknown>): unknown {

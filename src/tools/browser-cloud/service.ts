@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { validateCloudBrowserAction } from './actions.js';
 import {
   CLOUD_BROWSER_DAILY_SESSION_LIMIT, CLOUD_BROWSER_MAX_ACTIONS, CLOUD_BROWSER_MAX_ACTION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS,
   type CloudBrowserAction, type CloudBrowserObservation, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore,
@@ -31,16 +32,14 @@ function assertProfile(profile: CloudBrowserProfile): void {
 }
 
 function assertAction(action: CloudBrowserAction, hosts: readonly string[]): void {
+  validateCloudBrowserAction(action);
   if (action.type === 'navigate') {
     let url: URL;
     try { url = new URL(action.url); } catch { throw new CloudBrowserError('invalid_action', 'Navigation URL is invalid.'); }
     if (url.protocol !== 'https:' || url.username || url.password || url.port || !hosts.includes(url.hostname.toLowerCase())) throw new CloudBrowserError('host_forbidden', 'Navigation host is not allowed for this profile.');
     return;
   }
-  if (action.type === 'snapshot') return;
-  const selector = action.selector;
-  if (selector.length === 0 || selector.length > 256 || /[\r\n]/.test(selector)) throw new CloudBrowserError('invalid_action', 'Selector is invalid.');
-  if (action.type === 'type' && (action.text.length > 1_024 || /[\u0000-\u001f]/.test(action.text))) throw new CloudBrowserError('invalid_action', 'Text input is invalid.');
+  // Non-navigation operations share the same strict typed validation as the gateway.
 }
 
 function assertObservationHost(observation: CloudBrowserObservation | null, hosts: readonly string[]): void {
