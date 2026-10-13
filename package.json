@@ -21,7 +21,7 @@
   "dependencies": {
     "@descope/node-sdk": "^2.14.0",
     "@fastify/rate-limit": "10.3.0",
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "dd-trace": "^5.109.0",
     "fastify": "5.12.5",
     "pg": "8.22.0",
@@ -40,7 +40,9 @@
     "fast-uri@^3": "3.1.8",
     "fast-uri@^4": "4.1.5",
     "ip-address": "10.7.1",
-    "hono": "4.13.7"
+    "hono": "4.13.7",
+    "proxy-addr": "2.0.8",
+    "fast-copy": "3.1.0"
   }
 }
 
