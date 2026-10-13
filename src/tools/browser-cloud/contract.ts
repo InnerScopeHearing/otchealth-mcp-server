@@ -2,23 +2,41 @@
  * Cloud browser contract.  The persistence payload deliberately contains no cookie,
  * credential, endpoint, or browser-profile value.  The provider retains those values.
  */
-export const CLOUD_BROWSER_MAX_SESSION_SECONDS = 180;
+/** AgentCore StartBrowserSession documents a maximum TTL of 28,800 seconds. */
+export const CLOUD_BROWSER_MAX_SESSION_SECONDS = 28_800;
+export const CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS = 180;
 export const CLOUD_BROWSER_DAILY_SESSION_LIMIT = 10;
 export const CLOUD_BROWSER_MAX_ACTIONS = 20;
 export const CLOUD_BROWSER_MAX_ACTION_SECONDS = 20;
-export const CLOUD_BROWSER_KEYS = ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'KeyA', 'KeyC', 'KeyV', 'KeyP', 'KeyS', 'KeyF', 'KeyZ', 'F5'] as const;
+export const CLOUD_BROWSER_KEYS = ["Enter", "Tab", "Escape", "Backspace", "Delete", "Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "KeyA", "KeyC", "KeyV", "KeyP", "KeyS", "KeyF", "KeyZ", "F5"] as const;
 
 export type CloudBrowserAction =
-  | import('./page-controls.js').BrowserPageAction
-  | { type: 'navigate'; url: string }
-  | { type: 'click'; selector: string; button?: 'left' | 'right'; clickCount?: 1 | 2 }
-  | { type: 'type'; selector: string; text: string }
-  | { type: 'wait_for'; selector: string }
-  | { type: 'snapshot' }
-  | { type: 'press_key'; key: (typeof CLOUD_BROWSER_KEYS)[number]; modifiers?: number }
-  | { type: 'scroll'; x: number; y: number; deltaX: number; deltaY: number }
-  | { type: 'mouse_move'; x: number; y: number }
-  | { type: 'drag'; fromX: number; fromY: number; toX: number; toY: number; steps?: number };
+  | import("./page-controls.js").BrowserPageAction
+  | { type: "navigate"; url: string }
+  | {
+      type: "click";
+      selector: string;
+      button?: "left" | "right";
+      clickCount?: 1 | 2;
+    }
+  | { type: "type"; selector: string; text: string }
+  | { type: "wait_for"; selector: string }
+  | { type: "snapshot" }
+  | {
+      type: "press_key";
+      key: (typeof CLOUD_BROWSER_KEYS)[number];
+      modifiers?: number;
+    }
+  | { type: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
+  | { type: "mouse_move"; x: number; y: number }
+  | {
+      type: "drag";
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+      steps?: number;
+    };
 
 export interface CloudBrowserObservation {
   url: string | null;
@@ -34,6 +52,22 @@ export interface CloudBrowserProfile {
   owner: string;
   allowedHosts: readonly string[];
   persistent: boolean;
+  /** Missing mode is the original exact-host policy for backwards compatibility. */
+  mode?: "enrolled_hosts" | "public_web";
+  /** Set only by trusted provisioning after isolated network policy is verified. */
+  customBrowserIdentifier?: string;
+  networkPolicyVersion?: string;
+  /** Provider proxy configuration; secret references only, never secret values. */
+  proxyConfiguration?: {
+    proxies: Array<Record<string, unknown>>;
+    bypass?: { domainPatterns: string[] };
+  };
+  /** Server-owned destination boundary configuration version/receipt reference. */
+  privateHostPolicy?: string;
+  /** Explicit per-mission action budget, set by the caller when starting a session. */
+  actionBudget?: number;
+  maxSessionSeconds?: number;
+  maxActionSeconds?: number;
 }
 
 export interface CloudBrowserSession {
@@ -45,6 +79,10 @@ export interface CloudBrowserSession {
   actionsUsed: number;
   /** Opaque provider identifier, never return this to MCP callers. */
   providerSessionId: string;
+  /** Browser resource used to create this session, needed for correct stop/save. */
+  providerBrowserId?: string;
+  mode?: "enrolled_hosts" | "public_web";
+  actionBudget?: number;
   /** Opaque provider endpoint, never return this to MCP callers. */
   automationEndpoint: string;
   /** Optional additive page ownership state; absent in legacy records. */
@@ -56,7 +94,7 @@ export interface CloudBrowserSession {
 
 export interface CloudBrowserExecutionResult {
   observation: CloudBrowserObservation | null;
-  pageReceipt?: import('./page-controls.js').BrowserPageReceipt;
+  pageReceipt?: import("./page-controls.js").BrowserPageReceipt;
 }
 
 export interface CloudBrowserStore {
@@ -74,7 +112,7 @@ export interface CloudBrowserStore {
 }
 
 export interface CloudBrowserTransport {
-  start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, 'providerSessionId' | 'automationEndpoint'>>;
+  start(input: { owner: string; profile: CloudBrowserProfile; maxSeconds: number }): Promise<Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint" | "providerBrowserId">>;
   execute(session: CloudBrowserSession, action: CloudBrowserAction, timeoutSeconds: number): Promise<CloudBrowserObservation | null | CloudBrowserExecutionResult>;
   stop(session: CloudBrowserSession): Promise<void>;
   /** Persist the active remote browser state (cookies/local storage) at the provider, never locally. */
@@ -82,5 +120,11 @@ export interface CloudBrowserTransport {
 }
 
 export class CloudBrowserError extends Error {
-  constructor(readonly code: string, message: string) { super(message); this.name = 'CloudBrowserError'; }
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CloudBrowserError";
+  }
 }

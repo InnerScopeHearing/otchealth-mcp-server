@@ -1,60 +1,126 @@
-import { signRequest, resolveAwsCredentials } from '../../search/sigv4.js';
-import type { CloudBrowserProfile, CloudBrowserSession, CloudBrowserStore } from './contract.js';
-import { CloudBrowserError } from './contract.js';
+import { signRequest, resolveAwsCredentials } from "../../search/sigv4.js";
+import type { CloudBrowserProfile, CloudBrowserSession, CloudBrowserStore } from "./contract.js";
+import { CloudBrowserError } from "./contract.js";
 
-type DynamoAttribute = { S?: string; N?: string; BOOL?: boolean; NULL?: boolean; L?: DynamoAttribute[] };
+type DynamoAttribute = {
+  S?: string;
+  N?: string;
+  BOOL?: boolean;
+  NULL?: boolean;
+  L?: DynamoAttribute[];
+};
 type DynamoItem = Record<string, DynamoAttribute>;
 
 function validTargets(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length <= 21 && new Set(value).size === value.length
-    && value.every(id => typeof id === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(id));
+  return Array.isArray(value) && value.length <= 21 && new Set(value).size === value.length && value.every((id) => typeof id === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(id));
 }
 
 function pageStateItem(session: CloudBrowserSession): DynamoItem {
   if (session.ownedTargetIds === undefined) {
-    if (session.selectedTargetId !== undefined) throw new CloudBrowserError('session_state_invalid', 'Browser tab state is invalid.');
+    if (session.selectedTargetId !== undefined) throw new CloudBrowserError("session_state_invalid", "Browser tab state is invalid.");
     return session.effectUnknown === undefined ? {} : { effectUnknown: { BOOL: session.effectUnknown } };
   }
-  if (!validTargets(session.ownedTargetIds) || (session.selectedTargetId !== null && !session.ownedTargetIds.includes(session.selectedTargetId ?? ''))) {
-    throw new CloudBrowserError('session_state_invalid', 'Browser tab state is invalid.');
+  if (!validTargets(session.ownedTargetIds) || (session.selectedTargetId !== null && !session.ownedTargetIds.includes(session.selectedTargetId ?? ""))) {
+    throw new CloudBrowserError("session_state_invalid", "Browser tab state is invalid.");
   }
   return {
-    ownedTargetIds: { L: session.ownedTargetIds.map(id => ({ S: id })) },
+    ownedTargetIds: { L: session.ownedTargetIds.map((id) => ({ S: id })) },
     selectedTargetId: session.selectedTargetId === null ? { NULL: true } : { S: session.selectedTargetId },
     ...(session.effectUnknown === undefined ? {} : { effectUnknown: { BOOL: session.effectUnknown } }),
   };
 }
 
 function profileItem(profile: CloudBrowserProfile): DynamoItem {
-  return { pk: { S: `PROFILE#${profile.profileId}` }, owner: { S: profile.owner }, ...(profile.providerProfileId ? { providerProfileId: { S: profile.providerProfileId } } : {}), hosts: { L: profile.allowedHosts.map((host) => ({ S: host })) }, persistent: { BOOL: profile.persistent } };
+  return {
+    pk: { S: `PROFILE#${profile.profileId}` },
+    owner: { S: profile.owner },
+    ...(profile.providerProfileId ? { providerProfileId: { S: profile.providerProfileId } } : {}),
+    hosts: { L: profile.allowedHosts.map((host) => ({ S: host })) },
+    persistent: { BOOL: profile.persistent },
+    ...(profile.mode ? { mode: { S: profile.mode } } : {}),
+    ...(profile.customBrowserIdentifier ? { customBrowserIdentifier: { S: profile.customBrowserIdentifier } } : {}),
+    ...(profile.networkPolicyVersion ? { networkPolicyVersion: { S: profile.networkPolicyVersion } } : {}),
+    ...(profile.privateHostPolicy ? { privateHostPolicy: { S: profile.privateHostPolicy } } : {}),
+    ...(profile.proxyConfiguration
+      ? {
+          proxyConfiguration: { S: JSON.stringify(profile.proxyConfiguration) },
+        }
+      : {}),
+    ...(profile.actionBudget ? { actionBudget: { N: String(profile.actionBudget) } } : {}),
+    ...(profile.maxSessionSeconds ? { maxSessionSeconds: { N: String(profile.maxSessionSeconds) } } : {}),
+    ...(profile.maxActionSeconds ? { maxActionSeconds: { N: String(profile.maxActionSeconds) } } : {}),
+  };
 }
 function readProfile(item: DynamoItem | undefined): CloudBrowserProfile | null {
-  if (!item?.pk?.S?.startsWith('PROFILE#') || !item.owner?.S || !item.hosts?.L) return null;
-  const allowedHosts = item.hosts.L.map((x) => x.S).filter((x): x is string => typeof x === 'string');
-  return { profileId: item.pk.S.slice(8), owner: item.owner.S, ...(item.providerProfileId?.S ? { providerProfileId: item.providerProfileId.S } : {}), allowedHosts, persistent: item.persistent?.BOOL === true };
+  if (!item?.pk?.S?.startsWith("PROFILE#") || !item.owner?.S || !item.hosts?.L) return null;
+  const allowedHosts = item.hosts.L.map((x) => x.S).filter((x): x is string => typeof x === "string");
+  const proxyConfiguration = item.proxyConfiguration?.S ? (JSON.parse(item.proxyConfiguration.S) as CloudBrowserProfile["proxyConfiguration"]) : undefined;
+  return {
+    profileId: item.pk.S.slice(8),
+    owner: item.owner.S,
+    ...(item.providerProfileId?.S ? { providerProfileId: item.providerProfileId.S } : {}),
+    allowedHosts,
+    persistent: item.persistent?.BOOL === true,
+    ...(item.mode?.S === "public_web" || item.mode?.S === "enrolled_hosts" ? { mode: item.mode.S } : {}),
+    ...(item.customBrowserIdentifier?.S ? { customBrowserIdentifier: item.customBrowserIdentifier.S } : {}),
+    ...(item.networkPolicyVersion?.S ? { networkPolicyVersion: item.networkPolicyVersion.S } : {}),
+    ...(item.privateHostPolicy?.S ? { privateHostPolicy: item.privateHostPolicy.S } : {}),
+    ...(proxyConfiguration ? { proxyConfiguration } : {}),
+    ...(item.actionBudget?.N ? { actionBudget: Number(item.actionBudget.N) } : {}),
+    ...(item.maxSessionSeconds?.N ? { maxSessionSeconds: Number(item.maxSessionSeconds.N) } : {}),
+    ...(item.maxActionSeconds?.N ? { maxActionSeconds: Number(item.maxActionSeconds.N) } : {}),
+  };
 }
 function sessionItem(session: CloudBrowserSession): DynamoItem {
-  return { pk: { S: `SESSION#${session.sessionId}` }, owner: { S: session.owner }, profileId: { S: session.profileId }, hosts: { L: session.allowedHosts.map((host) => ({ S: host })) }, expiresAt: { N: String(session.expiresAt) }, expiresAtEpoch: { N: String(Math.ceil(session.expiresAt / 1_000)) }, actionsUsed: { N: String(session.actionsUsed) }, providerSessionId: { S: session.providerSessionId }, automationEndpoint: { S: session.automationEndpoint }, ...pageStateItem(session) };
+  return {
+    pk: { S: `SESSION#${session.sessionId}` },
+    owner: { S: session.owner },
+    profileId: { S: session.profileId },
+    hosts: { L: session.allowedHosts.map((host) => ({ S: host })) },
+    expiresAt: { N: String(session.expiresAt) },
+    expiresAtEpoch: { N: String(Math.ceil(session.expiresAt / 1_000)) },
+    actionsUsed: { N: String(session.actionsUsed) },
+    providerSessionId: { S: session.providerSessionId },
+    automationEndpoint: { S: session.automationEndpoint },
+    ...(session.providerBrowserId ? { providerBrowserId: { S: session.providerBrowserId } } : {}),
+    ...(session.mode ? { mode: { S: session.mode } } : {}),
+    ...(session.actionBudget ? { actionBudget: { N: String(session.actionBudget) } } : {}),
+    ...pageStateItem(session),
+  };
 }
 function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
-  if (!item?.pk?.S?.startsWith('SESSION#') || !item.owner?.S || !item.profileId?.S || !item.hosts?.L || !item.expiresAt?.N || !item.actionsUsed?.N || !item.providerSessionId?.S || !item.automationEndpoint?.S) return null;
-  const expiresAt = Number(item.expiresAt.N); const actionsUsed = Number(item.actionsUsed.N);
+  if (!item?.pk?.S?.startsWith("SESSION#") || !item.owner?.S || !item.profileId?.S || !item.hosts?.L || !item.expiresAt?.N || !item.actionsUsed?.N || !item.providerSessionId?.S || !item.automationEndpoint?.S) return null;
+  const expiresAt = Number(item.expiresAt.N);
+  const actionsUsed = Number(item.actionsUsed.N);
   if (!Number.isSafeInteger(expiresAt) || !Number.isSafeInteger(actionsUsed)) return null;
-  const pageState: Pick<CloudBrowserSession, 'ownedTargetIds' | 'selectedTargetId' | 'effectUnknown'> = {};
+  const pageState: Pick<CloudBrowserSession, "ownedTargetIds" | "selectedTargetId" | "effectUnknown"> = {};
   if (item.ownedTargetIds !== undefined || item.selectedTargetId !== undefined) {
     if (!Array.isArray(item.ownedTargetIds?.L)) return null;
-    const targets = item.ownedTargetIds.L.map(value => value?.S);
+    const targets = item.ownedTargetIds.L.map((value) => value?.S);
     if (!validTargets(targets)) return null;
     const selected = item.selectedTargetId?.NULL === true ? null : item.selectedTargetId?.S;
-    if (selected !== null && (typeof selected !== 'string' || !targets.includes(selected))) return null;
+    if (selected !== null && (typeof selected !== "string" || !targets.includes(selected))) return null;
     pageState.ownedTargetIds = targets;
     pageState.selectedTargetId = selected;
   }
   if (item.effectUnknown !== undefined) {
-    if (typeof item.effectUnknown.BOOL !== 'boolean') return null;
+    if (typeof item.effectUnknown.BOOL !== "boolean") return null;
     pageState.effectUnknown = item.effectUnknown.BOOL;
   }
-  return { sessionId: item.pk.S.slice(8), owner: item.owner.S, profileId: item.profileId.S, allowedHosts: item.hosts.L.map((x) => x.S).filter((x): x is string => typeof x === 'string'), expiresAt, actionsUsed, providerSessionId: item.providerSessionId.S, automationEndpoint: item.automationEndpoint.S, ...pageState };
+  return {
+    sessionId: item.pk.S.slice(8),
+    owner: item.owner.S,
+    profileId: item.profileId.S,
+    allowedHosts: item.hosts.L.map((x) => x.S).filter((x): x is string => typeof x === "string"),
+    expiresAt,
+    actionsUsed,
+    providerSessionId: item.providerSessionId.S,
+    automationEndpoint: item.automationEndpoint.S,
+    ...(item.providerBrowserId?.S ? { providerBrowserId: item.providerBrowserId.S } : {}),
+    ...(item.mode?.S === "public_web" || item.mode?.S === "enrolled_hosts" ? { mode: item.mode.S } : {}),
+    ...(item.actionBudget?.N ? { actionBudget: Number(item.actionBudget.N) } : {}),
+    ...pageState,
+  };
 }
 
 /**
@@ -62,33 +128,182 @@ function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
  * `expiresAtEpoch` as TTL. The only opaque provider references are encrypted at rest by Dynamo.
  */
 export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
-  constructor(private readonly tableName = process.env.CLOUD_BROWSER_DDB_TABLE || 'otchealth-browser-cloud', private readonly region = process.env.AWS_REGION || 'us-east-1', private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(
+    private readonly tableName = process.env.CLOUD_BROWSER_DDB_TABLE || "otchealth-browser-cloud",
+    private readonly region = process.env.AWS_REGION || "us-east-1",
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {}
   private async call(target: string, payload: unknown): Promise<unknown> {
     const credentials = await resolveAwsCredentials();
-    if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Cloud browser runtime credentials are unavailable.');
-    const host = `dynamodb.${this.region}.amazonaws.com`; const body = JSON.stringify(payload);
-    const signed = signRequest({ method: 'POST', host, path: '/', body, region: this.region, service: 'dynamodb', credentials, extraHeaders: { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': `DynamoDB_20120810.${target}` } });
-    const response = await this.fetchImpl(`https://${host}/`, { method: 'POST', headers: signed.headers, body, signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) throw new CloudBrowserError('session_store_failed', 'Cloud browser session store rejected the request.');
+    if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
+    const host = `dynamodb.${this.region}.amazonaws.com`;
+    const body = JSON.stringify(payload);
+    const signed = signRequest({
+      method: "POST",
+      host,
+      path: "/",
+      body,
+      region: this.region,
+      service: "dynamodb",
+      credentials,
+      extraHeaders: {
+        "content-type": "application/x-amz-json-1.0",
+        "x-amz-target": `DynamoDB_20120810.${target}`,
+      },
+    });
+    const response = await this.fetchImpl(`https://${host}/`, {
+      method: "POST",
+      headers: signed.headers,
+      body,
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) throw new CloudBrowserError("session_store_failed", "Cloud browser session store rejected the request.");
     return response.json();
   }
-  async loadProfile(profileId: string): Promise<CloudBrowserProfile | null> { const r = await this.call('GetItem', { TableName: this.tableName, Key: { pk: { S: `PROFILE#${profileId}` } }, ConsistentRead: true }) as { Item?: DynamoItem }; return readProfile(r.Item); }
-  async saveProfile(profile: CloudBrowserProfile): Promise<void> { await this.call('PutItem', { TableName: this.tableName, Item: profileItem(profile), ConditionExpression: 'attribute_not_exists(pk) OR #owner = :owner', ExpressionAttributeNames: { '#owner': 'owner' }, ExpressionAttributeValues: { ':owner': { S: profile.owner } } }); }
-  async loadSession(sessionId: string): Promise<CloudBrowserSession | null> { const r = await this.call('GetItem', { TableName: this.tableName, Key: { pk: { S: `SESSION#${sessionId}` } }, ConsistentRead: true }) as { Item?: DynamoItem }; return readSession(r.Item); }
-  async saveSession(session: CloudBrowserSession): Promise<void> { await this.call('PutItem', { TableName: this.tableName, Item: sessionItem(session) }); }
+  async loadProfile(profileId: string): Promise<CloudBrowserProfile | null> {
+    const r = (await this.call("GetItem", {
+      TableName: this.tableName,
+      Key: { pk: { S: `PROFILE#${profileId}` } },
+      ConsistentRead: true,
+    })) as { Item?: DynamoItem };
+    return readProfile(r.Item);
+  }
+  async saveProfile(profile: CloudBrowserProfile): Promise<void> {
+    await this.call("PutItem", {
+      TableName: this.tableName,
+      Item: profileItem(profile),
+      ConditionExpression: "attribute_not_exists(pk) OR #owner = :owner",
+      ExpressionAttributeNames: { "#owner": "owner" },
+      ExpressionAttributeValues: { ":owner": { S: profile.owner } },
+    });
+  }
+  async loadSession(sessionId: string): Promise<CloudBrowserSession | null> {
+    const r = (await this.call("GetItem", {
+      TableName: this.tableName,
+      Key: { pk: { S: `SESSION#${sessionId}` } },
+      ConsistentRead: true,
+    })) as { Item?: DynamoItem };
+    return readSession(r.Item);
+  }
+  async saveSession(session: CloudBrowserSession): Promise<void> {
+    await this.call("PutItem", {
+      TableName: this.tableName,
+      Item: sessionItem(session),
+    });
+  }
   async saveSessionUnderLock(session: CloudBrowserSession, lockOwner: string): Promise<void> {
     const state = pageStateItem(session);
-    const values: Record<string, DynamoAttribute> = { ':actions': { N: String(session.actionsUsed) }, ':expires': { N: String(session.expiresAt) }, ':ttl': { N: String(Math.ceil(session.expiresAt / 1_000)) }, ':owner': { S: lockOwner } };
-    const assignments = ['actionsUsed = :actions', 'expiresAt = :expires', 'expiresAtEpoch = :ttl'];
-    for (const [attribute, variable] of [['ownedTargetIds', ':targets'], ['selectedTargetId', ':selected'], ['effectUnknown', ':uncertain']] as const) {
-      if (state[attribute] !== undefined) { assignments.push(`${attribute} = ${variable}`); values[variable] = state[attribute]; }
+    const values: Record<string, DynamoAttribute> = {
+      ":actions": { N: String(session.actionsUsed) },
+      ":expires": { N: String(session.expiresAt) },
+      ":ttl": { N: String(Math.ceil(session.expiresAt / 1_000)) },
+      ":owner": { S: lockOwner },
+    };
+    const assignments = ["actionsUsed = :actions", "expiresAt = :expires", "expiresAtEpoch = :ttl"];
+    for (const [attribute, variable] of [
+      ["ownedTargetIds", ":targets"],
+      ["selectedTargetId", ":selected"],
+      ["effectUnknown", ":uncertain"],
+    ] as const) {
+      if (state[attribute] !== undefined) {
+        assignments.push(`${attribute} = ${variable}`);
+        values[variable] = state[attribute];
+      }
     }
-    await this.call('UpdateItem', { TableName: this.tableName, Key: { pk: { S: `SESSION#${session.sessionId}` } }, UpdateExpression: `SET ${assignments.join(', ')}`, ConditionExpression: 'lockOwner = :owner', ExpressionAttributeValues: values });
+    await this.call("UpdateItem", {
+      TableName: this.tableName,
+      Key: { pk: { S: `SESSION#${session.sessionId}` } },
+      UpdateExpression: `SET ${assignments.join(", ")}`,
+      ConditionExpression: "lockOwner = :owner",
+      ExpressionAttributeValues: values,
+    });
   }
-  async deleteSession(sessionId: string): Promise<void> { await this.call('DeleteItem', { TableName: this.tableName, Key: { pk: { S: `SESSION#${sessionId}` } } }); }
-  async acquireSessionLock(sessionId: string, owner: string, until: number): Promise<boolean> { try { await this.call('UpdateItem', { TableName: this.tableName, Key: { pk: { S: `SESSION#${sessionId}` } }, UpdateExpression: 'SET lockOwner = :owner, lockUntil = :until', ConditionExpression: 'attribute_exists(pk) AND (attribute_not_exists(lockUntil) OR lockUntil < :now)', ExpressionAttributeValues: { ':owner': { S: owner }, ':until': { N: String(until) }, ':now': { N: String(Date.now()) } } }); return true; } catch { return false; } }
-  async releaseSessionLock(sessionId: string, owner: string): Promise<void> { try { await this.call('UpdateItem', { TableName: this.tableName, Key: { pk: { S: `SESSION#${sessionId}` } }, UpdateExpression: 'REMOVE lockOwner, lockUntil', ConditionExpression: 'lockOwner = :owner', ExpressionAttributeValues: { ':owner': { S: owner } } }); } catch { /* lease expiry safely recovers a failed owner */ } }
-  async acquireProfileLock(profileId: string, owner: string, until: number): Promise<boolean> { try { await this.call('UpdateItem', { TableName: this.tableName, Key: { pk: { S: `PROFILE#${profileId}` } }, UpdateExpression: 'SET lockOwner = :owner, lockUntil = :until', ConditionExpression: 'attribute_exists(pk) AND (attribute_not_exists(lockUntil) OR lockUntil < :now)', ExpressionAttributeValues: { ':owner': { S: owner }, ':until': { N: String(until) }, ':now': { N: String(Date.now()) } } }); return true; } catch { return false; } }
-  async releaseProfileLock(profileId: string, owner: string): Promise<void> { try { await this.call('UpdateItem', { TableName: this.tableName, Key: { pk: { S: `PROFILE#${profileId}` } }, UpdateExpression: 'REMOVE lockOwner, lockUntil', ConditionExpression: 'lockOwner = :owner', ExpressionAttributeValues: { ':owner': { S: owner } } }); } catch { /* lease expiry safely recovers a failed owner */ } }
-  async reserveDailySession(owner: string, day: string, limit: number): Promise<boolean> { try { await this.call('UpdateItem', { TableName: this.tableName, Key: { pk: { S: `BUDGET#${day}#${owner}` } }, UpdateExpression: 'ADD sessionCount :one SET expiresAtEpoch = :ttl', ConditionExpression: 'attribute_not_exists(sessionCount) OR sessionCount < :limit', ExpressionAttributeValues: { ':one': { N: '1' }, ':limit': { N: String(limit) }, ':ttl': { N: String(Math.floor(Date.parse(`${day}T00:00:00.000Z`) / 1_000) + 2 * 86_400) } } }); return true; } catch { return false; } }
+  async deleteSession(sessionId: string): Promise<void> {
+    await this.call("DeleteItem", {
+      TableName: this.tableName,
+      Key: { pk: { S: `SESSION#${sessionId}` } },
+    });
+  }
+  async acquireSessionLock(sessionId: string, owner: string, until: number): Promise<boolean> {
+    try {
+      await this.call("UpdateItem", {
+        TableName: this.tableName,
+        Key: { pk: { S: `SESSION#${sessionId}` } },
+        UpdateExpression: "SET lockOwner = :owner, lockUntil = :until",
+        ConditionExpression: "attribute_exists(pk) AND (attribute_not_exists(lockUntil) OR lockUntil < :now)",
+        ExpressionAttributeValues: {
+          ":owner": { S: owner },
+          ":until": { N: String(until) },
+          ":now": { N: String(Date.now()) },
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async releaseSessionLock(sessionId: string, owner: string): Promise<void> {
+    try {
+      await this.call("UpdateItem", {
+        TableName: this.tableName,
+        Key: { pk: { S: `SESSION#${sessionId}` } },
+        UpdateExpression: "REMOVE lockOwner, lockUntil",
+        ConditionExpression: "lockOwner = :owner",
+        ExpressionAttributeValues: { ":owner": { S: owner } },
+      });
+    } catch {
+      /* lease expiry safely recovers a failed owner */
+    }
+  }
+  async acquireProfileLock(profileId: string, owner: string, until: number): Promise<boolean> {
+    try {
+      await this.call("UpdateItem", {
+        TableName: this.tableName,
+        Key: { pk: { S: `PROFILE#${profileId}` } },
+        UpdateExpression: "SET lockOwner = :owner, lockUntil = :until",
+        ConditionExpression: "attribute_exists(pk) AND (attribute_not_exists(lockUntil) OR lockUntil < :now)",
+        ExpressionAttributeValues: {
+          ":owner": { S: owner },
+          ":until": { N: String(until) },
+          ":now": { N: String(Date.now()) },
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async releaseProfileLock(profileId: string, owner: string): Promise<void> {
+    try {
+      await this.call("UpdateItem", {
+        TableName: this.tableName,
+        Key: { pk: { S: `PROFILE#${profileId}` } },
+        UpdateExpression: "REMOVE lockOwner, lockUntil",
+        ConditionExpression: "lockOwner = :owner",
+        ExpressionAttributeValues: { ":owner": { S: owner } },
+      });
+    } catch {
+      /* lease expiry safely recovers a failed owner */
+    }
+  }
+  async reserveDailySession(owner: string, day: string, limit: number): Promise<boolean> {
+    try {
+      await this.call("UpdateItem", {
+        TableName: this.tableName,
+        Key: { pk: { S: `BUDGET#${day}#${owner}` } },
+        UpdateExpression: "ADD sessionCount :one SET expiresAtEpoch = :ttl",
+        ConditionExpression: "attribute_not_exists(sessionCount) OR sessionCount < :limit",
+        ExpressionAttributeValues: {
+          ":one": { N: "1" },
+          ":limit": { N: String(limit) },
+          ":ttl": {
+            N: String(Math.floor(Date.parse(`${day}T00:00:00.000Z`) / 1_000) + 2 * 86_400),
+          },
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }
