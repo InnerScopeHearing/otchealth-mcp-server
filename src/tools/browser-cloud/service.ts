@@ -98,6 +98,13 @@ export class CloudBrowserService {
    */
   async publicTrialProfile(caller: string): Promise<Pick<CloudBrowserProfile, "profileId" | "allowedHosts" | "persistent">> {
     if (!isPublicTrialOwner(caller)) throw new CloudBrowserError("profile_not_enrolled", "This caller has no cloud-browser public profile.");
+    const publicWebProfile = await this.enrolledPublicWebProfile(caller);
+    if (publicWebProfile) {
+      // Keep the existing discovery response contract for cached clients. The
+      // public-web boundary is represented by an empty host list; callers do
+      // not get a new tool or a way to enroll/convert profiles.
+      return { profileId: publicWebProfile.profileId, allowedHosts: [], persistent: false };
+    }
     const profile = await this.loadProfile(caller, publicTrialProfileId(caller));
     if (profile.mode === "public_web") throw new CloudBrowserError("profile_not_enrolled", "This caller has no legacy enrolled-host profile.");
     return { profileId: profile.profileId, allowedHosts: profile.allowedHosts, persistent: profile.persistent };
@@ -105,9 +112,8 @@ export class CloudBrowserService {
 
   async publicWebProfile(caller: string): Promise<Pick<CloudBrowserProfile, "profileId" | "allowedHosts" | "persistent" | "mode" | "actionBudget" | "maxSessionSeconds" | "maxActionSeconds">> {
     if (!isPublicTrialOwner(caller)) throw new CloudBrowserError("profile_not_enrolled", "This caller has no cloud-browser public profile.");
-    const profile = await this.loadProfile(caller, `${caller}-public-web`);
-    assertProfile(profile);
-    if (profile.mode !== "public_web") throw new CloudBrowserError("profile_not_enrolled", "This caller has no verified public-web profile.");
+    const profile = await this.enrolledPublicWebProfile(caller);
+    if (!profile) throw new CloudBrowserError("profile_not_enrolled", "This caller has no verified public-web profile.");
     return {
       profileId: profile.profileId,
       allowedHosts: [],
@@ -148,16 +154,27 @@ export class CloudBrowserService {
   }
 
   async start(caller: string, profileId: string, maxSeconds: number, actionBudget?: number): Promise<{ sessionId: string; expiresAt: number }> {
-    const profile = await this.loadProfile(caller, profileId);
+    let resolvedProfileId = profileId;
+    const publicWebProfileId = `${caller}-public-web`;
+    if (isPublicTrialOwner(caller) && profileId === publicTrialProfileId(caller)) {
+      const publicWebProfile = await this.enrolledPublicWebProfile(caller);
+      if (publicWebProfile) resolvedProfileId = publicWebProfile.profileId;
+    }
+    const profile = await this.loadProfile(caller, resolvedProfileId);
+    // A public-web profile ID is never allowed to fall through to an
+    // enrolled-host profile if its server enrollment changes or is malformed.
+    if (resolvedProfileId === publicWebProfileId && profile.mode !== "public_web") {
+      throw new CloudBrowserError("invalid_profile", "The server-enrolled public-web profile is invalid.");
+    }
     if (profile.mode === "public_web") assertProfile(profile);
     const maxDuration = profile.mode === "public_web" ? profile.maxSessionSeconds! : CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS;
     if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > maxDuration) throw new CloudBrowserError("invalid_duration", "Session duration exceeds the configured profile bound.");
     const selectedActionBudget = profile.mode === 'public_web' ? (actionBudget ?? profile.actionBudget) : CLOUD_BROWSER_MAX_ACTIONS;
     if (profile.mode === "public_web" && (!Number.isSafeInteger(selectedActionBudget) || selectedActionBudget! < 1 || selectedActionBudget! > profile.actionBudget!)) throw new CloudBrowserError("invalid_action_budget", "Public session action budget must be within the server configured mission budget.");
     const lockOwner = `${caller}:${randomUUID()}`;
-    if (!(await this.store.acquireProfileLock(profileId, lockOwner, this.now() + 30_000))) throw new CloudBrowserError("profile_busy", "Another browser session operation is in progress for this profile.");
+    if (!(await this.store.acquireProfileLock(resolvedProfileId, lockOwner, this.now() + 30_000))) throw new CloudBrowserError("profile_busy", "Another browser session operation is in progress for this profile.");
     if (profile.mode !== "public_web" && !(await this.store.reserveDailySession(caller, new Date(this.now()).toISOString().slice(0, 10), CLOUD_BROWSER_DAILY_SESSION_LIMIT))) {
-      await this.store.releaseProfileLock(profileId, lockOwner);
+      await this.store.releaseProfileLock(resolvedProfileId, lockOwner);
       throw new CloudBrowserError("daily_session_limit", "The daily cloud-browser session limit has been reached.");
     }
     let remote: Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint" | "providerBrowserId">;
@@ -168,7 +185,7 @@ export class CloudBrowserService {
         maxSeconds,
       });
     } finally {
-      await this.store.releaseProfileLock(profileId, lockOwner);
+      await this.store.releaseProfileLock(resolvedProfileId, lockOwner);
     }
     const session: CloudBrowserSession = {
       sessionId: randomUUID(),
@@ -358,5 +375,20 @@ export class CloudBrowserService {
     if (!session || session.owner !== caller) throw new CloudBrowserError("owner_forbidden", "Session is unavailable to this caller.");
     if (!allowExpired && session.expiresAt <= this.now()) throw new CloudBrowserError("session_expired", "Session expired and must be stopped before a new session starts.");
     return session;
+  }
+
+  /**
+   * Loads only the caller's deterministic root-enrolled public-web profile.
+   * A missing record permits legacy fallback; a present but invalid/misowned
+   * record fails closed so it cannot silently downgrade to host-only policy.
+   */
+  private async enrolledPublicWebProfile(caller: string): Promise<CloudBrowserProfile | null> {
+    const profileId = `${caller}-public-web`;
+    const profile = await this.store.loadProfile(profileId);
+    if (!profile) return null;
+    if (profile.owner !== caller) throw new CloudBrowserError("owner_forbidden", "Profile is unavailable to this caller.");
+    if (profile.profileId !== profileId || profile.mode !== "public_web") throw new CloudBrowserError("invalid_profile", "The server-enrolled public-web profile is invalid.");
+    assertProfile(profile);
+    return profile;
   }
 }

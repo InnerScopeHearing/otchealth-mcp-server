@@ -119,7 +119,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
     {
       name: "browser_cloud_profile_discover",
       category: "read",
-      annotations: { title: "Cloud browser: discover my enrolled-host profile", description: "Returns only the authenticated caller's legacy host-enrolled profile. Public-web profiles are discovered separately and cannot be provisioned by callers.", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { title: "Cloud browser: discover my browser profile", description: "Returns only the authenticated caller's profile using the existing response shape. When that caller has a valid root-enrolled public-web profile, its ID and an empty host list are returned for cached clients; otherwise the legacy host-enrolled trial is returned. This does not enroll or convert profiles.", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputShape: {},
       outputShape: { profile_id: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), error: z.string().optional() },
       handler: async (_input, ctx) => {
@@ -443,7 +443,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       category: "write_simple",
       annotations: {
         title: "Cloud browser: start session",
-        description: "Starts an authenticated caller’s session within the server-configured browser and mission budgets.",
+        description: "Starts an authenticated caller’s session within server-configured budgets. A caller’s legacy public-trial ID resolves to their verified root-enrolled public-web profile when present; otherwise the legacy profile is used.",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,

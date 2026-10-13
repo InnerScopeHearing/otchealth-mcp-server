@@ -59,9 +59,11 @@ class MemoryStore implements CloudBrowserStore {
 }
 class FakeTransport implements CloudBrowserTransport {
   readonly actions: unknown[] = [];
+  readonly startedProfileIds: string[] = [];
   stopped = 0;
   uncertainCreate = false;
-  async start(): Promise<Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint">> {
+  async start(input: { owner: string; profile: CloudBrowserProfile }): Promise<Pick<CloudBrowserSession, "providerSessionId" | "automationEndpoint">> {
+    this.startedProfileIds.push(`${input.owner}:${input.profile.profileId}`);
     return {
       providerSessionId: "remote-session",
       automationEndpoint: "wss://example.test/automation",
@@ -142,6 +144,24 @@ class FakeTransport implements CloudBrowserTransport {
   async stop(): Promise<void> {
     this.stopped += 1;
   }
+}
+
+function serverPublicWebProfile(owner: string, overrides: Partial<CloudBrowserProfile> = {}): CloudBrowserProfile {
+  return {
+    profileId: `${owner}-public-web`,
+    owner,
+    allowedHosts: [],
+    persistent: false,
+    mode: "public_web",
+    customBrowserIdentifier: "browser-public-1",
+    networkPolicyVersion: "egress-v3",
+    privateHostPolicy: "verified-proxy-acl-v2",
+    proxyConfiguration: { proxies: [{ externalProxy: { server: "proxy.internal", port: 8080 } }] },
+    actionBudget: 500,
+    maxSessionSeconds: 28_800,
+    maxActionSeconds: 120,
+    ...overrides,
+  };
 }
 
 test("typed keys, pointer and scroll controls retain session owner and host guards", async () => {
@@ -443,6 +463,118 @@ test("CTO can provision one deterministic public profile per ordinary Chat lane,
     () => service.provisionPublicTrialProfile("cto", "clo-personal", ["example.test"]),
     (e: unknown) => e instanceof CloudBrowserError && e.code === "profile_owner_not_allowed",
   );
+});
+
+test("legacy discovery and old trial starts prefer this owner's verified public-web enrollment", async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const service = new CloudBrowserService(store, transport);
+  const legacy: CloudBrowserProfile = {
+    profileId: "cfo-public-trial",
+    owner: "cfo",
+    allowedHosts: ["example.test"],
+    persistent: false,
+  };
+  const publicWeb = serverPublicWebProfile("cfo");
+  store.profiles.set(legacy.profileId, legacy);
+  store.profiles.set(publicWeb.profileId, publicWeb);
+
+  assert.deepEqual(await service.publicTrialProfile("cfo"), {
+    profileId: "cfo-public-web",
+    allowedHosts: [],
+    persistent: false,
+  });
+  const { sessionId } = await service.start("cfo", "cfo-public-trial", 60);
+  const session = store.sessions.get(sessionId);
+  assert.equal(session?.profileId, "cfo-public-web");
+  assert.equal(session?.mode, "public_web");
+  assert.deepEqual(transport.startedProfileIds, ["cfo:cfo-public-web"]);
+  assert.equal(store.dailyReservations, 0);
+  assert.deepEqual(store.profiles.get("cfo-public-trial"), legacy, "upgrade does not rewrite the old profile");
+  assert.deepEqual(store.profiles.get("cfo-public-web"), publicWeb, "discovery/start do not modify the root enrollment");
+});
+
+test("legacy trial discovery and explicit starts fall back when no public-web enrollment exists", async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const service = new CloudBrowserService(store, transport);
+  const legacy: CloudBrowserProfile = {
+    profileId: "cro-public-trial",
+    owner: "cro",
+    allowedHosts: ["example.test"],
+    persistent: false,
+  };
+  store.profiles.set(legacy.profileId, legacy);
+
+  assert.deepEqual(await service.publicTrialProfile("cro"), {
+    profileId: "cro-public-trial",
+    allowedHosts: ["example.test"],
+    persistent: false,
+  });
+  const { sessionId } = await service.start("cro", "cro-public-trial", 60);
+  assert.equal(store.sessions.get(sessionId)?.profileId, "cro-public-trial");
+  assert.equal(store.sessions.get(sessionId)?.mode, "enrolled_hosts");
+  assert.deepEqual(transport.startedProfileIds, ["cro:cro-public-trial"]);
+  assert.equal(store.dailyReservations, 1);
+});
+
+test("public-web resolution is owner-scoped and ignores unrelated profiles", async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const service = new CloudBrowserService(store, transport);
+  const ctoPublicWeb = serverPublicWebProfile("cto");
+  const cfoLegacy: CloudBrowserProfile = {
+    profileId: "cfo-public-trial",
+    owner: "cfo",
+    allowedHosts: ["cfo.example.test"],
+    persistent: false,
+  };
+  const croPublicWeb = serverPublicWebProfile("cro");
+  store.profiles.set(ctoPublicWeb.profileId, ctoPublicWeb);
+  store.profiles.set(cfoLegacy.profileId, cfoLegacy);
+  store.profiles.set(croPublicWeb.profileId, croPublicWeb);
+
+  assert.deepEqual(await service.publicTrialProfile("cfo"), {
+    profileId: "cfo-public-trial",
+    allowedHosts: ["cfo.example.test"],
+    persistent: false,
+  });
+  await assert.rejects(
+    service.start("cfo", "cto-public-trial", 60),
+    (error: unknown) => error instanceof CloudBrowserError && error.code === "owner_forbidden",
+  );
+  await assert.rejects(
+    service.publicTrialProfile("clo-personal"),
+    (error: unknown) => error instanceof CloudBrowserError && error.code === "profile_not_enrolled",
+  );
+  assert.deepEqual(transport.startedProfileIds, []);
+  assert.deepEqual(store.profiles.get("cto-public-web"), ctoPublicWeb, "another owner's profile is neither returned nor modified");
+  assert.deepEqual(store.profiles.get("cro-public-web"), croPublicWeb, "unrelated enrollments are not enumerated");
+});
+
+test("an invalid server-enrolled public-web record fails closed instead of downgrading to the old trial", async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const service = new CloudBrowserService(store, transport);
+  store.profiles.set("developer-public-trial", {
+    profileId: "developer-public-trial",
+    owner: "developer",
+    allowedHosts: ["example.test"],
+    persistent: false,
+  });
+  store.profiles.set("developer-public-web", serverPublicWebProfile("developer", { proxyConfiguration: undefined }));
+
+  await assert.rejects(
+    service.publicTrialProfile("developer"),
+    (error: unknown) => error instanceof CloudBrowserError && error.code === "invalid_profile",
+  );
+  await assert.rejects(
+    service.start("developer", "developer-public-trial", 60),
+    (error: unknown) => error instanceof CloudBrowserError && error.code === "invalid_profile",
+  );
+  assert.equal(store.dailyReservations, 0);
+  assert.equal(store.sessions.size, 0);
+  assert.deepEqual(transport.startedProfileIds, []);
 });
 
 test("session action lease fences concurrent gateway copies and preserves action increments", async () => {
