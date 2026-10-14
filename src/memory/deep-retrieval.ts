@@ -607,16 +607,30 @@ export function buildSynthesisMessages(query: string, hits: FusedHit[]): ChatMes
 
 /** FAIL-OPEN: the chat provider unconfigured or a chat() failure degrades to a trivial
  *  one-sub-query plan over every allowed room — never throws. */
-function providerDeadline(deadline: number, now: () => number): { deadlineAtMs: number; signal: AbortSignal } {
+function providerDeadline(
+  deadline: number,
+  now: () => number,
+  callSignal?: AbortSignal,
+  onDeadline?: () => void,
+): { deadlineAtMs: number; signal: AbortSignal } {
   const remainingMs = Math.max(0, Math.floor(deadline - now()));
-  return { deadlineAtMs: Date.now() + remainingMs, signal: AbortSignal.timeout(remainingMs) };
+  const timeoutSignal = AbortSignal.timeout(remainingMs);
+  if (onDeadline) {
+    const expireOperation = () => onDeadline();
+    if (timeoutSignal.aborted) expireOperation();
+    else timeoutSignal.addEventListener('abort', expireOperation, { once: true });
+  }
+  return {
+    deadlineAtMs: Date.now() + remainingMs,
+    signal: callSignal ? AbortSignal.any([callSignal, timeoutSignal]) : timeoutSignal,
+  };
 }
 
-async function planQuery(query: string, allowedRooms: string[], deadline: number, now: () => number): Promise<QueryPlan> {
+async function planQuery(query: string, allowedRooms: string[], deadline: number, now: () => number, signal?: AbortSignal, onDeadline?: () => void): Promise<QueryPlan> {
   return timedDeepStage('planning', async () => {
     if (!chatConfigured()) return { value: { subQueries: [query], rooms: allowedRooms }, outcome: 'partial' };
     try {
-      const res = await chat(buildPlanMessages(query, allowedRooms), { maxTokens: 500, jsonMode: true, tier: 'standard', ...providerDeadline(deadline, now) });
+      const res = await chat(buildPlanMessages(query, allowedRooms), { maxTokens: 500, jsonMode: true, tier: 'standard', ...providerDeadline(deadline, now, signal, onDeadline) });
       return { value: parseQueryPlan(res.text, query, allowedRooms) };
     } catch {
       return { value: { subQueries: [query], rooms: allowedRooms }, outcome: 'partial' };
@@ -627,7 +641,7 @@ async function planQuery(query: string, allowedRooms: string[], deadline: number
 /** FAIL-OPEN: the chat provider unconfigured or a chat() failure yields no refinement (the caller
  *  keeps round 1's hits rather than spending a round on a query set that failed to even plan) —
  *  never throws. */
-async function refineSubQueries(query: string, triedSubQueries: string[], resultsSoFar: number, deadline: number, now: () => number): Promise<string[]> {
+async function refineSubQueries(query: string, triedSubQueries: string[], resultsSoFar: number, deadline: number, now: () => number, signal?: AbortSignal, onDeadline?: () => void): Promise<string[]> {
   return timedDeepStage('refinement', async () => {
     if (!chatConfigured()) return { value: [], outcome: 'partial' };
     try {
@@ -635,7 +649,7 @@ async function refineSubQueries(query: string, triedSubQueries: string[], result
         maxTokens: 300,
         jsonMode: true,
         tier: 'standard',
-        ...providerDeadline(deadline, now),
+        ...providerDeadline(deadline, now, signal, onDeadline),
       });
       return { value: parseRefineResponse(res.text, triedSubQueries) };
     } catch {
@@ -648,7 +662,7 @@ async function refineSubQueries(query: string, triedSubQueries: string[], result
  *  unconfigured or a chat() failure -> a clear "synthesis unavailable" note, with the retrieved
  *  hits still returned by the caller. Never throws. Runs on tier 'high': this is the user-facing
  *  answer, the one step in the pipeline worth the better-quality deployment. */
-async function synthesizeAnswer(query: string, hits: FusedHit[], deadline: number, now: () => number): Promise<string> {
+async function synthesizeAnswer(query: string, hits: FusedHit[], deadline: number, now: () => number, signal?: AbortSignal, onDeadline?: () => void): Promise<string> {
   return timedDeepStage('synthesis', async () => {
     if (hits.length === 0) return { value: NO_CONTEXT_ANSWER, outcome: 'partial' };
     if (!chatConfigured()) return { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
@@ -656,7 +670,7 @@ async function synthesizeAnswer(query: string, hits: FusedHit[], deadline: numbe
       const res = await chat(buildSynthesisMessages(query, hits.slice(0, MAX_SYNTH_HITS)), {
         maxTokens: 900,
         tier: 'high',
-        ...providerDeadline(deadline, now),
+        ...providerDeadline(deadline, now, signal, onDeadline),
       });
       const text = res.text.trim();
       return text ? { value: text } : { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
@@ -750,13 +764,15 @@ async function runDeepFlow(
   rooms: string[],
   top: number,
   includeOps: boolean,
-  budget: { deadline: number; now: () => number },
+  budget: { deadline: number; now: () => number; signal?: AbortSignal; expire?: () => void },
   continuation?: DeepContinuation,
   embeddingCache?: EmbeddingRequestCache,
   shield: typeof retrievalShield = retrievalShield,
 ): Promise<DeepRetrieveResult> {
   const { deadline, now } = budget;
-  const overBudget = (): boolean => now() >= deadline;
+  // Check both the budget clock and the authoritative cancellation signal. The signal closes
+  // the timeout race where provider abort fires before a delayed wall clock observes its deadline.
+  const overBudget = (): boolean => Boolean(budget.signal?.aborted) || now() >= deadline;
   const budgetSkipped: string[] = [];
   const anchorQuery = extractExactIdentifierAnchor(query);
   let preferredWitnesses: FusedHit[] = [];
@@ -786,7 +802,7 @@ async function runDeepFlow(
       };
     }
     const round = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now, budget.signal, budget.expire), embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
     pool = [...round.perRoom];
@@ -795,7 +811,7 @@ async function runDeepFlow(
     for (const s of round.searched) searched.add(s);
     for (const f of round.failed) failed.add(f);
   } else {
-    const plan = await planQuery(query, rooms, deadline, now);
+    const plan = await planQuery(query, rooms, deadline, now, budget.signal, budget.expire);
     subQueries = plan.subQueries;
     targetRooms = plan.rooms;
 
@@ -811,7 +827,7 @@ async function runDeepFlow(
     }
 
     const round1 = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
+      const value = await runRetrievalRound(subQueries, targetRooms, top, includeOps, providerDeadline(deadline, now, budget.signal, budget.expire), embeddingCache, anchorQuery ? { query: anchorQuery, rooms } : undefined);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
     rounds = 1;
@@ -831,7 +847,7 @@ async function runDeepFlow(
         budgetSkipped.push('refine');
         recordSkippedDeepStage('refinement');
       } else {
-        const refined = await refineSubQueries(query, subQueries, fusedPreview.length, deadline, now);
+        const refined = await refineSubQueries(query, subQueries, fusedPreview.length, deadline, now, budget.signal, budget.expire);
         if (refined.length) {
           subQueries = [...subQueries, ...refined];
           // Refinement is sequential with retrieval. If it consumed the remaining budget, do not
@@ -841,7 +857,7 @@ async function runDeepFlow(
             recordSkippedDeepStage('retrieval');
           } else {
             const round2 = await timedDeepStage('retrieval', async () => {
-      const value = await runRetrievalRound(refined, targetRooms, top, includeOps, providerDeadline(deadline, now), embeddingCache);
+      const value = await runRetrievalRound(refined, targetRooms, top, includeOps, providerDeadline(deadline, now, budget.signal, budget.expire), embeddingCache);
       return { value, outcome: value.failed.length ? 'partial' : undefined };
     });
             rounds = 2;
@@ -892,7 +908,7 @@ async function runDeepFlow(
   // synthesizeAnswer normally, just annotates the result; enforce withholds ONLY the synthesized
   // narrative when a passage is flagged, never the raw hits themselves (returned below regardless).
   const synthHits = hits.slice(0, MAX_SYNTH_HITS);
-  const injectionScreen = await shield(query, synthHits.map((h) => h.text), providerDeadline(deadline, now));
+  const injectionScreen = await shield(query, synthHits.map((h) => h.text), providerDeadline(deadline, now, budget.signal, budget.expire));
   // A blocked shield result is already the final safe response and must survive an expired
   // deadline. Otherwise, do not start the paid synthesis call after the shield consumed the rest
   // of the budget. The remaining provider budget also cancels an in-flight shield request.
@@ -921,7 +937,7 @@ async function runDeepFlow(
     return result;
   }
   if (postShield === 'blocked') recordSkippedDeepStage('synthesis');
-  const answer = postShield === 'blocked' ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits, deadline, now);
+  const answer = postShield === 'blocked' ? INJECTION_DETECTED_ANSWER : await synthesizeAnswer(query, hits, deadline, now, budget.signal, budget.expire);
 
   // A provider may abort at the deadline after fetch headers while its response body is still
   // streaming. Preserve the retrieved, retraction-filtered passages and report the skipped answer
@@ -1043,6 +1059,17 @@ export async function deepRetrieve(
   const includeOps = opts.includeOps ?? false;
   const now = opts.now ?? Date.now;
   const budgetMs = opts.budgetMs ?? resolveDeepBudgetMs(process.env.DEEP_RETRIEVAL_BUDGET_MS);
+  // One authoritative cancellation signal covers the whole operation. Per-stage signals are
+  // still derived from the remaining deadline, but this one cannot be reset between stages. Start
+  // it before capturing the deadline so its timer cannot expire after the budget clock's target.
+  const globalBudgetSignal = AbortSignal.timeout(Math.max(0, Math.min(Math.ceil(budgetMs), 2_147_483_647)));
+  const budgetController = new AbortController();
+  const expireBudget = () => {
+    if (!budgetController.signal.aborted) budgetController.abort(globalBudgetSignal.aborted ? globalBudgetSignal.reason : undefined);
+  };
+  if (globalBudgetSignal.aborted) expireBudget();
+  else globalBudgetSignal.addEventListener('abort', expireBudget, { once: true });
+  const budgetSignal = budgetController.signal;
   const deadline = now() + budgetMs;
   const embeddingCache = createEmbeddingRequestCache();
 
@@ -1059,7 +1086,7 @@ export async function deepRetrieve(
       rooms,
       top,
       includeOps,
-      { deadline, now },
+      { deadline, now, signal: budgetSignal, expire: expireBudget },
       opts.continuation,
       embeddingCache,
       testDeps.retrievalShield,
@@ -1068,7 +1095,7 @@ export async function deepRetrieve(
     // Once the caller's budget has expired, never enter the unbounded fast-path fallback: it
     // would start a fresh embedding/search request after cancellation. Return the honest partial
     // shape, constrained to the rooms this invocation was already authorized to read.
-    if (now() >= deadline) {
+    if (budgetSignal.aborted || now() >= deadline) {
       const subQueries = opts.continuation?.sub_queries?.filter((q): q is string => typeof q === 'string').slice(0, 4) ?? [query];
       return {
         mode: 'deep-agentic', answer: PARTIAL_BUDGET_ANSWER, citations: [],
