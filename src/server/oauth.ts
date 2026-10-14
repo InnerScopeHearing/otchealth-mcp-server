@@ -21,6 +21,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../audit/logger.js';
 import {
@@ -538,7 +539,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       logger.info({ type: 'oauth_client_credentials', agent: rc.agent }, 'issued client_credentials access token');
       return reply.send({
         // gty records the grant (see issuedGrantType below): a machine credential, with no code exchange and no refresh token.
-        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS, 'client_credentials', connectorSurface),
+        access_token: issueAccessToken(client_id, 'mcp', env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, rc.agent, env.OAUTH_CC_TTL_SECONDS, 'client_credentials', connectorSurface, randomUUID()),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
         scope: 'mcp',
@@ -549,7 +550,7 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
     if (grant_type === 'refresh_token') {
       if (!oauthConfigured()) return reply.status(400).send({ error: 'unsupported_grant_type' });
       const claims = refresh_token ? verifyToken(refresh_token, env.OAUTH_TOKEN_SIGNING_SECRET) : null;
-      if (!claims || claims.typ !== 'refresh') {
+      if (!claims || claims.typ !== 'refresh' || (claims.connection_id !== undefined && !isConnectionId(claims.connection_id))) {
         return reply.status(400).send({ error: 'invalid_grant', error_description: 'invalid refresh_token' });
       }
       const rc = resolveAnyClient(claims.sub);
@@ -574,6 +575,9 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       const agent = rc.isPublic ? claims.agent || rc.agent : rc.agent;
       // Older refresh tokens carry no surface claim; grant them the restrictive curated surface.
       const connectorSurface = typeof claims.cs === 'boolean' ? claims.cs : true;
+      // A legacy refresh token has no connection_id; upgrade it exactly once and carry the new
+      // authorization identity through both the access token and its replacement refresh token.
+      const connectionId = typeof claims.connection_id === 'string' ? claims.connection_id : randomUUID();
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // Same 24h TTL as client_credentials (OAUTH_CC_TTL_SECONDS). The 2026-07-16 TTL fix only
@@ -581,10 +585,10 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
         // hardcoded 1h and dropped mid-session — the recurring "brain went offline" experience.
         // gty: a refresh token is only ever issued alongside an authorization_code access token (the
         // client_credentials grant returns no refresh token), so this session descends from a code exchange.
-        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'refresh_token', connectorSurface),
+        access_token: issueAccessToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'refresh_token', connectorSurface, connectionId),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
-        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS, connectorSurface),
+        refresh_token: issueRefreshToken(claims.sub, claims.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS, connectorSurface, connectionId),
         scope: claims.scope,
       });
     }
@@ -636,14 +640,15 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
       const agent =
         rc.isPublic && rec.elevatedAgent && isElevationRole(rec.elevatedAgent) ? rec.elevatedAgent : rc.agent;
       const connectorSurface = connectorSurfaceFor(rec.clientId, rc);
+      const connectionId = randomUUID();
       reply.header('Cache-Control', 'no-store');
       return reply.send({
         // 24h, matching the CC grant (see the refresh_token grant note above).
         // gty: a code exchange with PKCE. A public client was shown the consent screen; a confidential client's code was issued without one.
-        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'authorization_code', connectorSurface),
+        access_token: issueAccessToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_CC_TTL_SECONDS, 'authorization_code', connectorSurface, connectionId),
         token_type: 'Bearer',
         expires_in: env.OAUTH_CC_TTL_SECONDS,
-        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS, connectorSurface),
+        refresh_token: issueRefreshToken(rec.clientId, rec.scope, env.OAUTH_TOKEN_SIGNING_SECRET, baseUrl, agent, env.OAUTH_REFRESH_TTL_SECONDS, connectorSurface, connectionId),
         scope: rec.scope,
       });
     }
@@ -701,7 +706,19 @@ export function registerOAuthRoutes(app: FastifyInstance, routeDeps: OAuthRouteD
 export function isValidIssuedAccessToken(token: string): boolean {
   if (!env.OAUTH_TOKEN_SIGNING_SECRET) return false;
   const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
-  return Boolean(claims && claims.typ === 'access');
+  return Boolean(claims && claims.typ === 'access' && (claims.connection_id === undefined || isConnectionId(claims.connection_id)));
+}
+
+function isConnectionId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+/** Unique authorization instance carried by a valid access token; undefined for legacy tokens. */
+export function issuedConnectionId(token: string): string | null {
+  if (!env.OAUTH_TOKEN_SIGNING_SECRET) return null;
+  const claims = verifyToken(token, env.OAUTH_TOKEN_SIGNING_SECRET);
+  if (!claims || claims.typ !== 'access' || !isConnectionId(claims.connection_id)) return null;
+  return claims.connection_id;
 }
 
 /** The client_id (sub) embedded in a valid issued access token, or null. DCR connector clients start with 'dcr_'. */

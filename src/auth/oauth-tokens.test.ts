@@ -118,3 +118,14 @@ test('a refresh token never carries a grant claim', () => {
   assert.equal(claims.typ, 'refresh');
   assert.equal('gty' in claims, false);
 });
+
+test('access and refresh token primitives carry an optional authorization connection id', () => {
+  const secret = 'unit-test-secret';
+  const id = 'a4e8e81b-fb87-4b4e-a1db-07aaf3ae1842';
+  const access = verifyToken(issueAccessToken('client-abc', 'mcp', secret, 'https://mcp.otchealth.app', 'coo', 60, 'authorization_code', true, id), secret);
+  const refresh = verifyToken(issueRefreshToken('client-abc', 'mcp', secret, 'https://mcp.otchealth.app', 'coo', 60, true, id), secret);
+  assert.equal(access?.connection_id, id);
+  assert.equal(refresh?.connection_id, id);
+  const legacy = verifyToken(issueRefreshToken('client-abc', 'mcp', secret, 'https://mcp.otchealth.app'), secret);
+  assert.equal('connection_id' in (legacy ?? {}), false);
+});

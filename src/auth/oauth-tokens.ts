@@ -39,6 +39,8 @@ export interface AccessClaims {
   gty?: OAuthGrantType;
   /** Signed connector-surface decision, fixed when the OAuth credential is issued. */
   cs?: boolean;
+  /** Unique authorization instance, shared by its access and refresh tokens. */
+  connection_id?: string;
   iat: number;
   exp: number;
   jti: string;
@@ -96,17 +98,18 @@ export function issueAccessToken(
   ttlSeconds = 3600,
   grantType?: OAuthGrantType,
   connectorSurface?: boolean,
+  connectionId?: string,
 ): string {
   const now = Math.floor(Date.now() / 1000);
   return signToken(
-    { iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds, ...(grantType ? { gty: grantType } : {}), ...(typeof connectorSurface === 'boolean' ? { cs: connectorSurface } : {}) },
+    { iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'access', exp: now + ttlSeconds, ...(grantType ? { gty: grantType } : {}), ...(typeof connectorSurface === 'boolean' ? { cs: connectorSurface } : {}), ...(connectionId ? { connection_id: connectionId } : {}) },
     secret,
   );
 }
 
-export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 60 * 60 * 24 * 30, connectorSurface?: boolean): string {
+export function issueRefreshToken(clientId: string, scope: string, secret: string, baseUrl: string, agent = '', ttlSeconds = 60 * 60 * 24 * 30, connectorSurface?: boolean, connectionId?: string): string {
   const now = Math.floor(Date.now() / 1000);
-  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'refresh', exp: now + ttlSeconds, ...(typeof connectorSurface === 'boolean' ? { cs: connectorSurface } : {}) }, secret);
+  return signToken({ iss: baseUrl, aud: AUD, sub: clientId, scope, agent, typ: 'refresh', exp: now + ttlSeconds, ...(typeof connectorSurface === 'boolean' ? { cs: connectorSurface } : {}), ...(connectionId ? { connection_id: connectionId } : {}) }, secret);
 }
 
 // ── Authorization-code store: Cosmos-backed when configured, in-memory fallback ──

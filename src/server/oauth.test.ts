@@ -43,6 +43,7 @@ test('OAUTH_CLIENTS client_credentials and refresh keep the signed internal surf
   const { default: Fastify } = await import('fastify');
   const { registerOAuthRoutes, issuedConnectorSurface } = await import('./oauth.js');
   const { issueRefreshToken } = await import('../auth/oauth-tokens.js');
+  const { verifyToken } = await import('../auth/oauth-tokens.js');
   const app = Fastify();
   registerOAuthRoutes(app);
   const clientId = 'internal-machine';
@@ -63,6 +64,15 @@ test('OAUTH_CLIENTS client_credentials and refresh keep the signed internal surf
   assert.equal(issuedConnectorSurface(refreshed.json().access_token), false);
   const refreshedClaims = (await import('../auth/oauth-tokens.js')).verifyToken(refreshed.json().refresh_token, SIGNING_SECRET);
   assert.equal(refreshedClaims?.cs, false, 'the replacement refresh token carries the same surface');
+  assert.match(refreshedClaims?.connection_id ?? '', /^[0-9a-f-]{36}$/i, 'a pre-claim refresh is upgraded with a fresh connection id');
+  const connectionId = refreshedClaims!.connection_id;
+  const refreshedAgain = await app.inject({
+    method: 'POST', url: '/oauth/token', headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ grant_type: 'refresh_token', refresh_token: refreshed.json().refresh_token, client_secret: secret }),
+  });
+  assert.equal(refreshedAgain.statusCode, 200);
+  assert.equal(verifyToken(refreshedAgain.json().access_token, SIGNING_SECRET)?.connection_id, connectionId);
+  assert.equal(verifyToken(refreshedAgain.json().refresh_token, SIGNING_SECRET)?.connection_id, connectionId);
   await app.close();
 });
 
@@ -499,6 +509,10 @@ test('E2E: a DCR client redeeming a genuine cfo setup code reaches the token end
   assert.equal(tokenRes.statusCode, 200, JSON.stringify(tokenRes.json()));
   const body = tokenRes.json();
   assert.equal(issuedAgent(body.access_token), 'cfo', 'the access token must carry the elevated role');
+  const { verifyToken } = await import('../auth/oauth-tokens.js');
+  const connectionId = verifyToken(body.access_token, SIGNING_SECRET)?.connection_id;
+  assert.ok(connectionId);
+  assert.equal(verifyToken(body.refresh_token, SIGNING_SECRET)?.connection_id, connectionId, 'both initial tokens share one authorization id');
 
   // THE key regression this feature exists to fix: a refresh must NOT silently re-derive the
   // client's baked-in external-read lane and drop the elevation.
@@ -510,6 +524,8 @@ test('E2E: a DCR client redeeming a genuine cfo setup code reaches the token end
   });
   assert.equal(refreshRes.statusCode, 200);
   assert.equal(issuedAgent(refreshRes.json().access_token), 'cfo', 'refresh must PRESERVE the elevated role, never revert to external-read');
+  assert.equal(verifyToken(refreshRes.json().access_token, SIGNING_SECRET)?.connection_id, connectionId);
+  assert.equal(verifyToken(refreshRes.json().refresh_token, SIGNING_SECRET)?.connection_id, connectionId);
 
   // And a SECOND refresh (refreshing a refresh) must still preserve it -- not a one-hop fluke.
   const refresh2 = await app.inject({
@@ -520,6 +536,7 @@ test('E2E: a DCR client redeeming a genuine cfo setup code reaches the token end
   });
   assert.equal(refresh2.statusCode, 200);
   assert.equal(issuedAgent(refresh2.json().access_token), 'cfo');
+  assert.equal(verifyToken(refresh2.json().access_token, SIGNING_SECRET)?.connection_id, connectionId);
 
   await app.close();
 });

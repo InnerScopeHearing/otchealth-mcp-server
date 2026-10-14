@@ -6,8 +6,12 @@ import { cloudBrowserRuntimeStatus, startCloudBrowserWorker, type CloudBrowserGa
 import { BrowserFileBroker } from '../tools/browser-cloud/file-broker.js';
 import { createAwsBrowserFileStore } from '../tools/browser-cloud/aws-file-store.js';
 import { createTrustedBrowserBinaryValidator } from '../tools/browser-cloud/binary-validation.js';
+import { IntercomLoginService } from '../tools/browser-cloud/intercom-login-service.js';
+import { IntercomProfileProvider } from '../tools/browser-cloud/intercom-profile-provider.js';
+import { IntercomLoginTicketStore } from '../tools/browser-cloud/intercom-login-store.js';
 
 let instance: CloudBrowserGatewayRuntime | undefined;
+let intercomLogin: IntercomLoginService | undefined;
 function configured(): CloudBrowserGatewayRuntime {
   if (!cloudBrowserRuntimeStatus().enabled) throw new Error('cloud_browser_not_configured');
   if (!instance) {
@@ -19,11 +23,16 @@ function configured(): CloudBrowserGatewayRuntime {
     const files = new BrowserFileBroker(createAwsBrowserFileStore(config), {
       allowValidatedText: true, validator: createTrustedBrowserBinaryValidator(),
     });
-    instance = { browser: new CloudBrowserService(new DynamoCloudBrowserSessionStore(config.table, config.region), new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId) => files.forUpload(owner, fileId)), Date.now, publicWebPolicy),
+    const store = new DynamoCloudBrowserSessionStore(config.table, config.region);
+    const transport = new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId) => files.forUpload(owner, fileId));
+    const browser = new CloudBrowserService(store, transport, Date.now, publicWebPolicy);
+    intercomLogin = new IntercomLoginService(store, browser, transport, new IntercomProfileProvider({ region:config.region, browserIdentifier:'aws.browser.v1' }), new IntercomLoginTicketStore({ tableName:config.table, region:config.region }));
+    instance = { browser,
       jobs: new CloudBrowserJobs(createDynamoBrowserJobStore(config), queue, artifacts), queue, artifacts, files };
   }
   return instance!;
 }
+export function intercomLoginRuntime(): IntercomLoginService { configured(); return intercomLogin!; }
 
 // Lazy properties let disabled tools explain configuration gaps without making AWS calls at registration.
 export const cloudBrowserRuntime: CloudBrowserGatewayRuntime = {

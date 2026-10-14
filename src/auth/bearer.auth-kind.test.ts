@@ -106,6 +106,26 @@ test('the OAuth grant that issued an access token is recorded as auth_grant, wha
   }
 });
 
+test('OAuth authorization connection id is validated and exposed separately from reusable client id', async () => {
+  const id = 'a4e8e81b-fb87-4b4e-a1db-07aaf3ae1842';
+  const token = issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'coo', 3600, 'authorization_code', true, id);
+  const auth = await validateBearer(bearer(token), ready);
+  assert.equal(auth?.auth_subject, 'dcr_fixture');
+  assert.equal(auth?.auth_connection_id, id);
+
+  const legacy = issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'coo');
+  const legacyAuth = await validateBearer(bearer(legacy), ready);
+  assert.ok(legacyAuth, 'legacy OAuth tokens remain valid');
+  assert.equal(legacyAuth.auth_connection_id, undefined);
+
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const malformed = signToken(
+    { iss: 'https://fixture.invalid', aud: 'otchealth-mcp', sub: 'dcr_fixture', scope: 'mcp', typ: 'access', agent: 'coo', exp, connection_id: 'not-a-uuid' } as never,
+    SIGNING_SECRET,
+  );
+  assert.equal(await validateBearer(bearer(malformed), ready), null, 'malformed signed connection ids fail closed');
+});
+
 test('a token that records no grant has none, and an unrecognized grant claim counts as no grant', async () => {
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const legacy = issueAccessToken('dcr_fixture', 'mcp', SIGNING_SECRET, 'https://fixture.invalid', 'cto');

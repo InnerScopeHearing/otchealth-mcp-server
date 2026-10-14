@@ -1035,7 +1035,15 @@ test('deepRetrieve BUDGET: an in-flight planner is aborted at the remaining dead
       unboundedControl = false;
 
       started = Date.now();
-      const res = await deepRetrieve('q', { rooms: ['memory-exec'], budgetMs: 20 });
+      // The provider-stage deadline floors remaining milliseconds: the first read sets
+      // deadline 20, and the planner's second read leaves 16.5ms. That stage timeout
+      // precedes the global timer, but must mark the whole operation expired itself.
+      let budgetClockReads = 0;
+      const res = await deepRetrieve('q', {
+        rooms: ['memory-exec'],
+        budgetMs: 20,
+        now: () => budgetClockReads++ === 0 ? 0 : 3.5,
+      });
       const elapsed = Date.now() - started;
       assert.equal(plannerAborted, true, 'the actual in-flight provider request must receive and observe cancellation');
       assert.ok(elapsed < 100, `20ms request budget must cancel the 120ms planner, took ${elapsed}ms`);

@@ -588,13 +588,20 @@ test('synthetic company_shared typed query is advertised only to the CTO connect
 
 test('coo lane: seat-memory, ledger coordination, and bounded GitHub operations without unrelated privilege', () => {
   const set = connectorToolset(testEnv(), 'coo');
-  assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS].sort());
+  assert.deepEqual([...set].sort(), [...COO_CONNECTOR_TOOLSET, ...CLOUD_BROWSER_TOOLS, ...AWS_MCP_TOOLS, 'browser_cloud_intercom_login_start'].sort());
   assert.ok(set.has('brain_public_kb_search'), 'coo connector must expose fixed public-only KB retrieval');
   for (const needed of ['memory_team', 'memory_remember', 'memory_pack', 'checkpoint', 'incident_match', 'task_list', 'task_create', 'task_claim', 'task_update', 'task_heartbeat', 'task_complete', 'agent_dispatch', 'inbox_read', 'brain_search', 'brain_graph_search', 'catalog_probe', 'search', 'fetch', 'github_push_files', 'github_merge_pull_request', 'github_dispatch_workflow', 'intercom_conversation_list', 'intercom_conversation_search', 'intercom_conversation_get']) {
     assert.ok(set.has(needed), `coo connector must advertise ${needed} (its instruction block names it)`);
   }
   for (const excluded of ['kb_search_privileged', 'legal_blob_list', 'legal_blob_put', 'xero_orgs', 'shopify_list_products', 'shopify_location_list', 'memory_write', 'cio_send_transactional', 'cio_admin_read_workspace_health', 'graph_send_email', 'intercom_reply_conversation', 'intercom_conversation_assign', 'intercom_conversation_close']) {
     assert.equal(set.has(excluded), false, `coo connector must NOT advertise ${excluded}`);
+  }
+});
+
+test('Intercom login authorization is advertised only on the COO connector', () => {
+  assert.equal(connectorToolset(testEnv(), 'coo').has('browser_cloud_intercom_login_start'), true);
+  for (const lane of ['cto', 'cfo', 'clo', 'clo-personal', 'cro', 'developer', 'exec', 'external-read', 'totally-unknown-lane']) {
+    assert.equal(connectorToolset(testEnv(), lane).has('browser_cloud_intercom_login_start'), false, `${lane} must not advertise Intercom login`);
   }
 });
 

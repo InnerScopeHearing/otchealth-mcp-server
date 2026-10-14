@@ -613,3 +613,18 @@ test("service and AgentCore transport recover through close-last, create, then s
   assert.equal(select.selectedTargetId, "created-1");
   assert.equal(store.sessions.get(sessionId)?.effectUnknown, false);
 });
+
+test('persistent save requires the exact provider profile, browser, session and timestamp receipt', async (t) => {
+  const prior = {...process.env};t.after(()=>{process.env=prior;});
+  process.env.AWS_ACCESS_KEY_ID='synthetic-save-access';process.env.AWS_SECRET_ACCESS_KEY='synthetic-save-secret';
+  const owned={...session,providerBrowserId:'aws.browser.v1'};
+  const profile:CloudBrowserProfile={profileId:'coo-owned-profile',owner:'coo',persistent:true,providerProfileId:'cooIntercomAuth_owned-created123',allowedHosts:['app.intercom.com']};
+  const valid={profileIdentifier:profile.providerProfileId,browserIdentifier:'aws.browser.v1',sessionId:owned.providerSessionId,lastUpdatedAt:'2026-10-14T00:00:00Z'};
+  for(const payload of [valid,{...valid,profileIdentifier:'other-profile'},{...valid,sessionId:'other-session'},{...valid,lastUpdatedAt:'invalid'},{}]) {
+    let calls=0;
+    const transport=new AgentCoreCloudBrowserTransport('us-east-1',async()=>{calls++;return new Response(JSON.stringify(payload),{status:200});});
+    if(payload===valid) await transport.saveProfile(owned,profile);
+    else await assert.rejects(transport.saveProfile(owned,profile),/exact owned profile/);
+    assert.equal(calls,1,'save is never retried');
+  }
+});
