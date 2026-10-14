@@ -435,7 +435,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
     if (!browserId) throw new CloudBrowserError("provider_browser_id_missing", "Public session is missing its original browser resource identifier.");
     const credentials = await resolveAwsCredentials();
     if (!credentials) throw new CloudBrowserError("aws_credentials_unavailable", "Cloud browser runtime credentials are unavailable.");
-    await this.request(
+    const saved = await this.request(
       "PUT",
       `/browser-profiles/${encodeURIComponent(profile.providerProfileId)}/save`,
       {
@@ -444,6 +444,9 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
         clientToken: randomUUID(),
       },
       credentials,
-    );
+    ) as {profileIdentifier?:unknown; browserIdentifier?:unknown; sessionId?:unknown; lastUpdatedAt?:unknown};
+    if (saved.profileIdentifier !== profile.providerProfileId || saved.browserIdentifier !== browserId || saved.sessionId !== session.providerSessionId || typeof saved.lastUpdatedAt !== 'string' || !Number.isFinite(Date.parse(saved.lastUpdatedAt))) {
+      throw new CloudBrowserError('profile_save_receipt_invalid','The provider did not confirm the exact owned profile/session save.');
+    }
   }
 }
