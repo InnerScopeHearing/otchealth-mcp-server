@@ -100,6 +100,7 @@ export function isOpaqueIdentifierQuery(query: string): boolean {
 
 /** Canonical idempotent memory documents use the OpenSearch key `{lane}__m_idem_{sha256}`. */
 const EXACT_IDEMPOTENT_MEMORY_ID = /^[a-z0-9][a-z0-9_-]{0,40}__m_idem_[a-f0-9]{64}$/;
+const BARE_IDEMPOTENT_MEMORY_ID = /^m_idem_[a-f0-9]{64}$/;
 
 /** A backend can mark a full-source literal witness before it truncates its public snippet. */
 export function exactIdentifierCandidate(
