@@ -246,6 +246,13 @@ export interface BrainSearchDependencies {
   deepRetrieve?: typeof deepRetrieve;
 }
 
+/** Search documents do not carry validated assertion records or source-owner receipts. */
+const SOURCE_CURRENTNESS_UNAVAILABLE = {
+  contractVersion: 'source-currentness.query.v1',
+  state: 'unknown',
+  reasons: ['trusted_source_authority_unavailable'],
+} as const;
+
 export async function handleBrainSearch(
   input: BrainSearchInput,
   ctx: ToolContext,
@@ -320,6 +327,7 @@ export async function handleBrainSearch(
       matches: taggedMatches,
       count: taggedMatches.length,
       mode,
+      source_currentness: SOURCE_CURRENTNESS_UNAVAILABLE,
       rooms_searched: ['memory-exec'],
       include_ops: includeOps,
       retraction_verification: snapshot.verified ? 'complete' : 'incomplete',
@@ -398,6 +406,7 @@ export async function handleBrainSearch(
       matches: taggedHits,
       count: taggedHits.length,
       mode: deep.mode,
+      source_currentness: SOURCE_CURRENTNESS_UNAVAILABLE,
       rooms_searched: deep.rooms_searched,
       include_ops: includeOps,
       answer: deepAnswer,
@@ -537,6 +546,9 @@ export async function handleBrainSearch(
     matches: taggedMatches,
     count: taggedMatches.length,
     mode: directSurvived ? 'direct-id' : identifierSurvived ? 'identifier-match' : 'federated-rrf',
+    // Search snippets are not source-authority receipts. Keep the caller-visible claim explicit
+    // until this boundary receives complete typed assertions and trusted owner resolution.
+    source_currentness: SOURCE_CURRENTNESS_UNAVAILABLE,
     rooms_searched: searched,
     include_ops: includeOps,
     retraction_verification: retractionSnapshot.verified ? 'complete' : 'incomplete',
