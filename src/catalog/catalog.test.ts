@@ -68,6 +68,38 @@ test('catalogVersion changes when an EXISTING tool is recategorized (not just on
   assert.notEqual(v1, v2);
 });
 
+test('catalogVersion changes when an existing tool input schema changes, with stable JSON key ordering', () => {
+  recordTool({
+    name: 'zzz_schema_probe', service: 'zzz', category: 'read', title: 'schema probe', description: '', readOnly: true,
+    inputSchema: { type: 'object', properties: { expected_message_id: { type: 'string', format: 'uuid' } } },
+  });
+  const v1 = catalogVersion();
+  // Same schema, different object key order in its JSON representation: not a change.
+  recordTool({
+    name: 'zzz_schema_probe', service: 'zzz', category: 'read', title: 'schema probe', description: '', readOnly: true,
+    inputSchema: { properties: { expected_message_id: { format: 'uuid', type: 'string' } }, type: 'object' },
+  });
+  assert.equal(catalogVersion(), v1);
+  recordTool({
+    name: 'zzz_schema_probe', service: 'zzz', category: 'read', title: 'schema probe', description: '', readOnly: true,
+    inputSchema: { type: 'object', properties: { expected_message_id: { type: 'string', format: 'uuid', minLength: 1 } } },
+  });
+  assert.notEqual(catalogVersion(), v1);
+});
+
+test('catalogVersion handles malformed cyclic schema metadata deterministically', () => {
+  const malformed: Record<string, unknown> = { type: 'object' };
+  malformed.self = malformed;
+  const entry = {
+    name: 'zzz_malformed_schema_probe', service: 'zzz', category: 'read' as const, title: 'bad schema', description: '', readOnly: true,
+    inputSchema: malformed,
+  };
+  recordTool(entry);
+  const version = catalogVersion();
+  recordTool(entry);
+  assert.equal(catalogVersion(), version);
+});
+
 test('catalogVersion is order-independent (registration order never changes the fingerprint)', () => {
   const registered = allTools();
   // Recording the same set again (idempotent by name, per recordTool's own contract) in a

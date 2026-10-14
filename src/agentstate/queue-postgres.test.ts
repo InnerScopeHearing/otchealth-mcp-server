@@ -75,11 +75,12 @@ test('ensureQueue resolves against a reachable DB (it provisions the shared tabl
 
 test('DRAIN (ack=true, default): consumes -- a message read once is never read again', async () => {
   const agent = uniqueAgent('drain');
-  await enqueue(agent, { to: agent, from: 'cto', subject: 'hello', body: 'first', ts: new Date().toISOString() });
+  const persistedId = await enqueue(agent, { to: agent, from: 'cto', subject: 'hello', body: 'first', ts: new Date().toISOString() });
 
   const first = await readMessages(agent, { max: 8 }); // ack defaults true
   assert.equal(first.length, 1);
   assert.equal(first[0].body, 'first');
+  assert.equal(first[0].message_id, persistedId, 'enqueue receipt must be the exact ID persisted and later read');
   assert.equal(first[0].acked, true);
   assert.equal(first[0].dequeue_count, 1);
 

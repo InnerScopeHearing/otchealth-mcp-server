@@ -52,6 +52,7 @@ before(() => {
 
 let allTools: () => CatalogEntry[];
 let recordTool: (entry: CatalogEntry) => void;
+let catalogVersion: () => string;
 
 before(async () => {
   // Dynamic imports (never static top-level ones): ES module imports are hoisted ahead of any
@@ -65,6 +66,7 @@ before(async () => {
 
   allTools = catalog.allTools;
   recordTool = catalog.recordTool;
+  catalogVersion = catalog.catalogVersion;
 
   registerAllTools(
     new McpServer(
@@ -112,6 +114,24 @@ test('pinned: known read tools carry readOnlyHint:true (brain/kb search, catalog
     assert.equal(t!.readOnly, true, `${name} should carry readOnlyHint:true`);
     assert.equal(t!.category, 'read', `${name} should be classified category:'read'`);
   }
+});
+
+test('registered MCP input schema fingerprint includes inbox_read exact-ack argument', () => {
+  const inboxRead = allTools().find((tool) => tool.name === 'inbox_read');
+  assert.ok(inboxRead, 'inbox_read should be captured from the real registry boot');
+  const input = inboxRead!.inputSchema as { internal?: { properties?: Record<string, unknown> } };
+  assert.ok(input.internal?.properties?.expected_message_id, 'the canonical protocol schema fingerprint source must include expected_message_id');
+  const before = catalogVersion();
+  recordTool({
+    ...inboxRead!,
+    inputSchema: {
+      ...input,
+      internal: { ...input.internal, properties: { ...input.internal?.properties, expected_message_id: { type: 'string', format: 'uuid', minLength: 1 } } },
+    },
+  });
+  assert.notEqual(catalogVersion(), before, 'changing a registered argument schema changes the catalog version');
+  recordTool(inboxRead!);
+  assert.equal(catalogVersion(), before, 'restoring the registered MCP schema restores its version');
 });
 
 test('COVERAGE REPORT: annotation classification across the full live tool catalog', () => {

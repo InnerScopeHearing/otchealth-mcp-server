@@ -275,7 +275,7 @@ export async function claimTask(
     }
     const now = new Date();
     const leasedToOther =
-      task.status === 'claimed' &&
+      (task.status === 'claimed' || task.status === 'in_progress' || task.status === 'blocked') &&
       task.owner_agent !== who &&
       task.lease_until &&
       new Date(task.lease_until) > now;
@@ -312,7 +312,7 @@ export async function claimTask(
     // and is being claimed again" — true whether the previous holder's lease lapsed back to the same
     // agent or a different one. A brand-new task (status 'open', claim_ts null) is NOT a reclaim, so
     // its first claim leaves attempt_count untouched (stays 0).
-    const isReclaim = task.status === 'claimed' && task.claim_ts !== null;
+    const isReclaim = task.claim_ts != null;
     if (isReclaim) {
       task.attempt_count = (task.attempt_count ?? 0) + 1;
     }
