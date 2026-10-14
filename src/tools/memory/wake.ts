@@ -565,7 +565,14 @@ export function buildBriefWake(
     .filter(notRetracted)
     .slice(0, WAKE_BRIEF_LIST_CAP)
     .map(boundNonNull);
-  const memory_records = full.memory_records.filter(notRetracted).slice(0, WAKE_BRIEF_MEMORY_CAP).map(boundNonNull);
+  const currentMemory = full.memory_records.filter(notRetracted);
+  // Keep an eligible own-lane canonical status ahead of operational episodes in brief mode. This
+  // runs only after provenance and supersession filtering, so neither kind alone nor a stale row
+  // can claim priority. Stable partitioning preserves the relative order of all other records.
+  const ownStatus = currentMemory.find((r) => r['kind'] === 'status' && r['agent'] === full.agent);
+  const memory_records = [...(ownStatus ? [ownStatus] : []), ...currentMemory.filter((r) => r !== ownStatus)]
+    .slice(0, WAKE_BRIEF_MEMORY_CAP)
+    .map(boundNonNull);
   const active = full.tasks.active.filter(notRetracted).slice(0, WAKE_BRIEF_TASK_CAP).map(boundNonNull);
   const preview = (full.inbox.preview as Record<string, unknown>[]).filter(notRetracted).slice(0, WAKE_BRIEF_INBOX_CAP).map(boundNonNull);
   // inbound notes ARE shared-feed MemoryEntry rows (unlike inbox.preview, which is a queue message
@@ -748,7 +755,20 @@ export function filterSupersededWakeData(
   };
 }
 
-export function registerWake(server: McpServer, callerHash: CallerHashProvider): void {
+export function registerWake(
+  server: McpServer,
+  callerHash: CallerHashProvider,
+  memoryRead: {
+    configured?: typeof cosmosConfigured;
+    search?: typeof searchMemory;
+    sharedConfigured?: typeof sharedConfigured;
+    readSharedAll?: typeof readSharedAll;
+  } = {},
+): void {
+  const memoryConfigured = memoryRead.configured ?? cosmosConfigured;
+  const readMemory = memoryRead.search ?? searchMemory;
+  const sharedMemoryConfigured = memoryRead.sharedConfigured ?? sharedConfigured;
+  const readAllSharedMemory = memoryRead.readSharedAll ?? readSharedAll;
   registerTool(
     server,
     {
@@ -836,10 +856,10 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
 
         // Fetched ONCE and shared by packP + the doctrine pitfall digest below, so doctrine never
         // doubles the shared-feed network fetch.
-        const sharedFeedP: Promise<MemoryEntry[]> = sharedConfigured() ? readSharedAll() : Promise.resolve([]);
+        const sharedFeedP: Promise<MemoryEntry[]> = sharedMemoryConfigured() ? readAllSharedMemory() : Promise.resolve([]);
 
         const packP = (async () => {
-          if (!sharedConfigured()) return { configured: false, status: null, corrections: [], decisions: [], recent: [], count: 0 };
+          if (!sharedMemoryConfigured()) return { configured: false, status: null, corrections: [], decisions: [], recent: [], count: 0 };
           const mine = (await sharedFeedP).filter((r) => r.agent === agent && wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent)); // newest-first
           const status = mine.find((r) => r.type === 'status') ?? null;
           const corrections = collapseSuperseded(mine.filter((r) => r.type === 'correction')).slice(0, 8);
@@ -865,8 +885,8 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         // always false, so memoryFetchLimit === memoryLimit (zero behavior change for full mode).
         const memoryFetchLimit = brief ? Math.max(memoryLimit, WAKE_BRIEF_MEMORY_CAP * 4) : memoryLimit;
         const memP = (async () => {
-          if (!cosmosConfigured()) return { configured: false, records: [] as Record<string, unknown>[] };
-          const records = await searchMemory({ agent, limit: memoryFetchLimit });
+          if (!memoryConfigured()) return { configured: false, records: [] as Record<string, unknown>[] };
+          const records = await readMemory({ agent, limit: memoryFetchLimit });
           return { configured: true, records: records
             .filter((r) => wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent))
             .map((r) => capText(r as unknown as Record<string, unknown>)) };
@@ -885,7 +905,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         })();
 
         const inboundP = (async () => {
-          if (!sharedConfigured()) return { configured: false, count: 0, sinceMarker: '', notes: [] as unknown[] };
+          if (!sharedMemoryConfigured()) return { configured: false, count: 0, sinceMarker: '', notes: [] as unknown[] };
           const marker = await readReconcileMarker(agent);
           const notes = await readInbound(agent, marker);
           const visible = notes.filter((n) => wakeRecordVisibleToAgent(n as unknown as Record<string, unknown>, agent));
@@ -952,7 +972,7 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         // Reuse the full same-agent shared feed as local proof in both full and brief modes. The
         // provenance gate is applied before these entries can contribute a retraction edge.
         let rawMine: Record<string, unknown>[] | undefined;
-        if (sharedConfigured()) {
+        if (sharedMemoryConfigured()) {
           try {
             rawMine = (await sharedFeedP)
               .filter((r) => r.agent === agent && wakeRecordVisibleToAgent(r as unknown as Record<string, unknown>, agent)) as unknown as Record<string, unknown>[];
@@ -979,7 +999,27 @@ export function registerWake(server: McpServer, callerHash: CallerHashProvider):
         } catch (e) {
           errors.push(`retracted_ids: ${e instanceof Error ? e.message : String(e)}`);
         }
-        const currentData = filterSupersededWakeData(fullData, rawMine, externalRetractedIds);
+        let currentData = filterSupersededWakeData(fullData, rawMine, externalRetractedIds);
+        // Episodes can crowd status out of the brief cap, and a primary-window status can already
+        // be retracted. Promote any surviving row during brief shaping; if none survives the full
+        // known retraction set, make one bounded lookup now. Kind alone does not establish lane
+        // ownership. The row stays labeled status, not a claim that past status is current fact.
+        if (brief && !currentData.memory_records.some((record) => record['kind'] === 'status' && record['agent'] === agent) && memoryConfigured()) {
+          try {
+            const statuses = await readMemory({ agent, kind: 'status', limit: 4 });
+            const eligible = statuses
+              .filter((record) => record.agent === agent && record.kind === 'status' && wakeRecordVisibleToAgent(record as unknown as Record<string, unknown>, agent))
+              .map((record) => capText(record as unknown as Record<string, unknown>));
+            if (eligible.length) {
+              currentData = filterSupersededWakeData({
+                ...currentData,
+                memory_records: [...eligible, ...currentData.memory_records],
+              }, [...(rawMine ?? []), ...fullData.memory_records], externalRetractedIds);
+            }
+          } catch (e) {
+            errors.push(`memory_status: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
         const data = compact
           ? buildStartupCompactWake(currentData)
           : m365Lite
