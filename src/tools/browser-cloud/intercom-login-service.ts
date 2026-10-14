@@ -21,7 +21,7 @@ export function intercomPrincipalHash(subject: string | undefined): string {
   return createHash('sha256').update(`coo\0${subject}`).digest('hex');
 }
 export function intercomProfileId(hash: string, workspace: string, host = 'app.intercom.com'): string {
-  if (!/^[a-f0-9]{64}$/.test(hash) || !/^[a-zA-Z0-9]{3,32}$/.test(workspace) || !['app.intercom.com','app.eu.intercom.com','app.au.intercom.com'].includes(host)) throw new CloudBrowserError('invalid_workspace', 'Use the company workspace ID from its dashboard address.');
+  if (!/^[a-f0-9]{64}$/.test(hash) || !/^[a-zA-Z0-9]{3,32}$/.test(workspace) || !new Set(['app.intercom.com','app.eu.intercom.com','app.au.intercom.com']).has(host)) throw new CloudBrowserError('invalid_workspace', 'Use the company workspace ID from its dashboard address.');
   return `coo-intercom-${createHash('sha256').update(`${hash}\0${host}\0${workspace}`).digest('hex').slice(0,32)}`;
 }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');

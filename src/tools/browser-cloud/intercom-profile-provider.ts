@@ -68,7 +68,8 @@ function checkedSessionId(value: string): string {
 function xmlValue(xml: string, tag: string): string | undefined {
   const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = new RegExp(`<${escaped}(?:\\s[^>]*)?>([^<]*)</${escaped}>`).exec(xml);
-  return match?.[1]?.replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').trim();
+  // One-pass entity decoding cannot turn &amp;lt; into a second decoded character.
+  return match?.[1]?.replace(/&(amp|lt|gt);/g, entity => ({ '&amp;':'&', '&lt;':'<', '&gt;':'>' })[entity]!).trim();
 }
 
 async function verifyPrincipal(region: string, credentials: AwsCredentials, fetcher: typeof fetch, now: Date): Promise<ProfileCreateResult['roleReceipt']> {

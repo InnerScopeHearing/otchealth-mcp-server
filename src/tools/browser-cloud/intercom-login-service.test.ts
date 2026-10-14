@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { CloudBrowserError, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore } from './contract.js';
-import { IntercomLoginService, intercomPrincipalHash } from './intercom-login-service.js';
+import { IntercomLoginService, intercomPrincipalHash, intercomProfileId } from './intercom-login-service.js';
 import type { AgentCoreCloudBrowserTransport } from './agentcore-transport.js';
 import type { IntercomProfileProvider } from './intercom-profile-provider.js';
 import type { IntercomLoginTicketStore } from './intercom-login-store.js';
@@ -11,7 +10,6 @@ const subject = 'coo-oauth-subject';
 const workspace = 'abc123';
 const now = 1_700_000_000_000;
 const loginToken = 'A'.repeat(43);
-const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 function fixture(overrides: {
   existingProfile?: CloudBrowserProfile;
@@ -95,7 +93,13 @@ function fixture(overrides: {
 
   const tickets = {
     create: async (input: Record<string, unknown>) => { state.ticketCreates.push(input); },
-    exchange: async () => overrides.exchangeBinding ?? null,
+    exchange: async (tokenHash: string) => {
+      if (overrides.exchangeBinding !== undefined) return overrides.exchangeBinding;
+      const index = state.ticketCreates.findIndex(v => v.tokenHash === tokenHash);
+      if (index < 0) return null;
+      const {tokenHash: _hash, ...binding} = state.ticketCreates.splice(index, 1)[0]!;
+      return binding;
+    },
     load: async () => null,
     finish: async () => true,
     complete: async () => true,
@@ -129,7 +133,13 @@ test('absent profile bootstrap uses atomic create intent instead of a profile lo
   const ticket = state.ticketCreates[0]!;
   assert.equal(ticket.ownerSubjectHash, ownerHash);
   assert.equal(ticket.expectedWorkspaceId, workspace);
-  assert.equal(ticket.tokenHash, digest(result.login_url.split('#token=')[1]!));
+  assert.match(String(ticket.tokenHash), /^[a-f0-9]{64}$/);
+  const rawToken = result.login_url.split('#token=')[1]!;
+  assert.equal(JSON.stringify(ticket).includes(rawToken), false);
+  // Verify the capability resolves the stored ticket instead of duplicating the hash formula.
+  const exchanged = await service.exchange(rawToken);
+  assert.equal(exchanged.status, 'login_required');
+  await assert.rejects(service.exchange(rawToken), /invalid|consumed|expired/);
   assert.equal(JSON.stringify(ticket).includes(result.login_url.split('#token=')[1]!), false);
 });
 
@@ -146,9 +156,9 @@ test('durable pending profile intent freezes after ambiguous provider creation a
 });
 
 test('existing profile bound to another subject is rejected before provider or browser calls', async () => {
-  const otherHash = digest('another-coo-subject');
+  const otherHash = 'b'.repeat(64);
   const ownerHash = intercomPrincipalHash(subject);
-  const profileId = `coo-intercom-${digest(`${ownerHash}\0app.intercom.com\0${workspace}`).slice(0, 32)}`;
+  const profileId = intercomProfileId(ownerHash,workspace);
   const existing: CloudBrowserProfile = {
     profileId, owner: 'coo', ownerSubjectHash: otherHash, providerProfileId: 'provider-profile-owned-by-other',
     allowedHosts: ['app.intercom.com'], persistent: true,
@@ -179,7 +189,7 @@ test('exchange rejects an expired ticket before loading a session or signing a l
 
 test('successful exchange returns a numeric safe-integer expiry accepted by the login page contract', async () => {
   const ownerHash = intercomPrincipalHash(subject);
-  const profileId = `coo-intercom-${digest(`${ownerHash}\0app.intercom.com\0${workspace}`).slice(0, 32)}`;
+  const profileId = intercomProfileId(ownerHash,workspace);
   const binding = { ownerSubjectHash: ownerHash, profileId, sessionId: 'browser-session-1', expectedWorkspaceId: workspace, expiresAt: now + 600_000 };
   const { service, state, sessions } = fixture({ exchangeBinding: binding });
   sessions.set(binding.sessionId, {
@@ -199,8 +209,8 @@ test('successful exchange returns a numeric safe-integer expiry accepted by the 
 
 test('exchange refuses a ticket whose owner hash does not match its browser session', async () => {
   const ownerHash = intercomPrincipalHash(subject);
-  const profileId = `coo-intercom-${digest(`${ownerHash}\0app.intercom.com\0${workspace}`).slice(0, 32)}`;
-  const foreignHash = digest('foreign-subject');
+  const profileId = intercomProfileId(ownerHash,workspace);
+  const foreignHash = 'c'.repeat(64);
   const binding = { ownerSubjectHash: ownerHash, profileId, sessionId: 'browser-session-foreign', expectedWorkspaceId: workspace, expiresAt: now + 600_000 };
   const { service, state, sessions } = fixture({ exchangeBinding: binding, sessionOwnerSubjectHash: foreignHash });
   sessions.set(binding.sessionId, {
