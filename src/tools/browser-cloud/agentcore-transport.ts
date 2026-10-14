@@ -160,7 +160,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
       const page = attached.sessionId;
       if (typeof page !== 'string') throw new CloudBrowserError('login_page_missing', 'The sign-in window is unavailable.');
       if (navigate) {
-        const result = await cdp.command('Page.navigate', { url: `https://${host}/a/apps/${workspace}/settings` }, 10_000, page);
+        const result = await cdp.command('Page.navigate', { url: `https://${host}/a/apps/${workspace}/settings/workspace/general` }, 10_000, page);
         if (result.errorText) throw new CloudBrowserError('login_navigation_failed', 'The company sign-in page could not be opened.');
         session.ownedTargetIds = [target.targetId]; session.selectedTargetId = target.targetId;
         return;

@@ -626,13 +626,24 @@ function providerDeadline(
   };
 }
 
+/** The shared fetch helper may hit its own absolute-deadline timer just before this stage's
+ * AbortSignal.timeout callback. Only classify explicit abort/timeout errors at the provider
+ * deadline as whole-operation expiry; ordinary provider failures remain fail-open. */
+function expireIfProviderDeadlineError(error: unknown, deadlineAtMs: number, onDeadline?: () => void): void {
+  if (!onDeadline || !(error instanceof Error)) return;
+  if (error.name !== 'AbortError' && error.name !== 'TimeoutError') return;
+  if (deadlineAtMs <= Date.now() + 1) onDeadline();
+}
+
 async function planQuery(query: string, allowedRooms: string[], deadline: number, now: () => number, signal?: AbortSignal, onDeadline?: () => void): Promise<QueryPlan> {
   return timedDeepStage('planning', async () => {
     if (!chatConfigured()) return { value: { subQueries: [query], rooms: allowedRooms }, outcome: 'partial' };
+    const requestBudget = providerDeadline(deadline, now, signal, onDeadline);
     try {
-      const res = await chat(buildPlanMessages(query, allowedRooms), { maxTokens: 500, jsonMode: true, tier: 'standard', ...providerDeadline(deadline, now, signal, onDeadline) });
+      const res = await chat(buildPlanMessages(query, allowedRooms), { maxTokens: 500, jsonMode: true, tier: 'standard', ...requestBudget });
       return { value: parseQueryPlan(res.text, query, allowedRooms) };
-    } catch {
+    } catch (error) {
+      expireIfProviderDeadlineError(error, requestBudget.deadlineAtMs, onDeadline);
       return { value: { subQueries: [query], rooms: allowedRooms }, outcome: 'partial' };
     }
   });
@@ -644,15 +655,17 @@ async function planQuery(query: string, allowedRooms: string[], deadline: number
 async function refineSubQueries(query: string, triedSubQueries: string[], resultsSoFar: number, deadline: number, now: () => number, signal?: AbortSignal, onDeadline?: () => void): Promise<string[]> {
   return timedDeepStage('refinement', async () => {
     if (!chatConfigured()) return { value: [], outcome: 'partial' };
+    const requestBudget = providerDeadline(deadline, now, signal, onDeadline);
     try {
       const res = await chat(buildRefineMessages(query, triedSubQueries, resultsSoFar), {
         maxTokens: 300,
         jsonMode: true,
         tier: 'standard',
-        ...providerDeadline(deadline, now, signal, onDeadline),
+        ...requestBudget,
       });
       return { value: parseRefineResponse(res.text, triedSubQueries) };
-    } catch {
+    } catch (error) {
+      expireIfProviderDeadlineError(error, requestBudget.deadlineAtMs, onDeadline);
       return { value: [], outcome: 'partial' };
     }
   });
@@ -666,15 +679,17 @@ async function synthesizeAnswer(query: string, hits: FusedHit[], deadline: numbe
   return timedDeepStage('synthesis', async () => {
     if (hits.length === 0) return { value: NO_CONTEXT_ANSWER, outcome: 'partial' };
     if (!chatConfigured()) return { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
+    const requestBudget = providerDeadline(deadline, now, signal, onDeadline);
     try {
       const res = await chat(buildSynthesisMessages(query, hits.slice(0, MAX_SYNTH_HITS)), {
         maxTokens: 900,
         tier: 'high',
-        ...providerDeadline(deadline, now, signal, onDeadline),
+        ...requestBudget,
       });
       const text = res.text.trim();
       return text ? { value: text } : { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
-    } catch {
+    } catch (error) {
+      expireIfProviderDeadlineError(error, requestBudget.deadlineAtMs, onDeadline);
       return { value: SYNTH_UNAVAILABLE_ANSWER, outcome: 'partial' };
     }
   });
