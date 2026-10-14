@@ -40,6 +40,10 @@ test('brain_search keeps an exact m_idem miss in memory-exec and never substitut
     assert.equal(data.mode, 'exact-not-indexed');
     assert.deepEqual(data.matches, []);
     assert.equal(data.source_currentness, undefined, 'a missing exact ID receives no currentness claim');
+    assert.equal(data.evidence_pack.reason, 'exact_id_not_indexed');
+    assert.equal(data.evidence_pack.outcome, 'no_evidence');
+    assert.equal(data.evidence_pack.sourceCurrentness, 'unknown');
+    assert.equal(data.evidence_pack.coverage.expectedMatchCount, null);
     assert.deepEqual(data.rooms_searched, ['memory-exec']);
     assert.equal(seen.some((u) => u.includes('/commons-company-journal/_search')), false);
     assert.equal(seen.some((u) => u.includes('/embeddings')), false);
@@ -63,6 +67,11 @@ test('brain_search preserves exact denial instead of reporting an empty federate
     assert.equal(data.mode, 'exact-denied');
     assert.deepEqual(data.matches, []);
     assert.equal(data.source_currentness, undefined, 'a denied exact ID receives no currentness claim');
+    assert.equal(data.evidence_pack.reason, 'exact_id_denied');
+    assert.equal(data.evidence_pack.outcome, 'partial');
+    assert.equal(data.evidence_pack.sourceCurrentness, 'unknown');
+    assert.deepEqual(data.evidence_pack.coverage.roomsSearched, []);
+    assert.deepEqual(data.evidence_pack.coverage.roomsFailed, ['memory-exec']);
     assert.deepEqual(data.rooms_searched, ['memory-exec']);
     assert.equal(seen.length, 1);
   } finally { globalThis.fetch = original; }
@@ -85,9 +94,33 @@ test('brain_search preserves exact unavailability without searching another room
     assert.equal(data.mode, 'exact-unavailable');
     assert.deepEqual(data.matches, []);
     assert.equal(data.source_currentness, undefined, 'an unavailable exact ID receives no currentness claim');
+    assert.equal(data.evidence_pack.reason, 'exact_id_unavailable');
+    assert.equal(data.evidence_pack.outcome, 'partial');
+    assert.equal(data.evidence_pack.sourceCurrentness, 'unknown');
+    assert.deepEqual(data.evidence_pack.coverage.roomsSearched, []);
+    assert.deepEqual(data.evidence_pack.coverage.roomsFailed, ['memory-exec']);
     assert.deepEqual(data.rooms_searched, ['memory-exec']);
     assert.equal(seen.length, 2, 'the existing bounded 5xx retry repeats only the exact GET');
     assert.ok(seen.every((u) => u.endsWith(`/memory-exec/_doc/${exactKey}`)));
+  } finally { globalThis.fetch = original; }
+});
+
+test('brain_search marks exact IDs outside the selected domain as unchecked, not absent', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; throw new Error('must not search outside the selected domain'); }) as typeof fetch;
+  try {
+    const result = await handleBrainSearch({ query: exactKey, top: 3, domain: 'commons' }, { callerAgent: 'cto' } as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const data = result.data as any;
+    assert.equal(data.mode, 'exact-unavailable');
+    assert.equal(data.evidence_pack.reason, 'exact_id_not_checked');
+    assert.equal(data.evidence_pack.outcome, 'partial');
+    assert.equal(data.evidence_pack.coverage.expectedMatchCount, null);
+    assert.deepEqual(data.evidence_pack.coverage.roomsSearched, []);
+    assert.equal(calls, 0);
   } finally { globalThis.fetch = original; }
 });
 

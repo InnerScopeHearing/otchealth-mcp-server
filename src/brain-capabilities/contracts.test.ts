@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   BRAIN_CONTRACT_VERSION,
   assertionRecordSchema,
+  evidencePackV1Schema,
   evidenceReferenceSchema,
   idempotencyEnvelopeSchema,
   persistenceReceiptSchema,
@@ -79,6 +80,20 @@ test('source coverage rejects impossible counts and unqualified complete states'
   assert.equal(sourceCoverageSchema.safeParse({ ...coverage, counts: { expected: 2, processed: 2, accepted: 2, rejected: 1 } }).success, false);
   assert.equal(sourceCoverageSchema.safeParse({ ...coverage, counts: { expected: null, processed: 2, accepted: 2, rejected: 0 } }).success, false);
   assert.equal(sourceCoverageSchema.safeParse({ ...coverage, authoritativeEndReached: false }).success, false);
+});
+
+test('EvidencePackV1 requires honest partial coverage and rejects source-authority inflation', () => {
+  const pack = {
+    schema: 'evidence-pack.v1', authorityState: 'unknown', sourceCurrentness: 'unknown', outcome: 'partial', reason: 'untyped_search_hits',
+    matches: [{ packLocatorId: 'match-1', sourceRoom: 'memory-exec', sourceRecordId: 'doc-1', indexedVersionHint: 'index-v2', pathHint: null, alternatePathHints: [], authorityState: 'unknown', currentnessState: 'unknown' }],
+    claimBindings: [{ claimText: 'Synthetic answer [1]', disposition: 'unknown', retrievalLocatorRefs: ['match-1'] }],
+    citationAssessment: 'retrieval_only', conflictAssessment: 'not_assessed', calculationAssessment: 'not_evaluated',
+    coverage: { requestedTop: 8, expectedMatchCount: null, returnedMatchCount: 1, materialClaimCount: 1, sourceBoundClaimCount: 0, unsupportedClaimCount: 0, retrievalComplete: false, claimCoverage: 'partial', roomsSearched: ['memory-exec'], roomsFailed: [] },
+  };
+  assert.equal(evidencePackV1Schema.safeParse(pack).success, true);
+  assert.equal(evidencePackV1Schema.safeParse({ ...pack, sourceCurrentness: 'current' }).success, false);
+  assert.equal(evidencePackV1Schema.safeParse({ ...pack, coverage: { ...pack.coverage, retrievalComplete: true } }).success, false);
+  assert.equal(evidencePackV1Schema.safeParse({ ...pack, claimBindings: [{ ...pack.claimBindings[0], retrievalLocatorRefs: ['missing'] }] }).success, false);
 });
 
 test('idempotency and persistence receipts distinguish a committed outcome from unknown', () => {

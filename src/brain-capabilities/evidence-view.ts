@@ -1,4 +1,10 @@
-import { assertionRecordSchema, type AssertionRecord, type EvidenceReference } from './contracts.js';
+import {
+  assertionRecordSchema,
+  evidencePackV1Schema,
+  type AssertionRecord,
+  type EvidencePackV1,
+  type EvidenceReference,
+} from './contracts.js';
 import { z } from 'zod';
 
 export type EvidenceViewContext = Readonly<{ actorId: string; tenantId: string }>;
@@ -28,6 +34,114 @@ export type EvidenceBackedBrief = Readonly<{
   recordedUntil: string | null;
   evidence: readonly EvidenceReference[];
 }>;
+
+export type RetrievalMatchFields = Readonly<{
+  source?: unknown;
+  id?: unknown;
+  source_version?: unknown;
+  path?: unknown;
+  variants?: unknown;
+}>;
+
+function boundedText(value: unknown, max: number): string | null {
+  if (typeof value !== 'string' || value.length < 1 || value.length > max || /[\u0000-\u001F\u007F]/.test(value)) return null;
+  return value;
+}
+
+/**
+ * Preserve actual search locators while making the missing assertion/authority boundary explicit.
+ * Search metadata is intentionally labeled as an index hint, never an immutable source receipt.
+ */
+export function createRetrievalEvidencePack(input: Readonly<{
+  hits: readonly unknown[];
+  requestedTop: number;
+  roomsSearched: readonly string[];
+  roomsFailed: readonly string[];
+  answer?: string;
+  citations?: readonly unknown[];
+  emptyReason?: 'search_unconfigured' | 'no_readable_rooms' | 'exact_id_not_checked' | 'exact_id_not_indexed' | 'exact_id_denied' | 'exact_id_unavailable' | 'search_unavailable';
+}>): EvidencePackV1 {
+  const hits = input.hits.slice(0, 100).map((value): RetrievalMatchFields => (
+    value && typeof value === 'object' && !Array.isArray(value) ? value as RetrievalMatchFields : {}
+  ));
+  const matches = hits.map((hit, index) => ({
+    packLocatorId: `match-${index + 1}`,
+    sourceRoom: boundedText(hit.source, 128),
+    sourceRecordId: boundedText(typeof hit.id === 'string' || typeof hit.id === 'number' ? String(hit.id) : null, 1_024),
+    indexedVersionHint: boundedText(hit.source_version, 1_024),
+    pathHint: boundedText(hit.path, 2_000),
+    alternatePathHints: Array.isArray(hit.variants)
+      ? hit.variants.slice(0, 100).map((path) => boundedText(path, 2_000)).filter((path): path is string => path !== null)
+      : [],
+    authorityState: 'unknown' as const,
+    currentnessState: 'unknown' as const,
+  }));
+
+  const answer = typeof input.answer === 'string' ? input.answer.trim().slice(0, 20_000) : '';
+  const markerMatches = answer.matchAll(/\[(\d+)\]/g);
+  const markerNumbers = [...markerMatches].map((match) => Number(match[1]));
+  const citationRows = Array.isArray(input.citations) ? input.citations : [];
+  const citationsByNumber = new Map<number, Record<string, unknown>>();
+  let citationInvalid = false;
+  for (const candidate of citationRows) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      citationInvalid = true;
+      continue;
+    }
+    const row = candidate as Record<string, unknown>;
+    if (!Number.isSafeInteger(row.n) || Number(row.n) < 1 || Number(row.n) > hits.length || citationsByNumber.has(Number(row.n))) {
+      citationInvalid = true;
+      continue;
+    }
+    const hit = hits[Number(row.n) - 1];
+    if (!hit || row.source !== hit.source || (row.id !== undefined && String(row.id) !== String(hit.id ?? ''))
+      || (row.path !== undefined && row.path !== hit.path)
+      || (row.source_version !== undefined && row.source_version !== hit.source_version)) {
+      citationInvalid = true;
+      continue;
+    }
+    citationsByNumber.set(Number(row.n), row);
+  }
+  const markerSyntaxInvalid = answer.includes('[') && (markerNumbers.length === 0 || /\[(?!\d+\])/.test(answer));
+  const refs = markerNumbers.map((number) => matches[number - 1]?.packLocatorId)
+    .filter((ref): ref is string => typeof ref === 'string');
+  const allCitationsResolve = markerNumbers.length > 0
+    && refs.length === markerNumbers.length
+    && markerNumbers.every((number) => citationsByNumber.has(number));
+  const citationInvalidFinal = Boolean(answer) && (citationInvalid || markerSyntaxInvalid || !allCitationsResolve);
+  // A synthesized answer is an unsegmented text bundle, not a material-claim inventory.
+  // Citation markers can be checked as retrieval metadata, but must not be promoted into
+  // claim bindings or a fabricated denominator without typed claim/assertion segmentation.
+  const claimBindings: EvidencePackV1['claimBindings'] = [];
+  const roomsFailed = input.roomsFailed.filter((room) => boundedText(room, 128) !== null);
+  const reason = input.emptyReason ?? (matches.length === 0 && roomsFailed.length > 0 ? 'search_unavailable' : 'no_matches');
+  const noEvidence = matches.length === 0 && (reason === 'no_matches' || reason === 'exact_id_not_indexed');
+
+  return evidencePackV1Schema.parse({
+    schema: 'evidence-pack.v1',
+    authorityState: 'unknown',
+    sourceCurrentness: 'unknown',
+    outcome: noEvidence ? 'no_evidence' : 'partial',
+    reason: matches.length === 0 ? reason : 'untyped_search_hits',
+    matches,
+    claimBindings,
+    citationAssessment: !answer ? 'not_applicable' : citationInvalidFinal ? 'invalid' : 'retrieval_only',
+    conflictAssessment: 'not_assessed',
+    calculationAssessment: 'not_evaluated',
+    coverage: {
+      requestedTop: Math.max(1, Math.min(25, Math.trunc(input.requestedTop) || 1)),
+      expectedMatchCount: null,
+      returnedMatchCount: matches.length,
+      materialClaimCount: null,
+      sourceBoundClaimCount: 0,
+      unsupportedClaimCount: null,
+      retrievalComplete: false,
+      claimCoverage: 'not_assessed',
+      roomsSearched: input.roomsSearched.filter((room) => boundedText(room, 128) !== null),
+      roomsFailed,
+    },
+  });
+}
 
 function timeValue(value: unknown): number | null {
   const timestamp = z.string().datetime({ offset: true }).safeParse(value);

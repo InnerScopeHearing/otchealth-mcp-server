@@ -197,6 +197,79 @@ export const sourceCoverageSchema = z.object({
   }
 });
 
+/** Search results may be useful retrieval locators without constituting source-authorized claims. */
+const retrievalLocatorSchema = z.object({
+  packLocatorId: identifier,
+  sourceRoom: identifier.nullable(),
+  sourceRecordId: opaqueSourceIdentifier.nullable(),
+  indexedVersionHint: opaqueSourceIdentifier.nullable(),
+  pathHint: z.string().max(2_000).nullable(),
+  alternatePathHints: z.array(z.string().max(2_000)).max(100),
+  authorityState: z.literal('unknown'),
+  currentnessState: z.literal('unknown'),
+}).strict();
+
+const retrievalClaimBindingSchema = z.object({
+  claimText: z.string().trim().min(1).max(20_000),
+  disposition: z.enum(['unknown', 'unsupported']),
+  retrievalLocatorRefs: z.array(identifier).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.retrievalLocatorRefs).size !== value.retrievalLocatorRefs.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['retrievalLocatorRefs'], message: 'locator references must be unique' });
+  }
+  if ((value.disposition === 'unsupported') !== (value.retrievalLocatorRefs.length === 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'unsupported claims have no retrieval locators; unknown claims retain only observed locators' });
+  }
+});
+
+/** Additive, conservative packet for callers; it never upgrades index snippets to assertions. */
+export const evidencePackV1Schema = z.object({
+  schema: z.literal('evidence-pack.v1'),
+  authorityState: z.literal('unknown'),
+  sourceCurrentness: z.literal('unknown'),
+  outcome: z.enum(['no_evidence', 'partial']),
+  reason: z.enum([
+    'no_matches', 'search_unconfigured', 'no_readable_rooms', 'untyped_search_hits',
+    'exact_id_not_checked', 'exact_id_not_indexed', 'exact_id_denied', 'exact_id_unavailable', 'search_unavailable',
+  ]),
+  matches: z.array(retrievalLocatorSchema).max(100),
+  claimBindings: z.array(retrievalClaimBindingSchema).max(20),
+  citationAssessment: z.enum(['not_applicable', 'retrieval_only', 'invalid']),
+  conflictAssessment: z.literal('not_assessed'),
+  calculationAssessment: z.literal('not_evaluated'),
+  coverage: z.object({
+    requestedTop: z.number().int().min(1).max(25),
+    expectedMatchCount: z.null(),
+    returnedMatchCount: z.number().int().nonnegative(),
+    materialClaimCount: z.number().int().nonnegative().nullable(),
+    sourceBoundClaimCount: z.literal(0),
+    unsupportedClaimCount: z.number().int().nonnegative().nullable(),
+    retrievalComplete: z.literal(false),
+    claimCoverage: z.enum(['not_assessed', 'partial', 'unsupported']),
+    roomsSearched: z.array(identifier).max(100),
+    roomsFailed: z.array(identifier).max(100),
+  }).strict(),
+}).strict().superRefine((pack, context) => {
+  if (pack.matches.length !== pack.coverage.returnedMatchCount) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['coverage', 'returnedMatchCount'], message: 'must equal the observed locator count' });
+  }
+  if (pack.outcome === 'no_evidence' && pack.matches.length !== 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['outcome'], message: 'no_evidence requires zero returned locators' });
+  }
+  const refs = new Set(pack.matches.map((match) => match.packLocatorId));
+  if (pack.claimBindings.some((claim) => claim.retrievalLocatorRefs.some((ref) => !refs.has(ref)))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['claimBindings'], message: 'claim references must resolve to returned retrieval locators' });
+  }
+  const materialClaimCount = pack.coverage.materialClaimCount;
+  if (materialClaimCount !== null && materialClaimCount !== pack.claimBindings.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['coverage', 'materialClaimCount'], message: 'must equal observed claim binding count' });
+  }
+  const unsupported = pack.claimBindings.filter((claim) => claim.disposition === 'unsupported').length;
+  if (pack.coverage.unsupportedClaimCount !== null && pack.coverage.unsupportedClaimCount !== unsupported) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['coverage', 'unsupportedClaimCount'], message: 'must equal explicitly unsupported claims' });
+  }
+});
+
 export const idempotencyEnvelopeSchema = z.object({
   contractVersion: z.literal(BRAIN_CONTRACT_VERSION),
   operationId: identifier,
@@ -231,3 +304,4 @@ export type EvidenceReference = z.infer<typeof evidenceReferenceSchema>;
 export type SourceCoverage = z.infer<typeof sourceCoverageSchema>;
 export type IdempotencyEnvelope = z.infer<typeof idempotencyEnvelopeSchema>;
 export type PersistenceReceipt = z.infer<typeof persistenceReceiptSchema>;
+export type EvidencePackV1 = z.infer<typeof evidencePackV1Schema>;
