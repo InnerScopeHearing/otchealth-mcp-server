@@ -95,7 +95,10 @@ test('unsupported caller is rejected before configuration or lookup', async () =
   const deps = { ...provider(task()), isConfigured: () => false };
   await assert.rejects(handleTaskGet({ task_id: 'synthetic', view: 'metadata' }, { callerAgent: 'cfo' }, deps), /Unsupported task_get view/);
   assert.deepEqual(deps.calls, { task: 0, events: 0 });
-  await assert.rejects(handleTaskGet({ task_id: 'synthetic', context_need: 'approval' }, { callerAgent: 'cfo' }, deps), /Unsupported task_get context need/);
+  await assert.rejects(
+    handleTaskGet({ task_id: 'synthetic', context_need: 'approval' }, { callerAgent: 'cfo' }, deps),
+    /task_get context_need is Developer-only; omit context_need for the supported full read\./,
+  );
   assert.deepEqual(deps.calls, { task: 0, events: 0 });
 });
 

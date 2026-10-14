@@ -38,7 +38,7 @@ export async function handleTaskGet(
     throw new Error('Conflicting task_get view and context_need.');
   }
   if (contextNeed && (ctx.callerAgent || '').trim().toLowerCase() !== 'developer') {
-    throw new Error('Unsupported task_get context need.');
+    throw new Error('task_get context_need is Developer-only; omit context_need for the supported full read.');
   }
   // Resolve the controller-known question class before returning anything to a model. Questions
   // limited to coordination facts use the compact view; note, history, approval, and correction
