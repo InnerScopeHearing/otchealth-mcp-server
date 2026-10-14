@@ -290,7 +290,26 @@ export async function handleBrainSearch(
   // A canonical m_idem key addresses one memory-exec document, not a semantic query over every
   // readable room. Keep the caller's existing room/domain gate, then resolve only that exact key.
   // In particular, a miss or denied GET must never be masked by a similar commons row.
-  const exactMemoryId = input.query.trim();
+  const suppliedMemoryId = input.query.trim();
+  // Native memory_search may surface its canonical bare idempotency key. Resolve it only inside
+  // the authenticated caller's lane; never guess a lane or let a bare key fall through to semantic
+  // federation, where a neighbor could be mistaken for the requested record.
+  const bareIdLane = BARE_IDEMPOTENT_MEMORY_ID.test(suppliedMemoryId) ? ctx.callerAgent : undefined;
+  const callerLane = bareIdLane && /^[a-z0-9][a-z0-9_-]{0,40}$/.test(bareIdLane) ? bareIdLane : undefined;
+  const exactMemoryId = BARE_IDEMPOTENT_MEMORY_ID.test(suppliedMemoryId) && callerLane
+    ? `${callerLane}__${suppliedMemoryId}`
+    : suppliedMemoryId;
+  if (BARE_IDEMPOTENT_MEMORY_ID.test(suppliedMemoryId) && !callerLane) {
+    return {
+      data: {
+        matches: [], count: 0, mode: 'exact-unavailable', rooms_searched: [], include_ops: includeOps,
+        evidence_pack: createRetrievalEvidencePack({
+          hits: [], requestedTop: top, roomsSearched: [], roomsFailed: [], emptyReason: 'exact_id_not_checked',
+        }),
+      },
+      summary: 'Exact memory ID could not be checked because the authenticated caller lane is unavailable.',
+    };
+  }
   if (EXACT_IDEMPOTENT_MEMORY_ID.test(exactMemoryId)) {
     if (!rooms.includes('memory-exec')) {
       return {
