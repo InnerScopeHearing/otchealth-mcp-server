@@ -17,6 +17,10 @@ export interface CatalogEntry {
   title: string;
   description: string;
   readOnly: boolean;
+  /** The exact protocol schemas/metadata used to advertise this tool, kept out of listTools(). */
+  inputSchema?: unknown;
+  outputSchema?: unknown;
+  annotations?: unknown;
 }
 
 const registeredTools: CatalogEntry[] = [];
@@ -44,19 +48,20 @@ export function toolCount(): number {
 }
 
 /**
- * A short, deterministic fingerprint of the CURRENT tool catalog (name+category, sorted). Changes
- * whenever a tool is added, removed, or recategorized. Exists so a client can detect a STALE cached
- * tools/list without a human first having to notice a "missing" tool is actually just an unrefreshed
- * cache (CFO P1-A / P0-1 post-mortem, 2026-07-30: a full connector reconnect did NOT clear a client's
- * cached MCP tool list, and the resulting "xero_attachment_upload is absent" symptom cost two full
- * review rounds before the real cause -- a stale cache, not a missing/allowlist bug -- was found by
- * asking the gateway's own catalog directly). Cheap FNV-1a hash (no crypto import needed for a
+ * A deterministic fingerprint of canonical tool definitions and declared projections, sorted.
+ * It is independent of the caller-specific MCP view selected for one request. Changes whenever a
+ * tool is added, removed, recategorized, or its contract/projection definitions change. It tells a
+ * client that the canonical catalog definitions changed; it does not fingerprint the exact
+ * caller-specific tools/list response. This helps diagnose stale-cache symptoms such as the CFO P1-A
+ * / P0-1 incident (2026-07-30), where a full connector reconnect did NOT clear a client's cached MCP
+ * tool list and "xero_attachment_upload is absent" was mistaken for a missing/allowlist bug. Cheap
+ * FNV-1a hash (no crypto import needed for a
  * non-security fingerprint); collisions are not a security concern here, only a staleness signal.
  * Pure/testable.
  */
 export function catalogVersion(): string {
   const key = allTools()
-    .map((t) => `${t.name}:${t.category}`)
+    .map((t) => stableJson([t.name, t.category, t.title, t.description, t.readOnly, t.inputSchema, t.outputSchema, t.annotations]))
     .sort()
     .join('|');
   let hash = 0x811c9dc5;
@@ -65,6 +70,73 @@ export function catalogVersion(): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/** Canonical, bounded JSON encoding for protocol metadata; malformed/cyclic values get a stable marker. */
+function stableJson(value: unknown): string {
+  const seen = new Set<object>();
+  let nodes = 0;
+  let outputBudget = 1_000_000;
+  let exhausted = false;
+  const limit = '"[catalog-limit:bytes]"';
+  const spend = (count: number): boolean => {
+    outputBudget -= count;
+    if (outputBudget < 0) exhausted = true;
+    return !exhausted;
+  };
+  const encode = (item: unknown, depth: number): string => {
+    if (exhausted) return limit;
+    nodes++;
+    if (nodes > 50_000) { exhausted = true; return '"[catalog-limit:nodes]"'; }
+    if (depth > 64) return '"[catalog-limit:depth]"';
+    if (item === null) return 'null';
+    if (typeof item === 'string') {
+      if (item.length > 100_000) { exhausted = true; return limit; }
+      const encoded = JSON.stringify(item);
+      return spend(encoded.length) ? encoded : limit;
+    }
+    if (typeof item === 'boolean') return item ? 'true' : 'false';
+    if (typeof item === 'number') return Number.isFinite(item) ? String(item) : '"[catalog-invalid:number]"';
+    if (typeof item !== 'object') return `"[catalog-invalid:${typeof item}]"`;
+    if (seen.has(item)) return '"[catalog-invalid:cycle]"';
+    seen.add(item);
+    let result: string;
+    if (Array.isArray(item)) {
+      if (item.length > 10_000) { exhausted = true; return '"[catalog-limit:array]"'; }
+      const parts: string[] = [];
+      for (const child of item) {
+        if (parts.length && !spend(1)) break;
+        parts.push(encode(child, depth + 1));
+        if (exhausted) break;
+      }
+      spend(2);
+      result = exhausted ? limit : `[${parts.join(',')}]`;
+    } else {
+      const keys = Object.keys(item);
+      if (keys.length > 10_000) { exhausted = true; return '"[catalog-limit:object]"'; }
+      const keyBytes = keys.reduce((total, key) => total + key.length, 0);
+      if (keyBytes > outputBudget || keys.some((key) => key.length > 100_000)) { exhausted = true; return limit; }
+      keys.sort();
+      const parts: string[] = [];
+      for (const key of keys) {
+        if (parts.length && !spend(1)) break;
+        const encodedKey = JSON.stringify(key);
+        if (!spend(encodedKey.length + 1)) break;
+        const encodedValue = encode((item as Record<string, unknown>)[key], depth + 1);
+        parts.push(`${encodedKey}:${encodedValue}`);
+        if (exhausted) break;
+      }
+      spend(2);
+      result = exhausted ? limit : `{${parts.join(',')}}`;
+    }
+    seen.delete(item);
+    return result;
+  };
+  try {
+    return encode(value, 0);
+  } catch {
+    return '"[catalog-invalid:unreadable]"';
+  }
 }
 
 export interface ServiceInfo {

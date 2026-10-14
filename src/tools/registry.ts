@@ -9,6 +9,7 @@
  */
 
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js';
 import { z, type ZodRawShape } from 'zod';
 import { loadEnv, type Env } from '../config/env.js';
 import { isAwsOperatorLane } from '../config/aws-operators.js';
@@ -1009,18 +1010,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     ? null
     : evaluateCatalogCuration(catalogCurationMode, laneForThisTool, canonicalName, isM365StaticAuth(), curateLaneOverrides);
   if (catalogCuration && !catalogCuration.advertise) return;
-  // Record into the Capability Catalog under the CANONICAL name -- recordTool is idempotent by
-  // name, so an alias's second call is a harmless no-op rather than polluting the catalog with a
-  // fake "service" derived from the alias's stripped bare name (e.g. "containerapp" instead of
-  // "azure" for the "containerapp_get" alias of azure_containerapp_get).
-  recordTool({
-    name: canonicalName,
-    service: deriveService(canonicalName),
-    category: def.category,
-    title: def.annotations.title,
-    description: def.annotations.description,
-    readOnly: def.annotations.readOnlyHint,
-  });
   // Only an explicitly opted-in tool receives a connector projection. A lane-specific projection
   // takes precedence over the neutral projection; strict validation uses the selected public schema,
   // while handler authorization and the internal Work/Codex input shape remain unchanged.
@@ -1062,6 +1051,49 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
     dry_run: z.boolean(),
   };
 
+  // Record the canonical tool definition, independent of the request that happened to register it.
+  // A connector request can select a lane-specific input projection and omits outputSchema/title;
+  // those are presentation choices for that MCP server instance, not changes to the declaration.
+  // Include the base schema and every declared connector projection/selection so the fingerprint
+  // changes when the contract definitions change without oscillating across internal/connector boots.
+  const jsonSchema = (shape: ZodRawShape, pipeStrategy: 'input' | 'output') =>
+    toJsonSchemaCompat(z.object(shape), { strictUnions: true, pipeStrategy });
+  const connectorShapeForLane = (lane: string): ZodRawShape => ({
+    ...(def.connectorInputShapeByLane?.[lane] ?? def.connectorInputShape ?? def.inputShape),
+    ...CONNECTOR_COMMON_INPUT,
+  });
+  const connectorByLane = Object.fromEntries(
+    Object.keys(def.connectorInputShapeByLane ?? {}).sort().map((lane) => [lane, jsonSchema(connectorShapeForLane(lane), 'input')]),
+  );
+  const includeConnectorAnnotations =
+    parseConnectorAnnotationsMode(process.env.CONNECTOR_ANNOTATIONS_MODE) === 'on';
+  const connectorAnnotationsMode = includeConnectorAnnotations ? 'on' : 'off';
+  recordTool({
+    name: canonicalName,
+    service: deriveService(canonicalName),
+    category: def.category,
+    title: def.annotations.title,
+    description: def.annotations.description,
+    readOnly: def.annotations.readOnlyHint,
+    inputSchema: {
+      internal: jsonSchema({ ...def.inputShape, ...COMMON_INPUT }, 'input'),
+      connectorDefault: jsonSchema({ ...(def.connectorInputShape ?? def.inputShape), ...CONNECTOR_COMMON_INPUT }, 'input'),
+      connectorByLane,
+    },
+    outputSchema: { internal: jsonSchema(outputShape, 'output'), connector: null },
+    annotations: {
+      internal: def.annotations,
+      connectorDescription: def.connectorDescription ?? def.annotations.description,
+      connectorAnnotationsMode,
+      connector: includeConnectorAnnotations ? {
+        readOnlyHint: def.annotations.readOnlyHint,
+        destructiveHint: def.annotations.destructiveHint,
+        idempotentHint: def.annotations.idempotentHint,
+        openWorldHint: def.annotations.openWorldHint,
+      } : null,
+    },
+  });
+
   // See parseConnectorAnnotationsMode's doc comment (above, next to connectorToolset()) for the
   // full history of why this is a flag: 66cdde5 dropped annotations/outputSchema/title together for
   // a Claude web client bug, but the #80/#82 saga later showed unexpected extra fields are not
@@ -1070,8 +1102,6 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
   // write-capable) can pass safe reads like brain_search silently; CONNECTOR_ANNOTATIONS_MODE=off
   // reverts to the exact prior bare shape (task-definition env change + rollout, no image rebuild)
   // if a client regresses.
-  const includeConnectorAnnotations =
-    parseConnectorAnnotationsMode(process.env.CONNECTOR_ANNOTATIONS_MODE) === 'on';
   const connectorDescription = def.connectorDescription ?? def.annotations.description;
   const toolConfig = connectorSurfaceForThisTool
     ? {
