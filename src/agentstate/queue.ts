@@ -36,6 +36,10 @@ export function isConfigured(): boolean {
   return activeBackend() === 'postgres' ? postgres.isConfigured() : azure.isConfigured();
 }
 
+export function supportsExactAcknowledgment(): boolean {
+  return activeBackend() === 'postgres';
+}
+
 export async function ensureQueue(agent: string): Promise<void> {
   return activeBackend() === 'postgres' ? postgres.ensureQueue(agent) : azure.ensureQueue(agent);
 }
@@ -56,4 +60,12 @@ export async function readMessages(agent: string, opts: ReadMessagesOptions = {}
   // live Azure read: with the default ack=true that would DRAIN real messages instead of auditing.
   if (opts.deadLetter) return [];
   return azure.readMessages(agent, opts);
+}
+
+/** Remove one explicitly identified message, only on a backend with an atomic exact-target primitive. */
+export async function acknowledgeMessage(agent: string, messageId: string): Promise<boolean> {
+  if (activeBackend() !== 'postgres') {
+    throw new Error('Exact message acknowledgment is unsupported by the active Azure Queue backend.');
+  }
+  return postgres.acknowledgeMessage(agent, messageId);
 }

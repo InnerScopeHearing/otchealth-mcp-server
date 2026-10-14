@@ -1,9 +1,18 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerTool, type CallerHashProvider } from '../registry.js';
-import { isConfigured, readMessages } from '../../agentstate/queue.js';
+import { acknowledgeMessage, isConfigured, readMessages, supportsExactAcknowledgment } from '../../agentstate/queue.js';
 
-export function registerInboxRead(server: McpServer, callerHash: CallerHashProvider): void {
+interface InboxQueue {
+  isConfigured: typeof isConfigured;
+  supportsExactAcknowledgment: typeof supportsExactAcknowledgment;
+  acknowledgeMessage: typeof acknowledgeMessage;
+  readMessages: typeof readMessages;
+}
+
+const defaultQueue: InboxQueue = { isConfigured, supportsExactAcknowledgment, acknowledgeMessage, readMessages };
+
+export function registerInboxRead(server: McpServer, callerHash: CallerHashProvider, queue: InboxQueue = defaultQueue): void {
   registerTool(
     server,
     {
@@ -12,7 +21,7 @@ export function registerInboxRead(server: McpServer, callerHash: CallerHashProvi
       annotations: {
         title: 'Read an agent inbox',
         description:
-          'Read (and by default drain) the messages waiting in an agent\'s inbox. This is how an agent picks up cross-engine handoffs on wake. Durable enqueue means delivery on the recipient\'s next active turn; it does not wake an idle persistent-role chat in the background. ack=true (default) removes messages after reading. ack=false peeks do not consume messages or count them as deliveries; Azure may apply its visibility timeout. Inbox housekeeping may still move expired or overage messages to dead-letter status. newest_first=true is a bounded Postgres peek of live messages in newest-first order; it requires ack=false, and does not consume, lease, or count selected messages as deliveries. Messages past their TTL, older than 7 days, or delivered more than 50 times are dead-lettered: they stop appearing in peeks, drains and wake, and dead_letter=true lists them for audit.',
+          'Read (and by default drain) an agent inbox, or acknowledge one previously observed Postgres message by expected_message_id. Exact acknowledgment is atomic, restricted to the authenticated caller\'s own inbox, and unsupported on Azure. Durable enqueue does not wake an idle persistent-role chat. ack=false peeks do not consume messages; newest_first requires ack=false. Expired, overage, and over-delivered messages are ineligible for exact acknowledgment; dead_letter=true lists dead letters for audit.',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -24,16 +33,29 @@ export function registerInboxRead(server: McpServer, callerHash: CallerHashProvi
         ack: z.boolean().optional().describe('Delete after reading (default true). false = peek; selected messages are not consumed or counted as deliveries.'),
         newest_first: z.boolean().optional().describe('Return selected live messages newest first. Requires ack=false and Postgres; no selected message is consumed, leased, or counted as a delivery. Inbox dead-letter housekeeping still applies.'),
         dead_letter: z.boolean().optional().describe('Audit: list dead-lettered messages (newest first) instead of live ones. Read-only; ack is ignored.'),
+        expected_message_id: z.string().uuid().optional().describe('Atomically acknowledge exactly this previously observed message ID in your own inbox. Cannot be combined with drain, peek, or dead-letter mode.'),
       },
       outputShape: { count: z.number(), messages: z.unknown() },
-      handler: async (input) => {
+      handler: async (input, ctx) => {
+        if (input.expected_message_id) {
+          if (input.ack !== undefined || input.newest_first !== undefined || input.dead_letter !== undefined || input.max !== undefined) {
+            throw new Error('expected_message_id cannot be combined with ack, max, newest_first, or dead_letter.');
+          }
+          if (!ctx.callerAgent || input.agent.toLowerCase() !== ctx.callerAgent.toLowerCase()) {
+            throw new Error('Exact acknowledgment is restricted to the authenticated caller’s own inbox.');
+          }
+          if (!queue.supportsExactAcknowledgment()) throw new Error('Exact message acknowledgment is unsupported by the active Azure Queue backend.');
+          if (!queue.isConfigured()) throw new Error('Exact message acknowledgment is unavailable because the inbox backend is not configured.');
+          const acknowledged = await queue.acknowledgeMessage(ctx.callerAgent, input.expected_message_id);
+          return { data: { count: 0, messages: [], acknowledged, message_id: input.expected_message_id, outcome: acknowledged ? 'acknowledged' : 'not_acknowledged' }, summary: acknowledged ? 'Exact message acknowledged.' : 'Exact message was absent or no longer eligible.' };
+        }
         if (input.newest_first && ((input.ack ?? true) || input.dead_letter)) {
           throw new Error('newest_first is supported only for live read-only peeks; set ack=false and omit dead_letter.');
         }
-        if (!isConfigured()) return { data: { count: 0, messages: [], note: 'agent inbox not configured.' }, summary: 'Inbox not configured.' };
+        if (!queue.isConfigured()) return { data: { count: 0, messages: [], note: 'agent inbox not configured.' }, summary: 'Inbox not configured.' };
         const deadLetter = input.dead_letter === true;
         const ack = deadLetter ? false : (input.ack ?? true);
-        const messages = await readMessages(input.agent, { max: input.max ?? 16, ack, deadLetter, newestFirst: input.newest_first });
+        const messages = await queue.readMessages(input.agent, { max: input.max ?? 16, ack, deadLetter, newestFirst: input.newest_first });
         const mode = deadLetter ? ' (dead letters, read-only)' : ack ? ' (drained)' : ' (peeked)';
         return { data: { count: messages.length, messages }, summary: `${messages.length} message(s) in ${input.agent}'s inbox${mode}.` };
       },
