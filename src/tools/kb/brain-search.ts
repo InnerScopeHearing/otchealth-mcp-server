@@ -97,6 +97,9 @@ export function isOpaqueIdentifierQuery(query: string): boolean {
   return opaqueIdentifierQuery(query) !== null;
 }
 
+/** Canonical idempotent memory documents use the OpenSearch key `{lane}__m_idem_{sha256}`. */
+const EXACT_IDEMPOTENT_MEMORY_ID = /^[a-z0-9][a-z0-9_-]{0,40}__m_idem_[a-f0-9]{64}$/;
+
 /** A backend can mark a full-source literal witness before it truncates its public snippet. */
 export function exactIdentifierCandidate(
   query: string,
@@ -266,6 +269,67 @@ export async function handleBrainSearch(
     return {
       data: { matches: [], count: 0, mode: 'no-rooms', rooms_searched: [], include_ops: includeOps },
       summary: `No readable rooms for domain "${input.domain}".`,
+    };
+  }
+
+  // A canonical m_idem key addresses one memory-exec document, not a semantic query over every
+  // readable room. Keep the caller's existing room/domain gate, then resolve only that exact key.
+  // In particular, a miss or denied GET must never be masked by a similar commons row.
+  const exactMemoryId = input.query.trim();
+  if (EXACT_IDEMPOTENT_MEMORY_ID.test(exactMemoryId)) {
+    if (!rooms.includes('memory-exec')) {
+      return {
+        data: { matches: [], count: 0, mode: 'exact-unavailable', rooms_searched: [], include_ops: includeOps },
+        summary: `Exact memory ID could not be checked in the selected domain for "${input.query}".`,
+      };
+    }
+
+    let result;
+    try {
+      result = await hybridSearch('memory-exec', exactMemoryId, 1, { includeOps });
+    } catch {
+      result = null;
+    }
+    if (!result || result.mode !== 'direct-id') {
+      const mode = result?.mode === 'exact-not-indexed' || result?.mode === 'exact-denied' || result?.mode === 'exact-unavailable'
+        ? result.mode
+        : 'exact-unavailable';
+      return {
+        data: { matches: [], count: 0, mode, rooms_searched: ['memory-exec'], include_ops: includeOps },
+        summary: `Exact memory lookup ${mode.replace('exact-', '')} for "${input.query}" in memory-exec.`,
+      };
+    }
+
+    const exact = result.matches.find((hit) => String(hit.id ?? '') === exactMemoryId);
+    if (!exact) {
+      return {
+        data: { matches: [], count: 0, mode: 'exact-unavailable', rooms_searched: ['memory-exec'], include_ops: includeOps },
+        summary: `Exact memory lookup unavailable for "${input.query}" in memory-exec.`,
+      };
+    }
+    const snapshot = await readSnapshot();
+    const candidate: FusedHit = {
+      score: 1, source: 'memory-exec', text: exact.text, id: exact.id,
+      agent: exact.agent, path: exact.path, variants: exact.variants, type: exact.type,
+      source_version: exact.source_version,
+    };
+    const boundary = filterRetractedByAgent([candidate], snapshot.byAgent);
+    const mode = boundary.dropped.length ? 'exact-superseded' : 'direct-id';
+    const taggedMatches = tagWithFeedbackRefs(boundary.kept, { tool: 'brain_search', query: input.query, defaultRoom: 'memory-exec' });
+    const data: Record<string, unknown> = {
+      matches: taggedMatches,
+      count: taggedMatches.length,
+      mode,
+      rooms_searched: ['memory-exec'],
+      include_ops: includeOps,
+      retraction_verification: snapshot.verified ? 'complete' : 'incomplete',
+    };
+    if (boundary.dropped.length) data.retracted_dropped = boundary.dropped;
+    return {
+      data,
+      summary: mode === 'direct-id'
+        ? `1 exact memory ID match for "${input.query}" in memory-exec.`
+        : `Exact memory ID "${input.query}" is superseded and was withheld.`,
     };
   }
 

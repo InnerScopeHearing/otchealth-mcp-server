@@ -56,6 +56,7 @@ const OS_HOST = 'search-otchealth-brain-uqmq2jw23cv4yjnnxblxzb7nny.us-east-1.es.
 test('exactFlatMemoryId accepts canonical IDs only in flat memory rooms', () => {
   assert.equal(exactFlatMemoryId('memory-exec', 'cto__20260907-007'), 'cto__20260907-007');
   assert.equal(exactFlatMemoryId('memory-exec', 'cto__m_mtqtdgxm_cac8442d'), 'cto__m_mtqtdgxm_cac8442d');
+  assert.equal(exactFlatMemoryId('memory-exec', 'cto__m_idem_813ec810aeae436ce02567a793cda8d2ae5641820a0b1add34894b1c9406e226'), 'cto__m_idem_813ec810aeae436ce02567a793cda8d2ae5641820a0b1add34894b1c9406e226');
   assert.equal(exactFlatMemoryId('memory-exec', '20260907-007'), null);
   assert.equal(exactFlatMemoryId('memory-exec', '80a4f5c1c43f5f506df1885644d27cff1bf969c1'), null);
   assert.equal(exactFlatMemoryId('commons-company-journal', 'cto__20260907-007'), null);
@@ -132,22 +133,20 @@ test('hybridSearch direct lookup returns the canonical key and owning prefix wit
   assert.equal(res?.matches[0]?.agent, 'cto');
 });
 
-test('hybridSearch does not bypass a caller filter for an exact-looking query', async () => {
+test('hybridSearch does not drop a caller filter or rank a neighbor for an exact-looking query', async () => {
   const calls: string[] = [];
-  await withStubbedFetch(
+  const res = await withStubbedFetch(
     (async (url: string | URL) => {
       const u = String(url);
       calls.push(u);
-      if (isEmbeddingsUrl(u)) return embeddingsOk();
-      if (u.startsWith(`https://${OS_HOST}/memory-exec/_search`)) {
-        return new Response(JSON.stringify({ hits: { hits: [] } }), { status: 200 });
-      }
       throw new Error(`unexpected fetch: ${u}`);
     }) as typeof fetch,
     () => hybridSearch('memory-exec', 'cto__20260907-007', 5, { filter: "type eq 'fact'", includeOps: false }),
   );
+  assert.equal(res?.mode, 'exact-unavailable');
+  assert.deepEqual(res?.matches, []);
   assert.equal(calls.some((u) => u.includes('/_doc/')), false);
-  assert.ok(calls.some((u) => isEmbeddingsUrl(u)));
+  assert.equal(calls.length, 0, 'an exact request with an unenforceable filter must not drop it or rank neighbors');
 });
 
 test('direct operational ID preserves includeOps=false demotion semantics', async () => {
@@ -162,30 +161,45 @@ test('direct operational ID preserves includeOps=false demotion semantics', asyn
   assert.equal(res?.matches.length, 1, 'operational rows are deprioritized, not excluded');
 });
 
-test('hybridSearch falls through to hybrid after an exact GET miss', async () => {
+test('hybridSearch returns an exact miss without substituting a semantically related record', async () => {
   const calls: string[] = [];
   const res = await withStubbedFetch(
     (async (url: string | URL) => {
       const u = String(url);
       calls.push(u);
-      if (u.endsWith('/memory-exec/_doc/cto__20260907-999')) {
+      if (u.endsWith('/memory-exec/_doc/cto__m_idem_813ec810aeae436ce02567a793cda8d2ae5641820a0b1add34894b1c9406e226')) {
         return new Response(JSON.stringify({ found: false }), { status: 404 });
-      }
-      if (isEmbeddingsUrl(u)) return embeddingsOk();
-      if (u.startsWith(`https://${OS_HOST}/memory-exec/_search`)) {
-        return new Response(JSON.stringify({ hits: { hits: [{
-          _id: 'related', _score: 1, _source: { id: 'cto__related', agent: 'cto', text: 'fallback result' },
-        }] } }), { status: 200 });
       }
       throw new Error(`unexpected fetch: ${u}`);
     }) as typeof fetch,
-    () => hybridSearch('memory-exec', 'cto__20260907-999', 5, { includeOps: false }),
+    () => hybridSearch('memory-exec', 'cto__m_idem_813ec810aeae436ce02567a793cda8d2ae5641820a0b1add34894b1c9406e226', 5, { includeOps: false }),
   );
-  assert.equal(res?.mode, 'hybrid');
-  assert.equal(res?.matches[0]?.id, 'cto__related');
-  assert.ok(calls.some((u) => isEmbeddingsUrl(u)), 'miss must reach the embedding path');
-  assert.ok(calls.filter((u) => u.includes('/memory-exec/_search')).length >= 2,
-    'miss must run BM25 and vector search');
+  assert.equal(res?.mode, 'exact-not-indexed');
+  assert.deepEqual(res?.matches, []);
+  assert.equal(calls.length, 1, 'an exact miss must not embed or run ranked search');
+});
+
+test('hybridSearch reports exact lookup authorization failures without ranked fallback', async () => {
+  const calls: string[] = [];
+  const res = await withStubbedFetch(
+    (async (url: string | URL) => {
+      calls.push(String(url));
+      return new Response('forbidden', { status: 403 });
+    }) as typeof fetch,
+    () => hybridSearch('memory-exec', 'cto__m_idem_813ec810aeae436ce02567a793cda8d2ae5641820a0b1add34894b1c9406e226', 5),
+  );
+  assert.equal(res?.mode, 'exact-denied');
+  assert.deepEqual(res?.matches, []);
+  assert.equal(calls.length, 1);
+});
+
+test('hybridSearch reports malformed exact success payloads as unavailable', async () => {
+  const res = await withStubbedFetch(
+    (async () => new Response(JSON.stringify({ found: true, _source: [] }), { status: 200 })) as typeof fetch,
+    () => hybridSearch('memory-exec', 'cto__m_idem_813ec810aeae436ce02567a793cda8d2ae5641820a0b1add34894b1c9406e226', 5),
+  );
+  assert.equal(res?.mode, 'exact-unavailable');
+  assert.deepEqual(res?.matches, []);
 });
 
 // ================================================================================================
