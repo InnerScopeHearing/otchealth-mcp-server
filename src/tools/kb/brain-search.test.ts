@@ -307,6 +307,11 @@ test('handleBrainSearch mode:"fast" is a regression: same output shape as brain_
     assert.equal(typeof data.count, 'number');
     assert.ok(Array.isArray(data.rooms_searched));
     assert.equal(data.include_ops, false);
+    assert.deepEqual(data.source_currentness, {
+      contractVersion: 'source-currentness.query.v1',
+      state: 'unknown',
+      reasons: ['trusted_source_authority_unavailable'],
+    }, 'untyped search snippets remain explicitly unknown at the real handler boundary');
     // FND-20260829-e454: the wall-clock-budget fields are ALSO deep-only -- fast mode's code path
     // (below the deep-mode `if`) is untouched by this fix and must never carry them.
     for (const deepOnlyField of ['answer', 'citations', 'sub_queries', 'rounds_used', 'partial', 'continuation', 'resumed', 'budget_skipped']) {
@@ -370,6 +375,33 @@ test('DEEP_RETRIEVAL_MODE unset (default "on"): mode:"deep" takes the deep path 
     assert.ok(Array.isArray(data.sub_queries));
     assert.equal(typeof data.rounds_used, 'number');
   });
+});
+
+test('deep response annotates untyped injected retrieval hits as currentness unknown', async () => {
+  const priorMode = process.env.DEEP_RETRIEVAL_MODE;
+  process.env.DEEP_RETRIEVAL_MODE = 'on';
+  try {
+    const result = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'), {
+      deepRetrieve: async () => ({
+        mode: 'deep-agentic', answer: 'Synthesized from a raw snippet.', citations: [],
+        sub_queries: ['q'], rounds_used: 1,
+        hits: [{ score: 1, source: 'memory-exec', text: 'untyped raw snippet', id: 'doc-1' }],
+        rooms_searched: ['memory-exec'],
+      } as any),
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const data = result.data as Record<string, unknown>;
+    assert.equal(data.answer, 'Synthesized from a raw snippet.');
+    assert.equal((data.matches as unknown[]).length, 1);
+    assert.deepEqual(data.source_currentness, {
+      contractVersion: 'source-currentness.query.v1', state: 'unknown',
+      reasons: ['trusted_source_authority_unavailable'],
+    });
+  } finally {
+    if (priorMode === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
+    else process.env.DEEP_RETRIEVAL_MODE = priorMode;
+  }
 });
 
 test('deep mode promotes the current typed entity, removes its semantic duplicate, and cites the authoritative match', async () => {

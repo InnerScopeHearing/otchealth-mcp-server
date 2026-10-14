@@ -39,6 +39,7 @@ test('brain_search keeps an exact m_idem miss in memory-exec and never substitut
     const data = result.data as any;
     assert.equal(data.mode, 'exact-not-indexed');
     assert.deepEqual(data.matches, []);
+    assert.equal(data.source_currentness, undefined, 'a missing exact ID receives no currentness claim');
     assert.deepEqual(data.rooms_searched, ['memory-exec']);
     assert.equal(seen.some((u) => u.includes('/commons-company-journal/_search')), false);
     assert.equal(seen.some((u) => u.includes('/embeddings')), false);
@@ -61,6 +62,7 @@ test('brain_search preserves exact denial instead of reporting an empty federate
     const data = result.data as any;
     assert.equal(data.mode, 'exact-denied');
     assert.deepEqual(data.matches, []);
+    assert.equal(data.source_currentness, undefined, 'a denied exact ID receives no currentness claim');
     assert.deepEqual(data.rooms_searched, ['memory-exec']);
     assert.equal(seen.length, 1);
   } finally { globalThis.fetch = original; }
@@ -82,6 +84,7 @@ test('brain_search preserves exact unavailability without searching another room
     const data = result.data as any;
     assert.equal(data.mode, 'exact-unavailable');
     assert.deepEqual(data.matches, []);
+    assert.equal(data.source_currentness, undefined, 'an unavailable exact ID receives no currentness claim');
     assert.deepEqual(data.rooms_searched, ['memory-exec']);
     assert.equal(seen.length, 2, 'the existing bounded 5xx retry repeats only the exact GET');
     assert.ok(seen.every((u) => u.endsWith(`/memory-exec/_doc/${exactKey}`)));
@@ -107,6 +110,11 @@ test('brain_search keeps an exact hit canonical', async () => {
     assert.equal(data.mode, 'direct-id');
     assert.equal(data.matches.length, 1);
     assert.equal(data.matches[0].id, exactKey);
+    assert.deepEqual(data.source_currentness, {
+      contractVersion: 'source-currentness.query.v1',
+      state: 'unknown',
+      reasons: ['trusted_source_authority_unavailable'],
+    });
     assert.deepEqual(data.rooms_searched, ['memory-exec']);
     assert.equal(seen.length, 1);
   } finally { globalThis.fetch = original; }
