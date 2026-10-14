@@ -57,14 +57,15 @@ class MemoryStore implements CloudBrowserStore {
     this.dailyReservations += 1;
     return true;
   }
-  async createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number): Promise<BrowserCaptureMetadata> {
-    const metadata: BrowserCaptureMetadata = { id: 'bca_123e4567-e89b-42d3-a456-426614174000', owner, sessionId, contentType: artifact.contentType, byteLength: artifact.body.byteLength, sha256: artifact.sha256, createdAt, ...(artifact.pageCount === undefined ? {} : { pageCount: artifact.pageCount }) };
+  async createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number, ownerSubjectHash?: string): Promise<BrowserCaptureMetadata> {
+    const metadata: BrowserCaptureMetadata = { id: 'bca_123e4567-e89b-42d3-a456-426614174000', owner, sessionId, contentType: artifact.contentType, byteLength: artifact.body.byteLength, sha256: artifact.sha256, createdAt, ...(ownerSubjectHash === undefined ? {} : { ownerSubjectHash }), ...(artifact.pageCount === undefined ? {} : { pageCount: artifact.pageCount }) };
     this.captures.set(metadata.id, { metadata, body: artifact.body });
     return metadata;
   }
-  async loadCapture(owner: string, id: string) {
+  async loadCapture(owner: string, id: string, principalHash?: string) {
     const value = this.captures.get(id);
-    return value?.metadata.owner === owner ? value : null;
+    if (value?.metadata.owner !== owner || (value.metadata.ownerSubjectHash !== undefined && value.metadata.ownerSubjectHash !== principalHash)) return null;
+    return value;
   }
 }
 class FakeTransport implements CloudBrowserTransport {
@@ -735,6 +736,57 @@ test('capture is a locked budgeted action and returns only an owner-bound opaque
   assert.equal(store.sessions.get(sessionId)?.actionsUsed, 1);
   assert.equal((await service.getCapture('cto', result.id)).body.byteLength, result.byteLength);
   await assert.rejects(service.getCapture('cfo', result.id), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+});
+
+test('subject-bound browser profiles and sessions require the matching validated hash before provider access', async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  let persistentSaves = 0;
+  transport.saveProfile = async () => { persistentSaves += 1; };
+  const service = new CloudBrowserService(store, transport, () => 1234);
+  const ownerSubjectHash = 'a'.repeat(64);
+  const persistentProfile: CloudBrowserProfile = {
+    profileId: 'coo-bound-persist', owner: 'coo', allowedHosts: ['example.test'], persistent: true,
+    providerProfileId: 'provider-profile', maxSessionSeconds: 28_800, ownerSubjectHash,
+  };
+
+  await assert.rejects(service.saveProfile('coo', persistentProfile), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  await assert.rejects(service.saveProfile('coo', persistentProfile, 'bad-hash'), (e: unknown) => e instanceof CloudBrowserError && e.code === 'principal_binding_invalid');
+  assert.equal(store.profiles.has(persistentProfile.profileId), false);
+  await service.saveProfile('coo', persistentProfile, ownerSubjectHash);
+  await assert.rejects(service.loadProfile('coo', persistentProfile.profileId), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  await assert.rejects(service.loadProfile('coo', persistentProfile.profileId, 'b'.repeat(64)), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  assert.equal((await service.loadProfile('coo', persistentProfile.profileId, ownerSubjectHash)).ownerSubjectHash, ownerSubjectHash);
+
+  await assert.rejects(service.start('coo', persistentProfile.profileId, 60, undefined, 'b'.repeat(64)), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  assert.deepEqual(transport.startedProfileIds, []);
+  const persistent = await service.start('coo', persistentProfile.profileId, 28_800, undefined, ownerSubjectHash);
+  const session = store.sessions.get(persistent.sessionId)!;
+  assert.equal(session.ownerSubjectHash, ownerSubjectHash);
+  assert.equal(session.expiresAt, 1234 + 28_800_000);
+  const actionCount = transport.actions.length;
+  await assert.rejects(service.snapshot('coo', persistent.sessionId, 'b'.repeat(64)), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  await assert.rejects(service.execute('coo', persistent.sessionId, { type: 'snapshot' }, 2), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  assert.equal(transport.actions.length, actionCount);
+  await assert.rejects(service.savePersistentProfile('coo', persistent.sessionId, 'b'.repeat(64)), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  assert.equal(persistentSaves, 0);
+  await service.savePersistentProfile('coo', persistent.sessionId, ownerSubjectHash);
+  assert.equal(persistentSaves, 1);
+  await assert.rejects(service.stop('coo', persistent.sessionId, 'b'.repeat(64)), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  assert.equal(transport.stopped, 0);
+  await service.stop('coo', persistent.sessionId, ownerSubjectHash);
+  assert.equal(transport.stopped, 1);
+
+  const captureProfile = { profileId: 'coo-bound-capture', owner: 'coo', allowedHosts: ['example.test'], persistent: false, ownerSubjectHash };
+  await service.saveProfile('coo', captureProfile, ownerSubjectHash);
+  const captureSession = await service.start('coo', captureProfile.profileId, 60, undefined, ownerSubjectHash);
+  const beforeCapture = transport.actions.length;
+  await assert.rejects(service.execute('coo', captureSession.sessionId, { type: 'capture', request: { type: 'screenshot' } }, 2, 'b'.repeat(64)), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  assert.equal(transport.actions.length, beforeCapture);
+  const capture = await service.execute('coo', captureSession.sessionId, { type: 'capture', request: { type: 'screenshot' } }, 2, ownerSubjectHash) as BrowserCaptureMetadata;
+  assert.equal(capture.ownerSubjectHash, ownerSubjectHash);
+  await assert.rejects(service.getCapture('coo', capture.id), (e: unknown) => e instanceof CloudBrowserError && e.code === 'owner_forbidden');
+  assert.equal((await service.getCapture('coo', capture.id, ownerSubjectHash)).metadata.ownerSubjectHash, ownerSubjectHash);
 });
 
 test('capture fails closed for persisted profiles, sensitive suppression, and exhausted action budgets', async () => {

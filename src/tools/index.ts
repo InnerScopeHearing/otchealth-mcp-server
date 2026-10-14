@@ -151,6 +151,8 @@ import { registerBrowserAgentcoreTools } from './browser-agentcore/tools.js';
 // General AgentCore Browser broker with per-agent capability enrollment.
 import { registerAgentCoreBrowserBrokerTools } from './browser-broker/tools.js';
 import { registerCloudBrowserTools } from './browser-cloud-gateway/index.js';
+import { registerIntercomBrowserLoginTool } from './browser-cloud/intercom-login-tools.js';
+import { intercomLoginRuntime } from '../server/cloud-browser-runtime.js';
 import { cloudBrowserRuntime } from '../server/cloud-browser-runtime.js';
 import { registerFramerProjectInspect } from './framer/tool.js';
 
@@ -1969,6 +1971,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   // General Browser broker: per-agent capability enrollments, beginning with Wefunder Campaign Director.
   registerAgentCoreBrowserBrokerTools(server, callerHash);
   registerCloudBrowserTools(server, callerHash, cloudBrowserRuntime);
+  registerIntercomBrowserLoginTool(server, callerHash, intercomLoginRuntime);
   registerFramerProjectInspect(server, callerHash);
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).

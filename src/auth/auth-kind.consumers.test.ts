@@ -1,5 +1,5 @@
 /**
- * Nothing but the AWS MCP bridge may depend on HOW a request authenticated.
+ * Only reviewed AWS bridge and isolated browser sign-in boundaries may depend on request authentication.
  *
  * validateBearer records an auth kind, the OAuth grant and the client id on a request (auth_kind,
  * auth_grant, auth_subject), and server/mcp.ts puts them into the request context. They exist for one
@@ -47,17 +47,19 @@ const AUTH_FIELD_FILES: Readonly<Record<string, string>> = Object.freeze({
   'server/request-context.ts': 'defines the fields and their accessors',
   'tools/aws-mcp/access.ts': 'the bridge access check',
   'tools/aws-mcp/audit.ts': 'the bridge audit line',
-  'tools/aws-mcp/tools.ts': 'the bridge tools, the only caller of the accessors',
+  'tools/aws-mcp/tools.ts': 'the bridge tools',
+  'tools/browser-cloud/intercom-login-service.ts': 'reviewed OAuth-only per-authorization browser credential isolation; never a shared client ID',
 });
 
 /** The only files that may call a currentAuth* accessor: the file that defines them, and the bridge. */
 const ACCESSOR_FILES: Readonly<Record<string, string>> = Object.freeze({
   'server/request-context.ts': 'defines the accessors',
-  'tools/aws-mcp/tools.ts': 'the bridge tools, the only consumer',
+  'tools/aws-mcp/tools.ts': 'the bridge tools',
+  'tools/browser-cloud/intercom-login-service.ts': 'requires validated OAuth kind/subject and binds only the authorization connection or legacy bearer fingerprint',
 });
 
-const AUTH_FIELD = /\b(?:currentAuthKind|currentAuthGrant|currentAuthSubject|authKind|authGrant|authSubject|auth_kind|auth_grant|auth_subject)\b/;
-const ACCESSOR_CALL = /\bcurrentAuth(?:Kind|Grant|Subject)\s*\(/;
+const AUTH_FIELD = /\b(?:currentAuthKind|currentAuthGrant|currentAuthSubject|currentAuthConnectionId|authKind|authGrant|authSubject|authConnectionId|auth_kind|auth_grant|auth_subject|auth_connection_id)\b/;
+const ACCESSOR_CALL = /\bcurrentAuth(?:Kind|Grant|Subject|ConnectionId)\s*\(/;
 
 test('SCAN: only the producer, the context plumbing and the three bridge files name the authentication-kind fields', () => {
   const found = FILES.filter((f) => AUTH_FIELD.test(f.text)).map((f) => f.path).sort();
@@ -73,8 +75,8 @@ test('SCAN: only the bridge tools call the currentAuth accessors, so no other to
   const callers = FILES.filter((f) => ACCESSOR_CALL.test(f.text)).map((f) => f.path).sort();
   assert.deepEqual(callers, Object.keys(ACCESSOR_FILES).sort());
   // The definition file only defines them. The call it matches is the declaration, not a use.
-  const definitions = (FILES.find((f) => f.path === 'server/request-context.ts')?.text.match(/export function currentAuth(?:Kind|Grant|Subject)\(/g) ?? []).length;
-  assert.equal(definitions, 3);
+  const definitions = (FILES.find((f) => f.path === 'server/request-context.ts')?.text.match(/export function currentAuth(?:Kind|Grant|Subject|ConnectionId)\(/g) ?? []).length;
+  assert.equal(definitions, 4);
   const bridge = FILES.find((f) => f.path === 'tools/aws-mcp/tools.ts');
   assert.ok(bridge);
   assert.equal((bridge.text.match(/\bcurrentAuth(?:Kind|Grant|Subject)\(\)/g) ?? []).length, 3, 'one call per field, all inside bridgeContext()');
@@ -86,11 +88,11 @@ test('SCAN: mcp.ts only copies the recorded fields into the request context, and
   const lines = mcp.text.split('\n').filter((line) => AUTH_FIELD.test(line));
   assert.deepEqual(
     lines.map((line) => line.trim()),
-    ['authKind: ctx.auth_kind,', 'authGrant: ctx.auth_grant,', 'authSubject: ctx.auth_subject,'],
+    ['authKind: ctx.auth_kind,', 'authGrant: ctx.auth_grant,', 'authSubject: ctx.auth_subject,', 'authConnectionId: ctx.auth_connection_id,'],
   );
   const bearer = FILES.find((f) => f.path === 'auth/bearer.ts');
   assert.ok(bearer);
-  for (const field of ['auth_kind', 'auth_grant', 'auth_subject']) {
+  for (const field of ['auth_kind', 'auth_grant', 'auth_subject', 'auth_connection_id']) {
     assert.match(bearer.text, new RegExp(`\\n\\s*${field}\\?: `), `${field} is optional on AuthContext`);
   }
   // The kind starts undefined and is set only where a credential proves it: it is not initialised to 'oauth'.

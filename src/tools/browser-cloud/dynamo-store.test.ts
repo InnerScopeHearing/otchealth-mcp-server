@@ -191,6 +191,30 @@ test("public profile and provider browser binding survive durable round-trip", a
   assert.equal(restored?.mode, "public_web");
 });
 
+test('authenticated subject binding survives profile/session persistence and rejects malformed durable values', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  let item: Record<string, any> = {};
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (request.Item) { item = request.Item; return new Response('{}'); }
+    return new Response(JSON.stringify({ Item: item }));
+  });
+  const subjectHash = 'A'.repeat(64);
+  const profile: CloudBrowserProfile = { profileId: 'coo-bound', owner: 'coo', allowedHosts: ['example.com'], persistent: true, maxSessionSeconds: 28_800, ownerSubjectHash: subjectHash };
+  await store.saveProfile(profile);
+  assert.deepEqual(item.ownerSubjectHash, { S: 'a'.repeat(64) });
+  assert.deepEqual(await store.loadProfile(profile.profileId), { ...profile, ownerSubjectHash: 'a'.repeat(64) });
+
+  const session = { ...ownedSession, ownerSubjectHash: subjectHash };
+  await store.saveSession(session);
+  assert.deepEqual(item.ownerSubjectHash, { S: 'a'.repeat(64) });
+  assert.equal((await store.loadSession(session.sessionId))?.ownerSubjectHash, 'a'.repeat(64));
+  item.ownerSubjectHash = { S: 'not-a-subject-hash' };
+  assert.equal(await store.loadSession(session.sessionId), null);
+});
+
 test('sensitive-output suppression is backward-compatible durable session state', async (t) => {
   const prior = { ...process.env };
   t.after(() => { process.env = prior; });
@@ -228,23 +252,25 @@ test('capture bytes use immutable versioned browser-cloud S3 keys and owner-chec
     if (method === 'GET') return new Response(bytes, { headers: { 'x-amz-version-id': 's3-version-1', 'content-type': 'image/jpeg', 'content-length': String(bytes.length) } });
     return new Response('{}');
   }, () => nowMs);
-  const metadata = await store.createCapture('cto', '123e4567-e89b-42d3-a456-426614174000', { contentType: 'image/jpeg', body: bytes, sha256 }, 1000);
+  const metadata = await store.createCapture('cto', '123e4567-e89b-42d3-a456-426614174000', { contentType: 'image/jpeg', body: bytes, sha256 }, 1000, 'a'.repeat(64));
   assert.match(metadata.id, /^bca_[0-9a-f-]{36}$/);
   assert.equal(item?.pk.S, `CAPTURE#${metadata.id}`);
   assert.equal(item?.owner.S, 'cto');
   assert.equal(item?.storageKey.S, `browser-cloud/captures/cto/${metadata.id}`);
   assert.equal(item?.storageVersion.S, 's3-version-1');
+  assert.deepEqual(item?.ownerSubjectHash, { S: 'a'.repeat(64) });
   const s3Put = calls.find(call => call.method === 'PUT')!;
   assert.equal(s3Put.headers?.get('if-none-match'), '*');
   assert.equal(s3Put.headers?.get('x-amz-server-side-encryption'), 'AES256');
   const s3CallCount = calls.filter(call => call.method === 'GET').length;
   assert.equal(await store.loadCapture('cfo', metadata.id), null);
+  assert.equal(await store.loadCapture('cto', metadata.id, 'b'.repeat(64)), null, 'wrong subject is rejected before reading capture bytes');
   assert.equal(calls.filter(call => call.method === 'GET').length, s3CallCount);
-  const loaded = await store.loadCapture('cto', metadata.id);
+  const loaded = await store.loadCapture('cto', metadata.id, 'a'.repeat(64));
   assert.deepEqual(loaded?.body, bytes);
   assert.equal(loaded?.metadata.sha256, sha256);
   const s3ReadsBeforeExpiry = calls.filter(call => call.method === 'GET').length;
   nowMs = Number(item?.expiresAtEpoch.N) * 1_000;
-  assert.equal(await store.loadCapture('cto', metadata.id), null, 'capture must expire at its TTL boundary even before DynamoDB TTL cleanup');
+  assert.equal(await store.loadCapture('cto', metadata.id, 'a'.repeat(64)), null, 'capture must expire at its TTL boundary even before DynamoDB TTL cleanup');
   assert.equal(calls.filter(call => call.method === 'GET').length, s3ReadsBeforeExpiry, 'expired capture must be rejected before fetching S3 bytes');
 });

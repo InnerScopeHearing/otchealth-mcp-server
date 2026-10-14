@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from '../config/env.js';
 import { hashToken, logger } from '../audit/logger.js';
 import { isRevoked, isStaticTokenAuthReady } from './revocation-store.js';
-import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, issuedConnectorSurface, baseUrlOf } from '../server/oauth.js';
+import { isValidIssuedAccessToken, issuedAgent, issuedClientId, issuedGrantType, issuedConnectorSurface, issuedConnectionId, baseUrlOf } from '../server/oauth.js';
 import type { AuthKind, OAuthGrantType } from '../server/request-context.js';
 import { agentFromDescopeToken } from './descope.js';
 
@@ -31,6 +31,8 @@ export interface AuthContext {
    * issuedClientId in server/oauth.ts). A public identifier, not a secret. Absent for every non-oauth kind.
    */
   auth_subject?: string;
+  /** Unique OAuth authorization instance, distinct even when one client_id is reused. */
+  auth_connection_id?: string;
   /** True when the token was issued to a Dynamic-Client-Registration (Claude Chat) connector client. */
   connector_surface: boolean;
   /**
@@ -318,6 +320,7 @@ export async function validateBearer(
   // How an issued token was minted (null when it records no grant, or is not an issued token).
   const authGrant = issued ? issuedGrantType(token) : null;
   const clientId = issued ? issuedClientId(token) : null;
+  const connectionId = issued ? issuedConnectionId(token) : null;
   // OAUTH_CLIENT_ID is the original single connector credential. Its identifier predates the dcr_/
   // occ_ naming convention and is operator-configurable, so its connector status cannot safely be
   // inferred from a prefix. OAUTH_CLIENTS entries are intentionally excluded: those are per-lane
@@ -341,7 +344,7 @@ export async function validateBearer(
       || isLegacyOAuthConnector
       || isCodexStatic
       || isLegacyConnectorStatic;
-  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static, ...(authKind ? { auth_kind: authKind } : {}), ...(authGrant ? { auth_grant: authGrant } : {}), ...(clientId ? { auth_subject: clientId } : {}) };
+  return { caller_hash: hashToken(token), raw_token: token, caller_agent, connector_surface, m365_static_auth: isM365Static, ...(authKind ? { auth_kind: authKind } : {}), ...(authGrant ? { auth_grant: authGrant } : {}), ...(clientId ? { auth_subject: clientId } : {}), ...(connectionId ? { auth_connection_id: connectionId } : {}) };
 }
 
 export function validateAdminToken(authHeader: string | undefined): boolean {

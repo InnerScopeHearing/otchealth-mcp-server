@@ -60,6 +60,8 @@ export interface RequestContext {
   authGrant?: OAuthGrantType;
   /** For an 'oauth' request, the client id the access token was issued to (its sub claim, a public identifier). Unset otherwise. */
   authSubject?: string;
+  /** Unique OAuth authorization instance (not the reusable OAuth client id). */
+  authConnectionId?: string;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
@@ -100,4 +102,9 @@ export function currentAuthGrant(): OAuthGrantType | undefined {
 /** The client id the current request's OAuth access token was issued to, or undefined when none was recorded. */
 export function currentAuthSubject(): string | undefined {
   return requestContext.getStore()?.authSubject;
+}
+
+/** Unique OAuth authorization instance, or undefined for legacy/non-OAuth credentials. */
+export function currentAuthConnectionId(): string | undefined {
+  return requestContext.getStore()?.authConnectionId;
 }

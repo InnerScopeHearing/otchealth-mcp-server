@@ -11,6 +11,11 @@ import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from "../browser
 import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 
+import { intercomPrincipalHash, currentIntercomPrincipalKey } from '../browser-cloud/intercom-login-service.js';
+function principalHash(caller: string): string | undefined {
+  const subject = currentIntercomPrincipalKey();
+  return caller === 'coo' && subject ? intercomPrincipalHash(subject) : undefined;
+}
 const actionSchema = cloudBrowserActionSchema;
 const planSchema = z
   .object({
@@ -82,21 +87,21 @@ function error(error: unknown): ToolResultPayload {
 
 /** `snapshot` is intentionally metadata-only and is supplied by the session-core owner. */
 export interface CloudBrowserGatewayService {
-  start(caller: string, profileId: string, maxSeconds: number, actionBudget?: number): Promise<{ sessionId: string; expiresAt: number }>;
-  execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number): Promise<unknown>;
-  stop(caller: string, sessionId: string): Promise<void>;
-  savePersistentProfile(caller: string, sessionId: string): Promise<void>;
-  snapshot(caller: string, sessionId: string): Promise<unknown>;
-  getCapture?(caller: string, captureId: string): Promise<{
+  start(caller: string, profileId: string, maxSeconds: number, actionBudget?: number, principalHash?: string): Promise<{ sessionId: string; expiresAt: number }>;
+  execute(caller: string, sessionId: string, action: CloudBrowserAction, timeoutSeconds: number, principalHash?: string): Promise<unknown>;
+  stop(caller: string, sessionId: string, principalHash?: string): Promise<void>;
+  savePersistentProfile(caller: string, sessionId: string, principalHash?: string): Promise<void>;
+  snapshot(caller: string, sessionId: string, principalHash?: string): Promise<unknown>;
+  getCapture?(caller: string, captureId: string, principalHash?: string): Promise<{
     metadata: BrowserCaptureMetadata;
     body: Uint8Array;
   }>;
-  publicTrialProfile(caller: string): Promise<{
+  publicTrialProfile(caller: string, principalHash?: string): Promise<{
     profileId: string;
     allowedHosts: readonly string[];
     persistent: boolean;
   }>;
-  publicWebProfile(caller: string): Promise<{
+  publicWebProfile(caller: string, principalHash?: string): Promise<{
     profileId: string;
     allowedHosts: readonly string[];
     persistent: boolean;
@@ -147,7 +152,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       handler: async (_input, ctx) => {
         if (!live()) return unavailable();
         try {
-          const profile = await runtime.browser.publicTrialProfile(ctx.callerAgent);
+          const profile = await runtime.browser.publicTrialProfile(ctx.callerAgent, principalHash(ctx.callerAgent));
           return { data: { profile_id: profile.profileId, allowed_hosts: profile.allowedHosts, persistent: profile.persistent }, summary: "Returned this caller's legacy enrolled-host profile." };
         } catch (e) {
           return error(e);
@@ -204,7 +209,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       handler: async (_input, ctx) => {
         if (!live()) return unavailable();
         try {
-          const profile = await runtime.browser.publicWebProfile(ctx.callerAgent);
+          const profile = await runtime.browser.publicWebProfile(ctx.callerAgent, principalHash(ctx.callerAgent));
           return {
             data: {
               profile_id: profile.profileId,
@@ -339,7 +344,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         try {
           if (input.artifact_id.startsWith('bca_')) {
             if (!runtime.browser.getCapture) throw Object.assign(new Error('capture_unavailable'), { code: 'capture_unavailable' });
-            const capture = await runtime.browser.getCapture(ctx.callerAgent, input.artifact_id);
+            const capture = await runtime.browser.getCapture(ctx.callerAgent, input.artifact_id, principalHash(ctx.callerAgent));
             const metadata = capture.metadata;
             if (
               metadata.id !== input.artifact_id ||
@@ -490,7 +495,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
           };
         try {
           return {
-            data: await runtime.browser.start(ctx.callerAgent, input.profile_id, input.max_seconds, input.action_budget),
+            data: await runtime.browser.start(ctx.callerAgent, input.profile_id, input.max_seconds, input.action_budget, principalHash(ctx.callerAgent)),
             summary: "Cloud browser session started.",
           };
         } catch (e) {
@@ -542,7 +547,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             summary: "Browser action was not executed.",
           };
         try {
-          const result = await runtime.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds) as {
+          const result = await runtime.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds, principalHash(ctx.callerAgent)) as {
             createdTargetId?: string;
             closedTargetId?: string;
             selectedTargetId?: string | null;
@@ -602,7 +607,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
           if (!live()) return unavailable();
           try {
             if (method === "snapshot") {
-              const session = await runtime.browser.snapshot(ctx.callerAgent, input.session_id);
+              const session = await runtime.browser.snapshot(ctx.callerAgent, input.session_id, principalHash(ctx.callerAgent));
               return {
                 data: { session },
                 summary: "Bounded cloud browser page observation returned.",
@@ -613,8 +618,8 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
                 data: { dry_run: true },
                 summary: "Lifecycle action was not executed.",
               };
-            if (method === "save") await runtime.browser.savePersistentProfile(ctx.callerAgent, input.session_id);
-            else await runtime.browser.stop(ctx.callerAgent, input.session_id);
+            if (method === "save") await runtime.browser.savePersistentProfile(ctx.callerAgent, input.session_id, principalHash(ctx.callerAgent));
+            else await runtime.browser.stop(ctx.callerAgent, input.session_id, principalHash(ctx.callerAgent));
             return {
               data: { ok: true },
               summary: "Cloud browser lifecycle action completed.",

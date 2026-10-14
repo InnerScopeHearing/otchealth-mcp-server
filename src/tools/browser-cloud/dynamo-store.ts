@@ -15,8 +15,9 @@ const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const captureKey = (owner: string, id: string) => `browser-cloud/captures/${owner}/${id}`;
 function readCapture(item: DynamoItem | undefined): BrowserCaptureRecord | null {
   if (!item?.pk?.S?.startsWith('CAPTURE#') || !item.owner?.S || !item.sessionId?.S || !item.captureId?.S || !item.contentType?.S || !item.byteLength?.N || !item.sha256?.S || !item.storageKey?.S || !item.storageVersion?.S || !item.createdAt?.N) return null;
-  const value = { id: item.captureId.S, owner: item.owner.S, sessionId: item.sessionId.S, contentType: item.contentType.S, byteLength: Number(item.byteLength.N), sha256: item.sha256.S, storageKey: item.storageKey.S, storageVersion: item.storageVersion.S, createdAt: Number(item.createdAt.N), ...(item.pageCount?.N ? { pageCount: Number(item.pageCount.N) } : {}) };
-  if (!/^bca_[0-9a-f-]{36}$/.test(value.id) || !/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(value.owner) || !/^[a-f0-9]{64}$/.test(value.sha256) || !Number.isSafeInteger(value.byteLength) || value.byteLength < 1 || value.byteLength > MAX_CAPTURE_BYTES || !Number.isSafeInteger(value.createdAt) || !['application/pdf', 'image/png', 'image/jpeg'].includes(value.contentType) || (value.pageCount !== undefined && (!Number.isSafeInteger(value.pageCount) || value.pageCount < 1 || value.pageCount > 100)) || value.storageKey !== captureKey(value.owner, value.id) || !value.storageVersion || value.storageVersion === 'null') return null;
+  if (item.ownerSubjectHash !== undefined && (typeof item.ownerSubjectHash.S !== 'string' || !/^[a-f0-9]{64}$/i.test(item.ownerSubjectHash.S))) return null;
+  const value = { id: item.captureId.S, owner: item.owner.S, sessionId: item.sessionId.S, contentType: item.contentType.S, byteLength: Number(item.byteLength.N), sha256: item.sha256.S, storageKey: item.storageKey.S, storageVersion: item.storageVersion.S, createdAt: Number(item.createdAt.N), ...(item.ownerSubjectHash?.S ? { ownerSubjectHash: item.ownerSubjectHash.S } : {}), ...(item.pageCount?.N ? { pageCount: Number(item.pageCount.N) } : {}) };
+  if (!/^bca_[0-9a-f-]{36}$/.test(value.id) || !/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(value.owner) || (value.ownerSubjectHash !== undefined && !/^[a-f0-9]{64}$/i.test(value.ownerSubjectHash)) || !/^[a-f0-9]{64}$/.test(value.sha256) || !Number.isSafeInteger(value.byteLength) || value.byteLength < 1 || value.byteLength > MAX_CAPTURE_BYTES || !Number.isSafeInteger(value.createdAt) || !['application/pdf', 'image/png', 'image/jpeg'].includes(value.contentType) || (value.pageCount !== undefined && (!Number.isSafeInteger(value.pageCount) || value.pageCount < 1 || value.pageCount > 100)) || value.storageKey !== captureKey(value.owner, value.id) || !value.storageVersion || value.storageVersion === 'null') return null;
   return value as BrowserCaptureRecord;
 }
 
@@ -41,9 +42,11 @@ function pageStateItem(session: CloudBrowserSession): DynamoItem {
 }
 
 function profileItem(profile: CloudBrowserProfile): DynamoItem {
+  if (profile.ownerSubjectHash !== undefined && !/^[a-f0-9]{64}$/i.test(profile.ownerSubjectHash)) throw new CloudBrowserError('profile_state_invalid', 'Browser profile state is invalid.');
   return {
     pk: { S: `PROFILE#${profile.profileId}` },
     owner: { S: profile.owner },
+    ...(profile.ownerSubjectHash ? { ownerSubjectHash: { S: profile.ownerSubjectHash.toLowerCase() } } : {}),
     ...(profile.providerProfileId ? { providerProfileId: { S: profile.providerProfileId } } : {}),
     hosts: { L: profile.allowedHosts.map((host) => ({ S: host })) },
     persistent: { BOOL: profile.persistent },
@@ -63,11 +66,13 @@ function profileItem(profile: CloudBrowserProfile): DynamoItem {
 }
 function readProfile(item: DynamoItem | undefined): CloudBrowserProfile | null {
   if (!item?.pk?.S?.startsWith("PROFILE#") || !item.owner?.S || !item.hosts?.L) return null;
+  if (item.ownerSubjectHash !== undefined && (typeof item.ownerSubjectHash.S !== 'string' || !/^[a-f0-9]{64}$/i.test(item.ownerSubjectHash.S))) return null;
   const allowedHosts = item.hosts.L.map((x) => x.S).filter((x): x is string => typeof x === "string");
   const proxyConfiguration = item.proxyConfiguration?.S ? (JSON.parse(item.proxyConfiguration.S) as CloudBrowserProfile["proxyConfiguration"]) : undefined;
   return {
     profileId: item.pk.S.slice(8),
     owner: item.owner.S,
+    ...(item.ownerSubjectHash?.S ? { ownerSubjectHash: item.ownerSubjectHash.S.toLowerCase() } : {}),
     ...(item.providerProfileId?.S ? { providerProfileId: item.providerProfileId.S } : {}),
     allowedHosts,
     persistent: item.persistent?.BOOL === true,
@@ -82,9 +87,11 @@ function readProfile(item: DynamoItem | undefined): CloudBrowserProfile | null {
   };
 }
 function sessionItem(session: CloudBrowserSession): DynamoItem {
+  if (session.ownerSubjectHash !== undefined && !/^[a-f0-9]{64}$/i.test(session.ownerSubjectHash)) throw new CloudBrowserError('session_state_invalid', 'Browser session state is invalid.');
   return {
     pk: { S: `SESSION#${session.sessionId}` },
     owner: { S: session.owner },
+    ...(session.ownerSubjectHash ? { ownerSubjectHash: { S: session.ownerSubjectHash.toLowerCase() } } : {}),
     profileId: { S: session.profileId },
     hosts: { L: session.allowedHosts.map((host) => ({ S: host })) },
     expiresAt: { N: String(session.expiresAt) },
@@ -100,6 +107,7 @@ function sessionItem(session: CloudBrowserSession): DynamoItem {
 }
 function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
   if (!item?.pk?.S?.startsWith("SESSION#") || !item.owner?.S || !item.profileId?.S || !item.hosts?.L || !item.expiresAt?.N || !item.actionsUsed?.N || !item.providerSessionId?.S || !item.automationEndpoint?.S) return null;
+  if (item.ownerSubjectHash !== undefined && (typeof item.ownerSubjectHash.S !== 'string' || !/^[a-f0-9]{64}$/i.test(item.ownerSubjectHash.S))) return null;
   const expiresAt = Number(item.expiresAt.N);
   const actionsUsed = Number(item.actionsUsed.N);
   if (!Number.isSafeInteger(expiresAt) || !Number.isSafeInteger(actionsUsed)) return null;
@@ -124,6 +132,7 @@ function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
   return {
     sessionId: item.pk.S.slice(8),
     owner: item.owner.S,
+    ...(item.ownerSubjectHash?.S ? { ownerSubjectHash: item.ownerSubjectHash.S.toLowerCase() } : {}),
     profileId: item.profileId.S,
     allowedHosts: item.hosts.L.map((x) => x.S).filter((x): x is string => typeof x === "string"),
     expiresAt,
@@ -142,6 +151,16 @@ function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
  * `expiresAtEpoch` as TTL. The only opaque provider references are encrypted at rest by Dynamo.
  */
 export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
+  async createProfileIntent(profile: CloudBrowserProfile): Promise<boolean> {
+    if (profile.providerProfileId || profile.owner !== 'coo' || !/^[a-f0-9]{64}$/.test(profile.ownerSubjectHash || '')) throw new CloudBrowserError('profile_intent_invalid','Profile preparation is invalid.');
+    try {
+      await this.call('PutItem',{ TableName:this.tableName, Item:profileItem(profile), ConditionExpression:'attribute_not_exists(pk)' });
+      return true;
+    } catch (error) {
+      if (error instanceof CloudBrowserError && error.code === 'session_store_conflict') return false;
+      throw error;
+    }
+  }
   constructor(
     private readonly tableName = process.env.CLOUD_BROWSER_DDB_TABLE || "otchealth-browser-cloud",
     private readonly region = process.env.AWS_REGION || "us-east-1",
@@ -172,7 +191,11 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
       body,
       signal: AbortSignal.timeout(5_000),
     });
-    if (!response.ok) throw new CloudBrowserError("session_store_failed", "Cloud browser session store rejected the request.");
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({})) as { __type?: unknown };
+      if (typeof error.__type === 'string' && error.__type.endsWith('ConditionalCheckFailedException')) throw new CloudBrowserError('session_store_conflict','Cloud browser state changed concurrently.');
+      throw new CloudBrowserError("session_store_failed", "Cloud browser session store rejected the request.");
+    }
     return response.json();
   }
   async loadProfile(profileId: string): Promise<CloudBrowserProfile | null> {
@@ -356,8 +379,8 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     }
   }
 
-  async createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number): Promise<BrowserCaptureMetadata> {
-    if (!/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(owner) || !/^[0-9a-f-]{36}$/i.test(sessionId) || !Number.isSafeInteger(createdAt) || createdAt < 0 || artifact.body.byteLength < 1 || artifact.body.byteLength > MAX_CAPTURE_BYTES) throw new CloudBrowserError('capture_storage_failed', 'The browser capture could not be stored safely.');
+  async createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number, ownerSubjectHash?: string): Promise<BrowserCaptureMetadata> {
+    if (!/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(owner) || !/^[0-9a-f-]{36}$/i.test(sessionId) || (ownerSubjectHash !== undefined && !/^[a-f0-9]{64}$/i.test(ownerSubjectHash)) || !Number.isSafeInteger(createdAt) || createdAt < 0 || artifact.body.byteLength < 1 || artifact.body.byteLength > MAX_CAPTURE_BYTES) throw new CloudBrowserError('capture_storage_failed', 'The browser capture could not be stored safely.');
     const id = `bca_${randomUUID()}`;
     const key = captureKey(owner, id);
     const sha256 = createHash('sha256').update(artifact.body).digest('hex');
@@ -376,23 +399,24 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
       version = response.headers.get('x-amz-version-id');
     } catch { throw new CloudBrowserError('capture_storage_failed', 'The browser capture could not be stored safely.'); }
     if (!version || version === 'null') throw new CloudBrowserError('capture_storage_failed', 'Immutable browser capture versioning is unavailable.');
-    const metadata: BrowserCaptureRecord = { id, owner, sessionId, contentType: artifact.contentType, byteLength: payload.byteLength, sha256, createdAt, storageKey: key, storageVersion: version, ...(artifact.pageCount === undefined ? {} : { pageCount: artifact.pageCount }) };
+    const metadata: BrowserCaptureRecord = { id, owner, sessionId, contentType: artifact.contentType, byteLength: payload.byteLength, sha256, createdAt, storageKey: key, storageVersion: version, ...(ownerSubjectHash === undefined ? {} : { ownerSubjectHash: ownerSubjectHash.toLowerCase() }), ...(artifact.pageCount === undefined ? {} : { pageCount: artifact.pageCount }) };
     try {
       await this.call('PutItem', { TableName: this.tableName, Item: {
-        pk: { S: `CAPTURE#${id}` }, captureId: { S: id }, owner: { S: owner }, sessionId: { S: sessionId }, contentType: { S: metadata.contentType }, byteLength: { N: String(metadata.byteLength) }, sha256: { S: sha256 }, storageKey: { S: key }, storageVersion: { S: version }, createdAt: { N: String(createdAt) }, ...(metadata.pageCount === undefined ? {} : { pageCount: { N: String(metadata.pageCount) } }), expiresAtEpoch: { N: String(Math.floor(createdAt / 1_000) + 30 * 86_400) },
+        pk: { S: `CAPTURE#${id}` }, captureId: { S: id }, owner: { S: owner }, sessionId: { S: sessionId }, contentType: { S: metadata.contentType }, byteLength: { N: String(metadata.byteLength) }, sha256: { S: sha256 }, storageKey: { S: key }, storageVersion: { S: version }, createdAt: { N: String(createdAt) }, ...(metadata.ownerSubjectHash === undefined ? {} : { ownerSubjectHash: { S: metadata.ownerSubjectHash } }), ...(metadata.pageCount === undefined ? {} : { pageCount: { N: String(metadata.pageCount) } }), expiresAtEpoch: { N: String(Math.floor(createdAt / 1_000) + 30 * 86_400) },
       }, ConditionExpression: 'attribute_not_exists(pk)' });
     } catch { throw new CloudBrowserError('capture_storage_failed', 'The browser capture could not be stored safely.'); }
     const { storageKey: _key, storageVersion: _version, ...publicMetadata } = metadata;
     return publicMetadata;
   }
 
-  async loadCapture(owner: string, captureId: string): Promise<{ metadata: BrowserCaptureMetadata; body: Uint8Array } | null> {
+  async loadCapture(owner: string, captureId: string, principalHash?: string): Promise<{ metadata: BrowserCaptureMetadata; body: Uint8Array } | null> {
     if (!/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(owner) || !/^bca_[0-9a-f-]{36}$/.test(captureId)) return null;
     const response = await this.call('GetItem', { TableName: this.tableName, Key: { pk: { S: `CAPTURE#${captureId}` } }, ConsistentRead: true }) as { Item?: DynamoItem };
     const expiresAtEpoch = Number(response.Item?.expiresAtEpoch?.N);
     if (!Number.isSafeInteger(expiresAtEpoch) || expiresAtEpoch <= Math.floor(this.now() / 1_000)) return null;
     const metadata = readCapture(response.Item);
     if (!metadata || metadata.id !== captureId || metadata.owner !== owner) return null;
+    if (metadata.ownerSubjectHash !== undefined && (!principalHash || !/^[a-f0-9]{64}$/i.test(principalHash) || metadata.ownerSubjectHash.toLowerCase() !== principalHash.toLowerCase())) return null;
     const bucket = process.env.CLOUD_BROWSER_ARTIFACT_BUCKET;
     if (!bucket || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) throw new CloudBrowserError('capture_storage_unavailable', 'Browser capture storage is unavailable.');
     const credentials = await resolveAwsCredentials();

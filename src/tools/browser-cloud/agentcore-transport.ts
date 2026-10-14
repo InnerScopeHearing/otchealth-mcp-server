@@ -137,6 +137,44 @@ class Cdp {
 }
 
 export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
+  /** Server-owned authentication path: no DOM or form values are returned to the model. */
+  async prepareIntercomLogin(session: CloudBrowserSession, workspace: string, host = 'app.intercom.com'): Promise<void> {
+    if (!/^[A-Za-z0-9]{3,32}$/.test(workspace) || session.owner !== 'coo' || !session.ownerSubjectHash || !session.sensitiveOutputSuppressed) throw new CloudBrowserError('login_invalid', 'The owned sign-in session is invalid.');
+    await this.intercomLoginPage(session, workspace, true, host);
+  }
+  async verifyIntercomLogin(session: CloudBrowserSession, workspace: string, host = 'app.intercom.com'): Promise<void> {
+    if (!/^[A-Za-z0-9]{3,32}$/.test(workspace) || session.owner !== 'coo' || !session.ownerSubjectHash || !session.sensitiveOutputSuppressed) throw new CloudBrowserError('login_invalid', 'The owned sign-in session is invalid.');
+    await this.intercomLoginPage(session, workspace, false, host);
+  }
+  private async intercomLoginPage(session: CloudBrowserSession, workspace: string, navigate: boolean, host: string): Promise<void> {
+    if (!['app.intercom.com','app.eu.intercom.com','app.au.intercom.com'].includes(host)) throw new CloudBrowserError('invalid_workspace','Company workspace host is invalid.');
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Browser runtime credentials are unavailable.');
+    const cdp = await Cdp.open(session.automationEndpoint, signAgentCoreAutomationStream({ ...credentials, sessionToken: credentials.sessionToken ?? '', region: this.region }, session.automationEndpoint), 10_000, this.webSocketFactory);
+    try {
+      const targets = await cdp.command('Target.getTargets', {}, 5000);
+      const pages = (targets.targetInfos as Array<{ type?: string; targetId?: string; url?: string }> | undefined)?.filter(t => t.type === 'page' && typeof t.targetId === 'string') ?? [];
+      const target = navigate ? pages[0] : pages.find(t => session.ownedTargetIds?.includes(t.targetId!));
+      if (!target?.targetId) throw new CloudBrowserError('login_page_missing', 'The sign-in window is unavailable.');
+      const attached = await cdp.command('Target.attachToTarget', { targetId: target.targetId, flatten: true }, 5000);
+      const page = attached.sessionId;
+      if (typeof page !== 'string') throw new CloudBrowserError('login_page_missing', 'The sign-in window is unavailable.');
+      if (navigate) {
+        const result = await cdp.command('Page.navigate', { url: `https://${host}/a/apps/${workspace}/settings` }, 10_000, page);
+        if (result.errorText) throw new CloudBrowserError('login_navigation_failed', 'The company sign-in page could not be opened.');
+        session.ownedTargetIds = [target.targetId]; session.selectedTargetId = target.targetId;
+        return;
+      }
+      const url = new URL(target.url || 'about:blank');
+      if (url.protocol !== 'https:' || url.hostname !== host || url.username || url.password || url.port || !new RegExp(`^/a/apps/${workspace}/settings(?:/|$)`).test(url.pathname)) throw new CloudBrowserError('company_sign_in_required', 'Open the requested company workspace Settings before clicking Done.');
+      const dom = await cdp.command('DOM.getDocument', { depth: 0 }, 5000, page);
+      const root = dom.root as { nodeId?: number } | undefined;
+      if (!root?.nodeId) throw new CloudBrowserError('company_sign_in_required', 'The company settings page is not ready.');
+      const password = await cdp.command('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="password"]' }, 5000, page);
+      if (password.nodeId !== 0) throw new CloudBrowserError('company_sign_in_required', 'Complete the company sign-in first.');
+      // No cookie values, form text, page content, or request bodies leave this runtime.
+    } finally { cdp.close(); }
+  }
   constructor(
     private readonly region = process.env.AWS_REGION || "us-east-1",
     private readonly fetchImpl: typeof fetch = fetch,

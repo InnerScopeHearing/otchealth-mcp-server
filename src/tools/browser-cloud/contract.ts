@@ -53,6 +53,8 @@ export interface CloudBrowserProfile {
   /** AgentCore Browser Profile ID. It is an opaque resource ID, never profile contents. */
   providerProfileId?: string;
   owner: string;
+  /** Optional authenticated subject binding; stored as a one-way hash only. */
+  ownerSubjectHash?: string;
   allowedHosts: readonly string[];
   persistent: boolean;
   /** Missing mode is the original exact-host policy for backwards compatibility. */
@@ -76,6 +78,8 @@ export interface CloudBrowserProfile {
 export interface CloudBrowserSession {
   sessionId: string;
   owner: string;
+  /** Optional authenticated subject binding copied from the profile at session start. */
+  ownerSubjectHash?: string;
   profileId: string;
   allowedHosts: readonly string[];
   expiresAt: number;
@@ -107,6 +111,8 @@ export interface CloudBrowserExecutionResult {
 export interface BrowserCaptureMetadata {
   id: string;
   owner: string;
+  /** Optional authenticated subject binding copied from the session that created the capture. */
+  ownerSubjectHash?: string;
   sessionId: string;
   contentType: 'image/png' | 'image/jpeg' | 'application/pdf';
   byteLength: number;
@@ -121,6 +127,8 @@ export interface BrowserCaptureRecord extends BrowserCaptureMetadata {
 }
 
 export interface CloudBrowserStore {
+  /** Atomic create-only provider preparation intent; unsupported stores cannot provision. */
+  createProfileIntent?(profile: CloudBrowserProfile): Promise<boolean>;
   loadProfile(profileId: string): Promise<CloudBrowserProfile | null>;
   saveProfile(profile: CloudBrowserProfile): Promise<void>;
   loadSession(sessionId: string): Promise<CloudBrowserSession | null>;
@@ -132,8 +140,8 @@ export interface CloudBrowserStore {
   acquireProfileLock(profileId: string, owner: string, until: number): Promise<boolean>;
   releaseProfileLock(profileId: string, owner: string): Promise<void>;
   reserveDailySession(owner: string, day: string, limit: number): Promise<boolean>;
-  createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number): Promise<BrowserCaptureMetadata>;
-  loadCapture(owner: string, captureId: string): Promise<{ metadata: BrowserCaptureMetadata; body: Uint8Array } | null>;
+  createCapture(owner: string, sessionId: string, artifact: import('./captures.js').BrowserCapturedArtifact, createdAt: number, ownerSubjectHash?: string): Promise<BrowserCaptureMetadata>;
+  loadCapture(owner: string, captureId: string, principalHash?: string): Promise<{ metadata: BrowserCaptureMetadata; body: Uint8Array } | null>;
 }
 
 export interface CloudBrowserTransport {

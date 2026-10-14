@@ -564,6 +564,8 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   // Keep it caller-bound even under connector overrides; no other service or ring is widened.
   if (isIntercomOperationsLane(lane)) for (const name of INTERCOM_OPERATIONS_TOOLSET) tools.add(name);
   else for (const name of INTERCOM_OPERATIONS_TOOLSET) tools.delete(name);
+  if (lane === 'coo') tools.add('browser_cloud_intercom_login_start');
+  else tools.delete('browser_cloud_intercom_login_start');
   if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane) && !(isShipLane(lane) && env.CONNECTOR_TOOLSET)) {
     for (const name of ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
       'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get']) tools.add(name);
@@ -733,6 +735,9 @@ export interface ToolDefinition<Shape extends ZodRawShape, Output extends ZodRaw
   handler: ToolHandler<z.infer<z.ZodObject<Shape>>>;
   /** Optional safe projection for structured start logs and mutation journaling when raw inputs contain sensitive text. */
   redactInputForLog?: (input: Record<string, unknown>) => unknown;
+  /** Short-lived login grants must not become journal artifacts or result-offload records. */
+  redactResultForLog?: (result: unknown) => unknown;
+  ephemeralOutput?: boolean;
   /**
    * Optional projection for the company Prompt Shield scan. Use when an input mixes scan-worthy prose
    * with credentials/capability grants/signed URLs that must never be sent to the safety service.
@@ -1523,7 +1528,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
               args: def.redactInputForLog
                 ? def.redactInputForLog(handlerInput)
                 : handlerInput,
-              result,
+              result: def.redactResultForLog ? def.redactResultForLog(result) : result,
             }).catch(() => undefined);
           }
           // PHASE 2 SLO TELEMETRY (observe-only): the denominator for the capture-rate SLO
@@ -1639,7 +1644,7 @@ export function registerTool<Shape extends ZodRawShape, Output extends ZodRawSha
         // gateway_fetch_result is already the terminal, bounded pagination transport. Re-offloading
         // one of its pages creates an unusable result-id chain instead of delivering that page.
         if (
-          mayOffloadToolResult(canonicalName) &&
+          !def.ephemeralOutput && mayOffloadToolResult(canonicalName) &&
           callerAgent !== WEFUNDER_CAMPAIGN_DIRECTOR_LANE &&
           shouldOffload(text) &&
           !isM365StaticAuth()

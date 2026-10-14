@@ -30,6 +30,8 @@ import {
 } from '../auth/revocation-store.js';
 import { startDeindexResweepReloader } from '../agentstate/deindex-resweep.js';
 import { responseLogFields } from './response-log.js';
+import { registerIntercomLoginRoutes } from './intercom-login.js';
+import { intercomLoginRuntime } from './cloud-browser-runtime.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -106,6 +108,7 @@ async function main(): Promise<void> {
   registerHeyGenPairingRoute(app);
   registerHeyGenApprovalCallback(app);
   registerMcpRoutes(app);
+  registerIntercomLoginRoutes(app, intercomLoginRuntime);
   registerGraphWorkerBrokerRoutes(app, { identityRegistry: createProductionIdentityRegistryResolver() });
   registerGraphCatalogControllerRoutes(app);
   registerRelationshipArtifactGatewayRoutes(app);
