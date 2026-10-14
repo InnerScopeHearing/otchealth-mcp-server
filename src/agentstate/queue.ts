@@ -44,7 +44,7 @@ export async function ensureQueue(agent: string): Promise<void> {
   return activeBackend() === 'postgres' ? postgres.ensureQueue(agent) : azure.ensureQueue(agent);
 }
 
-export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604800): Promise<void> {
+export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604800): Promise<string | undefined> {
   return activeBackend() === 'postgres' ? postgres.enqueue(agent, msg, ttlSeconds) : azure.enqueue(agent, msg, ttlSeconds);
 }
 

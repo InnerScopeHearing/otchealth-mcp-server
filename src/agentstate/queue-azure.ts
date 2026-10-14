@@ -64,7 +64,7 @@ function xmlEscape(s: string): string {
 }
 
 /** Enqueue a message to <agent>'s inbox. The payload is base64(JSON) so it is XML-safe. */
-export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604800): Promise<void> {
+export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604800): Promise<string | undefined> {
   const c = creds();
   if (!c) throw new Error('agent inbox not configured.');
   await ensureQueue(agent);
@@ -79,6 +79,10 @@ export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604
     body: bodyXml,
   });
   if (r.status !== 201) throw new Error(`enqueue ${q} -> ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  // Azure assigns this native ID only after accepting the message. Never substitute a local
+  // correlation ID here: it cannot identify or acknowledge the persisted queue message.
+  const xml = await r.text();
+  return xml.match(/<MessageId>([^<]+)<\/MessageId>/)?.[1];
 }
 
 /**

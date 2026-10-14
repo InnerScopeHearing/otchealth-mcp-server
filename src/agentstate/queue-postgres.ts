@@ -228,7 +228,7 @@ function toReadMessage(agent: string, row: { message_id: string; payload: unknow
 }
 
 /** Enqueue a message to <agent>'s inbox. */
-export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604800): Promise<void> {
+export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604800): Promise<string> {
   if (!isConfigured()) throw new Error('Postgres agent inbox not configured (PG_HOST unset).');
   const q = queueName(agent);
   await ensureSchema();
@@ -240,6 +240,7 @@ export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604
      VALUES ($1, $2, $3::jsonb, $4, $4, $5)`,
     [q, messageId, JSON.stringify(msg), now.toISOString(), expiresAt.toISOString()],
   );
+  return messageId;
 }
 
 /** Pure query builder shared by the execution path and isolated SQL guard tests. */
