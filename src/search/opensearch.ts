@@ -206,18 +206,34 @@ export async function hybridSearch(
   const chunked = isChunkedRoom(index);
   const vecField = vectorFieldFor(index);
 
-  // An exact identifier is a fetch request. Keep this before embed(query). A miss, malformed
-  // response, non-2xx response, or thrown error falls through to the existing hybrid path.
+  // An exact identifier is a fetch request. Keep this before embed(query). Its outcome must remain
+  // exact: replacing a missing or unreadable record with a semantic neighbor would falsely claim
+  // that the requested ID was retrieved. `exact-not-indexed` describes this index only; the source
+  // feed may still contain a row that has not been projected.
   // A caller-supplied filter is part of the authorization/selection contract. A direct GET cannot
-  // enforce an OData filter, so filtered searches always stay on the existing search path.
-  const exactId = opts?.filter ? null : exactFlatMemoryId(index, query);
+  // enforce an OData filter, so an exact-ID request with a filter cannot be resolved safely here.
+  // Report that limitation rather than dropping the filter or substituting a ranked neighbor.
+  const exactId = exactFlatMemoryId(index, query);
+  if (exactId && opts?.filter) return { matches: [], mode: 'exact-unavailable' };
   if (exactId) {
     try {
       const direct = await signedGetFetch(index, exactId, budget);
-      if (direct.ok) {
+      if (direct.status === 401 || direct.status === 403) {
+        return { matches: [], mode: 'exact-denied' };
+      }
+      if (direct.status === 404) {
+        return { matches: [], mode: 'exact-not-indexed' };
+      }
+      if (!direct.ok) {
+        return { matches: [], mode: 'exact-unavailable' };
+      }
+      try {
         const payload = (await direct.json()) as { found?: boolean; _source?: Record<string, unknown> };
         const doc = payload._source;
-        if (payload.found !== false && doc) {
+        if (payload.found === false) {
+          return { matches: [], mode: 'exact-not-indexed' };
+        }
+        if (doc && typeof doc === 'object' && !Array.isArray(doc)) {
           const sep = exactId.indexOf('__');
           const hit: KbHit = {
             score: 1,
@@ -236,10 +252,13 @@ export async function hybridSearch(
             mode: 'direct-id',
           };
         }
+        return { matches: [], mode: 'exact-unavailable' };
+      } catch {
+        return { matches: [], mode: 'exact-unavailable' };
       }
     } catch {
       if (budgetExpired()) throw new DOMException('Search request deadline exceeded', 'TimeoutError');
-      // Fail open to the existing hybrid path.
+      return { matches: [], mode: 'exact-unavailable' };
     }
   }
 

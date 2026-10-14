@@ -17,6 +17,122 @@ process.env.FOUNDRY_KEY ||= 'test';
 
 const { handleBrainSearch } = await import('./brain-search.js');
 
+const exactKey = `cto__m_idem_${'a'.repeat(64)}`;
+
+test('brain_search keeps an exact m_idem miss in memory-exec and never substitutes a commons neighbor', async () => {
+  const original = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    const u = String(url); seen.push(u);
+    if (u.endsWith(`/memory-exec/_doc/${exactKey}`)) return new Response(JSON.stringify({ found: false }), { status: 404 });
+    if (u.includes('/commons-company-journal/_search')) {
+      return new Response(JSON.stringify({ hits: { hits: [{ _id: 'neighbor', _score: 1, _source: { id: 'commons__neighbor', text: 'different record' } }] } }), { status: 200 });
+    }
+    if (u.includes('/embeddings')) return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200 });
+    throw new Error(`unexpected fetch ${u}`);
+  }) as typeof fetch;
+  try {
+    const result = await handleBrainSearch({ query: exactKey, top: 3 }, { callerAgent: 'cto' } as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const data = result.data as any;
+    assert.equal(data.mode, 'exact-not-indexed');
+    assert.deepEqual(data.matches, []);
+    assert.deepEqual(data.rooms_searched, ['memory-exec']);
+    assert.equal(seen.some((u) => u.includes('/commons-company-journal/_search')), false);
+    assert.equal(seen.some((u) => u.includes('/embeddings')), false);
+  } finally { globalThis.fetch = original; }
+});
+
+test('brain_search preserves exact denial instead of reporting an empty federated search', async () => {
+  const original = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    const u = String(url); seen.push(u);
+    if (u.endsWith(`/memory-exec/_doc/${exactKey}`)) return new Response('forbidden', { status: 403 });
+    throw new Error(`unexpected fetch ${u}`);
+  }) as typeof fetch;
+  try {
+    const result = await handleBrainSearch({ query: exactKey, top: 3, domain: 'exec' }, { callerAgent: 'cto' } as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const data = result.data as any;
+    assert.equal(data.mode, 'exact-denied');
+    assert.deepEqual(data.matches, []);
+    assert.deepEqual(data.rooms_searched, ['memory-exec']);
+    assert.equal(seen.length, 1);
+  } finally { globalThis.fetch = original; }
+});
+
+test('brain_search preserves exact unavailability without searching another room', async () => {
+  const original = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    const u = String(url); seen.push(u);
+    if (u.endsWith(`/memory-exec/_doc/${exactKey}`)) return new Response('unavailable', { status: 503 });
+    throw new Error(`unexpected fetch ${u}`);
+  }) as typeof fetch;
+  try {
+    const result = await handleBrainSearch({ query: exactKey, top: 3 }, { callerAgent: 'cto' } as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const data = result.data as any;
+    assert.equal(data.mode, 'exact-unavailable');
+    assert.deepEqual(data.matches, []);
+    assert.deepEqual(data.rooms_searched, ['memory-exec']);
+    assert.equal(seen.length, 2, 'the existing bounded 5xx retry repeats only the exact GET');
+    assert.ok(seen.every((u) => u.endsWith(`/memory-exec/_doc/${exactKey}`)));
+  } finally { globalThis.fetch = original; }
+});
+
+test('brain_search keeps an exact hit canonical', async () => {
+  const original = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    const u = String(url); seen.push(u);
+    if (u.endsWith(`/memory-exec/_doc/${exactKey}`)) return new Response(JSON.stringify({
+      found: true, _source: { id: 'wrong__source-id', agent: 'cfo', type: 'fact', text: 'exact requested row' },
+    }), { status: 200 });
+    throw new Error(`unexpected fetch ${u}`);
+  }) as typeof fetch;
+  try {
+    const result = await handleBrainSearch({ query: exactKey, top: 3 }, { callerAgent: 'cto' } as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const data = result.data as any;
+    assert.equal(data.mode, 'direct-id');
+    assert.equal(data.matches.length, 1);
+    assert.equal(data.matches[0].id, exactKey);
+    assert.deepEqual(data.rooms_searched, ['memory-exec']);
+    assert.equal(seen.length, 1);
+  } finally { globalThis.fetch = original; }
+});
+
+test('brain_search withholds an exact hit retracted in its owning lane', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL) => {
+    if (String(url).endsWith(`/memory-exec/_doc/${exactKey}`)) return new Response(JSON.stringify({
+      found: true, _source: { id: exactKey, type: 'fact', text: 'superseded row' },
+    }), { status: 200 });
+    throw new Error(`unexpected fetch ${String(url)}`);
+  }) as typeof fetch;
+  try {
+    const entryId = exactKey.slice(exactKey.indexOf('__') + 2);
+    const result = await handleBrainSearch({ query: exactKey, top: 3 }, { callerAgent: 'cto' } as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map([['cto', new Set([entryId])]]),
+    });
+    const data = result.data as any;
+    assert.equal(data.mode, 'exact-superseded');
+    assert.deepEqual(data.matches, []);
+    assert.deepEqual(data.retracted_dropped, [exactKey]);
+  } finally { globalThis.fetch = original; }
+});
+
 test('brain_search promotes an authorized full-text opaque identifier before federation trim', async () => {
   const original = globalThis.fetch;
   const seen: string[] = [], token = 'MXVEDTUKA2', longText = `${'x'.repeat(1400)} ${token} ${'y'.repeat(1400)}`;
