@@ -70,6 +70,7 @@ import { buildCitations, deepRetrieve, parseDeepRetrievalMode } from '../../memo
 import { lookupEntity, type EntityHit } from '../../memory/entity-lookup.js';
 import { tagWithFeedbackRefs } from '../../memory/retrieval-feedback.js';
 import { opaqueIdentifierQuery } from '../../search/identifier-match.js';
+import { createRetrievalEvidencePack } from '../../brain-capabilities/evidence-view.js';
 
 // Re-exported so the pre-existing `import { rrfFuse, ... } from './brain-search.js'` in
 // brain-search.test.ts keeps working unchanged -- the implementation moved to memory/rrf.ts (see
@@ -267,14 +268,20 @@ export async function handleBrainSearch(
   const retrieveDeep = dependencies.deepRetrieve ?? deepRetrieve;
   if (!searchConfigured()) {
     return {
-      data: { matches: [], count: 0, mode: 'unconfigured', rooms_searched: [], include_ops: includeOps },
+      data: {
+        matches: [], count: 0, mode: 'unconfigured', rooms_searched: [], include_ops: includeOps,
+        evidence_pack: createRetrievalEvidencePack({ hits: [], requestedTop: top, roomsSearched: [], roomsFailed: [], emptyReason: 'search_unconfigured' }),
+      },
       summary: 'AI Search not configured.',
     };
   }
   const rooms = roomsFor(ctx.callerAgent, input.domain);
   if (rooms.length === 0) {
     return {
-      data: { matches: [], count: 0, mode: 'no-rooms', rooms_searched: [], include_ops: includeOps },
+      data: {
+        matches: [], count: 0, mode: 'no-rooms', rooms_searched: [], include_ops: includeOps,
+        evidence_pack: createRetrievalEvidencePack({ hits: [], requestedTop: top, roomsSearched: [], roomsFailed: [], emptyReason: 'no_readable_rooms' }),
+      },
       summary: `No readable rooms for domain "${input.domain}".`,
     };
   }
@@ -286,7 +293,12 @@ export async function handleBrainSearch(
   if (EXACT_IDEMPOTENT_MEMORY_ID.test(exactMemoryId)) {
     if (!rooms.includes('memory-exec')) {
       return {
-        data: { matches: [], count: 0, mode: 'exact-unavailable', rooms_searched: [], include_ops: includeOps },
+        data: {
+          matches: [], count: 0, mode: 'exact-unavailable', rooms_searched: [], include_ops: includeOps,
+          evidence_pack: createRetrievalEvidencePack({
+            hits: [], requestedTop: top, roomsSearched: [], roomsFailed: [], emptyReason: 'exact_id_not_checked',
+          }),
+        },
         summary: `Exact memory ID could not be checked in the selected domain for "${input.query}".`,
       };
     }
@@ -302,7 +314,16 @@ export async function handleBrainSearch(
         ? result.mode
         : 'exact-unavailable';
       return {
-        data: { matches: [], count: 0, mode, rooms_searched: ['memory-exec'], include_ops: includeOps },
+        data: {
+          matches: [], count: 0, mode, rooms_searched: ['memory-exec'], include_ops: includeOps,
+          evidence_pack: createRetrievalEvidencePack({
+            hits: [], requestedTop: top,
+            roomsSearched: mode === 'exact-not-indexed' ? ['memory-exec'] : [],
+            roomsFailed: mode === 'exact-denied' || mode === 'exact-unavailable' ? ['memory-exec'] : [],
+            emptyReason: mode === 'exact-not-indexed' ? 'exact_id_not_indexed'
+              : mode === 'exact-denied' ? 'exact_id_denied' : 'exact_id_unavailable',
+          }),
+        },
         summary: `Exact memory lookup ${mode.replace('exact-', '')} for "${input.query}" in memory-exec.`,
       };
     }
@@ -310,7 +331,13 @@ export async function handleBrainSearch(
     const exact = result.matches.find((hit) => String(hit.id ?? '') === exactMemoryId);
     if (!exact) {
       return {
-        data: { matches: [], count: 0, mode: 'exact-unavailable', rooms_searched: ['memory-exec'], include_ops: includeOps },
+        data: {
+          matches: [], count: 0, mode: 'exact-unavailable', rooms_searched: ['memory-exec'], include_ops: includeOps,
+          evidence_pack: createRetrievalEvidencePack({
+            hits: [], requestedTop: top, roomsSearched: [], roomsFailed: ['memory-exec'],
+            emptyReason: 'exact_id_unavailable',
+          }),
+        },
         summary: `Exact memory lookup unavailable for "${input.query}" in memory-exec.`,
       };
     }
@@ -327,6 +354,9 @@ export async function handleBrainSearch(
       matches: taggedMatches,
       count: taggedMatches.length,
       mode,
+      evidence_pack: createRetrievalEvidencePack({
+        hits: taggedMatches, requestedTop: top, roomsSearched: ['memory-exec'], roomsFailed: [],
+      }),
       source_currentness: SOURCE_CURRENTNESS_UNAVAILABLE,
       rooms_searched: ['memory-exec'],
       include_ops: includeOps,
@@ -406,6 +436,10 @@ export async function handleBrainSearch(
       matches: taggedHits,
       count: taggedHits.length,
       mode: deep.mode,
+      evidence_pack: createRetrievalEvidencePack({
+        hits: taggedHits, requestedTop: top, roomsSearched: deep.rooms_searched,
+        roomsFailed: deep.rooms_failed ?? [], answer: deepAnswer, citations,
+      }),
       source_currentness: SOURCE_CURRENTNESS_UNAVAILABLE,
       rooms_searched: deep.rooms_searched,
       include_ops: includeOps,
@@ -468,6 +502,7 @@ export async function handleBrainSearch(
   const perRoom: Array<{ room: string; hits: Array<{ score?: number; text: string; id?: unknown; path?: string; agent?: string; variants?: string[]; type?: string; source_version?: string }> }> = [];
   const searched: string[] = [];
   const failed: string[] = [];
+  const failedRooms: string[] = [];
   let directCandidate: FusedHit | undefined;
   let identifierCandidate: FusedHit | undefined;
   for (let i = 0; i < settled.length; i++) {
@@ -500,6 +535,7 @@ export async function handleBrainSearch(
       // a human tailing gateway logs (the 2026-07-20 402 incident was undiagnosable client-side).
       const why = s.status === 'rejected' ? String((s.reason as Error)?.message ?? s.reason).slice(0, 80) : 'empty result';
       failed.push(`${rooms[i]}: ${why}`);
+      failedRooms.push(rooms[i]);
     }
   }
 
@@ -546,6 +582,9 @@ export async function handleBrainSearch(
     matches: taggedMatches,
     count: taggedMatches.length,
     mode: directSurvived ? 'direct-id' : identifierSurvived ? 'identifier-match' : 'federated-rrf',
+    evidence_pack: createRetrievalEvidencePack({
+      hits: taggedMatches, requestedTop: top, roomsSearched: searched, roomsFailed: failedRooms,
+    }),
     // Search snippets are not source-authority receipts. Keep the caller-visible claim explicit
     // until this boundary receives complete typed assertions and trusted owner resolution.
     source_currentness: SOURCE_CURRENTNESS_UNAVAILABLE,
@@ -589,6 +628,7 @@ export function registerBrainSearch(server: McpServer, callerHash: CallerHashPro
       inputShape: brainSearchInputShape,
       outputShape: {
         matches: z.array(z.unknown()),
+        evidence_pack: z.unknown().optional(),
         count: z.number(),
         mode: z.string(),
         rooms_searched: z.array(z.string()),

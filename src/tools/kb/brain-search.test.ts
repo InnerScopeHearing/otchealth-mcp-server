@@ -398,6 +398,119 @@ test('deep response annotates untyped injected retrieval hits as currentness unk
       contractVersion: 'source-currentness.query.v1', state: 'unknown',
       reasons: ['trusted_source_authority_unavailable'],
     });
+    const pack = data.evidence_pack as Record<string, any>;
+    assert.equal(pack.schema, 'evidence-pack.v1');
+    assert.equal(pack.authorityState, 'unknown');
+    assert.equal(pack.coverage.sourceBoundClaimCount, 0);
+    assert.deepEqual(pack.claimBindings, []);
+    assert.equal(pack.coverage.materialClaimCount, null);
+    assert.equal(pack.coverage.unsupportedClaimCount, null);
+    assert.equal(pack.coverage.claimCoverage, 'not_assessed');
+  } finally {
+    if (priorMode === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
+    else process.env.DEEP_RETRIEVAL_MODE = priorMode;
+  }
+});
+
+test('brain_search EvidencePack marks stale citations invalid and never upgrades conflicting numeric snippets', async () => {
+  const priorMode = process.env.DEEP_RETRIEVAL_MODE;
+  process.env.DEEP_RETRIEVAL_MODE = 'on';
+  try {
+    const stale = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'), {
+      deepRetrieve: async () => ({
+        mode: 'deep-agentic', answer: 'The current value is 10 [1]. The status is approved.',
+        citations: [{ n: 1, source: 'memory-exec', id: 'doc-1', source_version: 'old-version' }],
+        sub_queries: ['q'], rounds_used: 1,
+        hits: [{ score: 1, source: 'memory-exec', text: 'value 10', id: 'doc-1', source_version: 'new-version' }],
+        rooms_searched: ['memory-exec'],
+      } as any),
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const stalePack = (stale.data as Record<string, any>).evidence_pack;
+    assert.equal(stalePack.citationAssessment, 'invalid');
+    assert.deepEqual(stalePack.claimBindings, []);
+    assert.equal(stalePack.coverage.materialClaimCount, null);
+    assert.equal(stalePack.coverage.unsupportedClaimCount, null);
+    assert.equal(stalePack.sourceCurrentness, 'unknown');
+
+    const malformed = await handleBrainSearch({ query: 'q', mode: 'deep' }, fakeCtx('cto'), {
+      deepRetrieve: async () => ({
+        mode: 'deep-agentic', answer: 'The current value is 10 [1].',
+        citations: [{ n: 0, source: 'memory-exec', id: 'doc-1' }],
+        sub_queries: ['q'], rounds_used: 1,
+        hits: [{ score: 1, source: 'memory-exec', text: 'value 10', id: 'doc-1' }],
+        rooms_searched: ['memory-exec'],
+      } as any),
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const malformedPack = (malformed.data as Record<string, any>).evidence_pack;
+    assert.equal(malformedPack.citationAssessment, 'invalid');
+    assert.deepEqual(malformedPack.claimBindings, []);
+    assert.equal(malformedPack.coverage.materialClaimCount, null);
+    assert.equal(malformedPack.coverage.unsupportedClaimCount, null);
+
+    const conflicting = await handleBrainSearch({ query: 'compare values', mode: 'deep' }, fakeCtx('cto'), {
+      deepRetrieve: async () => ({
+        mode: 'deep-agentic', answer: 'The values are 10 [1] and 20 [2].',
+        citations: [
+          { n: 1, source: 'memory-exec', id: 'doc-1' },
+          { n: 2, source: 'commons-company-journal', id: 'doc-2' },
+        ],
+        sub_queries: ['compare values'], rounds_used: 1,
+        hits: [
+          { score: 1, source: 'memory-exec', text: 'value 10', id: 'doc-1' },
+          { score: 0.5, source: 'commons-company-journal', text: 'value 20', id: 'doc-2' },
+        ],
+        rooms_searched: ['memory-exec', 'commons-company-journal'],
+      } as any),
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const conflictPack = (conflicting.data as Record<string, any>).evidence_pack;
+    assert.equal(conflictPack.citationAssessment, 'retrieval_only');
+    assert.deepEqual(conflictPack.claimBindings, [], 'multi-sentence answer text is not duplicated into claim metadata');
+    assert.equal(conflictPack.coverage.materialClaimCount, null);
+    assert.equal(conflictPack.coverage.unsupportedClaimCount, null);
+    assert.equal(conflictPack.coverage.claimCoverage, 'not_assessed');
+    assert.equal(conflictPack.conflictAssessment, 'not_assessed');
+    assert.equal(conflictPack.calculationAssessment, 'not_evaluated');
+    assert.equal(conflictPack.coverage.sourceBoundClaimCount, 0);
+  } finally {
+    if (priorMode === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
+    else process.env.DEEP_RETRIEVAL_MODE = priorMode;
+  }
+});
+
+test('brain_search distinguishes an absent answer from backend failure with unknown coverage', async () => {
+  const priorMode = process.env.DEEP_RETRIEVAL_MODE;
+  process.env.DEEP_RETRIEVAL_MODE = 'on';
+  try {
+    const absent = await handleBrainSearch({ query: 'unsupported relationship', mode: 'deep' }, fakeCtx('cto'), {
+      deepRetrieve: async () => ({ mode: 'deep-agentic', answer: '', citations: [], sub_queries: ['unsupported relationship'], rounds_used: 1, hits: [], rooms_searched: ['memory-exec'] } as any),
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const absentPack = (absent.data as Record<string, any>).evidence_pack;
+    assert.equal(absentPack.outcome, 'no_evidence');
+    assert.equal(absentPack.reason, 'no_matches');
+    assert.equal(absentPack.coverage.materialClaimCount, null);
+    assert.equal(absentPack.claimBindings.length, 0);
+
+    const failureFetch = (async () => { throw new Error('synthetic search backend unavailable'); }) as typeof fetch;
+    const failed = await withStubbedFetch(failureFetch, () => handleBrainSearch({ query: 'q', mode: 'fast' }, fakeCtx('cto'), {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    }));
+    const failedData = failed.data as Record<string, any>;
+    const failedPack = failedData.evidence_pack;
+    assert.equal(failedPack.outcome, 'partial');
+    assert.equal(failedPack.reason, 'search_unavailable');
+    assert.equal(failedPack.coverage.expectedMatchCount, null);
+    assert.equal(failedPack.coverage.retrievalComplete, false);
+    assert.ok(failedPack.coverage.roomsFailed.length > 0);
+    assert.equal(failedData.source_currentness.state, 'unknown');
   } finally {
     if (priorMode === undefined) delete process.env.DEEP_RETRIEVAL_MODE;
     else process.env.DEEP_RETRIEVAL_MODE = priorMode;
