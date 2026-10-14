@@ -22,6 +22,43 @@ export const memoryTypeSchema = z.enum([
   'assertion',
   'decision',
 ]);
+
+/** Caller-supplied purpose metadata; it does not assert truth or infer purpose from content. */
+export const memoryPurposeMetadataSchema = z.object({
+  purpose: z.enum([
+    'source_assertion',
+    'preference',
+    'decision',
+    'correction',
+    'task_state',
+    'operational_exhaust',
+  ]),
+  declaredBy: identifier,
+  declaredAt: timestamp,
+}).strict();
+
+/** A compact context selection contract that keeps required decisions and audit locators explicit. */
+export const memoryContextPolicySchema = z.object({
+  role: identifier,
+  tokenBudget: z.number().int().positive().max(1_000_000),
+  requiredDecisionIds: z.array(identifier).max(1_000),
+  includedDecisionIds: z.array(identifier).max(10_000),
+  retainedAuditRefs: z.array(identifier).max(10_000),
+}).strict().superRefine((value, context) => {
+  for (const field of ['requiredDecisionIds', 'includedDecisionIds', 'retainedAuditRefs'] as const) {
+    const ids = value[field];
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'references must be unique' });
+    }
+  }
+  const included = new Set(value.includedDecisionIds);
+  for (const decisionId of value.requiredDecisionIds) {
+    if (!included.has(decisionId)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['includedDecisionIds'], message: `required decision is missing: ${decisionId}` });
+    }
+  }
+});
+
 export const authorizationLabelSchema = z.object({
   name: identifier,
   policyVersion: identifier,
@@ -188,6 +225,8 @@ export const persistenceReceiptSchema = z.object({
 });
 
 export type AssertionRecord = z.infer<typeof assertionRecordSchema>;
+export type MemoryPurposeMetadata = z.infer<typeof memoryPurposeMetadataSchema>;
+export type MemoryContextPolicy = z.infer<typeof memoryContextPolicySchema>;
 export type EvidenceReference = z.infer<typeof evidenceReferenceSchema>;
 export type SourceCoverage = z.infer<typeof sourceCoverageSchema>;
 export type IdempotencyEnvelope = z.infer<typeof idempotencyEnvelopeSchema>;
