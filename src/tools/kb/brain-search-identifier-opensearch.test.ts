@@ -18,6 +18,50 @@ process.env.FOUNDRY_KEY ||= 'test';
 const { handleBrainSearch } = await import('./brain-search.js');
 
 const exactKey = `cto__m_idem_${'a'.repeat(64)}`;
+const bareExactKey = `m_idem_${'b'.repeat(64)}`;
+
+test('brain_search resolves a bare native idempotency key only inside the authenticated caller lane', async () => {
+  const original = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    const u = String(url); seen.push(u);
+    if (u.endsWith(`/memory-exec/_doc/cto__${bareExactKey}`)) return new Response(JSON.stringify({
+      found: true, _source: { text: 'the exact native memory', type: 'fact' },
+    }), { status: 200 });
+    throw new Error(`unexpected fetch ${u}`);
+  }) as typeof fetch;
+  try {
+    const result = await handleBrainSearch({ query: bareExactKey, top: 1, domain: 'exec' }, { callerAgent: 'cto' } as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    const data = result.data as any;
+    assert.equal(data.mode, 'direct-id');
+    assert.equal(data.matches.length, 1);
+    assert.equal(data.matches[0].id, `cto__${bareExactKey}`);
+    assert.deepEqual(data.source_currentness, {
+      contractVersion: 'source-currentness.query.v1', state: 'unknown',
+      reasons: ['trusted_source_authority_unavailable'],
+    });
+    assert.deepEqual(seen, [`https://search.identifier.test.invalid/memory-exec/_doc/cto__${bareExactKey}`]);
+  } finally { globalThis.fetch = original; }
+});
+
+test('brain_search does not guess a lane or semantically search when a bare native id has no caller identity', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; throw new Error('must not search without caller identity'); }) as typeof fetch;
+  try {
+    const result = await handleBrainSearch({ query: bareExactKey, top: 1 }, {} as any, {
+      lookupEntity: async () => null,
+      retractedIdsByAgent: async () => new Map(),
+    });
+    assert.equal((result.data as any).mode, 'exact-unavailable');
+    assert.equal((result.data as any).count, 0);
+    assert.match(result.summary, /authenticated caller lane is unavailable/);
+    assert.equal(calls, 0);
+  } finally { globalThis.fetch = original; }
+});
 
 test('brain_search keeps an exact m_idem miss in memory-exec and never substitutes a commons neighbor', async () => {
   const original = globalThis.fetch;

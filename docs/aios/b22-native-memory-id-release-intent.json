@@ -1,0 +1,26 @@
+{
+  "intent_id": "AIOS-B22-NATIVE-ID-FIX-20261014-01",
+  "writer": "Root CTO",
+  "repo": "InnerScopeHearing/otchealth-mcp-server",
+  "base": "8b24047f79fef7afff39c0d2fa72f437c6808415",
+  "branch": "claude/aios-b22-native-memory-id-20261014",
+  "defect": "Bare canonical native memory ID incorrectly enters semantic ranking; exact own lane normalization must precede deep/federated retrieval.",
+  "live_reproduction": {
+    "wrong_result_correlation": "5de86632-395d-47fd-ab93-2c04b7ac7159",
+    "native_correct_correlation": "5738acf8-1d87-4068-a340-037cb26e4dbd"
+  },
+  "scope": "two existing source/test files only; authenticated server caller lane; no new source access or credentials",
+  "checks": "RED2/GREEN9; independent corrected focused12PASS; normalCI and live exact existing checkpoint plus guaranteed missing-ID canary required",
+  "rollback": {
+    "task_definition": "otchealth-gateway:216",
+    "source": "8b24047f79fef7afff39c0d2fa72f437c6808415",
+    "digest": "sha256:67b9dafa0095b0d88feaffc78ff75667c306a19539f21727bd88d4dc5f65ec5d"
+  },
+  "runtime_plan": "after source review/CI: build exact Main once, existing operator preview, image-only promotion preserving two replicas/roles/resources/network/secret references, strict runtime readback; no health registration retry",
+  "pre_share_reconciliation": {
+    "full_existing_test_export_rejected": true,
+    "correlation_id": "dcbdca03-fc2d-478d-a26f-e122b1415f0b",
+    "unrelated_existing_fixture_exported": false,
+    "mutation_scope": "Publish new non-sensitive source delta only; do not export or encode rejected existing content."
+  }
+}
