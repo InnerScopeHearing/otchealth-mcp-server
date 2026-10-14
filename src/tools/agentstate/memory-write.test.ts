@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { memoryWriteRefusal, memoryWriteIdentityRefusal, handleMemoryWrite } from './memory-write.js';
 import { EXEC_RING } from '../kb/search-privileged.js';
 import { requestContext } from '../../server/request-context.js';
+import type { MemoryRecord } from '../../agentstate/memory.js';
 
 // Only needed by the handler-level tests below (the pure-function tests above never call
 // loadEnv()): handleMemoryWrite's dry_run/not-configured branches call isConfigured() ->
@@ -238,4 +239,57 @@ test('handler-level: a matching self-write clears BOTH refusal gates -- reaches 
   assert.equal(data.written, false); // dry_run never persists
   assert.equal(data.note, 'dry_run: pass dry_run=false to persist.', 'must reach the dry_run branch, not an earlier refusal');
   assert.equal(data.preview?.agent, 'cto', 'the preview is attributed to the authenticated caller');
+});
+
+function projectionWriteHarness(indexResult: {
+  indexed: boolean;
+  primary: 'azure' | 'opensearch';
+  secondary?: { backend: 'azure' | 'opensearch'; indexed: boolean; reason?: string };
+}) {
+  const record: MemoryRecord = {
+    id: 'm_projection_test', type: 'memory', agent: 'cto', kind: 'fact', text: 'projection test',
+    tags: [], source: null, created_at: '2026-10-14T12:00:00.000Z',
+    indexing: { state: 'pending', attempts: 0, updated_at: '2026-10-14T12:00:00.000Z' },
+  };
+  const deps = {
+    isConfigured: () => true,
+    getMemory: async () => null,
+    embed: async () => [0.1],
+    detectSupersession: async () => ({ action: 'none' as const, reason: 'test' }),
+    writeMemory: async () => record,
+    indexMemoryNow: async () => indexResult,
+    recordMemoryIndexOutcome: async () => undefined,
+  };
+  return { record, deps };
+}
+
+test('successful primary with failed optional secondary exposes normalized degraded projection status', async () => {
+  const { deps } = projectionWriteHarness({
+    indexed: true, primary: 'opensearch',
+    secondary: { backend: 'azure', indexed: false, reason: 'transport details must not escape' },
+  });
+  const result = await requestContext.run(
+    { callerAgent: 'cto', callerHash: 'h', correlationId: 'c' },
+    () => handleMemoryWrite({ agent: 'cto', kind: 'fact', text: 'projection test' }, fakeCtx(), deps),
+  );
+  const data = result.data as { written: boolean; indexed: boolean; projection_status?: { primary: { backend: string; indexed: boolean }; secondary?: { backend: string; indexed: boolean } } };
+  assert.equal(data.written, true);
+  assert.equal(data.indexed, true, 'primary success semantics remain unchanged');
+  assert.deepEqual(data.projection_status, {
+    primary: { backend: 'opensearch', indexed: true },
+    secondary: { backend: 'azure', indexed: false },
+  });
+  assert.doesNotMatch(JSON.stringify(result), /transport details must not escape/);
+  assert.match(result.summary, /secondary .* projection was not indexed/i);
+});
+
+test('single-backend write remains compatible and reports its primary projection only', async () => {
+  const { deps } = projectionWriteHarness({ indexed: true, primary: 'opensearch' });
+  const result = await requestContext.run(
+    { callerAgent: 'cto', callerHash: 'h', correlationId: 'c' },
+    () => handleMemoryWrite({ agent: 'cto', kind: 'fact', text: 'projection test' }, fakeCtx(), deps),
+  );
+  const data = result.data as { indexed: boolean; projection_status?: { primary: { backend: string; indexed: boolean }; secondary?: unknown } };
+  assert.equal(data.indexed, true);
+  assert.deepEqual(data.projection_status, { primary: { backend: 'opensearch', indexed: true } });
 });
