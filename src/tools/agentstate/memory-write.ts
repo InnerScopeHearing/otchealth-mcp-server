@@ -194,6 +194,13 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
     text: record.text,
     vector,
   });
+  // `indexed` intentionally retains the active primary's success semantics. A configured
+  // secondary is optional during migration, but expose its outcome so callers can see degraded
+  // replica coverage without leaking transport error text.
+  const projectionStatus = {
+    primary: { backend: idx.primary, indexed: idx.indexed },
+    ...(idx.secondary ? { secondary: { backend: idx.secondary.backend, indexed: idx.secondary.indexed } } : {}),
+  };
   // Best effort only. The initial source write already recorded a pending obligation, so an
   // outcome-write outage cannot make an accepted memory silently disappear from reconciliation.
   await deps.recordMemoryIndexOutcome(record, idx.indexed).catch(() => undefined);
@@ -209,10 +216,11 @@ export async function handleMemoryWrite(input: MemoryWriteInput, ctx: ToolContex
       persistence_state: 'committed',
       record,
       indexed: idx.indexed,
+      projection_status: projectionStatus,
       ...(idx.reason ? { index_error: idx.reason } : {}),
       ...(sup.action !== 'none' ? { supersede: sup } : {}),
     },
-    summary: `Wrote ${input.kind} ${record.id} to ${record.agent}'s memory-of-record${idx.indexed ? ' and indexed it for semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — it will remain invisible to brain_search)`}.${supNote}`,
+    summary: `Wrote ${input.kind} ${record.id} to ${record.agent}'s memory-of-record${idx.indexed ? ' and indexed it for semantic recall' : ` (⚠ NOT indexed: ${idx.reason} — it will remain invisible to brain_search)`}${idx.secondary && !idx.secondary.indexed ? ` (⚠ secondary ${idx.secondary.backend} projection was not indexed)` : ''}.${supNote}`,
     audit: { after: record },
   };
 }
@@ -253,7 +261,15 @@ export function registerMemoryWrite(server: McpServer, callerHash: CallerHashPro
         idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{16,128}$/).optional().describe('Stable operation key for retry-safe capture. Reuse only with the identical original payload. Replay returns the committed record without a new embedding. Omit for legacy append behavior.'),
         supersedes: z.string().optional().describe('Optional: the id of an entry this one REPLACES (e.g. "20260713-015"). Set it ONLY when this entry makes the older one FALSE, not merely related -- readers (wake, memory_pack) DROP the superseded entry so a retracted belief cannot resurface as a live truth. Use it whenever you correct a previously-stated fact.'),
       },
-      outputShape: { written: z.boolean(), record: z.unknown() },
+      outputShape: {
+        written: z.boolean(),
+        record: z.unknown(),
+        indexed: z.boolean().optional(),
+        projection_status: z.object({
+          primary: z.object({ backend: z.enum(['azure', 'opensearch']), indexed: z.boolean() }),
+          secondary: z.object({ backend: z.enum(['azure', 'opensearch']), indexed: z.boolean() }).optional(),
+        }).optional(),
+      },
       handler: handleMemoryWrite,
     },
     callerHash,
