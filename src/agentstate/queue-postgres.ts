@@ -242,6 +242,33 @@ export async function enqueue(agent: string, msg: InboxMessage, ttlSeconds = 604
   );
 }
 
+/** Pure query builder shared by the execution path and isolated SQL guard tests. */
+export function buildAcknowledgeQuery(queue: string, messageId: string): { text: string; values: unknown[] } {
+  return {
+    text: `DELETE FROM ${TABLE}
+      WHERE queue = $1 AND message_id = $2
+        AND visible_at <= now() AND expires_at > now()
+        AND enqueued_at > now() - ($3 * interval '1 second')
+        AND dequeue_count <= $4
+      RETURNING message_id`,
+    values: [queue, messageId, INBOX_MAX_AGE_SECONDS, INBOX_MAX_DELIVERIES],
+  };
+}
+
+/** Atomic, recipient-scoped exact acknowledgment. The predicates make stale, expired, dead-letter,
+ * overage, and over-delivered IDs no-ops; no read-then-delete window exists. */
+export async function acknowledgeMessage(agent: string, messageId: string): Promise<boolean> {
+  if (!isConfigured()) throw new Error('Postgres agent inbox not configured (PG_HOST unset).');
+  const q = queueName(agent);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId)) {
+    throw new Error('Invalid message_id.');
+  }
+  await ensureSchema();
+  const query = buildAcknowledgeQuery(q, messageId);
+  const r = await getPool().query(query.text, query.values);
+  return r.rowCount === 1;
+}
+
 /**
  * Read up to `max` messages from <agent>'s inbox.
  *

@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { registerWake } from './wake.js';
+import { requestContext } from '../../server/request-context.js';
 import {
   collapseSuperseded,
   capText,
@@ -21,6 +23,130 @@ test('local retraction sets normalize only the source lane prefix for full and b
   assert.equal(ids.has('cro__foreign'),true);
   assert.equal(ids.has('foreign'),false);
 });
+
+test('brief wake handler backfills own canonical status behind episode chatter and keeps decision refs', async () => {
+  let handler: ((args: Record<string, unknown>) => Promise<any>) | undefined;
+  const rows = [
+    ...Array.from({ length: 7 }, (_, i) => ({ id: `episode-${i}`, type: 'memory', agent: 'cto', kind: 'episode', text: `tool episode ${i}` })),
+    { id: 'canonical-status', type: 'memory', agent: 'cto', kind: 'status', text: 'status assertion', created_at: '2026-10-13T00:00:00Z' },
+    ...Array.from({ length: 16 }, (_, i) => ({ id: `episode-later-${i}`, type: 'memory', agent: 'cto', kind: 'episode', text: `tool episode later ${i}` })),
+  ];
+  const calls: Array<{ agent?: string; kind?: string; limit?: number }> = [];
+  const memoryRead = {
+    configured: () => true,
+    search: async (filter: { agent?: string; kind?: string; limit?: number }) => {
+      calls.push(filter);
+      return filter.kind === 'status'
+        ? [{ id: 'foreign-status', type: 'memory', agent: 'clo-personal', kind: 'status', text: 'other lane' }]
+        : rows;
+    },
+  };
+  const server = { registerTool(_name: string, _config: unknown, candidate: typeof handler extends infer _ ? any : never) { handler = candidate; return { remove() {} }; } };
+  const previous = setWakeTestEnv();
+  try {
+    registerWake(server as never, () => 'synthetic', {
+      ...memoryRead,
+      sharedConfigured: () => true,
+      readSharedAll: async () => [
+        { id: 'decision-important', ts: '2026-10-13T00:00:00Z', type: 'decision', text: 'retain exact decision reference', tags: [], agent: 'cto' },
+        { id: 'correction-important', ts: '2026-10-12T00:00:00Z', type: 'correction', text: 'retain exact correction reference', tags: [], agent: 'cto' },
+      ] as any,
+    });
+    assert.ok(handler);
+    const response = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'cto' }, () => handler!({ brief: true }));
+    const result = response.structuredContent.result;
+    assert.equal(result.memory_records[0].id, 'canonical-status');
+    assert.equal(result.memory_records[0].kind, 'status');
+    assert.equal(result.memory_records.some((record: any) => record.id === 'foreign-status'), false);
+    assert.equal(result.memory_records.length, 6);
+    assert.equal(calls.filter((call) => call.kind === 'status').length, 0, 'the status already in the fetched window is promoted without another query');
+    assert.ok(result.pack.decisions.some((record: any) => record.id === 'decision-important'), 'decision references stay in their own section');
+    assert.ok(result.pack.corrections.some((record: any) => record.id === 'correction-important'), 'correction references stay in their own section');
+  } finally { restoreWakeTestEnv(previous); }
+});
+
+test('brief wake reports canonical-status query outages and keeps the ordinary memory result', async () => {
+  let handler: ((args: Record<string, unknown>) => Promise<any>) | undefined;
+  let statusQueries = 0;
+  const server = { registerTool(_name: string, _config: unknown, candidate: typeof handler extends infer _ ? any : never) { handler = candidate; return { remove() {} }; } };
+  const previous = setWakeTestEnv();
+  try {
+    registerWake(server as never, () => 'synthetic', {
+      configured: () => true,
+      search: async (filter: { kind?: string }) => {
+        if (filter.kind === 'status') { statusQueries += 1; throw new Error('synthetic status store outage'); }
+        return [{ id: 'episode-kept', type: 'memory', agent: 'cto', kind: 'episode', text: 'available memory' }];
+      },
+    });
+    assert.ok(handler);
+    const response = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'cto' }, () => handler!({ brief: true }));
+    const result = response.structuredContent.result;
+    assert.ok(result.errors.some((message: string) => message.includes('memory_status: synthetic status store outage')));
+    assert.ok(result.memory_records.some((record: any) => record.id === 'episode-kept'));
+    assert.equal(statusQueries, 1, 'a failed bounded lookup is not retried');
+  } finally { restoreWakeTestEnv(previous); }
+});
+
+test('brief wake does not treat kind=status alone as caller ownership', async () => {
+  let handler: ((args: Record<string, unknown>) => Promise<any>) | undefined;
+  const server = { registerTool(_name: string, _config: unknown, candidate: typeof handler extends infer _ ? any : never) { handler = candidate; return { remove() {} }; } };
+  const previous = setWakeTestEnv();
+  try {
+    registerWake(server as never, () => 'synthetic', {
+      configured: () => true,
+      search: async (filter: { kind?: string }) => filter.kind === 'status'
+        ? [{ id: 'foreign-status', type: 'memory', agent: 'clo-personal', kind: 'status', text: 'other lane' }]
+        : [{ id: 'episode-own', type: 'memory', agent: 'cto', kind: 'episode', text: 'own lane episode' }],
+    });
+    assert.ok(handler);
+    const response = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'cto' }, () => handler!({ brief: true }));
+    const result = response.structuredContent.result;
+    assert.equal(result.memory_records.some((record: any) => record.id === 'foreign-status'), false);
+    assert.ok(result.memory_records.some((record: any) => record.id === 'episode-own'));
+  } finally { restoreWakeTestEnv(previous); }
+});
+
+test('brief wake never restores a status retracted by a row in the fetched window', async () => {
+  let handler: ((args: Record<string, unknown>) => Promise<any>) | undefined;
+  const statusQueries: number[] = [];
+  const server = { registerTool(_name: string, _config: unknown, candidate: typeof handler extends infer _ ? any : never) { handler = candidate; return { remove() {} }; } };
+  const previous = setWakeTestEnv();
+  try {
+    registerWake(server as never, () => 'synthetic', {
+      configured: () => true,
+      search: async (filter: { kind?: string; limit?: number }) => {
+        if (filter.kind === 'status') {
+          statusQueries.push(filter.limit ?? 0);
+          return [{ id: 'current-status', type: 'memory', agent: 'cto', kind: 'status', text: 'current assertion' }];
+        }
+        return [
+          { id: 'episode-new', type: 'memory', agent: 'cto', kind: 'episode', supersedes: 'old-status', text: 'episode' },
+          { id: 'old-status', type: 'memory', agent: 'cto', kind: 'status', text: 'stale' },
+        ];
+      },
+    });
+    assert.ok(handler);
+    const response = await requestContext.run({ callerHash: 'synthetic', correlationId: 'synthetic', callerAgent: 'cto' }, () => handler!({ brief: true }));
+    const result = response.structuredContent.result;
+    assert.equal(result.memory_records.some((record: any) => record.id === 'old-status'), false);
+    assert.equal(result.memory_records[0].id, 'current-status', 'one deferred bounded lookup finds an unsuperseded status');
+    assert.deepEqual(statusQueries, [4]);
+  } finally { restoreWakeTestEnv(previous); }
+});
+
+function setWakeTestEnv(): Record<string, string | undefined> {
+  const values = { CIO_SITE_ID: 'synthetic-site', CIO_TRACK_KEY: 'synthetic-track-key', CIO_APP_API_BEARER: 'synthetic-bearer', PERPLEXITY_CONNECTOR_TOKEN: 'synthetic-connector-placeholder-1234567890', ADMIN_REVOKE_TOKEN: 'synthetic-admin-placeholder-1234567890', N8N_WEBHOOK_SECRET: 'synthetic-webhook-placeholder-1234567890' };
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  return previous;
+}
+
+function restoreWakeTestEnv(previous: Record<string, string | undefined>): void {
+  for (const [key, value] of Object.entries(previous)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
 import type { MemoryEntry } from '../../memory/store.js';
 
 const entry = (id: string, extra: Record<string, unknown> = {}): MemoryEntry =>

@@ -34,7 +34,7 @@ process.env.PG_USER = 'postgres';
 process.env.PG_PASSWORD = 'postgres';
 process.env.PG_SSL_VERIFY = 'false';
 
-const { isConfigured, ensureQueue, enqueue, readMessages, queueName, resetPoolForTests } = await import('./queue-postgres.js');
+const { isConfigured, ensureQueue, enqueue, readMessages, acknowledgeMessage, queueName, resetPoolForTests } = await import('./queue-postgres.js');
 // Raw pg used only to inspect/clean table state between tests -- not the code under test.
 const pg = (await import('pg')).default;
 const rawPool = new pg.Pool({
@@ -275,6 +275,42 @@ test('the dead-letter audit is read-only (ack is ignored) and isolated per agent
   assert.equal(first[0].acked, false);
   assert.deepEqual(second.map((m) => m.message_id), first.map((m) => m.message_id), 'auditing must never consume');
   assert.equal((await readMessages(other, { deadLetter: true })).length, 0, "another agent's audit must not see these");
+});
+
+test('exact acknowledgment deletes only the requested live message in its recipient queue', async () => {
+  const agent = uniqueAgent('exactack');
+  const other = uniqueAgent('exactother');
+  await enqueue(agent, { to: agent, from: 'cto', subject: 'one', body: 'one', ts: new Date().toISOString() });
+  await enqueue(agent, { to: agent, from: 'cto', subject: 'two', body: 'two', ts: new Date().toISOString() });
+  await enqueue(other, { to: other, from: 'cto', subject: 'foreign', body: 'foreign', ts: new Date().toISOString() });
+  const [one, two] = await readMessages(agent, { ack: false });
+  assert.equal(await acknowledgeMessage(other, one.message_id), false, 'wrong recipient queue cannot delete it');
+  const race = await Promise.all([acknowledgeMessage(agent, one.message_id), acknowledgeMessage(agent, one.message_id)]);
+  assert.equal(race.filter(Boolean).length, 1, 'concurrent exact acknowledgments have one winner');
+  assert.deepEqual((await readMessages(agent, { ack: false })).map((m) => m.message_id), [two.message_id], 'new/unselected message remains');
+  assert.equal(await acknowledgeMessage(agent, '00000000-0000-4000-8000-000000000000'), false);
+  await assert.rejects(() => acknowledgeMessage(agent, 'bad'), /Invalid message_id/);
+});
+
+test('exact acknowledgment preserves expired, dead-letter, hidden, overage, and over-delivered rows', async () => {
+  const agent = uniqueAgent('exactguard');
+  const mutations: Array<[string, (id: string) => Promise<void>]> = [
+    ['expired', async (id) => { await rawPool.query('UPDATE agentstate_queue SET expires_at = now() - interval \'1 second\' WHERE message_id = $1', [id]); }],
+    ['deadletter', async (id) => { await rawPool.query("UPDATE agentstate_queue SET visible_at = 'infinity' WHERE message_id = $1", [id]); }],
+    ['hidden', async (id) => { await rawPool.query('UPDATE agentstate_queue SET visible_at = now() + interval \'1 minute\' WHERE message_id = $1', [id]); }],
+    ['overage', async (id) => { await rawPool.query("UPDATE agentstate_queue SET enqueued_at = now() - interval '8 days' WHERE message_id = $1", [id]); }],
+    ['overdelivered', async (id) => { await rawPool.query('UPDATE agentstate_queue SET dequeue_count = 51 WHERE message_id = $1', [id]); }],
+  ];
+  for (const [name, mutate] of mutations) {
+    await enqueue(agent, { to: agent, from: 'cto', subject: name, body: name, ts: new Date().toISOString() });
+    const [msg] = await readMessages(agent, { ack: false });
+    assert.ok(msg, `${name} fixture was not peeked`);
+    await mutate(msg.message_id);
+    assert.equal(await acknowledgeMessage(agent, msg.message_id), false, `${name} message must not be acknowledged`);
+    const remains = await rawPool.query('SELECT 1 FROM agentstate_queue WHERE message_id = $1', [msg.message_id]);
+    assert.equal(remains.rowCount, 1, `${name} row must be preserved`);
+    await rawPool.query('DELETE FROM agentstate_queue WHERE message_id = $1', [msg.message_id]);
+  }
 });
 
 // A real backend failure (connection refused, missing table) must throw rather than resolve to an
