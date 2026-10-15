@@ -815,8 +815,9 @@ test('saved website profiles use mission budgets and preserve login lease exclus
   const service = new CloudBrowserService(store, transport);
   const principal = 'a'.repeat(64);
   let leaseActive = true;
-  const guardedStore = store as MemoryStore & { verifyLoginLease: (id: string, owner?: string) => Promise<boolean> };
+  const guardedStore = store as MemoryStore & { verifyLoginLease: (id: string, owner?: string) => Promise<boolean>; releaseStoppedLoginLease: () => Promise<void> };
   guardedStore.verifyLoginLease = async (_id, owner) => !leaseActive || owner === 'trusted-login-owner';
+  guardedStore.releaseStoppedLoginLease = async () => { leaseActive = false; };
   await service.saveProfile('cto', { profileId: 'website-mission', owner: 'cto', allowedHosts: ['example.test'], persistent: true, providerProfileId: 'provider-profile', ownerSubjectHash: principal, actionBudget: 10_000, maxSessionSeconds: 28_800, maxActionSeconds: 120 }, principal);
   await assert.rejects(service.start('cto', 'website-mission', 3600, undefined, principal), (error: unknown) => error instanceof CloudBrowserError && error.code === 'profile_login_in_progress');
   assert.equal(transport.startedProfileIds.length, 0);

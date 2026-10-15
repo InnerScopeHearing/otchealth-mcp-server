@@ -75,6 +75,20 @@ test("provider start omits unsupported tags and stop uses signed PUT query", asy
   assert.equal(typeof calls[1].body.clientToken, "string");
 });
 
+test('explicit stop retries reuse a durable StopBrowserSession clientToken without changing the owned provider binding', async t => {
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const transport = new AgentCoreCloudBrowserTransport('us-east-1', async (url, init) => {
+    calls.push({ url: String(url), body: JSON.parse(String(init?.body)) }); return new Response('{}');
+  });
+  const owned = { ...session, providerBrowserId: 'aws.browser.v1', providerStopToken: '2d590f1d-b5ac-4d52-8ccb-15a3e4a57e2c' };
+  await transport.stop(owned); await transport.stop(owned);
+  assert.equal(calls[0]!.body.clientToken, owned.providerStopToken);
+  assert.deepEqual(calls[1], calls[0]);
+});
+
 test("public mode starts only on its custom browser with the isolated default proxy and stops that same browser", async (t) => {
   const saved = { ...process.env };
   t.after(() => {
