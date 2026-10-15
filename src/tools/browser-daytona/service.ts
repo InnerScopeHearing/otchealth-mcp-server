@@ -71,6 +71,8 @@ export class DaytonaBrowserService {
     const checked = validateCloudBrowserAction(action); if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 120) return fail('invalid_duration');
     return this.locked(caller, id, principal, async (binding, session, lock) => {
       await this.active(binding, session); if (session.actionsUsed >= session.actionBudget) return fail('action_limit');
+      if (session.runtimeProtocol === 2 && checked.type === 'press_key' && ((checked.modifiers ?? 0) & 6) && ['KeyP', 'KeyS', 'KeyF'].includes(checked.key)) return fail('daytona_global_shortcut_unsupported');
+      if (session.runtimeProtocol === 2 && checked.type === 'press_key' && ['KeyC', 'KeyV'].includes(checked.key) && ((checked.modifiers ?? 0) & 6) && ![2, 4, 6].includes(checked.modifiers ?? 0)) return fail('daytona_clipboard_modifier_unsupported');
       session.actionsUsed++; session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock);
       let result: unknown;
       try { result = await this.provider.execute(binding, session, checked, timeoutSeconds, principal!); }

@@ -106,6 +106,26 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(result['sessionId'], self.request['sessionId'])
         self.assertEqual(result['principalHash'], self.request['principalHash'])
 
+    def test_v2_checkpoint_requires_exact_sole_mission_and_global_checkpoint_intent(self):
+        self.receipt.unlink()
+        mission = {'sessionId': self.request['sessionId'], 'principalHash': self.request['principalHash'], 'selected': 'OLD', 'owned': ['OLD'], 'uncertain': True}
+        value = {'version': 2, 'missions': [mission], 'human': None,
+                 'uncertain': {'sessionId': mission['sessionId'], 'principalHash': mission['principalHash'], 'operation': 'checkpoint'}}
+        path = self.profile['base'] / 'missions-v2.json'; path.write_text(json.dumps(value)); path.chmod(0o600)
+        request = {**self.request, 'runtimeProtocol': 2}
+        result = self.supervisor.checkpoint(request, time.monotonic() + 2)
+        self.assertTrue(result['checkpointed']); self.assertEqual(self.commands, ['Browser.close'])
+
+    def test_v2_checkpoint_rejects_other_working_mission_before_browser_close(self):
+        self.receipt.unlink()
+        mission = {'sessionId': self.request['sessionId'], 'principalHash': self.request['principalHash'], 'selected': 'OLD', 'owned': ['OLD'], 'uncertain': True}
+        other = {'sessionId': '22222222-2222-4222-8222-222222222222', 'principalHash': 'b' * 64, 'selected': 'OTHER', 'owned': ['OTHER'], 'uncertain': False}
+        value = {'version': 2, 'missions': [mission, other], 'human': None,
+                 'uncertain': {'sessionId': mission['sessionId'], 'principalHash': mission['principalHash'], 'operation': 'checkpoint'}}
+        path = self.profile['base'] / 'missions-v2.json'; path.write_text(json.dumps(value)); path.chmod(0o600)
+        with self.assertRaises(control.ControlError) as error: self.supervisor.checkpoint({**self.request, 'runtimeProtocol': 2}, time.monotonic() + 2)
+        self.assertEqual(error.exception.code, 'mission_not_owned'); self.assertEqual(self.commands, [])
+
     def test_foreign_session_principal_or_pid_never_closes_browser(self):
         for change in ({'sessionId': '22222222-2222-4222-8222-222222222222'}, {'principalHash': 'b' * 64}, {'expectedBrowserPid': 2000}):
             with self.subTest(change=change), self.assertRaises(control.ControlError):

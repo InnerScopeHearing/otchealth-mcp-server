@@ -104,11 +104,23 @@ class DispatcherTests(unittest.TestCase):
                 dispatch.assert_not_called()
 
     def test_unsupported_capture_formats_never_fake_success(self):
-        for action in ({'type': 'capture', 'request': {'type': 'pdf'}},
-                       {'type': 'capture', 'request': {'type': 'screenshot', 'format': 'jpeg'}}):
+        for action in ({'type': 'capture', 'request': {'type': 'screenshot', 'format': 'jpeg'}},):
             with self.assertRaises(dispatcher.DispatchError) as error:
                 dispatcher.validate_action(action)
             self.assertEqual(error.exception.code, 'unsupported_action')
+
+    def test_pdf_requests_allow_only_fixed_boolean_flags_and_bounded_print_frame(self):
+        for request in ({'type': 'pdf'}, {'type': 'pdf', 'landscape': True, 'printBackground': False}):
+            action = {'type': 'capture', 'request': request}
+            self.assertEqual(dispatcher.validate_action(action), action)
+        for request in ({'type': 'pdf', 'landscape': 'true'}, {'type': 'pdf', 'printBackground': 1}, {'type': 'pdf', 'path': '/tmp/private'}):
+            with self.assertRaises(dispatcher.DispatchError): dispatcher.validate_action({'type': 'capture', 'request': request})
+        cdp = dispatcher.Cdp.__new__(dispatcher.Cdp); cdp.identifier = 0; cdp.send = lambda *_: None
+        limits = []
+        def message(limit=dispatcher.MAX_FRAME): limits.append(limit); return {'id': cdp.identifier, 'result': {}}
+        cdp.message = message
+        cdp.command('Page.printToPDF'); cdp.command('Target.getTargets')
+        self.assertEqual(limits, [6 * 1024 * 1024, dispatcher.MAX_FRAME])
 
     def test_dispatch_identity_flags_actual_observation_and_fenced_release(self):
         class Cdp:
@@ -215,14 +227,17 @@ class DispatcherTests(unittest.TestCase):
             def __init__(self, _): pass
             def close(self): pass
             def command(self, *args): return {}
-        payload = {name: value for name, value in self.payload.items() if name not in ('sessionId', 'action')}
-        payload['op'] = 'probe'
-        status = {'profileKey': payload['profileKey'], 'profilePath': payload['profilePath'], 'checkpointReady': True, 'browserPid': 101, 'supervisorPid': 100, 'cdpLoopback': True, 'profileVerified': True, 'encryptedKeyringUnlocked': True}
-        with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), patch.object(dispatcher, 'verify_runtime', return_value=101), patch.object(dispatcher, 'Cdp', Cdp), patch.object(dispatcher, 'control_request', return_value=status):
-            result = dispatcher.dispatch(payload)
-            self.assertTrue(result['checkpointReady']); self.assertEqual(result['browserPid'], 101)
-            status['profileKey'] = 'foreign-profile'
-            self.assertFalse(dispatcher.dispatch(payload)['checkpointReady'])
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700); profile = base / 'chromium'; profile.mkdir(mode=0o700)
+            payload = {name: value for name, value in self.payload.items() if name not in ('sessionId', 'action')}
+            payload.update(op='probe', profilePath=str(profile))
+            status = {'profileKey': payload['profileKey'], 'profilePath': payload['profilePath'], 'checkpointReady': True, 'browserPid': 101, 'supervisorPid': 100, 'cdpLoopback': True, 'profileVerified': True, 'encryptedKeyringUnlocked': True}
+            with patch.object(dispatcher, 'safe_directory', side_effect=lambda p: Path(p)), patch.object(dispatcher, 'verify_runtime', return_value=101), patch.object(dispatcher, 'Cdp', Cdp), patch.object(dispatcher, 'control_request', return_value=status):
+                result = dispatcher.dispatch(payload)
+                self.assertTrue(result['checkpointReady']); self.assertEqual(result['browserPid'], 101)
+                self.assertEqual(result['runtimeProtocol'], 2); self.assertTrue(result['multiMissionReady'])
+                status['profileKey'] = 'foreign-profile'
+                self.assertFalse(dispatcher.dispatch(payload)['checkpointReady'])
 
     def test_snapshot_rejects_private_subframes_and_populated_blank_page(self):
         class Cdp:

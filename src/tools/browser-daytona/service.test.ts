@@ -186,3 +186,10 @@ test('V2 known pause busy never mints while unknown pause never clears suppressi
     assert.equal(h.leases.get(binding.profileKey), a.sessionId);
   }
 });
+test('V2 unsupported global browser shortcuts report a capability error before spending or fencing an action', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const a = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+  for (const key of ['KeyP', 'KeyS', 'KeyF'] as const) await assert.rejects(h.service.execute('cto', a.sessionId, { type: 'press_key', key, modifiers: 2 }, 10, hash), code('daytona_global_shortcut_unsupported'));
+  await assert.rejects(h.service.execute('cto', a.sessionId, { type: 'press_key', key: 'KeyC', modifiers: 10 }, 10, hash), code('daytona_clipboard_modifier_unsupported'));
+  assert.equal(h.state.executed, 0); assert.equal(h.sessions.get(a.sessionId)!.actionsUsed, 0); assert.equal(h.sessions.get(a.sessionId)!.effectUnknown, false);
+});

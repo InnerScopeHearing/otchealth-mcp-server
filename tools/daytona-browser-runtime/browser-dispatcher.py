@@ -36,13 +36,13 @@ MAX_FRAME = 4 * 1024 * 1024
 
 
 class DispatchError(Exception):
-    def __init__(self, code):
-        self.code = code
+    def __init__(self, code, before_effect=False):
+        self.code, self.before_effect = code, before_effect
         super().__init__(code)
 
 
-def fail(code):
-    raise DispatchError(code)
+def fail(code, before_effect=False):
+    raise DispatchError(code, before_effect)
 
 
 def trusted_transfers():
@@ -54,6 +54,24 @@ def trusted_transfers():
     if not spec or not spec.loader: raise ImportError('transfer_module_unavailable')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def trusted_registry():
+    path = Path(__file__).resolve(strict=True).with_name('mission-registry.py')
+    if path.is_symlink(): fail('registry_unavailable')
+    spec = importlib.util.spec_from_file_location('_otc_owned_mission_registry', path)
+    if not spec or not spec.loader: fail('registry_unavailable')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+
+def trusted_clipboard():
+    path = Path(__file__).resolve(strict=True).with_name('mission_clipboard.py')
+    if path.is_symlink(): fail('clipboard_provider_unavailable')
+    spec = importlib.util.spec_from_file_location('_otc_owned_mission_clipboard', path)
+    if not spec or not spec.loader: fail('clipboard_provider_unavailable')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 
 
@@ -77,7 +95,10 @@ def validate_action(action):
     if kind == 'capture':
         fields(action, ('type', 'request'))
         request = action['request']
-        if not isinstance(request, dict) or not {'type'} <= request.keys() or not request.keys() <= {'type', 'format'} or request['type'] != 'screenshot' or request.get('format', 'png') != 'png': fail('unsupported_action')
+        if not isinstance(request, dict) or 'type' not in request: fail('unsupported_action')
+        if request['type'] == 'pdf':
+            if not request.keys() <= {'type', 'landscape', 'printBackground'} or any(type(value) is not bool for key, value in request.items() if key != 'type'): fail('unsupported_action')
+        elif request['type'] != 'screenshot' or not request.keys() <= {'type', 'format'} or request.get('format', 'png') != 'png': fail('unsupported_action')
         return action
     if kind == 'upload':
         fields(action, ('type', 'selector', 'fileId'))
@@ -120,8 +141,10 @@ def validate_action(action):
 
 
 def validate_payload(payload):
-    fields(payload, ('version', 'op', 'profileKey', 'profilePath', 'timeoutMs'), ('sessionId', 'action', 'principalHash', 'upload'))
-    if type(payload['version']) is not int or payload['version'] != 1 or payload['op'] not in ('probe', 'open', 'execute', 'checkpoint', 'release'):
+    fields(payload, ('version', 'op', 'profileKey', 'profilePath', 'timeoutMs'), ('sessionId', 'action', 'principalHash', 'upload', 'runtimeProtocol'))
+    if 'runtimeProtocol' in payload and (type(payload['runtimeProtocol']) is not int or payload['runtimeProtocol'] != 2): fail('invalid_payload')
+    operations = ('probe', 'open', 'execute', 'checkpoint', 'release') + (('human_pause', 'human_resume') if payload.get('runtimeProtocol') == 2 else ())
+    if type(payload['version']) is not int or payload['version'] != 1 or payload['op'] not in operations:
         fail('invalid_payload')
     key = payload['profileKey']
     if not isinstance(key, str) or not KEY.fullmatch(key) or payload['profilePath'] != str(ROOT / key / 'chromium'):
@@ -133,6 +156,7 @@ def validate_payload(payload):
         fail('invalid_payload')
     if 'principalHash' in payload and not (isinstance(payload['principalHash'], str) and HASH.fullmatch(payload['principalHash'])):
         fail('invalid_payload')
+    if payload.get('runtimeProtocol') == 2 and not (isinstance(payload.get('principalHash'), str) and HASH.fullmatch(payload['principalHash'])): fail('invalid_payload')
     if payload['op'] == 'execute':
         validate_action(payload.get('action'))
         if payload['action']['type'] == 'upload':
@@ -343,7 +367,7 @@ class Cdp:
         while True:
             # A 4MiB PNG is base64 encoded in CDP. Ordinary observations retain
             # their original bound; no caller-supplied method reaches this API.
-            message = self.message(6 * 1024 * 1024 if method == 'Page.captureScreenshot' else MAX_FRAME)
+            message = self.message(6 * 1024 * 1024 if method in ('Page.captureScreenshot', 'Page.printToPDF') else MAX_FRAME)
             if message.get('id') != self.identifier: continue
             if 'error' in message: fail('provider_action_failed')
             if not isinstance(message.get('result'), dict): fail('provider_protocol_error')
@@ -539,6 +563,7 @@ def control_request(payload, deadline, expected_pid=None):
     if remaining < 1: fail('provider_timeout')
     request = {'version': 1, 'op': 'checkpoint' if expected_pid is not None else 'status',
                'profileKey': payload['profileKey'], 'profilePath': payload['profilePath'], 'timeoutMs': remaining}
+    if payload.get('runtimeProtocol') == 2: request['runtimeProtocol'] = 2
     if expected_pid is not None:
         request.update(sessionId=payload['sessionId'], principalHash=payload['principalHash'], expectedBrowserPid=expected_pid)
     try:
@@ -577,6 +602,115 @@ def checkpoint(receipt, state, payload, deadline, old_pid):
     finally: cdp.close()
 
 
+def perform_action(cdp, state, payload, profile):
+    kind = payload['action']['type']
+    if kind in ('capture', 'upload'):
+        transfers = trusted_transfers()
+        target, attached_session = selected(cdp, state)
+        before_url = current_url(cdp, attached_session)
+        try:
+            if kind == 'capture':
+                snapshot(cdp, attached_session, target)
+                result = transfers.capture_pdf(cdp, attached_session, payload['action']['request']) if payload['action']['request']['type'] == 'pdf' else transfers.capture_png(cdp, attached_session)
+            else:
+                descriptor = payload['upload']
+                node = transfers.file_input(cdp, attached_session, payload['action']['selector'], descriptor)
+                if descriptor['phase'] == 'prepare':
+                    transfers.prepare_upload_tree(profile.parent, descriptor); result = {'prepared': True}
+                else: result = transfers.attach_upload(cdp, attached_session, node, profile.parent, descriptor)
+            if current_url(cdp, attached_session) != before_url: fail('navigation_changed')
+            return result
+        except transfers.TransferError as error: fail(error.code)
+    action_result = execute(cdp, state, payload['action'])
+    if kind == 'snapshot': return action_result
+    if state['selected'] is None: result = {'url': None, 'title': None, 'visibleText': ''}
+    else:
+        target, attached_session = selected(cdp, state); result = snapshot(cdp, attached_session, target)
+    if kind in ('tab_create', 'tab_select', 'tab_close'): result['pageReceipt'] = action_result
+    return result
+
+
+class V2Receipt:
+    def __init__(self, receipt, value, mission, operation): self.receipt, self.value, self.mission, self.operation = receipt, value, mission, operation
+    def write(self, state):
+        self.value['uncertain'] = {'sessionId': state['sessionId'], 'principalHash': state['principalHash'], 'operation': self.operation} if state['uncertain'] else None
+        self.receipt.save(self.value)
+
+
+def dispatch_v2(payload, deadline, profile, browser_pid):
+    module = trusted_registry()
+    try:
+        with module.Registry(profile.parent, deadline - min(0.1, payload['timeoutMs'] / 10000)) as receipt:
+            if os.path.lexists(profile.parent / 'mission.json'): fail('mission_busy', True)
+            value = receipt.load(); op, session_id, principal = payload['op'], payload['sessionId'], payload['principalHash']
+            if value['uncertain'] is not None: fail('effect_unknown')
+            if op == 'open':
+                if value['human'] is not None: fail('human_active', True)
+                if len(value['missions']) >= module.MAX_MISSIONS or any(m['sessionId'] == session_id or m['principalHash'] == principal for m in value['missions']): fail('mission_busy', True)
+                mission = {'sessionId': session_id, 'principalHash': principal, 'selected': None, 'owned': [], 'uncertain': True}
+                value['missions'].append(mission)
+            else: mission = module.require_mission(value, session_id, principal)
+            if op in ('checkpoint', 'human_pause') and len(value['missions']) != 1: fail('other_missions_active', True)
+            if op in ('execute', 'human_pause') and value['human'] is not None: fail('human_active', True)
+            if op in ('human_resume', 'checkpoint', 'release') and value['human'] is not None and value['human'] != {'sessionId': session_id, 'principalHash': principal}: fail('human_active', True)
+            if op == 'human_resume' and value['human'] != {'sessionId': session_id, 'principalHash': principal}: fail('human_not_owned')
+            if op == 'execute':
+                action = payload['action']
+                if action['type'] in ('tab_select', 'tab_close') and action['targetId'] not in mission['owned']: fail('target_not_owned')
+                if action['type'] == 'tab_create' and (len(mission['owned']) >= module.MAX_TABS or sum(len(m['owned']) for m in value['missions']) >= module.MAX_TOTAL_TABS): fail('target_limit')
+                if action['type'] == 'press_key' and action.get('modifiers', 0) & 6 and action['key'] in ('KeyP', 'KeyS', 'KeyF'): fail('daytona_global_shortcut_unsupported')
+                if action['type'] == 'press_key' and action.get('modifiers', 0) & 6 and action['key'] in ('KeyC', 'KeyV') and action.get('modifiers') not in (2, 4, 6): fail('daytona_clipboard_modifier_unsupported')
+            adapter = V2Receipt(receipt, value, mission, 'action' if op == 'execute' else op)
+            if op == 'checkpoint': return checkpoint(adapter, mission, payload, deadline, browser_pid)
+            mission['uncertain'] = True
+            if op == 'human_pause': value['human'] = {'sessionId': session_id, 'principalHash': principal}
+            adapter.write(mission)
+            cdp = Cdp(deadline)
+            try:
+                if op == 'open':
+                    cdp.command('Browser.setDownloadBehavior', {'behavior': 'deny'})
+                    target = cdp.command('Target.createTarget', {'url': 'about:blank'}).get('targetId')
+                    if not isinstance(target, str) or not TARGET.fullmatch(target): fail('target_create_uncertain')
+                    mission['selected'], mission['owned'] = target, [target]
+                    result = {'ready': True, 'cdpLoopback': True, 'profileVerified': True}
+                elif op == 'human_pause':
+                    cdp.command('Browser.setDownloadBehavior', {'behavior': 'default'})
+                    if mission['selected']: cdp.command('Target.activateTarget', {'targetId': mission['selected']})
+                    result = {'paused': True}
+                elif op == 'human_resume':
+                    cdp.command('Browser.setDownloadBehavior', {'behavior': 'deny'}); value['human'] = None; result = {'resumed': True}
+                elif op == 'release':
+                    # A sole post-checkpoint mission may own the last page.
+                    # Keep a new unowned blank parking tab so closing this
+                    # logical mission cannot shut the retained browser down.
+                    pages = cdp.command('Target.getTargets').get('targetInfos', [])
+                    if not any(page.get('type') == 'page' and page.get('targetId') not in mission['owned'] for page in pages):
+                        parked = cdp.command('Target.createTarget', {'url': 'about:blank'}).get('targetId')
+                        if not isinstance(parked, str) or not TARGET.fullmatch(parked): fail('target_create_uncertain')
+                    for target in mission['owned']:
+                        if cdp.command('Target.closeTarget', {'targetId': target}).get('success') is not True: fail('target_operation_failed')
+                    value['missions'].remove(mission); value['human'] = None; value['uncertain'] = None
+                    receipt.save(value); return {'released': True, 'browserStopped': False}
+                else:
+                    # Browser-native focus belongs to the action, not the whole
+                    # mission. No other dispatcher can input until this ends.
+                    if mission['selected']: cdp.command('Target.activateTarget', {'targetId': mission['selected']})
+                    action = payload['action']
+                    if action['type'] == 'press_key' and action['key'] in ('KeyC', 'KeyV') and action.get('modifiers') in (2, 4, 6):
+                        target, attached = selected(cdp, mission)
+                        observed = snapshot(cdp, attached, target)  # Private frames and protected/password AX guard.
+                        clipboard = trusted_clipboard()
+                        try: private = clipboard.handle_clipboard(cdp, attached, action, mission.get('clipboardText', ''))
+                        except clipboard.ClipboardError as error: fail(error.code)
+                        if not isinstance(private, dict) or private.keys() != {'clipboardText', 'changed'} or type(private['changed']) is not bool or not isinstance(private['clipboardText'], str): fail('clipboard_provider_unavailable')
+                        mission['clipboardText'] = private['clipboardText']
+                        result = {'url': observed['url'], 'title': observed['title'], 'visibleText': ''}
+                    else: result = perform_action(cdp, mission, payload, profile)
+                mission['uncertain'] = False; adapter.write(mission); return result
+            finally: cdp.close()
+    except module.RegistryError as error: fail(error.code, error.before_effect)
+
+
 def dispatch(payload):
     deadline = time.monotonic() + payload['timeoutMs'] / 1000
     profile = safe_directory(Path(payload['profilePath']))
@@ -594,8 +728,23 @@ def dispatch(payload):
                 result.update(checkpointReady=True, profileKey=payload['profileKey'], profilePath=payload['profilePath'], encryptedKeyringUnlocked=True, browserPid=browser_pid, supervisorPid=status['supervisorPid'])
         except DispatchError:
             pass  # Ordinary browser capability is not encrypted warm-checkpoint readiness.
+        module = trusted_registry()
+        try:
+            with module.Registry(profile.parent, deadline) as receipt:
+                value = receipt.load()
+                ready = not os.path.lexists(profile.parent / 'mission.json') and value['human'] is None and value['uncertain'] is None
+                result.update(runtimeProtocol=2, multiMissionReady=ready, profileKey=payload['profileKey'], profilePath=payload['profilePath'])
+        except module.RegistryError as error: fail(error.code, error.before_effect)
         return result
+    if payload.get('runtimeProtocol') == 2: return dispatch_v2(payload, deadline, profile, browser_pid)
     with Receipt(profile.parent) as receipt:
+        module = trusted_registry()
+        base_fd = os.open(profile.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            module.read_registry_at(base_fd, os.getuid())
+            if os.path.lexists(profile.parent / 'missions-v2.json'): fail('mission_busy')
+        except module.RegistryError as error: fail(error.code)
+        finally: os.close(base_fd)
         op, session_id, principal = payload['op'], payload['sessionId'], payload.get('principalHash')
         if op == 'release':
             receipt.require(session_id, principal)
@@ -631,7 +780,7 @@ def dispatch(payload):
                 try:
                     if kind == 'capture':
                         snapshot(cdp, attached_session, target)  # Same private-frame/password-output guards.
-                        result = transfers.capture_png(cdp, attached_session)
+                        result = transfers.capture_pdf(cdp, attached_session, payload['action']['request']) if payload['action']['request']['type'] == 'pdf' else transfers.capture_png(cdp, attached_session)
                     else:
                         descriptor = payload['upload']
                         node = transfers.file_input(cdp, attached_session, payload['action']['selector'], descriptor)
@@ -684,7 +833,10 @@ def run_payload(encoded):
         response = {'version': 1, 'ok': True, 'profileKey': payload['profileKey'], 'profilePath': payload['profilePath'], 'result': result}
         if 'sessionId' in payload: response['sessionId'] = payload['sessionId']
         return response
-    except DispatchError as error: return {'version': 1, 'ok': False, 'code': error.code}
+    except DispatchError as error:
+        result = {'version': 1, 'ok': False, 'code': error.code}
+        if error.before_effect and error.code in ('mission_busy', 'human_active', 'other_missions_active'): result['beforeEffect'] = True
+        return result
     except (socket.timeout, TimeoutError): return {'version': 1, 'ok': False, 'code': 'provider_timeout'}
     except Exception:
         return {'version': 1, 'ok': False, 'code': 'provider_operation_failed'}
@@ -696,7 +848,7 @@ def main():
     args = parser.parse_args()
     result = run_payload(args.payload)
     print(json.dumps(result, separators=(',', ':')))
-    return 0 if result['ok'] else 1
+    return 0 if result['ok'] or result.get('beforeEffect') is True else 1
 
 
 if __name__ == '__main__':

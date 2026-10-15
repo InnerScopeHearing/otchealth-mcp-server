@@ -4,6 +4,7 @@
 import base64
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -79,7 +80,8 @@ def control_socket_path(profile_path):
 def validate_request(payload, profile, wire=False):
     required = {'version', 'op', 'profileKey', 'profilePath', 'timeoutMs'}
     if wire: required.add('deadlineMonotonicMs')
-    optional = {'sessionId', 'principalHash', 'expectedBrowserPid'}
+    mission_fields = {'sessionId', 'principalHash', 'expectedBrowserPid'}
+    optional = mission_fields | {'runtimeProtocol'}
     if not isinstance(payload, dict) or not required <= payload.keys() or not payload.keys() <= required | optional:
         fail('invalid_control_request')
     if type(payload['version']) is not int or payload['version'] != 1 or payload['op'] not in ('status', 'checkpoint'):
@@ -89,7 +91,8 @@ def validate_request(payload, profile, wire=False):
         fail('profile_not_owned')
     if not integer(payload['timeoutMs'], 1, 14000): fail('invalid_control_request')
     if wire and not integer(payload['deadlineMonotonicMs'], 1, 2 ** 63 - 1): fail('invalid_control_request')
-    if payload['op'] == 'checkpoint' and not optional <= payload.keys(): fail('invalid_control_request')
+    if payload['op'] == 'checkpoint' and not mission_fields <= payload.keys(): fail('invalid_control_request')
+    if 'runtimeProtocol' in payload and (type(payload['runtimeProtocol']) is not int or payload['runtimeProtocol'] != 2): fail('invalid_control_request')
     if 'sessionId' in payload and not (isinstance(payload['sessionId'], str) and UUID.fullmatch(payload['sessionId'])):
         fail('invalid_control_request')
     if 'principalHash' in payload and not (isinstance(payload['principalHash'], str) and HASH.fullmatch(payload['principalHash'])):
@@ -232,6 +235,24 @@ class WarmSupervisor:
                 'encryptedKeyringUnlocked': healthy, 'checkpointReady': healthy and verified and not self.faulted}
 
     def mission_owned(self, payload):
+        if payload.get('runtimeProtocol') == 2:
+            # The dispatcher holds the same mission.lock throughout this call.
+            path = Path(__file__).resolve(strict=True).with_name('mission-registry.py')
+            if path.is_symlink(): fail('mission_not_owned')
+            spec = importlib.util.spec_from_file_location('_otc_checkpoint_registry', path)
+            if not spec or not spec.loader: fail('mission_not_owned')
+            module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            fd = os.open(self.profile['base'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                value = module.read_registry_at(fd, os.getuid())
+                mission = module.require_mission(value, payload['sessionId'], payload['principalHash'])
+                expected = {'sessionId': payload['sessionId'], 'principalHash': payload['principalHash'], 'operation': 'checkpoint'}
+                if len(value['missions']) != 1 or not mission['uncertain'] or value['uncertain'] != expected: fail('mission_not_owned')
+                if value['human'] not in (None, {'sessionId': payload['sessionId'], 'principalHash': payload['principalHash']}): fail('mission_not_owned')
+                if os.path.lexists(self.profile['base'] / 'mission.json'): fail('mission_not_owned')
+                return
+            except module.RegistryError: fail('mission_not_owned')
+            finally: os.close(fd)
         path = self.profile['base'] / 'mission.json'
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
