@@ -671,7 +671,19 @@ test('fixed website handoff navigates while suppressed and verifies only expecte
     close() { this.dispatchEvent(new Event('close')); }
   }
   const factory = () => { const socket = new Socket(); queueMicrotask(() => socket.dispatchEvent(new Event('open'))); return socket as unknown as WebSocket; };
-  const transport = new AgentCoreCloudBrowserTransport('us-east-1', fetch, factory);
+  const fetchStream = (async (url, init) => {
+    const parsed = new URL(String(url));
+    assert.equal(parsed.pathname, '/browsers/aws.browser.v1/sessions/streams/update');
+    assert.equal(parsed.searchParams.get('sessionId'), session.providerSessionId);
+    assert.equal(init?.method, 'PUT');
+    const body = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({
+      browserIdentifier: 'aws.browser.v1',
+      sessionId: session.providerSessionId,
+      streams: { automationStream: { streamStatus: body.streamUpdate.automationStreamUpdate.streamStatus } },
+    }));
+  }) as typeof fetch;
+  const transport = new AgentCoreCloudBrowserTransport('us-east-1', fetchStream, factory);
   const owned = { ...session, owner: 'cto', ownerSubjectHash: 'a'.repeat(64), providerBrowserId: 'aws.browser.v1', allowedHosts: ['wefunder.com'], sensitiveOutputSuppressed: true } as CloudBrowserSession;
   await transport.prepareWebsiteLogin(owned, 'wefunder');
   assert.deepEqual(owned.ownedTargetIds, ['owned-target']); assert.equal(owned.selectedTargetId, 'owned-target');
@@ -705,3 +717,4 @@ test('fixed website handoff navigates while suppressed and verifies only expecte
   currentUrl = 'https://example.com/dashboard/other'; await assert.rejects(transport.verifyWebsiteLogin(generic, 'custom', target), /requested company website/);
   await assert.rejects(transport.prepareWebsiteLogin(generic, 'custom', { ...target, origin: 'https://other.example.com' }), /public HTTPS website/);
 });
+
