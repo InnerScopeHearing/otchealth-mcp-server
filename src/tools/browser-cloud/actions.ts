@@ -23,6 +23,7 @@ export const cloudBrowserActionSchema = z.discriminatedUnion("type", [
       selector,
       text: z
         .string()
+        .min(1)
         .max(1024)
         .refine((value) => !/[\u0000-\u001f]/.test(value)),
     })
