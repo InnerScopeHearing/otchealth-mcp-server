@@ -813,7 +813,7 @@ export function buildTextContent(
   return lines.join('\n');
 }
 
-function gatedReject(
+export function gatedReject(
   env: Env,
   category: ToolCategory,
   toolName: string,

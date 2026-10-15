@@ -28,7 +28,7 @@ export interface DaytonaRuntimeDependencies {
 }
 export interface DaytonaRuntimeController {
   adapter: DaytonaGatewayAdapter;
-  status(): { optedIn: boolean; configured: boolean; watchdogReady: boolean; missing: string[] };
+  status(): { optedIn: boolean; configured: boolean; watchdogReady: boolean; missing: string[]; enrollmentConfigured: boolean; enrollmentMissing: string[] };
   initialize(): Promise<boolean>;
   shutdown(): void;
   registerRoutes(app: FastifyInstance): Promise<boolean>;
@@ -109,8 +109,12 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
   const expiryReady = () => expiries.size > 0 && [...expiries.keys()].every(workerReady);
   const anyExpiryReady = () => [...expiries.keys()].some(workerReady);
   const status = () => {
-    const missing = [...commonMissing(), ...humanMissing(), ...enrollmentMissing()]; if (env.DAYTONA_BROWSER_ENABLED !== 'true') missing.unshift('DAYTONA_BROWSER_ENABLED');
-    return { optedIn: env.DAYTONA_BROWSER_ENABLED === 'true', configured: missing.length === 0, watchdogReady: expiryReady(), missing };
+    // Optional discovery enrollment cannot disable existing viewer revocation
+    // routes or their expiry watchdog after a restart. Report it separately.
+    const missing = [...commonMissing(), ...humanMissing()]; if (env.DAYTONA_BROWSER_ENABLED !== 'true') missing.unshift('DAYTONA_BROWSER_ENABLED');
+    const enrollmentProblems = enrollmentMissing();
+    return { optedIn: env.DAYTONA_BROWSER_ENABLED === 'true', configured: missing.length === 0, watchdogReady: expiryReady(), missing,
+      enrollmentConfigured: missing.length === 0 && env.DAYTONA_COMPANY_ENROLLMENT_ENABLED === 'true' && enrollmentProblems.length === 0, enrollmentMissing: enrollmentProblems };
   };
   const requireExpiry = (sandboxId?: string) => {
     if (!status().configured || !(sandboxId === undefined ? anyExpiryReady() : sandboxIds().includes(sandboxId) && workerReady(sandboxId))) fail('daytona_viewer_expiry_unavailable');
@@ -130,7 +134,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     const provider = (dependencies.createProvider ?? (options => new DaytonaApiBrowserProvider(options)))({ apiBaseUrl: env.DAYTONA_BROWSER_API_BASE_URL!, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, resolveApiToken, toolboxAllowedOrigins: origins(), ...createConfiguredDaytonaArtifactPorts({ env }), ...(viewer ? { viewer } : {}) });
     const store = sessionStore(), service = new DaytonaBrowserService(store, provider);
     // Opt-out or broken enrollment configuration cannot break sealed cleanup.
-    const template = status().configured && env.DAYTONA_COMPANY_ENROLLMENT_ENABLED === 'true' ? companyEnrollmentTemplate(env, sandboxIds()) : undefined;
+    const template = status().enrollmentConfigured ? companyEnrollmentTemplate(env, sandboxIds()) : undefined;
     const enrollment = new DaytonaCompanyEnrollment(template, store, provider, requireExpiry);
     const approved = async (caller: string, profile: string, principal?: string) => {
       const binding = await store.loadBinding(profile); assertDaytonaBinding(binding);

@@ -49,6 +49,11 @@ const AUTH_FIELD_FILES: Readonly<Record<string, string>> = Object.freeze({
   'tools/aws-mcp/audit.ts': 'the bridge audit line',
   'tools/aws-mcp/tools.ts': 'the bridge tools',
   'tools/browser-cloud/intercom-login-service.ts': 'reviewed OAuth-only per-authorization browser credential isolation; never a shared client ID',
+  // Reviewed by root and an independent reviewer for PR569: only the signed
+  // current OAuth owner/subject/connection may join a root-opted-in company
+  // profile after fresh private V2/keyring proof. Static, legacy and personal
+  // contexts fail before lookup; no caller-supplied principal is authoritative.
+  'server/daytona-company-enrollment.ts': 'reviewed create-only enrollment of the current signed OAuth connection, exact seven company lanes and derived principal; no invented identity',
 });
 
 /** The only files that may call a currentAuth* accessor: the file that defines them, and the bridge. */

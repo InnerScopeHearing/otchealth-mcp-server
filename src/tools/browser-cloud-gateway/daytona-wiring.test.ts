@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { requestContext } from '../../server/request-context.js';
 import { websitePrincipalHash } from '../browser-cloud/website-login-service.js';
@@ -59,6 +61,35 @@ test('explicit company profile discovery uses existing authenticated Daytona pat
   assert.equal(result.structuredContent?.result?.provider, 'daytona');
   assert.deepEqual(f.calls.map(call => call[0]), ['get', 'discover', 'readiness']);
   assert.equal(f.calls.some(call => ['start', 'issue', 'aws-start'].includes(String(call[0]))), false);
+});
+
+test('ordinary discovery remains a read under either write-disable flag while company admission uses the same write policy', () => {
+  // Separate processes exercise the registry's actual memoized Env, not a
+  // mutation of process.env after registration has already captured it.
+  const source = `
+    import { registerCloudBrowserTools } from './src/tools/browser-cloud-gateway/index.ts';
+    import { requestContext } from './src/server/request-context.ts';
+    const handlers = new Map(), calls = [];
+    const server = { registerTool(name, config, handler) { handlers.set(name,handler); return { remove(){} }; } };
+    const aws = { browser: { publicTrialProfile: async () => { calls.push('ordinary'); return { profileId:'original-profile', allowedHosts:[], persistent:false }; } }, jobs:{},queue:{},artifacts:{} };
+    const adapter = { forSession:async()=>undefined,get:async()=>{calls.push('get');return {browser:{
+      discover:async()=>{calls.push('discover');return {profileId:'owned',allowedHosts:[],persistent:true,provider:'daytona'};},
+      readiness:async()=>{calls.push('readiness');return {ready:true,profileKey:'owned',checkpointReady:true,runtimeProtocol:2,multiMissionReady:true};}
+    }};}};
+    registerCloudBrowserTools(server,()=> 'a'.repeat(64),aws,undefined,adapter);
+    const ctx={callerAgent:'cto',callerHash:'a'.repeat(64),correlationId:'test',authKind:'oauth',authSubject:'signed-client',authConnectionId:'11111111-1111-4111-8111-111111111111'};
+    const ordinary=await requestContext.run(ctx,()=>handlers.get('browser_cloud_profile_discover')({}));
+    const company=await requestContext.run(ctx,()=>handlers.get('browser_cloud_profile_discover')({profile_id:'daytona-company',dry_run:false}));
+    console.log('REGRESSION_RESULT='+JSON.stringify({ordinary:ordinary.structuredContent,company:company.structuredContent,calls}));
+  `;
+  for (const flags of [{ READ_ONLY_MODE: 'true', ENABLE_WRITE_TOOLS: 'true' }, { READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'false' }, { READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' }]) {
+    const child = spawnSync(process.execPath, ['--import','tsx','--input-type=module','-e',source], { cwd: fileURLToPath(new URL('../../../', import.meta.url)), env: { ...process.env, ...flags }, encoding: 'utf8', timeout: 20000 });
+    assert.equal(child.status, 0, child.stderr); const line = child.stdout.split('\n').find(value => value.startsWith('REGRESSION_RESULT=')); assert.ok(line);
+    const result = JSON.parse(line.slice('REGRESSION_RESULT='.length)); assert.equal(result.ordinary.result?.profile_id, 'original-profile');
+    if (flags.READ_ONLY_MODE === 'true' || flags.ENABLE_WRITE_TOOLS === 'false') {
+      assert.equal(result.company.error?.code ?? result.company.result?.error, 'write_disabled'); assert.deepEqual(result.calls, ['ordinary']);
+    } else { assert.equal(result.company.result.profile_id, 'daytona-company'); assert.deepEqual(result.calls, ['ordinary','get','discover','readiness']); }
+  }
 });
 
 test('Daytona alias rejects protected seats, static auth, disabled runtime and dry runs before provider effects', async () => {
