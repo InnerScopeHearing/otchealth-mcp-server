@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { canonicalUri, resolveAwsCredentials, signRequest, type AwsCredentials, type SignedRequest } from '../../search/sigv4.js';
-import type { BrowserFileRecord, BrowserFileStore } from './file-broker.js';
+import { validBrowserFileScanReceipt, type BrowserFileRecord, type BrowserFileStore } from './file-broker.js';
 
 export const BROWSER_FILE_STORE_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REGION = 'us-east-1';
@@ -43,12 +43,18 @@ function validRecord(value: unknown, owner: string, id: string): value is Browse
     && typeof record.contentType === 'string' && TYPES.has(record.contentType)
     && Number.isSafeInteger(record.byteLength) && record.byteLength! >= 1 && record.byteLength! <= BROWSER_FILE_STORE_MAX_BYTES
     && typeof record.sha256 === 'string' && /^[a-f0-9]{64}$/.test(record.sha256)
+    && (record.scanReceipt === undefined || validBrowserFileScanReceipt(record.scanReceipt, record.sha256, record.byteLength!))
     && (record.status === 'quarantined' || record.status === 'ready' || record.status === 'partial')
     && Number.isSafeInteger(record.expiresAt) && record.expiresAt! >= 0;
 }
 
 function readRecord(item: Item | undefined, owner: string, id: string): { record: BrowserFileRecord; storageKey: string; storageVersion: string; expiresAtEpoch: number } | null {
   if (!item || item.pk?.S !== `FILE#${owner}#${id}`) return null;
+  let scanReceipt: unknown;
+  if (Object.hasOwn(item, 'scanReceipt')) {
+    if (typeof item.scanReceipt?.S !== 'string' || item.scanReceipt.S.length > 1024) return null;
+    try { scanReceipt = JSON.parse(item.scanReceipt.S); } catch { return null; }
+  }
   const record = {
     id: item.fileId?.S,
     owner: item.owner?.S,
@@ -59,6 +65,7 @@ function readRecord(item: Item | undefined, owner: string, id: string): { record
     sha256: item.sha256?.S,
     status: item.status?.S,
     expiresAt: Number(item.expiresAt?.N),
+    ...(Object.hasOwn(item, 'scanReceipt') ? { scanReceipt } : {}),
   };
   const storageKey = item.storageKey?.S;
   const storageVersion = item.storageVersion?.S;
@@ -137,6 +144,7 @@ export function createAwsBrowserFileStore(configInput: AwsBrowserFileStoreConfig
       await dynamo('PutItem', { TableName: config.table, Item: {
         pk: { S: `FILE#${owner}#${id}` }, fileId: { S: id }, owner: { S: owner }, filename: { S: record.filename },
         ...(record.ownerSubjectHash === undefined ? {} : { ownerSubjectHash: { S: record.ownerSubjectHash } }),
+        ...(record.scanReceipt === undefined ? {} : { scanReceipt: { S: JSON.stringify(record.scanReceipt) } }),
         contentType: { S: record.contentType }, byteLength: { N: String(record.byteLength) }, sha256: { S: record.sha256 },
         status: { S: record.status }, expiresAt: { N: String(record.expiresAt) }, storageKey: { S: s3Key }, storageVersion: { S: version },
         expiresAtEpoch: { N: String(Math.ceil(record.expiresAt / 1_000)) },

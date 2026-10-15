@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
+import type { BrowserFileScanReceipt } from './file-broker.js';
 
 type FileStatus = 'quarantined' | 'ready' | 'partial';
 type BrowserFileRecord = {
@@ -18,7 +19,7 @@ type BrowserFileStore = {
   put(key: string, record: BrowserFileRecord, body: Uint8Array): Promise<void>;
   get(key: string): Promise<{ record: BrowserFileRecord; body: Uint8Array } | null>;
 };
-type BrowserFileScanner = { scan: (...args: never[]) => Promise<'clean' | 'infected' | 'error'> };
+type BrowserFileScanner = { scan: (input: { body: Uint8Array }) => Promise<BrowserFileScanReceipt | 'infected' | 'error'> };
 type BrowserFileValidator = { validate(input: { contentType: string; body: Uint8Array }): Promise<{ complete: boolean }> };
 type BrokerApi = {
   stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }, principalHash?: string): Promise<BrowserFileRecord>;
@@ -55,12 +56,14 @@ class MemoryFileStore implements BrowserFileStore {
   }
 }
 
-const cleanScanner: BrowserFileScanner = { scan: async () => 'clean' };
+const receipt = (body: Uint8Array, now: number): BrowserFileScanReceipt => ({ verdict: 'clean', scanner: 'clamav', sha256: sha(body), byteLength: body.byteLength, scannedAt: now, engineVersion: '1.4.3', signatureVersion: '27832', signaturesUpdatedAt: now - 1000 });
+const cleanScanner: BrowserFileScanner = { scan: async ({ body }) => receipt(body, 1_800_000_000_000) };
 const NO_SCANNER = Symbol('no scanner');
 function broker(store = new MemoryFileStore(), scanner: BrowserFileScanner | undefined | typeof NO_SCANNER = cleanScanner, now: number | (() => number) = 1_800_000_000_000, validator?: BrowserFileValidator) {
   assert.ok(BrowserFileBroker, 'file broker capability missing');
   const nowFn = typeof now === 'function' ? now : () => now;
-  const options = { ...(scanner === NO_SCANNER ? {} : { scanner }), ...(validator ? { validator } : {}), now: nowFn };
+  const boundScanner = scanner === cleanScanner ? { scan: async ({ body }: { body: Uint8Array }) => receipt(body, nowFn()) } : scanner;
+  const options = { ...(boundScanner === NO_SCANNER ? {} : { scanner: boundScanner }), ...(validator ? { validator } : {}), now: nowFn };
   return { store, broker: new BrowserFileBroker(store, options) };
 }
 

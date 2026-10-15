@@ -4,6 +4,7 @@ export const BROWSER_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const BROWSER_FILE_TTL_MS = 60 * 60 * 1_000;
 
 export type BrowserFileStatus = 'quarantined' | 'ready' | 'partial';
+export type BrowserFileScanReceipt = { verdict: 'clean'; scanner: 'clamav'; sha256: string; byteLength: number; scannedAt: number; engineVersion: string; signatureVersion: string; signaturesUpdatedAt: number };
 
 /** Public metadata only. File bytes and storage keys never leave the broker. */
 export type BrowserFileRecord = {
@@ -17,6 +18,7 @@ export type BrowserFileRecord = {
   sha256: string;
   status: BrowserFileStatus;
   expiresAt: number;
+  scanReceipt?: BrowserFileScanReceipt;
 };
 
 /** Implementations must treat keys as generated opaque references and reject replacement. */
@@ -26,7 +28,19 @@ export interface BrowserFileStore {
 }
 
 export interface BrowserFileScanner {
-  scan(input: { filename: string; contentType: string; body: Uint8Array }): Promise<'clean' | 'infected' | 'error'>;
+  scan(input: { filename: string; contentType: string; body: Uint8Array }): Promise<BrowserFileScanReceipt | { verdict: 'infected' | 'error' } | 'infected' | 'error'>;
+}
+
+export function validBrowserFileScanReceipt(value: unknown, sha256: string, byteLength: number): value is BrowserFileScanReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const receipt = value as BrowserFileScanReceipt;
+  const fields = ['verdict', 'scanner', 'sha256', 'byteLength', 'scannedAt', 'engineVersion', 'signatureVersion', 'signaturesUpdatedAt'];
+  if (Object.keys(value).some(field => !fields.includes(field))) return false;
+  return receipt.verdict === 'clean' && receipt.scanner === 'clamav' && receipt.sha256 === sha256 && /^[a-f0-9]{64}$/.test(receipt.sha256)
+    && receipt.byteLength === byteLength && Number.isSafeInteger(receipt.byteLength) && receipt.byteLength > 0 && receipt.byteLength <= BROWSER_FILE_MAX_BYTES
+    && Number.isSafeInteger(receipt.scannedAt) && receipt.scannedAt >= 0 && Number.isSafeInteger(receipt.signaturesUpdatedAt) && receipt.signaturesUpdatedAt >= 0
+    && receipt.signaturesUpdatedAt <= receipt.scannedAt && receipt.scannedAt - receipt.signaturesUpdatedAt <= 48 * 60 * 60 * 1000
+    && typeof receipt.engineVersion === 'string' && receipt.engineVersion.length <= 64 && /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(receipt.engineVersion) && /^[1-9][0-9]{0,11}$/.test(receipt.signatureVersion);
 }
 
 /** Trusted in-process adapter. Synthetic implementations belong in tests only. */
@@ -154,7 +168,7 @@ function isBinaryContent(contentType: string): boolean {
 }
 
 function cloneRecord(record: BrowserFileRecord): BrowserFileRecord {
-  return { ...record };
+  return { ...record, ...(record.scanReceipt ? { scanReceipt: { ...record.scanReceipt } } : {}) };
 }
 
 /**
@@ -189,10 +203,15 @@ export class BrowserFileBroker {
     if (!Number.isSafeInteger(expiresAt)) fail('invalid_clock', 'File expiration is invalid.');
     let status: BrowserFileStatus = 'quarantined';
     let scanClean = false;
+    let scanReceipt: BrowserFileScanReceipt | undefined;
     if (this.options.scanner) {
       try {
         const verdict = await this.options.scanner.scan({ filename, contentType, body: new Uint8Array(bytes) });
-        scanClean = verdict === 'clean';
+        const checkedAt = (this.options.now ?? Date.now)();
+        if (validBrowserFileScanReceipt(verdict, sha256, bytes.byteLength) && verdict.scannedAt >= createdAt && verdict.scannedAt <= checkedAt) {
+          scanClean = true;
+          scanReceipt = { ...verdict };
+        }
       } catch {
         // Scanner errors fail closed to quarantine.
       }
@@ -209,7 +228,7 @@ export class BrowserFileBroker {
         // Validation errors fail closed to quarantine.
       }
     }
-    const record: BrowserFileRecord = { id, owner, ...(ownerSubjectHash === undefined ? {} : { ownerSubjectHash }), filename, contentType, byteLength: bytes.byteLength, sha256, status, expiresAt };
+    const record: BrowserFileRecord = { id, owner, ...(ownerSubjectHash === undefined ? {} : { ownerSubjectHash }), filename, contentType, byteLength: bytes.byteLength, sha256, status, expiresAt, ...(scanReceipt ? { scanReceipt } : {}) };
     const key = this.storageKey(owner, id);
     try {
       await this.store.put(key, cloneRecord(record), new Uint8Array(bytes));
@@ -257,6 +276,7 @@ export class BrowserFileBroker {
         stored.record.ownerSubjectHash !== expectedPrincipal ||
         (stored.record.ownerSubjectHash !== undefined && !/^[a-f0-9]{64}$/.test(stored.record.ownerSubjectHash))) return null;
     if (stored.record.expiresAt <= (this.options.now ?? Date.now)()) fail('file_expired', 'File reference has expired.');
+    if (stored.record.scanReceipt !== undefined && !validBrowserFileScanReceipt(stored.record.scanReceipt, stored.record.sha256, stored.record.byteLength)) fail('file_integrity_failed', 'Stored scan receipt integrity check failed.');
     if (stored.record.byteLength !== stored.body.byteLength || createHash('sha256').update(stored.body).digest('hex') !== stored.record.sha256) {
       fail('file_integrity_failed', 'Stored file integrity check failed.');
     }

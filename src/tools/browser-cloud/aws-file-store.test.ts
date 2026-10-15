@@ -66,6 +66,14 @@ test('file store reads exact owner key and version, then verifies bytes and meta
   assert.equal(JSON.parse(String(ddbGet.init.body)).ConsistentRead, true);
 });
 
+test('scan receipt survives exact immutable storage and malformed/mismatched receipts reject', async () => {
+  const h = harness();
+  const scanned = { ...record, scanReceipt: { verdict: 'clean' as const, scanner: 'clamav' as const, sha256, byteLength: body.length, scannedAt: 999000, engineVersion: '1.4.3', signatureVersion: '27832', signaturesUpdatedAt: 998000 } };
+  await h.store.put(`browser-files/${owner}/${id}`, scanned, body);
+  assert.deepEqual((await h.store.get(`browser-files/${owner}/${id}`))?.record, scanned);
+  await assert.rejects(h.store.put(`browser-files/${owner}/${id}`, { ...scanned, scanReceipt: { ...scanned.scanReceipt, sha256: '0'.repeat(64) } }, body));
+});
+
 test('file store retains the connection hash through durable metadata and rejects malformed persisted bindings', async () => {
   const h = harness();
   const bound = { ...record, ownerSubjectHash: 'a'.repeat(64) };
