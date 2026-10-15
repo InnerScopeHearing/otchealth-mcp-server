@@ -43,6 +43,10 @@ export function websiteProfileId(owner: string, hash: string, site: WebsiteLogin
   return `web-${owner}-${site}-${digest(`${hash}\0${policy.target?.siteKey ?? site}`).slice(0, 20)}`;
 }
 const sameHosts = (actual: readonly string[], expected: readonly string[]) => actual.length === expected.length && actual.every((host, index) => host === expected[index]);
+export interface WebsiteLoginStartOptions {
+  maxSeconds?: number;
+  actionBudget?: number;
+}
 
 /** Owner-selected public websites reuse the deployed Intercom human-login provider boundary. */
 export class WebsiteLoginService {
@@ -59,13 +63,17 @@ export class WebsiteLoginService {
     if (profile.owner !== owner || profile.ownerSubjectHash !== hash || profile.mode === 'public_web' || !profile.persistent || !sameHosts(profile.allowedHosts, policy.allowedHosts)) throw new CloudBrowserError('owner_forbidden', 'The website profile is unavailable to this connection.');
     return { profile_id: profileId, persistent: true, allowed_hosts: [...profile.allowedHosts] };
   }
-  async start(owner: string, key: string | undefined, site: WebsiteLoginSite, target?: WebsiteLoginTarget): Promise<{ login_url: string; profile_id: string; session_id: string; expires_at: number; status: 'human_login_required' }> {
+  async start(owner: string, key: string | undefined, site: WebsiteLoginSite, target?: WebsiteLoginTarget, options: WebsiteLoginStartOptions = {}): Promise<{ login_url: string; profile_id: string; session_id: string; expires_at: number; session_expires_at: number; status: 'human_login_required' }> {
     const hash = websitePrincipalHash(owner, key);
+    const maxSeconds = options.maxSeconds === undefined ? 3600 : options.maxSeconds;
+    const actionBudget = options.actionBudget;
+    if (!Number.isSafeInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > 3600) throw new CloudBrowserError('invalid_duration', 'Human sign-in duration must be within one hour.');
+    if (actionBudget !== undefined && (!Number.isSafeInteger(actionBudget) || actionBudget < 1 || actionBudget > 10_000)) throw new CloudBrowserError('invalid_action_budget', 'Human sign-in action budget must be within the configured profile budget.');
     const policy = websiteLoginPolicy(site, target);
     if (policy.target) await this.assertPublic(policy.target);
     const profileId = websiteProfileId(owner, hash, site, policy.target);
     const profileLeaseOwner = randomUUID();
-    if (!await this.tickets.acquireProfileLease(profileId, profileLeaseOwner, this.now() + 3_630_000)) throw new CloudBrowserError('profile_busy', 'A human sign-in or profile save is already in progress for this website.');
+    if (!await this.tickets.acquireProfileLease(profileId, profileLeaseOwner, this.now() + (maxSeconds + 30) * 1000)) throw new CloudBrowserError('profile_busy', 'A human sign-in or profile save is already in progress for this website.');
     let sessionId: string | undefined;
     let retainLease = false;
     try {
@@ -83,16 +91,17 @@ export class WebsiteLoginService {
       }
       // A lost start acknowledgement may leave a real provider session. Preserve its lease.
       retainLease = true;
-      const started = await this.browser.start(owner, profileId, 3600, undefined, hash, profileLeaseOwner);
+      const started = await this.browser.start(owner, profileId, maxSeconds, actionBudget, hash, profileLeaseOwner);
       sessionId = started.sessionId;
       await this.browser.beginSensitiveOutputSuppression(owner, started.sessionId, hash);
-      const session = await this.ownedSession({ owner, ownerSubjectHash: hash, profileId, sessionId: started.sessionId, site, ...(policy.target ? { target: policy.target } : {}), profileLeaseOwner, expiresAt: this.now() + 600_000 });
+      const session = await this.ownedSession({ owner, ownerSubjectHash: hash, profileId, sessionId: started.sessionId, site, ...(policy.target ? { target: policy.target } : {}), profileLeaseOwner, expiresAt: Math.min(started.expiresAt, this.now() + 600_000) });
       await this.transport.prepareWebsiteLogin(session, site, policy.target);
       await this.store.saveSession(session);
       const token = randomBytes(32).toString('base64url');
-      const expiresAt = this.now() + 600_000;
+      const expiresAt = Math.min(started.expiresAt, this.now() + 600_000);
       await this.tickets.create({ tokenHash: digest(token), owner, ownerSubjectHash: hash, profileId, sessionId: started.sessionId, site, ...(policy.target ? { target: policy.target } : {}), profileLeaseOwner, expiresAt });
-      return { login_url: `https://mcp.otchealth.app/browser/connect#token=${token}`, profile_id: profileId, session_id: started.sessionId, expires_at: expiresAt, status: 'human_login_required' };
+      if (expiresAt <= this.now()) throw new CloudBrowserError('login_expired', 'The sign-in session expired during preparation.');
+      return { login_url: `https://mcp.otchealth.app/browser/connect#token=${token}`, profile_id: profileId, session_id: started.sessionId, expires_at: expiresAt, session_expires_at: started.expiresAt, status: 'human_login_required' };
     } catch (error) {
       if (sessionId) { try { await this.browser.stop(owner, sessionId, hash); retainLease = false; } catch { /* ambiguous cleanup retains the lease */ } }
       else if (error instanceof CloudBrowserError && PRE_START_REJECTIONS.has(error.code)) retainLease = false;
@@ -105,8 +114,13 @@ export class WebsiteLoginService {
     const binding = await this.tickets.exchange(digest(token));
     if (!binding) throw new CloudBrowserError('login_expired', 'This login link is invalid, consumed or expired.');
     const session = await this.ownedSession(binding);
-    const signed = await this.provider.generateLiveViewUrl({ browserIdentifier: session.providerBrowserId!, sessionId: session.providerSessionId, expiresIn: 300 });
-    return { signed_url: signed.url, expires_at: Math.min(binding.expiresAt, this.now() + 300_000), site_label: websiteLoginPolicy(binding.site, binding.target).label, workspace_id: binding.site, status: 'login_required' };
+    const expiresIn = Math.min(300, Math.floor((Math.min(binding.expiresAt, session.expiresAt) - this.now()) / 1000));
+    if (expiresIn < 1) throw new CloudBrowserError('login_expired', 'The sign-in session has expired.');
+    const signedAt = this.now();
+    const signed = await this.provider.generateLiveViewUrl({ browserIdentifier: session.providerBrowserId!, sessionId: session.providerSessionId, expiresIn });
+    const expiresAt = Math.min(binding.expiresAt, session.expiresAt, signedAt + expiresIn * 1000);
+    if (expiresAt <= this.now()) throw new CloudBrowserError('login_expired', 'The sign-in session expired during preparation.');
+    return { signed_url: signed.url, expires_at: expiresAt, site_label: websiteLoginPolicy(binding.site, binding.target).label, workspace_id: binding.site, status: 'login_required' };
   }
   async complete(token: string): Promise<{ status: 'saved'; site: WebsiteLoginSite; workspace_id: WebsiteLoginSite; verification: 'owner_confirmation_and_expected_url' }> {
     if (!tokenValid(token)) throw new CloudBrowserError('login_expired', 'The login session is invalid.');

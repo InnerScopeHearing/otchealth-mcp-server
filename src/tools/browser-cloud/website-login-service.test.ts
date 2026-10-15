@@ -17,9 +17,9 @@ function fixture() {
   const sessions = new Map<string, CloudBrowserSession>();
   const tickets = new Map<string, WebsiteLoginTicket>();
   const leases = new Map<string, string>();
-  const state = { creates: 0, starts: 0, saves: 0, stops: 0, signs: 0, prepares: 0, verifies: 0, releaseCalls: 0, releaseFailures: 0, startError: undefined as Error | undefined, createFails: false, prepareFails: false, verifyFails: false, saveFails: false, stopFails: false, suppressionSeen: [] as boolean[], names: [] as string[] };
+  const state = { creates: 0, starts: 0, saves: 0, stops: 0, signs: 0, prepares: 0, verifies: 0, profileReads: 0, releaseCalls: 0, releaseFailures: 0, clockOffsetMs: 0, prepareAdvanceMs: 0, signAdvanceMs: 0, startError: undefined as Error | undefined, sessionExpiresAt: undefined as number | undefined, createFails: false, prepareFails: false, verifyFails: false, saveFails: false, stopFails: false, suppressionSeen: [] as boolean[], names: [] as string[], startOptions: [] as Array<{ maxSeconds: number; actionBudget: number | undefined }>, leaseExpiries: [] as number[], signedLifetimes: [] as number[] };
   const store = {
-    loadProfile: async (id: string) => profiles.get(id) ?? null,
+    loadProfile: async (id: string) => { state.profileReads++; return profiles.get(id) ?? null; },
     createProfileIntent: async (profile: CloudBrowserProfile) => {
       if (profiles.has(profile.profileId)) return false;
       profiles.set(profile.profileId, { ...profile }); return true;
@@ -29,11 +29,12 @@ function fixture() {
   } as unknown as CloudBrowserStore;
   const browser = {
     saveProfile: async (_owner: string, profile: CloudBrowserProfile) => { profiles.set(profile.profileId, { ...profile }); },
-    start: async (owner: string, profileId: string, _seconds: number, _unused: unknown, ownerSubjectHash: string) => {
+    start: async (owner: string, profileId: string, maxSeconds: number, actionBudget: number | undefined, ownerSubjectHash: string) => {
       if (state.startError) throw state.startError;
+      state.startOptions.push({ maxSeconds, actionBudget });
       const profile = profiles.get(profileId)!;
       const sessionId = `session-${++state.starts}`;
-      const session: CloudBrowserSession = { sessionId, owner, ownerSubjectHash, profileId, allowedHosts: profile.allowedHosts, expiresAt: now + 3600_000, actionsUsed: 0, providerSessionId: `remote-${sessionId}`, providerBrowserId: 'aws.browser.v1', automationEndpoint: 'wss://synthetic.example/automation' };
+      const session: CloudBrowserSession = { sessionId, owner, ownerSubjectHash, profileId, allowedHosts: profile.allowedHosts, expiresAt: state.sessionExpiresAt ?? now + maxSeconds * 1000, actionsUsed: 0, providerSessionId: `remote-${sessionId}`, providerBrowserId: 'aws.browser.v1', automationEndpoint: 'wss://synthetic.example/automation' };
       sessions.set(sessionId, session); return { sessionId, expiresAt: session.expiresAt };
     },
     beginSensitiveOutputSuppression: async (_owner: string, id: string) => { sessions.get(id)!.sensitiveOutputSuppressed = true; },
@@ -43,14 +44,14 @@ function fixture() {
   } as unknown as CloudBrowserService;
   const provider = {
     createProfile: async (input: { name: string }) => { state.creates++; state.names.push(input.name); if (state.createFails) throw new Error('create acknowledgement unknown'); return { providerProfileId: `${input.name}-created123` }; },
-    generateLiveViewUrl: async () => { state.signs++; return { url: 'https://synthetic.example/live?signature=opaque', expiresIn: 300 }; },
+    generateLiveViewUrl: async (input: { expiresIn: number }) => { state.signs++; state.signedLifetimes.push(input.expiresIn); state.clockOffsetMs += state.signAdvanceMs; return { url: 'https://synthetic.example/live?signature=opaque', expiresIn: input.expiresIn }; },
   } as unknown as IntercomProfileProvider;
   const transport = {
-    prepareWebsiteLogin: async (session: CloudBrowserSession) => { state.prepares++; assert.equal(session.sensitiveOutputSuppressed, true); if (state.prepareFails) throw new Error('prepare unavailable'); },
+    prepareWebsiteLogin: async (session: CloudBrowserSession) => { state.prepares++; state.clockOffsetMs += state.prepareAdvanceMs; assert.equal(session.sensitiveOutputSuppressed, true); if (state.prepareFails) throw new Error('prepare unavailable'); },
     verifyWebsiteLogin: async (session: CloudBrowserSession) => { state.verifies++; assert.equal(session.sensitiveOutputSuppressed, true); if (state.verifyFails) throw new Error('wrong website'); },
   } as unknown as AgentCoreCloudBrowserTransport;
   const ticketStore = {
-    acquireProfileLease: async (profile: string, lease: string) => { if (leases.has(profile)) return false; leases.set(profile, lease); return true; },
+    acquireProfileLease: async (profile: string, lease: string, until: number) => { state.leaseExpiries.push(until); if (leases.has(profile)) return false; leases.set(profile, lease); return true; },
     ownsProfileLease: async (profile: string, lease: string) => leases.get(profile) === lease,
     releaseProfileLease: async (profile: string, lease: string) => { state.releaseCalls++; if (state.releaseFailures > 0) { state.releaseFailures--; throw new Error('lease release unavailable'); } if (leases.get(profile) === lease) leases.delete(profile); },
     create: async ({ tokenHash, ...binding }: CreateWebsiteLoginTicket) => { assert.equal(tickets.has(tokenHash), false); tickets.set(tokenHash, { ...binding, phase: 'NEW' }); },
@@ -60,10 +61,82 @@ function fixture() {
     complete: async (hash: string, outcome: 'SAVED' | 'FAILED') => { const ticket = tickets.get(hash); if (!ticket || ticket.phase !== 'COMPLETING') return false; ticket.phase = outcome; return true; },
   } as unknown as WebsiteLoginTicketStore;
   const publicChecks: WebsiteLoginTarget[] = [];
-  const make = () => new WebsiteLoginService(store, browser, transport, provider, ticketStore, () => now, async target => { publicChecks.push(target); });
+  const make = () => new WebsiteLoginService(store, browser, transport, provider, ticketStore, () => now + state.clockOffsetMs, async target => { publicChecks.push(target); });
   return { service: make(), make, state, profiles, sessions, tickets, leases, publicChecks };
 }
 const tokenFrom = (url: string) => url.split('#token=')[1]!;
+
+test('default handoff keeps its one-hour session and separates session expiry from the ten-minute login ticket', async () => {
+  const { service, state, tickets } = fixture();
+  const result = await service.start('cto', key, 'linkedin');
+  assert.deepEqual(state.startOptions, [{ maxSeconds: 3600, actionBudget: undefined }]);
+  assert.deepEqual(state.leaseExpiries, [now + 3_630_000]);
+  assert.equal(result.session_expires_at, now + 3_600_000);
+  assert.equal(result.expires_at, now + 600_000);
+  assert.equal([...tickets.values()][0]?.expiresAt, result.expires_at);
+});
+
+test('requested handoff duration and action budget reach the browser and bound lease and ticket expiry', async () => {
+  for (const [maxSeconds, actionBudget] of [[1, 1], [180, 25], [3600, 10_000]]) {
+    const { service, state, tickets } = fixture();
+    const result = await service.start('developer', key, 'wefunder', undefined, { maxSeconds, actionBudget });
+    assert.deepEqual(state.startOptions, [{ maxSeconds, actionBudget }]);
+    assert.deepEqual(state.leaseExpiries, [now + (maxSeconds + 30) * 1000]);
+    assert.equal(result.session_expires_at, now + maxSeconds * 1000);
+    assert.equal(result.expires_at, now + Math.min(maxSeconds * 1000, 600_000));
+    assert.equal([...tickets.values()][0]?.expiresAt, result.expires_at);
+  }
+});
+
+test('actual shorter provider session expiry caps the returned login ticket', async () => {
+  const { service, state, tickets } = fixture(); state.sessionExpiresAt = now + 45_000;
+  const result = await service.start('cto', key, 'linkedin', undefined, { maxSeconds: 180 });
+  assert.equal(result.session_expires_at, now + 45_000); assert.equal(result.expires_at, now + 45_000);
+  assert.equal([...tickets.values()][0]?.expiresAt, now + 45_000);
+});
+
+test('invalid handoff budgets reject before profile, lease or provider operations', async () => {
+  const invalidSeconds = [0, -1, 3601, 1.5, NaN, Infinity];
+  const invalidBudgets = [0, -1, 10_001, 1.5, NaN, Infinity];
+  for (const [option, values, code] of [['maxSeconds', invalidSeconds, 'invalid_duration'], ['actionBudget', invalidBudgets, 'invalid_action_budget']] as const) {
+    for (const value of values) {
+      const { service, state, profiles, leases, tickets } = fixture();
+      await assert.rejects(service.start('cto', key, 'linkedin', undefined, { [option]: value }), hasCode(code));
+      assert.equal(state.profileReads, 0); assert.equal(state.leaseExpiries.length, 0); assert.equal(state.creates, 0); assert.equal(state.starts, 0);
+      assert.equal(profiles.size, 0); assert.equal(leases.size, 0); assert.equal(tickets.size, 0);
+    }
+  }
+});
+
+test('viewer signature and returned expiry stay within the short session and original ticket', async () => {
+  for (const maxSeconds of [180, 3600]) {
+    const { service, state } = fixture();
+    const result = await service.start('cto', key, 'linkedin', undefined, { maxSeconds });
+    const exchange = await service.exchange(tokenFrom(result.login_url));
+    assert.deepEqual(state.signedLifetimes, [Math.min(300, maxSeconds)]);
+    assert.equal(exchange.expires_at, now + Math.min(300, maxSeconds) * 1000);
+    assert.ok(exchange.expires_at <= result.expires_at); assert.ok(exchange.expires_at <= result.session_expires_at);
+  }
+});
+
+test('very short sessions that expire during preparation stop and release without returning a stale link', async () => {
+  const { service, state, leases, sessions } = fixture(); state.prepareAdvanceMs = 1100;
+  await assert.rejects(service.start('cto', key, 'linkedin', undefined, { maxSeconds: 1 }), hasCode('login_expired'));
+  assert.equal(state.stops, 1); assert.equal(leases.size, 0); assert.equal(sessions.size, 0);
+});
+
+test('viewer exchange refuses subsecond lifetime or a URL whose signing outlasted session expiry', async () => {
+  const almostExpired = fixture();
+  const first = await almostExpired.service.start('cto', key, 'linkedin', undefined, { maxSeconds: 180 });
+  almostExpired.state.clockOffsetMs = 179_100;
+  await assert.rejects(almostExpired.service.exchange(tokenFrom(first.login_url)), hasCode('login_expired'));
+  assert.equal(almostExpired.state.signs, 0);
+  const slowSigning = fixture();
+  const second = await slowSigning.service.start('cto', key, 'linkedin', undefined, { maxSeconds: 180 });
+  slowSigning.state.signAdvanceMs = 180_001;
+  await assert.rejects(slowSigning.service.exchange(tokenFrom(second.login_url)), hasCode('login_expired'));
+  assert.equal(slowSigning.state.signs, 1);
+});
 
 test('website login isolates each owner, OAuth connection and site while retaining COO principal compatibility', async () => {
   assert.equal(websitePrincipalHash('coo', key), intercomPrincipalHash(key));
