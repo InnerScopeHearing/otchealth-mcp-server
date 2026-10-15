@@ -61,7 +61,12 @@ export class DaytonaBrowserService {
     return this.locked(caller, id, principal, async (binding, session, lock) => {
       await this.active(binding, session); if (session.actionsUsed >= session.actionBudget) return fail('action_limit');
       session.actionsUsed++; session.effectUnknown = true; await this.store.saveSessionUnderLock(session, lock);
-      const result = await this.provider.execute(binding, session, checked, timeoutSeconds, principal!); session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); return result;
+      const result = await this.provider.execute(binding, session, checked, timeoutSeconds, principal!); session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock);
+      if (result && typeof result === 'object' && 'observation' in result) {
+        const execution = result as { observation: unknown; pageReceipt?: unknown };
+        return execution.pageReceipt ?? execution.observation;
+      }
+      return result;
     });
   }
   async snapshot(caller: string, id: string, principal?: string): Promise<unknown> { return this.execute(caller, id, { type: 'snapshot' }, 20, principal); }
