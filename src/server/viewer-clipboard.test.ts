@@ -69,18 +69,18 @@ test('clipboard controls do nothing before connection and use only the establish
   assert.equal(v.state.copies, 0); assert.deepEqual(v.state.captures, []);
   await v.connect();
   assert.equal(v.elements['clipboard-copy']!.disabled, false); assert.equal(v.elements['clipboard-paste']!.disabled, false);
-  assert.equal(v.config()?.clipboardAutoSync, false); assert.deepEqual(v.state.captures, []);
+  assert.equal(v.config()?.clipboardAutoSync, false); assert.deepEqual(v.state.captures, [false]);
 });
 
 test('paste is explicitly armed then disarmed on the native paste event; copy uses supported native DCV sync only on click', async () => {
   const v = await viewer(); const event = v.config()?.observers?.clipboardEvent; assert.equal(typeof event, 'function');
   const privateEvent = { name: 'newDataAvailable', get clipboardData(): never { throw new Error('clipboard values must not be read or cached by the page'); } };
   event(privateEvent);
-  assert.equal(v.state.copies, 0); assert.deepEqual(v.state.captures, []);
-  await v.click('clipboard-paste'); assert.deepEqual(v.state.captures, [true]);
+  assert.equal(v.state.copies, 0); assert.deepEqual(v.state.captures, [false]);
+  await v.click('clipboard-paste'); assert.deepEqual(v.state.captures, [false, true]);
   assert.ok(v.state.focused.includes('dcv-display'));
-  event({ name: 'paste' }); assert.deepEqual(v.state.captures, [true, false]);
-  await v.click('clipboard-copy'); assert.equal(v.state.copies, 1); assert.deepEqual(v.state.captures, [true, false, true, false]);
+  event({ name: 'paste' }); assert.deepEqual(v.state.captures, [false, true, false]);
+  await v.click('clipboard-copy'); assert.equal(v.state.copies, 1); assert.deepEqual(v.state.captures, [false, true, false, true, false]);
   assert.equal(v.state.clipboardReads, 0); assert.equal(v.state.clipboardWrites, 0);
   assert.deepEqual(v.state.requests, ['/browser/connect/exchange']);
 });

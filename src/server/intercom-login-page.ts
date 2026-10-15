@@ -252,6 +252,7 @@ function renderLoginPage(nonce: string, website = false): string {
             }).then((activeConnection) => {
               if (clipboardClosed) { activeConnection.disconnect(); return; }
               connection = activeConnection;
+              if (typeof connection.captureClipboardEvents === 'function') connection.captureClipboardEvents(false, window);
               done.disabled = false;
               paste.disabled = !clipboardAvailable();
               copy.disabled = !clipboardAvailable();
