@@ -17,9 +17,10 @@ function fixture() {
   const sessions = new Map<string, CloudBrowserSession>();
   const tickets = new Map<string, WebsiteLoginTicket>();
   const leases = new Map<string, string>();
-  const state = { creates: 0, starts: 0, saves: 0, stops: 0, signs: 0, prepares: 0, verifies: 0, profileReads: 0, releaseCalls: 0, releaseFailures: 0, clockOffsetMs: 0, prepareAdvanceMs: 0, signAdvanceMs: 0, startError: undefined as Error | undefined, sessionExpiresAt: undefined as number | undefined, streamFailure: undefined as 'DISABLED' | 'ENABLED' | undefined, streamReceiptMismatch: false, createFails: false, prepareFails: false, verifyFails: false, saveFails: false, stopFails: false, suppressionSeen: [] as boolean[], names: [] as string[], startOptions: [] as Array<{ maxSeconds: number; actionBudget: number | undefined }>, leaseExpiries: [] as number[], signedLifetimes: [] as number[], flow: [] as string[], streamRequests: [] as Array<{ browserIdentifier: string; sessionId: string; streamStatus: 'DISABLED' | 'ENABLED'; suppressed: boolean }>, verifyEndpoints: [] as string[] };
+  const leaseUntil = new Map<string, number>();
+  const state = { creates: 0, starts: 0, saves: 0, stops: 0, signs: 0, prepares: 0, verifies: 0, profileReads: 0, releaseCalls: 0, releaseFailures: 0, clockOffsetMs: 0, profileLookupAdvanceMs: 0, prepareAdvanceMs: 0, signAdvanceMs: 0, stealLeaseBeforeRenew: false, startError: undefined as Error | undefined, sessionExpiresAt: undefined as number | undefined, streamFailure: undefined as 'DISABLED' | 'ENABLED' | undefined, streamReceiptMismatch: false, createFails: false, prepareFails: false, verifyFails: false, saveFails: false, stopFails: false, suppressionSeen: [] as boolean[], names: [] as string[], startOptions: [] as Array<{ maxSeconds: number; actionBudget: number | undefined }>, leaseExpiries: [] as number[], leaseRenewals: [] as number[], signedLifetimes: [] as number[], flow: [] as string[], streamRequests: [] as Array<{ browserIdentifier: string; sessionId: string; streamStatus: 'DISABLED' | 'ENABLED'; suppressed: boolean }>, verifyEndpoints: [] as string[] };
   const store = {
-    loadProfile: async (id: string) => { state.profileReads++; return profiles.get(id) ?? null; },
+    loadProfile: async (id: string) => { state.profileReads++; state.clockOffsetMs += state.profileLookupAdvanceMs; return profiles.get(id) ?? null; },
     createProfileIntent: async (profile: CloudBrowserProfile) => {
       if (profiles.has(profile.profileId)) return false;
       profiles.set(profile.profileId, { ...profile }); return true;
@@ -34,7 +35,7 @@ function fixture() {
       state.startOptions.push({ maxSeconds, actionBudget });
       const profile = profiles.get(profileId)!;
       const sessionId = `session-${++state.starts}`;
-      const session: CloudBrowserSession = { sessionId, owner, ownerSubjectHash, profileId, allowedHosts: profile.allowedHosts, expiresAt: state.sessionExpiresAt ?? now + maxSeconds * 1000, actionsUsed: 0, providerSessionId: `remote-${sessionId}`, providerBrowserId: 'aws.browser.v1', automationEndpoint: 'wss://synthetic.example/automation' };
+      const session: CloudBrowserSession = { sessionId, owner, ownerSubjectHash, profileId, allowedHosts: profile.allowedHosts, expiresAt: state.sessionExpiresAt ?? now + state.clockOffsetMs + maxSeconds * 1000, actionsUsed: 0, providerSessionId: `remote-${sessionId}`, providerBrowserId: 'aws.browser.v1', automationEndpoint: 'wss://synthetic.example/automation' };
       sessions.set(sessionId, session); return { sessionId, expiresAt: session.expiresAt };
     },
     beginSensitiveOutputSuppression: async (_owner: string, id: string) => { sessions.get(id)!.sensitiveOutputSuppressed = true; },
@@ -58,9 +59,10 @@ function fixture() {
     verifyWebsiteLogin: async (session: CloudBrowserSession) => { state.flow.push('verify'); state.verifies++; state.verifyEndpoints.push(session.automationEndpoint); assert.equal(session.sensitiveOutputSuppressed, true); if (state.verifyFails) throw new Error('wrong website'); },
   } as unknown as AgentCoreCloudBrowserTransport;
   const ticketStore = {
-    acquireProfileLease: async (profile: string, lease: string, until: number) => { state.leaseExpiries.push(until); if (leases.has(profile)) return false; leases.set(profile, lease); return true; },
-    ownsProfileLease: async (profile: string, lease: string) => leases.get(profile) === lease,
-    releaseProfileLease: async (profile: string, lease: string) => { state.releaseCalls++; if (state.releaseFailures > 0) { state.releaseFailures--; throw new Error('lease release unavailable'); } if (leases.get(profile) === lease) leases.delete(profile); },
+    acquireProfileLease: async (profile: string, lease: string, until: number) => { state.leaseExpiries.push(until); if (leases.has(profile) && (leaseUntil.get(profile) ?? 0) >= now + state.clockOffsetMs) return false; leases.set(profile, lease); leaseUntil.set(profile, until); return true; },
+    renewProfileLease: async (profile: string, lease: string, until: number) => { state.leaseRenewals.push(until); if (state.stealLeaseBeforeRenew) { leases.set(profile, 'successor-lease-owner'); leaseUntil.set(profile, now + state.clockOffsetMs + 3_630_000); } if (leases.get(profile) !== lease || (leaseUntil.get(profile) ?? 0) <= now + state.clockOffsetMs) return false; leaseUntil.set(profile, until); return true; },
+    ownsProfileLease: async (profile: string, lease: string) => leases.get(profile) === lease && (leaseUntil.get(profile) ?? 0) > now + state.clockOffsetMs,
+    releaseProfileLease: async (profile: string, lease: string) => { state.releaseCalls++; if (state.releaseFailures > 0) { state.releaseFailures--; throw new Error('lease release unavailable'); } if (leases.get(profile) === lease) { leases.delete(profile); leaseUntil.delete(profile); } },
     create: async ({ tokenHash, ...binding }: CreateWebsiteLoginTicket) => { state.flow.push('ticket-grant'); assert.equal(tickets.has(tokenHash), false); tickets.set(tokenHash, { ...binding, phase: 'NEW' }); },
     exchange: async (hash: string) => { const ticket = tickets.get(hash); if (!ticket || ticket.phase !== 'NEW') return null; ticket.phase = 'EXCHANGED'; const { phase: _phase, ...binding } = ticket; return binding; },
     load: async (hash: string) => { const ticket = tickets.get(hash); return ticket ? { ...ticket } : null; },
@@ -69,7 +71,7 @@ function fixture() {
   } as unknown as WebsiteLoginTicketStore;
   const publicChecks: WebsiteLoginTarget[] = [];
   const make = () => new WebsiteLoginService(store, browser, transport, provider, ticketStore, () => now + state.clockOffsetMs, async target => { publicChecks.push(target); });
-  return { service: make(), make, state, profiles, sessions, tickets, leases, publicChecks };
+  return { service: make(), make, state, profiles, sessions, tickets, leases, leaseUntil, publicChecks };
 }
 const tokenFrom = (url: string) => url.split('#token=')[1]!;
 
@@ -78,6 +80,7 @@ test('default handoff keeps its one-hour session and separates session expiry fr
   const result = await service.start('cto', key, 'linkedin');
   assert.deepEqual(state.startOptions, [{ maxSeconds: 3600, actionBudget: undefined }]);
   assert.deepEqual(state.leaseExpiries, [now + 3_630_000]);
+  assert.deepEqual(state.leaseRenewals, [now + 3_630_000]);
   assert.equal(result.session_expires_at, now + 3_600_000);
   assert.equal(result.expires_at, now + 600_000);
   assert.equal([...tickets.values()][0]?.expiresAt, result.expires_at);
@@ -88,7 +91,8 @@ test('requested handoff duration and action budget reach the browser and bound l
     const { service, state, tickets } = fixture();
     const result = await service.start('developer', key, 'wefunder', undefined, { maxSeconds, actionBudget });
     assert.deepEqual(state.startOptions, [{ maxSeconds, actionBudget }]);
-    assert.deepEqual(state.leaseExpiries, [now + (maxSeconds + 30) * 1000]);
+    assert.deepEqual(state.leaseExpiries, [now + 3_630_000]);
+    assert.deepEqual(state.leaseRenewals, [now + (maxSeconds + 30) * 1000]);
     assert.equal(result.session_expires_at, now + maxSeconds * 1000);
     assert.equal(result.expires_at, now + Math.min(maxSeconds * 1000, 600_000));
     assert.equal([...tickets.values()][0]?.expiresAt, result.expires_at);
@@ -100,6 +104,23 @@ test('actual shorter provider session expiry caps the returned login ticket', as
   const result = await service.start('cto', key, 'linkedin', undefined, { maxSeconds: 180 });
   assert.equal(result.session_expires_at, now + 45_000); assert.equal(result.expires_at, now + 45_000);
   assert.equal([...tickets.values()][0]?.expiresAt, now + 45_000);
+});
+
+test('delayed profile setup renews the owned lease through the actual later session expiry', async () => {
+  const { service, state, leaseUntil } = fixture(); state.profileLookupAdvanceMs = 45_000;
+  const result = await service.start('cto', key, 'linkedin', undefined, { maxSeconds: 180 });
+  assert.equal(result.session_expires_at, now + 225_000); assert.equal(result.expires_at, now + 225_000);
+  assert.equal(leaseUntil.get(result.profile_id), now + 255_000);
+  state.clockOffsetMs = 211_000;
+  const exchanged = await service.exchange(tokenFrom(result.login_url));
+  assert.equal(exchanged.status, 'login_required'); assert.equal(exchanged.expires_at, result.expires_at);
+});
+
+test('lost setup lease ownership fails closed and cleanup never removes the successor lease', async () => {
+  const { service, state, leases, sessions, tickets } = fixture(); state.stealLeaseBeforeRenew = true;
+  await assert.rejects(service.start('cto', key, 'linkedin', undefined, { maxSeconds: 180 }), hasCode('profile_login_lease_lost'));
+  assert.equal(state.stops, 1); assert.equal(sessions.size, 0); assert.equal(tickets.size, 0); assert.equal(state.signs, 0);
+  assert.deepEqual([...leases.values()], ['successor-lease-owner']);
 });
 
 test('invalid handoff budgets reject before profile, lease or provider operations', async () => {

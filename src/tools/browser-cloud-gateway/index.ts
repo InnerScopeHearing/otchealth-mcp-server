@@ -171,12 +171,13 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       outputShape: { profile_id: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), website_profiles: websiteProfilesSchema, error: z.string().optional() },
       handler: async (_input, ctx) => {
         if (!live()) return unavailable();
+        const websites = await websiteProfiles(ctx.callerAgent);
         try {
           const profile = await runtime.browser.publicTrialProfile(ctx.callerAgent, principalHash(ctx.callerAgent));
-          const websites = await websiteProfiles(ctx.callerAgent);
           return { data: { profile_id: profile.profileId, allowed_hosts: profile.allowedHosts, persistent: profile.persistent, ...(websites ? { website_profiles: websites } : {}) }, summary: "Returned this caller's public profile and available owned website profiles; no login or session was started." };
         } catch (e) {
-          return error(e);
+          const failure = error(e);
+          return { ...failure, data: { ...failure.data as Record<string, unknown>, ...(websites ? { website_profiles: websites } : {}) } };
         }
       },
     },
@@ -230,9 +231,9 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       },
       handler: async (_input, ctx) => {
         if (!live()) return unavailable();
+        const websites = await websiteProfiles(ctx.callerAgent);
         try {
           const profile = await runtime.browser.publicWebProfile(ctx.callerAgent, principalHash(ctx.callerAgent));
-          const websites = await websiteProfiles(ctx.callerAgent);
           return {
             data: {
               profile_id: profile.profileId,
@@ -247,7 +248,8 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             summary: "Returned this caller's server-enrolled public-web profile.",
           };
         } catch (e) {
-          return error(e);
+          const failure = error(e);
+          return { ...failure, data: { ...failure.data as Record<string, unknown>, ...(websites ? { website_profiles: websites } : {}) } };
         }
       },
     },

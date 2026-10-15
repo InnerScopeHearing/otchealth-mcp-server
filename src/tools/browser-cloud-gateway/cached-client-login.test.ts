@@ -20,15 +20,21 @@ function fixture() {
   const handlers = new Map<string, (input: unknown) => Promise<Result>>();
   const configs = new Map<string, Record<string, unknown>>();
   const calls = { normal: [] as unknown[][], login: [] as unknown[][], discover: [] as unknown[][], factories: 0 };
-  const state = { loginError: false, missingSavedProfile: false };
+  const state = { loginError: false, missingSavedProfile: false, trialError: '', publicWebError: '' };
   const server = { registerTool: (name: string, config: Record<string, unknown>, handler: (input: unknown) => Promise<Result>) => {
     handlers.set(name, handler); configs.set(name, config); return { remove() {} };
   } } as unknown as McpServer;
   const runtime = {
     browser: {
       start: async (...args: unknown[]) => { calls.normal.push(args); return { sessionId: 'ordinary-session', expiresAt: 200_000 }; },
-      publicTrialProfile: async () => ({ profileId: 'public-profile', allowedHosts: [], persistent: false }),
-      publicWebProfile: async () => ({ profileId: 'public-profile', allowedHosts: [], persistent: false, mode: 'public_web' }),
+      publicTrialProfile: async () => {
+        if (state.trialError) throw Object.assign(new Error('public trial unavailable'), { code: state.trialError });
+        return { profileId: 'public-profile', allowedHosts: [], persistent: false };
+      },
+      publicWebProfile: async () => {
+        if (state.publicWebError) throw Object.assign(new Error('public web unavailable'), { code: state.publicWebError });
+        return { profileId: 'public-profile', allowedHosts: [], persistent: false, mode: 'public_web' };
+      },
     } as never,
     jobs: {} as never, queue: {} as never, artifacts: {} as never,
   } satisfies CloudBrowserGatewayRuntime;
@@ -131,6 +137,40 @@ test('missing saved profiles advertise login-required without treating public pr
   ]);
   assert.equal(result.structuredContent?.result?.persistent, false);
   assert.equal(f.calls.login.length, 0);
+});
+
+test('saved website profiles remain discoverable without either public profile enrollment', async () => {
+  const f = fixture(); f.state.trialError = 'profile_not_enrolled'; f.state.publicWebError = 'owner_forbidden';
+  for (const [tool, expectedError] of [['browser_cloud_profile_discover', 'profile_not_enrolled'], ['browser_cloud_public_web_profile_discover', 'owner_forbidden']]) {
+    const data = (await f.call(tool!, {})).structuredContent?.result;
+    assert.equal(data?.error, expectedError);
+    assert.equal(data?.profile_id, undefined);
+    assert.deepEqual(data?.website_profiles, [
+      { site: 'linkedin', login_profile_id: 'website-login:linkedin', saved_profile_id: 'owned-linkedin', status: 'saved_profile_available' },
+      { site: 'wefunder', login_profile_id: 'website-login:wefunder', saved_profile_id: 'owned-wefunder', status: 'saved_profile_available' },
+    ]);
+  }
+  assert.equal(f.calls.login.length, 0); assert.equal(f.calls.normal.length, 0);
+});
+
+test('legacy-only enrollment does not hide website profiles from public-web discovery or grant public-web access', async () => {
+  const f = fixture(); f.state.publicWebError = 'profile_not_enrolled';
+  const data = (await f.call('browser_cloud_public_web_profile_discover', {})).structuredContent?.result;
+  assert.equal(data?.error, 'profile_not_enrolled');
+  assert.equal(data?.mode, undefined); assert.equal(data?.profile_id, undefined);
+  assert.equal((data?.website_profiles as unknown[])?.length, 2);
+  assert.equal((await f.call('browser_cloud_profile_discover', {})).structuredContent?.result?.profile_id, 'public-profile');
+});
+
+test('discovery errors cannot advertise website profiles to protected lanes or non-OAuth callers', async () => {
+  for (const [lane, oauth] of [['clo-personal', true], ['cto', false]] as const) {
+    const f = fixture(); f.state.trialError = 'owner_forbidden'; f.state.publicWebError = 'owner_forbidden';
+    for (const tool of ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover']) {
+      const data = (await f.call(tool, {}, lane, oauth)).structuredContent?.result;
+      assert.equal(data?.error, 'owner_forbidden'); assert.equal(data?.website_profiles, undefined);
+    }
+    assert.equal(f.calls.discover.length, 0);
+  }
 });
 
 test('login provider errors through existing tool remain sanitized', async () => {

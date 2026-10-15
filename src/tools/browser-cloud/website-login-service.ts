@@ -73,7 +73,9 @@ export class WebsiteLoginService {
     if (policy.target) await this.assertPublic(policy.target);
     const profileId = websiteProfileId(owner, hash, site, policy.target);
     const profileLeaseOwner = randomUUID();
-    if (!await this.tickets.acquireProfileLease(profileId, profileLeaseOwner, this.now() + (maxSeconds + 30) * 1000)) throw new CloudBrowserError('profile_busy', 'A human sign-in or profile save is already in progress for this website.');
+    // Setup can consume time before the provider starts its session clock. Keep
+    // a bounded setup/unknown-start fence, then align it to the actual session.
+    if (!await this.tickets.acquireProfileLease(profileId, profileLeaseOwner, this.now() + 3_630_000)) throw new CloudBrowserError('profile_busy', 'A human sign-in or profile save is already in progress for this website.');
     let sessionId: string | undefined;
     let retainLease = false;
     try {
@@ -94,6 +96,7 @@ export class WebsiteLoginService {
       const started = await this.browser.start(owner, profileId, maxSeconds, actionBudget, hash, profileLeaseOwner);
       sessionId = started.sessionId;
       await this.browser.beginSensitiveOutputSuppression(owner, started.sessionId, hash);
+      if (!await this.tickets.renewProfileLease(profileId, profileLeaseOwner, started.expiresAt + 30_000)) throw new CloudBrowserError('profile_login_lease_lost', 'The owned sign-in preparation lease could not be confirmed.');
       const session = await this.ownedSession({ owner, ownerSubjectHash: hash, profileId, sessionId: started.sessionId, site, ...(policy.target ? { target: policy.target } : {}), profileLeaseOwner, expiresAt: Math.min(started.expiresAt, this.now() + 600_000) });
       await this.transport.prepareWebsiteLogin(session, site, policy.target);
       await this.store.saveSession(session);

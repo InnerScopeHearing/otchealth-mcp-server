@@ -24,6 +24,11 @@ function fixture() {
       rows.set(pk, { pk: { S: pk }, lockOwner: structuredClone(values[':owner']), lockUntil: structuredClone(values[':until']), expiresAtEpoch: structuredClone(values[':ttl']) });
       return new Response('{}');
     }
+    if (request.ConditionExpression === 'lockOwner = :owner AND lockUntil > :now') {
+      if (!row || row.lockOwner?.S !== values[':owner']?.S || Number(row.lockUntil?.N) <= now) return conflict();
+      row.lockUntil = structuredClone(values[':until']); row.expiresAtEpoch = structuredClone(values[':ttl']);
+      return new Response('{}');
+    }
     if (request.ConditionExpression === 'lockOwner = :owner') {
       if (!row || row.lockOwner?.S !== values[':owner']?.S) return conflict();
       rows.delete(pk); return new Response('{}');
@@ -113,4 +118,23 @@ test('custom target policy survives durable roundtrip and rejects changed canoni
   assert.equal(await store.load(input.tokenHash), null);
   await assert.rejects(store.exchange(input.tokenHash), WebsiteLoginStoreError);
   await assert.rejects(store.create({ ...ticket(), site: 'custom' }), WebsiteLoginStoreError);
+});
+
+test('profile lease renewal updates expiry atomically for its active owner and never revives or replaces another lease', async () => {
+  const { store, rows, requests, setNow } = fixture(); const profile = 'renewable-profile';
+  assert.equal(await store.acquireProfileLease(profile, 'original-owner', 20_000), true);
+  setNow(5000);
+  assert.equal(await store.renewProfileLease(profile, 'original-owner', 60_001), true);
+  const row = rows.get(`WEBSITE_LOGIN_LEASE#${profile}`)!;
+  assert.equal(row.lockUntil?.N, '60001'); assert.equal(row.expiresAtEpoch?.N, '61');
+  assert.equal(requests.at(-1)?.ConditionExpression, 'lockOwner = :owner AND lockUntil > :now');
+  assert.equal(await store.renewProfileLease(profile, 'foreign-owner', 70_000), false);
+  assert.equal(row.lockUntil?.N, '60001');
+  setNow(60_001);
+  assert.equal(await store.renewProfileLease(profile, 'original-owner', 70_000), false);
+  setNow(60_002);
+  assert.equal(await store.acquireProfileLease(profile, 'successor-owner', 80_000), true);
+  assert.equal(await store.renewProfileLease(profile, 'original-owner', 90_000), false);
+  assert.equal(await store.ownsProfileLease(profile, 'successor-owner'), true);
+  assert.equal(await store.renewProfileLease('absent-profile', 'original-owner', 90_000), false);
 });
