@@ -453,7 +453,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
     const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
     const path = `/browsers/${encodeURIComponent(browserId)}/sessions/stop`;
     const query = { sessionId: session.providerSessionId };
-    const body = JSON.stringify({ clientToken: randomUUID() });
+    const body = JSON.stringify({ clientToken: session.providerStopToken ?? randomUUID() });
     const signed = signRequest({
       method: "PUT",
       host,

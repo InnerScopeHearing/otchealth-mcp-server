@@ -99,6 +99,12 @@ export interface CloudBrowserSession {
   effectUnknown?: boolean;
   /** Trusted auth runtime sets this fail-closed output suppression state; no caller tool can clear it. */
   sensitiveOutputSuppressed?: boolean;
+  /** Trusted human-login runtime copies the exact profile lease owner; never accepted by caller tools. */
+  loginLeaseOwner?: string;
+  /** Persisted before provider stop so explicit retries reuse the same AWS idempotency key. */
+  providerStopToken?: string;
+  /** Acknowledged provider stop; retain this receipt until lease and SESSION cleanup finish. */
+  providerStopped?: boolean;
 }
 
 export interface CloudBrowserExecutionResult {
@@ -131,6 +137,8 @@ export interface CloudBrowserStore {
   createProfileIntent?(profile: CloudBrowserProfile): Promise<boolean>;
   /** Trusted human-login lease: ordinary starts/saves cannot reuse a profile until its login stops. */
   verifyLoginLease?(profileId: string, leaseOwner?: string): Promise<boolean>;
+  /** Release only this confirmed-stopped, principal-bound session's exact trusted login lease. */
+  releaseStoppedLoginLease?(session: CloudBrowserSession, lockOwner: string): Promise<void>;
   loadProfile(profileId: string): Promise<CloudBrowserProfile | null>;
   saveProfile(profile: CloudBrowserProfile): Promise<void>;
   loadSession(sessionId: string): Promise<CloudBrowserSession | null>;
