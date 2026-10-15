@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { gatedReject, registerTool, type CallerHashProvider, type ToolResultPayload } from "../registry.js";
-import { loadEnv } from '../../config/env.js';
+import { registerTool, type CallerHashProvider, type ToolResultPayload } from "../registry.js";
 import { CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, type CloudBrowserAction } from "../browser-cloud/contract.js";
 import { cloudBrowserActionSchema } from "../browser-cloud/actions.js";
 import type { BrowserCaptureMetadata } from '../browser-cloud/contract.js';
@@ -200,8 +199,6 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       outputShape: { profile_id: z.string().optional(), enrolled_profile_id: z.string().optional(), provider: z.literal('daytona').optional(), dry_run: z.boolean().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), website_profiles: websiteProfilesSchema, error: z.string().optional() },
       handler: async (input, ctx) => {
         if (input.profile_id === 'daytona-company') {
-          const policy = gatedReject(loadEnv(), 'write_simple', 'browser_cloud_profile_discover');
-          if (policy.rejected) return error(new DaytonaBrowserError('write_disabled', policy.reason));
           if (ctx.dryRun) return { data: { dry_run: true }, summary: 'Company browser membership discovery was not executed.' };
           try {
             const principal = daytonaPrincipal(ctx.callerAgent), company = await daytona?.get();

@@ -92,6 +92,39 @@ test('ordinary discovery remains a read under either write-disable flag while co
   }
 });
 
+test('only company discovery honors the real write dry-run default while explicit true and false retain their meaning', () => {
+  const source = `
+    import { registerCloudBrowserTools } from './src/tools/browser-cloud-gateway/index.ts';
+    import { requestContext } from './src/server/request-context.ts';
+    const handlers=new Map(),calls=[];
+    const server={registerTool(name,config,handler){handlers.set(name,handler);return{remove(){}};}};
+    const aws={browser:{publicTrialProfile:async()=>({profileId:'original-profile',allowedHosts:[],persistent:false})},jobs:{},queue:{},artifacts:{}};
+    const adapter={forSession:async()=>undefined,get:async()=>{calls.push('get');return{browser:{
+      discover:async()=>{calls.push('discover');return{profileId:'owned',allowedHosts:[],persistent:true,provider:'daytona'};},
+      readiness:async()=>{calls.push('readiness');return{ready:true,profileKey:'owned',checkpointReady:true,runtimeProtocol:2,multiMissionReady:true};}
+    }};}};
+    registerCloudBrowserTools(server,()=> 'a'.repeat(64),aws,undefined,adapter);
+    const ctx={callerAgent:'cto',callerHash:'a'.repeat(64),correlationId:'test',authKind:'oauth',authSubject:'signed-client',authConnectionId:'11111111-1111-4111-8111-111111111111'};
+    const invoke=input=>requestContext.run(ctx,()=>handlers.get('browser_cloud_profile_discover')(input));
+    const ordinary=await invoke({}),results=[];
+    for(const dry_run of [undefined,true,false]){
+      const before=calls.length,input={profile_id:'daytona-company',...(dry_run===undefined?{}:{dry_run})};
+      const value=await invoke(input);results.push({value:value.structuredContent,calls:calls.slice(before)});
+    }
+    console.log('DRY_RUN_RESULT='+JSON.stringify({ordinary:ordinary.structuredContent,results}));
+  `;
+  for (const defaultDryRun of ['true','false']) {
+    const child=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',source],{cwd:fileURLToPath(new URL('../../../',import.meta.url)),env:{...process.env,READ_ONLY_MODE:'false',ENABLE_WRITE_TOOLS:'true',DRY_RUN_DEFAULT:defaultDryRun},encoding:'utf8',timeout:20000});
+    assert.equal(child.status,0,child.stderr);const line=child.stdout.split('\n').find(value=>value.startsWith('DRY_RUN_RESULT='));assert.ok(line);
+    const result=JSON.parse(line.slice('DRY_RUN_RESULT='.length));assert.equal(result.ordinary.dry_run,false);assert.equal(result.ordinary.result.profile_id,'original-profile');
+    for (const [index,expected] of [defaultDryRun==='true',true,false].entries()) {
+      const observed=result.results[index];assert.equal(observed.value.dry_run,expected);
+      assert.deepEqual(observed.calls,expected?[]:['get','discover','readiness']);
+      assert.equal(expected?observed.value.result.dry_run:observed.value.result.profile_id,expected?true:'daytona-company');
+    }
+  }
+});
+
 test('Daytona alias rejects protected seats, static auth, disabled runtime and dry runs before provider effects', async () => {
   const f = fixture();
   await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop', max_seconds: 180, dry_run: true });
