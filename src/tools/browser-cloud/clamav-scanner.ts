@@ -74,6 +74,7 @@ export function createClamAvBrowserFileScanner(options: Options): BrowserFileSca
       if (/^stream: [A-Za-z0-9_.()+ -]{1,256} FOUND$/.test(result)) return { verdict: 'infected' };
       if (result !== 'stream: OK') throw new Error('scanner_invalid_verdict');
       const after = await request('VERSION'); const scannedAt = now(); version(after, scannedAt);
+      remaining(); // A delayed event loop must not turn an expired scan into a clean receipt.
       if (after !== before || !Number.isSafeInteger(scannedAt) || scannedAt < 0) throw new Error('scanner_signature_changed');
       return { verdict: 'clean', scanner: 'clamav', sha256: createHash('sha256').update(body).digest('hex'), byteLength: body.length, scannedAt, ...signature };
     } catch { return { verdict: 'error' }; }

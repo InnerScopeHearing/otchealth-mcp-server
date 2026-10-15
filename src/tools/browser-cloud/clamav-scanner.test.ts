@@ -80,3 +80,14 @@ test('absolute timeout, signature rollover, body mutation and mixed DNS results 
   const scanner = api.createClamAvBrowserFileScanner({ host: 'scanner.internal', lookup: async () => [{ address: '10.1.2.3', family: 4 }, { address: '8.8.8.8', family: 4 }], connect: () => { connects++; throw new Error('must not connect'); } });
   assert.equal((await scanner.scan({ filename: 'safe.txt', contentType: 'text/plain', body: Buffer.from('safe') })).verdict, 'error'); assert.equal(connects, 0);
 });
+
+test('cannot report clean after its absolute deadline even if the event loop delays the timeout callback', async () => {
+  const f = await fixture('stream: OK'); let clocks = 0;
+  try {
+    const scanner = api.createClamAvBrowserFileScanner({ ...f.options, timeoutMs: 50, now: () => {
+      if (++clocks === 2) { const until = Date.now() + 60; while (Date.now() < until) { /* trusted clock delay */ } }
+      return now;
+    } });
+    assert.equal((await scanner.scan({ filename: 'safe.txt', contentType: 'text/plain', body: Buffer.from('safe') })).verdict, 'error');
+  } finally { await f.close(); }
+});
