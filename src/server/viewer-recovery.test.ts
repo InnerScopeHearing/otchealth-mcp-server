@@ -35,7 +35,7 @@ async function viewer(options: { stored?: Map<string, string>; resume?: () => Pr
   runInNewContext(script, {
     URL, URLSearchParams, history: { replaceState: () => {} }, document: { getElementById: (id: string) => nodes[id] },
     window: {
-      location: { hash: options.stored ? '' : `#token=${TOKEN}`, pathname: '/browser/connect' }, addEventListener: () => {},
+      location: { hash: options.stored ? '' : `#token=${TOKEN}`, pathname: '/browser/connect', origin: 'https://mcp.otchealth.app' }, addEventListener: () => {},
       sessionStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { assert.match(value, /^[a-f0-9]{32}$/); stored.set(key, value); }, removeItem: (key: string) => { stored.delete(key); } },
       dcv: { LogLevel: { SILENT: 0 }, setLogLevel: () => {}, authenticate: (_url: string, callbacks: any) => callbacks.success(null, [{ sessionId: 'same-session', authToken: 'private' }]), connect: async () => connection },
     },
