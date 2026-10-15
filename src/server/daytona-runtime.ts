@@ -10,6 +10,7 @@ import { DaytonaViewerExpiryController, type DaytonaViewerExpiryResult } from '.
 import type { DaytonaGatewayAdapter, DaytonaGatewayRuntime } from '../tools/browser-cloud-gateway/index.js';
 import { DaytonaViewerHandoffService, DynamoDaytonaViewerTicketStore, type DaytonaViewerTicketStore } from './daytona-viewer-service.js';
 import { registerDaytonaViewerRoutes, type DaytonaViewerOptions, type DaytonaViewerService } from './daytona-viewer.js';
+import { createConfiguredDaytonaArtifactPorts } from './daytona-artifact-ports.js';
 
 type CapableProvider = DaytonaProvider & { capabilities: Readonly<{ checkpoint: boolean }> };
 export interface DaytonaRuntimeDependencies {
@@ -104,7 +105,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
       finally { key.fill(0); }
       expiry = new DaytonaViewerExpiryController({ store, port: viewer, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, sandboxId: env.DAYTONA_BROWSER_SANDBOX_ID! });
     }
-    const provider = (dependencies.createProvider ?? (options => new DaytonaApiBrowserProvider(options)))({ apiBaseUrl: env.DAYTONA_BROWSER_API_BASE_URL!, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, resolveApiToken, toolboxAllowedOrigins: origins(), ...(viewer ? { viewer } : {}) });
+    const provider = (dependencies.createProvider ?? (options => new DaytonaApiBrowserProvider(options)))({ apiBaseUrl: env.DAYTONA_BROWSER_API_BASE_URL!, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, resolveApiToken, toolboxAllowedOrigins: origins(), ...createConfiguredDaytonaArtifactPorts({ env }), ...(viewer ? { viewer } : {}) });
     const store = sessionStore(), service = new DaytonaBrowserService(store, provider);
     const approved = async (caller: string, profile: string, principal?: string) => {
       const binding = await store.loadBinding(profile); assertDaytonaBinding(binding);

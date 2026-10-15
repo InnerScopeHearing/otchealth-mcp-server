@@ -11,7 +11,7 @@ const SESSION = randomUUID();
 const env = { DAYTONA_BROWSER_ENABLED: 'true', DAYTONA_BROWSER_API_BASE_URL: 'https://app.daytona.io/api', DAYTONA_BROWSER_ORGANIZATION_ID: '501db94e-10ee-4bc8-9cca-23c793c67524', DAYTONA_BROWSER_SANDBOX_ID: '11111111-1111-4111-8111-111111111111', DAYTONA_VIEWER_GRANT_KEY_BASE64: randomBytes(32).toString('base64'), DAYTONA_BROWSER_VIEWER_CONTROL_SHA256: '17f61b92692760ae7908a3987b593180bed0e8bf2f9a52afb1fa80d9489dcce2', DAYTONA_BROWSER_API_TOKEN: 'SERVER_ONLY_PRIVATE_TEST_TOKEN', CLOUD_BROWSER_DDB_TABLE: 'browser-table', DAYTONA_BROWSER_PREVIEW_DOMAIN: 'proxy.daytona.works', DAYTONA_BROWSER_PREVIEW_PORT: '6080', DAYTONA_BROWSER_PREVIEW_PATH: '/vnc.html', DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS: '["https://proxy.app.daytona.io"]' };
 function fixture(overrides: NodeJS.ProcessEnv = {}) {
   const calls: string[] = [];
-  const state = { checkpoint: true, lookupError: false, scopeError: false, scheduleFails: false, sandbox: env.DAYTONA_BROWSER_SANDBOX_ID, scheduled: 0, cancelled: 0, tick: undefined as (() => void) | undefined, session: null as DaytonaMission | null };
+  const state = { checkpoint: true, lookupError: false, scopeError: false, scheduleFails: false, uploadConfigured: false, captureConfigured: false, sandbox: env.DAYTONA_BROWSER_SANDBOX_ID, scheduled: 0, cancelled: 0, tick: undefined as (() => void) | undefined, session: null as DaytonaMission | null };
   const store: DaytonaBrowserStore = {
     loadBinding: async profileKey => ({ provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: state.sandbox, profileKey, profilePath: `/home/otcbrowser/.local/share/otchealth-browser/${profileKey}/chromium`, readinessReceiptSha256: 'b'.repeat(64) }), createBinding: async () => false,
     loadSession: async () => { calls.push('load'); if (state.lookupError) throw new Error('private-store-error'); return state.session; },
@@ -26,7 +26,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}) {
     viewerGrant: async () => { throw new Error('no grant'); }, readViewerGrant: async () => { throw new Error('no read'); }, revokeViewerGrant: async () => { throw new Error('no revoke'); },
   };
   const grants: DaytonaViewerGrantStore = { reserve: async () => { throw new Error('no mint'); }, load: async () => null, compareAndSwap: async () => { throw new Error('no write'); }, readPhysicalScope: async () => { calls.push('scope'); if (state.scopeError) throw new Error('PRIVATE_BACKEND_ERROR'); return null; } };
-  const controller = createDaytonaRuntimeController({ env: { ...env, ...overrides }, createGrantStore: () => grants, createStore: () => { calls.push('store'); return store; }, createProvider: options => { assert.equal(options.organizationId, env.DAYTONA_BROWSER_ORGANIZATION_ID); if (!Object.hasOwn(overrides, 'DAYTONA_BROWSER_PREVIEW_PATH')) assert.ok(options.viewer instanceof EncryptedDaytonaViewerGrantPort); calls.push('provider'); return provider; },
+  const controller = createDaytonaRuntimeController({ env: { ...env, ...overrides }, createGrantStore: () => grants, createStore: () => { calls.push('store'); return store; }, createProvider: options => { assert.equal(options.organizationId, env.DAYTONA_BROWSER_ORGANIZATION_ID); state.uploadConfigured = typeof options.files?.forUpload === 'function'; state.captureConfigured = typeof options.captures?.createCapture === 'function'; if (!Object.hasOwn(overrides, 'DAYTONA_BROWSER_PREVIEW_PATH')) assert.ok(options.viewer instanceof EncryptedDaytonaViewerGrantPort); calls.push('provider'); return provider; },
     scheduleTick: (tick, milliseconds) => { assert.equal(milliseconds, 1000); if (state.scheduleFails) throw new Error('PRIVATE_SCHEDULER_ERROR'); state.scheduled++; state.tick = tick; return () => { state.cancelled++; }; }, onWatchdogStatus: () => {} });
   return { controller, calls, state };
 }
@@ -124,4 +124,13 @@ test('a failed scheduler installation cannot enable human handoffs even after a 
   const f = fixture(); f.state.scheduleFails = true;
   assert.equal(await f.controller.initialize(), false); assert.equal(f.controller.status().watchdogReady, false);
   assert.equal(await f.controller.adapter.get(), undefined);
+});
+test('normal runtime passes real lazy file/capture ports only for configured shared artifact storage and AV scanner', async () => {
+  const storage = { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/123456789012/queue', CLOUD_BROWSER_ARTIFACT_BUCKET: 'browser-artifacts', BROWSER_FILE_CLAMAV_HOST: 'clamav.browser-security.internal', BROWSER_FILE_CLAMAV_PORT: '3310' };
+  const configured = fixture(storage); await configured.controller.initialize();
+  assert.equal(configured.state.uploadConfigured, true); assert.equal(configured.state.captureConfigured, true); configured.controller.shutdown();
+  const scannerMissing = fixture({ ...storage, BROWSER_FILE_CLAMAV_HOST: undefined }); await scannerMissing.controller.initialize();
+  assert.equal(scannerMissing.state.uploadConfigured, false); assert.equal(scannerMissing.state.captureConfigured, true); scannerMissing.controller.shutdown();
+  const missing = fixture(); await missing.controller.initialize();
+  assert.equal(missing.state.uploadConfigured, false); assert.equal(missing.state.captureConfigured, false); missing.controller.shutdown();
 });
