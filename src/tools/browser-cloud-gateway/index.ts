@@ -125,7 +125,7 @@ export interface CloudBrowserGatewayRuntime {
 }
 export interface DaytonaGatewayRuntime {
   capabilities: Readonly<{ checkpoint: boolean; humanViewer: boolean }>;
-  browser: Pick<DaytonaBrowserService, 'discover' | 'start' | 'execute' | 'snapshot' | 'savePersistentProfile' | 'stop'>;
+  browser: Pick<DaytonaBrowserService, 'discover' | 'readiness' | 'start' | 'execute' | 'snapshot' | 'savePersistentProfile' | 'stop'>;
   viewers: Pick<DaytonaViewerHandoffService, 'issue'>;
 }
 /** A consistent server-store lookup, never an untrusted provider hint, selects UUID routing. */
@@ -561,8 +561,10 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             const principal = daytonaPrincipal(ctx.callerAgent);
             const desktop = await daytona?.get();
             if (!desktop) throw new DaytonaBrowserError('daytona_not_configured');
-            if (desktop.capabilities.checkpoint !== true || desktop.capabilities.humanViewer !== true) throw new DaytonaBrowserError('daytona_handoff_unavailable');
+            if (desktop.capabilities.humanViewer !== true) throw new DaytonaBrowserError('daytona_handoff_unavailable');
             const profile = await desktop.browser.discover(ctx.callerAgent, principal);
+            const readiness = await desktop.browser.readiness(ctx.callerAgent, profile.profileId, principal);
+            if (readiness.ready !== true || readiness.profileKey !== profile.profileId || readiness.checkpointReady !== true) throw new DaytonaBrowserError('daytona_handoff_unavailable');
             const started = await desktop.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal);
             const handoff = await desktop.viewers.issue(ctx.callerAgent, started.sessionId, principal, Math.min(300, input.max_seconds));
             return { data: { ...started, profile_id: 'daytona-desktop', provider: 'daytona', login_url: handoff.login_url, login_expires_at: handoff.expires_at, status: 'human_login_required' }, summary: 'Owned Daytona desktop mission started. Open the short-lived private viewer, confirm the signed-in account and click Done to release human control. No AWS session was created.' };

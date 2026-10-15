@@ -14,9 +14,10 @@ const lanes = ['cto','cfo','clo','coo','cro','developer','wefunder-campaign-dire
 function fixture() {
   const handlers = new Map<string, (input: unknown) => Promise<Result>>();
   const calls: unknown[][] = [];
-  const state = { enabled: true, owned: true, lookupError: false, providerError: false, checkpoint: true, humanViewer: true };
+  const state = { enabled: true, owned: true, lookupError: false, providerError: false, checkpoint: true, checkpointReady: true, proofProfile: 'exact-enrolled-server-profile', humanViewer: true };
   const browser: DaytonaGatewayRuntime['browser'] = {
     discover: async (...args) => { calls.push(['discover', ...args]); return { profileId: 'exact-enrolled-server-profile', allowedHosts: [], persistent: true, provider: 'daytona' }; },
+    readiness: async (...args) => { calls.push(['readiness', ...args]); return { ready: true, profileKey: state.proofProfile, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/exact-enrolled-server-profile/chromium', checkpointReady: state.checkpointReady }; },
     start: async (...args) => { calls.push(['start', ...args]); return { sessionId: SESSION, expiresAt: 1900000300000 }; },
     execute: async (...args) => { calls.push(['execute', ...args]); if (state.providerError) throw Object.assign(new Error('PRIVATE_PROVIDER_SECRET'), { code: 'effect_unknown' }); return { completed: true }; },
     snapshot: async (...args) => { calls.push(['snapshot', ...args]); return { title: 'public fixture' }; },
@@ -77,13 +78,24 @@ test('native UUID sessions route by server lookup only and known Daytona failure
   assert.equal(f.calls.some(row => row[0] === 'aws-execute'), false);
 });
 
-test('Daytona human alias refuses missing checkpoint or viewer-revocation capability before any mission start', async () => {
-  for (const missing of ['checkpoint', 'humanViewer'] as const) {
+test('Daytona human alias refuses missing exact per-binding checkpoint proof or viewer revocation before any mission start', async () => {
+  for (const missing of ['checkpointReady', 'humanViewer'] as const) {
     const f = fixture(); f.state[missing] = false;
     const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop', max_seconds: 180, dry_run: false });
     assert.equal(result.structuredContent?.result?.error, 'daytona_handoff_unavailable');
-    assert.deepEqual(f.calls, [['get']]);
+    assert.equal(f.calls.some(call => call[0] === 'start' || call[0] === 'issue' || call[0] === 'aws-start'), false);
   }
+});
+test('static checkpoint=false stays honest while exact current binding readiness gates before starting each mission', async () => {
+  const f = fixture(); f.state.checkpoint = false;
+  const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop', max_seconds: 180, dry_run: false });
+  assert.equal(result.structuredContent?.result?.sessionId, SESSION);
+  assert.deepEqual(f.calls.map(call => call[0]), ['get', 'discover', 'readiness', 'start', 'issue']);
+  assert.deepEqual(f.calls[2], ['readiness', 'cto', 'exact-enrolled-server-profile', websitePrincipalHash('cto', 'connection:own-connection')]);
+  const foreign = fixture(); foreign.state.proofProfile = 'other-profile';
+  const refused = await foreign.call('browser_cloud_session_start', { profile_id: 'daytona-desktop', max_seconds: 180, dry_run: false });
+  assert.equal(refused.structuredContent?.result?.error, 'daytona_handoff_unavailable');
+  assert.equal(foreign.calls.some(call => call[0] === 'start' || call[0] === 'issue' || call[0] === 'aws-start'), false);
 });
 
 test('ordinary AWS starts and unknown UUIDs retain the existing provider path', async () => {
