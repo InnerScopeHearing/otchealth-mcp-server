@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { createHash, randomUUID } from 'node:crypto';
 import type { DaytonaBinding, DaytonaMission } from './contract.js';
 
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
@@ -19,17 +20,27 @@ async function client(options: Record<string, unknown> = {}) {
 }
 function network() {
   const requests: Array<{ url: string; init: RequestInit }> = [];
-  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102 };
+  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102, result: undefined as any, promotionForeign: false, afterPrepare: undefined as (() => void) | undefined };
   const fetchImpl: typeof fetch = async (input, init = {}) => {
     const url = String(input); requests.push({ url, init }); state.calls++;
     assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${token}`);
     if (url.endsWith('/toolbox-proxy-url')) return Response.json({ url: 'https://proxy.daytona.test/toolbox' });
+    if (url.includes('/files/')) {
+      assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'error');
+      return Response.json({ errors: null });
+    }
     if (url.endsWith('/process/execute')) {
       assert.equal(init.method, 'POST'); const body = JSON.parse(String(init.body));
-      assert.match(body.command, /^sudo -n runuser -u otcbrowser -- python3 \/opt\/otchealth-browser\/browser-dispatcher\.py --payload [A-Za-z0-9_-]+$/);
+      if (body.command.startsWith('sudo -n python3 -I ')) {
+        assert.match(body.command, /^sudo -n python3 -I \/opt\/otchealth-browser\/transfer-stage\.py --payload [A-Za-z0-9_-]+$/);
+        const payload = JSON.parse(Buffer.from(body.command.split(' ').at(-1), 'base64url').toString()); state.payloads.push({ op: 'promote', ...payload });
+        return Response.json({ exitCode: 0, result: JSON.stringify({ version: 1, ok: true, staged: true, profileKey: state.promotionForeign ? 'other' : payload.profileKey, sessionId: payload.sessionId, byteLength: payload.byteLength, sha256: payload.sha256 }) });
+      }
+      assert.match(body.command, /^sudo -n runuser -u otcbrowser -- python3(?: -I)? \/opt\/otchealth-browser\/browser-dispatcher\.py --payload [A-Za-z0-9_-]+$/);
       assert.ok(body.timeout >= 1 && body.timeout <= 18);
       const payload = JSON.parse(Buffer.from(body.command.split(' ').at(-1), 'base64url').toString()); state.payloads.push(payload);
-      const result = payload.op === 'probe' ? { ready: true, cdpLoopback: true, profileVerified: true, checkpointReady: state.checkpointReady, profileKey: binding.profileKey, profilePath: binding.profilePath, browserPid: 101, supervisorPid: 100, encryptedKeyringUnlocked: state.checkpointReady } : payload.op === 'checkpoint' ? { checkpointed: true, gracefulClosed: true, keyringSessionRetained: true, cdpLoopback: true, profileVerified: true, profileKey: binding.profileKey, profilePath: binding.profilePath, sessionId: payload.sessionId, principalHash: payload.principalHash, browserPidBefore: 101, browserPidAfter: state.checkpointAfter, supervisorPid: 100, tabsReset: true } : payload.op === 'open' ? { ready: true, cdpLoopback: true, profileVerified: true } : payload.op === 'release' ? { released: true } : { url: 'https://example.com/', title: 'Example', visibleText: 'Actual fixture page', ...(state.pageReceipt ? { pageReceipt: state.pageReceipt } : {}) };
+      const result = payload.upload ? (payload.upload.phase === 'prepare' ? { prepared: true } : { fileReceipt: { status: 'attached', ...Object.fromEntries(Object.entries(payload.upload.files[0]).filter(([key]) => key !== 'relativePath')) } }) : state.result ?? (payload.op === 'probe' ? { ready: true, cdpLoopback: true, profileVerified: true, checkpointReady: state.checkpointReady, profileKey: binding.profileKey, profilePath: binding.profilePath, browserPid: 101, supervisorPid: 100, encryptedKeyringUnlocked: state.checkpointReady } : payload.op === 'checkpoint' ? { checkpointed: true, gracefulClosed: true, keyringSessionRetained: true, cdpLoopback: true, profileVerified: true, profileKey: binding.profileKey, profilePath: binding.profilePath, sessionId: payload.sessionId, principalHash: payload.principalHash, browserPidBefore: 101, browserPidAfter: state.checkpointAfter, supervisorPid: 100, tabsReset: true } : payload.op === 'open' ? { ready: true, cdpLoopback: true, profileVerified: true } : payload.op === 'release' ? { released: true } : { url: 'https://example.com/', title: 'Example', visibleText: 'Actual fixture page', ...(state.pageReceipt ? { pageReceipt: state.pageReceipt } : {}) });
+      if (payload.upload?.phase === 'prepare') state.afterPrepare?.();
       const envelope = { version: 1, ok: true, profileKey: state.foreignReceipt ? 'foreign-profile' : binding.profileKey, profilePath: binding.profilePath, ...(payload.sessionId ? { sessionId: payload.sessionId } : {}), result };
       return Response.json({ exitCode: 0, result: JSON.stringify(envelope) }, { status: state.status });
     }
@@ -111,6 +122,113 @@ test('absolute operation deadline includes a hanging token resolver', async () =
   const c = await client({ deadlineMs: 25, resolveApiToken: async () => new Promise<string>(() => {}) });
   const started = Date.now(); await assert.rejects(c.inspect(binding), (e: any) => e.code === 'daytona_provider_timeout');
   assert.ok(Date.now() - started < 500);
+});
+function stagedFile() {
+  const body = Buffer.from('known public upload fixture\n'), id = randomUUID(), sha256 = createHash('sha256').update(body).digest('hex'), now = Date.now();
+  const record = { id, owner: binding.owner, ownerSubjectHash: binding.ownerSubjectHash, filename: 'notes.txt', contentType: 'text/plain', byteLength: body.length, sha256, status: 'ready', expiresAt: now + 120000,
+    scanReceipt: { verdict: 'clean', scanner: 'clamav', sha256, byteLength: body.length, scannedAt: now, engineVersion: '1.5.4', signatureVersion: '28154', signaturesUpdatedAt: now - 1000 } };
+  const calls: any[] = [];
+  return { id, body, record, calls, files: { forUpload: async (...args: any[]) => { calls.push(args); return { record, body }; } } };
+}
+test('transfer capabilities require concrete corresponding server-only ports', async () => {
+  const f = stagedFile();
+  assert.equal((await client({ files: f.files })).capabilities.upload, true);
+  assert.equal((await client({ files: f.files })).capabilities.capture, false);
+  const captures = { createCapture: async () => { throw new Error('unused'); } };
+  assert.equal((await client({ captures })).capabilities.capture, true);
+  assert.equal((await client({ captures })).capabilities.upload, false);
+  await assert.rejects(client({ files: {} })); await assert.rejects(client({ captures: {} }));
+});
+test('concrete upload wires cleared broker bytes through prepare, multipart, fixed sudo promotion and native attach', async () => {
+  const n = network(), f = stagedFile(), c = await client({ fetchImpl: n.fetchImpl, files: f.files });
+  const receipt = await c.execute(binding, mission, { type: 'upload', fileId: f.id, selector: '#actual-file' }, 20, binding.ownerSubjectHash);
+  assert.deepEqual(receipt, { status: 'attached', filename: f.record.filename, contentType: f.record.contentType, byteLength: f.body.length, sha256: f.record.sha256 });
+  assert.deepEqual(f.calls, [[binding.owner, f.id, binding.ownerSubjectHash]]);
+  assert.deepEqual(n.state.payloads.map(p => p.op === 'promote' ? p.op : p.upload.phase), ['prepare', 'promote', 'attach']);
+  const [prepare, promote, attach] = n.state.payloads;
+  assert.equal(prepare.principalHash, binding.ownerSubjectHash); assert.equal(prepare.sessionId, mission.sessionId);
+  assert.equal(promote.transferId, prepare.upload.transferId); assert.equal(attach.upload.transferId, prepare.upload.transferId);
+  assert.equal(promote.sha256, f.record.sha256); assert.equal(promote.relativePath, 'notes.txt');
+  const upload = n.requests.find(r => r.url.endsWith('/files/bulk-upload'))!;
+  const form = upload.init.body as FormData;
+  assert.deepEqual(Buffer.from(await (form.get('files[0].file') as Blob).arrayBuffer()), f.body);
+  assert.match(String(form.get('files[0].path')), /^\/tmp\/otc-browser-upload-[a-f0-9-]{36}\/payload.bin$/);
+  assert.equal(JSON.stringify(receipt).includes('/home/'), false); assert.equal(JSON.stringify(receipt).includes(token), false);
+});
+test('transfer rechecks current principal, mission and suppression before every subsequent effect', async () => {
+  for (const mutation of ['principal', 'phase', 'suppressed', 'expired']) {
+    const n = network(), f = stagedFile(), current = { ...mission }, c = await client({ fetchImpl: n.fetchImpl, files: f.files });
+    n.state.afterPrepare = () => {
+      if (mutation === 'principal') current.ownerSubjectHash = 'c'.repeat(64);
+      if (mutation === 'phase') current.phase = 'CLOSED';
+      if (mutation === 'suppressed') current.sensitiveOutputSuppressed = true;
+      if (mutation === 'expired') current.expiresAt = Date.now() - 1;
+    };
+    await assert.rejects(c.execute(binding, current, { type: 'upload', fileId: f.id, selector: '#file' }, 20, binding.ownerSubjectHash));
+    assert.equal(n.requests.some(r => r.url.includes('/files/')), false, mutation);
+    assert.equal(n.state.payloads.length, 1, mutation);
+  }
+});
+test('configured transfer ports never bypass initial caller binding or broker scan ownership', async () => {
+  for (const mode of ['caller', 'record-owner', 'unscanned']) {
+    const n = network(), f = stagedFile(), c = await client({ fetchImpl: n.fetchImpl, files: f.files });
+    if (mode === 'record-owner') f.record.ownerSubjectHash = 'c'.repeat(64);
+    if (mode === 'unscanned') delete (f.record as any).scanReceipt;
+    await assert.rejects(c.execute(binding, mission, { type: 'upload', fileId: f.id, selector: '#file' }, 20, mode === 'caller' ? 'c'.repeat(64) : binding.ownerSubjectHash));
+    assert.equal(n.requests.length, 0); if (mode === 'caller') assert.equal(f.calls.length, 0);
+  }
+});
+test('upload errors and foreign promotion receipts stop without retry or native attachment', async () => {
+  for (const kind of ['lost-upload', 'foreign-promote', 'foreign-origin']) {
+    const n = network(), f = stagedFile(); if (kind === 'foreign-promote') n.state.promotionForeign = true;
+    const c = await client({ files: f.files, fetchImpl: async (input: any, init: any) => {
+      if (kind === 'foreign-origin' && String(input).endsWith('/toolbox-proxy-url')) return Response.json({ url: 'https://attacker.example/toolbox' });
+      if (kind === 'lost-upload' && String(input).endsWith('/files/bulk-upload')) { await n.fetchImpl(input, init); throw new Error('PRIVATE_PROVIDER_BODY'); }
+      return n.fetchImpl(input, init);
+    } });
+    await assert.rejects(c.execute(binding, mission, { type: 'upload', fileId: f.id, selector: '#file' }, 20, binding.ownerSubjectHash), (error: any) => !String(error).includes('PRIVATE_PROVIDER_BODY'));
+    assert.equal(n.state.payloads.some(p => p.upload?.phase === 'attach'), false);
+    assert.ok(n.requests.filter(r => r.url.endsWith('/files/bulk-upload')).length <= 1);
+    if (kind === 'foreign-origin') assert.equal(n.requests.some(r => r.init.method === 'POST'), false);
+  }
+});
+test('one absolute provider deadline covers broker loading and prevents late transfer effects', async () => {
+  const n = network(), f = stagedFile(); let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const c = await client({ deadlineMs: 20, fetchImpl: n.fetchImpl, files: { forUpload: async () => { await pending; return { record: f.record, body: f.body }; } } });
+  await assert.rejects(c.execute(binding, mission, { type: 'upload', fileId: f.id, selector: '#file' }, 20, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_provider_timeout');
+  release(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(n.requests.length, 0);
+});
+test('only typed PNG capture admits a 4MiB frame and returns principal-bound metadata, not encoded bytes', async () => {
+  const n = network(), stores: any[] = [];
+  // A synthetic structurally-approved frame tests transport boundaries only;
+  // the bridge's production default performs actual binary validation.
+  const png = Buffer.alloc(4 * 1024 * 1024); png.set(Buffer.from('89504e470d0a1a0a', 'hex')); png.set(Buffer.from('49454e44ae426082', 'hex'), png.length - 8);
+  const sha256 = createHash('sha256').update(png).digest('hex');
+  n.state.result = { capture: { contentType: 'image/png', data: png.toString('base64') } };
+  const captures = { createCapture: async (...args: any[]) => { stores.push(args); return { id: 'bca_' + randomUUID(), owner: args[0], sessionId: args[1], ownerSubjectHash: args[4], contentType: args[2].contentType, byteLength: args[2].body.length, sha256: args[2].sha256, createdAt: args[3], storageKey: 'PRIVATE_STORAGE_KEY' }; } };
+  const c = await client({ fetchImpl: n.fetchImpl, captures, validator: { validate: async () => ({ complete: true }) } });
+  const metadata = await c.execute(binding, mission, { type: 'capture', request: { type: 'screenshot', format: 'png' } }, 20, binding.ownerSubjectHash);
+  assert.equal(stores.length, 1); assert.equal(stores[0][4], binding.ownerSubjectHash); assert.deepEqual(Buffer.from(stores[0][2].body), png);
+  assert.equal((metadata as any).sha256, sha256); assert.equal((metadata as any).byteLength, png.length);
+  assert.equal(JSON.stringify(metadata).includes('PRIVATE_STORAGE_KEY'), false); assert.equal('capture' in metadata, false);
+  const before = n.requests.length;
+  for (const request of [{ type: 'pdf' }, { type: 'screenshot', format: 'jpeg' }]) await assert.rejects(c.execute(binding, mission, { type: 'capture', request } as any, 20, binding.ownerSubjectHash));
+  assert.equal(n.requests.length, before);
+  n.state.result = { url: 'https://example.com/', title: 'Example', visibleText: 'x'.repeat(140000) };
+  await assert.rejects(c.execute(binding, mission, { type: 'snapshot' }, 20, binding.ownerSubjectHash));
+  n.state.result = { capture: { contentType: 'image/png', data: 'A'.repeat(Math.ceil(png.length / 3) * 4 + 32769) } };
+  await assert.rejects(c.execute(binding, mission, { type: 'capture', request: { type: 'screenshot' } }, 20, binding.ownerSubjectHash));
+  assert.equal(stores.length, 1);
+});
+test('capture cannot store a foreign envelope or continue after structural validation suppresses output', async () => {
+  for (const mode of ['foreign', 'suppressed-during-validation']) {
+    const n = network(), current = { ...mission }; let stores = 0;
+    n.state.foreignReceipt = mode === 'foreign';
+    n.state.result = { capture: { contentType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg==' } };
+    const c = await client({ fetchImpl: n.fetchImpl, captures: { createCapture: async () => { stores++; throw new Error('must not store'); } }, validator: { validate: async () => { current.sensitiveOutputSuppressed = true; return { complete: true }; } } });
+    await assert.rejects(c.execute(binding, current, { type: 'capture', request: { type: 'screenshot' } }, 20, binding.ownerSubjectHash)); assert.equal(stores, 0, mode);
+  }
 });
 test('viewer operations require a trusted port and exact original grant identity', async () => {
   const missing = await client(); await assert.rejects(missing.viewerGrant(binding, 60));

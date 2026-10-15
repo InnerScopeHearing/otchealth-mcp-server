@@ -1,9 +1,14 @@
-import type { CloudBrowserAction, CloudBrowserExecutionResult } from '../browser-cloud/contract.js';
+import type { BrowserCaptureMetadata, CloudBrowserAction, CloudBrowserExecutionResult, CloudBrowserStore } from '../browser-cloud/contract.js';
 import type { BrowserPageReceipt } from '../browser-cloud/page-controls.js';
+import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
+import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
+import type { TrustedBrowserBinaryValidator } from '../browser-cloud/binary-validation.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
 import { DaytonaBrowserError, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 export type { DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
+import { DaytonaTransferBridge, type DaytonaUploadDescriptor } from './transfer-bridge.js';
+import { uploadDaytonaControlledFile, type DaytonaStagePayload } from './toolbox-files.js';
 
 type ViewerGrant = { url: string; expiresAt: number; grantHandle: string };
 /** Trusted server-only vault. Revoke must include actual native VNC disconnection proof. */
@@ -21,9 +26,19 @@ export interface DaytonaApiBrowserProviderOptions {
   toolboxAllowedOrigins?: readonly string[];
   deadlineMs?: number;
   viewer?: DaytonaViewerGrantPort;
+  /** Trusted server-only broker and immutable artifact store; never MCP arguments. */
+  files?: Pick<BrowserFileBroker, 'forUpload'>;
+  captures?: Pick<CloudBrowserStore, 'createCapture'>;
+  /** Trusted structural verifier; production defaults to the bounded binary validator. */
+  validator?: TrustedBrowserBinaryValidator;
 }
 type Context = { signal: AbortSignal; remaining: () => number; token?: string };
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const ORDINARY_JSON_BYTES = 131072, ORDINARY_RESULT_CHARS = 100000;
+// PNG bytes stay capped at 4MiB by the artifact decoder. Only that fixed typed
+// command receives the base64 allowance; all other provider reads remain small.
+const PNG_RESULT_CHARS = Math.ceil(4 * 1024 * 1024 / 3) * 4 + 16384;
+const PNG_JSON_BYTES = PNG_RESULT_CHARS + 16384;
 const fail = (code: string): never => { throw new DaytonaBrowserError(code); };
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : fail('daytona_provider_invalid');
 function httpsUrl(raw: string): URL {
@@ -34,8 +49,7 @@ function httpsUrl(raw: string): URL {
 
 /** No provisioning methods. Each operation uses the exact approved enrollment and one absolute deadline. */
 export class DaytonaApiBrowserProvider implements DaytonaProvider {
-  readonly capabilities = Object.freeze({ typedBrowser: true, upload: false, capture: false, checkpoint: false, publicWebNetworkIsolation: false,
-    actions: Object.freeze(['navigate', 'snapshot', 'click', 'type', 'focus', 'select', 'wait_for', 'press_key', 'scroll', 'mouse_move', 'drag', 'tab_create', 'tab_select', 'tab_close', 'navigate_back', 'navigate_forward', 'reload', 'dialog']), maxActionSeconds: 14 });
+  readonly capabilities;
   private readonly base: URL;
   private readonly origins: ReadonlySet<string>;
   private readonly fetchImpl: typeof fetch;
@@ -48,6 +62,9 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     })]);
     this.fetchImpl = options.fetchImpl ?? fetch; this.deadlineMs = options.deadlineMs ?? 20000;
     if (!Number.isSafeInteger(this.deadlineMs) || this.deadlineMs < 1 || this.deadlineMs > 20000 || typeof options.resolveApiToken !== 'function') fail('daytona_provider_invalid');
+    if (options.files !== undefined && typeof options.files?.forUpload !== 'function' || options.captures !== undefined && typeof options.captures?.createCapture !== 'function' || options.validator !== undefined && typeof options.validator?.validate !== 'function') fail('daytona_provider_invalid');
+    this.capabilities = Object.freeze({ typedBrowser: true, upload: options.files !== undefined, capture: options.captures !== undefined, checkpoint: false, publicWebNetworkIsolation: false,
+      actions: Object.freeze(['navigate', 'snapshot', 'click', 'type', 'focus', 'select', 'wait_for', 'press_key', 'scroll', 'mouse_move', 'drag', 'tab_create', 'tab_select', 'tab_close', 'navigate_back', 'navigate_forward', 'reload', 'dialog', ...(options.files ? ['upload'] : []), ...(options.captures ? ['capture'] : [])]), maxActionSeconds: 14 });
   }
   private async bounded<T>(run: (context: Context) => Promise<T>): Promise<T> {
     const abort = new AbortController(); const until = Date.now() + this.deadlineMs;
@@ -58,7 +75,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     catch (error) { if (error instanceof DaytonaBrowserError) throw error; return fail(abort.signal.aborted ? 'daytona_provider_timeout' : 'daytona_provider_unavailable'); }
     finally { clearTimeout(timer); }
   }
-  private async json(context: Context, url: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
+  private async json(context: Context, url: string, init: RequestInit = {}, maxBytes = ORDINARY_JSON_BYTES): Promise<Record<string, unknown>> {
     context.remaining(); if (!context.token) {
       const token = await this.options.resolveApiToken(); context.remaining();
       if (typeof token !== 'string' || token.length < 1 || token.length > 8192 || /[\r\n]/.test(token)) return fail('daytona_credentials_unavailable');
@@ -69,7 +86,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (!response.body) return fail('daytona_provider_invalid');
     const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let total = 0;
     try {
-      while (true) { context.remaining(); const next = await reader.read(); if (next.done) break; total += next.value.byteLength; if (total > 131072) { await reader.cancel(); return fail('daytona_provider_invalid'); } chunks.push(next.value); }
+      while (true) { context.remaining(); const next = await reader.read(); if (next.done) break; total += next.value.byteLength; if (total > maxBytes) { await reader.cancel(); return fail('daytona_provider_invalid'); } chunks.push(next.value); }
       context.remaining(); let parsed: unknown; try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return fail('daytona_provider_invalid'); } return record(parsed);
     } finally { reader.releaseLock(); }
   }
@@ -81,27 +98,80 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   async inspect(binding: DaytonaBinding): Promise<{ sandboxId: string; state: 'started' | 'stopped' | 'other'; public: boolean }> {
     assertDaytonaBinding(binding); return this.bounded(context => this.inspectWith(context, binding));
   }
-  private async runtime(binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18): Promise<unknown> {
+  private assertMission(binding: DaytonaBinding, session: DaytonaMission, principal: string): void {
+    assertDaytonaBinding(binding); assertDaytonaMission(session);
+    if (session.sandboxId !== binding.sandboxId || session.profileKey !== binding.profileKey || session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || principal !== binding.ownerSubjectHash || session.phase !== 'ACTIVE' || session.sensitiveOutputSuppressed || session.expiresAt <= Date.now()) fail('owner_forbidden');
+  }
+  private async toolboxWith(context: Context, binding: DaytonaBinding): Promise<URL> {
+    const state = await this.inspectWith(context, binding); if (state.state !== 'started' || state.public !== false) return fail('daytona_not_ready');
+    const proxy = await this.json(context, `${this.base.href}/sandbox/${encodeURIComponent(binding.sandboxId)}/toolbox-proxy-url`);
+    if (typeof proxy.url !== 'string') return fail('daytona_provider_invalid'); const base = httpsUrl(proxy.url);
+    if (!this.origins.has(base.origin)) return fail('daytona_toolbox_origin_forbidden');
+    return base;
+  }
+  private async processWith(context: Context, base: URL, binding: DaytonaBinding, command: string, timeoutMs: number, png = false): Promise<Record<string, unknown>> {
+    context.remaining();
+    const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command, timeout: Math.ceil(timeoutMs / 1000) }) }, png ? PNG_JSON_BYTES : ORDINARY_JSON_BYTES);
+    if ((response.exitCode ?? response.code) !== 0 || typeof response.result !== 'string' || response.result.length > (png ? PNG_RESULT_CHARS : ORDINARY_RESULT_CHARS)) return fail('daytona_runtime_unavailable');
+    let parsed: unknown; try { parsed = JSON.parse(response.result); } catch { return fail('daytona_runtime_invalid'); }
+    return record(parsed);
+  }
+  private async runtimeWith(context: Context, binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18, upload?: DaytonaUploadDescriptor): Promise<unknown> {
     assertDaytonaBinding(binding); if (sessionId !== undefined && !UUID.test(sessionId)) return fail('owner_forbidden');
-    return this.bounded(async context => {
-      const state = await this.inspectWith(context, binding); if (state.state !== 'started' || state.public !== false) return fail('daytona_not_ready');
-      const proxy = await this.json(context, `${this.base.href}/sandbox/${encodeURIComponent(binding.sandboxId)}/toolbox-proxy-url`);
-      if (typeof proxy.url !== 'string') return fail('daytona_provider_invalid'); const base = httpsUrl(proxy.url);
-      if (!this.origins.has(base.origin)) return fail('daytona_toolbox_origin_forbidden');
-      // Official execute timeout is seconds; retain five seconds for its terminal receipt.
-      const timeoutMs = Math.min(14000, timeoutSeconds * 1000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
-      const payload = { version: 1, op, profileKey: binding.profileKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash };
-      const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
-      const command = `sudo -n runuser -u otcbrowser -- python3 /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
-      const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command, timeout: Math.ceil(timeoutMs / 1000) }) });
-      if ((response.exitCode ?? response.code) !== 0 || typeof response.result !== 'string' || response.result.length > 100000) return fail('daytona_runtime_unavailable');
-      let parsed: unknown; try { parsed = JSON.parse(response.result); } catch { return fail('daytona_runtime_invalid'); } const receipt = record(parsed);
-      if (receipt.version !== 1 || receipt.ok !== true || receipt.profileKey !== binding.profileKey || receipt.profilePath !== binding.profilePath || (sessionId !== undefined && receipt.sessionId !== sessionId)) return fail('daytona_runtime_invalid');
-      const result = record(receipt.result);
-      if ((op === 'probe' || op === 'open') && (result.ready !== true || result.cdpLoopback !== true || result.profileVerified !== true)) return fail('daytona_runtime_unavailable');
-      if (op === 'release' && result.released !== true) return fail('daytona_runtime_invalid');
-      return result;
+    const base = await this.toolboxWith(context, binding);
+    // Official execute timeout is seconds; retain five seconds for its terminal receipt.
+    const timeoutMs = Math.min(14000, timeoutSeconds * 1000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
+    const payload = { version: 1, op, profileKey: binding.profileKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash, ...(upload ? { upload } : {}) };
+    const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    if (encoded.length > 32768) return fail('daytona_runtime_invalid');
+    const command = `sudo -n runuser -u otcbrowser -- python3 -I /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
+    const png = op === 'execute' && action?.type === 'capture' && action.request.type === 'screenshot' && (!action.request.format || action.request.format === 'png');
+    const receipt = await this.processWith(context, base, binding, command, timeoutMs, png);
+    if (receipt.version !== 1 || receipt.ok !== true || receipt.profileKey !== binding.profileKey || receipt.profilePath !== binding.profilePath || (sessionId !== undefined && receipt.sessionId !== sessionId)) return fail('daytona_runtime_invalid');
+    const result = record(receipt.result);
+    if ((op === 'probe' || op === 'open') && (result.ready !== true || result.cdpLoopback !== true || result.profileVerified !== true)) return fail('daytona_runtime_unavailable');
+    if (op === 'release' && result.released !== true) return fail('daytona_runtime_invalid');
+    return result;
+  }
+  private async runtime(binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18): Promise<unknown> {
+    assertDaytonaBinding(binding);
+    return this.bounded(context => this.runtimeWith(context, binding, op, sessionId, action, principalHash, timeoutSeconds));
+  }
+  private async transfer(binding: DaytonaBinding, session: DaytonaMission, action: Extract<CloudBrowserAction, { type: 'upload' | 'capture' }>, seconds: number, principal: string): Promise<BrowserCaptureMetadata | BrowserFileTransferReceipt> {
+    if (action.type === 'upload' && !this.options.files || action.type === 'capture' && (!this.options.captures || action.request.type !== 'screenshot' || action.request.format && action.request.format !== 'png')) return fail('daytona_action_unsupported');
+    return this.bounded(async outer => {
+      const guarded = (remaining: () => number): Context => ({ signal: outer.signal, get token() { return outer.token; }, set token(value) { outer.token = value; }, remaining: () => { this.assertMission(binding, session, principal); return Math.min(outer.remaining(), remaining()); } });
+      const current = () => { outer.remaining(); this.assertMission(binding, session, principal); };
+      const bridge = new DaytonaTransferBridge({
+        files: this.options.files ? { forUpload: async (owner, fileId, subject) => { current(); if (owner !== binding.owner || subject !== principal) return fail('owner_forbidden'); const file = await this.options.files!.forUpload(owner, fileId, subject); current(); return file; } } : undefined,
+        captures: this.options.captures ? { createCapture: async (owner, sessionId, artifact, createdAt, subject) => { current(); if (owner !== binding.owner || sessionId !== session.sessionId || subject !== principal) return fail('owner_forbidden'); const metadata = await this.options.captures!.createCapture(owner, sessionId, artifact, createdAt, subject); current(); return metadata; } } : undefined,
+        validator: this.options.validator, remote: {
+        run: async (target, mission, typedAction, descriptor, remaining, subject) => {
+          this.assertMission(target, mission, subject); const context = guarded(remaining);
+          const result = await this.runtimeWith(context, target, 'execute', mission.sessionId, typedAction, subject, seconds, descriptor);
+          context.remaining(); return result;
+        },
+        upload: async (target, mission, path, body, remaining, subject) => {
+          this.assertMission(target, mission, subject); const context = guarded(remaining);
+          const base = await this.toolboxWith(context, target); context.remaining();
+          await uploadDaytonaControlledFile({ binding: target, session: mission, path, body, toolboxBaseUrl: base.href, allowedOrigins: [...this.origins], token: context.token!, remaining: context.remaining,
+            fetchImpl: async (input, init) => { context.remaining(); const response = await this.fetchImpl(input, { ...init, signal: init?.signal ? AbortSignal.any([context.signal, init.signal]) : context.signal }); context.remaining(); return response; },
+            promote: (payload, stageRemaining) => this.promoteWith(guarded(stageRemaining), base, target, mission, payload, subject) });
+          context.remaining();
+        },
+      } });
+      const result = await bridge.execute(binding, session, action, seconds, principal); outer.remaining(); this.assertMission(binding, session, principal); return result;
     });
+  }
+  private async promoteWith(context: Context, base: URL, binding: DaytonaBinding, session: DaytonaMission, payload: DaytonaStagePayload, principal: string): Promise<{ staged: true; sha256: string; byteLength: number }> {
+    this.assertMission(binding, session, principal); context.remaining();
+    if (payload.profileKey !== binding.profileKey || payload.sessionId !== session.sessionId || payload.principalHash !== principal) return fail('owner_forbidden');
+    const timeoutMs = Math.min(14000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
+    const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url'); if (encoded.length > 4096) return fail('daytona_upload_invalid');
+    const receipt = await this.processWith(context, base, binding, `sudo -n python3 -I /opt/otchealth-browser/transfer-stage.py --payload ${encoded}`, timeoutMs);
+    context.remaining();
+    if (receipt.version !== 1 || receipt.ok !== true || receipt.staged !== true || receipt.profileKey !== binding.profileKey || receipt.sessionId !== session.sessionId || receipt.sha256 !== payload.sha256 || receipt.byteLength !== payload.byteLength) return fail('daytona_upload_unconfirmed');
+    return { staged: true, sha256: payload.sha256, byteLength: payload.byteLength };
   }
   /** Read-only local runtime readiness, never browser/resource launch. */
   async probe(binding: DaytonaBinding): Promise<DaytonaRuntimeReadiness> {
@@ -114,12 +184,11 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: false };
   }
   async openMission(binding: DaytonaBinding, logicalSessionId: string): Promise<void> { await this.runtime(binding, 'open', logicalSessionId); }
-  async execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<CloudBrowserExecutionResult> {
-    assertDaytonaBinding(binding); assertDaytonaMission(session);
-    if (session.sandboxId !== binding.sandboxId || session.profileKey !== binding.profileKey || session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || principalHash !== binding.ownerSubjectHash || session.phase !== 'ACTIVE' || session.sensitiveOutputSuppressed || session.expiresAt <= Date.now()) return fail('owner_forbidden');
+  async execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<CloudBrowserExecutionResult | BrowserCaptureMetadata | BrowserFileTransferReceipt> {
+    this.assertMission(binding, session, principalHash);
     const checked = validateCloudBrowserAction(action);
-    if (checked.type === 'upload' || checked.type === 'capture') return fail('daytona_action_unsupported');
     if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 120) return fail('invalid_duration');
+    if (checked.type === 'upload' || checked.type === 'capture') return this.transfer(binding, session, checked, timeoutSeconds, principalHash);
     if (checked.type === 'navigate' || checked.type === 'tab_create') {
       let url: URL; try { url = new URL(checked.url); } catch { return fail('destination_forbidden'); }
       if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return fail('destination_forbidden');
