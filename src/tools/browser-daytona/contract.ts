@@ -32,6 +32,8 @@ export interface DaytonaMission {
   actionBudget: number;
   effectUnknown: boolean;
   phase: 'OPENING' | 'ACTIVE' | 'RELEASING' | 'CLOSED';
+  /** Server-persisted only after a fresh exact V2 multi-mission runtime proof. */
+  runtimeProtocol?: 2;
   sensitiveOutputSuppressed?: boolean;
   /** Opaque server grant ID only; the provider retains encrypted token material. */
   viewerGrantHandle?: string;
@@ -46,17 +48,22 @@ export interface DaytonaRuntimeReadiness {
   checkpointReady: boolean;
   browserPid?: number;
   supervisorPid?: number;
+  runtimeProtocol?: 2;
+  multiMissionReady?: boolean;
 }
 
 export interface DaytonaProvider {
   probe?(binding: DaytonaBinding): Promise<DaytonaRuntimeReadiness>;
   inspect(binding: DaytonaBinding): Promise<{ sandboxId: string; state: 'started' | 'stopped' | 'other'; public: boolean }>;
-  openMission(binding: DaytonaBinding, logicalSessionId: string): Promise<void>;
+  openMission(binding: DaytonaBinding, logicalSessionId: string, options?: { runtimeProtocol?: 2 }): Promise<void>;
   execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<unknown>;
   /** Trusted current mission is required by concrete lifecycle providers across replicas. */
   checkpoint(binding: DaytonaBinding, session?: DaytonaMission): Promise<void>;
   /** Detach this logical mission only. Never stop/delete the retained desktop. */
   releaseMission(binding: DaytonaBinding, session: DaytonaMission): Promise<void>;
+  /** Global human handoff fence, with the exact V2 initiating mission retained. */
+  pauseAutomation?(binding: DaytonaBinding, session: DaytonaMission): Promise<{ paused: true }>;
+  resumeAutomation?(binding: DaytonaBinding, session: DaytonaMission): Promise<{ resumed: true }>;
   viewerGrant(binding: DaytonaBinding, expiresSeconds: number): Promise<{ url: string; expiresAt: number; grantHandle: string }>;
   /** Read exactly the existing encrypted grant; never mint or extend it. */
   readViewerGrant(binding: DaytonaBinding, grantHandle: string): Promise<{ url: string; expiresAt: number; grantHandle: string }>;

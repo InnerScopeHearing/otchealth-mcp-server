@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DynamoDaytonaBrowserStore } from './store.js';
+import { assertDaytonaMission, DynamoDaytonaBrowserStore } from './store.js';
 import type { DaytonaBinding, DaytonaMission } from './contract.js';
 
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
@@ -70,4 +70,10 @@ test('shared enrollment cannot forge its fixed physical key, member principal, v
   const isolated = { ...binding, profileKey: sharedBinding.profileKey, profilePath: sharedBinding.profilePath };
   await assert.rejects(h.store.createBinding(isolated));
   assert.equal(h.calls.length, 0, 'the shared path never silently enrolls an isolated binding');
+});
+test('V2 mission protocol is immutable receipt metadata and rejects unsupported or caller-shaped versions', () => {
+  const mission: DaytonaMission = { provider: 'daytona', sessionId: 'mission-one', owner: 'cto', ownerSubjectHash: binding.ownerSubjectHash, profileKey: binding.profileKey, sandboxId: binding.sandboxId, expiresAt: 2000, actionsUsed: 0, actionBudget: 5, effectUnknown: false, phase: 'ACTIVE' };
+  assert.doesNotThrow(() => assertDaytonaMission(mission));
+  assert.doesNotThrow(() => assertDaytonaMission({ ...mission, runtimeProtocol: 2 }));
+  for (const runtimeProtocol of [1, 3, '2', null, undefined, true]) assert.throws(() => assertDaytonaMission({ ...mission, runtimeProtocol }));
 });

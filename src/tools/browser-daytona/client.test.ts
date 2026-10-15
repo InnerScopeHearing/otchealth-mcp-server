@@ -123,6 +123,73 @@ test('two virtual members share the physical profile without inheriting one anot
   await assert.rejects(c.execute(sharedBinding, otherMission, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash));
   assert.equal(n.requests.length, before);
 });
+test('V2 multi-mission readiness requires fresh exact physical runtime proof, never a constructor flag', async () => {
+  const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
+  const proof = { ready: true, cdpLoopback: true, profileVerified: true, checkpointReady: false, profileKey: 'company-browser', profilePath: sharedBinding.profilePath, runtimeProtocol: 2, multiMissionReady: true };
+  assert.equal((await c.probe(sharedBinding)).multiMissionReady, undefined);
+  n.state.result = proof;
+  assert.deepEqual(await c.probe(sharedBinding), { ready: true, profileKey: sharedBinding.profileKey, profilePath: sharedBinding.profilePath, checkpointReady: false, runtimeProtocol: 2, multiMissionReady: true });
+  n.state.result = { ...proof, multiMissionReady: false };
+  assert.equal((await c.probe(sharedBinding)).multiMissionReady, false);
+  for (const bad of [{ profileKey: sharedBinding.profileKey }, { profilePath: binding.profilePath }, { runtimeProtocol: 3 }, { runtimeProtocol: undefined }, { multiMissionReady: 'true' }]) {
+    n.state.result = { ...proof, ...bad }; await assert.rejects(c.probe(sharedBinding));
+  }
+  n.state.result = undefined;
+  assert.equal((await c.probe(sharedBinding)).multiMissionReady, undefined, 'earlier proof cannot enable another probe');
+});
+test('V2 human pause/resume are fixed exact-mission operations and unknown receipts fail closed without replay', async () => {
+  const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
+  const current = { ...sharedMission, runtimeProtocol: 2 as const, sensitiveOutputSuppressed: true };
+  n.state.result = { paused: true };
+  assert.deepEqual(await (c as any).pauseAutomation(sharedBinding, current), { paused: true });
+  n.state.result = { resumed: true };
+  assert.deepEqual(await (c as any).resumeAutomation(sharedBinding, current), { resumed: true });
+  assert.deepEqual(n.state.payloads.map(p => [p.op, p.profileKey, p.sessionId, p.principalHash]), [
+    ['human_pause', 'company-browser', current.sessionId, sharedBinding.ownerSubjectHash], ['human_resume', 'company-browser', current.sessionId, sharedBinding.ownerSubjectHash],
+  ]);
+  assert.ok(n.state.payloads.every(p => p.runtimeProtocol === 2));
+  n.state.result = { resumed: false }; await assert.rejects((c as any).resumeAutomation(sharedBinding, current));
+  assert.equal(n.state.payloads.length, 3, 'unknown pause/resume ACK is never automatically replayed');
+  const before = n.requests.length;
+  for (const bad of [sharedMission, { ...current, ownerSubjectHash: 'd'.repeat(64) }, { ...current, phase: 'CLOSED' }, { ...current, expiresAt: Date.now() - 1 }]) await assert.rejects((c as any).pauseAutomation(sharedBinding, bad));
+  assert.equal(n.requests.length, before);
+});
+test('only explicit trusted V2 missions select the new runtime protocol across lifecycle and transfers', async () => {
+  const n = network(sharedRuntime), f = stagedFile(), c = await client({ fetchImpl: n.fetchImpl, files: f.files });
+  const current = { ...sharedMission, runtimeProtocol: 2 as const };
+  await c.openMission(sharedBinding, current.sessionId, { runtimeProtocol: 2 });
+  await c.execute(sharedBinding, current, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash);
+  await c.execute(sharedBinding, current, { type: 'upload', fileId: f.id, selector: '#file' }, 20, sharedBinding.ownerSubjectHash);
+  await c.checkpoint(sharedBinding, current); await c.releaseMission(sharedBinding, current);
+  assert.ok(n.state.payloads.filter(p => p.op !== 'promote').every(p => p.runtimeProtocol === 2));
+  n.state.payloads.length = 0;
+  await c.openMission(sharedBinding, sharedMission.sessionId);
+  await c.execute(sharedBinding, sharedMission, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash);
+  await c.checkpoint(sharedBinding, sharedMission); await c.releaseMission(sharedBinding, sharedMission);
+  assert.ok(n.state.payloads.every(p => !('runtimeProtocol' in p)), 'legacy wire must remain byte-compatible');
+  const before = n.requests.length;
+  await assert.rejects(c.openMission(sharedBinding, current.sessionId, { runtimeProtocol: 3 } as any));
+  await assert.rejects(c.openMission(sharedBinding, current.sessionId, { sharedProfileKey: 'company-browser' } as any));
+  assert.equal(n.requests.length, before);
+});
+test('only exact V2 known-before-effect ACKs classify busy; all other runtime outcomes remain unknown and never retry', async () => {
+  const current = { ...sharedMission, runtimeProtocol: 2 as const };
+  for (const [receipt, legacy, known] of [
+    ...['mission_busy', 'human_active', 'other_missions_active'].map(code => [{ version: 1, ok: false, code, beforeEffect: true }, false, true]),
+    [{ version: 1, ok: false, code: 'mission_busy', beforeEffect: true }, true, false],
+    [{ version: 1, ok: false, code: 'mission_busy', beforeEffect: false }, false, false],
+    [{ version: 1, ok: false, code: 'unknown', beforeEffect: true }, false, false],
+    [{ version: 1, ok: false, code: 'mission_busy', beforeEffect: true, extra: 'forbidden' }, false, false],
+  ] as Array<[Record<string, unknown>, boolean, boolean]>) {
+    const n = network(sharedRuntime); let sends = 0;
+    const c = await client({ fetchImpl: async (input: any, init: any) => {
+      if (String(input).endsWith('/process/execute')) { sends++; return Response.json({ exitCode: 0, result: JSON.stringify(receipt) }); }
+      return n.fetchImpl(input, init);
+    } });
+    await assert.rejects(c.execute(sharedBinding, legacy ? sharedMission : current, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash), (error: any) => known ? error.code === 'daytona_operation_busy' : error.code !== 'daytona_operation_busy');
+    assert.equal(sends, 1);
+  }
+});
 test('foreign and missing organizations cannot reach any toolbox command', async () => {
   for (const org of ['22222222-2222-2222-2222-222222222222', undefined]) {
     const n = network(); n.state.sandbox.organizationId = org as any; const c = await client({ fetchImpl: n.fetchImpl });

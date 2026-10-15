@@ -116,27 +116,32 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     let parsed: unknown; try { parsed = JSON.parse(response.result); } catch { return fail('daytona_runtime_invalid'); }
     return record(parsed);
   }
-  private async runtimeWith(context: Context, binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18, upload?: DaytonaUploadDescriptor): Promise<unknown> {
+  private async runtimeWith(context: Context, binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint' | 'human_pause' | 'human_resume', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18, upload?: DaytonaUploadDescriptor, runtimeProtocol?: 2): Promise<unknown> {
     assertDaytonaBinding(binding); if (sessionId !== undefined && !UUID.test(sessionId)) return fail('owner_forbidden');
     const base = await this.toolboxWith(context, binding);
     // Official execute timeout is seconds; retain five seconds for its terminal receipt.
     const timeoutMs = Math.min(14000, timeoutSeconds * 1000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
     const physicalKey = daytonaPhysicalProfileKey(binding);
-    const payload = { version: 1, op, profileKey: physicalKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash, ...(upload ? { upload } : {}) };
+    const payload = { version: 1, op, profileKey: physicalKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash, ...(upload ? { upload } : {}), ...(runtimeProtocol === 2 ? { runtimeProtocol: 2 } : {}) };
     const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
     if (encoded.length > 32768) return fail('daytona_runtime_invalid');
     const command = `sudo -n runuser -u otcbrowser -- python3 -I /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
     const png = op === 'execute' && action?.type === 'capture' && action.request.type === 'screenshot' && (!action.request.format || action.request.format === 'png');
     const receipt = await this.processWith(context, base, binding, command, timeoutMs, png);
+    // Only the V2 dispatcher promises these exact negative ACKs were emitted
+    // before any effect. Nonzero exits and all other receipts stay unknown.
+    if (runtimeProtocol === 2 && receipt.version === 1 && receipt.ok === false && receipt.beforeEffect === true && typeof receipt.code === 'string'
+      && ['mission_busy', 'human_active', 'other_missions_active'].includes(receipt.code)
+      && Object.keys(receipt).length === 4 && Object.keys(receipt).every(key => ['version', 'ok', 'code', 'beforeEffect'].includes(key))) return fail('daytona_operation_busy');
     if (receipt.version !== 1 || receipt.ok !== true || receipt.profileKey !== physicalKey || receipt.profilePath !== binding.profilePath || (sessionId !== undefined && receipt.sessionId !== sessionId)) return fail('daytona_runtime_invalid');
     const result = record(receipt.result);
     if ((op === 'probe' || op === 'open') && (result.ready !== true || result.cdpLoopback !== true || result.profileVerified !== true)) return fail('daytona_runtime_unavailable');
     if (op === 'release' && result.released !== true) return fail('daytona_runtime_invalid');
     return result;
   }
-  private async runtime(binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18): Promise<unknown> {
+  private async runtime(binding: DaytonaBinding, op: 'probe' | 'open' | 'execute' | 'release' | 'checkpoint' | 'human_pause' | 'human_resume', sessionId?: string, action?: CloudBrowserAction, principalHash?: string, timeoutSeconds = 18, runtimeProtocol?: 2): Promise<unknown> {
     assertDaytonaBinding(binding);
-    return this.bounded(context => this.runtimeWith(context, binding, op, sessionId, action, principalHash, timeoutSeconds));
+    return this.bounded(context => this.runtimeWith(context, binding, op, sessionId, action, principalHash, timeoutSeconds, undefined, runtimeProtocol));
   }
   private async transfer(binding: DaytonaBinding, session: DaytonaMission, action: Extract<CloudBrowserAction, { type: 'upload' | 'capture' }>, seconds: number, principal: string): Promise<BrowserCaptureMetadata | BrowserFileTransferReceipt> {
     if (action.type === 'upload' && !this.options.files || action.type === 'capture' && (!this.options.captures || action.request.type !== 'screenshot' || action.request.format && action.request.format !== 'png')) return fail('daytona_action_unsupported');
@@ -149,7 +154,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
         validator: this.options.validator, remote: {
         run: async (target, mission, typedAction, descriptor, remaining, subject) => {
           this.assertMission(target, mission, subject); const context = guarded(remaining);
-          const result = await this.runtimeWith(context, target, 'execute', mission.sessionId, typedAction, subject, seconds, descriptor);
+          const result = await this.runtimeWith(context, target, 'execute', mission.sessionId, typedAction, subject, seconds, descriptor, mission.runtimeProtocol);
           context.remaining(); return result;
         },
         upload: async (target, mission, path, body, remaining, subject) => {
@@ -181,13 +186,21 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   async probe(binding: DaytonaBinding): Promise<DaytonaRuntimeReadiness> {
     const result = record(await this.runtime(binding, 'probe'));
     const pid = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+    let multiMission: Pick<DaytonaRuntimeReadiness, 'runtimeProtocol' | 'multiMissionReady'> = {};
+    if (result.runtimeProtocol !== undefined || result.multiMissionReady !== undefined) {
+      if (result.runtimeProtocol !== 2 || typeof result.multiMissionReady !== 'boolean' || result.profileKey !== daytonaPhysicalProfileKey(binding) || result.profilePath !== binding.profilePath) return fail('daytona_runtime_invalid');
+      multiMission = { runtimeProtocol: 2, multiMissionReady: result.multiMissionReady };
+    }
     if (result.checkpointReady === true) {
       if (result.profileKey !== daytonaPhysicalProfileKey(binding) || result.profilePath !== binding.profilePath || result.encryptedKeyringUnlocked !== true || !pid(result.browserPid) || !pid(result.supervisorPid)) return fail('daytona_runtime_invalid');
-      return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: true, browserPid: result.browserPid, supervisorPid: result.supervisorPid };
+      return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: true, browserPid: result.browserPid, supervisorPid: result.supervisorPid, ...multiMission };
     }
-    return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: false };
+    return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: false, ...multiMission };
   }
-  async openMission(binding: DaytonaBinding, logicalSessionId: string): Promise<void> { await this.runtime(binding, 'open', logicalSessionId); }
+  async openMission(binding: DaytonaBinding, logicalSessionId: string, options: { runtimeProtocol?: 2 } = {}): Promise<void> {
+    if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'runtimeProtocol') || 'runtimeProtocol' in options && options.runtimeProtocol !== 2) return fail('owner_forbidden');
+    await this.runtime(binding, 'open', logicalSessionId, undefined, undefined, 18, options.runtimeProtocol);
+  }
   async execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<CloudBrowserExecutionResult | BrowserCaptureMetadata | BrowserFileTransferReceipt> {
     this.assertMission(binding, session, principalHash);
     const checked = validateCloudBrowserAction(action);
@@ -197,7 +210,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
       let url: URL; try { url = new URL(checked.url); } catch { return fail('destination_forbidden'); }
       if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return fail('destination_forbidden');
     }
-    const result = record(await this.runtime(binding, 'execute', session.sessionId, checked, principalHash, timeoutSeconds));
+    const result = record(await this.runtime(binding, 'execute', session.sessionId, checked, principalHash, timeoutSeconds, session.runtimeProtocol));
     if ((result.url !== null && (typeof result.url !== 'string' || result.url.length > 2048)) || (result.title !== null && (typeof result.title !== 'string' || result.title.length > 1024)) || typeof result.visibleText !== 'string' || result.visibleText.length > 20000) return fail('daytona_runtime_invalid');
     if (typeof result.url === 'string') { let url: URL; try { url = new URL(result.url); } catch { return fail('daytona_runtime_invalid'); } if (!['https:', 'http:', 'about:'].includes(url.protocol) || (url.protocol === 'about:' && url.href !== 'about:blank') || url.username || url.password) return fail('destination_forbidden'); }
     let pageReceipt: BrowserPageReceipt | undefined;
@@ -213,14 +226,32 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   async checkpoint(binding: DaytonaBinding, session?: DaytonaMission): Promise<void> {
     assertDaytonaBinding(binding); if (!session) return fail('owner_forbidden'); assertDaytonaMission(session);
     if (session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || session.profileKey !== binding.profileKey || session.sandboxId !== binding.sandboxId || session.phase !== 'ACTIVE' || session.expiresAt <= Date.now()) return fail('owner_forbidden');
-    const result = record(await this.runtime(binding, 'checkpoint', session.sessionId, undefined, binding.ownerSubjectHash));
+    const result = record(await this.runtime(binding, 'checkpoint', session.sessionId, undefined, binding.ownerSubjectHash, 18, session.runtimeProtocol));
     const pid = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
     if (result.checkpointed !== true || result.gracefulClosed !== true || result.keyringSessionRetained !== true || result.cdpLoopback !== true || result.profileVerified !== true || result.tabsReset !== true || result.profileKey !== daytonaPhysicalProfileKey(binding) || result.profilePath !== binding.profilePath || result.sessionId !== session.sessionId || result.principalHash !== binding.ownerSubjectHash || !pid(result.browserPidBefore) || !pid(result.browserPidAfter) || result.browserPidBefore === result.browserPidAfter || !pid(result.supervisorPid)) return fail('daytona_checkpoint_unverified');
   }
   async releaseMission(binding: DaytonaBinding, session: DaytonaMission): Promise<void> {
     assertDaytonaBinding(binding); assertDaytonaMission(session);
     if (session.profileKey !== binding.profileKey || session.sandboxId !== binding.sandboxId || session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash) return fail('owner_forbidden');
-    await this.runtime(binding, 'release', session.sessionId);
+    await this.runtime(binding, 'release', session.sessionId, undefined, undefined, 18, session.runtimeProtocol);
+  }
+  private assertHumanMission(binding: DaytonaBinding, session: DaytonaMission): void {
+    assertDaytonaBinding(binding); assertDaytonaMission(session);
+    // Handoff persists suppression/unknown before pause and retains it until
+    // revoke+checkpoint+resume succeed. Those flags must not bypass cleanup.
+    if (session.runtimeProtocol !== 2 || session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || session.profileKey !== binding.profileKey || session.sandboxId !== binding.sandboxId || session.phase !== 'ACTIVE' || session.expiresAt <= Date.now()) return fail('owner_forbidden');
+  }
+  async pauseAutomation(binding: DaytonaBinding, session: DaytonaMission): Promise<{ paused: true }> {
+    this.assertHumanMission(binding, session);
+    const result = record(await this.runtime(binding, 'human_pause', session.sessionId, undefined, binding.ownerSubjectHash, 18, 2));
+    if (result.paused !== true) return fail('daytona_human_pause_unverified');
+    return { paused: true };
+  }
+  async resumeAutomation(binding: DaytonaBinding, session: DaytonaMission): Promise<{ resumed: true }> {
+    this.assertHumanMission(binding, session);
+    const result = record(await this.runtime(binding, 'human_resume', session.sessionId, undefined, binding.ownerSubjectHash, 18, 2));
+    if (result.resumed !== true) return fail('daytona_human_resume_unverified');
+    return { resumed: true };
   }
   private viewer(): DaytonaViewerGrantPort { return this.options.viewer ?? fail('daytona_viewer_unavailable'); }
   private grant(value: ViewerGrant, expectedHandle?: string): ViewerGrant {
