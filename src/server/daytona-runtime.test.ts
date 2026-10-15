@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import Fastify from 'fastify';
 import { createDaytonaRuntimeController } from './daytona-runtime.js';
@@ -8,12 +8,14 @@ import type { DaytonaViewerGrantRecord, DaytonaViewerGrantStore } from '../tools
 import { EncryptedDaytonaViewerGrantPort } from '../tools/browser-daytona/viewer-grants.js';
 import { DaytonaBrowserService } from '../tools/browser-daytona/service.js';
 import { daytonaViewerGrantBindingHash, daytonaViewerPhysicalScopeHash } from '../tools/browser-daytona/viewer-grant-store.js';
+import type { DaytonaViewerTicket, DaytonaViewerTicketStore } from './daytona-viewer-service.js';
+import type { DaytonaViewerService } from './daytona-viewer.js';
 
 const SESSION = randomUUID();
 const env = { DAYTONA_BROWSER_ENABLED: 'true', DAYTONA_BROWSER_API_BASE_URL: 'https://app.daytona.io/api', DAYTONA_BROWSER_ORGANIZATION_ID: '501db94e-10ee-4bc8-9cca-23c793c67524', DAYTONA_BROWSER_SANDBOX_ID: '11111111-1111-4111-8111-111111111111', DAYTONA_VIEWER_GRANT_KEY_BASE64: randomBytes(32).toString('base64'), DAYTONA_BROWSER_VIEWER_CONTROL_SHA256: '17f61b92692760ae7908a3987b593180bed0e8bf2f9a52afb1fa80d9489dcce2', DAYTONA_BROWSER_API_TOKEN: 'SERVER_ONLY_PRIVATE_TEST_TOKEN', CLOUD_BROWSER_DDB_TABLE: 'browser-table', DAYTONA_BROWSER_PREVIEW_DOMAIN: 'proxy.daytona.works', DAYTONA_BROWSER_PREVIEW_PORT: '6080', DAYTONA_BROWSER_PREVIEW_PATH: '/vnc.html', DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS: '["https://proxy.app.daytona.io"]' };
 function fixture(overrides: NodeJS.ProcessEnv = {}) {
   const calls: string[] = [];
-  const state = { checkpoint: true, lookupError: false, scopeError: false, scopeErrors: new Set<string>(), scopeReads: [] as string[], scopeGrants: new Map<string, DaytonaViewerGrantRecord>(), ticks: [] as (() => void)[], scheduleFails: false, uploadConfigured: false, captureConfigured: false, sandbox: env.DAYTONA_BROWSER_SANDBOX_ID, scheduled: 0, cancelled: 0, tick: undefined as (() => void) | undefined, session: null as DaytonaMission | null };
+  const state = { checkpoint: true, lookupError: false, scopeError: false, scopeErrors: new Set<string>(), scopeReads: [] as string[], scopeGrants: new Map<string, DaytonaViewerGrantRecord>(), tickets: new Map<string, DaytonaViewerTicket>(), ticketTransitions: [] as string[], ticks: [] as (() => void)[], scheduleFails: false, uploadConfigured: false, captureConfigured: false, sandbox: env.DAYTONA_BROWSER_SANDBOX_ID, scheduled: 0, cancelled: 0, tick: undefined as (() => void) | undefined, session: null as DaytonaMission | null };
   const store: DaytonaBrowserStore = {
     loadBinding: async profileKey => ({ provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: state.sandbox, profileKey, profilePath: `/home/otcbrowser/.local/share/otchealth-browser/${profileKey}/chromium`, readinessReceiptSha256: 'b'.repeat(64) }), createBinding: async () => false,
     loadSession: async () => { calls.push('load'); if (state.lookupError) throw new Error('private-store-error'); return state.session; },
@@ -28,7 +30,8 @@ function fixture(overrides: NodeJS.ProcessEnv = {}) {
     viewerGrant: async () => { throw new Error('no grant'); }, readViewerGrant: async () => { throw new Error('no read'); }, revokeViewerGrant: async () => { throw new Error('no revoke'); },
   };
   const grants: DaytonaViewerGrantStore = { reserve: async () => { throw new Error('no mint'); }, load: async handle => [...state.scopeGrants.values()].find(row => row.grantHandle === handle) ?? null, compareAndSwap: async () => { throw new Error('no write'); }, readPhysicalScope: async scope => { calls.push('scope'); state.scopeReads.push(scope); if (state.scopeError || state.scopeErrors.has(scope)) throw new Error('PRIVATE_BACKEND_ERROR'); return state.scopeGrants.get(scope)?.grantHandle ?? null; } };
-  const controller = createDaytonaRuntimeController({ env: { ...env, ...overrides }, createGrantStore: () => grants, createStore: () => { calls.push('store'); return store; }, createProvider: options => { assert.equal(options.organizationId, env.DAYTONA_BROWSER_ORGANIZATION_ID); state.uploadConfigured = typeof options.files?.forUpload === 'function'; state.captureConfigured = typeof options.captures?.createCapture === 'function'; if (!Object.hasOwn(overrides, 'DAYTONA_BROWSER_PREVIEW_PATH')) assert.ok(options.viewer instanceof EncryptedDaytonaViewerGrantPort); calls.push('provider'); return provider; },
+  const tickets: DaytonaViewerTicketStore = { create: async (hash, row) => { if (state.tickets.has(hash)) return false; state.tickets.set(hash, structuredClone(row)); return true; }, load: async hash => structuredClone(state.tickets.get(hash) ?? null), transition: async (hash, phase, row) => { const current = state.tickets.get(hash); if (current?.phase !== phase || row.version !== current.version + 1) return false; state.ticketTransitions.push(row.phase); state.tickets.set(hash, structuredClone(row)); return true; }, acquireMissionLease: async () => true, ownsMissionLease: async () => true, releaseMissionLease: async () => {} };
+  const controller = createDaytonaRuntimeController({ env: { ...env, ...overrides }, createTickets: () => tickets, createGrantStore: () => grants, createStore: () => { calls.push('store'); return store; }, createProvider: options => { assert.equal(options.organizationId, env.DAYTONA_BROWSER_ORGANIZATION_ID); state.uploadConfigured = typeof options.files?.forUpload === 'function'; state.captureConfigured = typeof options.captures?.createCapture === 'function'; if (!Object.hasOwn(overrides, 'DAYTONA_BROWSER_PREVIEW_PATH')) assert.ok(options.viewer instanceof EncryptedDaytonaViewerGrantPort); calls.push('provider'); return provider; },
     scheduleTick: (tick, milliseconds) => { assert.equal(milliseconds, 1000); if (state.scheduleFails) throw new Error('PRIVATE_SCHEDULER_ERROR'); state.scheduled++; state.tick = tick; state.ticks.push(tick); return () => { state.cancelled++; }; }, onWatchdogStatus: () => {} });
   return { controller, calls, state };
 }
@@ -213,4 +216,37 @@ test('one durable unknown viewer scope remains fenced without suppressing anothe
   await assert.rejects(runtime.browser.readiness('cto', 'profile-one', 'a'.repeat(64)));
   assert.equal(f.state.scopeGrants.get(scopeHash)!.phase, 'MINTING');
   f.controller.shutdown();
+});
+test('a degraded target worker refuses exchange and resume before the durable ticket phase changes', async () => {
+  for (const phase of ['NEW', 'EXCHANGED'] as const) {
+    const f = fixture(pool), token = 'A'.repeat(43), hash = createHash('sha256').update(token).digest('hex'), handle = randomUUID(), expiresAt = Date.now() + 60000;
+    f.state.sandbox = SECOND;
+    f.state.session = { provider: 'daytona', sessionId: SESSION, owner: 'cto', ownerSubjectHash: 'a'.repeat(64), profileKey: 'profile-one', sandboxId: SECOND, expiresAt, actionsUsed: 0, actionBudget: 10, effectUnknown: false, phase: 'ACTIVE', ...(phase === 'EXCHANGED' ? { viewerGrantHandle: handle, viewerExpiresAt: expiresAt, sensitiveOutputSuppressed: true } : {}) };
+    f.state.tickets.set(hash, { owner: 'cto', principalHash: 'a'.repeat(64), sessionId: SESSION, expiresAt, phase, version: 0, ...(phase === 'EXCHANGED' ? { grantHandle: handle, grantExpiresAt: expiresAt } : {}) });
+    f.state.scopeErrors.add(daytonaViewerPhysicalScopeHash(env.DAYTONA_BROWSER_ORGANIZATION_ID, SECOND));
+    await f.controller.initialize(); const runtime = (await f.controller.adapter.get())!;
+    const viewers = (runtime as unknown as { viewers: DaytonaViewerService }).viewers;
+    await assert.rejects(phase === 'NEW' ? viewers.exchange(token) : viewers.resume(token));
+    assert.equal(f.state.tickets.get(hash)!.phase, phase); assert.deepEqual(f.state.ticketTransitions, []);
+    f.controller.shutdown();
+  }
+});
+test('the separate sealed cleanup boundary completes and expires exact tickets while admission is opted out', async t => {
+  const effects: string[] = [];
+  t.mock.method(DaytonaBrowserService.prototype, 'stop', async () => { effects.push('stop'); });
+  t.mock.method(DaytonaBrowserService.prototype, 'completeHumanInput', async () => { effects.push('complete'); return { status: 'saved', human_input_revoked: true } as const; });
+  for (const operation of ['complete', 'expire'] as const) {
+    const f = fixture({ ...pool, DAYTONA_BROWSER_ENABLED: undefined }), token = 'B'.repeat(43), hash = createHash('sha256').update(token).digest('hex'), handle = randomUUID(), expiresAt = Date.now() + (operation === 'expire' ? -1000 : 60000);
+    f.state.sandbox = SECOND;
+    f.state.session = { provider: 'daytona', sessionId: SESSION, owner: 'cto', ownerSubjectHash: 'a'.repeat(64), profileKey: 'profile-one', sandboxId: SECOND, expiresAt, actionsUsed: 0, actionBudget: 10, effectUnknown: false, phase: 'ACTIVE', viewerGrantHandle: handle, viewerExpiresAt: expiresAt, sensitiveOutputSuppressed: true };
+    f.state.tickets.set(hash, { owner: 'cto', principalHash: 'a'.repeat(64), sessionId: SESSION, expiresAt, phase: 'EXCHANGED', version: 0, grantHandle: handle, grantExpiresAt: expiresAt });
+    assert.equal(await f.controller.initialize(), false); assert.equal(await f.controller.adapter.get(), undefined);
+    const runtime = (await f.controller.adapter.forSession(SESSION))!;
+    const viewers = (runtime as unknown as { viewers: DaytonaViewerService }).viewers;
+    const receipt = await viewers[operation](token);
+    assert.equal(receipt.human_input_revoked, true);
+    assert.equal(f.state.tickets.get(hash)!.phase, operation === 'complete' ? 'SAVED' : 'EXPIRED');
+    assert.equal(f.state.scheduled, 0); f.controller.shutdown();
+  }
+  assert.deepEqual(effects, ['complete', 'stop']);
 });

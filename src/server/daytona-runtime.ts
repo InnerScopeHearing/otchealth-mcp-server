@@ -8,7 +8,7 @@ import { EncryptedDaytonaViewerGrantPort } from '../tools/browser-daytona/viewer
 import { DynamoDaytonaViewerGrantStore, type DaytonaViewerGrantStore } from '../tools/browser-daytona/viewer-grant-store.js';
 import { DaytonaViewerExpiryController, type DaytonaViewerExpiryResult } from '../tools/browser-daytona/viewer-expiry.js';
 import type { DaytonaGatewayAdapter, DaytonaGatewayRuntime } from '../tools/browser-cloud-gateway/index.js';
-import { DaytonaViewerHandoffService, DynamoDaytonaViewerTicketStore, type DaytonaViewerTicketStore } from './daytona-viewer-service.js';
+import { DaytonaViewerHandoffService, DynamoDaytonaViewerTicketStore, type DaytonaViewerMissionBoundary, type DaytonaViewerTicketStore } from './daytona-viewer-service.js';
 import { registerDaytonaViewerRoutes, type DaytonaViewerOptions, type DaytonaViewerService } from './daytona-viewer.js';
 import { createConfiguredDaytonaArtifactPorts } from './daytona-artifact-ports.js';
 
@@ -147,16 +147,26 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
       const readiness = await browser.readiness(caller, session.profileKey, principal); if (readiness.checkpointReady !== true) fail('daytona_checkpoint_unavailable');
     };
     const tickets = dependencies.createTickets?.() ?? new DynamoDaytonaViewerTicketStore({ tableName: table(), region: region() });
-    const handoff = new DaytonaViewerHandoffService(tickets, {
+    const missions: DaytonaViewerMissionBoundary = {
       loadSession: id => store.loadSession(id),
       getViewerGrant: async (caller, id, principal, seconds) => { await grantPreflight(caller, id, principal); return service.getViewerGrant(caller, id, principal, seconds); },
       resumeViewerGrant: async (caller, id, principal, handle) => { await approvedSession(caller, id, principal); return service.resumeViewerGrant(caller, id, principal, handle); }, completeHumanInput: service.completeHumanInput.bind(service), stop: service.stop.bind(service),
-    });
+    };
+    // Admission must reject an unhealthy target inside owned(), BEFORE the
+    // ticket CAS. Another healthy worker cannot strand this ticket in ISSUING
+    // or RESUMING on an otherwise proven no-provider-effect refusal.
+    const handoff = new DaytonaViewerHandoffService(tickets, { ...missions, loadSession: async id => {
+      const session = await store.loadSession(id); if (session === null) return null; assertDaytonaMission(session);
+      if (session.sessionId !== id) fail('owner_forbidden');
+      const binding = await approved(session.owner, session.profileKey, session.ownerSubjectHash);
+      if (binding.sandboxId !== session.sandboxId) fail('owner_forbidden'); return session;
+    } });
+    const cleanup = new DaytonaViewerHandoffService(tickets, missions);
     const viewers = { issue: async (...args: Parameters<DaytonaViewerHandoffService['issue']>) => { await approvedSession(args[0], args[1], args[2]); return handoff.issue(...args); },
       exchange: async (token: string) => { requireExpiry(); return handoff.exchange(token); }, resume: async (token: string) => { requireExpiry(); return handoff.resume(token); },
       // Cleanup remains possible after scheduler/config degradation. Health is
       // NOT a human-input-revoked receipt; the core still owns all mission fences.
-      complete: handoff.complete.bind(handoff), expire: handoff.expire.bind(handoff) };
+      complete: cleanup.complete.bind(cleanup), expire: cleanup.expire.bind(cleanup) };
     return instance = { browser, viewers, capabilities: Object.freeze({ checkpoint: provider.capabilities.checkpoint === true, humanViewer: Boolean(viewer) }) };
   };
   const runTick = async (sandboxId: string, expiry: DaytonaViewerExpiryController) => {
