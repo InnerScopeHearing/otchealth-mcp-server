@@ -248,7 +248,7 @@ export class BrowserFileBroker {
   async forUpload(owner: string, fileId: string, principalHash?: string): Promise<{ record: BrowserFileRecord; body: Uint8Array }> {
     const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
-    if (stored.record.status !== 'ready') fail('file_not_ready', 'File is not cleared for browser transfer.');
+    if (stored.record.status !== 'ready' || (this.options.scanner && stored.record.scanReceipt === undefined)) fail('file_not_ready', 'File is not cleared for browser transfer.');
     return { record: cloneRecord(stored.record), body: new Uint8Array(stored.body) };
   }
 
@@ -256,7 +256,7 @@ export class BrowserFileBroker {
     const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     const record = stored.record;
-    if (record.status !== 'ready') fail('file_not_ready', 'File is not cleared for upload verification.');
+    if (record.status !== 'ready' || (this.options.scanner && record.scanReceipt === undefined)) fail('file_not_ready', 'File is not cleared for upload verification.');
     if (!evidence || evidence.completed !== true) fail('upload_partial', 'Upload is partial; receipt does not confirm a complete transfer.');
     if (!Number.isSafeInteger(evidence.byteLength) || evidence.byteLength !== record.byteLength) fail('upload_size_mismatch', 'Upload receipt byte length does not match the staged file.');
     if (typeof evidence.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(evidence.sha256) || evidence.sha256 !== record.sha256) fail('upload_hash_mismatch', 'Upload receipt hash does not match the staged file.');

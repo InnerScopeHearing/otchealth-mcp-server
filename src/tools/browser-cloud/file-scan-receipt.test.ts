@@ -20,3 +20,14 @@ test('exact clean receipt is retained as metadata and old bare clean verdicts ca
     assert.equal(row.status, 'quarantined'); await assert.rejects(files.forUpload('cto', row.id));
   }
 });
+
+test('enabling a scanner never grandfathers old unscanned ready files or silently rescans/promotes records', async () => {
+  let stored: { record: BrowserFileRecord; body: Uint8Array } | null = null; let scans = 0;
+  const store = { put: async (_key: string, record: BrowserFileRecord, body: Uint8Array) => { stored = { record: structuredClone(record), body }; }, get: async () => stored };
+  const old = new BrowserFileBroker(store, { allowValidatedText: true, now: () => now });
+  const row = await old.stage('cto', { filename: 'safe.txt', contentType: 'text/plain', body }); assert.equal(row.status, 'ready');
+  const current = new BrowserFileBroker(store, { scanner: { scan: async () => { scans++; return good; } }, now: () => now });
+  await assert.rejects(current.forUpload('cto', row.id));
+  await assert.rejects(current.verifyUpload('cto', row.id, { completed: true, sha256, byteLength: body.length }));
+  assert.equal(scans, 0); assert.equal((await current.get('cto', row.id)).scanReceipt, undefined);
+});
