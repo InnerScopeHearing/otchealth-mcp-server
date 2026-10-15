@@ -4,6 +4,7 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import Fastify from 'fastify';
 import type { WebsiteLoginService } from '../tools/browser-cloud/website-login-service.js';
+import { CloudBrowserError } from '../tools/browser-cloud/contract.js';
 import { registerIntercomLoginRoutes } from './intercom-login.js';
 import { registerWebsiteLoginRoutes } from './website-login.js';
 
@@ -205,6 +206,21 @@ test('website resume failures are sanitized and cannot recreate or exchange a lo
   } finally { await app.close(); }
 });
 
+test('website recovery identifies only proven pre-claim conflicts as retryable without exposing private errors', async () => {
+  for (const action of ['resume', 'complete'] as const) {
+    for (const code of ['login_operation_busy', 'session_busy', 'provider_timeout']) {
+      const app = routes({ [action]: async () => { throw new CloudBrowserError(code, `private ${TOKEN} ${LIVE_URL}`); } });
+      try {
+        const response = await app.inject({ method: 'POST', url: `/browser/connect/${action}`, headers: postHeaders({ cookie: `${COOKIE}=${TOKEN}` }), payload: { handoff_id: HANDOFF_ID } });
+        assert.equal(response.statusCode, 409);
+        assert.deepEqual(response.json(), { error: code === 'login_operation_busy' ? 'login_operation_busy' : action === 'resume' ? 'login_link_expired_or_unavailable' : 'website_sign_in_not_confirmed' });
+        assert.equal(response.headers['set-cookie'], undefined);
+        assert.equal(response.body.includes(TOKEN), false); assert.equal(response.body.includes(LIVE_URL), false);
+      } finally { await app.close(); }
+    }
+  }
+});
+
 test('website reload stores only its tab-local nonsecret selector, resumes without a bearer fragment, and clears terminal selectors', async () => {
   const app = routes();
   try {
@@ -230,7 +246,7 @@ test('website reload stores only its tab-local nonsecret selector, resumes witho
           assert.equal(init.body, JSON.stringify({ handoff_id: HANDOFF_ID }));
           assert.equal(init.body.includes(TOKEN), false);
           if (path.endsWith('/resume') && options.resumeRejected) return { ok: false, status: 409 };
-          if (path.endsWith('/complete')) { assert.equal(stored.size, 0); return { ok: true, json: async () => ({ status: 'saved', workspace_id: 'linkedin' }) }; }
+          if (path.endsWith('/complete')) { assert.equal(stored.size, 1, 'retain recovery selector until the server outcome is known'); return { ok: true, json: async () => ({ status: 'saved', workspace_id: 'linkedin' }) }; }
           assert.equal(path, '/browser/connect/resume');
           return { ok: true, json: async () => ({ ...EXCHANGE_RESULT, handoff_id: HANDOFF_ID }) };
         },

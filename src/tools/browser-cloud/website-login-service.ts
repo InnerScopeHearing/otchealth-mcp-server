@@ -177,7 +177,9 @@ export class WebsiteLoginService {
     if (!ticket || ticket.phase !== 'EXCHANGED' || ticket.expiresAt <= this.now()) throw new CloudBrowserError('login_expired', 'The login session is expired or already completed.');
     const lockOwner = `website-login:${randomUUID()}`;
     // Covers the existing bounded control transfer, verification and provider-profile save calls.
-    if (!await this.store.acquireSessionLock(ticket.sessionId, lockOwner, this.now() + fenceMs)) throw new CloudBrowserError('session_busy', 'Another sign-in operation is in progress for this session.');
+    // This distinct code proves Done has not claimed its ticket. Generic
+    // session_busy can also occur later, after a provider profile save.
+    if (!await this.store.acquireSessionLock(ticket.sessionId, lockOwner, this.now() + fenceMs)) throw new CloudBrowserError('login_operation_busy', 'Another sign-in operation is in progress for this session.');
     try {
       const current = await this.tickets.load(hash);
       if (!current || current.phase !== 'EXCHANGED' || current.expiresAt !== ticket.expiresAt || current.sessionId !== ticket.sessionId

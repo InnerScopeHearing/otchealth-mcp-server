@@ -113,6 +113,7 @@ function renderLoginPage(nonce: string, website = false): string {
     let clipboardArmed = false;
     ${website ? 'let terminal = false;' : ''}
     ${website ? 'let handoffId = null;' : ''}
+    ${website ? "const loginOperationBusy = Symbol('login_operation_busy');" : ''}
     ${website ? `const handoffStorageKey = 'otc.website-login.handoff:/browser/connect';
     function storedHandoff() {
       try {
@@ -210,7 +211,10 @@ function renderLoginPage(nonce: string, website = false): string {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       if (!response.ok) {
-        ${website ? "if (path === '/browser/connect/resume' && response.status === 409) forgetHandoff();" : ''}
+        ${website ? `let failure = null;
+        try { failure = await response.json(); } catch { /* No private server details are shown. */ }
+        if (response.status === 409 && failure?.error === 'login_operation_busy') throw loginOperationBusy;
+        if (path === '/browser/connect/resume' && response.status === 409) forgetHandoff();` : ''}
         throw new Error('request_failed');
       }
       return response.json();
@@ -277,7 +281,11 @@ function renderLoginPage(nonce: string, website = false): string {
             }).catch(() => show('The secure sign-in window could not connect. Request a new link or try again later.', true));
           },
         });
-      } catch {
+      } catch (error) {
+        ${website ? `if (error === loginOperationBusy) {
+          show('Another sign-in operation is in progress. Wait for it to finish, then reload this page to reconnect.', true);
+          return;
+        }` : ''}
         show('This sign-in link is unavailable or expired. Request a new link from your administrator.', true);
       }
     }
@@ -286,18 +294,26 @@ function renderLoginPage(nonce: string, website = false): string {
       if (busy || done.disabled${website ? ' || terminal' : ''}) return;
       busy = true;
       closeClipboard();
-      ${website ? 'terminal = true;' : ''}
-      ${website ? 'forgetHandoff();' : ''}
       done.disabled = true;
       show('Saving your secure sign-in…');
       try {
         const result = await postJson('${routePrefix}/complete'${website ? ', { handoff_id: handoffId }' : ''});
         if (result.status !== 'saved' || typeof result.workspace_id !== 'string') throw new Error('save_failed');
+        ${website ? 'terminal = true;\n        forgetHandoff();' : ''}
         connection?.disconnect();
         connection = null;
         stage.style.display = 'none';
         show('${savedMessage}');
-      } catch {
+      } catch (error) {
+        ${website ? `if (error === loginOperationBusy) {
+          // This is the only response that proves the server did not claim Done.
+          done.disabled = !connection;
+          show('Another sign-in operation is in progress. Wait for it to finish, then select Done again or reload this page.', true);
+          return;
+        }
+        // A failed or lost save acknowledgement is terminal: never replay it.
+        terminal = true;
+        forgetHandoff();` : ''}
         show('${saveError}', true);
         done.disabled = ${website};
       } finally {

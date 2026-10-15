@@ -20,7 +20,7 @@ function fixture() {
   const leaseUntil = new Map<string, number>();
   const sessionLocks = new Map<string, string>();
   const state = { creates: 0, starts: 0, saves: 0, stops: 0, signs: 0, prepares: 0, verifies: 0, profileReads: 0, releaseCalls: 0, releaseFailures: 0, clockOffsetMs: 0, profileLookupAdvanceMs: 0, prepareAdvanceMs: 0, signAdvanceMs: 0, stealLeaseBeforeRenew: false, startError: undefined as Error | undefined, sessionExpiresAt: undefined as number | undefined, streamFailure: undefined as 'DISABLED' | 'ENABLED' | undefined, streamReceiptMismatch: false, createFails: false, prepareFails: false, verifyFails: false, saveFails: false, stopFails: false, suppressionSeen: [] as boolean[], names: [] as string[], startOptions: [] as Array<{ maxSeconds: number; actionBudget: number | undefined }>, leaseExpiries: [] as number[], leaseRenewals: [] as number[], signedLifetimes: [] as number[], flow: [] as string[], streamRequests: [] as Array<{ browserIdentifier: string; sessionId: string; streamStatus: 'DISABLED' | 'ENABLED'; suppressed: boolean }>, verifyEndpoints: [] as string[] };
-  const controls = { streamGate: undefined as Promise<void> | undefined, gateStatus: 'DISABLED' as 'DISABLED' | 'ENABLED', enteredStream: undefined as (() => void) | undefined, onAcquire: undefined as (() => void) | undefined, fencedEndpointWrites: 0, lockDeadlines: [] as number[], unknownWrites: [] as boolean[], failUnknownWrite: undefined as 'intent' | 'clear' | 'clear-after-commit' | undefined };
+  const controls = { streamGate: undefined as Promise<void> | undefined, gateStatus: 'DISABLED' as 'DISABLED' | 'ENABLED', enteredStream: undefined as (() => void) | undefined, onAcquire: undefined as (() => void) | undefined, stopError: undefined as Error | undefined, fencedEndpointWrites: 0, lockDeadlines: [] as number[], unknownWrites: [] as boolean[], failUnknownWrite: undefined as 'intent' | 'clear' | 'clear-after-commit' | undefined };
   const store = {
     loadProfile: async (id: string) => { state.profileReads++; state.clockOffsetMs += state.profileLookupAdvanceMs; return profiles.get(id) ?? null; },
     createProfileIntent: async (profile: CloudBrowserProfile) => {
@@ -53,7 +53,7 @@ function fixture() {
     beginSensitiveOutputSuppression: async (_owner: string, id: string) => { sessions.get(id)!.sensitiveOutputSuppressed = true; },
     endSensitiveOutputSuppression: async () => { throw new Error('login must not unmask'); },
     savePersistentProfile: async (_owner: string, id: string) => { state.flow.push('save-profile'); state.saves++; state.suppressionSeen.push(sessions.get(id)!.sensitiveOutputSuppressed === true); if (state.saveFails) throw new Error('save acknowledgement unknown'); },
-    stop: async (_owner: string, id: string) => { assert.equal(sessionLocks.has(id), false, 'stop must acquire its own lock after the viewer fence is released'); state.flow.push('stop'); state.stops++; state.suppressionSeen.push(sessions.get(id)?.sensitiveOutputSuppressed === true); if (state.stopFails) throw new Error('stop unavailable'); sessions.delete(id); },
+    stop: async (_owner: string, id: string) => { assert.equal(sessionLocks.has(id), false, 'stop must acquire its own lock after the viewer fence is released'); state.flow.push('stop'); state.stops++; state.suppressionSeen.push(sessions.get(id)?.sensitiveOutputSuppressed === true); if (controls.stopError) throw controls.stopError; if (state.stopFails) throw new Error('stop unavailable'); sessions.delete(id); },
   } as unknown as CloudBrowserService;
   const provider = {
     createProfile: async (input: { name: string }) => { state.creates++; state.names.push(input.name); if (state.createFails) throw new Error('create acknowledgement unknown'); return { providerProfileId: `${input.name}-created123` }; },
@@ -140,7 +140,8 @@ test('viewer resume and Done serialize on the same real session fence without co
   const gateEntered = new Promise<void>(resolve => { entered = resolve; }); h.controls.enteredStream = entered;
   const resumed = h.service.resume(token);
   await gateEntered;
-  await assert.rejects(h.service.complete(token), hasCode('session_busy'));
+  await assert.rejects(h.service.complete(token), hasCode('login_operation_busy'));
+  await assert.rejects(h.service.resume(token), hasCode('login_operation_busy'));
   assert.equal([...h.tickets.values()][0]!.phase, 'EXCHANGED'); assert.equal(h.state.stops, 0);
   release(); await resumed;
   h.controls.streamGate = undefined;
@@ -149,6 +150,16 @@ test('viewer resume and Done serialize on the same real session fence without co
   assert.equal(h.controls.fencedEndpointWrites, 1);
   assert.equal(h.sessionLocks.size, 0);
   assert.equal(h.state.saves, 1); assert.equal(h.state.stops, 1);
+});
+
+test('a post-save session_busy is terminal and can never be mistaken for a pre-claim login conflict', async () => {
+  const h = fixture(); const started = await h.service.start('cto', key, 'linkedin'); const token = tokenFrom(started.login_url); await h.service.exchange(token);
+  h.controls.stopError = new CloudBrowserError('session_busy', 'Cleanup is busy after the save.');
+  await assert.rejects(h.service.complete(token), hasCode('session_busy'));
+  assert.equal(h.state.saves, 1); assert.equal([...h.tickets.values()][0]!.phase, 'FAILED');
+  await assert.rejects(h.service.complete(token), hasCode('login_expired'));
+  assert.equal(h.state.saves, 1); assert.equal(h.sessions.get(started.session_id)?.sensitiveOutputSuppressed, true);
+  assert.equal(h.leases.has(started.profile_id), true);
 });
 
 test('ambiguous resumed input transfer or rejected durable clear fences later resume and Done without retry or guessed cleanup', async () => {

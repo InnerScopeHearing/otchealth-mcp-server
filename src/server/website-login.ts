@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { WebsiteLoginService } from '../tools/browser-cloud/website-login-service.js';
+import { CloudBrowserError } from '../tools/browser-cloud/contract.js';
 import { registerWebsiteLoginPage } from './intercom-login-page.js';
 
 const ORIGIN = 'https://mcp.otchealth.app';
@@ -64,7 +65,8 @@ export function registerWebsiteLoginRoutes(app: FastifyInstance, runtime: () => 
       const result = await runtime().complete(token);
       reply.header('set-cookie', `${COOKIE}-${body.handoff_id}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
       return reply.send(result);
-    } catch {
+    } catch (error) {
+      if (error instanceof CloudBrowserError && error.code === 'login_operation_busy') return reply.code(409).send({ error: 'login_operation_busy' });
       return reply.code(409).send({ error: 'website_sign_in_not_confirmed' });
     }
   });
@@ -82,7 +84,8 @@ export function registerWebsiteLoginRoutes(app: FastifyInstance, runtime: () => 
       const result = await runtime().resume(token);
       // The original HttpOnly cookie and ticket expiry remain authoritative.
       return reply.send({ ...result, handoff_id: body.handoff_id });
-    } catch {
+    } catch (error) {
+      if (error instanceof CloudBrowserError && error.code === 'login_operation_busy') return reply.code(409).send({ error: 'login_operation_busy' });
       return reply.code(409).send({ error: 'login_link_expired_or_unavailable' });
     }
   });
