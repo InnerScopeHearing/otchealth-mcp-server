@@ -274,3 +274,76 @@ test('capture bytes use immutable versioned browser-cloud S3 keys and owner-chec
   assert.equal(await store.loadCapture('cto', metadata.id, 'a'.repeat(64)), null, 'capture must expire at its TTL boundary even before DynamoDB TTL cleanup');
   assert.equal(calls.filter(call => call.method === 'GET').length, s3ReadsBeforeExpiry, 'expired capture must be rejected before fetching S3 bytes');
 });
+
+function signedHeaderNames(headers: Headers): string[] {
+  const authorization = headers.get('authorization');
+  assert.ok(authorization, 'AWS request must include its SigV4 Authorization header');
+  const signedHeaders = /SignedHeaders=([^,]+)/.exec(authorization)?.[1];
+  assert.ok(signedHeaders, 'SigV4 Authorization must declare SignedHeaders');
+  return signedHeaders.split(';');
+}
+
+test('capture S3 PUT sends and signs the exact body SHA-256 header', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  process.env.CLOUD_BROWSER_ARTIFACT_BUCKET = 'synthetic-browser-artifacts';
+  const body = Buffer.from([0, 255, 1, 2, 3]);
+  const sha256 = (await import('node:crypto')).createHash('sha256').update(body).digest('hex');
+  const calls: Array<{ url: string; method: string; headers: Headers; body?: Buffer }> = [];
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (url, init) => {
+    const method = init?.method ?? '';
+    calls.push({ url: String(url), method, headers: new Headers(init?.headers), ...(init?.body ? { body: Buffer.from(init.body as Uint8Array) } : {}) });
+    if (String(url).includes('dynamodb.')) return new Response('{}');
+    return new Response('', { headers: { 'x-amz-version-id': 'put-version-1' } });
+  }, () => 1000);
+
+  await store.createCapture('cto', '123e4567-e89b-42d3-a456-426614174000', { contentType: 'image/png', body, sha256 }, 1000);
+
+  const put = calls.find((call) => call.method === 'PUT' && call.url.includes('.s3.'));
+  assert.ok(put, 'capture body must be sent to S3');
+  assert.deepEqual(put.body, body, 'the signed payload must be the exact capture bytes');
+  assert.equal(put.headers.get('x-amz-content-sha256'), sha256);
+  const signed = signedHeaderNames(put.headers);
+  assert.ok(signed.includes('x-amz-content-sha256'));
+  assert.ok(signed.includes('if-none-match'));
+  assert.ok(signed.includes('x-amz-server-side-encryption'));
+});
+
+test('capture S3 GET sends and signs the empty payload hash with the immutable version query', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  process.env.CLOUD_BROWSER_ARTIFACT_BUCKET = 'synthetic-browser-artifacts';
+  const body = Buffer.from([0, 255, 1, 2, 3]);
+  const sha256 = (await import('node:crypto')).createHash('sha256').update(body).digest('hex');
+  const emptySha256 = (await import('node:crypto')).createHash('sha256').update(new Uint8Array()).digest('hex');
+  let item: Record<string, any> | undefined;
+  const calls: Array<{ url: string; method: string; headers: Headers }> = [];
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (url, init) => {
+    const method = init?.method ?? '';
+    const call = { url: String(url), method, headers: new Headers(init?.headers) };
+    calls.push(call);
+    if (String(url).includes('dynamodb.') && method === 'POST') {
+      const request = JSON.parse(String(init?.body));
+      if (request.Item) { item = request.Item; return new Response('{}'); }
+      if (request.ConsistentRead) return new Response(JSON.stringify({ Item: item }));
+    }
+    if (method === 'PUT') return new Response('', { headers: { 'x-amz-version-id': 's3-version-1' } });
+    if (method === 'GET') return new Response(body, { headers: { 'x-amz-version-id': 's3-version-1', 'content-type': 'image/png', 'content-length': String(body.length) } });
+    return new Response('{}');
+  }, () => 1000);
+  const metadata = await store.createCapture('cto', '123e4567-e89b-42d3-a456-426614174000', { contentType: 'image/png', body, sha256 }, 1000);
+
+  const loaded = await store.loadCapture('cto', metadata.id);
+
+  assert.deepEqual(loaded?.body, body);
+  const get = calls.find((call) => call.method === 'GET' && call.url.includes('.s3.'));
+  assert.ok(get, 'capture bytes must be read from S3');
+  assert.match(get.url, /\?versionId=s3-version-1$/);
+  assert.equal(get.headers.get('x-amz-content-sha256'), emptySha256);
+  assert.ok(signedHeaderNames(get.headers).includes('x-amz-content-sha256'));
+});
+
