@@ -224,11 +224,13 @@ test('website viewer clears the fragment before exchange, uses textContent for s
       const status = { textContent: '', dataset: { error: '' } };
       const stage = { style: { display: '' } };
       const done = { disabled: true, addEventListener: (_event: string, callback: () => Promise<void>) => { click = callback; } };
+      const clipboardButton = { disabled: true, addEventListener: () => {} };
+      const clipboardStatus = { textContent: '', dataset: {} };
       const connection = { disconnect: () => { disconnects += 1; } };
       runInNewContext(script, {
         URL, URLSearchParams,
         history: { replaceState: (_state: unknown, _title: string, url: string) => { assert.equal(url, '/browser/connect'); cleared = true; } },
-        document: { getElementById: (id: string) => ({ title, status, stage, done })[id as 'title' | 'status' | 'stage' | 'done'] },
+        document: { getElementById: (id: string) => ({ title, status, stage, done, 'clipboard-copy': clipboardButton, 'clipboard-paste': clipboardButton, 'clipboard-status': clipboardStatus } as Record<string, unknown>)[id] },
         window: {
           location: { hash: `#token=${TOKEN}`, pathname: '/browser/connect' },
           addEventListener: () => {},
