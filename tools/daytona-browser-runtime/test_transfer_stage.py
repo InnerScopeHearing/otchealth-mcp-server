@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import sys
+import subprocess
 from unittest.mock import patch
 from types import SimpleNamespace
 sys.path.insert(0,str(Path(__file__).parent))
@@ -79,5 +80,16 @@ class StageTests(unittest.TestCase):
         result = stage.run_payload(base64.urlsafe_b64encode(json.dumps(dict(self.payload,unexpected='PRIVATE')).encode()).decode())
         self.assertFalse(result['ok']); self.assertNotIn('PRIVATE',json.dumps(result))
         self.assertEqual(stage.run_payload('not-json'),dict(version=1,ok=False,code='invalid_stage_payload'))
+    def test_actual_isolated_root_helper_uses_only_owned_sibling_capacity_module(self):
+        code='''import importlib.util,json,os,sys,types
+sys.modules['browser_transfers']=types.ModuleType('browser_transfers')
+spec=importlib.util.spec_from_file_location('owned_stage',sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+values=json.load(sys.stdin)
+print(json.dumps(module.promote(values['payload'],profiles=values['profiles'],staging=values['staging'],browser_uid=os.getuid(),browser_gid=os.getgid(),source_uids={os.getuid()})))
+'''
+        result=subprocess.run([sys.executable,'-I','-c',code,str(PATH)],input=json.dumps(dict(payload=self.payload,profiles=str(self.profiles),staging=str(self.staging))),text=True,capture_output=True,cwd=self.root,env={**os.environ,'PYTHONPATH':str(self.root)},timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(json.loads(result.stdout)['staged']); self.assertFalse(self.source.exists())
+        self.assertEqual((self.upload/self.transfer/'notes.txt').read_bytes(),self.body)
 
 if __name__ == '__main__': unittest.main()

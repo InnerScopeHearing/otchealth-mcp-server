@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -101,6 +102,17 @@ class Transfers(unittest.TestCase):
         cdp.message=message
         cdp.command('Target.getTargets'); cdp.command('Page.captureScreenshot',{'format':'png'},'owned'); cdp.command('Accessibility.getFullAXTree',{},'owned')
         self.assertEqual(limits,[4*1024*1024,6*1024*1024,4*1024*1024])
+
+    def test_actual_isolated_dispatcher_ignores_ambient_module_and_pythonpath(self):
+        payload=dict(version=1,op='execute',profileKey='profile-one',profilePath='/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium',timeoutMs=1000,sessionId='11111111-1111-4111-8111-111111111111',principalHash='a'*64,action={'type':'upload','selector':'#file','fileId':'11111111-1111-4111-8111-111111111111'},upload=self.descriptor)
+        code='''import importlib.util,json,sys,types
+sys.modules['browser_transfers']=types.ModuleType('browser_transfers')
+spec=importlib.util.spec_from_file_location('owned_dispatcher',sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+print(json.dumps(module.validate_payload(json.load(sys.stdin))))
+'''
+        result=subprocess.run([sys.executable,'-I','-c',code,str(Path(__file__).with_name('browser-dispatcher.py'))],input=json.dumps(payload),text=True,capture_output=True,cwd=self.base,env={**os.environ,'PYTHONPATH':str(self.base)},timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout),payload)
 
     def test_actual_sandboxed_chromium_native_single_file_directory_paths_and_png(self):
         binary = shutil.which('chromium') or shutil.which('chromium-browser')

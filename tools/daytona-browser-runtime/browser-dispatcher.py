@@ -45,6 +45,18 @@ def fail(code):
     raise DispatchError(code)
 
 
+def trusted_transfers():
+    # -I intentionally removes the script directory. Load only this installed,
+    # root-owned sibling, never cwd, PYTHONPATH or an ambient sys.modules entry.
+    path = Path(__file__).resolve(strict=True).with_name('browser_transfers.py')
+    if path.is_symlink(): raise ImportError('transfer_module_unavailable')
+    spec = importlib.util.spec_from_file_location('_otc_owned_browser_transfers', path)
+    if not spec or not spec.loader: raise ImportError('transfer_module_unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def integer(value, low, high):
     return type(value) is int and low <= value <= high
 
@@ -125,8 +137,7 @@ def validate_payload(payload):
         validate_action(payload.get('action'))
         if payload['action']['type'] == 'upload':
             try:
-                from browser_transfers import validate_descriptor
-                validate_descriptor(payload.get('upload'))
+                trusted_transfers().validate_descriptor(payload.get('upload'))
             except (ImportError, ValueError): fail('invalid_upload_descriptor')
         elif 'upload' in payload: fail('invalid_payload')
     elif 'action' in payload: fail('invalid_payload')
@@ -614,22 +625,22 @@ def dispatch(payload):
             receipt.write(state)
             kind = payload['action']['type']
             if kind in ('capture', 'upload'):
-                from browser_transfers import TransferError, attach_upload, capture_png, file_input, prepare_upload_tree
+                transfers = trusted_transfers()
                 target, attached_session = selected(cdp, state)
                 before_url = current_url(cdp, attached_session)
                 try:
                     if kind == 'capture':
                         snapshot(cdp, attached_session, target)  # Same private-frame/password-output guards.
-                        result = capture_png(cdp, attached_session)
+                        result = transfers.capture_png(cdp, attached_session)
                     else:
                         descriptor = payload['upload']
-                        node = file_input(cdp, attached_session, payload['action']['selector'], descriptor)
+                        node = transfers.file_input(cdp, attached_session, payload['action']['selector'], descriptor)
                         if descriptor['phase'] == 'prepare':
-                            prepare_upload_tree(profile.parent, descriptor)
+                            transfers.prepare_upload_tree(profile.parent, descriptor)
                             result = {'prepared': True}
-                        else: result = attach_upload(cdp, attached_session, node, profile.parent, descriptor)
+                        else: result = transfers.attach_upload(cdp, attached_session, node, profile.parent, descriptor)
                     if current_url(cdp, attached_session) != before_url: fail('navigation_changed')
-                except TransferError as error: fail(error.code)
+                except transfers.TransferError as error: fail(error.code)
             else: action_result = execute(cdp, state, payload['action'])
             if kind in ('capture', 'upload'): pass
             elif kind == 'snapshot': result = action_result

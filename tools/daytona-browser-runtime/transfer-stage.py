@@ -3,6 +3,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,16 @@ UUID = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z',re.I)
 FIELDS = {'version','profileKey','sessionId','principalHash','transferId','relativePath','stagingId','byteLength','sha256'}
 class StageError(ValueError): pass
 def fail(): raise StageError('stage_unconfirmed')
+
+def trusted_transfers():
+    # Fixed root-owned installed sibling only, including under python3 -I.
+    # Do not widen sys.path or trust an ambient browser_transfers module.
+    path=Path(__file__).resolve(strict=True).with_name('browser_transfers.py')
+    if path.is_symlink(): raise ImportError('transfer_module_unavailable')
+    spec=importlib.util.spec_from_file_location('_otc_owned_browser_transfers',path)
+    if not spec or not spec.loader: raise ImportError('transfer_module_unavailable')
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
 
 def validate(value):
     if not isinstance(value,dict) or set(value)!=FIELDS or type(value['version']) is not int or value['version']!=1: fail()
@@ -78,8 +89,7 @@ def promote(value,*,profiles,staging,browser_uid,browser_gid,source_uids):
         receipt=json.loads(read_file(base,'mission.json',{browser_uid},65536),object_pairs_hook=unique_object)
         if not isinstance(receipt,dict) or receipt.get('sessionId')!=value['sessionId'] or receipt.get('principalHash')!=value['principalHash'] or receipt.get('uncertain') is not False: fail()
         parent=os.open('uploads',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=base); opened.append(parent); private(parent,{browser_uid},True)
-        from browser_transfers import check_upload_capacity
-        check_upload_capacity(parent,value['byteLength'],browser_uid)
+        trusted_transfers().check_upload_capacity(parent,value['byteLength'],browser_uid)
         for part in [value['transferId']]+value['relativePath'].split('/')[:-1]:
             parent=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent); opened.append(parent); private(parent,{browser_uid},True)
         target=os.open(value['relativePath'].split('/')[-1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent); opened.append(target)
