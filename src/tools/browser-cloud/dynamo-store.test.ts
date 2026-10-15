@@ -18,6 +18,36 @@ const ownedSession: CloudBrowserSession = {
   effectUnknown: true,
 };
 
+test('fenced session endpoint updates persist the new provider endpoint without replacing or removing its session lock', async t => {
+  const prior = { ...process.env }; t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  let item: Record<string, any> = {}; let update: Record<string, any> = {};
+  const store = new DynamoCloudBrowserSessionStore('synthetic-state', 'us-east-1', async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (request.Item) item = { ...request.Item, lockOwner: { S: 'viewer-lock' }, lockUntil: { N: '200000' } };
+    if (request.UpdateExpression) { update = request; if (request.ExpressionAttributeValues[':automationEndpoint']) item.automationEndpoint = request.ExpressionAttributeValues[':automationEndpoint']; }
+    return new Response(JSON.stringify(request.ConsistentRead ? { Item: item } : {}));
+  });
+  await store.saveSession(ownedSession);
+  const endpoint = 'wss://provider.example/updated-automation';
+  await store.saveSessionUnderLock({ ...ownedSession, automationEndpoint: endpoint }, 'viewer-lock');
+  assert.equal((await store.loadSession(ownedSession.sessionId))?.automationEndpoint, endpoint);
+  assert.equal(update.ConditionExpression, 'lockOwner = :owner');
+  assert.doesNotMatch(update.UpdateExpression, /REMOVE|lockOwner\s*=|lockUntil\s*=/);
+  assert.deepEqual(item.lockOwner, { S: 'viewer-lock' }); assert.deepEqual(item.lockUntil, { N: '200000' });
+});
+
+test('fenced endpoint writes reject malformed, credential-bearing or signed URLs before DynamoDB', async t => {
+  const prior = { ...process.env }; t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access'; process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  let requests = 0;
+  const store = new DynamoCloudBrowserSessionStore('synthetic-state', 'us-east-1', async () => { requests++; return new Response('{}'); });
+  for (const endpoint of ['not-a-url', 'https://provider.example/stream', 'wss://user:private@provider.example/stream', 'wss://provider.example/stream?signature=private', 'wss://provider.example/stream#private']) {
+    await assert.rejects(store.saveSessionUnderLock({ ...ownedSession, automationEndpoint: endpoint }, 'viewer-lock'), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'session_state_invalid');
+  }
+  assert.equal(requests, 0);
+});
+
 test('persistent profile intents support every eligible company lane and remain create-only', async (t) => {
   const prior = { ...process.env };
   t.after(() => { process.env = prior; });

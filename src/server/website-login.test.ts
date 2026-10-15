@@ -108,8 +108,10 @@ test('website completion requires a strict handoff selector and its unique cooki
 test('concurrent website login tabs keep independent cookies and completing one never selects or clears the other ticket', async () => {
   const secondToken = 'B'.repeat(43);
   const completed: string[] = [];
+  const resumed: string[] = [];
   const app = routes({
     exchange: async token => ({ ...EXCHANGE_RESULT, workspace_id: token === TOKEN ? 'linkedin' : 'wefunder', site_label: token === TOKEN ? 'LinkedIn' : 'WeFunder' }),
+    resume: async token => { resumed.push(token); return EXCHANGE_RESULT; },
     complete: async token => {
       assert.equal(completed.includes(token), false);
       completed.push(token);
@@ -129,6 +131,13 @@ test('concurrent website login tabs keep independent cookies and completing one 
     const firstCookie = String(first.headers['set-cookie']).split(';')[0]!;
     const secondCookie = String(second.headers['set-cookie']).split(';')[0]!;
     assert.notEqual(firstCookie.split('=')[0], secondCookie.split('=')[0]);
+    for (const handoffId of [firstId, secondId]) {
+      const resumedViewer = await app.inject({ method: 'POST', url: '/browser/connect/resume', headers: postHeaders({ cookie: `${secondCookie}; ${firstCookie}` }), payload: { handoff_id: handoffId } });
+      assert.equal(resumedViewer.statusCode, 200);
+      assert.equal(resumedViewer.json().handoff_id, handoffId);
+      assert.equal(resumedViewer.headers['set-cookie'], undefined);
+    }
+    assert.deepEqual(resumed, [TOKEN, secondToken]);
     const firstDone = await app.inject({ method: 'POST', url: '/browser/connect/complete', headers: postHeaders({ cookie: `${secondCookie}; ${firstCookie}` }), payload: { handoff_id: firstId } });
     assert.equal(firstDone.statusCode, 200);
     assert.deepEqual(completed, [TOKEN]);
@@ -155,6 +164,87 @@ test('website completion returns no private error details', async () => {
   } finally {
     await app.close();
   }
+});
+
+test('website viewer resume requires exact origin, strict selector and its unique matching cookie without renewing it', async () => {
+  const resumed: string[] = [];
+  const app = routes({ resume: async token => { resumed.push(token); return EXCHANGE_RESULT; } });
+  try {
+    for (const headers of [{}, postHeaders({ origin: 'https://evil.example' }), postHeaders({ 'sec-fetch-site': 'cross-site' })]) {
+      const response = await app.inject({ method: 'POST', url: '/browser/connect/resume', headers, payload: { handoff_id: HANDOFF_ID } });
+      assert.equal(response.statusCode, 403);
+    }
+    for (const cookie of ['', `${INTERCOM_COOKIE}=${TOKEN}`, `${COOKIE}=${'B'.repeat(43)}`, `${COOKIE}=${TOKEN}; ${COOKIE}=${TOKEN}`]) {
+      const response = await app.inject({ method: 'POST', url: '/browser/connect/resume', headers: postHeaders({ cookie }), payload: { handoff_id: HANDOFF_ID } });
+      assert.equal(response.statusCode, 400);
+    }
+    for (const payload of [{}, [], { handoff_id: 'bad' }, { handoff_id: HANDOFF_ID, token: TOKEN }]) {
+      const response = await app.inject({ method: 'POST', url: '/browser/connect/resume', headers: postHeaders({ cookie: `${COOKIE}=${TOKEN}` }), payload });
+      assert.equal(response.statusCode, 400);
+    }
+    assert.deepEqual(resumed, []);
+    const success = await app.inject({ method: 'POST', url: '/browser/connect/resume', headers: postHeaders({ cookie: `${COOKIE}=${TOKEN}` }), payload: { handoff_id: HANDOFF_ID } });
+    assert.equal(success.statusCode, 200);
+    assert.deepEqual(success.json(), { ...EXCHANGE_RESULT, handoff_id: HANDOFF_ID });
+    assert.deepEqual(resumed, [TOKEN]);
+    assert.equal(success.headers['set-cookie'], undefined, 'resume must not extend the HttpOnly cookie lifetime');
+    assert.equal(success.body.includes(TOKEN), false);
+    assert.match(success.headers['cache-control'] ?? '', /no-store/);
+  } finally { await app.close(); }
+});
+
+test('website resume failures are sanitized and cannot recreate or exchange a login ticket', async () => {
+  let exchanges = 0;
+  const app = routes({ exchange: async () => { exchanges++; return EXCHANGE_RESULT; }, resume: async () => { throw new Error(`private ${TOKEN} ${LIVE_URL}`); } });
+  try {
+    const failed = await app.inject({ method: 'POST', url: '/browser/connect/resume', headers: postHeaders({ cookie: `${COOKIE}=${TOKEN}` }), payload: { handoff_id: HANDOFF_ID } });
+    assert.equal(failed.statusCode, 409);
+    assert.deepEqual(failed.json(), { error: 'login_link_expired_or_unavailable' });
+    assert.equal(failed.body.includes(TOKEN), false); assert.equal(failed.body.includes(LIVE_URL), false);
+    assert.equal(failed.headers['set-cookie'], undefined); assert.equal(exchanges, 0);
+  } finally { await app.close(); }
+});
+
+test('website reload stores only its tab-local nonsecret selector, resumes without a bearer fragment, and clears terminal selectors', async () => {
+  const app = routes();
+  try {
+    const page = await app.inject({ method: 'GET', url: '/browser/connect' });
+    const script = page.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
+    const stored = new Map<string, string>(); const calls: string[] = [];
+    let doneClick: (() => Promise<void>) | undefined;
+    async function load(hash: string, options: { storageDenied?: boolean; resumeRejected?: boolean } = {}) {
+      const node = () => ({ disabled: true, textContent: '', dataset: {}, style: {}, addEventListener: () => {} });
+      const nodes: Record<string, any> = Object.fromEntries(['title', 'status', 'stage', 'done', 'clipboard-copy', 'clipboard-paste', 'clipboard-status'].map(id => [id, node()]));
+      nodes.done.addEventListener = (_event: string, handler: () => Promise<void>) => { doneClick = handler; };
+      const storage = {
+        getItem: (key: string) => { if (options.storageDenied) throw new Error('SecurityError'); return stored.get(key) ?? null; },
+        setItem: (key: string, value: string) => { if (options.storageDenied) throw new Error('SecurityError'); assert.match(value, /^[a-f0-9]{32}$/); assert.equal(value.includes(TOKEN), false); stored.set(key, value); },
+        removeItem: (key: string) => { if (options.storageDenied) throw new Error('SecurityError'); stored.delete(key); },
+      };
+      runInNewContext(script, {
+        URL, URLSearchParams, history: { replaceState: () => {} }, document: { getElementById: (id: string) => nodes[id] },
+        window: { location: { hash, pathname: '/browser/connect' }, sessionStorage: storage, addEventListener: () => {}, dcv: { LogLevel: { SILENT: 0 }, setLogLevel: () => {}, authenticate: (_url: string, callbacks: any) => callbacks.success(null, [{ sessionId: 'same-session', authToken: 'private-viewer-auth' }]), connect: async () => ({ disconnect: () => {} }) } },
+        fetch: async (path: string, init: { body?: string }) => {
+          calls.push(path);
+          if (path.endsWith('/exchange')) { assert.equal(init.body, JSON.stringify({ token: TOKEN })); return { ok: true, json: async () => ({ ...EXCHANGE_RESULT, handoff_id: HANDOFF_ID }) }; }
+          assert.equal(init.body, JSON.stringify({ handoff_id: HANDOFF_ID }));
+          assert.equal(init.body.includes(TOKEN), false);
+          if (path.endsWith('/resume') && options.resumeRejected) return { ok: false, status: 409 };
+          if (path.endsWith('/complete')) { assert.equal(stored.size, 0); return { ok: true, json: async () => ({ status: 'saved', workspace_id: 'linkedin' }) }; }
+          assert.equal(path, '/browser/connect/resume');
+          return { ok: true, json: async () => ({ ...EXCHANGE_RESULT, handoff_id: HANDOFF_ID }) };
+        },
+      });
+      await new Promise(resolve => setImmediate(resolve)); return nodes;
+    }
+    await load(`#token=${TOKEN}`);
+    assert.deepEqual([...stored.values()], [HANDOFF_ID]);
+    const reloaded = await load(''); assert.equal(reloaded.done.disabled, false);
+    assert.deepEqual(calls, ['/browser/connect/exchange', '/browser/connect/resume']);
+    assert.ok(doneClick); await doneClick(); assert.equal(stored.size, 0);
+    await load(`#token=${TOKEN}`); await load('', { resumeRejected: true }); assert.equal(stored.size, 0);
+    const denied = await load(`#token=${TOKEN}`, { storageDenied: true }); assert.equal(denied.done.disabled, false);
+  } finally { await app.close(); }
 });
 
 test('website viewer reuses the original SDK asset route and headers without changing Intercom copy or endpoints', async () => {
@@ -196,7 +286,7 @@ test('website viewer reuses the original SDK asset route and headers without cha
     assert.equal(registered.filter(route => route.url.includes('/assets/') && route.url !== '/browser/login/assets/*').length, 0);
     // Fastify also creates a HEAD route for this one GET registration.
     assert.equal(registered.filter(route => route.url === '/browser/login/assets/*').length, 2);
-    for (const url of ['/browser/connect/exchange', '/browser/connect/complete']) {
+    for (const url of ['/browser/connect/exchange', '/browser/connect/complete', '/browser/connect/resume']) {
       const route = registered.find(route => route.url === url);
       assert.equal(route?.bodyLimit, 256);
       assert.deepEqual(route?.config, { rateLimit: { max: 10, timeWindow: '1 minute' } });

@@ -18,15 +18,27 @@ function fixture() {
   const tickets = new Map<string, WebsiteLoginTicket>();
   const leases = new Map<string, string>();
   const leaseUntil = new Map<string, number>();
+  const sessionLocks = new Map<string, string>();
   const state = { creates: 0, starts: 0, saves: 0, stops: 0, signs: 0, prepares: 0, verifies: 0, profileReads: 0, releaseCalls: 0, releaseFailures: 0, clockOffsetMs: 0, profileLookupAdvanceMs: 0, prepareAdvanceMs: 0, signAdvanceMs: 0, stealLeaseBeforeRenew: false, startError: undefined as Error | undefined, sessionExpiresAt: undefined as number | undefined, streamFailure: undefined as 'DISABLED' | 'ENABLED' | undefined, streamReceiptMismatch: false, createFails: false, prepareFails: false, verifyFails: false, saveFails: false, stopFails: false, suppressionSeen: [] as boolean[], names: [] as string[], startOptions: [] as Array<{ maxSeconds: number; actionBudget: number | undefined }>, leaseExpiries: [] as number[], leaseRenewals: [] as number[], signedLifetimes: [] as number[], flow: [] as string[], streamRequests: [] as Array<{ browserIdentifier: string; sessionId: string; streamStatus: 'DISABLED' | 'ENABLED'; suppressed: boolean }>, verifyEndpoints: [] as string[] };
+  const controls = { streamGate: undefined as Promise<void> | undefined, gateStatus: 'DISABLED' as 'DISABLED' | 'ENABLED', enteredStream: undefined as (() => void) | undefined, onAcquire: undefined as (() => void) | undefined, fencedEndpointWrites: 0, lockDeadlines: [] as number[], unknownWrites: [] as boolean[], failUnknownWrite: undefined as 'intent' | 'clear' | 'clear-after-commit' | undefined };
   const store = {
     loadProfile: async (id: string) => { state.profileReads++; state.clockOffsetMs += state.profileLookupAdvanceMs; return profiles.get(id) ?? null; },
     createProfileIntent: async (profile: CloudBrowserProfile) => {
       if (profiles.has(profile.profileId)) return false;
       profiles.set(profile.profileId, { ...profile }); return true;
     },
-    loadSession: async (id: string) => sessions.get(id) ?? null,
+    loadSession: async (id: string) => { const session = sessions.get(id); return session ? { ...session } : null; },
     saveSession: async (session: CloudBrowserSession) => { state.flow.push(session.automationEndpoint.endsWith('/resumed') ? 'persist-resumed' : 'persist-prepared'); sessions.set(session.sessionId, { ...session }); },
+    acquireSessionLock: async (id: string, owner: string, until: number) => { controls.onAcquire?.(); if (sessionLocks.has(id)) return false; controls.lockDeadlines.push(until); sessionLocks.set(id, owner); return true; },
+    releaseSessionLock: async (id: string, owner: string) => { if (sessionLocks.get(id) === owner) sessionLocks.delete(id); },
+    saveSessionUnderLock: async (session: CloudBrowserSession, owner: string) => {
+      assert.equal(sessionLocks.get(session.sessionId), owner);
+      if ((controls.failUnknownWrite === 'intent' && session.effectUnknown === true) || (controls.failUnknownWrite === 'clear' && session.effectUnknown === false)) throw new Error('session store acknowledgement unknown');
+      if (session.effectUnknown !== undefined) controls.unknownWrites.push(session.effectUnknown);
+      if (session.automationEndpoint.endsWith('/resumed')) { controls.fencedEndpointWrites++; state.flow.push('persist-resumed'); }
+      sessions.set(session.sessionId, { ...session });
+      if (controls.failUnknownWrite === 'clear-after-commit' && session.effectUnknown === false) throw new Error('committed session clear acknowledgement lost');
+    },
   } as unknown as CloudBrowserStore;
   const browser = {
     saveProfile: async (_owner: string, profile: CloudBrowserProfile) => { profiles.set(profile.profileId, { ...profile }); },
@@ -41,7 +53,7 @@ function fixture() {
     beginSensitiveOutputSuppression: async (_owner: string, id: string) => { sessions.get(id)!.sensitiveOutputSuppressed = true; },
     endSensitiveOutputSuppression: async () => { throw new Error('login must not unmask'); },
     savePersistentProfile: async (_owner: string, id: string) => { state.flow.push('save-profile'); state.saves++; state.suppressionSeen.push(sessions.get(id)!.sensitiveOutputSuppressed === true); if (state.saveFails) throw new Error('save acknowledgement unknown'); },
-    stop: async (_owner: string, id: string) => { state.flow.push('stop'); state.stops++; state.suppressionSeen.push(sessions.get(id)?.sensitiveOutputSuppressed === true); if (state.stopFails) throw new Error('stop unavailable'); sessions.delete(id); },
+    stop: async (_owner: string, id: string) => { assert.equal(sessionLocks.has(id), false, 'stop must acquire its own lock after the viewer fence is released'); state.flow.push('stop'); state.stops++; state.suppressionSeen.push(sessions.get(id)?.sensitiveOutputSuppressed === true); if (state.stopFails) throw new Error('stop unavailable'); sessions.delete(id); },
   } as unknown as CloudBrowserService;
   const provider = {
     createProfile: async (input: { name: string }) => { state.creates++; state.names.push(input.name); if (state.createFails) throw new Error('create acknowledgement unknown'); return { providerProfileId: `${input.name}-created123` }; },
@@ -50,6 +62,7 @@ function fixture() {
       state.flow.push(`stream-${input.streamStatus}`);
       const owned = [...sessions.values()].find(session => session.providerSessionId === input.sessionId);
       state.streamRequests.push({ ...input, suppressed: owned?.sensitiveOutputSuppressed === true });
+      if (controls.streamGate && input.streamStatus === controls.gateStatus) { controls.enteredStream?.(); await controls.streamGate; }
       if (state.streamFailure === input.streamStatus) throw new Error('stream acknowledgement unknown');
       return { ...input, ...(state.streamReceiptMismatch ? { sessionId: 'foreign-provider-session' } : {}), ...(input.streamStatus === 'ENABLED' ? { automationEndpoint: 'wss://synthetic.example/resumed' } : {}) };
     },
@@ -71,9 +84,150 @@ function fixture() {
   } as unknown as WebsiteLoginTicketStore;
   const publicChecks: WebsiteLoginTarget[] = [];
   const make = () => new WebsiteLoginService(store, browser, transport, provider, ticketStore, () => now + state.clockOffsetMs, async target => { publicChecks.push(target); });
-  return { service: make(), make, state, profiles, sessions, tickets, leases, leaseUntil, publicChecks };
+  return { service: make(), make, state, profiles, sessions, tickets, leases, leaseUntil, sessionLocks, controls, publicChecks };
 }
 const tokenFrom = (url: string) => url.split('#token=')[1]!;
+
+test('cookie-authenticated viewer resume reuses the exchanged ticket and original session without extending any lifetime', async () => {
+  const h = fixture();
+  const started = await h.service.start('cto', key, 'linkedin');
+  const token = tokenFrom(started.login_url);
+  await h.service.exchange(token);
+  const originalTicket = { ...[...h.tickets.values()][0]! };
+  const leaseExpiry = h.leaseUntil.get(started.profile_id);
+  const sessionExpiry = h.sessions.get(started.session_id)!.expiresAt;
+  for (const elapsed of [100_000, 400_000, 599_000]) {
+    h.state.clockOffsetMs = elapsed;
+    const viewer = await h.service.resume(token);
+    assert.equal(viewer.status, 'login_required');
+    assert.ok(viewer.expires_at <= originalTicket.expiresAt);
+    assert.ok(viewer.expires_at > now + elapsed);
+    assert.equal(h.controls.lockDeadlines.at(-1), now + elapsed + 120_000);
+    assert.equal(h.sessions.get(started.session_id)!.expiresAt, sessionExpiry);
+    assert.equal(h.sessionLocks.size, 0);
+  }
+  assert.deepEqual([...h.tickets.values()][0], originalTicket);
+  assert.equal(h.leaseUntil.get(started.profile_id), leaseExpiry);
+  assert.equal(h.state.starts, 1); assert.equal(h.state.creates, 1); assert.equal(h.state.saves, 0); assert.equal(h.state.stops, 0);
+  assert.equal(h.state.leaseRenewals.length, 1);
+  assert.equal(h.state.signedLifetimes.at(-1), 1);
+});
+
+test('viewer resume rejects non-exchanged, expired, stopped, foreign-principal and replaced-lease sessions before provider effects', async () => {
+  for (const invalid of ['NEW', 'COMPLETING', 'SAVED', 'FAILED', 'expired-ticket', 'expired-session', 'stopped', 'stop-pending', 'foreign-principal', 'replaced-lease']) {
+    const h = fixture(); const started = await h.service.start('cto', key, 'linkedin'); const token = tokenFrom(started.login_url);
+    if (invalid !== 'NEW') await h.service.exchange(token);
+    const ticket = [...h.tickets.values()][0]!;
+    if (['COMPLETING', 'SAVED', 'FAILED'].includes(invalid)) ticket.phase = invalid as 'COMPLETING' | 'SAVED' | 'FAILED';
+    if (invalid === 'expired-ticket') h.state.clockOffsetMs = 600_001;
+    if (invalid === 'expired-session') h.sessions.get(started.session_id)!.expiresAt = now;
+    if (invalid === 'stopped') h.sessions.get(started.session_id)!.providerStopped = true;
+    if (invalid === 'stop-pending') h.sessions.get(started.session_id)!.providerStopToken = 'unacknowledged-stop-intent';
+    if (invalid === 'foreign-principal') h.sessions.get(started.session_id)!.ownerSubjectHash = 'b'.repeat(64);
+    if (invalid === 'replaced-lease') h.leases.set(started.profile_id, 'new-lease-owner');
+    const requests = h.state.streamRequests.length; const signs = h.state.signs;
+    await assert.rejects(h.service.resume(token));
+    assert.equal(h.state.streamRequests.length, requests, invalid);
+    assert.equal(h.state.signs, signs, invalid);
+    assert.equal(h.state.stops, 0, invalid);
+  }
+});
+
+test('viewer resume and Done serialize on the same real session fence without consuming an unclaimed Done attempt', async () => {
+  const h = fixture(); const started = await h.service.start('cto', key, 'linkedin'); const token = tokenFrom(started.login_url); await h.service.exchange(token);
+  let release!: () => void; let entered!: () => void;
+  h.controls.streamGate = new Promise<void>(resolve => { release = resolve; });
+  const gateEntered = new Promise<void>(resolve => { entered = resolve; }); h.controls.enteredStream = entered;
+  const resumed = h.service.resume(token);
+  await gateEntered;
+  await assert.rejects(h.service.complete(token), hasCode('session_busy'));
+  assert.equal([...h.tickets.values()][0]!.phase, 'EXCHANGED'); assert.equal(h.state.stops, 0);
+  release(); await resumed;
+  h.controls.streamGate = undefined;
+  await h.service.complete(token);
+  assert.equal(h.controls.lockDeadlines.at(-1), now + 300_000);
+  assert.equal(h.controls.fencedEndpointWrites, 1);
+  assert.equal(h.sessionLocks.size, 0);
+  assert.equal(h.state.saves, 1); assert.equal(h.state.stops, 1);
+});
+
+test('ambiguous resumed input transfer or rejected durable clear fences later resume and Done without retry or guessed cleanup', async () => {
+  for (const failure of ['provider', 'mismatch', 'clear']) {
+    const h = fixture(); const started = await h.service.start('cto', key, 'linkedin'); const token = tokenFrom(started.login_url); await h.service.exchange(token);
+    const leaseOwner = h.leases.get(started.profile_id); const leaseExpiry = h.leaseUntil.get(started.profile_id);
+    const sessionExpiry = h.sessions.get(started.session_id)!.expiresAt; const ticket = { ...[...h.tickets.values()][0]! };
+    if (failure === 'provider') h.state.streamFailure = 'DISABLED';
+    if (failure === 'mismatch') h.state.streamReceiptMismatch = true;
+    if (failure === 'clear') h.controls.failUnknownWrite = 'clear';
+    const requests = h.state.streamRequests.length; const signs = h.state.signs;
+    await assert.rejects(h.service.resume(token));
+    assert.deepEqual(h.controls.unknownWrites, [true]);
+    assert.equal(h.state.streamRequests.length, requests + 1);
+    assert.equal(h.sessions.get(started.session_id)!.effectUnknown, true);
+    assert.equal(h.sessions.get(started.session_id)!.sensitiveOutputSuppressed, true);
+    assert.equal(h.sessionLocks.size, 0);
+    h.state.streamFailure = undefined; h.state.streamReceiptMismatch = false; h.controls.failUnknownWrite = undefined;
+    await assert.rejects(h.service.resume(token)); await assert.rejects(h.service.complete(token));
+    assert.equal(h.state.streamRequests.length, requests + 1); assert.equal(h.state.signs, signs);
+    assert.equal(h.state.verifies, 0); assert.equal(h.state.saves, 0); assert.equal(h.state.stops, 0);
+    assert.equal(h.leases.get(started.profile_id), leaseOwner); assert.equal(h.leaseUntil.get(started.profile_id), leaseExpiry);
+    assert.equal(h.sessions.get(started.session_id)!.expiresAt, sessionExpiry);
+    assert.deepEqual([...h.tickets.values()][0], ticket);
+  }
+});
+
+test('lost acknowledgement after a committed clear returns failure without retry and permits only a fresh manually authorized Done', async () => {
+  const h = fixture(); const started = await h.service.start('cto', key, 'linkedin'); const token = tokenFrom(started.login_url); await h.service.exchange(token);
+  const sessionExpiry = h.sessions.get(started.session_id)!.expiresAt;
+  const leaseExpiry = h.leaseUntil.get(started.profile_id); const ticket = { ...[...h.tickets.values()][0]! };
+  h.controls.failUnknownWrite = 'clear-after-commit';
+  const requests = h.state.streamRequests.length; const signs = h.state.signs;
+  await assert.rejects(h.service.resume(token));
+  assert.deepEqual(h.controls.unknownWrites, [true, false]);
+  assert.equal(h.sessions.get(started.session_id)!.effectUnknown, false, 'DISABLED was exactly confirmed before this clear committed');
+  assert.equal(h.state.streamRequests.length, requests + 1); assert.equal(h.state.signs, signs);
+  assert.equal(h.state.verifies, 0); assert.equal(h.state.saves, 0); assert.equal(h.state.stops, 0);
+  assert.equal(h.sessionLocks.size, 0); assert.equal(h.sessions.get(started.session_id)!.sensitiveOutputSuppressed, true);
+  assert.equal(h.sessions.get(started.session_id)!.expiresAt, sessionExpiry); assert.equal(h.leaseUntil.get(started.profile_id), leaseExpiry);
+  assert.deepEqual([...h.tickets.values()][0], ticket);
+  h.controls.failUnknownWrite = undefined;
+  h.sessions.get(started.session_id)!.ownerSubjectHash = 'b'.repeat(64);
+  await assert.rejects(h.service.complete(token));
+  assert.equal(h.state.streamRequests.length, requests + 1); assert.equal([...h.tickets.values()][0]!.phase, 'EXCHANGED');
+  h.sessions.get(started.session_id)!.ownerSubjectHash = ticket.ownerSubjectHash;
+  assert.equal((await h.service.complete(token)).status, 'saved');
+  assert.equal(h.state.streamRequests.length, requests + 2); assert.equal(h.state.streamRequests.at(-1)!.streamStatus, 'ENABLED');
+  assert.equal(h.state.saves, 1); assert.equal(h.state.stops, 1);
+});
+
+test('resume persists its unknown-effect intent before any provider call and aborts when that write fails', async () => {
+  const h = fixture(); const started = await h.service.start('cto', key, 'linkedin'); const token = tokenFrom(started.login_url); await h.service.exchange(token);
+  h.controls.failUnknownWrite = 'intent';
+  const requests = h.state.streamRequests.length; const signs = h.state.signs;
+  await assert.rejects(h.service.resume(token));
+  assert.equal(h.state.streamRequests.length, requests); assert.equal(h.state.signs, signs);
+  assert.equal(h.sessionLocks.size, 0); assert.equal(h.state.stops, 0);
+  assert.equal([...h.tickets.values()][0]!.phase, 'EXCHANGED');
+});
+
+test('Done claimed first and phase or principal changes during lock acquisition fail closed before resumed input control', async () => {
+  const doneFirst = fixture(); const started = await doneFirst.service.start('cto', key, 'linkedin'); const token = tokenFrom(started.login_url); await doneFirst.service.exchange(token);
+  let release!: () => void; let entered!: () => void;
+  doneFirst.controls.gateStatus = 'ENABLED';
+  doneFirst.controls.streamGate = new Promise<void>(resolve => { release = resolve; });
+  const gateEntered = new Promise<void>(resolve => { entered = resolve; }); doneFirst.controls.enteredStream = entered;
+  const completed = doneFirst.service.complete(token); await gateEntered;
+  const before = doneFirst.state.streamRequests.length;
+  await assert.rejects(doneFirst.service.resume(token)); assert.equal(doneFirst.state.streamRequests.length, before);
+  release(); await completed;
+  for (const changed of ['phase', 'principal']) {
+    const h = fixture(); const fresh = await h.service.start('cto', key, 'linkedin'); const raw = tokenFrom(fresh.login_url); await h.service.exchange(raw);
+    h.controls.onAcquire = () => { if (changed === 'phase') [...h.tickets.values()][0]!.phase = 'COMPLETING'; else h.sessions.get(fresh.session_id)!.ownerSubjectHash = 'b'.repeat(64); };
+    const requests = h.state.streamRequests.length;
+    await assert.rejects(h.service.resume(raw));
+    assert.equal(h.state.streamRequests.length, requests); assert.equal(h.sessionLocks.size, 0); assert.equal(h.state.stops, 0);
+  }
+});
 
 test('default handoff keeps its one-hour session and separates session expiry from the ten-minute login ticket', async () => {
   const { service, state, tickets } = fixture();

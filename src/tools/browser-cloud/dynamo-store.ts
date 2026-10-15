@@ -277,14 +277,18 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     });
   }
   async saveSessionUnderLock(session: CloudBrowserSession, lockOwner: string): Promise<void> {
+    let endpoint: URL;
+    try { endpoint = new URL(session.automationEndpoint); } catch { throw new CloudBrowserError('session_state_invalid', 'Browser session endpoint is invalid.'); }
+    if (endpoint.protocol !== 'wss:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new CloudBrowserError('session_state_invalid', 'Browser session endpoint is invalid.');
     const state = { ...pageStateItem(session), ...lifecycleStateItem(session) };
     const values: Record<string, DynamoAttribute> = {
       ":actions": { N: String(session.actionsUsed) },
       ":expires": { N: String(session.expiresAt) },
       ":ttl": { N: sessionTtl(session) },
       ":owner": { S: lockOwner },
+      ":automationEndpoint": { S: session.automationEndpoint },
     };
-    const assignments = ["actionsUsed = :actions", "expiresAt = :expires", "expiresAtEpoch = :ttl"];
+    const assignments = ["actionsUsed = :actions", "expiresAt = :expires", "expiresAtEpoch = :ttl", "automationEndpoint = :automationEndpoint"];
     for (const [attribute, variable] of [
       ["ownedTargetIds", ":targets"],
       ["selectedTargetId", ":selected"],

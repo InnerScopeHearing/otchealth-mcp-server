@@ -113,6 +113,19 @@ function renderLoginPage(nonce: string, website = false): string {
     let clipboardArmed = false;
     ${website ? 'let terminal = false;' : ''}
     ${website ? 'let handoffId = null;' : ''}
+    ${website ? `const handoffStorageKey = 'otc.website-login.handoff:/browser/connect';
+    function storedHandoff() {
+      try {
+        const value = window.sessionStorage.getItem(handoffStorageKey);
+        return typeof value === 'string' && /^[a-f0-9]{32}$/.test(value) ? value : null;
+      } catch { return null; }
+    }
+    function rememberHandoff(value) {
+      try { window.sessionStorage.setItem(handoffStorageKey, value); } catch { /* Initial sign-in works without storage. */ }
+    }
+    function forgetHandoff() {
+      try { window.sessionStorage.removeItem(handoffStorageKey); } catch { /* Storage may be unavailable. */ }
+    }` : ''}
 
     function show(message, isError = false) {
       statusNode.textContent = message;
@@ -196,7 +209,10 @@ function renderLoginPage(nonce: string, website = false): string {
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-      if (!response.ok) throw new Error('request_failed');
+      if (!response.ok) {
+        ${website ? "if (path === '/browser/connect/resume' && response.status === 409) forgetHandoff();" : ''}
+        throw new Error('request_failed');
+      }
       return response.json();
     }
 
@@ -205,15 +221,16 @@ function renderLoginPage(nonce: string, website = false): string {
       const token = fragment.get('token');
       // Remove the one-time link token from browser history before sending it to the server.
       history.replaceState(null, '', window.location.pathname);
-      if (!token || token.length > 8192 || !window.dcv) {
+      ${website ? 'if (token !== null) forgetHandoff();\n      else handoffId = storedHandoff();' : ''}
+      if (${website ? '(!token && !handoffId)' : '!token'} || (token && token.length > 8192) || !window.dcv) {
         show('This sign-in link is unavailable or expired. Request a new link from your administrator.', true);
         return;
       }
       show('Preparing your secure sign-in window…');
       try {
-        const result = await postJson('${routePrefix}/exchange', { token });
+        const result = ${website ? "token !== null ? await postJson('/browser/connect/exchange', { token }) : await postJson('/browser/connect/resume', { handoff_id: handoffId })" : "await postJson('/browser/login/exchange', { token })"};
         if (result.status !== 'login_required' || typeof result.signed_url !== 'string' || !Number.isSafeInteger(result.expires_at) || typeof result.workspace_id !== 'string') throw new Error('invalid_response');
-        ${website ? "if (typeof result.handoff_id !== 'string' || !/^[a-f0-9]{32}$/.test(result.handoff_id)) throw new Error('invalid_response');\n        handoffId = result.handoff_id;" : ''}
+        ${website ? "if (typeof result.handoff_id !== 'string' || !/^[a-f0-9]{32}$/.test(result.handoff_id) || (token === null && result.handoff_id !== handoffId)) throw new Error('invalid_response');\n        handoffId = result.handoff_id;\n        rememberHandoff(handoffId);" : ''}
         ${website ? "if (typeof result.site_label === 'string' && result.site_label) document.getElementById('title').textContent = 'Connect your browser: ' + result.site_label;" : ''}
         const signedUrl = result.signed_url;
         if (!signedUrl.startsWith('https://')) throw new Error('invalid_response');
@@ -270,6 +287,7 @@ function renderLoginPage(nonce: string, website = false): string {
       busy = true;
       closeClipboard();
       ${website ? 'terminal = true;' : ''}
+      ${website ? 'forgetHandoff();' : ''}
       done.disabled = true;
       show('Saving your secure sign-in…');
       try {
