@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CLOUD_BROWSER_KEYS, CloudBrowserError, type CloudBrowserAction } from "./contract.js";
 import type { BrowserPageAction } from "./page-controls.js";
+import { browserDirectoryManifestSchema } from './directory-upload.js';
 
 const coordinate = z.number().finite().min(0).max(10_000);
 const selector = z
@@ -12,6 +13,7 @@ export const cloudBrowserActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("navigate"), url: z.string().url().max(2048) }).strict(),
   z.object({ type: z.literal("snapshot") }).strict(),
   z.object({ type: z.literal("upload"), selector, fileId: z.string().uuid() }).strict(),
+  z.object({ type: z.literal("upload_directory"), selector, files: browserDirectoryManifestSchema }).strict(),
   z.object({ type: z.literal("capture"), request: z.discriminatedUnion("type", [
     z.object({ type: z.literal("screenshot"), format: z.enum(["png", "jpeg"]).optional() }).strict(),
     z.object({ type: z.literal("pdf"), landscape: z.boolean().optional(), printBackground: z.boolean().optional() }).strict(),

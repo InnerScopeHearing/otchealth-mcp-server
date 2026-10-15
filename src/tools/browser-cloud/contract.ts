@@ -25,6 +25,7 @@ export type CloudBrowserAction =
   | { type: "snapshot" }
   | { type: "capture"; request: BrowserCaptureRequest }
   | { type: "upload"; selector: string; fileId: string }
+  | { type: "upload_directory"; selector: string; files: Array<{ fileId: string; relativePath: string }> }
   | {
       type: "press_key";
       key: (typeof CLOUD_BROWSER_KEYS)[number];

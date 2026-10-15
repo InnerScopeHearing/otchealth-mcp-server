@@ -7,7 +7,7 @@ import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
 import { DaytonaBrowserError, daytonaPhysicalProfileKey, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 export type { DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
-import { DaytonaTransferBridge, type DaytonaUploadDescriptor } from './transfer-bridge.js';
+import { DaytonaTransferBridge, type DaytonaUploadDescriptor, type DaytonaDirectoryReceipt } from './transfer-bridge.js';
 import { uploadDaytonaControlledFile, type DaytonaStagePayload } from './toolbox-files.js';
 
 type ViewerGrant = { url: string; expiresAt: number; grantHandle: string };
@@ -64,7 +64,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (!Number.isSafeInteger(this.deadlineMs) || this.deadlineMs < 1 || this.deadlineMs > 20000 || typeof options.resolveApiToken !== 'function') fail('daytona_provider_invalid');
     if (options.files !== undefined && typeof options.files?.forUpload !== 'function' || options.captures !== undefined && typeof options.captures?.createCapture !== 'function' || options.validator !== undefined && typeof options.validator?.validate !== 'function') fail('daytona_provider_invalid');
     this.capabilities = Object.freeze({ typedBrowser: true, upload: options.files !== undefined, capture: options.captures !== undefined, captureFormats: Object.freeze(options.captures ? ['png', 'pdf'] : []), checkpoint: false, publicWebNetworkIsolation: false,
-      actions: Object.freeze(['navigate', 'snapshot', 'click', 'type', 'focus', 'select', 'wait_for', 'press_key', 'scroll', 'mouse_move', 'drag', 'tab_create', 'tab_select', 'tab_close', 'navigate_back', 'navigate_forward', 'reload', 'dialog', ...(options.files ? ['upload'] : []), ...(options.captures ? ['capture'] : [])]), maxActionSeconds: 14 });
+      actions: Object.freeze(['navigate', 'snapshot', 'click', 'type', 'focus', 'select', 'wait_for', 'press_key', 'scroll', 'mouse_move', 'drag', 'tab_create', 'tab_select', 'tab_close', 'navigate_back', 'navigate_forward', 'reload', 'dialog', ...(options.files ? ['upload', 'upload_directory'] : []), ...(options.captures ? ['capture'] : [])]), maxActionSeconds: 14 });
   }
   private async bounded<T>(run: (context: Context) => Promise<T>): Promise<T> {
     const abort = new AbortController(); const until = Date.now() + this.deadlineMs;
@@ -143,8 +143,8 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     assertDaytonaBinding(binding);
     return this.bounded(context => this.runtimeWith(context, binding, op, sessionId, action, principalHash, timeoutSeconds, undefined, runtimeProtocol));
   }
-  private async transfer(binding: DaytonaBinding, session: DaytonaMission, action: Extract<CloudBrowserAction, { type: 'upload' | 'capture' }>, seconds: number, principal: string): Promise<BrowserCaptureMetadata | BrowserFileTransferReceipt> {
-    if (action.type === 'upload' && !this.options.files || action.type === 'capture' && (!this.options.captures || action.request.type !== 'pdf' && (action.request.type !== 'screenshot' || action.request.format && action.request.format !== 'png'))) return fail('daytona_action_unsupported');
+  private async transfer(binding: DaytonaBinding, session: DaytonaMission, action: Extract<CloudBrowserAction, { type: 'upload' | 'upload_directory' | 'capture' }>, seconds: number, principal: string): Promise<BrowserCaptureMetadata | BrowserFileTransferReceipt | DaytonaDirectoryReceipt> {
+    if (action.type !== 'capture' && !this.options.files || action.type === 'capture' && (!this.options.captures || action.request.type !== 'pdf' && (action.request.type !== 'screenshot' || action.request.format && action.request.format !== 'png'))) return fail('daytona_action_unsupported');
     return this.bounded(async outer => {
       const guarded = (remaining: () => number): Context => ({ signal: outer.signal, get token() { return outer.token; }, set token(value) { outer.token = value; }, remaining: () => { this.assertMission(binding, session, principal); return Math.min(outer.remaining(), remaining()); } });
       const current = () => { outer.remaining(); this.assertMission(binding, session, principal); };
@@ -166,7 +166,10 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
           context.remaining();
         },
       } });
-      const result = await bridge.execute(binding, session, action, seconds, principal); outer.remaining(); this.assertMission(binding, session, principal); return result;
+      const result = action.type === 'upload_directory'
+        ? await bridge.uploadDirectory(binding, session, action.selector, action.files, seconds, principal)
+        : await bridge.execute(binding, session, action, seconds, principal);
+      outer.remaining(); this.assertMission(binding, session, principal); return result;
     });
   }
   private async promoteWith(context: Context, base: URL, binding: DaytonaBinding, session: DaytonaMission, payload: DaytonaStagePayload, principal: string): Promise<{ staged: true; sha256: string; byteLength: number }> {
@@ -201,11 +204,11 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'runtimeProtocol') || 'runtimeProtocol' in options && options.runtimeProtocol !== 2) return fail('owner_forbidden');
     await this.runtime(binding, 'open', logicalSessionId, undefined, undefined, 18, options.runtimeProtocol);
   }
-  async execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<CloudBrowserExecutionResult | BrowserCaptureMetadata | BrowserFileTransferReceipt> {
+  async execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<CloudBrowserExecutionResult | BrowserCaptureMetadata | BrowserFileTransferReceipt | DaytonaDirectoryReceipt> {
     this.assertMission(binding, session, principalHash);
     const checked = validateCloudBrowserAction(action);
     if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 120) return fail('invalid_duration');
-    if (checked.type === 'upload' || checked.type === 'capture') return this.transfer(binding, session, checked, timeoutSeconds, principalHash);
+    if (checked.type === 'upload' || checked.type === 'upload_directory' || checked.type === 'capture') return this.transfer(binding, session, checked, timeoutSeconds, principalHash);
     if (checked.type === 'navigate' || checked.type === 'tab_create') {
       let url: URL; try { url = new URL(checked.url); } catch { return fail('destination_forbidden'); }
       if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return fail('destination_forbidden');

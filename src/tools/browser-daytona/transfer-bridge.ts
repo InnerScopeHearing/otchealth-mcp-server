@@ -5,6 +5,7 @@ import { BROWSER_FILE_MAX_BYTES, validBrowserFileScanReceipt } from '../browser-
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 import { captureBrowserArtifact } from '../browser-cloud/captures.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
+import { browserDirectoryManifestSchema } from '../browser-cloud/directory-upload.js';
 import { createTrustedBrowserBinaryValidator, type TrustedBrowserBinaryValidator } from '../browser-cloud/binary-validation.js';
 import { DaytonaBrowserError, type DaytonaBinding, type DaytonaMission } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
@@ -35,18 +36,11 @@ const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest(
 const segment = (value: string) => value.length > 0 && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(value) && !value.includes('..') && !/[. ]$/.test(value);
 function plain(value: unknown): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) return fail('daytona_transfer_invalid'); return value as Record<string, unknown>; }
 
-/** Explicit internal folder contract. Existing single-file MCP input does NOT accept this manifest. */
+/** Shared external/internal manifest policy; raw filesystem paths are never accepted. */
 export function validateDaytonaDirectoryManifest(input: unknown): DaytonaDirectoryEntry[] {
-  if (!Array.isArray(input) || input.length < 1 || input.length > 32) return fail('daytona_directory_manifest_invalid');
-  const paths = new Set<string>(); const ids = new Set<string>(); let root: string | undefined;
-  return input.map(item => {
-    const value = plain(item);
-    if (Object.keys(value).sort().join(',') !== 'fileId,relativePath' || typeof value.fileId !== 'string' || !UUID.test(value.fileId) || typeof value.relativePath !== 'string' || value.relativePath.length > 512) return fail('daytona_directory_manifest_invalid');
-    const parts = value.relativePath.split('/');
-    if (parts.length < 2 || parts.length > 8 || parts.some(part => !segment(part)) || paths.has(value.relativePath) || ids.has(value.fileId) || (root && parts[0] !== root)) return fail('daytona_directory_manifest_invalid');
-    root = parts[0]; paths.add(value.relativePath); ids.add(value.fileId);
-    return { fileId: value.fileId, relativePath: value.relativePath };
-  });
+  const parsed = browserDirectoryManifestSchema.safeParse(input);
+  if (!parsed.success) return fail('daytona_directory_manifest_invalid');
+  return parsed.data;
 }
 
 /** Broker/immutable capture-store bridge. No raw file paths, scripts, cookies or captures leave it. */
@@ -97,7 +91,7 @@ export class DaytonaTransferBridge implements DaytonaTransferBridgePort {
     if (action.type !== 'upload' || !UUID.test(action.fileId) || typeof action.selector !== 'string' || action.selector.length < 1 || action.selector.length > 256 || /[\u0000-\u001f\u007f]/.test(action.selector)) return fail('invalid_action');
     return this.budget(seconds, remaining => this.attach(binding, session, action, [{ fileId: action.fileId }], false, remaining, principal)) as Promise<BrowserFileTransferReceipt>;
   }
-  /** Called only by a future explicitly typed directory tool while its owned mission lock is held. */
+  /** Called only by the explicitly typed directory action under its owned mission lock. */
   async uploadDirectory(binding: DaytonaBinding, session: DaytonaMission, selector: string, entries: unknown, seconds: number, principal: string): Promise<DaytonaDirectoryReceipt> {
     this.bound(binding, session, principal); const manifest = validateDaytonaDirectoryManifest(entries);
     if (typeof selector !== 'string' || selector.length < 1 || selector.length > 256 || /[\u0000-\u001f\u007f]/.test(selector)) return fail('invalid_action');

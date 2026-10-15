@@ -13,6 +13,7 @@ import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files
 import { DaytonaBrowserError } from '../browser-daytona/contract.js';
 import type { DaytonaBrowserService } from '../browser-daytona/service.js';
 import type { DaytonaViewerHandoffService } from '../../server/daytona-viewer-service.js';
+import type { DaytonaDirectoryReceipt } from '../browser-daytona/transfer-bridge.js';
 
 import { currentIntercomPrincipalKey } from '../browser-cloud/intercom-login-service.js';
 import { websitePrincipalHash, type WebsiteLoginService } from '../browser-cloud/website-login-service.js';
@@ -145,10 +146,10 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
   };
   const sessionBackend = async (sessionId: string, caller: string) => {
     const desktop = await daytona?.forSession(sessionId);
-    if (desktop) return { browser: desktop.browser, principal: daytonaPrincipal(caller) };
+    if (desktop) return { browser: desktop.browser, principal: daytonaPrincipal(caller), daytona: true };
     // A lookup or ownership error is never caught here and cannot select AWS.
     if (!live()) throw new DaytonaBrowserError('cloud_browser_not_configured');
-    return { browser: runtime.browser, principal: principalHash(caller) };
+    return { browser: runtime.browser, principal: principalHash(caller), daytona: false };
   };
   const websiteProfiles = async (caller: string) => {
     const key = currentIntercomPrincipalKey();
@@ -639,6 +640,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         selected_target_id: z.string().nullable().optional(),
         file_id: z.string().optional(),
         file_status: z.literal('attached').optional(),
+        file_count: z.number().int().min(1).max(32).optional(),
         error: z.string().optional(),
       },
       redactInputForLog: redactCloudBrowserInputForLog,
@@ -652,6 +654,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
           };
         try {
           const backend = await sessionBackend(input.session_id, ctx.callerAgent);
+          if (input.action.type === 'upload_directory' && !backend.daytona) throw new DaytonaBrowserError('directory_upload_unsupported');
           const result = await backend.browser.execute(ctx.callerAgent, input.session_id, input.action as CloudBrowserAction, input.timeout_seconds, backend.principal) as {
             createdTargetId?: string;
             closedTargetId?: string;
@@ -666,6 +669,13 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             const file = result as BrowserFileTransferReceipt | null;
             if (!file || file.status !== 'attached' || !Number.isSafeInteger(file.byteLength) || file.byteLength < 1 || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('file_result_invalid');
             return { data: { ok: true, file_id: input.action.fileId, file_status: 'attached', content_type: file.contentType, byte_length: file.byteLength, sha256: file.sha256 }, summary: 'Staged file attached to the owned browser input and its bytes verified. The website’s final upload completion must be verified separately.' };
+          }
+          if (input.action.type === 'upload_directory') {
+            const manifest = input.action.files;
+            const folder = result as unknown as DaytonaDirectoryReceipt | null;
+            if (!folder || folder.status !== 'attached' || folder.directory !== true || folder.fileCount !== manifest.length || !Array.isArray(folder.files) || folder.files.length !== folder.fileCount || !Number.isSafeInteger(folder.byteLength) || folder.byteLength < 1 || folder.byteLength > 10 * 1024 * 1024
+              || !folder.files.every((file, index) => file.relativePath === manifest[index]?.relativePath && Number.isSafeInteger(file.byteLength) && file.byteLength > 0 && /^[a-f0-9]{64}$/.test(file.sha256)) || folder.files.reduce((sum, file) => sum + file.byteLength, 0) !== folder.byteLength) throw new Error('directory_result_invalid');
+            return { data: { ok: true, file_status: 'attached', file_count: folder.fileCount, byte_length: folder.byteLength }, summary: 'Staged folder files attached to the owned directory input and exact bytes verified. Website upload completion must be verified separately.' };
           }
           const actionResult = result as { createdTargetId?: string; closedTargetId?: string; selectedTargetId?: string | null } | null;
           return {
