@@ -133,6 +133,7 @@ test('Daytona page is nonce-protected private iframe UI, clears fragment and sto
     const script = response.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
     assert.ok(script);
     const requests: { url: string; body: unknown }[] = [];
+    const scheduled: number[] = [];
     const stored = new Map<string, string>();
     const handlers = new Map<string, () => Promise<void>>();
     const nodes = new Map<string, Record<string, unknown>>();
@@ -141,7 +142,7 @@ test('Daytona page is nonce-protected private iframe UI, clears fragment and sto
     const context = {
       window: { location: { hash: `#token=${TOKEN}`, origin: ORIGIN, pathname: '/browser/daytona' } },
       history: { replaceState: () => { fragmentCleared = true; } },
-      URLSearchParams, URL, Date, setTimeout: () => 0, clearTimeout: () => {},
+      URLSearchParams, URL, Date: { now: () => NOW }, setTimeout: (_: unknown, delay: number) => { scheduled.push(delay); return 0; }, clearTimeout: () => {},
       document: { getElementById: (id: string) => nodes.get(id) },
       sessionStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
       fetch: async (url: string, init: { body: string }) => { assert.equal(fragmentCleared, true); requests.push({ url, body: JSON.parse(init.body) }); return { ok: true, json: async () => url.endsWith('exchange') ? { ...VIEW, handoff_id: ID } : { status: 'saved', human_input_revoked: true } }; },
@@ -151,6 +152,7 @@ test('Daytona page is nonce-protected private iframe UI, clears fragment and sto
     assert.equal(requests[0]?.url, '/browser/daytona/exchange');
     assert.equal(nodes.get('viewer')!.src, URL);
     assert.deepEqual([...stored.values()], [ID]);
+    assert.deepEqual(scheduled, [89_000], 'best-effort release starts before original HttpOnly cookie expires');
     assert.equal(JSON.stringify([...stored]).includes(TOKEN), false);
     assert.equal(JSON.stringify([...stored]).includes(URL), false);
     await handlers.get('done')!();

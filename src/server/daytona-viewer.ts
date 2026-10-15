@@ -133,6 +133,30 @@ const storage={get:()=>{try{return sessionStorage.getItem(key)||'';}catch{return
 async function post(action,body){const response=await fetch(root+'/'+action,{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify(body)});if(!response.ok)throw new Error('unavailable');return response.json();}
 async function finish(action){if(terminal||!handoffId)return;terminal=true;done.disabled=true;cancel.disabled=true;clearTimeout(timer);storage.clear();viewer.src='about:blank';viewer.hidden=true;status.textContent='Releasing human control…';try{const result=await post(action,{handoff_id:handoffId});if(result.human_input_revoked!==true)throw new Error('unconfirmed');status.textContent=action==='complete'?'Signed-in browser saved. Control released.':'Desktop handoff ended. Control released.';}catch{status.textContent='Control release could not be confirmed. Do not retry Done; ask your agent to check the existing session.';}}
 done.addEventListener('click',()=>finish('complete'));cancel.addEventListener('click',()=>finish('expire'));
-(async()=>{const fragment=new URLSearchParams(window.location.hash.slice(1));const token=fragment.get('token');history.replaceState(null,'',window.location.pathname);try{let result;if(token){if(!/^[A-Za-z0-9_-]{43}$/.test(token))throw new Error('invalid');result=await post('exchange',{token});}else{handoffId=storage.get();if(!/^[a-f0-9]{32}$/.test(handoffId))throw new Error('invalid');result=await post('resume',{handoff_id:handoffId});}if(!/^[a-f0-9]{32}$/.test(result.handoff_id)||typeof result.signed_url!=='string'||!Number.isSafeInteger(result.expires_at)||result.expires_at<=Date.now())throw new Error('invalid');handoffId=result.handoff_id;storage.set(handoffId);viewer.src=result.signed_url;viewer.hidden=false;done.disabled=false;cancel.disabled=false;status.textContent='Connect in the desktop window if prompted. Confirm the correct signed-in account before Done.';timer=setTimeout(()=>finish('expire'),Math.min(result.expires_at-Date.now(),600000));}catch{terminal=true;storage.clear();viewer.src='about:blank';viewer.hidden=true;status.textContent='This desktop handoff is expired or unavailable. Ask your agent for a new secure link.';}})();
+(async()=>{
+  const fragment=new URLSearchParams(window.location.hash.slice(1));
+  const token=fragment.get('token');
+  history.replaceState(null,'',window.location.pathname);
+  try{
+    let result;
+    if(token){
+      if(!/^[A-Za-z0-9_-]{43}$/.test(token))throw new Error('invalid');
+      result=await post('exchange',{token});
+    }else{
+      handoffId=storage.get();
+      if(!/^[a-f0-9]{32}$/.test(handoffId))throw new Error('invalid');
+      result=await post('resume',{handoff_id:handoffId});
+    }
+    if(!/^[a-f0-9]{32}$/.test(result.handoff_id)||typeof result.signed_url!=='string'||!Number.isSafeInteger(result.expires_at)||result.expires_at<=Date.now())throw new Error('invalid');
+    handoffId=result.handoff_id;storage.set(handoffId);viewer.src=result.signed_url;viewer.hidden=false;done.disabled=false;cancel.disabled=false;
+    status.textContent='Connect in the desktop window if prompted. Confirm the correct signed-in account before Done.';
+    // Best effort only: the provider must also revoke expired grants when the
+    // tab is offline/closed. The original cookie/ticket lifetime is not extended.
+    timer=setTimeout(()=>finish('expire'),Math.max(0,Math.min(result.expires_at-Date.now()-1000,600000)));
+  }catch{
+    terminal=true;storage.clear();viewer.src='about:blank';viewer.hidden=true;
+    status.textContent='This desktop handoff is expired or unavailable. Ask your agent for a new secure link.';
+  }
+})();
 })();</script></body></html>`;
 }
