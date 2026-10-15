@@ -23,7 +23,7 @@ export interface DaytonaRuntimeDependencies {
   createTickets?: () => DaytonaViewerTicketStore;
   createGrantStore?: () => DaytonaViewerGrantStore;
   scheduleTick?: (tick: () => void, milliseconds: 1000) => () => void;
-  onWatchdogStatus?: (result: DaytonaViewerExpiryResult) => void;
+  onWatchdogStatus?: (result: DaytonaViewerExpiryResult, sandboxId: string) => void;
 }
 export interface DaytonaRuntimeController {
   adapter: DaytonaGatewayAdapter;
@@ -42,6 +42,17 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
   const table = () => env.DAYTONA_BROWSER_DDB_TABLE ?? env.CLOUD_BROWSER_DDB_TABLE;
   const grantTable = () => env.DAYTONA_VIEWER_GRANT_DDB_TABLE ?? table();
   const region = () => env.AWS_REGION ?? 'us-east-1';
+  const sandboxIds = (): readonly string[] => {
+    const legacy = env.DAYTONA_BROWSER_SANDBOX_ID;
+    if (env.DAYTONA_BROWSER_SANDBOX_IDS === undefined) {
+      if (!UUID.test(legacy ?? '')) return fail('daytona_sandbox_enrollment_invalid'); return [legacy!];
+    }
+    let values: unknown;
+    try { values = JSON.parse(env.DAYTONA_BROWSER_SANDBOX_IDS); } catch { return fail('daytona_sandbox_enrollment_invalid'); }
+    if (!Array.isArray(values) || values.length < 1 || values.length > 3 || !values.every(value => typeof value === 'string' && UUID.test(value))
+      || new Set(values).size !== values.length || (legacy !== undefined && legacy !== values[0])) return fail('daytona_sandbox_enrollment_invalid');
+    return values as string[];
+  };
   const token = (): string => {
     const value = env.DAYTONA_BROWSER_API_TOKEN;
     if (typeof value !== 'string' || !/^[\x21-\x7e]{16,4096}$/.test(value)) return fail('daytona_api_token_unavailable'); return value;
@@ -77,7 +88,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
   };
   const humanMissing = (): string[] => {
     const missing: string[] = [];
-    if (!UUID.test(env.DAYTONA_BROWSER_SANDBOX_ID ?? '')) missing.push('DAYTONA_BROWSER_SANDBOX_ID');
+    try { sandboxIds(); } catch { missing.push(env.DAYTONA_BROWSER_SANDBOX_IDS === undefined ? 'DAYTONA_BROWSER_SANDBOX_ID' : 'DAYTONA_BROWSER_SANDBOX_IDS'); }
     if (!/^[A-Za-z0-9_.-]{3,255}$/.test(grantTable() ?? '')) missing.push('DAYTONA_VIEWER_GRANT_DDB_TABLE');
     if (!/^[a-f0-9]{64}$/.test(env.DAYTONA_BROWSER_VIEWER_CONTROL_SHA256 ?? '')) missing.push('DAYTONA_BROWSER_VIEWER_CONTROL_SHA256');
     try { grantKey().fill(0); } catch { missing.push('DAYTONA_VIEWER_GRANT_KEY_BASE64'); }
@@ -85,14 +96,19 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
   };
   let ownedStore: DaytonaBrowserStore | undefined;
   const sessionStore = () => ownedStore ??= dependencies.createStore?.() ?? new DynamoDaytonaBrowserStore({ tableName: table(), region: region() });
-  let expiry: DaytonaViewerExpiryController | undefined, cancelTick: (() => void) | undefined, initializing: Promise<boolean> | undefined;
-  let running = false, closed = false, lastAttention = '';
-  const expiryReady = () => !closed && running && expiry?.ready() === true;
+  const expiries = new Map<string, DaytonaViewerExpiryController>(), cancelTicks: (() => void)[] = [], lastAttention = new Map<string, string>();
+  let initializing: Promise<boolean> | undefined;
+  let running = false, closed = false;
+  const workerReady = (id: string) => !closed && running && expiries.get(id)?.ready() === true;
+  const expiryReady = () => expiries.size > 0 && [...expiries.keys()].every(workerReady);
+  const anyExpiryReady = () => [...expiries.keys()].some(workerReady);
   const status = () => {
     const missing = [...commonMissing(), ...humanMissing()]; if (env.DAYTONA_BROWSER_ENABLED !== 'true') missing.unshift('DAYTONA_BROWSER_ENABLED');
     return { optedIn: env.DAYTONA_BROWSER_ENABLED === 'true', configured: missing.length === 0, watchdogReady: expiryReady(), missing };
   };
-  const requireExpiry = () => { if (!expiryReady()) fail('daytona_viewer_expiry_unavailable'); };
+  const requireExpiry = (sandboxId?: string) => {
+    if (!status().configured || !(sandboxId === undefined ? anyExpiryReady() : sandboxIds().includes(sandboxId) && workerReady(sandboxId))) fail('daytona_viewer_expiry_unavailable');
+  };
   type Runtime = DaytonaGatewayRuntime & { viewers: Pick<DaytonaViewerHandoffService, 'issue'> & DaytonaViewerService };
   let instance: Runtime | undefined;
   const build = (): Runtime => {
@@ -103,62 +119,72 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
       const key = grantKey();
       try { viewer = dependencies.viewer?.() ?? new EncryptedDaytonaViewerGrantPort({ store, apiBaseUrl: env.DAYTONA_BROWSER_API_BASE_URL!, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, resolveApiToken, encryptionKey: key, previewDomain: options.previewDomain, previewPort: options.previewPort, previewPath: options.viewerPath, viewerControlSha256: env.DAYTONA_BROWSER_VIEWER_CONTROL_SHA256!, toolboxAllowedOrigins: origins() }); }
       finally { key.fill(0); }
-      expiry = new DaytonaViewerExpiryController({ store, port: viewer, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, sandboxId: env.DAYTONA_BROWSER_SANDBOX_ID! });
+      for (const sandboxId of sandboxIds()) expiries.set(sandboxId, new DaytonaViewerExpiryController({ store, port: viewer, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, sandboxId }));
     }
     const provider = (dependencies.createProvider ?? (options => new DaytonaApiBrowserProvider(options)))({ apiBaseUrl: env.DAYTONA_BROWSER_API_BASE_URL!, organizationId: env.DAYTONA_BROWSER_ORGANIZATION_ID!, resolveApiToken, toolboxAllowedOrigins: origins(), ...createConfiguredDaytonaArtifactPorts({ env }), ...(viewer ? { viewer } : {}) });
     const store = sessionStore(), service = new DaytonaBrowserService(store, provider);
     const approved = async (caller: string, profile: string, principal?: string) => {
       const binding = await store.loadBinding(profile); assertDaytonaBinding(binding);
-      if (binding.profileKey !== profile || binding.owner !== caller || binding.ownerSubjectHash !== principal || binding.sandboxId !== env.DAYTONA_BROWSER_SANDBOX_ID) fail('owner_forbidden');
+      if (binding.profileKey !== profile || binding.owner !== caller || binding.ownerSubjectHash !== principal || !sandboxIds().includes(binding.sandboxId)) fail('owner_forbidden');
+      requireExpiry(binding.sandboxId); return binding;
+    };
+    const approvedSession = async (caller: string, id: string, principal?: string) => {
+      const session = await store.loadSession(id); assertDaytonaMission(session);
+      if (session.sessionId !== id || session.owner !== caller || session.ownerSubjectHash !== principal) fail('owner_forbidden');
+      const binding = await approved(caller, session.profileKey, principal);
+      if (session.sandboxId !== binding.sandboxId) fail('owner_forbidden'); return session;
     };
     const browser: DaytonaGatewayRuntime['browser'] = {
-      discover: service.discover.bind(service),
-      readiness: async (caller, profile, principal) => { requireExpiry(); await approved(caller, profile, principal); return service.readiness(caller, profile, principal); },
-      start: async (caller, profile, seconds, budget, principal, options) => { requireExpiry(); await approved(caller, profile, principal); return service.start(caller, profile, seconds, budget, principal, options); },
-      execute: service.execute.bind(service), snapshot: service.snapshot.bind(service), savePersistentProfile: service.savePersistentProfile.bind(service), stop: service.stop.bind(service),
+      discover: async (caller, principal, profile) => { const result = await service.discover(caller, principal, profile); await approved(caller, result.profileId, principal); return result; },
+      readiness: async (caller, profile, principal) => { await approved(caller, profile, principal); return service.readiness(caller, profile, principal); },
+      start: async (caller, profile, seconds, budget, principal, options) => { await approved(caller, profile, principal); return service.start(caller, profile, seconds, budget, principal, options); },
+      execute: async (caller, id, action, seconds, principal) => { await approvedSession(caller, id, principal); return service.execute(caller, id, action, seconds, principal); },
+      snapshot: async (caller, id, principal) => { await approvedSession(caller, id, principal); return service.snapshot(caller, id, principal); },
+      savePersistentProfile: async (caller, id, principal) => { await approvedSession(caller, id, principal); return service.savePersistentProfile(caller, id, principal); }, stop: service.stop.bind(service),
     };
     const grantPreflight = async (caller: string, id: string, principal: string) => {
-      requireExpiry(); const session = await store.loadSession(id); assertDaytonaMission(session);
-      if (session.sessionId !== id || session.owner !== caller || session.ownerSubjectHash !== principal || session.sandboxId !== env.DAYTONA_BROWSER_SANDBOX_ID) fail('owner_forbidden');
+      const session = await approvedSession(caller, id, principal);
       const readiness = await browser.readiness(caller, session.profileKey, principal); if (readiness.checkpointReady !== true) fail('daytona_checkpoint_unavailable');
     };
     const tickets = dependencies.createTickets?.() ?? new DynamoDaytonaViewerTicketStore({ tableName: table(), region: region() });
     const handoff = new DaytonaViewerHandoffService(tickets, {
       loadSession: id => store.loadSession(id),
       getViewerGrant: async (caller, id, principal, seconds) => { await grantPreflight(caller, id, principal); return service.getViewerGrant(caller, id, principal, seconds); },
-      resumeViewerGrant: service.resumeViewerGrant.bind(service), completeHumanInput: service.completeHumanInput.bind(service), stop: service.stop.bind(service),
+      resumeViewerGrant: async (caller, id, principal, handle) => { await approvedSession(caller, id, principal); return service.resumeViewerGrant(caller, id, principal, handle); }, completeHumanInput: service.completeHumanInput.bind(service), stop: service.stop.bind(service),
     });
-    const viewers = { issue: async (...args: Parameters<DaytonaViewerHandoffService['issue']>) => { requireExpiry(); return handoff.issue(...args); },
+    const viewers = { issue: async (...args: Parameters<DaytonaViewerHandoffService['issue']>) => { await approvedSession(args[0], args[1], args[2]); return handoff.issue(...args); },
       exchange: async (token: string) => { requireExpiry(); return handoff.exchange(token); }, resume: async (token: string) => { requireExpiry(); return handoff.resume(token); },
       // Cleanup remains possible after scheduler/config degradation. Health is
       // NOT a human-input-revoked receipt; the core still owns all mission fences.
       complete: handoff.complete.bind(handoff), expire: handoff.expire.bind(handoff) };
     return instance = { browser, viewers, capabilities: Object.freeze({ checkpoint: provider.capabilities.checkpoint === true, humanViewer: Boolean(viewer) }) };
   };
-  const runTick = async () => {
-    if (!running || !expiry) return;
-    const result = await expiry.tick(); dependencies.onWatchdogStatus?.(result);
+  const runTick = async (sandboxId: string, expiry: DaytonaViewerExpiryController) => {
+    if (!running) return;
+    const result = await expiry.tick(); dependencies.onWatchdogStatus?.(result, sandboxId);
     const attention = result.status === 'operator_attention' ? result.reason : '';
-    if (attention && attention !== lastAttention) logger.warn({ type: 'daytona_viewer_expiry', status: 'operator_attention', reason: attention }, 'Daytona viewer expiry requires owned operator reconciliation');
-    lastAttention = attention;
+    if (attention && attention !== lastAttention.get(sandboxId)) logger.warn({ type: 'daytona_viewer_expiry', status: 'operator_attention', reason: attention, sandboxId }, 'Daytona viewer expiry requires owned operator reconciliation');
+    lastAttention.set(sandboxId, attention);
   };
   const initialize = async (): Promise<boolean> => {
     if (closed || !status().configured) return false; if (running && !initializing) return expiryReady(); if (initializing) return initializing;
     initializing = (async () => {
-      build(); running = true; await runTick();
+      build(); running = true; await Promise.all([...expiries].map(([id, expiry]) => runTick(id, expiry)));
       if (!closed) {
-        const callback = () => { void runTick().catch(() => undefined); };
-        cancelTick = dependencies.scheduleTick?.(callback, 1000) ?? (() => { const timer = setInterval(callback, 1000); timer.unref(); return () => clearInterval(timer); })();
+        for (const [id, expiry] of expiries) {
+          const callback = () => { void runTick(id, expiry).catch(() => undefined); };
+          cancelTicks.push(dependencies.scheduleTick?.(callback, 1000) ?? (() => { const timer = setInterval(callback, 1000); timer.unref(); return () => clearInterval(timer); })());
+        }
       }
       return expiryReady();
     })();
     try { return await initializing; }
-    catch { running = false; cancelTick?.(); cancelTick = undefined; return false; }
+    catch { running = false; for (const cancel of cancelTicks.splice(0)) cancel(); return false; }
     finally { initializing = undefined; }
   };
-  const shutdown = () => { closed = true; running = false; cancelTick?.(); cancelTick = undefined; };
+  const shutdown = () => { closed = true; running = false; for (const cancel of cancelTicks.splice(0)) cancel(); };
   const adapter: DaytonaGatewayAdapter = {
-    get: async () => status().configured && expiryReady() ? build() : undefined,
+    get: async () => status().configured && anyExpiryReady() ? build() : undefined,
     forSession: async id => {
       if (!UUID.test(id) || !table()) return undefined;
       const session = await sessionStore().loadSession(id); if (!session) return undefined; assertDaytonaMission(session);
