@@ -1,0 +1,64 @@
+import type { CloudBrowserAction } from '../browser-cloud/contract.js';
+
+/** Server-enrolled identity. No caller-supplied sandbox, credential or preview token. */
+export interface DaytonaBinding {
+  provider: 'daytona';
+  owner: string;
+  ownerSubjectHash: string;
+  sandboxId: string;
+  profileKey: string;
+  profilePath: string;
+  readinessReceiptSha256: string;
+}
+
+export interface DaytonaMission {
+  provider: 'daytona';
+  sessionId: string;
+  owner: string;
+  ownerSubjectHash: string;
+  profileKey: string;
+  sandboxId: string;
+  expiresAt: number;
+  actionsUsed: number;
+  actionBudget: number;
+  effectUnknown: boolean;
+  phase: 'OPENING' | 'ACTIVE' | 'RELEASING' | 'CLOSED';
+  sensitiveOutputSuppressed?: boolean;
+  /** Opaque server grant ID only; the provider retains encrypted token material. */
+  viewerGrantHandle?: string;
+  viewerExpiresAt?: number;
+}
+
+export interface DaytonaProvider {
+  inspect(binding: DaytonaBinding): Promise<{ sandboxId: string; state: 'started' | 'stopped' | 'other'; public: boolean }>;
+  openMission(binding: DaytonaBinding, logicalSessionId: string): Promise<void>;
+  execute(binding: DaytonaBinding, session: DaytonaMission, action: CloudBrowserAction, timeoutSeconds: number, principalHash: string): Promise<unknown>;
+  checkpoint(binding: DaytonaBinding): Promise<void>;
+  /** Detach this logical mission only. Never stop/delete the retained desktop. */
+  releaseMission(binding: DaytonaBinding, session: DaytonaMission): Promise<void>;
+  viewerGrant(binding: DaytonaBinding, expiresSeconds: number): Promise<{ url: string; expiresAt: number; grantHandle: string }>;
+  /** Read exactly the existing encrypted grant; never mint or extend it. */
+  readViewerGrant(binding: DaytonaBinding, grantHandle: string): Promise<{ url: string; expiresAt: number; grantHandle: string }>;
+  /** Provider's private encrypted TTL grant namespace retains the secret token. */
+  revokeViewerGrant(binding: DaytonaBinding, grantHandle: string): Promise<{ human_input_revoked: true }>;
+}
+
+export interface DaytonaBrowserStore {
+  loadBinding(profileKey: string): Promise<DaytonaBinding | null>;
+  /** Trusted enrollment only; immutable create-only readiness record. */
+  createBinding(binding: DaytonaBinding): Promise<boolean>;
+  loadSession(sessionId: string): Promise<DaytonaMission | null>;
+  createSession(session: DaytonaMission): Promise<boolean>;
+  saveSessionUnderLock(session: DaytonaMission, lockOwner: string): Promise<void>;
+  acquireSessionLock(sessionId: string, lockOwner: string, until: number): Promise<boolean>;
+  releaseSessionLock(sessionId: string, lockOwner: string): Promise<void>;
+  acquireProfileLease(profileKey: string, leaseOwner: string, until: number): Promise<boolean>;
+  ownsProfileLease(profileKey: string, leaseOwner: string): Promise<boolean>;
+  releaseProfileLease(profileKey: string, leaseOwner: string): Promise<void>;
+}
+
+export class DaytonaBrowserError extends Error {
+  constructor(readonly code: string, message = 'The owned Daytona browser operation could not be completed safely.') {
+    super(message); this.name = 'DaytonaBrowserError';
+  }
+}
