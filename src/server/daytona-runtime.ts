@@ -114,7 +114,7 @@ export function createDaytonaRuntimeController(dependencies: DaytonaRuntimeDepen
     const browser: DaytonaGatewayRuntime['browser'] = {
       discover: service.discover.bind(service),
       readiness: async (caller, profile, principal) => { requireExpiry(); await approved(caller, profile, principal); return service.readiness(caller, profile, principal); },
-      start: async (caller, profile, seconds, budget, principal) => { requireExpiry(); await approved(caller, profile, principal); return service.start(caller, profile, seconds, budget, principal); },
+      start: async (caller, profile, seconds, budget, principal, options) => { requireExpiry(); await approved(caller, profile, principal); return service.start(caller, profile, seconds, budget, principal, options); },
       execute: service.execute.bind(service), snapshot: service.snapshot.bind(service), savePersistentProfile: service.savePersistentProfile.bind(service), stop: service.stop.bind(service),
     };
     const grantPreflight = async (caller: string, id: string, principal: string) => {

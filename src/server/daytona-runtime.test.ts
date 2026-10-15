@@ -6,6 +6,7 @@ import { createDaytonaRuntimeController } from './daytona-runtime.js';
 import type { DaytonaBrowserStore, DaytonaMission, DaytonaProvider } from '../tools/browser-daytona/contract.js';
 import type { DaytonaViewerGrantStore } from '../tools/browser-daytona/viewer-grant-store.js';
 import { EncryptedDaytonaViewerGrantPort } from '../tools/browser-daytona/viewer-grants.js';
+import { DaytonaBrowserService } from '../tools/browser-daytona/service.js';
 
 const SESSION = randomUUID();
 const env = { DAYTONA_BROWSER_ENABLED: 'true', DAYTONA_BROWSER_API_BASE_URL: 'https://app.daytona.io/api', DAYTONA_BROWSER_ORGANIZATION_ID: '501db94e-10ee-4bc8-9cca-23c793c67524', DAYTONA_BROWSER_SANDBOX_ID: '11111111-1111-4111-8111-111111111111', DAYTONA_VIEWER_GRANT_KEY_BASE64: randomBytes(32).toString('base64'), DAYTONA_BROWSER_VIEWER_CONTROL_SHA256: '17f61b92692760ae7908a3987b593180bed0e8bf2f9a52afb1fa80d9489dcce2', DAYTONA_BROWSER_API_TOKEN: 'SERVER_ONLY_PRIVATE_TEST_TOKEN', CLOUD_BROWSER_DDB_TABLE: 'browser-table', DAYTONA_BROWSER_PREVIEW_DOMAIN: 'proxy.daytona.works', DAYTONA_BROWSER_PREVIEW_PORT: '6080', DAYTONA_BROWSER_PREVIEW_PATH: '/vnc.html', DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS: '["https://proxy.app.daytona.io"]' };
@@ -133,4 +134,19 @@ test('normal runtime passes real lazy file/capture ports only for configured sha
   assert.equal(scannerMissing.state.uploadConfigured, false); assert.equal(scannerMissing.state.captureConfigured, true); scannerMissing.controller.shutdown();
   const missing = fixture(); await missing.controller.initialize();
   assert.equal(missing.state.uploadConfigured, false); assert.equal(missing.state.captureConfigured, false); missing.controller.shutdown();
+});
+test('runtime forwards the mandatory V2 mode to the real service without weakening binding or health gates', async t => {
+  const f = fixture(); await f.controller.initialize();
+  const calls: unknown[][] = [];
+  t.mock.method(DaytonaBrowserService.prototype, 'start', async (...args: Parameters<DaytonaBrowserService['start']>) => { calls.push(args); return { sessionId: SESSION, expiresAt: 1900000300000, runtimeProtocol: 2 as const }; });
+  try {
+    const browser = (await f.controller.adapter.get())!.browser;
+    assert.equal((await browser.start('cto', 'profile-one', 180, 25, 'a'.repeat(64), { requireMultiMission: true })).runtimeProtocol, 2);
+    assert.deepEqual(calls, [['cto', 'profile-one', 180, 25, 'a'.repeat(64), { requireMultiMission: true }]]);
+    await assert.rejects(browser.start('cto', 'profile-one', 180, 25, 'c'.repeat(64), { requireMultiMission: true }));
+    assert.equal(calls.length, 1);
+    f.controller.shutdown();
+    await assert.rejects(browser.start('cto', 'profile-one', 180, 25, 'a'.repeat(64), { requireMultiMission: true }));
+    assert.equal(calls.length, 1);
+  } finally { f.controller.shutdown(); }
 });

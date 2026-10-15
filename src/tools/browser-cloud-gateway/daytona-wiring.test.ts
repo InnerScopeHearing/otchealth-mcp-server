@@ -14,11 +14,11 @@ const lanes = ['cto','cfo','clo','coo','cro','developer','wefunder-campaign-dire
 function fixture() {
   const handlers = new Map<string, (input: unknown) => Promise<Result>>();
   const calls: unknown[][] = [];
-  const state = { enabled: true, owned: true, lookupError: false, providerError: false, checkpoint: true, checkpointReady: true, proofProfile: 'exact-enrolled-server-profile', humanViewer: true };
+  const state = { enabled: true, owned: true, lookupError: false, providerError: false, checkpoint: true, checkpointReady: true, runtimeProtocol: 2 as number | undefined, multiMissionReady: true, proofProfile: 'exact-enrolled-server-profile', humanViewer: true, startFails: false, startProtocol: 2 as 2 | undefined };
   const browser: DaytonaGatewayRuntime['browser'] = {
     discover: async (...args) => { calls.push(['discover', ...args]); return { profileId: 'exact-enrolled-server-profile', allowedHosts: [], persistent: true, provider: 'daytona' }; },
-    readiness: async (...args) => { calls.push(['readiness', ...args]); return { ready: true, profileKey: state.proofProfile, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/exact-enrolled-server-profile/chromium', checkpointReady: state.checkpointReady }; },
-    start: async (...args) => { calls.push(['start', ...args]); return { sessionId: SESSION, expiresAt: 1900000300000 }; },
+    readiness: async (...args) => { calls.push(['readiness', ...args]); return { ready: true, profileKey: state.proofProfile, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/exact-enrolled-server-profile/chromium', checkpointReady: state.checkpointReady, runtimeProtocol: state.runtimeProtocol, multiMissionReady: state.multiMissionReady }; },
+    start: async (...args) => { calls.push(['start', ...args]); if (state.startFails) throw Object.assign(new Error('PRIVATE_PROVIDER_SECRET'), { code: 'daytona_multimission_unavailable' }); return { sessionId: SESSION, expiresAt: 1900000300000, ...(args[5]?.requireMultiMission ? { runtimeProtocol: state.startProtocol } : {}) }; },
     execute: async (...args) => { calls.push(['execute', ...args]); if (state.providerError) throw Object.assign(new Error('PRIVATE_PROVIDER_SECRET'), { code: 'effect_unknown' }); return { completed: true }; },
     snapshot: async (...args) => { calls.push(['snapshot', ...args]); return { title: 'public fixture' }; },
     savePersistentProfile: async (...args) => { calls.push(['save', ...args]); },
@@ -96,6 +96,53 @@ test('static checkpoint=false stays honest while exact current binding readiness
   const refused = await foreign.call('browser_cloud_session_start', { profile_id: 'daytona-desktop', max_seconds: 180, dry_run: false });
   assert.equal(refused.structuredContent?.result?.error, 'daytona_handoff_unavailable');
   assert.equal(foreign.calls.some(call => call[0] === 'start' || call[0] === 'issue' || call[0] === 'aws-start'), false);
+});
+test('company automation alias requires exact V2 proof, forwards mandatory no-fallback mode and never issues a human viewer', async () => {
+  const f = fixture(); f.state.checkpoint = false; f.state.checkpointReady = false; f.state.humanViewer = false;
+  for (const lane of lanes) {
+    const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-company', max_seconds: 180, action_budget: 25, dry_run: false }, lane);
+    assert.equal(result.structuredContent?.result?.sessionId, SESSION); assert.equal(result.structuredContent?.result?.provider, 'daytona');
+    assert.equal(result.structuredContent?.result?.profile_id, 'daytona-company'); assert.equal(result.structuredContent?.result?.login_url, undefined);
+    assert.equal(result.structuredContent?.result?.runtime_protocol, 2); assert.equal(result.structuredContent?.result?.status, 'ready');
+    assert.deepEqual(f.calls.filter(row => row[0] === 'start').at(-1), ['start', lane, 'exact-enrolled-server-profile', 180, 25, websitePrincipalHash(lane, 'connection:own-connection'), { requireMultiMission: true }]);
+  }
+  assert.equal(f.calls.some(row => row[0] === 'issue' || row[0] === 'aws-start'), false);
+});
+test('company automation alias rejects absent/old V2 protocol, missing readiness and foreign proofs before any start', async () => {
+  for (const invalid of [{ runtimeProtocol: undefined }, { runtimeProtocol: 1 }, { multiMissionReady: false }, { proofProfile: 'foreign' }]) {
+    const f = fixture(); Object.assign(f.state, invalid);
+    const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-company', max_seconds: 180, dry_run: false });
+    assert.equal(result.structuredContent?.result?.error, 'daytona_multimission_unavailable');
+    assert.equal(f.calls.some(row => row[0] === 'start' || row[0] === 'issue' || row[0] === 'aws-start'), false);
+  }
+});
+test('company alias preserves OAuth lane checks, dry runs and off-default runtime refusal without AWS fallback', async () => {
+  const f = fixture();
+  const input = { profile_id: 'daytona-company', max_seconds: 180, dry_run: false };
+  await f.call('browser_cloud_session_start', { ...input, dry_run: true }); assert.deepEqual(f.calls, []);
+  for (const lane of ['clo-personal', 'exec', 'unknown']) assert.equal((await f.call('browser_cloud_session_start', input, lane)).structuredContent?.result?.error, 'company_connection_required');
+  assert.equal((await f.call('browser_cloud_session_start', input, 'cto', false)).structuredContent?.result?.error, 'oauth_connection_required');
+  assert.deepEqual(f.calls, []); f.state.enabled = false;
+  assert.equal((await f.call('browser_cloud_session_start', input)).structuredContent?.result?.error, 'daytona_not_configured');
+  assert.deepEqual(f.calls, [['get']]);
+});
+test('company alias remains its own opt-in provider when the unrelated AWS browser switch is off', async () => {
+  const previous = process.env.CLOUD_BROWSER_ENABLED; process.env.CLOUD_BROWSER_ENABLED = 'false';
+  try {
+    const f = fixture(); const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-company', max_seconds: 180, dry_run: false });
+    assert.equal(result.structuredContent?.result?.sessionId, SESSION);
+    assert.equal(f.calls.some(row => row[0] === 'aws-start' || row[0] === 'issue'), false);
+  } finally { process.env.CLOUD_BROWSER_ENABLED = previous; }
+});
+test('company start refusal or missing V2 receipt never produces ready, a human viewer or an AWS fallback', async () => {
+  for (const scenario of ['refusal', 'receipt']) {
+    const f = fixture(); f.state.startFails = scenario === 'refusal'; f.state.startProtocol = scenario === 'receipt' ? undefined : 2;
+    const result = await f.call('browser_cloud_session_start', { profile_id: 'daytona-company', max_seconds: 180, dry_run: false });
+    assert.equal(result.structuredContent?.result?.error, 'daytona_multimission_unavailable');
+    assert.equal(result.structuredContent?.result?.status, undefined); assert.equal(JSON.stringify(result).includes('PRIVATE_PROVIDER_SECRET'), false);
+    assert.equal(f.calls.filter(row => row[0] === 'start').length, 1);
+    assert.equal(f.calls.some(row => row[0] === 'issue' || row[0] === 'aws-start'), false);
+  }
 });
 
 test('ordinary AWS starts and unknown UUIDs retain the existing provider path', async () => {

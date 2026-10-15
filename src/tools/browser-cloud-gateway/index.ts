@@ -524,7 +524,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       category: "write_simple",
       annotations: {
         title: "Cloud browser: start session",
-        description: "Starts an authenticated caller's browser within requested budgets. The opt-in daytona-desktop profile uses only this OAuth connection's exact root-enrolled Daytona desktop and requires configured human-viewer revocation and checkpoint support. The named profiles website-login:linkedin and website-login:wefunder retain the connection-bound AWS human sign-in flow. Open a returned login_url, confirm the signed-in account and click Done. Other profile IDs retain normal AWS session behavior.",
+        description: "Starts an authenticated caller's browser within requested budgets. The opt-in daytona-company profile starts automation only when this OAuth connection's exact root-enrolled company browser proves V2 multi-mission readiness; it never opens a human viewer. The daytona-desktop profile requires configured human-viewer revocation and checkpoint support. The named profiles website-login:linkedin and website-login:wefunder retain the connection-bound AWS human sign-in flow. Open a returned login_url, confirm the signed-in account and click Done. Other profile IDs retain normal AWS session behavior.",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -541,8 +541,9 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         profile_id: z.string().optional(),
         login_url: z.string().optional(),
         login_expires_at: z.number().optional(),
-        status: z.literal('human_login_required').optional(),
+        status: z.enum(['human_login_required', 'ready']).optional(),
         provider: z.literal('daytona').optional(),
+        runtime_protocol: z.literal(2).optional(),
         error: z.string().optional(),
       },
       ephemeralOutput: true,
@@ -550,13 +551,26 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       shieldInputForScan: shieldCloudBrowserInput,
       redactResultForLog: () => ({ operation: 'browser_cloud_session_start', result: '[redacted browser session]' }),
       handler: async (input, ctx) => {
-        if (!live() && input.profile_id !== 'daytona-desktop') return unavailable();
+        if (!live() && input.profile_id !== 'daytona-desktop' && input.profile_id !== 'daytona-company') return unavailable();
         if (ctx.dryRun)
           return {
             data: { dry_run: true },
             summary: "Session start was not executed.",
           };
         try {
+          if (input.profile_id === 'daytona-company') {
+            const principal = daytonaPrincipal(ctx.callerAgent);
+            const company = await daytona?.get();
+            if (!company) throw new DaytonaBrowserError('daytona_not_configured');
+            const profile = await company.browser.discover(ctx.callerAgent, principal);
+            const readiness = await company.browser.readiness(ctx.callerAgent, profile.profileId, principal);
+            if (readiness.ready !== true || readiness.profileKey !== profile.profileId || readiness.runtimeProtocol !== 2 || readiness.multiMissionReady !== true) throw new DaytonaBrowserError('daytona_multimission_unavailable');
+            // The service must re-probe at the effect boundary and forbid a V1
+            // fallback if readiness changed after the gateway's observation.
+            const started = await company.browser.start(ctx.callerAgent, profile.profileId, input.max_seconds, input.action_budget, principal, { requireMultiMission: true });
+            if (started.runtimeProtocol !== 2) throw new DaytonaBrowserError('daytona_multimission_unavailable');
+            return { data: { sessionId: started.sessionId, expiresAt: started.expiresAt, profile_id: 'daytona-company', provider: 'daytona', runtime_protocol: 2, status: 'ready' }, summary: 'Owned company-browser automation mission started with confirmed V2 runtime routing. No human viewer or AWS session was created.' };
+          }
           if (input.profile_id === 'daytona-desktop') {
             const principal = daytonaPrincipal(ctx.callerAgent);
             const desktop = await daytona?.get();
