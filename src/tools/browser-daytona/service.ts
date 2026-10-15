@@ -130,9 +130,38 @@ export class DaytonaBrowserService {
         try { const paused = await this.provider.pauseAutomation!(binding, session); if (paused.paused !== true) return fail('daytona_pause_unconfirmed'); }
         catch (error) { if (beforeEffectBusy(session, error)) { session.sensitiveOutputSuppressed = false; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); } throw error; }
       }
-      const grant = await this.provider.viewerGrant(binding, seconds); let url: URL; try { url = new URL(grant.url); } catch { return fail('viewer_grant_invalid'); }
-      if (url.protocol !== 'https:' || url.username || url.password || !UUID.test(grant.grantHandle) || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= this.now() || grant.expiresAt > Math.min(session.expiresAt, this.now() + seconds * 1000)) return fail('viewer_grant_invalid');
-      session.viewerGrantHandle = grant.grantHandle; session.viewerExpiresAt = grant.expiresAt; session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); return grant;
+      const grant = await this.provider.viewerGrant(binding, seconds, session.expiresAt);
+      if (!UUID.test(grant.grantHandle)) return fail('viewer_grant_invalid');
+      // A UUID alone is not ownership proof. The trusted vault read is bound to
+      // this enrollment; a foreign handle must never become a cleanup target.
+      let owned: typeof grant;
+      try { owned = await this.provider.readViewerGrant(binding, grant.grantHandle); }
+      catch (error) {
+        // An expired read is not proof that input was revoked. Only a positive
+        // binding-checked revoke permits retaining this handle for cleanup.
+        try {
+          const receipt = await this.provider.revokeViewerGrant(binding, grant.grantHandle);
+          if (receipt.human_input_revoked === true) {
+            session.viewerGrantHandle = grant.grantHandle;
+            session.viewerExpiresAt = Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > 0 ? Math.min(grant.expiresAt, session.expiresAt) : session.expiresAt;
+            await this.store.saveSessionUnderLock(session, lock);
+          }
+        } catch { /* foreign or unknown handle stays untrusted and fenced */ }
+        throw error;
+      }
+      if (owned.grantHandle !== grant.grantHandle || !Number.isSafeInteger(owned.expiresAt) || owned.expiresAt <= 0) return fail('viewer_grant_invalid');
+      session.viewerGrantHandle = owned.grantHandle; session.viewerExpiresAt = Math.min(owned.expiresAt, session.expiresAt);
+      await this.store.saveSessionUnderLock(session, lock);
+      try {
+        const url = new URL(grant.url);
+        if (grant.url !== owned.url || grant.expiresAt !== owned.expiresAt || url.protocol !== 'https:' || url.username || url.password || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= this.now() || grant.expiresAt > Math.min(session.expiresAt, this.now() + seconds * 1000)) return fail('viewer_grant_invalid');
+      } catch {
+        // Keep the durable handle/unknown fence even if cleanup or its ACK is
+        // lost. stop() can then retry only the vault's governed revoke path.
+        try { await this.provider.revokeViewerGrant(binding, owned.grantHandle); } catch { /* unknown cleanup stays fenced */ }
+        return fail('viewer_grant_invalid');
+      }
+      session.effectUnknown = false; await this.store.saveSessionUnderLock(session, lock); return grant;
     });
   }
   async resumeViewerGrant(caller: string, id: string, principal: string | undefined, expectedHandle: string): Promise<{ url: string; expiresAt: number; grantHandle: string }> {

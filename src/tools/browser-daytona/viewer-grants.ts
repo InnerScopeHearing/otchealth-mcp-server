@@ -126,14 +126,20 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
     const value = await this.options.store.load(handle, context.signal); context.check(); assertDaytonaViewerGrantRecord(value);
     if (value.grantHandle !== handle || value.organizationId !== this.options.organizationId || value.bindingHash !== this.bindingHash(binding) || value.scopeHash !== daytonaViewerPhysicalScopeHash(this.options.organizationId, binding.sandboxId)) fail(); return value;
   }
-  async mint(binding: DaytonaBinding, expiresSeconds: number): Promise<Grant> {
+  async mint(binding: DaytonaBinding, expiresSeconds: number, notAfter?: number): Promise<Grant> {
     return this.bounded(async context => {
-      assertDaytonaBinding(binding); if (!Number.isSafeInteger(expiresSeconds) || expiresSeconds < 1 || expiresSeconds > 300) fail();
+      assertDaytonaBinding(binding); if (!Number.isSafeInteger(expiresSeconds) || expiresSeconds < 1 || expiresSeconds > 300 || (notAfter !== undefined && (!Number.isSafeInteger(notAfter) || notAfter <= this.now()))) fail();
       await this.inspect(context, binding); context.check();
-      const value: DaytonaViewerGrantRecord = { version: 2, organizationId: this.options.organizationId, binding: structuredClone(binding), grantHandle: randomUUID(), bindingHash: this.bindingHash(binding), scopeHash: daytonaViewerPhysicalScopeHash(this.options.organizationId, binding.sandboxId), expiresAt: this.now() + expiresSeconds * 1000, phase: 'MINTING' };
+      const expiresAt = Math.min(this.now() + expiresSeconds * 1000, notAfter ?? Number.MAX_SAFE_INTEGER);
+      if (Math.floor((expiresAt - this.now()) / 1000) < 1) fail();
+      const value: DaytonaViewerGrantRecord = { version: 2, organizationId: this.options.organizationId, binding: structuredClone(binding), grantHandle: randomUUID(), bindingHash: this.bindingHash(binding), scopeHash: daytonaViewerPhysicalScopeHash(this.options.organizationId, binding.sandboxId), expiresAt, phase: 'MINTING' };
       if (!await this.options.store.reserve(value, context.signal)) fail(); context.check();
+      // Reservation and inspection can consume mission lifetime. Recompute at
+      // the final boundary before the effectful provider GET; never extend it.
+      const seconds = notAfter === undefined ? expiresSeconds : Math.min(expiresSeconds, Math.floor((expiresAt - this.now()) / 1000));
+      if (seconds < 1) fail();
       // SDK0.224.1 SandboxApi.get_signed_port_preview_url (effectful GET).
-      const result = await this.json(context, `${this.base.href}/sandbox/${encodeURIComponent(binding.sandboxId)}/ports/${this.options.previewPort}/signed-preview-url?expiresInSeconds=${expiresSeconds}`);
+      const result = await this.json(context, `${this.base.href}/sandbox/${encodeURIComponent(binding.sandboxId)}/ports/${this.options.previewPort}/signed-preview-url?expiresInSeconds=${seconds}`);
       if (result.sandboxId !== binding.sandboxId || result.port !== this.options.previewPort || typeof result.token !== 'string' || typeof result.url !== 'string') fail();
       const root = https(result.url); if (root.pathname !== '/') fail();
       const url = new URL(this.options.previewPath, root.origin).href; this.validateSecret(result.token, url);

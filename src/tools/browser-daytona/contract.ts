@@ -64,7 +64,7 @@ export interface DaytonaProvider {
   /** Global human handoff fence, with the exact V2 initiating mission retained. */
   pauseAutomation?(binding: DaytonaBinding, session: DaytonaMission): Promise<{ paused: true }>;
   resumeAutomation?(binding: DaytonaBinding, session: DaytonaMission): Promise<{ resumed: true }>;
-  viewerGrant(binding: DaytonaBinding, expiresSeconds: number): Promise<{ url: string; expiresAt: number; grantHandle: string }>;
+  viewerGrant(binding: DaytonaBinding, expiresSeconds: number, notAfter?: number): Promise<{ url: string; expiresAt: number; grantHandle: string }>;
   /** Read exactly the existing encrypted grant; never mint or extend it. */
   readViewerGrant(binding: DaytonaBinding, grantHandle: string): Promise<{ url: string; expiresAt: number; grantHandle: string }>;
   /** Provider's private encrypted TTL grant namespace retains the secret token. */

@@ -13,7 +13,7 @@ import { uploadDaytonaControlledFile, type DaytonaStagePayload } from './toolbox
 type ViewerGrant = { url: string; expiresAt: number; grantHandle: string };
 /** Trusted server-only vault. Revoke must include actual native VNC disconnection proof. */
 export interface DaytonaViewerGrantPort {
-  mint(binding: DaytonaBinding, expiresSeconds: number): Promise<ViewerGrant>;
+  mint(binding: DaytonaBinding, expiresSeconds: number, notAfter?: number): Promise<ViewerGrant>;
   read(binding: DaytonaBinding, grantHandle: string): Promise<ViewerGrant>;
   revoke(binding: DaytonaBinding, grantHandle: string): Promise<{ human_input_revoked: true }>;
 }
@@ -262,9 +262,12 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (url.protocol !== 'https:' || url.username || url.password || !UUID.test(value.grantHandle) || (expectedHandle && value.grantHandle !== expectedHandle) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now()) return fail('daytona_viewer_invalid');
     return { url: value.url, expiresAt: value.expiresAt, grantHandle: value.grantHandle };
   }
-  async viewerGrant(binding: DaytonaBinding, expiresSeconds: number): Promise<ViewerGrant> {
+  async viewerGrant(binding: DaytonaBinding, expiresSeconds: number, notAfter?: number): Promise<ViewerGrant> {
     assertDaytonaBinding(binding); if (!Number.isSafeInteger(expiresSeconds) || expiresSeconds < 1 || expiresSeconds > 300) return fail('invalid_duration');
-    return this.bounded(async () => { const grant = this.grant(await this.viewer().mint(binding, expiresSeconds)); if (grant.expiresAt > Date.now() + expiresSeconds * 1000) return fail('daytona_viewer_invalid'); return grant; });
+    if (notAfter !== undefined && (!Number.isSafeInteger(notAfter) || notAfter <= Date.now())) return fail('invalid_duration');
+    // With a mission deadline the service must first retain the known owned
+    // handle before rejecting a late/invalid receipt. Do not lose it here.
+    return this.bounded(async () => { const value = await this.viewer().mint(binding, expiresSeconds, notAfter); if (notAfter !== undefined) return value; const grant = this.grant(value); if (grant.expiresAt > Date.now() + expiresSeconds * 1000) return fail('daytona_viewer_invalid'); return grant; });
   }
   async readViewerGrant(binding: DaytonaBinding, grantHandle: string): Promise<ViewerGrant> {
     assertDaytonaBinding(binding); if (!UUID.test(grantHandle)) return fail('daytona_viewer_invalid'); return this.bounded(async () => this.grant(await this.viewer().read(binding, grantHandle), grantHandle));
