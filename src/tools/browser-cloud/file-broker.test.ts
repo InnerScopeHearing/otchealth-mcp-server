@@ -6,6 +6,7 @@ type FileStatus = 'quarantined' | 'ready' | 'partial';
 type BrowserFileRecord = {
   id: string;
   owner: string;
+  ownerSubjectHash?: string;
   filename: string;
   contentType: string;
   byteLength: number;
@@ -20,10 +21,10 @@ type BrowserFileStore = {
 type BrowserFileScanner = { scan: (...args: never[]) => Promise<'clean' | 'infected' | 'error'> };
 type BrowserFileValidator = { validate(input: { contentType: string; body: Uint8Array }): Promise<{ complete: boolean }> };
 type BrokerApi = {
-  stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }): Promise<BrowserFileRecord>;
-  get(owner: string, fileId: string): Promise<BrowserFileRecord>;
-  verifyUpload(owner: string, fileId: string, evidence: { sha256: string; byteLength: number; completed: boolean }): Promise<{ verified: true }>;
-  forUpload(owner: string, fileId: string): Promise<{ record: BrowserFileRecord; body: Uint8Array }>;
+  stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }, principalHash?: string): Promise<BrowserFileRecord>;
+  get(owner: string, fileId: string, principalHash?: string): Promise<BrowserFileRecord>;
+  verifyUpload(owner: string, fileId: string, evidence: { sha256: string; byteLength: number; completed: boolean }, principalHash?: string): Promise<{ verified: true }>;
+  forUpload(owner: string, fileId: string, principalHash?: string): Promise<{ record: BrowserFileRecord; body: Uint8Array }>;
 };
 type BrokerConstructor = new (store: BrowserFileStore, options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; allowValidatedText?: boolean; now?: () => number }) => BrokerApi;
 
@@ -79,6 +80,42 @@ test('stages safe CSV with actual byte hash and generated owner-bound storage ke
   assert.match(store.keys[0], /cfo/);
   assert.equal('body' in result, false);
   assert.equal('path' in result, false);
+});
+
+test('staged bytes and metadata are available only to their exact OAuth connection within a lane', async () => {
+  const { broker: files } = broker();
+  const principal = 'a'.repeat(64);
+  const staged = await files.stage('cfo', { filename: 'private.csv', contentType: 'text/csv', body: textBody }, principal);
+  assert.equal(staged.ownerSubjectHash, principal);
+  assert.deepEqual(await files.get('cfo', staged.id, principal), staged);
+  assert.deepEqual((await files.forUpload('cfo', staged.id, principal)).body, textBody);
+  const evidence = { sha256: staged.sha256, byteLength: staged.byteLength, completed: true };
+  assert.deepEqual(await files.verifyUpload('cfo', staged.id, evidence, principal), { verified: true });
+  for (const other of [undefined, 'b'.repeat(64)]) {
+    await assert.rejects(files.get('cfo', staged.id, other), /owner|connection/i);
+    await assert.rejects(files.forUpload('cfo', staged.id, other), /owner|connection/i);
+    await assert.rejects(files.verifyUpload('cfo', staged.id, evidence, other), /owner|connection/i);
+  }
+});
+
+test('legacy unbound file references stay legacy-only and cannot be adopted by a new OAuth connection', async () => {
+  const { broker: files } = broker();
+  const staged = await files.stage('cfo', { filename: 'legacy.txt', contentType: 'text/plain', body: textBody });
+  assert.equal((await files.get('cfo', staged.id)).id, staged.id);
+  assert.deepEqual((await files.forUpload('cfo', staged.id)).body, textBody);
+  await assert.rejects(files.get('cfo', staged.id, 'a'.repeat(64)), /owner|connection/i);
+  await assert.rejects(files.forUpload('cfo', staged.id, 'a'.repeat(64)), /owner|connection/i);
+});
+
+test('malformed connection hashes reject before staging and malformed persisted bindings fail closed', async () => {
+  const { broker: files, store } = broker();
+  for (const hash of ['', 'not-a-hash', 'g'.repeat(64)]) {
+    await assert.rejects(files.stage('cfo', { filename: 'safe.txt', contentType: 'text/plain', body: textBody }, hash), /binding|connection/i);
+  }
+  assert.equal(store.keys.length, 0);
+  const staged = await files.stage('cfo', { filename: 'safe.txt', contentType: 'text/plain', body: textBody }, 'a'.repeat(64));
+  store.rows.get(store.keys[0]!)!.record.ownerSubjectHash = 'invalid-persisted-binding';
+  await assert.rejects(files.forUpload('cfo', staged.id, 'a'.repeat(64)), /owner|binding|connection/i);
 });
 
 test('quarantines unsafe scan results and never reports them ready', async () => {

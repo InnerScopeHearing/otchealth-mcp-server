@@ -79,6 +79,41 @@ const upload = (cdp: BrowserFileCdp) => attachStagedFileToOwnedInput({
   file: { record: file, body }, cdp, timeoutMs: 1_000, now: () => 1_000,
 });
 
+test('file-input transfer enforces connection ownership before any browser protocol command', async () => {
+  const principal = 'a'.repeat(64);
+  for (const fileHash of [undefined, 'b'.repeat(64)]) {
+    const cdp = new Protocol();
+    await assert.rejects(attachStagedFileToOwnedInput({
+      caller: 'cfo', session: { ...session, ownerSubjectHash: principal }, targetId: 'owned-target',
+      pageSessionId: 'page-session', selector: 'input[type=file]',
+      file: { record: { ...file, ownerSubjectHash: fileHash }, body }, cdp, timeoutMs: 1_000, now: () => 1_000,
+    }), (error: unknown) => error instanceof CloudBrowserError && error.code === 'owner_forbidden');
+    assert.equal(cdp.calls.length, 0);
+  }
+  const cdp = new Protocol();
+  assert.equal((await attachStagedFileToOwnedInput({
+    caller: 'cfo', session: { ...session, ownerSubjectHash: principal }, targetId: 'owned-target',
+    pageSessionId: 'page-session', selector: 'input[type=file]',
+    file: { record: { ...file, ownerSubjectHash: principal }, body }, cdp, timeoutMs: 1_000, now: () => 1_000,
+  })).status, 'attached');
+});
+
+test('an OAuth invocation on an unbound public session can attach only that connection\'s file', async () => {
+  const principalHash = 'a'.repeat(64);
+  for (const fileHash of [undefined, 'b'.repeat(64)]) {
+    const cdp = new Protocol();
+    await assert.rejects(attachStagedFileToOwnedInput({
+      caller: 'cfo', session, principalHash, targetId: 'owned-target', pageSessionId: 'page-session', selector: 'input[type=file]',
+      file: { record: { ...file, ownerSubjectHash: fileHash }, body }, cdp, timeoutMs: 1_000, now: () => 1_000,
+    }), (error: unknown) => error instanceof CloudBrowserError && error.code === 'owner_forbidden');
+    assert.equal(cdp.calls.length, 0);
+  }
+  assert.equal((await attachStagedFileToOwnedInput({
+    caller: 'cfo', session, principalHash, targetId: 'owned-target', pageSessionId: 'page-session', selector: 'input[type=file]',
+    file: { record: { ...file, ownerSubjectHash: principalHash }, body }, cdp: new Protocol(), timeoutMs: 1_000, now: () => 1_000,
+  })).status, 'attached');
+});
+
 test('rejects directory inputs before resolving the input or transferring file bytes, including boolean attributes spelled false', async () => {
   for (const attributeValue of ['', 'false']) {
     const cdp = new DirectoryProtocol('description', attributeValue);

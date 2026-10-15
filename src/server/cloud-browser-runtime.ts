@@ -27,7 +27,7 @@ function configured(): CloudBrowserGatewayRuntime {
       allowValidatedText: true, validator: createTrustedBrowserBinaryValidator(),
     });
     const store = new DynamoCloudBrowserSessionStore(config.table, config.region);
-    const transport = new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId) => files.forUpload(owner, fileId));
+    const transport = new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId, principalHash) => files.forUpload(owner, fileId, principalHash));
     const browser = new CloudBrowserService(store, transport, Date.now, publicWebPolicy);
     intercomLogin = new IntercomLoginService(store, browser, transport, new IntercomProfileProvider({ region:config.region, browserIdentifier:'aws.browser.v1' }), new IntercomLoginTicketStore({ tableName:config.table, region:config.region }));
     websiteLogin = new WebsiteLoginService(store, browser, transport, new IntercomProfileProvider({ region:config.region, browserIdentifier:'aws.browser.v1' }), new WebsiteLoginTicketStore({ tableName:config.table, region:config.region }));

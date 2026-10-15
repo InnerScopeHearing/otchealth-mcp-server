@@ -9,6 +9,8 @@ export type BrowserFileStatus = 'quarantined' | 'ready' | 'partial';
 export type BrowserFileRecord = {
   id: string;
   owner: string;
+  /** Trusted OAuth connection binding; legacy internal records may be unbound. */
+  ownerSubjectHash?: string;
   filename: string;
   contentType: string;
   byteLength: number;
@@ -56,6 +58,12 @@ function fail(code: string, message: string): never {
 
 function validOwner(owner: string): boolean {
   return /^[a-z0-9][a-z0-9_-]{1,63}$/i.test(owner);
+}
+
+function checkedPrincipalHash(hash: string | undefined): string | undefined {
+  if (hash === undefined) return undefined;
+  if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/i.test(hash)) fail('principal_binding_invalid', 'The browser file connection binding is invalid.');
+  return hash.toLowerCase();
 }
 
 function safeFilename(filename: string, contentType: string): boolean {
@@ -159,8 +167,9 @@ export class BrowserFileBroker {
     private readonly options: { scanner?: BrowserFileScanner; validator?: BrowserFileValidator; allowValidatedText?: boolean; now?: () => number } = {},
   ) {}
 
-  async stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }): Promise<BrowserFileRecord> {
+  async stage(owner: string, input: { filename: string; contentType: string; body: Uint8Array }, principalHash?: string): Promise<BrowserFileRecord> {
     if (!validOwner(owner)) fail('invalid_owner', 'File owner is invalid.');
+    const ownerSubjectHash = checkedPrincipalHash(principalHash);
     if (!input || typeof input !== 'object' || typeof input.filename !== 'string' || typeof input.contentType !== 'string' || !(input.body instanceof Uint8Array)) {
       fail('invalid_file', 'File name, content type, or body is invalid.');
     }
@@ -200,7 +209,7 @@ export class BrowserFileBroker {
         // Validation errors fail closed to quarantine.
       }
     }
-    const record: BrowserFileRecord = { id, owner, filename, contentType, byteLength: bytes.byteLength, sha256, status, expiresAt };
+    const record: BrowserFileRecord = { id, owner, ...(ownerSubjectHash === undefined ? {} : { ownerSubjectHash }), filename, contentType, byteLength: bytes.byteLength, sha256, status, expiresAt };
     const key = this.storageKey(owner, id);
     try {
       await this.store.put(key, cloneRecord(record), new Uint8Array(bytes));
@@ -210,22 +219,22 @@ export class BrowserFileBroker {
     return cloneRecord(record);
   }
 
-  async get(owner: string, fileId: string): Promise<BrowserFileRecord> {
-    const stored = await this.load(owner, fileId);
+  async get(owner: string, fileId: string, principalHash?: string): Promise<BrowserFileRecord> {
+    const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     return cloneRecord(stored.record);
   }
 
   /** Trusted server-only provider port. This method must never be exposed as an MCP response. */
-  async forUpload(owner: string, fileId: string): Promise<{ record: BrowserFileRecord; body: Uint8Array }> {
-    const stored = await this.load(owner, fileId);
+  async forUpload(owner: string, fileId: string, principalHash?: string): Promise<{ record: BrowserFileRecord; body: Uint8Array }> {
+    const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     if (stored.record.status !== 'ready') fail('file_not_ready', 'File is not cleared for browser transfer.');
     return { record: cloneRecord(stored.record), body: new Uint8Array(stored.body) };
   }
 
-  async verifyUpload(owner: string, fileId: string, evidence: BrowserFileUploadEvidence): Promise<{ verified: true }> {
-    const stored = await this.load(owner, fileId);
+  async verifyUpload(owner: string, fileId: string, evidence: BrowserFileUploadEvidence, principalHash?: string): Promise<{ verified: true }> {
+    const stored = await this.load(owner, fileId, principalHash);
     if (!stored) fail('owner_forbidden', 'File is unavailable to this owner.');
     const record = stored.record;
     if (record.status !== 'ready') fail('file_not_ready', 'File is not cleared for upload verification.');
@@ -235,15 +244,18 @@ export class BrowserFileBroker {
     return { verified: true };
   }
 
-  private async load(owner: string, fileId: string): Promise<{ record: BrowserFileRecord; body: Uint8Array } | null> {
+  private async load(owner: string, fileId: string, principalHash?: string): Promise<{ record: BrowserFileRecord; body: Uint8Array } | null> {
     if (!validOwner(owner) || !/^[0-9a-f-]{36}$/i.test(fileId)) fail('invalid_file_reference', 'File reference is invalid.');
+    const expectedPrincipal = checkedPrincipalHash(principalHash);
     let stored: { record: BrowserFileRecord; body: Uint8Array } | null;
     try {
       stored = await this.store.get(this.storageKey(owner, fileId));
     } catch {
       fail('file_store_failed', 'File metadata is unavailable.');
     }
-    if (!stored || stored.record.id !== fileId || stored.record.owner !== owner) return null;
+    if (!stored || stored.record.id !== fileId || stored.record.owner !== owner ||
+        stored.record.ownerSubjectHash !== expectedPrincipal ||
+        (stored.record.ownerSubjectHash !== undefined && !/^[a-f0-9]{64}$/.test(stored.record.ownerSubjectHash))) return null;
     if (stored.record.expiresAt <= (this.options.now ?? Date.now)()) fail('file_expired', 'File reference has expired.');
     if (stored.record.byteLength !== stored.body.byteLength || createHash('sha256').update(stored.body).digest('hex') !== stored.record.sha256) {
       fail('file_integrity_failed', 'Stored file integrity check failed.');

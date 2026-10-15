@@ -156,7 +156,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       try {
         const body = Buffer.from(input.body_base64, 'base64');
         if (body.toString('base64') !== input.body_base64) return { data: { error: 'invalid_file_encoding' }, summary: 'File bytes must have a canonical encoding.' };
-        const record = await runtime.files.stage(ctx.callerAgent, { filename: input.filename, contentType: input.content_type, body });
+        const record = await runtime.files.stage(ctx.callerAgent, { filename: input.filename, contentType: input.content_type, body }, principalHash(ctx.callerAgent));
         return { data: { file_id: record.id, status: record.status, content_type: record.contentType, byte_length: record.byteLength, sha256: record.sha256, expires_at: record.expiresAt }, summary: record.status === 'ready' ? 'Owner-bound validated text file staged for browser attachment. No antivirus or completed website upload is claimed.' : 'File staged privately in quarantine; it is not cleared for browser attachment.' };
       } catch (e) { return error(e); }
     },

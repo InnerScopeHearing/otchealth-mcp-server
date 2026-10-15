@@ -31,11 +31,13 @@ export type BrowserFileTransferReceipt = {
 };
 
 /** Trusted server-only resolver backed by BrowserFileBroker.forUpload. */
-export type BrowserFileResolver = (owner: string, fileId: string) => Promise<{ record: BrowserFileRecord; body: Uint8Array }>;
+export type BrowserFileResolver = (owner: string, fileId: string, principalHash?: string) => Promise<{ record: BrowserFileRecord; body: Uint8Array }>;
 
 export type AttachStagedFileInput = {
   caller: string;
   session: CloudBrowserSession;
+  /** Trusted invocation context for legacy unbound sessions; never sourced from a tool argument. */
+  principalHash?: string;
   targetId: string;
   /** Obtained by the trusted transport after attaching to the owned target. */
   pageSessionId: string;
@@ -96,6 +98,14 @@ function value(result: Record<string, unknown>): Record<string, unknown> {
 export async function attachStagedFileToOwnedInput(input: AttachStagedFileInput): Promise<BrowserFileTransferReceipt> {
   const now = input.now ?? Date.now;
   if (input.caller !== input.session.owner) fail('owner_forbidden', 'Browser session is unavailable to this caller.');
+  const sessionHash = input.session.ownerSubjectHash;
+  const invocationHash = input.principalHash;
+  if ((sessionHash !== undefined && !/^[a-f0-9]{64}$/.test(sessionHash)) ||
+      (invocationHash !== undefined && !/^[a-f0-9]{64}$/.test(invocationHash)) ||
+      (sessionHash !== undefined && invocationHash !== undefined && sessionHash !== invocationHash) ||
+      input.file.record.ownerSubjectHash !== (sessionHash ?? invocationHash)) {
+    fail('owner_forbidden', 'File is unavailable to this connection.');
+  }
   if (!Number.isSafeInteger(input.session.expiresAt) || input.session.expiresAt <= now()) fail('session_expired', 'Browser session has expired.');
   if (!input.session.ownedTargetIds?.includes(input.targetId) || input.session.selectedTargetId !== input.targetId) {
     fail('target_not_owned', 'File transfer requires the selected owned browser tab.');
