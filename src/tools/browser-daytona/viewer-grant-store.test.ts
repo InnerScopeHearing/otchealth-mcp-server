@@ -1,0 +1,67 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import type { DaytonaViewerGrantRecord } from './viewer-grant-store.js';
+
+const grantHandle = '11111111-1111-4111-8111-111111111111';
+const original: DaytonaViewerGrantRecord = { grantHandle, bindingHash: 'a'.repeat(64), scopeHash: 'b'.repeat(64), expiresAt: 2000000000000, phase: 'MINTING' };
+const active: DaytonaViewerGrantRecord = { ...original, phase: 'ACTIVE', sealed: { iv: Buffer.alloc(12, 1).toString('base64url'), tag: Buffer.alloc(16, 2).toString('base64url'), ciphertext: Buffer.alloc(100, 3).toString('base64url') } };
+async function fixture() {
+  const module = await import('./viewer-grant-store.js').catch(() => null);
+  assert.equal(typeof module?.DynamoDaytonaViewerGrantStore, 'function', 'durable private viewer grant store is missing');
+  const requests: Array<{ operation: string; body: Record<string, unknown>; init: RequestInit }> = [];
+  const state = { status: 200, result: {} as Record<string, unknown>, calls: 0 };
+  const fetchImpl: typeof fetch = async (_url, init = {}) => {
+    state.calls++;
+    requests.push({ operation: new Headers(init.headers).get('x-amz-target')!.split('.').at(-1)!, body: JSON.parse(String(init.body)), init });
+    return Response.json(state.result, { status: state.status });
+  };
+  const store = new module!.DynamoDaytonaViewerGrantStore({ tableName: 'private-grants', region: 'us-east-1', resolveCredentials: async () => ({ accessKeyId: 'test-key', secretAccessKey: 'test-secret' }), fetchImpl, now: () => 1000000000000 });
+  return { module: module!, store, requests, state };
+}
+test('reserve atomically creates permanent physical scope fence and encrypted grant intent before effects', async () => {
+  const { store, requests } = await fixture(); assert.equal(await store.reserve(original, AbortSignal.timeout(1000)), true);
+  const call = requests[0]!; assert.equal(call.operation, 'TransactWriteItems');
+  const writes = call.body.TransactItems as Array<{ Put: Record<string, unknown> }>;
+  assert.equal(writes.length, 2);
+  for (const write of writes) assert.equal(write.Put.ConditionExpression, 'attribute_not_exists(pk)');
+  const serialized = JSON.stringify(call.body); assert.equal(serialized.includes('expiresAtEpoch'), false); assert.equal(serialized.includes('DAYTONA#VIEWER_GRANT#'), true); assert.equal(serialized.includes('DAYTONA#VIEWER_SCOPE#'), true);
+  assert.equal(call.init.redirect, 'error'); assert.ok(call.init.signal);
+});
+test('load uses strong consistency and rejects unexpected or plaintext grant payloads', async () => {
+  const { store, requests, state } = await fixture();
+  state.result = { Item: { pk: { S: `DAYTONA#VIEWER_GRANT#${grantHandle}` }, payload: { S: JSON.stringify(active) } } };
+  assert.deepEqual(await store.load(grantHandle, AbortSignal.timeout(1000)), active);
+  assert.equal(requests[0]!.body.ConsistentRead, true);
+  state.result = { Item: { pk: { S: `DAYTONA#VIEWER_GRANT#${grantHandle}` }, payload: { S: JSON.stringify({ ...active, token: 'forbidden-plaintext' }) } } };
+  await assert.rejects(store.load(grantHandle, AbortSignal.timeout(1000)));
+});
+test('phase transitions use full original receipt CAS, never refresh original expiry, retain unknown records without TTL', async () => {
+  const { store, requests } = await fixture();
+  assert.equal(await store.compareAndSwap(original, active, AbortSignal.timeout(1000)), true);
+  const request = requests[0]!; assert.equal(request.operation, 'UpdateItem');
+  assert.equal(request.body.ConditionExpression, 'payload = :expected');
+  assert.equal(JSON.stringify(request.body).includes('expiresAtEpoch'), false);
+  await assert.rejects(store.compareAndSwap(active, { ...active, expiresAt: active.expiresAt + 1 }, AbortSignal.timeout(1000)));
+  await assert.rejects(store.compareAndSwap(active, { ...active, phase: 'MINTING' }, AbortSignal.timeout(1000)));
+  assert.equal(requests.length, 1);
+});
+test('only confirmed terminal revoke atomically removes exact owned scope fence and encrypted material', async () => {
+  const { store, requests } = await fixture(); const revoking = { ...active, phase: 'REVOKING' as const };
+  const revoked: DaytonaViewerGrantRecord = { ...original, phase: 'REVOKED' };
+  assert.equal(await store.compareAndSwap(revoking, revoked, AbortSignal.timeout(1000)), true);
+  const request = requests[0]!; assert.equal(request.operation, 'TransactWriteItems');
+  const writes = request.body.TransactItems as Array<Record<string, Record<string, unknown>>>;
+  assert.equal(writes[0]!.Update!.ConditionExpression, 'payload = :expected');
+  assert.equal(writes[1]!.Delete!.ConditionExpression, 'grantHandle = :handle');
+  assert.equal(JSON.stringify(writes[0]!.Update!.ExpressionAttributeValues).includes('ciphertext'), true, 'expected CAS still binds prior encrypted receipt');
+  assert.equal(JSON.stringify(request.body).includes('expiresAtEpoch'), true);
+});
+test('conditional conflicts are finite false, unknown transaction outcomes throw sanitized error and are never retried', async () => {
+  const { store, state } = await fixture(); state.status = 400;
+  state.result = { __type: 'com.amazonaws.dynamodb.v20120810#TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }] };
+  assert.equal(await store.reserve(original, AbortSignal.timeout(1000)), false); assert.equal(state.calls, 1);
+  state.result = { __type: 'TransactionCanceledException', CancellationReasons: [{ Code: 'TransactionConflict' }] };
+  await assert.rejects(store.reserve(original, AbortSignal.timeout(1000)), e => !String(e).includes('TransactionConflict')); assert.equal(state.calls, 2);
+  state.result = { __type: 'ConditionalCheckFailedException' };
+  assert.equal(await store.compareAndSwap(original, active, AbortSignal.timeout(1000)), false); assert.equal(state.calls, 3);
+});
