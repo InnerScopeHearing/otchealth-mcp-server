@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { DaytonaBinding } from './contract.js';
 import type { DaytonaViewerGrantRecord, DaytonaViewerGrantStore } from './viewer-grant-store.js';
 
@@ -60,7 +63,7 @@ function network(store: MemoryGrants) {
     if (url.endsWith('/process/execute')) {
       assert.equal(state.expired, true); assert.ok([401, 403].includes(state.negativeStatus));
       const body = JSON.parse(String(init.body)) as { command: string; timeout: number };
-      assert.match(body.command, /^sudo -n python3 -c '[^']+'$/); assert.ok(body.command.includes(state.scriptSha));
+      assert.match(body.command, /^sudo -n python3 -I -c '[^']+'$/); assert.ok(body.command.includes(state.scriptSha));
       assert.ok(body.command.includes('/opt/otchealth-browser/viewer_control.py'));
       assert.ok(body.command.indexOf('sha256') < body.command.indexOf('exec(compile'));
       assert.ok(body.command.includes('sys.argv=[str(p),"disconnect"]'));
@@ -192,7 +195,7 @@ test('native SHA pin cannot be bypassed by Python optimization and executes exac
   const grant = await port.mint(binding, 60); await port.revoke(binding, grant.grantHandle);
   const request = net.calls.find(call => call.url.endsWith('/process/execute'))!;
   const command = (JSON.parse(String(request.init.body)) as { command: string }).command;
-  const code = /^sudo -n python3 -c '([^']+)'$/.exec(command)![1]!;
+  const code = /^sudo -n python3 -I -c '([^']+)'$/.exec(command)![1]!;
   const driver = `
 import base64,pathlib,sys
 from unittest.mock import patch
@@ -264,4 +267,18 @@ test('watchdog deadline aborts concrete vault after ambiguous expire ACK and fut
   assert.equal(store.rows.get(grant.grantHandle)?.phase, 'REVOKING'); assert.equal(store.leases.size, 1);
   const count = net.calls.length; assert.equal((await controller.tick()).status, 'operator_attention'); assert.equal(net.calls.length, count);
   assert.equal(net.calls.filter(call => call.url.endsWith('/expire')).length, 1); assert.equal(net.calls.some(call => call.url.endsWith('/process/execute')), false);
+});
+test('privileged pin wrapper ignores writable current directory and PYTHONPATH module shadowing', async () => {
+  const source = 'print("PINNED-HELPER-ONLY")'; const expectedSha = createHash('sha256').update(source).digest('hex');
+  const { port, net } = await fixture({ viewerControlSha256: expectedSha }); net.state.scriptSha = expectedSha;
+  const grant = await port.mint(binding, 60); await port.revoke(binding, grant.grantHandle);
+  const command = (JSON.parse(String(net.calls.find(call => call.url.endsWith('/process/execute'))!.init.body)) as { command: string }).command;
+  const code = /^sudo -n python3 (?:-I )?-c '([^']+)'$/.exec(command)![1]!;
+  const directory = await mkdtemp(join(tmpdir(), 'daytona-pin-isolation-'));
+  const driver = 'import base64,pathlib,sys;from unittest.mock import patch\nsource=base64.b64decode(sys.argv[2])\nsys.modules.pop("hashlib",None)\nwith patch.object(pathlib.Path,"read_bytes",return_value=source):exec(sys.argv[1],{})';
+  try {
+    await writeFile(join(directory, 'hashlib.py'), 'raise RuntimeError("UNTRUSTED-MODULE-SHADOWING")\n');
+    const result = await promisify(execFile)('python3', [...(command.includes('python3 -I -c') ? ['-I'] : []), '-c', driver, code, Buffer.from(source).toString('base64')], { cwd: directory, env: { ...process.env, PYTHONPATH: directory }, timeout: 2000, maxBuffer: 4096 });
+    assert.equal(result.stdout.trim(), 'PINNED-HELPER-ONLY');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

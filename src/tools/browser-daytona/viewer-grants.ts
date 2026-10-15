@@ -152,7 +152,7 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
     // No caller-provided PID, display, shell, profile or command is accepted.
     const python = `import hashlib,pathlib,sys;p=pathlib.Path("/opt/otchealth-browser/viewer_control.py");code=p.read_bytes();sys.exit(1) if hashlib.sha256(code).hexdigest()!="${this.options.viewerControlSha256}" else None;sys.argv=[str(p),"disconnect"];exec(compile(code,str(p),"exec"),{"__name__":"__main__","__file__":str(p)})`;
     const seconds = Math.min(12, Math.floor((context.check() - 2000) / 1000)); if (seconds < 1) fail();
-    const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command: `sudo -n python3 -c '${python}'`, timeout: seconds }) });
+    const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command: `sudo -n python3 -I -c '${python}'`, timeout: seconds }) });
     if ((response.exitCode ?? response.code) !== 0 || typeof response.result !== 'string' || response.result.length > 4096) fail();
     const receipt = record(JSON.parse(response.result));
     if (Object.keys(receipt).some(key => !['human_input_revoked', 'display', 'active_clients', 'x11vnc_pid'].includes(key)) || receipt.human_input_revoked !== true || receipt.display !== ':0' || receipt.active_clients !== 0 || !Number.isSafeInteger(receipt.x11vnc_pid) || Number(receipt.x11vnc_pid) < 1) fail();
