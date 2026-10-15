@@ -89,8 +89,9 @@ function value(result: Record<string, unknown>): Record<string, unknown> {
 
 /**
  * Attach already validated broker bytes to exactly one file input on the currently selected,
- * owned page. It uses fixed, server-authored Runtime.callFunctionOn bodies; no caller JavaScript
- * or remote path is accepted. The receipt proves only file-input selection, never site upload.
+ * owned page. Directory inputs are unsupported: a synthetic File cannot preserve their native
+ * relative paths. It uses fixed, server-authored Runtime.callFunctionOn bodies; no caller
+ * JavaScript or remote path is accepted. The receipt proves only file-input selection, never site upload.
  */
 export async function attachStagedFileToOwnedInput(input: AttachStagedFileInput): Promise<BrowserFileTransferReceipt> {
   const now = input.now ?? Date.now;
@@ -132,12 +133,15 @@ export async function attachStagedFileToOwnedInput(input: AttachStagedFileInput)
     let inputType: unknown;
     let accept: string | undefined;
     let disabled = false;
+    let directory = false;
     for (let i = 0; i + 1 < attributes.length; i += 2) {
       if (attributes[i] === 'type') inputType = attributes[i + 1];
       if (attributes[i] === 'accept' && typeof attributes[i + 1] === 'string') accept = attributes[i + 1] as string;
       if (attributes[i] === 'disabled') disabled = true;
+      if (attributes[i] === 'webkitdirectory') directory = true;
     }
     if (node?.nodeName !== 'INPUT' || String(inputType).toLowerCase() !== 'file' || disabled) fail('file_input_invalid', 'Target must be one enabled file input.');
+    if (directory) fail('directory_input_unsupported', 'Directory inputs require native folder transfer and are not supported by single-file attachment.');
     if (!acceptedByInput(accept, input.file.record.filename, input.file.record.contentType)) fail('file_input_type_rejected', 'File type is not accepted by the selected input.');
     const resolved = await command('DOM.resolveNode', { nodeId });
     const object = resolved.object as { objectId?: unknown } | undefined;
@@ -146,7 +150,7 @@ export async function attachStagedFileToOwnedInput(input: AttachStagedFileInput)
 
     const typeCheck = value(await command('Runtime.callFunctionOn', {
       objectId: inputObjectId,
-      functionDeclaration: 'function(){ return this instanceof HTMLInputElement && this.type === "file" && this.isConnected && !this.disabled; }',
+      functionDeclaration: 'function(){ return this instanceof HTMLInputElement && this.type === "file" && this.isConnected && !this.disabled && !this.webkitdirectory && !this.hasAttribute("webkitdirectory"); }',
       returnByValue: true,
       awaitPromise: false,
       userGesture: false,
@@ -178,7 +182,7 @@ export async function attachStagedFileToOwnedInput(input: AttachStagedFileInput)
     assignmentAttempted = true;
     const assigned = value(await command('Runtime.callFunctionOn', {
       objectId: inputObjectId,
-      functionDeclaration: 'function(parts,name,type){ if (!(this instanceof HTMLInputElement) || this.type !== "file" || !this.isConnected || this.disabled) return false; const file = new File(parts,name,{type,lastModified:0}); const transfer = new DataTransfer(); transfer.items.add(file); this.files = transfer.files; this.dispatchEvent(new Event("input",{bubbles:true})); this.dispatchEvent(new Event("change",{bubbles:true})); return true; }',
+      functionDeclaration: 'function(parts,name,type){ if (!(this instanceof HTMLInputElement) || this.type !== "file" || !this.isConnected || this.disabled || this.webkitdirectory || this.hasAttribute("webkitdirectory")) return false; const file = new File(parts,name,{type,lastModified:0}); const transfer = new DataTransfer(); transfer.items.add(file); this.files = transfer.files; this.dispatchEvent(new Event("input",{bubbles:true})); this.dispatchEvent(new Event("change",{bubbles:true})); return true; }',
       arguments: [{ objectId: partsObjectId }, { value: input.file.record.filename }, { value: input.file.record.contentType }],
       returnByValue: true,
       awaitPromise: false,
