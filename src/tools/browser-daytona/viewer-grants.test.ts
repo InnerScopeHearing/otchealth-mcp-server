@@ -23,6 +23,7 @@ class MemoryGrants implements DaytonaViewerGrantStore {
     this.leases.set(value.scopeHash, value.grantHandle); this.rows.set(value.grantHandle, structuredClone(value)); return true;
   }
   async load(handle: string) { return structuredClone(this.rows.get(handle) ?? null); }
+  async readPhysicalScope(scopeHash: string) { return this.leases.get(scopeHash) ?? null; }
   async compareAndSwap(before: DaytonaViewerGrantRecord, after: DaytonaViewerGrantRecord) {
     if (JSON.stringify(this.rows.get(before.grantHandle)) !== JSON.stringify(before)) return false;
     if (this.failActive && after.phase === 'ACTIVE' || this.failFinish && after.phase === 'REVOKED') throw new Error(`${apiToken} ${viewerUrl}`);
@@ -34,7 +35,7 @@ class MemoryGrants implements DaytonaViewerGrantStore {
 }
 function network(store: MemoryGrants) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
-  const state = { public: false, organizationId, sandboxId: binding.sandboxId, started: true, expireStatus: 200, negativeStatus: 403, baselineStatus: 200, expired: false, nativeExit: 0, nativeClients: 0, nativePid: 321, nativeRevoked: true, proxy: 'https://toolbox.daytona.test/toolbox', mintFailure: false, mintDelayMs: 0, scriptSha, mintResult: {} as Record<string, unknown> };
+  const state = { public: false, organizationId, sandboxId: binding.sandboxId, started: true, expireStatus: 200, negativeStatus: 403, baselineStatus: 200, expired: false, nativeExit: 0, nativeClients: 0, nativePid: 321, nativeRevoked: true, proxy: 'https://toolbox.daytona.test/toolbox', mintFailure: false, mintDelayMs: 0, expireDelayMs: 0, scriptSha, mintResult: {} as Record<string, unknown> };
   const fetchImpl: typeof fetch = async (input, init = {}) => {
     const url = String(input); calls.push({ url, init });
     assert.equal(init.redirect, 'manual'); assert.equal(init.signal?.aborted, false);
@@ -52,6 +53,7 @@ function network(store: MemoryGrants) {
     if (url.endsWith(`/signed-preview-url/${signedToken}/expire`)) {
       assert.equal([...store.rows.values()].at(-1)?.phase, 'REVOKING', 'durable fence must precede revoke');
       assert.equal(init.method, 'POST'); assert.equal(init.body, undefined); state.expired = true;
+      if (state.expireDelayMs) await new Promise(resolve => setTimeout(resolve, state.expireDelayMs));
       return new Response('', { status: state.expireStatus });
     }
     if (url.endsWith('/toolbox-proxy-url')) return Response.json({ url: state.proxy });
@@ -85,7 +87,12 @@ test('official scoped mint is fenced before effects, encrypted at rest, and relo
   assert.equal(value.url, viewerUrl); assert.match(value.grantHandle, /^[a-f0-9-]{36}$/);
   assert.ok(value.expiresAt >= started + 59000 && value.expiresAt <= Date.now() + 60000);
   const persisted = JSON.stringify([...store.rows]);
-  for (const secret of [apiToken, signedToken, viewerUrl, signedRoot, binding.ownerSubjectHash]) assert.equal(persisted.includes(secret), false);
+  for (const secret of [apiToken, signedToken, viewerUrl, signedRoot]) assert.equal(persisted.includes(secret), false);
+  // Explicit approved NONSECRET enrollment metadata supports restart cleanup;
+  // token/URL/credential fields remain forbidden by the strict record codec.
+  const stored = [...store.rows.values()][0]!;
+  assert.deepEqual(stored.binding, binding); assert.equal(stored.organizationId, organizationId); assert.equal(stored.version, 2);
+  assert.deepEqual(Object.keys(stored).sort(), ['version', 'organizationId', 'binding', 'grantHandle', 'bindingHash', 'scopeHash', 'expiresAt', 'phase', 'sealed'].sort());
   assert.equal([...store.rows.values()][0]?.phase, 'ACTIVE');
   assert.deepEqual(await port.read(binding, value.grantHandle), value);
   assert.deepEqual(await port.read(binding, value.grantHandle), value);
@@ -228,4 +235,33 @@ test('AES-GCM binds original expiry and rejects a wrong dedicated key even when 
   const row = store.rows.get(grant.grantHandle)!; row.expiresAt += 1000;
   await assert.rejects(port.read(binding, grant.grantHandle)); await assert.rejects(port.revoke(binding, grant.grantHandle));
   assert.equal(net.calls.length, 0);
+});
+test('watchdog cancellation before or during revoke cannot launch late provider effects or discard durable unknown fencing', async () => {
+  const { port, net, store } = await fixture(); const grant = await port.mint(binding, 60); net.calls.length = 0;
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(port.revoke(binding, grant.grantHandle, cancelled.signal));
+  await new Promise(resolve => setTimeout(resolve, 2));
+  assert.equal(net.calls.length, 0); assert.equal(store.rows.get(grant.grantHandle)?.phase, 'ACTIVE');
+});
+test('real expiry controller drives real vault CAS/full revoke once without any URL or ticket lifetime extension', async () => {
+  const { DaytonaViewerExpiryController } = await import('./viewer-expiry.js'); let now = Date.now();
+  const { port, net, store } = await fixture({ now: () => now }); const grant = await port.mint(binding, 60);
+  const controller = new DaytonaViewerExpiryController({ store, port, organizationId, sandboxId: binding.sandboxId, now: () => now });
+  assert.equal(controller.ready(), false); assert.deepEqual(await controller.tick(), { status: 'active' });
+  now = grant.expiresAt;
+  assert.deepEqual(await controller.tick(), { status: 'expired_revoked' }); assert.equal(controller.ready(), true);
+  assert.equal(store.rows.get(grant.grantHandle)?.expiresAt, grant.expiresAt); assert.equal(store.leases.size, 0);
+  assert.deepEqual(await controller.tick(), { status: 'idle' });
+  assert.equal(net.calls.filter(call => call.url.endsWith('/expire')).length, 1); assert.equal(net.calls.filter(call => call.url.endsWith('/process/execute')).length, 1);
+});
+test('watchdog deadline aborts concrete vault after ambiguous expire ACK and future ticks never replay unknown provider effects', async () => {
+  const { DaytonaViewerExpiryController } = await import('./viewer-expiry.js'); let now = Date.now();
+  const { port, net, store } = await fixture({ now: () => now }); const grant = await port.mint(binding, 60);
+  now = grant.expiresAt; net.state.expireDelayMs = 60;
+  const controller = new DaytonaViewerExpiryController({ store, port, organizationId, sandboxId: binding.sandboxId, now: () => now, deadlineMs: 25 });
+  assert.equal((await controller.tick()).status, 'operator_attention'); assert.equal(controller.ready(), false);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(store.rows.get(grant.grantHandle)?.phase, 'REVOKING'); assert.equal(store.leases.size, 1);
+  const count = net.calls.length; assert.equal((await controller.tick()).status, 'operator_attention'); assert.equal(net.calls.length, count);
+  assert.equal(net.calls.filter(call => call.url.endsWith('/expire')).length, 1); assert.equal(net.calls.some(call => call.url.endsWith('/process/execute')), false);
 });

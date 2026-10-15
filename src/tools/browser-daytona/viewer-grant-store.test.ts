@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { DaytonaViewerGrantRecord } from './viewer-grant-store.js';
+import { daytonaViewerGrantBindingHash, daytonaViewerPhysicalScopeHash } from './viewer-grant-store.js';
+import type { DaytonaBinding } from './contract.js';
 
 const grantHandle = '11111111-1111-4111-8111-111111111111';
-const original: DaytonaViewerGrantRecord = { grantHandle, bindingHash: 'a'.repeat(64), scopeHash: 'b'.repeat(64), expiresAt: 2000000000000, phase: 'MINTING' };
+const organizationId = '501db94e-10ee-4bc8-9cca-23c793c67524';
+const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
+const original: DaytonaViewerGrantRecord = { version: 2, organizationId, binding, grantHandle, bindingHash: daytonaViewerGrantBindingHash(organizationId, binding), scopeHash: daytonaViewerPhysicalScopeHash(organizationId, binding.sandboxId), expiresAt: 2000000000000, phase: 'MINTING' };
 const active: DaytonaViewerGrantRecord = { ...original, phase: 'ACTIVE', sealed: { iv: Buffer.alloc(12, 1).toString('base64url'), tag: Buffer.alloc(16, 2).toString('base64url'), ciphertext: Buffer.alloc(100, 3).toString('base64url') } };
 async function fixture() {
   const module = await import('./viewer-grant-store.js').catch(() => null);
@@ -64,4 +68,20 @@ test('conditional conflicts are finite false, unknown transaction outcomes throw
   await assert.rejects(store.reserve(original, AbortSignal.timeout(1000)), e => !String(e).includes('TransactionConflict')); assert.equal(state.calls, 2);
   state.result = { __type: 'ConditionalCheckFailedException' };
   assert.equal(await store.compareAndSwap(original, active, AbortSignal.timeout(1000)), false); assert.equal(state.calls, 3);
+});
+test('physical scope lookup is strongly consistent, namespace-exact and rejects missing owners or TTL-reclaimable fences', async () => {
+  const { store, requests, state } = await fixture(); const pk = `DAYTONA#VIEWER_SCOPE#${original.scopeHash}`;
+  state.result = { Item: { pk: { S: pk }, grantHandle: { S: grantHandle } } };
+  assert.equal(await store.readPhysicalScope(original.scopeHash, AbortSignal.timeout(1000)), grantHandle);
+  assert.equal(requests[0]!.operation, 'GetItem'); assert.equal(requests[0]!.body.ConsistentRead, true);
+  state.result = { Item: { pk: { S: pk }, grantHandle: { S: grantHandle }, expiresAtEpoch: { N: '1' } } };
+  await assert.rejects(store.readPhysicalScope(original.scopeHash, AbortSignal.timeout(1000)));
+  state.result = { Item: { pk: { S: pk } } }; await assert.rejects(store.readPhysicalScope(original.scopeHash, AbortSignal.timeout(1000)));
+});
+test('v2 restart ownership metadata is strict, hash-bound and never accepts credential-bearing extra fields', async () => {
+  const { store, state } = await fixture();
+  for (const bad of [{ ...active, version: 1 }, { ...active, binding: { ...binding, apiToken: 'secret' } }, { ...active, binding: { ...binding, ownerSubjectHash: 'c'.repeat(64) } }, { ...active, organizationId: '22222222-2222-4222-8222-222222222222' }]) {
+    state.result = { Item: { pk: { S: `DAYTONA#VIEWER_GRANT#${grantHandle}` }, payload: { S: JSON.stringify(bad) } } };
+    await assert.rejects(store.load(grantHandle, AbortSignal.timeout(1000)));
+  }
 });

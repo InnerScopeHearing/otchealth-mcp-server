@@ -1,8 +1,8 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
 import type { DaytonaViewerGrantPort } from './client.js';
 import { DaytonaBrowserError, type DaytonaBinding } from './contract.js';
 import { assertDaytonaBinding } from './store.js';
-import { assertDaytonaViewerGrantRecord, type DaytonaViewerGrantRecord, type DaytonaViewerGrantStore } from './viewer-grant-store.js';
+import { assertDaytonaViewerGrantRecord, daytonaViewerGrantBindingHash, daytonaViewerPhysicalScopeHash, type DaytonaViewerGrantRecord, type DaytonaViewerGrantStore } from './viewer-grant-store.js';
 
 export interface EncryptedDaytonaViewerGrantOptions {
   store: DaytonaViewerGrantStore;
@@ -30,7 +30,6 @@ const DOMAIN = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
 const TOKEN = /^[a-z0-9](?:[a-z0-9-]{0,60}[a-z0-9])?$/;
 function fail(code = 'daytona_viewer_unavailable'): never { throw new DaytonaBrowserError(code); }
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : fail();
-const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function https(raw: string): URL {
   let value: URL; try { value = new URL(raw); } catch { return fail(); }
   if (value.protocol !== 'https:' || value.port || value.username || value.password || value.search || value.hash) return fail(); return value;
@@ -55,21 +54,24 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
     this.fetcher = options.fetchImpl ?? fetch; this.now = options.now ?? Date.now; this.deadline = options.deadlineMs ?? 20000;
     if (!Number.isSafeInteger(this.deadline) || this.deadline < 1 || this.deadline > 20000) fail();
   }
-  private async bounded<T>(run: (context: Context) => Promise<T>): Promise<T> {
+  private async bounded<T>(run: (context: Context) => Promise<T>, externalSignal?: AbortSignal): Promise<T> {
     const abort = new AbortController(); const until = Date.now() + this.deadline;
-    const context: Context = { signal: abort.signal, check: () => { const left = until - Date.now(); if (abort.signal.aborted || left <= 0) return fail(); return left; } };
+    const signal = externalSignal ? AbortSignal.any([abort.signal, externalSignal]) : abort.signal;
+    const context: Context = { signal, check: () => { const left = until - Date.now(); if (signal.aborted || left <= 0) return fail(); return left; } };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { abort.abort(); reject(new DaytonaBrowserError('daytona_viewer_unavailable')); }, this.deadline); });
-    try { return await Promise.race([run(context), timeout]); }
+    let onCancel: (() => void) | undefined;
+    const cancelled = new Promise<never>((_resolve, reject) => { onCancel = () => reject(new DaytonaBrowserError('daytona_viewer_unavailable')); if (signal.aborted) onCancel(); else signal.addEventListener('abort', onCancel, { once: true }); });
+    try { return await Promise.race([Promise.resolve().then(() => { context.check(); return run(context); }), timeout, cancelled]); }
     // Never relay vendor, credential resolver, crypto or storage exception text.
     catch { return fail(); }
-    finally { clearTimeout(timer); abort.abort(); }
+    finally { clearTimeout(timer); if (onCancel) signal.removeEventListener('abort', onCancel); abort.abort(); }
   }
   private bindingHash(binding: DaytonaBinding): string {
-    return hash(['daytona-viewer-v1', this.options.organizationId, binding.owner, binding.ownerSubjectHash, binding.sandboxId, binding.profileKey, binding.profilePath, binding.readinessReceiptSha256]);
+    return daytonaViewerGrantBindingHash(this.options.organizationId, binding);
   }
   private aad(binding: DaytonaBinding, value: DaytonaViewerGrantRecord): Buffer {
-    return Buffer.from(JSON.stringify(['daytona-viewer-v1', this.options.organizationId, binding.sandboxId, binding.profileKey, binding.profilePath, binding.owner, binding.ownerSubjectHash, binding.readinessReceiptSha256, value.grantHandle, value.expiresAt]));
+    return Buffer.from(JSON.stringify(['daytona-viewer-v2', value.version, this.options.organizationId, binding.sandboxId, binding.profileKey, binding.profilePath, binding.owner, binding.ownerSubjectHash, binding.readinessReceiptSha256, value.grantHandle, value.expiresAt]));
   }
   private seal(binding: DaytonaBinding, value: DaytonaViewerGrantRecord, secret: Secret): NonNullable<DaytonaViewerGrantRecord['sealed']> {
     const iv = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', this.key, iv); cipher.setAAD(this.aad(binding, value));
@@ -119,13 +121,13 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
   private async owned(context: Context, binding: DaytonaBinding, handle: string): Promise<DaytonaViewerGrantRecord> {
     assertDaytonaBinding(binding); if (!UUID.test(handle)) fail();
     const value = await this.options.store.load(handle, context.signal); context.check(); assertDaytonaViewerGrantRecord(value);
-    if (value.grantHandle !== handle || value.bindingHash !== this.bindingHash(binding) || value.scopeHash !== hash(['daytona-viewer-scope-v1', this.options.organizationId, binding.sandboxId])) fail(); return value;
+    if (value.grantHandle !== handle || value.organizationId !== this.options.organizationId || value.bindingHash !== this.bindingHash(binding) || value.scopeHash !== daytonaViewerPhysicalScopeHash(this.options.organizationId, binding.sandboxId)) fail(); return value;
   }
   async mint(binding: DaytonaBinding, expiresSeconds: number): Promise<Grant> {
     return this.bounded(async context => {
       assertDaytonaBinding(binding); if (!Number.isSafeInteger(expiresSeconds) || expiresSeconds < 1 || expiresSeconds > 300) fail();
       await this.inspect(context, binding); context.check();
-      const value: DaytonaViewerGrantRecord = { grantHandle: randomUUID(), bindingHash: this.bindingHash(binding), scopeHash: hash(['daytona-viewer-scope-v1', this.options.organizationId, binding.sandboxId]), expiresAt: this.now() + expiresSeconds * 1000, phase: 'MINTING' };
+      const value: DaytonaViewerGrantRecord = { version: 2, organizationId: this.options.organizationId, binding: structuredClone(binding), grantHandle: randomUUID(), bindingHash: this.bindingHash(binding), scopeHash: daytonaViewerPhysicalScopeHash(this.options.organizationId, binding.sandboxId), expiresAt: this.now() + expiresSeconds * 1000, phase: 'MINTING' };
       if (!await this.options.store.reserve(value, context.signal)) fail(); context.check();
       // SDK0.224.1 SandboxApi.get_signed_port_preview_url (effectful GET).
       const result = await this.json(context, `${this.base.href}/sandbox/${encodeURIComponent(binding.sandboxId)}/ports/${this.options.previewPort}/signed-preview-url?expiresInSeconds=${expiresSeconds}`);
@@ -155,7 +157,7 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
     const receipt = record(JSON.parse(response.result));
     if (Object.keys(receipt).some(key => !['human_input_revoked', 'display', 'active_clients', 'x11vnc_pid'].includes(key)) || receipt.human_input_revoked !== true || receipt.display !== ':0' || receipt.active_clients !== 0 || !Number.isSafeInteger(receipt.x11vnc_pid) || Number(receipt.x11vnc_pid) < 1) fail();
   }
-  async revoke(binding: DaytonaBinding, handle: string): Promise<{ human_input_revoked: true }> {
+  async revoke(binding: DaytonaBinding, handle: string, signal?: AbortSignal): Promise<{ human_input_revoked: true }> {
     return this.bounded(async context => {
       const before = await this.owned(context, binding, handle);
       if (before.phase === 'REVOKED') return { human_input_revoked: true };
@@ -168,9 +170,9 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
       await response.body?.cancel().catch(() => undefined); if (response.status !== 200) fail(); context.check();
       const denied = await this.previewStatus(context, secret.url); if (denied !== 401 && denied !== 403) fail();
       await this.disconnect(context, binding); context.check();
-      const revoked: DaytonaViewerGrantRecord = { grantHandle: before.grantHandle, bindingHash: before.bindingHash, scopeHash: before.scopeHash, expiresAt: before.expiresAt, phase: 'REVOKED' };
+      const revoked: DaytonaViewerGrantRecord = { version: 2, organizationId: before.organizationId, binding: before.binding, grantHandle: before.grantHandle, bindingHash: before.bindingHash, scopeHash: before.scopeHash, expiresAt: before.expiresAt, phase: 'REVOKED' };
       if (!await this.options.store.compareAndSwap(revoking, revoked, context.signal)) fail(); context.check();
       return { human_input_revoked: true };
-    });
+    }, signal);
   }
 }
