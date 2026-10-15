@@ -78,6 +78,7 @@ function harness() {
   } as unknown as CloudBrowserTransport & AgentCoreCloudBrowserTransport;
   const ticketStore = {
     acquireProfileLease: async (id: string, leaseOwner: string) => { if (leases.has(id)) return false; leases.set(id, leaseOwner); return true; },
+    renewProfileLease: async (id: string, leaseOwner: string, until: number) => leases.get(id) === leaseOwner && until > now,
     releaseProfileLease: async (id: string, leaseOwner: string) => { if (leases.get(id) === leaseOwner) leases.delete(id); },
     ownsProfileLease: async (id: string, leaseOwner: string) => leases.get(id) === leaseOwner,
     create: async () => {},
