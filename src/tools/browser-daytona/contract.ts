@@ -7,8 +7,17 @@ export interface DaytonaBinding {
   ownerSubjectHash: string;
   sandboxId: string;
   profileKey: string;
+  /** Explicit immutable server-admin membership; never caller/MCP input.
+   * profileKey remains the virtual owner/principal identity in auth and storage.
+   */
+  sharedProfileKey?: 'company-browser';
   profilePath: string;
   readinessReceiptSha256: string;
+}
+
+/** Physical runtime identity only; callers must first validate the enrollment. */
+export function daytonaPhysicalProfileKey(binding: DaytonaBinding): string {
+  return binding.sharedProfileKey ?? binding.profileKey;
 }
 
 export interface DaytonaMission {

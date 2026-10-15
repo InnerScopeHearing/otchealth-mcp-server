@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import type { DaytonaViewerGrantRecord } from './viewer-grant-store.js';
 import { daytonaViewerGrantBindingHash, daytonaViewerPhysicalScopeHash } from './viewer-grant-store.js';
 import type { DaytonaBinding } from './contract.js';
@@ -82,6 +83,23 @@ test('v2 restart ownership metadata is strict, hash-bound and never accepts cred
   const { store, state } = await fixture();
   for (const bad of [{ ...active, version: 1 }, { ...active, binding: { ...binding, apiToken: 'secret' } }, { ...active, binding: { ...binding, ownerSubjectHash: 'c'.repeat(64) } }, { ...active, organizationId: '22222222-2222-4222-8222-222222222222' }]) {
     state.result = { Item: { pk: { S: `DAYTONA#VIEWER_GRANT#${grantHandle}` }, payload: { S: JSON.stringify(bad) } } };
+    await assert.rejects(store.load(grantHandle, AbortSignal.timeout(1000)));
+  }
+});
+test('shared physical enrollment is hash-bound while legacy isolated binding hashes stay byte-compatible', async () => {
+  const legacyParts = ['daytona-viewer-v1', organizationId, binding.owner, binding.ownerSubjectHash, binding.sandboxId, binding.profileKey, binding.profilePath, binding.readinessReceiptSha256];
+  assert.equal(daytonaViewerGrantBindingHash(organizationId, binding), createHash('sha256').update(JSON.stringify(legacyParts)).digest('hex'));
+  const shared: DaytonaBinding = { ...binding, profileKey: `cto-${binding.ownerSubjectHash}`, sharedProfileKey: 'company-browser', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium' };
+  const sharedParts = ['daytona-viewer-v1', organizationId, shared.owner, shared.ownerSubjectHash, shared.sandboxId, shared.profileKey, shared.profilePath, shared.readinessReceiptSha256];
+  const expected = createHash('sha256').update(JSON.stringify([...sharedParts, 'company-browser'])).digest('hex');
+  assert.equal(daytonaViewerGrantBindingHash(organizationId, shared), expected);
+  const { store, state } = await fixture();
+  const record = { ...active, binding: shared, bindingHash: expected };
+  state.result = { Item: { pk: { S: `DAYTONA#VIEWER_GRANT#${grantHandle}` }, payload: { S: JSON.stringify(record) } } };
+  assert.deepEqual(await store.load(grantHandle, AbortSignal.timeout(1000)), record);
+  const { sharedProfileKey: _shared, ...withoutMembership } = shared;
+  for (const tampered of [{ ...record, binding: withoutMembership }, { ...record, bindingHash: createHash('sha256').update(JSON.stringify(sharedParts)).digest('hex') }]) {
+    state.result = { Item: { pk: { S: `DAYTONA#VIEWER_GRANT#${grantHandle}` }, payload: { S: JSON.stringify(tampered) } } };
     await assert.rejects(store.load(grantHandle, AbortSignal.timeout(1000)));
   }
 });

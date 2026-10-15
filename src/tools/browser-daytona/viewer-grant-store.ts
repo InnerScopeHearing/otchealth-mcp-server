@@ -38,7 +38,10 @@ function fail(): never { throw new DaytonaBrowserError('daytona_viewer_store_una
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 export function daytonaViewerGrantBindingHash(organizationId: string, binding: DaytonaBinding): string {
   if (!UUID.test(organizationId)) fail(); assertDaytonaBinding(binding);
-  return hash(['daytona-viewer-v1', organizationId, binding.owner, binding.ownerSubjectHash, binding.sandboxId, binding.profileKey, binding.profilePath, binding.readinessReceiptSha256]);
+  const parts = ['daytona-viewer-v1', organizationId, binding.owner, binding.ownerSubjectHash, binding.sandboxId, binding.profileKey, binding.profilePath, binding.readinessReceiptSha256];
+  // Append only for explicitly shared enrollment, preserving existing receipts.
+  if (binding.sharedProfileKey !== undefined) parts.push(binding.sharedProfileKey);
+  return hash(parts);
 }
 export function daytonaViewerPhysicalScopeHash(organizationId: string, sandboxId: string): string {
   if (!UUID.test(organizationId) || !ID.test(sandboxId)) fail(); return hash(['daytona-viewer-scope-v1', organizationId, sandboxId]);

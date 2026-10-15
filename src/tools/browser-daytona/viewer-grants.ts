@@ -71,7 +71,10 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
     return daytonaViewerGrantBindingHash(this.options.organizationId, binding);
   }
   private aad(binding: DaytonaBinding, value: DaytonaViewerGrantRecord): Buffer {
-    return Buffer.from(JSON.stringify(['daytona-viewer-v2', value.version, this.options.organizationId, binding.sandboxId, binding.profileKey, binding.profilePath, binding.owner, binding.ownerSubjectHash, binding.readinessReceiptSha256, value.grantHandle, value.expiresAt]));
+    const parts: Array<string | number> = ['daytona-viewer-v2', value.version, this.options.organizationId, binding.sandboxId, binding.profileKey, binding.profilePath, binding.owner, binding.ownerSubjectHash, binding.readinessReceiptSha256, value.grantHandle, value.expiresAt];
+    // Keep isolated grants decryptable while binding explicit shared membership.
+    if (binding.sharedProfileKey !== undefined) parts.push(binding.sharedProfileKey);
+    return Buffer.from(JSON.stringify(parts));
   }
   private seal(binding: DaytonaBinding, value: DaytonaViewerGrantRecord, secret: Secret): NonNullable<DaytonaViewerGrantRecord['sealed']> {
     const iv = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', this.key, iv); cipher.setAAD(this.aad(binding, value));

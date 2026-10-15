@@ -4,7 +4,7 @@ import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 import type { TrustedBrowserBinaryValidator } from '../browser-cloud/binary-validation.js';
 import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
-import { DaytonaBrowserError, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
+import { DaytonaBrowserError, daytonaPhysicalProfileKey, type DaytonaBinding, type DaytonaMission, type DaytonaProvider, type DaytonaRuntimeReadiness } from './contract.js';
 export type { DaytonaRuntimeReadiness } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
 import { DaytonaTransferBridge, type DaytonaUploadDescriptor } from './transfer-bridge.js';
@@ -121,13 +121,14 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     const base = await this.toolboxWith(context, binding);
     // Official execute timeout is seconds; retain five seconds for its terminal receipt.
     const timeoutMs = Math.min(14000, timeoutSeconds * 1000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
-    const payload = { version: 1, op, profileKey: binding.profileKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash, ...(upload ? { upload } : {}) };
+    const physicalKey = daytonaPhysicalProfileKey(binding);
+    const payload = { version: 1, op, profileKey: physicalKey, profilePath: binding.profilePath, timeoutMs: Math.floor(timeoutMs), ...(sessionId ? { sessionId } : {}), ...(action ? { action } : {}), principalHash: principalHash ?? binding.ownerSubjectHash, ...(upload ? { upload } : {}) };
     const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
     if (encoded.length > 32768) return fail('daytona_runtime_invalid');
     const command = `sudo -n runuser -u otcbrowser -- python3 -I /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
     const png = op === 'execute' && action?.type === 'capture' && action.request.type === 'screenshot' && (!action.request.format || action.request.format === 'png');
     const receipt = await this.processWith(context, base, binding, command, timeoutMs, png);
-    if (receipt.version !== 1 || receipt.ok !== true || receipt.profileKey !== binding.profileKey || receipt.profilePath !== binding.profilePath || (sessionId !== undefined && receipt.sessionId !== sessionId)) return fail('daytona_runtime_invalid');
+    if (receipt.version !== 1 || receipt.ok !== true || receipt.profileKey !== physicalKey || receipt.profilePath !== binding.profilePath || (sessionId !== undefined && receipt.sessionId !== sessionId)) return fail('daytona_runtime_invalid');
     const result = record(receipt.result);
     if ((op === 'probe' || op === 'open') && (result.ready !== true || result.cdpLoopback !== true || result.profileVerified !== true)) return fail('daytona_runtime_unavailable');
     if (op === 'release' && result.released !== true) return fail('daytona_runtime_invalid');
@@ -167,10 +168,13 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     this.assertMission(binding, session, principal); context.remaining();
     if (payload.profileKey !== binding.profileKey || payload.sessionId !== session.sessionId || payload.principalHash !== principal) return fail('owner_forbidden');
     const timeoutMs = Math.min(14000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
-    const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url'); if (encoded.length > 4096) return fail('daytona_upload_invalid');
+    // The broker/session above retain virtual principal ownership. Only this
+    // fixed root-helper wire identity changes to the enrolled physical profile.
+    const physicalKey = daytonaPhysicalProfileKey(binding);
+    const encoded = Buffer.from(JSON.stringify({ ...payload, profileKey: physicalKey })).toString('base64url'); if (encoded.length > 4096) return fail('daytona_upload_invalid');
     const receipt = await this.processWith(context, base, binding, `sudo -n python3 -I /opt/otchealth-browser/transfer-stage.py --payload ${encoded}`, timeoutMs);
     context.remaining();
-    if (receipt.version !== 1 || receipt.ok !== true || receipt.staged !== true || receipt.profileKey !== binding.profileKey || receipt.sessionId !== session.sessionId || receipt.sha256 !== payload.sha256 || receipt.byteLength !== payload.byteLength) return fail('daytona_upload_unconfirmed');
+    if (receipt.version !== 1 || receipt.ok !== true || receipt.staged !== true || receipt.profileKey !== physicalKey || receipt.sessionId !== session.sessionId || receipt.sha256 !== payload.sha256 || receipt.byteLength !== payload.byteLength) return fail('daytona_upload_unconfirmed');
     return { staged: true, sha256: payload.sha256, byteLength: payload.byteLength };
   }
   /** Read-only local runtime readiness, never browser/resource launch. */
@@ -178,7 +182,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     const result = record(await this.runtime(binding, 'probe'));
     const pid = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
     if (result.checkpointReady === true) {
-      if (result.profileKey !== binding.profileKey || result.profilePath !== binding.profilePath || result.encryptedKeyringUnlocked !== true || !pid(result.browserPid) || !pid(result.supervisorPid)) return fail('daytona_runtime_invalid');
+      if (result.profileKey !== daytonaPhysicalProfileKey(binding) || result.profilePath !== binding.profilePath || result.encryptedKeyringUnlocked !== true || !pid(result.browserPid) || !pid(result.supervisorPid)) return fail('daytona_runtime_invalid');
       return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: true, browserPid: result.browserPid, supervisorPid: result.supervisorPid };
     }
     return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: false };
@@ -211,7 +215,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (session.owner !== binding.owner || session.ownerSubjectHash !== binding.ownerSubjectHash || session.profileKey !== binding.profileKey || session.sandboxId !== binding.sandboxId || session.phase !== 'ACTIVE' || session.expiresAt <= Date.now()) return fail('owner_forbidden');
     const result = record(await this.runtime(binding, 'checkpoint', session.sessionId, undefined, binding.ownerSubjectHash));
     const pid = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
-    if (result.checkpointed !== true || result.gracefulClosed !== true || result.keyringSessionRetained !== true || result.cdpLoopback !== true || result.profileVerified !== true || result.tabsReset !== true || result.profileKey !== binding.profileKey || result.profilePath !== binding.profilePath || result.sessionId !== session.sessionId || result.principalHash !== binding.ownerSubjectHash || !pid(result.browserPidBefore) || !pid(result.browserPidAfter) || result.browserPidBefore === result.browserPidAfter || !pid(result.supervisorPid)) return fail('daytona_checkpoint_unverified');
+    if (result.checkpointed !== true || result.gracefulClosed !== true || result.keyringSessionRetained !== true || result.cdpLoopback !== true || result.profileVerified !== true || result.tabsReset !== true || result.profileKey !== daytonaPhysicalProfileKey(binding) || result.profilePath !== binding.profilePath || result.sessionId !== session.sessionId || result.principalHash !== binding.ownerSubjectHash || !pid(result.browserPidBefore) || !pid(result.browserPidAfter) || result.browserPidBefore === result.browserPidAfter || !pid(result.supervisorPid)) return fail('daytona_checkpoint_unverified');
   }
   async releaseMission(binding: DaytonaBinding, session: DaytonaMission): Promise<void> {
     assertDaytonaBinding(binding); assertDaytonaMission(session);

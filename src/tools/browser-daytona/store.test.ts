@@ -4,6 +4,7 @@ import { DynamoDaytonaBrowserStore } from './store.js';
 import type { DaytonaBinding, DaytonaMission } from './contract.js';
 
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
+const sharedBinding = { ...binding, profileKey: `cto-${binding.ownerSubjectHash}`, sharedProfileKey: 'company-browser' as const, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium' };
 function fixture() {
   const calls: Array<Record<string, any>> = []; let conflict = false; let item: Record<string, any> | undefined;
   const store = new DynamoDaytonaBrowserStore({ tableName: 'test-browser-table', region: 'us-east-1', now: () => 1000,
@@ -48,4 +49,25 @@ test('unclosed mission receipts and exact desktop fences survive logical expiry 
   h.seed({ pk: { S: 'DAYTONA#LEASE#profile-one' }, lockOwner: { S: 'mission-one' }, lockUntil: { N: '1' } });
   assert.equal(await h.store.ownsProfileLease('profile-one', 'mission-one'), true, 'expiry may block actions but cannot destroy exact-owner cleanup authority');
   assert.equal(await h.store.ownsProfileLease('profile-one', 'successor'), false);
+});
+test('explicit server-enrolled shared membership retains its immutable virtual identity and physical path', async () => {
+  const h = fixture(); assert.equal(await h.store.createBinding(sharedBinding), true);
+  assert.equal(h.calls[0]!.Item.pk.S, `DAYTONA#PROFILE#${sharedBinding.profileKey}`);
+  assert.equal(h.calls[0]!.ConditionExpression, 'attribute_not_exists(pk)');
+  assert.deepEqual(await h.store.loadBinding(sharedBinding.profileKey), sharedBinding);
+  h.conflict(); assert.equal(await h.store.createBinding(sharedBinding), false);
+});
+test('shared enrollment cannot forge its fixed physical key, member principal, virtual key or physical path', async () => {
+  const h = fixture();
+  for (const bad of [
+    { ...sharedBinding, sharedProfileKey: 'other-browser' }, { ...sharedBinding, sharedProfileKey: undefined },
+    { ...sharedBinding, sharedProfileKey: null }, { ...sharedBinding, profileKey: 'company-browser' },
+    { ...sharedBinding, owner: 'cfo' }, { ...sharedBinding, ownerSubjectHash: 'c'.repeat(64) },
+    { ...sharedBinding, profilePath: binding.profilePath }, { ...sharedBinding, apiToken: 'not-accepted' },
+    { ...sharedBinding, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/../other/chromium' },
+  ]) await assert.rejects(h.store.createBinding(bad as DaytonaBinding));
+  assert.equal(h.calls.length, 0);
+  const isolated = { ...binding, profileKey: sharedBinding.profileKey, profilePath: sharedBinding.profilePath };
+  await assert.rejects(h.store.createBinding(isolated));
+  assert.equal(h.calls.length, 0, 'the shared path never silently enrolls an isolated binding');
 });

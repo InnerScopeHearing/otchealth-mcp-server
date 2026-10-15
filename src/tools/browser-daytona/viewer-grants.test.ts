@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -181,6 +181,32 @@ test('one physical sandbox cannot receive concurrent profile grants and ambiguou
   const values = await Promise.allSettled([port.mint(binding, 60), port.mint(other, 60)]);
   assert.equal(values.filter(v => v.status === 'fulfilled').length, 1); assert.equal(store.rows.size, 1);
   assert.equal(net.calls.filter(c => c.url.includes('?expiresInSeconds=')).length, 1);
+});
+test('shared membership is appended to encrypted AAD without changing isolated grants or virtual viewer ownership', async () => {
+  const shared: DaytonaBinding = { ...binding, profileKey: `cto-${binding.ownerSubjectHash}`, sharedProfileKey: 'company-browser', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium' };
+  const other: DaytonaBinding = { ...shared, owner: 'cfo', ownerSubjectHash: 'd'.repeat(64), profileKey: `cfo-${'d'.repeat(64)}` };
+  for (const enrolled of [binding, shared]) {
+    const { port, store, net, options } = await fixture();
+    const grant = await port.mint(enrolled, 60), row = store.rows.get(grant.grantHandle)!;
+    assert.ok(row.sealed);
+    const legacyAad = ['daytona-viewer-v2', row.version, organizationId, enrolled.sandboxId, enrolled.profileKey, enrolled.profilePath, enrolled.owner, enrolled.ownerSubjectHash, enrolled.readinessReceiptSha256, row.grantHandle, row.expiresAt];
+    const decrypt = (parts: unknown[]) => {
+      const decipher = createDecipheriv('aes-256-gcm', options.encryptionKey, Buffer.from(row.sealed!.iv, 'base64url'));
+      decipher.setAAD(Buffer.from(JSON.stringify(parts))); decipher.setAuthTag(Buffer.from(row.sealed!.tag, 'base64url'));
+      return JSON.parse(Buffer.concat([decipher.update(Buffer.from(row.sealed!.ciphertext, 'base64url')), decipher.final()]).toString());
+    };
+    const aad = enrolled.sharedProfileKey ? [...legacyAad, enrolled.sharedProfileKey] : legacyAad;
+    assert.deepEqual(decrypt(aad), { token: signedToken, url: viewerUrl });
+    assert.deepEqual(await port.read(enrolled, grant.grantHandle), grant);
+    if (enrolled.sharedProfileKey) {
+      assert.throws(() => decrypt(legacyAad));
+      const count = net.calls.length;
+      await assert.rejects(port.read(other, grant.grantHandle)); await assert.rejects(port.revoke(other, grant.grantHandle));
+      assert.equal(net.calls.length, count, 'same physical membership must not inherit another member\'s viewer grant');
+      await assert.rejects(port.mint(other, 60));
+      assert.equal(net.calls.filter(call => call.url.includes('?expiresInSeconds=')).length, 1, 'physical viewer scope remains fenced across members');
+    }
+  }
 });
 test('absolute timeout fences slow mint and prevents late activation or automatic second provider call', async () => {
   const { port, store, net } = await fixture({ deadlineMs: 20 }); net.state.mintDelayMs = 50;

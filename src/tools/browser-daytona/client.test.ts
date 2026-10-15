@@ -13,12 +13,15 @@ const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjec
 const mission: DaytonaMission = { provider: 'daytona', sessionId: '12345678-1234-4234-8234-123456789abc', owner: 'cto', ownerSubjectHash: binding.ownerSubjectHash, profileKey: binding.profileKey, sandboxId: binding.sandboxId, expiresAt: Date.now() + 180000, actionsUsed: 1, actionBudget: 25, effectUnknown: true, phase: 'ACTIVE' };
 const token = 'server-only-secret-not-for-output';
 const organizationId = '501db94e-10ee-4bc8-9cca-23c793c67524';
+const sharedBinding = { ...binding, profileKey: `cto-${binding.ownerSubjectHash}`, sharedProfileKey: 'company-browser' as const, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium' };
+const sharedRuntime = { profileKey: 'company-browser', profilePath: sharedBinding.profilePath };
+const sharedMission = { ...mission, profileKey: sharedBinding.profileKey };
 async function client(options: Record<string, unknown> = {}) {
   const module = await import('./client.js').catch(() => null);
   assert.equal(typeof module?.DaytonaApiBrowserProvider, 'function', 'concrete Daytona API provider is missing');
   return new module!.DaytonaApiBrowserProvider({ apiBaseUrl: 'https://app.daytona.test/api', organizationId, resolveApiToken: async () => token, toolboxAllowedOrigins: ['https://proxy.daytona.test'], ...options } as any);
 }
-function network() {
+function network(runtimeBinding: Pick<DaytonaBinding, 'profileKey' | 'profilePath'> = binding) {
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102, result: undefined as any, promotionForeign: false, afterPrepare: undefined as (() => void) | undefined };
   const fetchImpl: typeof fetch = async (input, init = {}) => {
@@ -39,9 +42,9 @@ function network() {
       assert.match(body.command, /^sudo -n runuser -u otcbrowser -- python3(?: -I)? \/opt\/otchealth-browser\/browser-dispatcher\.py --payload [A-Za-z0-9_-]+$/);
       assert.ok(body.timeout >= 1 && body.timeout <= 18);
       const payload = JSON.parse(Buffer.from(body.command.split(' ').at(-1), 'base64url').toString()); state.payloads.push(payload);
-      const result = payload.upload ? (payload.upload.phase === 'prepare' ? { prepared: true } : { fileReceipt: { status: 'attached', ...Object.fromEntries(Object.entries(payload.upload.files[0]).filter(([key]) => key !== 'relativePath')) } }) : state.result ?? (payload.op === 'probe' ? { ready: true, cdpLoopback: true, profileVerified: true, checkpointReady: state.checkpointReady, profileKey: binding.profileKey, profilePath: binding.profilePath, browserPid: 101, supervisorPid: 100, encryptedKeyringUnlocked: state.checkpointReady } : payload.op === 'checkpoint' ? { checkpointed: true, gracefulClosed: true, keyringSessionRetained: true, cdpLoopback: true, profileVerified: true, profileKey: binding.profileKey, profilePath: binding.profilePath, sessionId: payload.sessionId, principalHash: payload.principalHash, browserPidBefore: 101, browserPidAfter: state.checkpointAfter, supervisorPid: 100, tabsReset: true } : payload.op === 'open' ? { ready: true, cdpLoopback: true, profileVerified: true } : payload.op === 'release' ? { released: true } : { url: 'https://example.com/', title: 'Example', visibleText: 'Actual fixture page', ...(state.pageReceipt ? { pageReceipt: state.pageReceipt } : {}) });
+      const result = payload.upload ? (payload.upload.phase === 'prepare' ? { prepared: true } : { fileReceipt: { status: 'attached', ...Object.fromEntries(Object.entries(payload.upload.files[0]).filter(([key]) => key !== 'relativePath')) } }) : state.result ?? (payload.op === 'probe' ? { ready: true, cdpLoopback: true, profileVerified: true, checkpointReady: state.checkpointReady, profileKey: runtimeBinding.profileKey, profilePath: runtimeBinding.profilePath, browserPid: 101, supervisorPid: 100, encryptedKeyringUnlocked: state.checkpointReady } : payload.op === 'checkpoint' ? { checkpointed: true, gracefulClosed: true, keyringSessionRetained: true, cdpLoopback: true, profileVerified: true, profileKey: runtimeBinding.profileKey, profilePath: runtimeBinding.profilePath, sessionId: payload.sessionId, principalHash: payload.principalHash, browserPidBefore: 101, browserPidAfter: state.checkpointAfter, supervisorPid: 100, tabsReset: true } : payload.op === 'open' ? { ready: true, cdpLoopback: true, profileVerified: true } : payload.op === 'release' ? { released: true } : { url: 'https://example.com/', title: 'Example', visibleText: 'Actual fixture page', ...(state.pageReceipt ? { pageReceipt: state.pageReceipt } : {}) });
       if (payload.upload?.phase === 'prepare') state.afterPrepare?.();
-      const envelope = { version: 1, ok: true, profileKey: state.foreignReceipt ? 'foreign-profile' : binding.profileKey, profilePath: binding.profilePath, ...(payload.sessionId ? { sessionId: payload.sessionId } : {}), result };
+      const envelope = { version: 1, ok: true, profileKey: state.foreignReceipt ? 'foreign-profile' : runtimeBinding.profileKey, profilePath: runtimeBinding.profilePath, ...(payload.sessionId ? { sessionId: payload.sessionId } : {}), result };
       return Response.json({ exitCode: 0, result: JSON.stringify(envelope) }, { status: state.status });
     }
     assert.equal(url, 'https://app.daytona.test/api/sandbox/sandbox-one');
@@ -70,6 +73,55 @@ test('checkpoint readiness is exact-binding runtime evidence and checkpoint requ
   assert.equal(n.state.payloads.at(-1).principalHash, binding.ownerSubjectHash);
   n.state.checkpointAfter = 101; await assert.rejects(c.checkpoint(binding, mission));
   const count = n.requests.length; await assert.rejects(c.checkpoint(binding, { ...mission, ownerSubjectHash: 'c'.repeat(64) })); assert.equal(n.requests.length, count);
+});
+test('shared membership uses one physical runtime key while readiness, missions and principal remain virtual', async () => {
+  const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
+  const readiness = await c.probe(sharedBinding);
+  assert.equal(readiness.profileKey, sharedBinding.profileKey); assert.equal(readiness.profilePath, sharedBinding.profilePath);
+  await c.openMission(sharedBinding, sharedMission.sessionId);
+  await c.execute(sharedBinding, sharedMission, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash);
+  await c.checkpoint(sharedBinding, sharedMission);
+  await c.releaseMission(sharedBinding, sharedMission);
+  for (const payload of n.state.payloads) {
+    assert.equal(payload.profileKey, 'company-browser'); assert.equal(payload.profilePath, sharedBinding.profilePath);
+    assert.equal(payload.principalHash, sharedBinding.ownerSubjectHash);
+    if (payload.op !== 'probe') assert.equal(payload.sessionId, sharedMission.sessionId);
+  }
+  n.state.foreignReceipt = true; await assert.rejects(c.probe(sharedBinding));
+});
+test('shared upload maps only physical promotion/runtime identity and preserves virtual broker ownership', async () => {
+  const n = network(sharedRuntime), f = stagedFile(), c = await client({ fetchImpl: n.fetchImpl, files: f.files });
+  const result = await c.execute(sharedBinding, sharedMission, { type: 'upload', fileId: f.id, selector: '#actual-file' }, 20, sharedBinding.ownerSubjectHash);
+  assert.equal((result as any).status, 'attached');
+  assert.deepEqual(f.calls, [[sharedBinding.owner, f.id, sharedBinding.ownerSubjectHash]]);
+  assert.deepEqual(n.state.payloads.map(p => p.op === 'promote' ? p.op : p.upload.phase), ['prepare', 'promote', 'attach']);
+  for (const payload of n.state.payloads) {
+    assert.equal(payload.profileKey, 'company-browser'); assert.equal(payload.sessionId, sharedMission.sessionId);
+    assert.equal(payload.principalHash, sharedBinding.ownerSubjectHash);
+  }
+});
+test('caller action fields cannot select shared membership, change profile paths or substitute another principal', async () => {
+  const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
+  await assert.rejects(c.execute(sharedBinding, sharedMission, { type: 'snapshot', sharedProfileKey: 'company-browser' } as any, 10, sharedBinding.ownerSubjectHash));
+  await assert.rejects(c.execute(sharedBinding, sharedMission, { type: 'snapshot' }, 10, 'd'.repeat(64)));
+  await assert.rejects(c.openMission({ ...sharedBinding, profilePath: binding.profilePath }, sharedMission.sessionId));
+  assert.equal(n.requests.length, 0);
+});
+test('two virtual members share the physical profile without inheriting one another\'s mission authority', async () => {
+  const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
+  const other = { ...sharedBinding, owner: 'cfo', ownerSubjectHash: 'd'.repeat(64), profileKey: `cfo-${'d'.repeat(64)}` };
+  const otherMission = { ...sharedMission, sessionId: '22345678-1234-4234-8234-123456789abc', owner: other.owner, ownerSubjectHash: other.ownerSubjectHash, profileKey: other.profileKey };
+  for (const [enrolled, ownMission] of [[sharedBinding, sharedMission], [other, otherMission]] as const) {
+    assert.equal((await c.probe(enrolled)).profileKey, enrolled.profileKey);
+    await c.execute(enrolled, ownMission, { type: 'snapshot' }, 10, enrolled.ownerSubjectHash);
+  }
+  assert.deepEqual(n.state.payloads.filter(p => p.op === 'execute').map(p => [p.profileKey, p.principalHash, p.sessionId]), [
+    ['company-browser', sharedBinding.ownerSubjectHash, sharedMission.sessionId], ['company-browser', other.ownerSubjectHash, otherMission.sessionId],
+  ]);
+  const before = n.requests.length;
+  await assert.rejects(c.execute(other, sharedMission, { type: 'snapshot' }, 10, other.ownerSubjectHash));
+  await assert.rejects(c.execute(sharedBinding, otherMission, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash));
+  assert.equal(n.requests.length, before);
 });
 test('foreign and missing organizations cannot reach any toolbox command', async () => {
   for (const org of ['22222222-2222-2222-2222-222222222222', undefined]) {
@@ -229,6 +281,15 @@ test('capture cannot store a foreign envelope or continue after structural valid
     const c = await client({ fetchImpl: n.fetchImpl, captures: { createCapture: async () => { stores++; throw new Error('must not store'); } }, validator: { validate: async () => { current.sensitiveOutputSuppressed = true; return { complete: true }; } } });
     await assert.rejects(c.execute(binding, current, { type: 'capture', request: { type: 'screenshot' } }, 20, binding.ownerSubjectHash)); assert.equal(stores, 0, mode);
   }
+});
+test('shared capture returns only the actual virtual member\'s principal-bound artifact', async () => {
+  const n = network(sharedRuntime), calls: any[] = [];
+  n.state.result = { capture: { contentType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg==' } };
+  const c = await client({ fetchImpl: n.fetchImpl, captures: { createCapture: async (...args: any[]) => { calls.push(args); return { id: 'bca_' + randomUUID(), owner: args[0], sessionId: args[1], ownerSubjectHash: args[4], contentType: args[2].contentType, byteLength: args[2].body.length, sha256: args[2].sha256, createdAt: args[3] }; } }, validator: { validate: async () => ({ complete: true }) } });
+  const receipt = await c.execute(sharedBinding, sharedMission, { type: 'capture', request: { type: 'screenshot' } }, 20, sharedBinding.ownerSubjectHash);
+  assert.equal(calls.length, 1); assert.equal(calls[0][0], sharedBinding.owner); assert.equal(calls[0][1], sharedMission.sessionId); assert.equal(calls[0][4], sharedBinding.ownerSubjectHash);
+  assert.equal(n.state.payloads.at(-1).profileKey, 'company-browser');
+  assert.equal('capture' in receipt, false); assert.equal('data' in receipt, false);
 });
 test('viewer operations require a trusted port and exact original grant identity', async () => {
   const missing = await client(); await assert.rejects(missing.viewerGrant(binding, 60));
