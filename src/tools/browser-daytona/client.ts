@@ -171,7 +171,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
   }
   private async promoteWith(context: Context, base: URL, binding: DaytonaBinding, session: DaytonaMission, payload: DaytonaStagePayload, principal: string): Promise<{ staged: true; sha256: string; byteLength: number }> {
     this.assertMission(binding, session, principal); context.remaining();
-    if (payload.profileKey !== binding.profileKey || payload.sessionId !== session.sessionId || payload.principalHash !== principal) return fail('owner_forbidden');
+    if (payload.profileKey !== binding.profileKey || payload.sessionId !== session.sessionId || payload.principalHash !== principal || payload.runtimeProtocol !== session.runtimeProtocol) return fail('owner_forbidden');
     const timeoutMs = Math.min(14000, context.remaining() - 5000); if (timeoutMs < 1000) return fail('daytona_provider_timeout');
     // The broker/session above retain virtual principal ownership. Only this
     // fixed root-helper wire identity changes to the enrolled physical profile.
@@ -179,7 +179,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     const encoded = Buffer.from(JSON.stringify({ ...payload, profileKey: physicalKey })).toString('base64url'); if (encoded.length > 4096) return fail('daytona_upload_invalid');
     const receipt = await this.processWith(context, base, binding, `sudo -n python3 -I /opt/otchealth-browser/transfer-stage.py --payload ${encoded}`, timeoutMs);
     context.remaining();
-    if (receipt.version !== 1 || receipt.ok !== true || receipt.staged !== true || receipt.profileKey !== physicalKey || receipt.sessionId !== session.sessionId || receipt.sha256 !== payload.sha256 || receipt.byteLength !== payload.byteLength) return fail('daytona_upload_unconfirmed');
+    if (receipt.version !== 1 || receipt.ok !== true || receipt.staged !== true || receipt.profileKey !== physicalKey || receipt.sessionId !== session.sessionId || receipt.runtimeProtocol !== session.runtimeProtocol || receipt.sha256 !== payload.sha256 || receipt.byteLength !== payload.byteLength) return fail('daytona_upload_unconfirmed');
     return { staged: true, sha256: payload.sha256, byteLength: payload.byteLength };
   }
   /** Read-only local runtime readiness, never browser/resource launch. */

@@ -23,7 +23,7 @@ async function client(options: Record<string, unknown> = {}) {
 }
 function network(runtimeBinding: Pick<DaytonaBinding, 'profileKey' | 'profilePath'> = binding) {
   const requests: Array<{ url: string; init: RequestInit }> = [];
-  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102, result: undefined as any, promotionForeign: false, afterPrepare: undefined as (() => void) | undefined };
+  const state = { sandbox: { id: binding.sandboxId, organizationId, state: 'started', public: false }, foreignReceipt: false, status: 200, calls: 0, payloads: [] as any[], pageReceipt: undefined as any, checkpointReady: true, checkpointAfter: 102, result: undefined as any, promotionForeign: false, omitPromotionProtocol: false, forgePromotionProtocol: false, afterPrepare: undefined as (() => void) | undefined };
   const fetchImpl: typeof fetch = async (input, init = {}) => {
     const url = String(input); requests.push({ url, init }); state.calls++;
     assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${token}`);
@@ -37,7 +37,7 @@ function network(runtimeBinding: Pick<DaytonaBinding, 'profileKey' | 'profilePat
       if (body.command.startsWith('sudo -n python3 -I ')) {
         assert.match(body.command, /^sudo -n python3 -I \/opt\/otchealth-browser\/transfer-stage\.py --payload [A-Za-z0-9_-]+$/);
         const payload = JSON.parse(Buffer.from(body.command.split(' ').at(-1), 'base64url').toString()); state.payloads.push({ op: 'promote', ...payload });
-        return Response.json({ exitCode: 0, result: JSON.stringify({ version: 1, ok: true, staged: true, profileKey: state.promotionForeign ? 'other' : payload.profileKey, sessionId: payload.sessionId, byteLength: payload.byteLength, sha256: payload.sha256 }) });
+        return Response.json({ exitCode: 0, result: JSON.stringify({ version: 1, ok: true, staged: true, profileKey: state.promotionForeign ? 'other' : payload.profileKey, sessionId: payload.sessionId, byteLength: payload.byteLength, sha256: payload.sha256, ...(!state.omitPromotionProtocol && (payload.runtimeProtocol === 2 || state.forgePromotionProtocol) ? { runtimeProtocol: 2 } : {}) }) });
       }
       assert.match(body.command, /^sudo -n runuser -u otcbrowser -- python3(?: -I)? \/opt\/otchealth-browser\/browser-dispatcher\.py --payload [A-Za-z0-9_-]+$/);
       assert.ok(body.timeout >= 1 && body.timeout <= 18);
@@ -161,7 +161,7 @@ test('only explicit trusted V2 missions select the new runtime protocol across l
   await c.execute(sharedBinding, current, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash);
   await c.execute(sharedBinding, current, { type: 'upload', fileId: f.id, selector: '#file' }, 20, sharedBinding.ownerSubjectHash);
   await c.checkpoint(sharedBinding, current); await c.releaseMission(sharedBinding, current);
-  assert.ok(n.state.payloads.filter(p => p.op !== 'promote').every(p => p.runtimeProtocol === 2));
+  assert.ok(n.state.payloads.every(p => p.runtimeProtocol === 2));
   n.state.payloads.length = 0;
   await c.openMission(sharedBinding, sharedMission.sessionId);
   await c.execute(sharedBinding, sharedMission, { type: 'snapshot' }, 10, sharedBinding.ownerSubjectHash);
@@ -206,6 +206,20 @@ test('V2 upload attach busy is not a whole-action no-effect proof after staging 
     await assert.rejects(c.execute(sharedBinding, { ...sharedMission, runtimeProtocol: 2 }, { type: 'upload', fileId: f.id, selector: '#file' }, 20, sharedBinding.ownerSubjectHash), (error: any) => phase === 'prepare' ? error.code === 'daytona_operation_busy' : error.code !== 'daytona_operation_busy');
     assert.equal(denied, 1);
     assert.equal(n.requests.some(r => r.url.includes('/files/')), phase === 'attach');
+  }
+});
+test('promotion protocol must match both the trusted mission and exact positive helper receipt', async () => {
+  const current = { ...sharedMission, runtimeProtocol: 2 as const };
+  const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
+  const payload = { version: 1, profileKey: sharedBinding.profileKey, sessionId: current.sessionId, principalHash: current.ownerSubjectHash, transferId: randomUUID(), stagingId: randomUUID(), relativePath: 'notes.txt', sha256: 'a'.repeat(64), byteLength: 1 };
+  const context = { signal: AbortSignal.timeout(1000), remaining: () => 10000 };
+  await assert.rejects((c as any).promoteWith(context, new URL('https://proxy.daytona.test/toolbox'), sharedBinding, current, payload, current.ownerSubjectHash));
+  assert.equal(n.requests.length, 0, 'missing trusted V2 marker must not reach the root helper');
+  for (const legacy of [false, true]) {
+    const net = network(sharedRuntime), f = stagedFile(), provider = await client({ fetchImpl: net.fetchImpl, files: f.files });
+    net.state.omitPromotionProtocol = !legacy; net.state.forgePromotionProtocol = legacy;
+    await assert.rejects(provider.execute(sharedBinding, legacy ? sharedMission : current, { type: 'upload', fileId: f.id, selector: '#file' }, 20, sharedBinding.ownerSubjectHash));
+    assert.equal(net.state.payloads.some(p => p.upload?.phase === 'attach'), false);
   }
 });
 test('foreign and missing organizations cannot reach any toolbox command', async () => {
