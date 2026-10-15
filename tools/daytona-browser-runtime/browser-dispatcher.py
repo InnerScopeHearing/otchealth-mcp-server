@@ -62,8 +62,15 @@ def validate_action(action):
     if not isinstance(action, dict) or not isinstance(action.get('type'), str):
         fail('invalid_action')
     kind = action['type']
-    if kind in ('capture', 'upload'):
-        fail('unsupported_action')
+    if kind == 'capture':
+        fields(action, ('type', 'request'))
+        request = action['request']
+        if not isinstance(request, dict) or not {'type'} <= request.keys() or not request.keys() <= {'type', 'format'} or request['type'] != 'screenshot' or request.get('format', 'png') != 'png': fail('unsupported_action')
+        return action
+    if kind == 'upload':
+        fields(action, ('type', 'selector', 'fileId'))
+        if not text(action['selector']) or not isinstance(action['fileId'], str) or not UUID.fullmatch(action['fileId']): fail('invalid_action')
+        return action
     schemas = {
         'navigate': (('url',), ()), 'snapshot': ((), ()),
         'click': (('selector',), ('button', 'clickCount')), 'type': (('selector', 'text'), ()),
@@ -101,7 +108,7 @@ def validate_action(action):
 
 
 def validate_payload(payload):
-    fields(payload, ('version', 'op', 'profileKey', 'profilePath', 'timeoutMs'), ('sessionId', 'action', 'principalHash'))
+    fields(payload, ('version', 'op', 'profileKey', 'profilePath', 'timeoutMs'), ('sessionId', 'action', 'principalHash', 'upload'))
     if type(payload['version']) is not int or payload['version'] != 1 or payload['op'] not in ('probe', 'open', 'execute', 'checkpoint', 'release'):
         fail('invalid_payload')
     key = payload['profileKey']
@@ -114,8 +121,16 @@ def validate_payload(payload):
         fail('invalid_payload')
     if 'principalHash' in payload and not (isinstance(payload['principalHash'], str) and HASH.fullmatch(payload['principalHash'])):
         fail('invalid_payload')
-    if payload['op'] == 'execute': validate_action(payload.get('action'))
+    if payload['op'] == 'execute':
+        validate_action(payload.get('action'))
+        if payload['action']['type'] == 'upload':
+            try:
+                from browser_transfers import validate_descriptor
+                validate_descriptor(payload.get('upload'))
+            except (ImportError, ValueError): fail('invalid_upload_descriptor')
+        elif 'upload' in payload: fail('invalid_payload')
     elif 'action' in payload: fail('invalid_payload')
+    elif 'upload' in payload: fail('invalid_payload')
     return payload
 
 
@@ -290,7 +305,7 @@ class Cdp:
         header = bytes([0x80 | opcode, 0x80 | (length if length < 126 else 126 if length < 65536 else 127)])
         if length >= 126: header += struct.pack('!H' if length < 65536 else '!Q', length)
         self.sock.sendall(header + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(value)))
-    def message(self):
+    def message(self, maximum=MAX_FRAME):
         result, active = b'', False
         while True:
             head = self.read(2)
@@ -298,7 +313,7 @@ class Cdp:
             if head[0] & 0x70 or head[1] & 0x80: fail('provider_protocol_error')
             if length == 126: length = struct.unpack('!H', self.read(2))[0]
             elif length == 127: length = struct.unpack('!Q', self.read(8))[0]
-            if length > MAX_FRAME or len(result) + length > MAX_FRAME: fail('provider_response_too_large')
+            if length > maximum or len(result) + length > maximum: fail('provider_response_too_large')
             value = self.read(length)
             if opcode == 8: fail('provider_connection_lost')
             if opcode == 9:
@@ -315,7 +330,9 @@ class Cdp:
         if session: payload['sessionId'] = session
         self.send(1, json.dumps(payload, separators=(',', ':')).encode())
         while True:
-            message = self.message()
+            # A 4MiB PNG is base64 encoded in CDP. Ordinary observations retain
+            # their original bound; no caller-supplied method reaches this API.
+            message = self.message(6 * 1024 * 1024 if method == 'Page.captureScreenshot' else MAX_FRAME)
             if message.get('id') != self.identifier: continue
             if 'error' in message: fail('provider_action_failed')
             if not isinstance(message.get('result'), dict): fail('provider_protocol_error')
@@ -595,8 +612,27 @@ def dispatch(payload):
                 return {'ready': True, 'cdpLoopback': True, 'profileVerified': True}
             state['uncertain'] = True
             receipt.write(state)
-            action_result = execute(cdp, state, payload['action'])
-            if payload['action']['type'] == 'snapshot': result = action_result
+            kind = payload['action']['type']
+            if kind in ('capture', 'upload'):
+                from browser_transfers import TransferError, attach_upload, capture_png, file_input, prepare_upload_tree
+                target, attached_session = selected(cdp, state)
+                before_url = current_url(cdp, attached_session)
+                try:
+                    if kind == 'capture':
+                        snapshot(cdp, attached_session, target)  # Same private-frame/password-output guards.
+                        result = capture_png(cdp, attached_session)
+                    else:
+                        descriptor = payload['upload']
+                        node = file_input(cdp, attached_session, payload['action']['selector'], descriptor)
+                        if descriptor['phase'] == 'prepare':
+                            prepare_upload_tree(profile.parent, descriptor)
+                            result = {'prepared': True}
+                        else: result = attach_upload(cdp, attached_session, node, profile.parent, descriptor)
+                    if current_url(cdp, attached_session) != before_url: fail('navigation_changed')
+                except TransferError as error: fail(error.code)
+            else: action_result = execute(cdp, state, payload['action'])
+            if kind in ('capture', 'upload'): pass
+            elif kind == 'snapshot': result = action_result
             else:
                 if state['selected'] is None:
                     result = {'url': None, 'title': None, 'visibleText': ''}

@@ -103,9 +103,9 @@ class DispatcherTests(unittest.TestCase):
                 self.assertEqual(dispatcher.run_payload(encoded), {'version': 1, 'ok': False, 'code': 'invalid_payload'})
                 dispatch.assert_not_called()
 
-    def test_checkpoint_and_artifact_actions_never_fake_success(self):
-        for action in ({'type': 'upload', 'selector': '#file', 'fileId': self.payload['sessionId']},
-                       {'type': 'capture', 'request': {'type': 'screenshot'}}):
+    def test_unsupported_capture_formats_never_fake_success(self):
+        for action in ({'type': 'capture', 'request': {'type': 'pdf'}},
+                       {'type': 'capture', 'request': {'type': 'screenshot', 'format': 'jpeg'}}):
             with self.assertRaises(dispatcher.DispatchError) as error:
                 dispatcher.validate_action(action)
             self.assertEqual(error.exception.code, 'unsupported_action')
