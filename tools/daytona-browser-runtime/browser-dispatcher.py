@@ -637,6 +637,13 @@ class V2Receipt:
         self.receipt.save(self.value)
 
 
+def preserve_retained_browser(cdp, closing):
+    pages = cdp.command('Target.getTargets').get('targetInfos', [])
+    if not any(page.get('type') == 'page' and page.get('targetId') not in closing for page in pages):
+        parked = cdp.command('Target.createTarget', {'url': 'about:blank'}).get('targetId')
+        if not isinstance(parked, str) or not TARGET.fullmatch(parked): fail('target_create_uncertain')
+
+
 def dispatch_v2(payload, deadline, profile, browser_pid):
     module = trusted_registry()
     try:
@@ -683,10 +690,7 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
                     # A sole post-checkpoint mission may own the last page.
                     # Keep a new unowned blank parking tab so closing this
                     # logical mission cannot shut the retained browser down.
-                    pages = cdp.command('Target.getTargets').get('targetInfos', [])
-                    if not any(page.get('type') == 'page' and page.get('targetId') not in mission['owned'] for page in pages):
-                        parked = cdp.command('Target.createTarget', {'url': 'about:blank'}).get('targetId')
-                        if not isinstance(parked, str) or not TARGET.fullmatch(parked): fail('target_create_uncertain')
+                    preserve_retained_browser(cdp, mission['owned'])
                     for target in mission['owned']:
                         if cdp.command('Target.closeTarget', {'targetId': target}).get('success') is not True: fail('target_operation_failed')
                     value['missions'].remove(mission); value['human'] = None; value['uncertain'] = None
@@ -696,6 +700,7 @@ def dispatch_v2(payload, deadline, profile, browser_pid):
                     # mission. No other dispatcher can input until this ends.
                     if mission['selected']: cdp.command('Target.activateTarget', {'targetId': mission['selected']})
                     action = payload['action']
+                    if action['type'] == 'tab_close': preserve_retained_browser(cdp, [action['targetId']])
                     if action['type'] == 'press_key' and action['key'] in ('KeyC', 'KeyV') and action.get('modifiers') in (2, 4, 6):
                         target, attached = selected(cdp, mission)
                         observed = snapshot(cdp, attached, target)  # Private frames and protected/password AX guard.

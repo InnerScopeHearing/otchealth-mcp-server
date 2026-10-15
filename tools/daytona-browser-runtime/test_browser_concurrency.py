@@ -93,6 +93,14 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(len(Cdp.targets), 1)
         self.assertEqual(list(Cdp.targets.values()), ['about:blank'])
 
+    def test_ordinary_tab_close_of_last_page_preserves_retained_chromium_without_adopting_parking(self):
+        self.call(); del Cdp.targets['UNOWNED']
+        result = self.call(op='execute', action={'type': 'tab_close', 'targetId': 'OWNED1'})
+        self.assertTrue(result['pageReceipt']['completed']); self.assertIsNone(result['pageReceipt']['selectedTargetId'])
+        self.assertEqual(list(Cdp.targets.values()), ['about:blank'])
+        state = json.loads((self.base / 'missions-v2.json').read_text())
+        self.assertEqual(state['missions'][0]['owned'], [])
+
     def test_unknown_native_effect_freezes_other_mission_and_release_across_new_dispatch(self):
         self.call(); self.call(B, 'b' * 64)
         with patch.object(dispatcher, 'execute', side_effect=dispatcher.DispatchError('provider_connection_lost')):
