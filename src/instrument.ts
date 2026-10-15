@@ -21,7 +21,7 @@ if (process.env.DD_API_KEY) {
   });
   // Default query obfuscation cannot hide a signed token embedded in a
   // Daytona preview hostname or token-expiration path. Do not create those
-  // outbound spans or propagate tracing headers to private viewer endpoints.
+  // outbound span records or propagate tracing headers to private viewer endpoints.
   const privacy = daytonaTracePrivacyOptions(process.env.DAYTONA_BROWSER_PREVIEW_DOMAIN);
   tracer.use('http', privacy.http);
   tracer.use('undici', privacy.undici);

@@ -9,6 +9,7 @@ export function daytonaTracePrivacyOptions(previewDomain = '') {
     try {
       const host = new URL(raw).hostname.toLowerCase().replace(/\.$/, '');
       return host === 'daytona.io' || host.endsWith('.daytona.io') || host === 'daytona.works' || host.endsWith('.daytona.works')
+        || host === 'daytonaproxy01.net' || host.endsWith('.daytonaproxy01.net')
         || Boolean(configured && (host === configured || host.endsWith(`.${configured}`)));
     } catch { return false; }
   };
