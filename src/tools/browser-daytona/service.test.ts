@@ -7,9 +7,10 @@ const hash = 'a'.repeat(64);
 const binding: DaytonaBinding = { provider: 'daytona', owner: 'cto', ownerSubjectHash: hash, sandboxId: 'sandbox-one', profileKey: 'profile-one', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium', readinessReceiptSha256: 'b'.repeat(64) };
 function fixture() {
   let now = 1000; let grantExpiry = 0; const sessions = new Map<string, DaytonaMission>(); const locks = new Map<string, string>(); const leases = new Map<string, string>();
-  const state = { opened: 0, executed: 0, released: 0, checkpoints: 0, grants: 0, revoked: 0, probes: 0, readinessForeign: false, checkpointReady: true, public: false, openFails: false, executeFails: false, releaseFails: false, grantFails: false, revokeFails: false, executionResult: undefined as unknown, checkpointSession: undefined as DaytonaMission | undefined, flow: [] as string[] };
+  const state = { opened: 0, executed: 0, released: 0, checkpoints: 0, grants: 0, revoked: 0, probes: 0, readinessForeign: false, checkpointReady: true, runtimeProtocol: undefined as 2 | undefined, multiMissionReady: true, openBusy: false, executeBusy: false, pauseBusy: false, pauseFails: false, resumeFails: false, public: false, openFails: false, executeFails: false, releaseFails: false, grantFails: false, revokeFails: false, executionResult: undefined as unknown, checkpointSession: undefined as DaytonaMission | undefined, flow: [] as string[] };
+  const bindings = new Map([[binding.profileKey, binding], ['profile-two', { ...binding, owner: 'cfo', ownerSubjectHash: 'c'.repeat(64), profileKey: 'profile-two', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/profile-two/chromium' }]]);
   const store: DaytonaBrowserStore = {
-    loadBinding: async key => key === binding.profileKey ? { ...binding } : null, createBinding: async () => false,
+    loadBinding: async key => bindings.has(key) ? { ...bindings.get(key)! } : null, createBinding: async () => false,
     loadSession: async id => sessions.has(id) ? { ...sessions.get(id)! } : null,
     createSession: async s => { if (sessions.has(s.sessionId)) return false; sessions.set(s.sessionId, { ...s }); return true; },
     saveSessionUnderLock: async (s, owner) => { assert.equal(locks.get(s.sessionId), owner); sessions.set(s.sessionId, { ...s }); },
@@ -20,12 +21,14 @@ function fixture() {
     releaseProfileLease: async (key, owner) => { if (leases.get(key) === owner) leases.delete(key); },
   };
   const provider: DaytonaProvider = {
-    probe: async () => { state.probes++; return { ready: true, profileKey: state.readinessForeign ? 'foreign' : binding.profileKey, profilePath: binding.profilePath, checkpointReady: state.checkpointReady, browserPid: 101, supervisorPid: 100, unexpectedSecret: 'must-not-return' }; },
+    probe: async b => { state.probes++; return { ready: true, profileKey: state.readinessForeign ? 'foreign' : b.profileKey, profilePath: b.profilePath, checkpointReady: state.checkpointReady, browserPid: 101, supervisorPid: 100, ...(state.runtimeProtocol ? { runtimeProtocol: state.runtimeProtocol, multiMissionReady: state.multiMissionReady } : {}), unexpectedSecret: 'must-not-return' }; },
     inspect: async () => ({ sandboxId: binding.sandboxId, state: 'started', public: state.public }),
-    openMission: async () => { state.opened++; if (state.openFails) throw new Error('unknown open'); },
-    execute: async (_b, _s, _a, _t, principal) => { assert.equal(principal, hash); state.executed++; if (state.executeFails) throw new Error('unknown action'); return state.executionResult ?? { url: 'https://example.com', title: 'Example', visibleText: 'public canary' }; },
+    openMission: async (_b, id, options) => { state.opened++; assert.equal(options?.runtimeProtocol, sessions.get(id)?.runtimeProtocol); if (state.openBusy) throw new DaytonaBrowserError('daytona_operation_busy'); if (state.openFails) throw new Error('unknown open'); },
+    execute: async (b, _s, _a, _t, principal) => { assert.equal(principal, b.ownerSubjectHash); state.executed++; if (state.executeBusy) throw new DaytonaBrowserError('daytona_operation_busy'); if (state.executeFails) throw new Error('unknown action'); return state.executionResult ?? { url: 'https://example.com', title: 'Example', visibleText: 'public canary' }; },
+    pauseAutomation: async (_b, s) => { state.flow.push('pause'); assert.equal(s.runtimeProtocol, 2); assert.equal(s.sensitiveOutputSuppressed, true); assert.equal(s.effectUnknown, true); if (state.pauseBusy) throw new DaytonaBrowserError('daytona_operation_busy'); if (state.pauseFails) throw new Error('unknown pause'); return { paused: true }; },
+    resumeAutomation: async (_b, s) => { state.flow.push('resume'); assert.equal(s.sensitiveOutputSuppressed, true); assert.equal(s.effectUnknown, true); if (state.resumeFails) throw new Error('unknown resume'); return { resumed: true }; },
     checkpoint: async (_binding, session) => { state.checkpoints++; state.checkpointSession = session; state.flow.push('checkpoint'); }, releaseMission: async () => { state.released++; if (state.releaseFails) throw new Error('unknown release'); },
-    viewerGrant: async () => { state.grants++; if (state.grantFails) throw new Error('unknown grant'); grantExpiry = now + 60_000; return { url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: grantExpiry, grantHandle: '12345678-1234-1234-1234-123456789abc' }; },
+    viewerGrant: async () => { state.grants++; if (state.runtimeProtocol) state.flow.push('mint'); if (state.grantFails) throw new Error('unknown grant'); grantExpiry = now + 60_000; return { url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: grantExpiry, grantHandle: '12345678-1234-1234-1234-123456789abc' }; },
     readViewerGrant: async (_b, grantHandle) => ({ url: 'https://6080-synthetic.proxy.daytona.works/', expiresAt: grantExpiry, grantHandle }),
     revokeViewerGrant: async () => { state.revoked++; state.flow.push('revoke'); if (state.revokeFails) throw new Error('unknown revoke'); return { human_input_revoked: true }; },
   };
@@ -124,4 +127,62 @@ test('readiness is exact caller-bound fresh evidence with zero mission or lease 
   h.state.readinessForeign = true;
   await assert.rejects(h.service.readiness('cto', binding.profileKey, hash));
   assert.equal(h.state.opened, 0); assert.equal(h.sessions.size, 0); assert.equal(h.leases.size, 0);
+});
+
+test('automation alias requires exact fresh V2 proof before any mission or lease', async () => {
+  for (const invalid of ['absent', 'busy', 'foreign']) {
+    const h = fixture(); if (invalid !== 'absent') h.state.runtimeProtocol = 2;
+    h.state.multiMissionReady = invalid !== 'busy'; h.state.readinessForeign = invalid === 'foreign';
+    await assert.rejects(h.service.start('cto', binding.profileKey, 180, 5, hash, { requireMultiMission: true }));
+    assert.equal(h.sessions.size, 0); assert.equal(h.leases.size, 0); assert.equal(h.state.opened, 0);
+  }
+});
+test('two principals overlap only with persisted V2 proof and keep independent principal leases', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const a = await h.service.start('cto', binding.profileKey, 180, 5, hash, { requireMultiMission: true });
+  const b = await h.service.start('cfo', 'profile-two', 180, 5, 'c'.repeat(64), { requireMultiMission: true });
+  assert.equal(h.sessions.get(a.sessionId)!.runtimeProtocol, 2); assert.equal(h.sessions.get(b.sessionId)!.runtimeProtocol, 2);
+  assert.equal(h.leases.size, 2); assert.equal([...h.leases.keys()].some(key => key.startsWith('display-')), false);
+  await h.service.stop('cto', a.sessionId, hash);
+  assert.equal((await h.service.snapshot('cfo', b.sessionId, 'c'.repeat(64)) as { title: string }).title, 'Example');
+  assert.equal(h.leases.size, 1); assert.equal(h.sessions.get(b.sessionId)!.phase, 'ACTIVE');
+  const legacy = fixture(); await legacy.service.start('cto', binding.profileKey, 180, 5, hash);
+  await assert.rejects(legacy.service.start('cfo', 'profile-two', 180, 5, 'c'.repeat(64)), code('profile_busy'));
+});
+test('only proven before-effect V2 admission busy releases the failed attempt', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2; h.state.openBusy = true;
+  await assert.rejects(h.service.start('cto', binding.profileKey, 180, 5, hash), code('daytona_operation_busy'));
+  assert.equal(h.leases.size, 0); assert.equal([...h.sessions.values()][0]!.phase, 'CLOSED');
+  h.state.openBusy = false; assert.ok(await h.service.start('cto', binding.profileKey, 180, 5, hash));
+  const unknown = fixture(); unknown.state.runtimeProtocol = 2; unknown.state.openFails = true;
+  await assert.rejects(unknown.service.start('cto', binding.profileKey, 180, 5, hash));
+  assert.equal(unknown.leases.size, 1); assert.equal([...unknown.sessions.values()][0]!.effectUnknown, true);
+});
+test('known V2 action mutex busy permits explicit retry without spending action budget or unknown fence', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const a = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+  h.state.executeBusy = true;
+  await assert.rejects(h.service.snapshot('cto', a.sessionId, hash), code('daytona_operation_busy'));
+  assert.equal(h.sessions.get(a.sessionId)!.effectUnknown, false); assert.equal(h.sessions.get(a.sessionId)!.actionsUsed, 0);
+  h.state.executeBusy = false; await h.service.snapshot('cto', a.sessionId, hash); assert.equal(h.sessions.get(a.sessionId)!.actionsUsed, 1);
+});
+test('V2 global pause precedes human mint and exact revocation checkpoint precede global resume', async () => {
+  const h = fixture(); h.state.runtimeProtocol = 2;
+  const a = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+  await h.service.getViewerGrant('cto', a.sessionId, hash, 60);
+  await h.service.completeHumanInput('cto', a.sessionId, hash);
+  assert.deepEqual(h.state.flow, ['pause', 'mint', 'revoke', 'checkpoint', 'resume']);
+  assert.equal(h.sessions.get(a.sessionId)!.sensitiveOutputSuppressed, false);
+});
+test('V2 known pause busy never mints while unknown pause never clears suppression or its lease', async () => {
+  for (const known of [true, false]) {
+    const h = fixture(); h.state.runtimeProtocol = 2;
+    const a = await h.service.start('cto', binding.profileKey, 180, 5, hash);
+    h.state.pauseBusy = known; h.state.pauseFails = !known;
+    await assert.rejects(h.service.getViewerGrant('cto', a.sessionId, hash, 60));
+    assert.equal(h.state.grants, 0); assert.equal(h.sessions.get(a.sessionId)!.effectUnknown, !known);
+    assert.equal(h.sessions.get(a.sessionId)!.sensitiveOutputSuppressed, !known);
+    if (!known) await assert.rejects(h.service.stop('cto', a.sessionId, hash), code('viewer_revocation_unknown'));
+    assert.equal(h.leases.get(binding.profileKey), a.sessionId);
+  }
 });
