@@ -97,6 +97,9 @@ export class WebsiteLoginService {
       const session = await this.ownedSession({ owner, ownerSubjectHash: hash, profileId, sessionId: started.sessionId, site, ...(policy.target ? { target: policy.target } : {}), profileLeaseOwner, expiresAt: Math.min(started.expiresAt, this.now() + 600_000) });
       await this.transport.prepareWebsiteLogin(session, site, policy.target);
       await this.store.saveSession(session);
+      // AgentCore viewer input requires automation ownership to be released.
+      // Confirm that transition before issuing any human-access capability.
+      await this.setAutomationStreamStatus(session, 'DISABLED');
       const token = randomBytes(32).toString('base64url');
       const expiresAt = Math.min(started.expiresAt, this.now() + 600_000);
       await this.tickets.create({ tokenHash: digest(token), owner, ownerSubjectHash: hash, profileId, sessionId: started.sessionId, site, ...(policy.target ? { target: policy.target } : {}), profileLeaseOwner, expiresAt });
@@ -114,6 +117,8 @@ export class WebsiteLoginService {
     const binding = await this.tickets.exchange(digest(token));
     if (!binding) throw new CloudBrowserError('login_expired', 'This login link is invalid, consumed or expired.');
     const session = await this.ownedSession(binding);
+    // Also repairs unconsumed tickets prepared by the prior video-only release.
+    await this.setAutomationStreamStatus(session, 'DISABLED');
     const expiresIn = Math.min(300, Math.floor((Math.min(binding.expiresAt, session.expiresAt) - this.now()) / 1000));
     if (expiresIn < 1) throw new CloudBrowserError('login_expired', 'The sign-in session has expired.');
     const signedAt = this.now();
@@ -130,6 +135,7 @@ export class WebsiteLoginService {
     let confirmedStopped = false;
     try {
       const session = await this.ownedSession(ticket);
+      await this.setAutomationStreamStatus(session, 'ENABLED');
       await this.transport.verifyWebsiteLogin(session, ticket.site, ticket.target);
       await this.browser.savePersistentProfile(ticket.owner, session.sessionId, ticket.ownerSubjectHash, ticket.profileLeaseOwner);
       // Never unmask a human login session. Successful stop removes its suppressed state;
@@ -146,6 +152,15 @@ export class WebsiteLoginService {
       }
       if (confirmedStopped) await this.tickets.releaseProfileLease(ticket.profileId, ticket.profileLeaseOwner).catch(() => undefined);
       throw error;
+    }
+  }
+  private async setAutomationStreamStatus(session: CloudBrowserSession, streamStatus: 'DISABLED' | 'ENABLED'): Promise<void> {
+    if (!session.sensitiveOutputSuppressed || !session.providerBrowserId) throw new CloudBrowserError('owner_forbidden', 'The suppressed sign-in session is unavailable.');
+    const receipt = await this.provider.setAutomationStreamStatus({ browserIdentifier: session.providerBrowserId, sessionId: session.providerSessionId, streamStatus });
+    if (receipt.browserIdentifier !== session.providerBrowserId || receipt.sessionId !== session.providerSessionId || receipt.streamStatus !== streamStatus) throw new CloudBrowserError('automation_stream_state_unknown', 'The owned browser input handoff could not be confirmed.');
+    if (streamStatus === 'ENABLED' && receipt.automationEndpoint !== undefined) {
+      session.automationEndpoint = receipt.automationEndpoint;
+      await this.store.saveSession(session);
     }
   }
   private async ownedSession(binding: WebsiteLoginBinding): Promise<CloudBrowserSession> {

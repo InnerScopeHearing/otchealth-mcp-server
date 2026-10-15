@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { BedrockAgentCoreControlClient, CreateBrowserProfileCommand, type CreateBrowserProfileCommandOutput } from '@aws-sdk/client-bedrock-agentcore-control';
+import { BedrockAgentCoreClient, UpdateBrowserStreamCommand, type UpdateBrowserStreamCommandOutput } from '@aws-sdk/client-bedrock-agentcore';
 import { Browser } from 'bedrock-agentcore/browser';
 import { resolveAwsCredentials, signRequest, type AwsCredentials } from '../../search/sigv4.js';
 
@@ -36,13 +37,26 @@ export interface LiveViewInput {
   expiresIn?: number;
 }
 
+export interface AutomationStreamStatusInput {
+  browserIdentifier: string;
+  sessionId: string;
+  streamStatus: 'DISABLED' | 'ENABLED';
+}
+
+export interface AutomationStreamStatusResult extends AutomationStreamStatusInput {
+  /** Present only after AWS confirms the exact re-enabled automation endpoint. */
+  automationEndpoint?: string;
+}
+
 type CreateClient = { send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> };
+type DataClientConfig = { region: string; maxAttempts: 1; credentials: () => Promise<AwsCredentials> };
 type BrowserForSigning = { attachSession(sessionId: string): void; generateLiveViewUrl(expiresIn?: number): Promise<string> };
 
 export interface IntercomProfileProviderDeps {
   resolveCredentials?: () => Promise<AwsCredentials | null>;
   fetch?: typeof fetch;
   createControlClient?: (region: string, credentials: AwsCredentials) => CreateClient;
+  createDataClient?: (config: DataClientConfig) => CreateClient;
   createProfileCommand?: (input: { name: string; clientToken: string }) => unknown;
   createBrowser?: (input: { region: string; identifier: string; credentials: AwsCredentials }) => BrowserForSigning;
   now?: () => Date;
@@ -56,12 +70,12 @@ function checkedRegion(region: string): string {
 }
 
 function checkedBrowserId(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return fail('browser_identifier_invalid', 'The browser identifier is invalid.');
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return fail('browser_identifier_invalid', 'The browser identifier is invalid.');
   return value;
 }
 
 function checkedSessionId(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return fail('session_id_invalid', 'The browser session identifier is invalid.');
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return fail('session_id_invalid', 'The browser session identifier is invalid.');
   return value;
 }
 
@@ -99,6 +113,7 @@ export class IntercomProfileProvider {
   private readonly credentialsOf: () => Promise<AwsCredentials | null>;
   private readonly fetcher: typeof fetch;
   private readonly controlClient: (region: string, credentials: AwsCredentials) => CreateClient;
+  private readonly dataClient: (config: DataClientConfig) => CreateClient;
   private readonly makeCreateCommand: (input: { name: string; clientToken: string }) => unknown;
   private readonly makeBrowser: (input: { region: string; identifier: string; credentials: AwsCredentials }) => BrowserForSigning;
   private readonly now: () => Date;
@@ -111,6 +126,7 @@ export class IntercomProfileProvider {
     this.controlClient = deps.createControlClient ?? ((region, credentials) => new BedrockAgentCoreControlClient({
       region, maxAttempts: 1, credentials: async () => credentials,
     }) as unknown as CreateClient);
+    this.dataClient = deps.createDataClient ?? ((clientConfig) => new BedrockAgentCoreClient(clientConfig) as unknown as CreateClient);
     this.makeCreateCommand = deps.createProfileCommand ?? ((input) => new CreateBrowserProfileCommand(input));
     this.makeBrowser = deps.createBrowser ?? ((input) => new Browser({
       region: input.region, identifier: input.identifier, credentialsProvider: async () => input.credentials,
@@ -159,6 +175,43 @@ export class IntercomProfileProvider {
       if (error instanceof IntercomProfileProviderError) throw error;
       return fail('live_view_unavailable', 'The browser live-view could not be created.');
     }
+  }
+
+  /** Transfer control on the existing owned session; never creates or replaces a session. */
+  async setAutomationStreamStatus(input: AutomationStreamStatusInput): Promise<AutomationStreamStatusResult> {
+    const browserIdentifier = checkedBrowserId(input.browserIdentifier);
+    const sessionId = checkedSessionId(input.sessionId);
+    if (browserIdentifier !== this.defaultBrowserIdentifier) return fail('browser_identifier_forbidden', 'The browser session is unavailable.');
+    if (input.streamStatus !== 'DISABLED' && input.streamStatus !== 'ENABLED') return fail('automation_stream_status_invalid', 'The requested browser control state is invalid.');
+    let credentials: AwsCredentials | null;
+    try { credentials = await this.credentialsOf(); } catch { return fail('credentials_unavailable', 'Browser provider credentials are unavailable.'); }
+    if (!credentials) return fail('credentials_unavailable', 'Browser provider credentials are unavailable.');
+    let response: unknown;
+    try {
+      response = await this.dataClient({ region: this.region, maxAttempts: 1, credentials: async () => credentials! }).send(
+        new UpdateBrowserStreamCommand({
+          browserIdentifier, sessionId,
+          streamUpdate: { automationStreamUpdate: { streamStatus: input.streamStatus } },
+          clientToken: randomUUID(),
+        }),
+        { abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      );
+    } catch { return fail('automation_stream_update_failed', 'The browser control transfer could not be confirmed.'); }
+    const receipt = response as UpdateBrowserStreamCommandOutput | null;
+    const stream = receipt?.streams?.automationStream;
+    if (receipt?.browserIdentifier !== browserIdentifier || receipt.sessionId !== sessionId || stream?.streamStatus !== input.streamStatus) {
+      return fail('automation_stream_receipt_invalid', 'The browser provider did not confirm the requested control transfer.');
+    }
+    if (input.streamStatus === 'DISABLED') return { browserIdentifier, sessionId, streamStatus: 'DISABLED' };
+    if (typeof stream.streamEndpoint !== 'string') return fail('automation_stream_receipt_invalid', 'The browser provider did not confirm the requested control transfer.');
+    let endpoint: URL;
+    try { endpoint = new URL(stream.streamEndpoint); } catch { return fail('automation_stream_receipt_invalid', 'The browser provider did not confirm the requested control transfer.'); }
+    if (endpoint.protocol !== 'wss:' || endpoint.hostname !== `bedrock-agentcore.${this.region}.amazonaws.com`
+      || endpoint.pathname !== `/browser-streams/${encodeURIComponent(browserIdentifier)}/sessions/${encodeURIComponent(sessionId)}/automation`
+      || endpoint.username || endpoint.password || endpoint.port || endpoint.search || endpoint.hash) {
+      return fail('automation_stream_receipt_invalid', 'The browser provider did not confirm the requested control transfer.');
+    }
+    return { browserIdentifier, sessionId, streamStatus: 'ENABLED', automationEndpoint: stream.streamEndpoint };
   }
 
   static newClientToken(): string { return randomUUID(); }

@@ -22,6 +22,8 @@ Custom sites continue to use the newer explicit login tool below. Updating the s
 
 ### Current explicit login tools
 
+The viewer requires an explicit AgentCore control transfer, not merely a successful video connection. Setup prepares and suppresses the owned session, confirms `UpdateBrowserStream` with automation `DISABLED`, and only then grants human access. Exchange repeats that check for an unconsumed ticket. Done confirms automation `ENABLED` on the same session, persists its validated automation endpoint, then verifies and saves while output remains suppressed. A failed or mismatched transfer cannot report a usable handoff or a saved login. The gateway task role needs `bedrock-agentcore:UpdateBrowserStream` on the exact built-in browser ARN; this does not grant another connection's session.
+
 1. Call `browser_cloud_login_start` with `site: "wefunder"` or `site: "linkedin"`. For another public HTTPS website, use `site: "custom"`, the expected signed-in page `url`, and optional additional exact `allowed_hosts` needed for that site. Use a normal page address without a signed query, OAuth callback, token, or fragment.
 2. Show the returned short-lived `login_url` to the owner immediately. Do not save that link in shared memory. The owner signs in inside the embedded browser, confirms the intended account, opens the requested page, and selects Done. Passwords and verification codes stay inside that browser.
 3. After the page reports a successful save, call `browser_cloud_session_start` with the returned `profile_id`. Read the requested website and verify the intended signed-in account. A saved profile alone does not prove authentication.
