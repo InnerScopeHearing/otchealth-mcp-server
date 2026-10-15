@@ -223,7 +223,7 @@ test('website reload stores only its tab-local nonsecret selector, resumes witho
       };
       runInNewContext(script, {
         URL, URLSearchParams, history: { replaceState: () => {} }, document: { getElementById: (id: string) => nodes[id] },
-        window: { location: { hash, pathname: '/browser/connect' }, sessionStorage: storage, addEventListener: () => {}, dcv: { LogLevel: { SILENT: 0 }, setLogLevel: () => {}, authenticate: (_url: string, callbacks: any) => callbacks.success(null, [{ sessionId: 'same-session', authToken: 'private-viewer-auth' }]), connect: async () => ({ disconnect: () => {} }) } },
+        window: { location: { hash, pathname: '/browser/connect', origin: ORIGIN }, sessionStorage: storage, addEventListener: () => {}, dcv: { LogLevel: { SILENT: 0 }, setLogLevel: () => {}, authenticate: (_url: string, callbacks: any) => callbacks.success(null, [{ sessionId: 'same-session', authToken: 'private-viewer-auth' }]), connect: async () => ({ disconnect: () => {} }) } },
         fetch: async (path: string, init: { body?: string }) => {
           calls.push(path);
           if (path.endsWith('/exchange')) { assert.equal(init.body, JSON.stringify({ token: TOKEN })); return { ok: true, json: async () => ({ ...EXCHANGE_RESULT, handoff_id: HANDOFF_ID }) }; }
@@ -322,7 +322,7 @@ test('website viewer clears the fragment before exchange, uses textContent for s
         history: { replaceState: (_state: unknown, _title: string, url: string) => { assert.equal(url, '/browser/connect'); cleared = true; } },
         document: { getElementById: (id: string) => ({ title, status, stage, done, 'clipboard-copy': clipboardButton, 'clipboard-paste': clipboardButton, 'clipboard-status': clipboardStatus } as Record<string, unknown>)[id] },
         window: {
-          location: { hash: `#token=${TOKEN}`, pathname: '/browser/connect' },
+          location: { hash: `#token=${TOKEN}`, pathname: '/browser/connect', origin: ORIGIN },
           addEventListener: () => {},
           dcv: {
             LogLevel: { SILENT: 'silent' },

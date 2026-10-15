@@ -252,7 +252,7 @@ function renderLoginPage(nonce: string, website = false): string {
               url: signedUrl,
               sessionId: auth.sessionId,
               authToken: auth.authToken,
-              baseUrl: '${ASSET_PREFIX}dcvjs-umd',
+              baseUrl: new URL('${ASSET_PREFIX}dcvjs-umd', window.location.origin).href,
               divId: 'dcv-display',
               clipboardAutoSync: false,
               observers: {
