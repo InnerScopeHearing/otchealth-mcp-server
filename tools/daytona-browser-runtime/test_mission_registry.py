@@ -113,4 +113,28 @@ class RegistryTests(unittest.TestCase):
             invalid = state(); invalid['missions'][0]['clipboardText'] = text
             with self.assertRaises(registry.RegistryError): registry.validate_registry(invalid)
 
+    def test_all_seven_valid_clipboards_roundtrip_even_at_worst_case_json_expansion(self):
+        value = {'version': 2, 'human': None, 'uncertain': None, 'missions': []}
+        for index in range(1, 8):
+            target = 'PAGE_' + str(index)
+            value['missions'].append({'sessionId': f'{index:08x}-1111-4111-8111-{index:012x}', 'principalHash': f'{index:064x}', 'selected': target, 'owned': [target], 'uncertain': False, 'clipboardText': '\x00' * 65536})
+        registry.validate_registry(value)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700)
+            with registry.Registry(base, time.monotonic() + 1) as receipt: receipt.save(value)
+            size = (base / 'missions-v2.json').stat().st_size
+            self.assertGreater(size, 1048576); self.assertLess(size, 3 * 1048576)
+            with registry.Registry(base, time.monotonic() + 1) as receipt: self.assertEqual(receipt.load(), value)
+
+    def test_serialized_registry_exact_three_mib_boundary_and_one_over_are_enforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); base.chmod(0o700); path = base / 'missions-v2.json'
+            raw = json.dumps({'version': 2, 'missions': [], 'human': None, 'uncertain': None}).encode()
+            path.write_bytes(raw + b' ' * (3 * 1048576 - len(raw))); path.chmod(0o600)
+            with registry.Registry(base, time.monotonic() + 1) as receipt: self.assertEqual(receipt.load()['missions'], [])
+            with path.open('ab') as stream: stream.write(b' ')
+            with self.assertRaises(registry.RegistryError) as error:
+                with registry.Registry(base, time.monotonic() + 1) as receipt: receipt.load()
+            self.assertEqual(error.exception.code, 'registry_unavailable')
+
 if __name__ == '__main__': unittest.main()

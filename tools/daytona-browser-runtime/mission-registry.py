@@ -13,7 +13,10 @@ UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 TARGET = re.compile(r'[A-Za-z0-9_-]{1,256}\Z')
 MAX_MISSIONS, MAX_TABS, MAX_TOTAL_TABS = 7, 4, 28
-MAX_REGISTRY_BYTES = 1048576
+# Seven64KiB UTF8 buffers can expand sixfold when JSON escapes controls.
+# Reserve that bounded representation plus target/ownership metadata, while
+# leaving per-mission plaintext limits unchanged.
+MAX_REGISTRY_BYTES = 3 * 1048576
 OPERATIONS = {'open', 'action', 'release', 'checkpoint', 'human_pause', 'human_resume'}
 
 class RegistryError(Exception):
