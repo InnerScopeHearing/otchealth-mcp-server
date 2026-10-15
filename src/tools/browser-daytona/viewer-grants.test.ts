@@ -57,7 +57,7 @@ function network(store: MemoryGrants) {
       assert.equal([...store.rows.values()].at(-1)?.phase, 'REVOKING', 'durable fence must precede revoke');
       assert.equal(init.method, 'POST'); assert.equal(init.body, undefined); state.expired = true;
       if (state.expireDelayMs) await new Promise(resolve => setTimeout(resolve, state.expireDelayMs));
-      return new Response('', { status: state.expireStatus });
+      return new Response(null, { status: state.expireStatus });
     }
     if (url.endsWith('/toolbox-proxy-url')) return Response.json({ url: state.proxy });
     if (url.endsWith('/process/execute')) {
@@ -112,6 +112,27 @@ test('revoke requires exact provider ACK, old signed URL denial, then SHA-pinned
   const count = net.calls.length; assert.deepEqual(await port.revoke(binding, grant.grantHandle), { human_input_revoked: true }); assert.equal(net.calls.length, count);
   await assert.rejects(port.read(binding, grant.grantHandle));
 });
+test('observed HTTP201 expiry ACK permits revocation only after exact old-token denial and positive native proof', async () => {
+  for (const denied of [401, 403]) {
+    const { port, store, net } = await fixture(); const grant = await port.mint(binding, 60); net.calls.length = 0;
+    net.state.expireStatus = 201; net.state.negativeStatus = denied;
+    assert.deepEqual(await port.revoke(binding, grant.grantHandle), { human_input_revoked: true });
+    assert.deepEqual(net.calls.map(call => new URL(call.url).pathname), ['/api/sandbox/sandbox-one', `/api/sandbox/sandbox-one/ports/6080/signed-preview-url/${signedToken}/expire`, '/vnc.html', '/api/sandbox/sandbox-one/toolbox-proxy-url', '/toolbox/sandbox-one/process/execute']);
+    assert.equal(store.rows.get(grant.grantHandle)?.phase, 'REVOKED'); assert.equal(store.leases.size, 0);
+    assert.equal(store.rows.get(grant.grantHandle)?.sealed, undefined);
+    const count = net.calls.length; assert.deepEqual(await port.revoke(binding, grant.grantHandle), { human_input_revoked: true }); assert.equal(net.calls.length, count);
+  }
+});
+test('HTTP201 ACK alone never clears unknown physical revocation or authorizes a retry', async () => {
+  for (const missing of [{ negativeStatus: 200 }, { negativeStatus: 404 }, { negativeStatus: 503 }, { nativeExit: 1 }, { nativeClients: 1 }, { nativeRevoked: false }]) {
+    const { port, store, net } = await fixture(); const grant = await port.mint(binding, 60); net.state.expireStatus = 201; Object.assign(net.state, missing);
+    await assert.rejects(port.revoke(binding, grant.grantHandle));
+    assert.equal(store.rows.get(grant.grantHandle)?.phase, 'REVOKING'); assert.equal(store.leases.size, 1);
+    assert.equal(net.calls.some(call => call.url.endsWith('/process/execute')), !Object.hasOwn(missing, 'negativeStatus'));
+    const count = net.calls.length; await assert.rejects(port.revoke(binding, grant.grantHandle)); assert.equal(net.calls.length, count);
+    assert.equal(net.calls.filter(call => call.url.endsWith('/expire')).length, 1);
+  }
+});
 test('foreign OAuth subject, owner, profile, sandbox, org or ciphertext cannot decrypt or revoke another grant', async () => {
   const { port, store, net, options, module } = await fixture(); const grant = await port.mint(binding, 60); net.calls.length = 0;
   for (const foreign of [{ ...binding, ownerSubjectHash: 'c'.repeat(64) }, { ...binding, owner: 'cfo' }, { ...binding, sandboxId: 'foreign' }, { ...binding, profileKey: 'other', profilePath: '/home/otcbrowser/.local/share/otchealth-browser/other/chromium' }]) {
@@ -161,8 +182,8 @@ test('only 401/403 old-token denial is positive: 200, redirect, 404, 429, 5xx an
     await assert.rejects(port.revoke(binding, grant.grantHandle)); assert.equal(store.rows.get(grant.grantHandle)?.phase, 'REVOKING'); assert.equal(store.leases.size, 1);
   }
 });
-test('expire non-200 ACK, including 204, cannot run native disconnect or report success', async () => {
-  for (const status of [204, 401, 403, 500]) {
+test('expire ACK outside exact200/201, including202/204, cannot run native disconnect or report success', async () => {
+  for (const status of [202, 204, 301, 302, 400, 401, 403, 404, 409, 429, 500, 503]) {
     const { port, store, net } = await fixture(); const grant = await port.mint(binding, 60); net.state.expireStatus = status;
     await assert.rejects(port.revoke(binding, grant.grantHandle)); assert.equal(store.rows.get(grant.grantHandle)?.phase, 'REVOKING'); assert.equal(net.calls.some(c => c.url.endsWith('/process/execute')), false);
   }

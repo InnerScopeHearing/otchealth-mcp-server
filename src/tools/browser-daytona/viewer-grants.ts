@@ -168,9 +168,10 @@ export class EncryptedDaytonaViewerGrantPort implements DaytonaViewerGrantPort {
       const revoking: DaytonaViewerGrantRecord = { ...before, phase: 'REVOKING' };
       if (!await this.options.store.compareAndSwap(before, revoking, context.signal)) fail(); context.check();
       await this.inspect(context, binding);
-      // SDK0.224.1 SandboxApi.expire_signed_port_preview_url: exact 200 ACK.
+      // OpenAPI declares200; the actual provider also confirms expiry with201.
+      // Neither ACK alone proves revocation: old-token denial and native proof follow.
       const response = await this.request(context, `${this.base.href}/sandbox/${encodeURIComponent(binding.sandboxId)}/ports/${this.options.previewPort}/signed-preview-url/${encodeURIComponent(secret.token)}/expire`, { method: 'POST' });
-      await response.body?.cancel().catch(() => undefined); if (response.status !== 200) fail(); context.check();
+      await response.body?.cancel().catch(() => undefined); if (response.status !== 200 && response.status !== 201) fail(); context.check();
       const denied = await this.previewStatus(context, secret.url); if (denied !== 401 && denied !== 403) fail();
       await this.disconnect(context, binding); context.check();
       const revoked: DaytonaViewerGrantRecord = { version: 2, organizationId: before.organizationId, binding: before.binding, grantHandle: before.grantHandle, bindingHash: before.bindingHash, scopeHash: before.scopeHash, expiresAt: before.expiresAt, phase: 'REVOKED' };
