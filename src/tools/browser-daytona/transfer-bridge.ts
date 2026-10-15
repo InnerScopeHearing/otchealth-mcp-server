@@ -4,6 +4,7 @@ import type { BrowserFileBroker, BrowserFileRecord } from '../browser-cloud/file
 import { BROWSER_FILE_MAX_BYTES, validBrowserFileScanReceipt } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 import { captureBrowserArtifact } from '../browser-cloud/captures.js';
+import { validateCloudBrowserAction } from '../browser-cloud/actions.js';
 import { createTrustedBrowserBinaryValidator, type TrustedBrowserBinaryValidator } from '../browser-cloud/binary-validation.js';
 import { DaytonaBrowserError, type DaytonaBinding, type DaytonaMission } from './contract.js';
 import { assertDaytonaBinding, assertDaytonaMission } from './store.js';
@@ -73,18 +74,24 @@ export class DaytonaTransferBridge implements DaytonaTransferBridgePort {
   }
   async execute(binding: DaytonaBinding, session: DaytonaMission, action: DaytonaTransferAction, seconds: number, principal: string): Promise<BrowserCaptureMetadata | BrowserFileTransferReceipt> {
     this.bound(binding, session, principal);
+    const checked = validateCloudBrowserAction(action);
+    if (checked.type !== 'capture' && checked.type !== 'upload') return fail('invalid_action');
+    action = checked;
     if (action.type === 'capture') {
-      if (!this.options.captures || action.request.type !== 'screenshot' || (action.request.format && action.request.format !== 'png')) return fail('daytona_capture_unsupported');
+      if (!this.options.captures || (action.request.type === 'screenshot' && action.request.format && action.request.format !== 'png')) return fail('daytona_capture_unsupported');
+      const request = action.request;
+      const contentType = request.type === 'pdf' ? 'application/pdf' : 'image/png';
+      const method = request.type === 'pdf' ? 'Page.printToPDF' : 'Page.captureScreenshot';
       return this.budget(seconds, async remaining => {
         const wire = plain(await this.options.remote.run(binding, session, action, undefined, remaining, principal)); remaining();
         const data = plain(wire.capture);
-        if (data.contentType !== 'image/png' || typeof data.data !== 'string' || Object.keys(data).some(key => !['contentType', 'data'].includes(key))) return fail('daytona_capture_invalid');
-        const artifact = await captureBrowserArtifact({ command: async method => { if (method !== 'Page.captureScreenshot') return fail('daytona_capture_invalid'); remaining(); return { data: data.data }; } }, 'owned-daytona-frame', { type: 'screenshot', format: 'png' }, remaining,
+        if (data.contentType !== contentType || typeof data.data !== 'string' || Object.keys(data).some(key => !['contentType', 'data'].includes(key))) return fail('daytona_capture_invalid');
+        const artifact = await captureBrowserArtifact({ command: async command => { if (command !== method) return fail('daytona_capture_invalid'); remaining(); return { data: data.data }; } }, 'owned-daytona-frame', request, remaining,
           input => this.validator.validate(input));
         remaining(); this.bound(binding, session, principal);
         const metadata = await this.options.captures!.createCapture(session.owner, session.sessionId, artifact, Date.now(), principal); remaining();
-        if (metadata.owner !== session.owner || metadata.ownerSubjectHash !== principal || metadata.sessionId !== session.sessionId || metadata.sha256 !== artifact.sha256 || metadata.byteLength !== artifact.body.length || metadata.contentType !== 'image/png' || !/^bca_[a-f0-9-]{36}$/i.test(metadata.id) || !Number.isSafeInteger(metadata.createdAt) || metadata.createdAt < 0 || metadata.createdAt > Date.now()) return fail('daytona_capture_storage_invalid');
-        return { id: metadata.id, owner: metadata.owner, ownerSubjectHash: principal, sessionId: metadata.sessionId, contentType: 'image/png', byteLength: metadata.byteLength, sha256: metadata.sha256, createdAt: metadata.createdAt };
+        if (metadata.owner !== session.owner || metadata.ownerSubjectHash !== principal || metadata.sessionId !== session.sessionId || metadata.sha256 !== artifact.sha256 || metadata.byteLength !== artifact.body.length || metadata.contentType !== contentType || metadata.pageCount !== artifact.pageCount || !/^bca_[a-f0-9-]{36}$/i.test(metadata.id) || !Number.isSafeInteger(metadata.createdAt) || metadata.createdAt < 0 || metadata.createdAt > Date.now()) return fail('daytona_capture_storage_invalid');
+        return { id: metadata.id, owner: metadata.owner, ownerSubjectHash: principal, sessionId: metadata.sessionId, contentType, byteLength: metadata.byteLength, sha256: metadata.sha256, createdAt: metadata.createdAt, ...(artifact.pageCount === undefined ? {} : { pageCount: artifact.pageCount }) };
       });
     }
     if (action.type !== 'upload' || !UUID.test(action.fileId) || typeof action.selector !== 'string' || action.selector.length < 1 || action.selector.length > 256 || /[\u0000-\u001f\u007f]/.test(action.selector)) return fail('invalid_action');

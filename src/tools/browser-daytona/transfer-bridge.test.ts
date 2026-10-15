@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import type { DaytonaBinding, DaytonaMission } from './contract.js';
 const api = await import('./transfer-bridge.js').catch(() => ({})) as Record<string, any>;
 const hash = (body: Uint8Array) => createHash('sha256').update(body).digest('hex');
@@ -80,12 +83,66 @@ test('actual PNG is structurally decoded then persisted under exact principal; s
   assert.equal(stored.length,1); assert.deepEqual(stored[0].slice(0,2),['cto',session.sessionId]); assert.equal(stored[0][4],principal);
   assert.equal(result.sha256,hash(Buffer.from(png,'base64'))); assert.equal(JSON.stringify(result).includes('PRIVATE_STORAGE_KEY'),false);
 });
-test('malformed/truncated captures, unsupported PDF and output suppression never create an artifact', async () => {
+test('malformed/truncated captures, unsupported JPEG and output suppression never create an artifact', async () => {
   let stores = 0, runs = 0;
   const f = fixture();
   const bridge = new api.DaytonaTransferBridge({remote:{...f.remote,run:async()=>{runs++;return {capture:{contentType:'image/png',data:'aW52YWxpZA=='}};}},captures:{createCapture:async()=>{stores++;throw new Error('must not store');}}});
   await assert.rejects(bridge.execute(binding,session,{type:'capture',request:{type:'screenshot'}},20,principal));
-  await assert.rejects(bridge.execute(binding,session,{type:'capture',request:{type:'pdf'}},20,principal));
+  await assert.rejects(bridge.execute(binding,session,{type:'capture',request:{type:'screenshot',format:'jpeg'}},20,principal));
   await assert.rejects(bridge.execute(binding,{...session,sensitiveOutputSuppressed:true},{type:'capture',request:{type:'screenshot'}},20,principal));
   assert.equal(stores,0); assert.equal(runs,1);
+});
+test('typed PDF capture is private, preserves print flags, requires page count and rejects invalid requests before remote effects',async()=>{
+  const requests:any[]=[],stored:any[]=[];
+  const bytes=Buffer.from('%PDF-1.7\n% structural validator test seam\n%%EOF'), data=bytes.toString('base64');
+  const bridge=new api.DaytonaTransferBridge({remote:{run:async(...args:any[])=>{requests.push(args[2]);return {capture:{contentType:'application/pdf',data}};},upload:async()=>{throw new Error('not upload');}},validator:{validate:async()=>({complete:true,pageCount:2})},captures:{createCapture:async(owner:string,id:string,artifact:any,createdAt:number,subject:string)=>{stored.push(artifact);return {id:'bca_'+randomUUID(),owner,ownerSubjectHash:subject,sessionId:id,sha256:artifact.sha256,byteLength:artifact.body.length,contentType:artifact.contentType,createdAt,pageCount:artifact.pageCount,storageKey:'PRIVATE_STORAGE_KEY'};}}});
+  const result=await bridge.execute(binding,session,{type:'capture',request:{type:'pdf',landscape:true,printBackground:true}},20,principal);
+  assert.equal(result.contentType,'application/pdf');assert.equal(result.pageCount,2);assert.equal(result.sha256,hash(bytes));
+  assert.deepEqual(requests,[{type:'capture',request:{type:'pdf',landscape:true,printBackground:true}}]);assert.deepEqual(Buffer.from(stored[0].body),bytes);assert.equal(JSON.stringify(result).includes('PRIVATE_STORAGE_KEY'),false);
+  for(const request of [{type:'pdf',path:'/etc/passwd'},{type:'pdf',landscape:'yes'},{type:'pdf',printBackground:1},{type:'screenshot',format:'jpeg'}]) await assert.rejects(bridge.execute(binding,session,{type:'capture',request},20,principal));
+  assert.equal(requests.length,1);
+});
+test('PDF capture fails closed on malformed bytes or missing/out-of-range validator page count without storing',async()=>{
+  const good=Buffer.from('%PDF-1.7\n% test seam\n%%EOF').toString('base64');let stores=0,validations=0;
+  for(const [data,pageCount] of [['aW52YWxpZA==',1],[good,undefined],[good,0],[good,101]] as const){
+    const bridge=new api.DaytonaTransferBridge({remote:{run:async()=>({capture:{contentType:'application/pdf',data}}),upload:async()=>{}},validator:{validate:async()=>{validations++;return {complete:true,pageCount};}},captures:{createCapture:async()=>{stores++;throw new Error('must not store');}}});
+    await assert.rejects(bridge.execute(binding,session,{type:'capture',request:{type:'pdf'}},20,principal));
+  }
+  assert.equal(stores,0);assert.equal(validations,3);
+});
+test('actual sandboxed Chromium PDF bytes pass the existing qpdf validator and private principal-bound artifact bridge',async(t)=>{
+  if(process.env.DAYTONA_NATIVE_PDF_ACCEPTANCE!=='1'){t.skip('Explicit isolated local-browser acceptance; set DAYTONA_NATIVE_PDF_ACCEPTANCE=1');return;}
+  try{await promisify(execFile)('qpdf',['--version']);await promisify(execFile)('chromium',['--version']);}catch{t.skip('qpdf/Chromium unavailable; no real PDF acceptance proof');return;}
+  const script=fileURLToPath(new URL('../../../tools/daytona-browser-runtime/browser-dispatcher.py',import.meta.url));
+  const python=String.raw`import importlib.util,json,os,pathlib,signal,subprocess,sys,tempfile,time
+spec=importlib.util.spec_from_file_location('owned_dispatcher',sys.argv[1]);d=importlib.util.module_from_spec(spec);spec.loader.exec_module(d)
+spec=importlib.util.spec_from_file_location('owned_transfers',pathlib.Path(sys.argv[1]).with_name('browser_transfers.py'));f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
+with tempfile.TemporaryDirectory(prefix='otc-public-pdf-') as directory:
+ profile=pathlib.Path(directory)/'chromium';profile.mkdir(mode=0o700)
+ child=subprocess.Popen(['chromium','--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--remote-debugging-address=127.0.0.1','--remote-debugging-port=9222','--user-data-dir='+str(profile),'about:blank'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True);cdp=None
+ try:
+  deadline=time.monotonic()+6
+  while True:
+   try:d.verify_runtime(str(profile));break
+   except d.DispatchError:
+    if child.poll() is not None or time.monotonic()>deadline:raise RuntimeError('disposable_browser_unavailable')
+    time.sleep(.05)
+  cdp=d.Cdp(time.monotonic()+10)
+  target=next(v['targetId'] for v in cdp.command('Target.getTargets')['targetInfos'] if v['type']=='page')
+  session=cdp.command('Target.attachToTarget',{'targetId':target,'flatten':True})['sessionId']
+  cdp.command('Runtime.evaluate',{'expression':'document.body.innerHTML="<h1>Public PDF fixture</h1><p>CTO-PDF-ACCEPTANCE</p>"'},session)
+  print(json.dumps(f.capture_pdf(cdp,session,{'type':'pdf','landscape':True,'printBackground':True})))
+ finally:
+  if cdp:cdp.close()
+  os.killpg(child.pid,signal.SIGTERM)
+  try:child.wait(timeout=4)
+  except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);child.wait(timeout=4)
+  time.sleep(.2)
+`;
+  const printed=await promisify(execFile)('python3',['-I','-c',python,script],{timeout:20000,maxBuffer:6*1024*1024});
+  const wire=JSON.parse(printed.stdout),body=Buffer.from(wire.capture.data,'base64'),stored:any[]=[];
+  assert.equal(body.subarray(0,5).toString(),'%PDF-');
+  const bridge=new api.DaytonaTransferBridge({remote:{run:async()=>wire,upload:async()=>{throw new Error('not upload');}},captures:{createCapture:async(owner:string,id:string,artifact:any,createdAt:number,subject:string)=>{stored.push([owner,id,artifact,subject]);return {id:'bca_'+randomUUID(),owner,ownerSubjectHash:subject,sessionId:id,sha256:artifact.sha256,byteLength:artifact.body.length,contentType:artifact.contentType,createdAt,pageCount:artifact.pageCount};}}});
+  const result=await bridge.execute(binding,session,{type:'capture',request:{type:'pdf',landscape:true,printBackground:true}},20,principal);
+  assert.equal(result.contentType,'application/pdf');assert.equal(result.pageCount,1);assert.equal(result.sha256,hash(body));assert.deepEqual(stored[0].slice(0,2),['cto',session.sessionId]);assert.equal(stored[0][3],principal);assert.deepEqual(Buffer.from(stored[0][2].body),body);assert.equal('data' in result,false);
 });

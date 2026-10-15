@@ -83,6 +83,23 @@ class Transfers(unittest.TestCase):
         for invalid in ('', 'not base64!', base64.b64encode(b'x'*(4*1024*1024+1)).decode()):
             with self.assertRaises(transfer.TransferError): transfer.capture_png(Cdp(invalid),'owned-session')
 
+    def test_pdf_capture_uses_only_fixed_typed_print_parameters_and_bounded_bytes(self):
+        self.assertTrue(callable(getattr(transfer,'capture_pdf',None)), 'Typed PDF capture is missing')
+        class Cdp:
+            def __init__(self,data): self.data,self.calls=data,[]
+            def command(self,method,params,session): self.calls.append((method,params,session)); return {'data':self.data}
+        data=base64.b64encode(b'%PDF-1.7\nreal structural verification occurs at gateway\n%%EOF').decode()
+        for request in ({'type':'pdf'},{'type':'pdf','landscape':True,'printBackground':True}):
+            cdp=Cdp(data); result=transfer.capture_pdf(cdp,'owned-session',request)
+            self.assertEqual(cdp.calls,[('Page.printToPDF',{'landscape':request.get('landscape',False),'printBackground':request.get('printBackground',False),'transferMode':'ReturnAsBase64'},'owned-session')])
+            self.assertEqual(result,{'capture':{'contentType':'application/pdf','data':data}})
+        for request in ({'type':'screenshot'},{'type':'pdf','landscape':'yes'},{'type':'pdf','printBackground':1},{'type':'pdf','path':'/etc/passwd'},{'type':'pdf','transferMode':'ReturnAsStream'}):
+            cdp=Cdp(data)
+            with self.assertRaises(transfer.TransferError): transfer.capture_pdf(cdp,'owned-session',request)
+            self.assertFalse(cdp.calls)
+        for invalid in ('','not-base64!',base64.b64encode(b'x'*(4*1024*1024+1)).decode()):
+            with self.assertRaises(transfer.TransferError): transfer.capture_pdf(Cdp(invalid),'owned-session',{'type':'pdf'})
+
     def test_dispatcher_accepts_only_typed_png_capture_or_upload_with_trusted_manifest(self):
         payload = dict(version=1, op='execute',profileKey='profile-one',profilePath='/home/otcbrowser/.local/share/otchealth-browser/profile-one/chromium',timeoutMs=1000, sessionId='11111111-1111-4111-8111-111111111111',principalHash='a'*64)
         capture = dict(payload, action={'type':'capture','request':{'type':'screenshot','format':'png'}})

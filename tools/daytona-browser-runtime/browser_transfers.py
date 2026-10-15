@@ -215,3 +215,14 @@ def capture_png(cdp, session):
     except ValueError: fail('capture_invalid')
     if not 1 <= len(decoded) <= MAX_CAPTURE or base64.b64encode(decoded).decode() != data: fail('capture_invalid')
     return {'capture': {'contentType': 'image/png', 'data': data}}
+
+
+def capture_pdf(cdp, session, request):
+    if not isinstance(request,dict) or request.get('type')!='pdf' or not request.keys()<={'type','landscape','printBackground'} or any(key in request and type(request[key]) is not bool for key in ('landscape','printBackground')): fail('capture_invalid')
+    result=cdp.command('Page.printToPDF',{'landscape':request.get('landscape',False),'printBackground':request.get('printBackground',False),'transferMode':'ReturnAsBase64'},session)
+    data=result.get('data')
+    if not isinstance(data,str) or not data or len(data)>((MAX_CAPTURE+2)//3)*4: fail('capture_invalid')
+    try: decoded=base64.b64decode(data,validate=True)
+    except ValueError: fail('capture_invalid')
+    if not 1<=len(decoded)<=MAX_CAPTURE or base64.b64encode(decoded).decode()!=data: fail('capture_invalid')
+    return {'capture':{'contentType':'application/pdf','data':data}}
