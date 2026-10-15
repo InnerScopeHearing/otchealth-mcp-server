@@ -14,7 +14,7 @@ async function fixture() {
   const principal = websitePrincipalHash('cto', 'connection:own-connection'), sessionId = randomUUID();
   const binding = { provider: 'daytona' as const, owner: 'cto', ownerSubjectHash: principal, sandboxId: 'sandbox-one', profileKey: `cto-${principal}`, sharedProfileKey: 'company-browser' as const, profilePath: '/home/otcbrowser/.local/share/otchealth-browser/company-browser/chromium', readinessReceiptSha256: 'b'.repeat(64) };
   const mission = { provider: 'daytona' as const, sessionId, owner: 'cto', ownerSubjectHash: principal, sandboxId: binding.sandboxId, profileKey: binding.profileKey, phase: 'ACTIVE' as const, runtimeProtocol: 2 as const, expiresAt: Date.now() + 180000, actionsUsed: 1, actionBudget: 25, effectUnknown: true };
-  const rows = new Map<string, { record: BrowserFileRecord; body: Uint8Array }>(), reads: string[] = [], effects: any[] = [], uploads: Uint8Array[] = [];
+  const rows = new Map<string, { record: BrowserFileRecord; body: Uint8Array }>(), reads: string[] = [], effects: any[] = [], uploads: Uint8Array[] = [], state = { executions: 0 };
   const broker = new BrowserFileBroker({ put: async (key, record, body) => { assert.equal(rows.has(key), false); rows.set(key, { record, body }); }, get: async key => { reads.push(key); return rows.get(key) ?? null; } }, { scanner: { scan: async input => { const now = Date.now(); return { verdict: 'clean', scanner: 'clamav', sha256: hash(input.body), byteLength: input.body.length, scannedAt: now, engineVersion: '1.5.4', signatureVersion: '28154', signaturesUpdatedAt: now - 1 }; } } });
   const files = [];
   for (const [filename, text] of [['one.txt', 'first public fixture\n'], ['two.txt', 'second public fixture\n']]) {
@@ -41,12 +41,12 @@ async function fixture() {
     return Response.json({ id: binding.sandboxId, organizationId: '501db94e-10ee-4bc8-9cca-23c793c67524', state: 'started', public: false });
   };
   const provider = new DaytonaApiBrowserProvider({ apiBaseUrl: 'https://app.daytona.test/api', organizationId: '501db94e-10ee-4bc8-9cca-23c793c67524', resolveApiToken: async () => 'SYNTHETIC-SERVER-TOKEN', toolboxAllowedOrigins: ['https://proxy.daytona.test'], fetchImpl, files: broker });
-  const runtime = { browser: { execute: async (_caller: string, id: string, action: any, seconds: number, subject: string) => { assert.equal(id, sessionId); return provider.execute(binding, mission, action, seconds, subject); } }, capabilities: { checkpoint: false, humanViewer: false }, viewers: {} } as unknown as DaytonaGatewayRuntime;
+  const runtime = { browser: { execute: async (_caller: string, id: string, action: any, seconds: number, subject: string) => { state.executions++; assert.equal(id, sessionId); return provider.execute(binding, mission, action, seconds, subject); } }, capabilities: { checkpoint: false, humanViewer: false }, viewers: {} } as unknown as DaytonaGatewayRuntime;
   const handlers = new Map<string, any>();
   const awsEffects: any[] = [];
   registerCloudBrowserTools({ registerTool: (name: string, _config: unknown, handler: any) => { handlers.set(name, handler); return { remove() {} }; } } as unknown as McpServer, () => 'a'.repeat(64), { browser: { execute: async (...args: any[]) => { awsEffects.push(args); return {}; } }, jobs: {}, queue: {}, artifacts: {} } as unknown as CloudBrowserGatewayRuntime, undefined, { get: async () => runtime, forSession: async id => id === sessionId ? runtime : undefined });
   const call = (action: unknown, id = sessionId, connection = 'own-connection') => requestContext.run({ callerAgent: 'cto', callerHash: 'a'.repeat(64), correlationId: 'directory-test', authKind: 'oauth', authSubject: 'client', authConnectionId: connection }, () => handlers.get('browser_cloud_session_action')({ session_id: id, action, timeout_seconds: 20, dry_run: false }));
-  return { files, rows, reads, effects, uploads, awsEffects, call, action: { type: 'upload_directory', selector: '#folder', files }, principal };
+  return { files, rows, reads, effects, uploads, awsEffects, state, call, action: { type: 'upload_directory', selector: '#folder', files }, principal };
 }
 test('external folder action uses immutable broker references for every file and only server-generated directory wire', async () => {
   const f = await fixture(); const result = await f.call(f.action);
@@ -79,4 +79,13 @@ test('folder action on AWS is rejected before provider execution', async () => {
   const f = await fixture(); const result = await f.call(f.action, randomUUID());
   assert.equal(result.structuredContent.result.error, 'directory_upload_unsupported');
   assert.equal(f.awsEffects.length, 0); assert.equal(f.effects.length, 0); assert.equal(f.reads.length, 0);
+});
+test('external folder ancestor-file collisions reject before broker reads or remote preparation in either order', async () => {
+  for (const reverse of [false, true]) {
+    const f = await fixture();
+    const entries = [{ fileId: f.files[0]!.fileId, relativePath: 'Docs/one.txt' }, { fileId: f.files[1]!.fileId, relativePath: 'Docs/one.txt/two.txt' }];
+    const result = await f.call({ ...f.action, files: reverse ? entries.reverse() : entries });
+    assert.ok(result.isError || result.structuredContent?.result?.error);
+    assert.equal(f.state.executions, 0); assert.equal(f.reads.length, 0); assert.equal(f.effects.length, 0); assert.equal(f.awsEffects.length, 0);
+  }
 });

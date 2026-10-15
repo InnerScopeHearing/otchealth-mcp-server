@@ -12,3 +12,8 @@ test('external folder action accepts bounded named tree while preserving single-
   assert.throws(() => validateCloudBrowserAction({ ...action, path: '/home/otcbrowser' }));
   assert.throws(() => validateDeterministicPlan({ profile_id: 'public-profile', max_seconds: 180, actions: [action] }));
 });
+test('folder manifest rejects a file that is also an ancestor directory in either entry order', () => {
+  const entries = [{ fileId: randomUUID(), relativePath: 'Docs/a.txt' }, { fileId: randomUUID(), relativePath: 'Docs/a.txt/b.txt' }];
+  for (const files of [entries, [...entries].reverse()]) assert.throws(() => validateCloudBrowserAction({ type: 'upload_directory', selector: '#folder', files }));
+  assert.doesNotThrow(() => validateCloudBrowserAction({ type: 'upload_directory', selector: '#folder', files: [{ fileId: randomUUID(), relativePath: 'Docs/a.txt' }, { fileId: randomUUID(), relativePath: 'Docs/a.txt-other/b.txt' }] }));
+});

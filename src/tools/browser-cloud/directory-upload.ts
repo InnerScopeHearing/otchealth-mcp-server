@@ -15,4 +15,15 @@ export const browserDirectoryManifestSchema = z.array(z.object({
     if (paths.has(entry.relativePath) || ids.has(entry.fileId) || entry.relativePath.split('/')[0] !== root) context.addIssue({ code: z.ZodIssueCode.custom, message: 'Directory manifest is invalid.' });
     paths.add(entry.relativePath); ids.add(entry.fileId);
   }
+  // Every entry is a file. No file may also be a directory needed by another
+  // entry, irrespective of caller ordering or a shared text-only prefix.
+  for (const path of paths) {
+    const parts = path.split('/');
+    for (let depth = 1; depth < parts.length; depth++) {
+      if (paths.has(parts.slice(0, depth).join('/'))) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: 'Directory manifest is invalid.' });
+        break;
+      }
+    }
+  }
 });
