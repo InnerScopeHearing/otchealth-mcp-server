@@ -126,6 +126,7 @@ test('Daytona Dynamo ticket wire uses exact phase/version and owner fences; meta
   await store.acquireMissionLease(SESSION, hash);
   await store.releaseMissionLease(SESSION, hash);
   assert.equal(requests[0]!.ConditionExpression, 'attribute_not_exists(pk)');
+  assert.equal((requests[0]!.Item as Record<string, unknown>).expiresAtEpoch, undefined, 'unknown-effect reconciliation metadata cannot disappear while its permanent lease remains');
   assert.equal(requests[1]!.ConditionExpression, '#phase = :old AND #version = :oldVersion');
   assert.deepEqual((requests[1]!.ExpressionAttributeValues as Record<string, unknown>)[':oldVersion'], { N: '0' });
   assert.equal(requests[2]!.ConditionExpression, 'attribute_not_exists(pk)');

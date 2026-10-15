@@ -136,7 +136,9 @@ export class DynamoDaytonaViewerTicketStore implements DaytonaViewerTicketStore 
   }
   async create(hash: string, row: DaytonaViewerTicket): Promise<boolean> {
     this.checked(row);
-    try { await this.call('PutItem', { Item: { pk: { S: this.key('TICKET', hash) }, payload: { S: JSON.stringify(row) }, phase: { S: row.phase }, version: { N: String(row.version) }, expiresAtEpoch: { N: String(Math.ceil((row.expiresAt + 300000) / 1000)) } }, ConditionExpression: 'attribute_not_exists(pk)' }); return true; } catch (error) { if (error instanceof Conflict) return false; throw error; }
+    // Retain reconciliation receipts with their permanent owner fence. Access
+    // still expires at row.expiresAt; metadata retention never renews a ticket.
+    try { await this.call('PutItem', { Item: { pk: { S: this.key('TICKET', hash) }, payload: { S: JSON.stringify(row) }, phase: { S: row.phase }, version: { N: String(row.version) } }, ConditionExpression: 'attribute_not_exists(pk)' }); return true; } catch (error) { if (error instanceof Conflict) return false; throw error; }
   }
   async load(hash: string): Promise<DaytonaViewerTicket | null> {
     const pk = this.key('TICKET', hash), result = await this.call('GetItem', { Key: { pk: { S: pk } }, ConsistentRead: true });
