@@ -130,7 +130,7 @@ function page(nonce: string): string {
 const root='${ROUTE}', key='otc-daytona-handoff', status=document.getElementById('status'), viewer=document.getElementById('viewer'), done=document.getElementById('done'), cancel=document.getElementById('cancel');
 let handoffId='', terminal=false, timer;
 const storage={get:()=>{try{return sessionStorage.getItem(key)||'';}catch{return '';}},set:value=>{try{sessionStorage.setItem(key,value);}catch{}},clear:()=>{try{sessionStorage.removeItem(key);}catch{}}};
-async function post(action,body){const response=await fetch(root+'/'+action,{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify(body)});if(!response.ok)throw new Error('unavailable');return response.json();}
+async function post(action,body){let response;try{response=await fetch(root+'/'+action,{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify(body)});}catch{throw new Error(action==='resume'?'resume_retryable':'unavailable');}if(!response.ok)throw new Error(action==='resume'&&(response.status===408||response.status===429||(response.status>=500&&response.status<=599))?'resume_retryable':'unavailable');return response.json();}
 async function finish(action){if(terminal||!handoffId)return;terminal=true;done.disabled=true;cancel.disabled=true;clearTimeout(timer);storage.clear();viewer.src='about:blank';viewer.hidden=true;status.textContent='Releasing human control…';try{const result=await post(action,{handoff_id:handoffId});if(result.human_input_revoked!==true)throw new Error('unconfirmed');status.textContent=action==='complete'?'Signed-in browser saved. Control released.':'Desktop handoff ended. Control released.';}catch{status.textContent='Control release could not be confirmed. Do not retry Done; ask your agent to check the existing session.';}}
 done.addEventListener('click',()=>finish('complete'));cancel.addEventListener('click',()=>finish('expire'));
 (async()=>{
@@ -153,9 +153,13 @@ done.addEventListener('click',()=>finish('complete'));cancel.addEventListener('c
     // Best effort only: the provider must also revoke expired grants when the
     // tab is offline/closed. The original cookie/ticket lifetime is not extended.
     timer=setTimeout(()=>finish('expire'),Math.max(0,Math.min(result.expires_at-Date.now()-1000,600000)));
-  }catch{
-    terminal=true;storage.clear();viewer.src='about:blank';viewer.hidden=true;
-    status.textContent='This desktop handoff is expired or unavailable. Ask your agent for a new secure link.';
+  }catch(error){
+    terminal=true;viewer.src='about:blank';viewer.hidden=true;
+    if(error?.message==='resume_retryable'){
+      status.textContent='The secure desktop could not be reached. Check your connection, then reload this page to resume the same handoff before its original expiry.';
+    }else{
+      storage.clear();status.textContent='This desktop handoff is expired or unavailable. Ask your agent for a new secure link.';
+    }
   }
 })();
 })();</script></body></html>`;

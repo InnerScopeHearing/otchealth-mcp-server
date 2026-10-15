@@ -222,3 +222,92 @@ test('Daytona page still opens initial handoff if browser storage is blocked', a
     assert.equal(nodes.get('done')!.disabled, false);
   } finally { await app.close(); }
 });
+
+test('Daytona offline or transient resume retains only selector and a later manual reload resumes the same cookie-bound grant', async () => {
+  let resumes = 0;
+  const app = appWith({ resume: async token => { assert.equal(token, TOKEN); resumes++; return VIEW; } });
+  try {
+    const html = await app.inject('/browser/daytona');
+    const script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(script);
+    for (const failure of ['offline', 408, 429, 500, 502, 503, 504] as const) {
+      const stored = new Map([['otc-daytona-handoff', ID]]);
+      const requests: string[] = [];
+      const scheduled: number[] = [];
+      let online = false;
+      const reload = async () => {
+        const nodes = new Map<string, Record<string, unknown>>();
+        const handlers = new Map<string, () => Promise<void>>();
+        for (const id of ['status', 'viewer', 'done', 'cancel']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, addEventListener: (_: string, fn: () => Promise<void>) => handlers.set(id, fn) });
+        runInNewContext(script, {
+          window: { location: { hash: '', pathname: '/browser/daytona' } }, history: { replaceState: () => {} }, URLSearchParams, Date: { now: () => NOW },
+          setTimeout: (_: unknown, delay: number) => { scheduled.push(delay); return 0; }, clearTimeout: () => {},
+          document: { getElementById: (id: string) => nodes.get(id) },
+          sessionStorage: { getItem: (key: string) => stored.get(key), setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
+          fetch: async (url: string, init: { body: string; credentials: string }) => {
+            requests.push(url);
+            assert.equal(init.credentials, 'same-origin');
+            assert.deepEqual(JSON.parse(init.body), { handoff_id: ID });
+            if (!online) {
+              if (failure === 'offline') throw new TypeError('Failed to fetch');
+              return { ok: false, status: failure };
+            }
+            const response = await app.inject({ method: 'POST', url, headers: { ...HEADERS, cookie: COOKIE }, payload: JSON.parse(init.body) });
+            assert.equal(response.headers['set-cookie'], undefined, 'reload must not extend the original cookie');
+            return { ok: response.statusCode === 200, status: response.statusCode, json: async () => response.json() };
+          },
+        });
+        for (let i = 0; i < 30 && !nodes.get('status')!.textContent; i++) await new Promise<void>(resolve => setImmediate(resolve));
+        return { nodes, handlers };
+      };
+      const failed = await reload();
+      assert.equal(stored.get('otc-daytona-handoff'), ID, String(failure));
+      assert.deepEqual(requests, ['/browser/daytona/resume'], 'no automatic retry');
+      assert.deepEqual(scheduled, [], 'no expiry or other effect scheduled on failure');
+      assert.equal(failed.nodes.get('viewer')!.src, 'about:blank');
+      assert.equal(failed.nodes.get('done')!.disabled, true);
+      assert.equal(failed.nodes.get('cancel')!.disabled, true);
+      assert.match(String(failed.nodes.get('status')!.textContent), /reload/i);
+      await failed.handlers.get('done')!(); await failed.handlers.get('cancel')!();
+      assert.equal(requests.length, 1, 'failed bootstrap cannot invoke terminal effects');
+      online = true;
+      const recovered = await reload();
+      assert.equal(recovered.nodes.get('viewer')!.src, URL);
+      assert.equal(recovered.nodes.get('done')!.disabled, false);
+      assert.deepEqual(requests, ['/browser/daytona/resume', '/browser/daytona/resume']);
+      assert.deepEqual(scheduled, [89_000], 'only the original expiry is scheduled after recovery');
+      assert.deepEqual([...stored.values()], [ID]);
+      assert.equal(JSON.stringify([...stored]).includes(TOKEN), false);
+      assert.equal(JSON.stringify([...stored]).includes(URL), false);
+    }
+    assert.equal(resumes, 7);
+  } finally { await app.close(); }
+});
+
+test('Daytona explicit denied or terminal resume response clears selector and cannot invoke Done or expiry', async () => {
+  const app = appWith();
+  try {
+    const html = await app.inject('/browser/daytona');
+    const script = html.body.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(script);
+    for (const status of [400, 401, 403, 404, 409, 410, 422]) {
+      const stored = new Map([['otc-daytona-handoff', ID]]);
+      const requests: string[] = [];
+      const handlers = new Map<string, () => Promise<void>>();
+      const nodes = new Map<string, Record<string, unknown>>();
+      for (const id of ['status', 'viewer', 'done', 'cancel']) nodes.set(id, { textContent: '', src: '', hidden: true, disabled: true, addEventListener: (_: string, fn: () => Promise<void>) => handlers.set(id, fn) });
+      runInNewContext(script, {
+        window: { location: { hash: '', pathname: '/browser/daytona' } }, history: { replaceState: () => {} }, URLSearchParams, Date: { now: () => NOW },
+        setTimeout: () => { assert.fail('terminal resume must not schedule effects'); }, clearTimeout: () => {}, document: { getElementById: (id: string) => nodes.get(id) },
+        sessionStorage: { getItem: (key: string) => stored.get(key), setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
+        fetch: async (url: string) => { requests.push(url); return { ok: false, status }; },
+      });
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      assert.equal(stored.size, 0, String(status));
+      assert.equal(nodes.get('viewer')!.src, 'about:blank');
+      await handlers.get('done')!(); await handlers.get('cancel')!();
+      assert.deepEqual(requests, ['/browser/daytona/resume']);
+      assert.match(String(nodes.get('status')!.textContent), /expired or unavailable/);
+    }
+  } finally { await app.close(); }
+});
