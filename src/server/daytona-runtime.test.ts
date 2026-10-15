@@ -10,22 +10,52 @@ import { DaytonaBrowserService } from '../tools/browser-daytona/service.js';
 import { daytonaViewerGrantBindingHash, daytonaViewerPhysicalScopeHash } from '../tools/browser-daytona/viewer-grant-store.js';
 import type { DaytonaViewerTicket, DaytonaViewerTicketStore } from './daytona-viewer-service.js';
 import type { DaytonaViewerService } from './daytona-viewer.js';
+import { requestContext } from './request-context.js';
+import type { DaytonaBinding } from '../tools/browser-daytona/contract.js';
 
 const SESSION = randomUUID();
 const env = { DAYTONA_BROWSER_ENABLED: 'true', DAYTONA_BROWSER_API_BASE_URL: 'https://app.daytona.io/api', DAYTONA_BROWSER_ORGANIZATION_ID: '501db94e-10ee-4bc8-9cca-23c793c67524', DAYTONA_BROWSER_SANDBOX_ID: '11111111-1111-4111-8111-111111111111', DAYTONA_VIEWER_GRANT_KEY_BASE64: randomBytes(32).toString('base64'), DAYTONA_BROWSER_VIEWER_CONTROL_SHA256: '17f61b92692760ae7908a3987b593180bed0e8bf2f9a52afb1fa80d9489dcce2', DAYTONA_BROWSER_API_TOKEN: 'SERVER_ONLY_PRIVATE_TEST_TOKEN', CLOUD_BROWSER_DDB_TABLE: 'browser-table', DAYTONA_BROWSER_PREVIEW_DOMAIN: 'proxy.daytona.works', DAYTONA_BROWSER_PREVIEW_PORT: '6080', DAYTONA_BROWSER_PREVIEW_PATH: '/vnc.html', DAYTONA_BROWSER_TOOLBOX_ALLOWED_ORIGINS: '["https://proxy.app.daytona.io"]' };
+
+test('company enrollment uses only current OAuth context and exact healthy worker before existing alias discovery', async () => {
+  const f = fixture({ DAYTONA_COMPANY_ENROLLMENT_ENABLED: 'true', DAYTONA_COMPANY_ENROLLMENT_SANDBOX_ID: env.DAYTONA_BROWSER_SANDBOX_ID, DAYTONA_COMPANY_ENROLLMENT_READINESS_SHA256: 'b'.repeat(64) });
+  f.state.bindings = new Map(); f.state.enrollmentReady = true;
+  await f.controller.initialize(); const browser = (await f.controller.adapter.get())!.browser;
+  const connection = '22222222-2222-4222-8222-222222222222';
+  const principal = createHash('sha256').update(`cto\0connection:${connection}`).digest('hex');
+  const own = <T>(run: () => T) => requestContext.run({ callerAgent: 'cto', callerHash: 'a'.repeat(64), correlationId: 'synthetic', authKind: 'oauth', authSubject: 'signed-client', authConnectionId: connection }, run);
+  assert.equal((await own(() => browser.discover('cto', principal))).profileId, `cto-${principal}`);
+  assert.equal(f.calls.filter(call => call === 'create-binding').length, 1);
+  assert.equal((await own(() => browser.readiness('cto', `cto-${principal}`, principal))).checkpointReady, true);
+  await assert.rejects(browser.discover('cto', principal));
+  f.state.scopeError = true; f.state.tick!(); await new Promise(resolve => setImmediate(resolve));
+  const count = f.calls.filter(call => call === 'probe').length;
+  await assert.rejects(own(() => browser.discover('cto', principal)));
+  assert.equal(f.calls.filter(call => call === 'probe').length, count); f.controller.shutdown();
+});
+test('malformed root company enrollment opt-in cannot instantiate provider or create bindings', async () => {
+  const f = fixture({ DAYTONA_COMPANY_ENROLLMENT_ENABLED: 'true', DAYTONA_COMPANY_ENROLLMENT_SANDBOX_ID: '22222222-2222-4222-8222-222222222222', DAYTONA_COMPANY_ENROLLMENT_READINESS_SHA256: 'b'.repeat(64) });
+  assert.equal(await f.controller.initialize(), false); assert.equal(await f.controller.adapter.get(), undefined); assert.deepEqual(f.calls, []);
+});
+test('misconfigured new enrollment cannot destroy sealed cleanup routing after opt-out', async () => {
+  const f = fixture({ DAYTONA_BROWSER_ENABLED: undefined, DAYTONA_BROWSER_SANDBOX_ID: undefined, DAYTONA_BROWSER_PREVIEW_PATH: undefined, DAYTONA_COMPANY_ENROLLMENT_ENABLED: 'true', DAYTONA_COMPANY_ENROLLMENT_SANDBOX_ID: 'foreign' });
+  f.state.session = { provider: 'daytona', sessionId: SESSION, owner: 'cto', ownerSubjectHash: 'a'.repeat(64), profileKey: 'profile-one', sandboxId: env.DAYTONA_BROWSER_SANDBOX_ID, expiresAt: 1900000300000, actionsUsed: 0, actionBudget: 10, effectUnknown: false, phase: 'ACTIVE' };
+  assert.equal(await f.controller.adapter.get(), undefined);
+  assert.equal(typeof (await f.controller.adapter.forSession(SESSION))!.browser.stop, 'function');
+  assert.equal(f.calls.includes('create-binding'), false); f.controller.shutdown();
+});
 function fixture(overrides: NodeJS.ProcessEnv = {}) {
   const calls: string[] = [];
-  const state = { checkpoint: true, lookupError: false, scopeError: false, scopeErrors: new Set<string>(), scopeReads: [] as string[], scopeGrants: new Map<string, DaytonaViewerGrantRecord>(), tickets: new Map<string, DaytonaViewerTicket>(), ticketTransitions: [] as string[], ticks: [] as (() => void)[], scheduleFails: false, uploadConfigured: false, captureConfigured: false, sandbox: env.DAYTONA_BROWSER_SANDBOX_ID, scheduled: 0, cancelled: 0, tick: undefined as (() => void) | undefined, session: null as DaytonaMission | null };
+  const state = { enrollmentReady: false, bindings: undefined as Map<string, DaytonaBinding> | undefined, checkpoint: true, lookupError: false, scopeError: false, scopeErrors: new Set<string>(), scopeReads: [] as string[], scopeGrants: new Map<string, DaytonaViewerGrantRecord>(), tickets: new Map<string, DaytonaViewerTicket>(), ticketTransitions: [] as string[], ticks: [] as (() => void)[], scheduleFails: false, uploadConfigured: false, captureConfigured: false, sandbox: env.DAYTONA_BROWSER_SANDBOX_ID, scheduled: 0, cancelled: 0, tick: undefined as (() => void) | undefined, session: null as DaytonaMission | null };
   const store: DaytonaBrowserStore = {
-    loadBinding: async profileKey => ({ provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: state.sandbox, profileKey, profilePath: `/home/otcbrowser/.local/share/otchealth-browser/${profileKey}/chromium`, readinessReceiptSha256: 'b'.repeat(64) }), createBinding: async () => false,
+    loadBinding: async profileKey => state.bindings ? state.bindings.get(profileKey) ?? null : ({ provider: 'daytona', owner: 'cto', ownerSubjectHash: 'a'.repeat(64), sandboxId: state.sandbox, profileKey, profilePath: `/home/otcbrowser/.local/share/otchealth-browser/${profileKey}/chromium`, readinessReceiptSha256: 'b'.repeat(64) }), createBinding: async binding => { calls.push('create-binding'); if (!state.bindings || state.bindings.has(binding.profileKey)) return false; state.bindings.set(binding.profileKey, { ...binding }); return true; },
     loadSession: async () => { calls.push('load'); if (state.lookupError) throw new Error('private-store-error'); return state.session; },
     createSession: async () => false, saveSessionUnderLock: async () => {}, acquireSessionLock: async () => false, releaseSessionLock: async () => {},
     acquireProfileLease: async () => false, ownsProfileLease: async () => false, releaseProfileLease: async () => {},
   };
   const provider: DaytonaProvider & { capabilities: { checkpoint: boolean } } = {
     capabilities: { checkpoint: false },
-    probe: async binding => { calls.push('probe'); return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: state.checkpoint }; },
-    inspect: async () => { calls.push('inspect'); throw new Error('must not call provider in factory'); },
+    probe: async binding => { calls.push('probe'); return { ready: true, profileKey: binding.profileKey, profilePath: binding.profilePath, checkpointReady: state.checkpoint, ...(state.enrollmentReady ? { browserPid: 101, supervisorPid: 100, runtimeProtocol: 2 as const, multiMissionReady: true } : {}) }; },
+    inspect: async () => { calls.push('inspect'); if (state.enrollmentReady) return { sandboxId: state.sandbox, public: false, state: 'started' }; throw new Error('must not call provider in factory'); },
     openMission: async () => { calls.push('open'); }, execute: async () => { calls.push('execute'); }, checkpoint: async () => { calls.push('checkpoint'); }, releaseMission: async () => { calls.push('release'); },
     viewerGrant: async () => { throw new Error('no grant'); }, readViewerGrant: async () => { throw new Error('no read'); }, revokeViewerGrant: async () => { throw new Error('no revoke'); },
   };

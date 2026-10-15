@@ -49,6 +49,18 @@ test('reserved Daytona alias starts exact enrolled real service for each origina
   assert.equal(f.calls.some(row => row[0] === 'aws-start'), false);
 });
 
+test('explicit company profile discovery uses existing authenticated Daytona path and honors dry-run before admission', async () => {
+  const f = fixture();
+  const preview = await f.call('browser_cloud_profile_discover', { profile_id: 'daytona-company', dry_run: true });
+  assert.equal(preview.structuredContent?.result?.dry_run, true); assert.deepEqual(f.calls, []);
+  const result = await f.call('browser_cloud_profile_discover', { profile_id: 'daytona-company', dry_run: false });
+  assert.equal(result.structuredContent?.result?.profile_id, 'daytona-company');
+  assert.equal(result.structuredContent?.result?.enrolled_profile_id, 'exact-enrolled-server-profile');
+  assert.equal(result.structuredContent?.result?.provider, 'daytona');
+  assert.deepEqual(f.calls.map(call => call[0]), ['get', 'discover', 'readiness']);
+  assert.equal(f.calls.some(call => ['start', 'issue', 'aws-start'].includes(String(call[0]))), false);
+});
+
 test('Daytona alias rejects protected seats, static auth, disabled runtime and dry runs before provider effects', async () => {
   const f = fixture();
   await f.call('browser_cloud_session_start', { profile_id: 'daytona-desktop', max_seconds: 180, dry_run: true });
