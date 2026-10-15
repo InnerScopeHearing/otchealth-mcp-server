@@ -11,10 +11,11 @@ import { CloudBrowserJobWorker, type CloudBrowserPlanExecutor } from "../browser
 import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 
-import { intercomPrincipalHash, currentIntercomPrincipalKey } from '../browser-cloud/intercom-login-service.js';
+import { currentIntercomPrincipalKey } from '../browser-cloud/intercom-login-service.js';
+import { websitePrincipalHash } from '../browser-cloud/website-login-service.js';
 function principalHash(caller: string): string | undefined {
   const subject = currentIntercomPrincipalKey();
-  return caller === 'coo' && subject ? intercomPrincipalHash(subject) : undefined;
+  return (CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(caller) && subject ? websitePrincipalHash(caller, subject) : undefined;
 }
 const actionSchema = cloudBrowserActionSchema;
 const planSchema = z
@@ -265,6 +266,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         try {
           const out = await runtime.jobs.submit({
             agent: ctx.callerAgent,
+            ownerSubjectHash: principalHash(ctx.callerAgent),
             idempotencyKey: input.idempotency_key,
             request: validateDeterministicPlan(input.plan),
           });
@@ -304,8 +306,8 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       handler: async (input, ctx) => {
         if (!live()) return unavailable();
         try {
-          const job = await runtime.jobs.get(input.job_id, ctx.callerAgent);
-          const { request: _request, ...safe } = job;
+          const job = await runtime.jobs.get(input.job_id, ctx.callerAgent, principalHash(ctx.callerAgent));
+          const { request: _request, ownerSubjectHash: _principal, ...safe } = job;
           return {
             data: { job: safe },
             summary: `Browser job ${job.id} is ${job.status}.`,
@@ -390,7 +392,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
               summary: 'Owner-bound browser capture returned as native MCP image or PDF content.',
             };
           }
-          const job = await runtime.jobs.get(input.job_id, ctx.callerAgent);
+          const job = await runtime.jobs.get(input.job_id, ctx.callerAgent, principalHash(ctx.callerAgent));
           const artifact = job.artifacts.find((item) => item.id === input.artifact_id);
           if (!artifact)
             return {
@@ -451,7 +453,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             summary: "Cancellation was not requested.",
           };
         try {
-          const job = await runtime.jobs.requestCancellation(input.job_id, ctx.callerAgent);
+          const job = await runtime.jobs.requestCancellation(input.job_id, ctx.callerAgent, principalHash(ctx.callerAgent));
           return {
             data: { status: job.status },
             summary: "Cancellation state was saved.",
@@ -638,7 +640,7 @@ export function startCloudBrowserWorker(runtime: CloudBrowserGatewayRuntime): Cl
   const executor: CloudBrowserPlanExecutor = {
     execute: async (job, control) => {
       const plan = validateDeterministicPlan(job.request);
-      const started = await runtime.browser.start(job.agent, plan.profile_id, plan.max_seconds, plan.actions.length);
+      const started = await runtime.browser.start(job.agent, plan.profile_id, plan.max_seconds, plan.actions.length + 1, job.ownerSubjectHash);
       try {
         for (let index = 0; index < plan.actions.length; index++) {
           if (control.cancellationRequested()) return;
@@ -646,15 +648,15 @@ export function startCloudBrowserWorker(runtime: CloudBrowserGatewayRuntime): Cl
           const step = `action:${index}`;
           if (await control.heartbeat()) return;
           await control.beginExternalEffect(step);
-          await runtime.browser.execute(job.agent, started.sessionId, action, 20);
+          await runtime.browser.execute(job.agent, started.sessionId, action, 20, job.ownerSubjectHash);
           await runtime.jobs.recordExternalEffectSucceeded(job.id, job.agent, job.leaseToken, step);
         }
-        const observation = await runtime.browser.snapshot(job.agent, started.sessionId);
+        const observation = await runtime.browser.snapshot(job.agent, started.sessionId, job.ownerSubjectHash);
         const body = Buffer.from(JSON.stringify(observation));
         await runtime.jobs.attachArtifact(job.id, job.agent, job.leaseToken, body, "application/json", createHash("sha256").update(body).digest("hex"));
         return observation;
       } finally {
-        await runtime.browser.stop(job.agent, started.sessionId);
+        await runtime.browser.stop(job.agent, started.sessionId, job.ownerSubjectHash);
       }
     },
   };

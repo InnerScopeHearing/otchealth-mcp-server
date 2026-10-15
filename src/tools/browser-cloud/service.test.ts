@@ -789,15 +789,16 @@ test('subject-bound browser profiles and sessions require the matching validated
   assert.equal((await service.getCapture('coo', capture.id, ownerSubjectHash)).metadata.ownerSubjectHash, ownerSubjectHash);
 });
 
-test('capture fails closed for persisted profiles, sensitive suppression, and exhausted action budgets', async () => {
+test('saved profiles can capture authorized pages while human sign-in and exhausted budgets stay blocked', async () => {
   const store = new MemoryStore();
   const transport = new FakeTransport();
   const service = new CloudBrowserService(store, transport);
   await service.saveProfile('cto', { profileId: 'cto-persist', owner: 'cto', allowedHosts: ['example.test'], persistent: true, providerProfileId: 'provider-profile' });
   const persisted = await service.start('cto', 'cto-persist', 60);
-  const before = transport.actions.length;
-  await assert.rejects(service.execute('cto', persisted.sessionId, { type: 'capture', request: { type: 'pdf' } }, 5), (e: unknown) => e instanceof CloudBrowserError && e.code === 'sensitive_output_denied');
-  assert.equal(transport.actions.length, before);
+  const capture = await service.execute('cto', persisted.sessionId, { type: 'capture', request: { type: 'screenshot' } }, 5) as BrowserCaptureMetadata;
+  assert.equal(capture.sessionId, persisted.sessionId);
+  assert.equal(capture.owner, 'cto');
+  assert.equal(capture.contentType, 'image/png');
 
   await service.saveProfile('cto', { profileId: 'cto-public-capture', owner: 'cto', allowedHosts: ['example.test'], persistent: false });
   const fresh = await service.start('cto', 'cto-public-capture', 60);
@@ -806,4 +807,29 @@ test('capture fails closed for persisted profiles, sensitive suppression, and ex
   await service.endSensitiveOutputSuppression('cto', fresh.sessionId);
   store.sessions.set(fresh.sessionId, { ...store.sessions.get(fresh.sessionId)!, actionsUsed: 20 });
   await assert.rejects(service.execute('cto', fresh.sessionId, { type: 'capture', request: { type: 'screenshot' } }, 5), (e: unknown) => e instanceof CloudBrowserError && e.code === 'action_limit');
+});
+
+test('saved website profiles use mission budgets and preserve login lease exclusivity', async () => {
+  const store = new MemoryStore();
+  const transport = new FakeTransport();
+  const service = new CloudBrowserService(store, transport);
+  const principal = 'a'.repeat(64);
+  let leaseActive = true;
+  const guardedStore = store as MemoryStore & { verifyLoginLease: (id: string, owner?: string) => Promise<boolean> };
+  guardedStore.verifyLoginLease = async (_id, owner) => !leaseActive || owner === 'trusted-login-owner';
+  await service.saveProfile('cto', { profileId: 'website-mission', owner: 'cto', allowedHosts: ['example.test'], persistent: true, providerProfileId: 'provider-profile', ownerSubjectHash: principal, actionBudget: 10_000, maxSessionSeconds: 28_800, maxActionSeconds: 120 }, principal);
+  await assert.rejects(service.start('cto', 'website-mission', 3600, undefined, principal), (error: unknown) => error instanceof CloudBrowserError && error.code === 'profile_login_in_progress');
+  assert.equal(transport.startedProfileIds.length, 0);
+  const session = await service.start('cto', 'website-mission', 3600, 9999, principal, 'trusted-login-owner');
+  assert.equal(store.sessions.get(session.sessionId)?.actionBudget, 9999);
+  assert.equal(store.dailyReservations, 0, 'website sessions do not inherit the temporary public trial daily quota');
+  await assert.rejects(service.savePersistentProfile('cto', session.sessionId, principal), (error: unknown) => error instanceof CloudBrowserError && error.code === 'profile_login_in_progress');
+  store.sessions.get(session.sessionId)!.actionsUsed = 21;
+  const page = await service.execute('cto', session.sessionId, { type: 'snapshot' }, 60, principal);
+  assert.equal((page as { url: string }).url, 'https://example.test/');
+  leaseActive = false;
+  await service.stop('cto', session.sessionId, principal);
+  const reopened = await service.start('cto', 'website-mission', 28_800, undefined, principal);
+  assert.equal(store.sessions.get(reopened.sessionId)?.actionBudget, 10_000);
+  await service.stop('cto', reopened.sessionId, principal);
 });

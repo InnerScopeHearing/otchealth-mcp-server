@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { canonicalUri, signRequest, resolveAwsCredentials } from "../../search/sigv4.js";
 import type { BrowserCaptureMetadata, BrowserCaptureRecord, CloudBrowserProfile, CloudBrowserSession, CloudBrowserStore } from "./contract.js";
 import { CloudBrowserError } from "./contract.js";
+import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from './service.js';
 
 type DynamoAttribute = {
   S?: string;
@@ -151,8 +152,25 @@ function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
  * `expiresAtEpoch` as TTL. The only opaque provider references are encrypted at rest by Dynamo.
  */
 export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
+  async verifyLoginLease(profileId: string, leaseOwner?: string): Promise<boolean> {
+    if (!/^[a-z0-9][a-z0-9_-]{2,63}$/i.test(profileId) ||
+      (leaseOwner !== undefined && !/^[A-Za-z0-9._:-]{1,256}$/.test(leaseOwner))) return false;
+    const pk = `WEBSITE_LOGIN_LEASE#${profileId}`;
+    const response = await this.call('GetItem', {
+      TableName: this.tableName, Key: { pk: { S: pk } }, ConsistentRead: true,
+    }) as { Item?: DynamoItem };
+    if (response.Item === undefined) return true;
+    const item = response.Item;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    if (item.pk?.S !== pk) return false;
+    const lockOwner = item.lockOwner?.S;
+    const lockUntil = Number(item.lockUntil?.N);
+    if (typeof lockOwner !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(lockOwner) ||
+      !Number.isSafeInteger(lockUntil) || lockUntil <= 0) return false;
+    return lockUntil < this.now() || leaseOwner === lockOwner;
+  }
   async createProfileIntent(profile: CloudBrowserProfile): Promise<boolean> {
-    if (profile.providerProfileId || profile.owner !== 'coo' || !/^[a-f0-9]{64}$/.test(profile.ownerSubjectHash || '')) throw new CloudBrowserError('profile_intent_invalid','Profile preparation is invalid.');
+    if (profile.providerProfileId || !(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(profile.owner) || !/^[a-f0-9]{64}$/.test(profile.ownerSubjectHash || '')) throw new CloudBrowserError('profile_intent_invalid','Profile preparation is invalid.');
     try {
       await this.call('PutItem',{ TableName:this.tableName, Item:profileItem(profile), ConditionExpression:'attribute_not_exists(pk)' });
       return true;

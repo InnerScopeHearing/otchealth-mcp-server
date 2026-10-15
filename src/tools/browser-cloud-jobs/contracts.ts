@@ -8,6 +8,8 @@ export type ExternalEffectState = 'none' | 'unknown' | 'not_started' | 'succeede
 
 export interface BrowserJobRequest {
   agent: string;
+  /** Supplied only by the authenticated server context, never by the caller's plan. */
+  readonly ownerSubjectHash?: string;
   idempotencyKey: string;
   request: unknown;
 }
@@ -27,6 +29,8 @@ export interface BrowserArtifactMetadata {
 export interface BrowserJob {
   id: string;
   agent: string;
+  /** Immutable authenticated principal bound at submission and carried to the browser runtime. */
+  readonly ownerSubjectHash?: string;
   requestDigest: string;
   idempotencyDigest: string;
   /** Bounded, validated plan envelope. It is durable so a cloud worker never depends on the submitting Chat session. */
@@ -79,6 +83,16 @@ const digest = (value: string): string => createHash('sha256').update(value).dig
 const canonical = (value: unknown): string => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) : item);
 
 function assertAgent(agent: string): void { if (!AGENT.test(agent)) throw new BrowserJobError('invalid_agent'); }
+function assertSubjectHash(subjectHash: string | undefined): void {
+  if (subjectHash !== undefined && (typeof subjectHash !== 'string' || !SHA256.test(subjectHash))) throw new BrowserJobError('invalid_owner_subject_hash');
+}
+function assertOwner(job: BrowserJob, agent: string): void {
+  if (job.agent !== agent) throw new BrowserJobError('job_owner_mismatch');
+  assertSubjectHash(job.ownerSubjectHash);
+}
+function assertPrincipal(job: BrowserJob, ownerSubjectHash: string | undefined): void {
+  if (job.ownerSubjectHash !== undefined && job.ownerSubjectHash !== ownerSubjectHash) throw new BrowserJobError('job_principal_mismatch');
+}
 function assertLease(job: BrowserJob, agent: string, token: number, now: number): void {
   if (job.leaseOwner !== agent) throw new BrowserJobError('job_owner_mismatch');
   if (job.leaseToken !== token) throw new BrowserJobError('stale_lease');
@@ -91,21 +105,27 @@ export class CloudBrowserJobs {
 
   async submit(input: BrowserJobRequest): Promise<{ job: BrowserJob; replayed: boolean }> {
     assertAgent(input.agent);
+    assertSubjectHash(input.ownerSubjectHash);
+    if (input.request && typeof input.request === 'object' && (Object.hasOwn(input.request, 'ownerSubjectHash') || Object.hasOwn(input.request, 'owner_subject_hash'))) throw new BrowserJobError('invalid_job_auth_metadata');
     if (!IDEMPOTENCY.test(input.idempotencyKey)) throw new BrowserJobError('invalid_idempotency_key');
     const requestDigest = digest(canonical(input.request));
     const idempotencyDigest = digest(input.idempotencyKey);
     const existing = await this.store.readByIdempotency(input.agent, idempotencyDigest);
     if (existing) {
+      assertOwner(existing.value, input.agent);
+      if (existing.value.ownerSubjectHash !== input.ownerSubjectHash) throw new BrowserJobError('job_principal_mismatch');
       if (existing.value.requestDigest !== requestDigest) throw new BrowserJobError('idempotency_conflict');
       if (existing.value.status === 'queued' && existing.value.dispatchState === 'pending') await this.dispatch(existing);
       return { job: existing.value, replayed: true };
     }
     const iso = new Date(this.now()).toISOString();
-    const job: BrowserJob = { id: `bcj_${this.newId()}`, agent: input.agent, requestDigest, idempotencyDigest, request: structuredClone(input.request), status: 'queued', createdAt: iso, updatedAt: iso, leaseOwner: null, leaseUntil: null, leaseToken: 0, attempts: 0, cancellationRequestedAt: null, externalEffect: 'none', actionEffects: {}, dispatchState: 'pending', dispatchAttempts: 0, artifacts: [], errorCode: null };
+    const job: BrowserJob = { id: `bcj_${this.newId()}`, agent: input.agent, ...(input.ownerSubjectHash === undefined ? {} : { ownerSubjectHash: input.ownerSubjectHash }), requestDigest, idempotencyDigest, request: structuredClone(input.request), status: 'queued', createdAt: iso, updatedAt: iso, leaseOwner: null, leaseUntil: null, leaseToken: 0, attempts: 0, cancellationRequestedAt: null, externalEffect: 'none', actionEffects: {}, dispatchState: 'pending', dispatchAttempts: 0, artifacts: [], errorCode: null };
     const created = await this.store.createIfAbsent(job);
     if (created === 'exists') {
       const raced = await this.store.readByIdempotency(input.agent, idempotencyDigest);
       if (!raced) throw new BrowserJobError('idempotency_read_after_conflict_failed');
+      assertOwner(raced.value, input.agent);
+      if (raced.value.ownerSubjectHash !== input.ownerSubjectHash) throw new BrowserJobError('job_principal_mismatch');
       if (raced.value.requestDigest !== requestDigest) throw new BrowserJobError('idempotency_conflict');
       return { job: raced.value, replayed: true };
     }
@@ -113,14 +133,19 @@ export class CloudBrowserJobs {
     return { job, replayed: false };
   }
 
-  async get(jobId: string, agent: string): Promise<BrowserJob> { const hit = await this.required(jobId); if (hit.value.agent !== agent) throw new BrowserJobError('job_owner_mismatch'); return hit.value; }
+  async get(jobId: string, agent: string, ownerSubjectHash?: string): Promise<BrowserJob> {
+    const job = await this.getForWorker(jobId, agent); assertPrincipal(job, ownerSubjectHash); return job;
+  }
+
+  /** Trusted worker recovery only; never expose this lane-only lookup as an authenticated client endpoint. */
+  async getForWorker(jobId: string, agent: string): Promise<BrowserJob> { const hit = await this.required(jobId); assertOwner(hit.value, agent); return hit.value; }
 
   async claim(jobId: string, agent: string, leaseMs: number): Promise<BrowserJob> {
     assertAgent(agent);
     if (!Number.isInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 15 * 60_000) throw new BrowserJobError('invalid_lease_duration');
     const hit = await this.required(jobId);
     const job = clone(hit.value); const now = this.now();
-    if (job.agent !== agent) throw new BrowserJobError('job_owner_mismatch');
+    assertOwner(job, agent);
     if (job.status === 'cancelled' || job.status === 'succeeded' || job.status === 'failed' || job.status === 'needs_reconciliation') throw new BrowserJobError('job_terminal');
     if (job.leaseUntil && Date.parse(job.leaseUntil) > now) throw new BrowserJobError('lease_held');
     if (job.externalEffect === 'unknown') {
@@ -146,8 +171,8 @@ export class CloudBrowserJobs {
     job.leaseUntil = new Date(now + leaseMs).toISOString(); job.updatedAt = new Date(now).toISOString(); await this.replace(job, hit.version); return job;
   }
 
-  async requestCancellation(jobId: string, agent: string): Promise<BrowserJob> {
-    const hit = await this.required(jobId); const job = clone(hit.value); if (job.agent !== agent) throw new BrowserJobError('job_owner_mismatch');
+  async requestCancellation(jobId: string, agent: string, ownerSubjectHash?: string): Promise<BrowserJob> {
+    const hit = await this.required(jobId); const job = clone(hit.value); assertOwner(job, agent); assertPrincipal(job, ownerSubjectHash);
     if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') return job;
     job.cancellationRequestedAt = new Date(this.now()).toISOString(); job.status = job.leaseOwner ? 'cancelling' : 'cancelled'; job.updatedAt = new Date(this.now()).toISOString(); await this.replace(job, hit.version); return job;
   }

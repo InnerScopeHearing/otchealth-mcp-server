@@ -10,6 +10,9 @@ import { captureBrowserArtifact, type BrowserCaptureValidator } from './captures
 import { createTrustedBrowserBinaryValidator } from './binary-validation.js';
 import { assertTrustedPublicWebProfile, type TrustedPublicWebPolicy } from './public-web-policy.js';
 import { attachStagedFileToOwnedInput, type BrowserFileResolver } from './provider-files.js';
+import { websiteLoginPolicy, type WebsiteLoginSite } from './website-login-service.js';
+import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from './service.js';
+import type { WebsiteLoginTarget } from './website-login-policy.js';
 
 const BROWSER_ID = "aws.browser.v1";
 type FrameMessage = { id?: unknown; result?: unknown; error?: unknown };
@@ -137,6 +140,43 @@ class Cdp {
 }
 
 export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
+  async prepareWebsiteLogin(session: CloudBrowserSession, site: WebsiteLoginSite, target?: WebsiteLoginTarget): Promise<void> {
+    await this.websiteLoginPage(session, site, true, target);
+  }
+  async verifyWebsiteLogin(session: CloudBrowserSession, site: WebsiteLoginSite, target?: WebsiteLoginTarget): Promise<void> {
+    await this.websiteLoginPage(session, site, false, target);
+  }
+  /** Fixed trusted login path. No DOM text, credentials or form values leave this method. */
+  private async websiteLoginPage(session: CloudBrowserSession, site: WebsiteLoginSite, navigate: boolean, target?: WebsiteLoginTarget): Promise<void> {
+    const policy = websiteLoginPolicy(site, target);
+    if (!(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(session.owner) || !/^[a-f0-9]{64}$/.test(session.ownerSubjectHash ?? '') || !session.sensitiveOutputSuppressed || session.providerBrowserId !== BROWSER_ID || session.allowedHosts.length !== policy.allowedHosts.length || session.allowedHosts.some((host, index) => host !== policy.allowedHosts[index])) throw new CloudBrowserError('login_invalid', 'The owned sign-in session is invalid.');
+    const credentials = await resolveAwsCredentials();
+    if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Browser runtime credentials are unavailable.');
+    const cdp = await Cdp.open(session.automationEndpoint, signAgentCoreAutomationStream({ ...credentials, sessionToken: credentials.sessionToken ?? '', region: this.region }, session.automationEndpoint), 10_000, this.webSocketFactory);
+    try {
+      const targets = await cdp.command('Target.getTargets', {}, 5000);
+      const pages = (targets.targetInfos as Array<{ type?: string; targetId?: string; url?: string }> | undefined)?.filter(t => t.type === 'page' && typeof t.targetId === 'string') ?? [];
+      const target = navigate ? pages[0] : pages.find(t => t.targetId === session.selectedTargetId && session.ownedTargetIds?.includes(t.targetId!));
+      if (!target?.targetId) throw new CloudBrowserError('login_page_missing', 'The sign-in window is unavailable.');
+      const attached = await cdp.command('Target.attachToTarget', { targetId: target.targetId, flatten: true }, 5000);
+      if (typeof attached.sessionId !== 'string') throw new CloudBrowserError('login_page_missing', 'The sign-in window is unavailable.');
+      const page = attached.sessionId;
+      if (navigate) {
+        const result = await cdp.command('Page.navigate', { url: policy.loginUrl }, 10_000, page);
+        if (result.errorText) throw new CloudBrowserError('login_navigation_failed', 'The company sign-in page could not be opened.');
+        session.ownedTargetIds = [target.targetId]; session.selectedTargetId = target.targetId;
+        return;
+      }
+      let url: URL;
+      try { url = new URL(target.url ?? 'about:blank'); } catch { throw new CloudBrowserError('company_sign_in_required', 'Open the requested company website before clicking Done.'); }
+      if (url.protocol !== 'https:' || url.hostname !== policy.host || url.username || url.password || url.port || !policy.signedInPath.test(url.pathname)) throw new CloudBrowserError('company_sign_in_required', 'Open the requested company website before clicking Done.');
+      const dom = await cdp.command('DOM.getDocument', { depth: 0 }, 5000, page);
+      const root = dom.root as { nodeId?: number } | undefined;
+      if (!root?.nodeId) throw new CloudBrowserError('company_sign_in_required', 'The company website is not ready.');
+      const password = await cdp.command('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="password"]' }, 5000, page);
+      if (password.nodeId !== 0) throw new CloudBrowserError('company_sign_in_required', 'Complete the company sign-in first.');
+    } finally { cdp.close(); }
+  }
   /** Server-owned authentication path: no DOM or form values are returned to the model. */
   async prepareIntercomLogin(session: CloudBrowserSession, workspace: string, host = 'app.intercom.com'): Promise<void> {
     if (!/^[A-Za-z0-9]{3,32}$/.test(workspace) || session.owner !== 'coo' || !session.ownerSubjectHash || !session.sensitiveOutputSuppressed) throw new CloudBrowserError('login_invalid', 'The owned sign-in session is invalid.');

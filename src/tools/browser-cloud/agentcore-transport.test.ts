@@ -6,6 +6,7 @@ import type { CloudBrowserSession } from "./contract.js";
 import type { CloudBrowserProfile, CloudBrowserStore } from "./contract.js";
 import { CloudBrowserService } from "./service.js";
 import { parseTrustedPublicWebPolicy } from './public-web-policy.js';
+import { resolveWebsiteLoginTarget } from './website-login-policy.js';
 
 const TEST_PUBLIC_WEB_POLICY = parseTrustedPublicWebPolicy({
   AWS_REGION: 'us-east-1',
@@ -620,11 +621,87 @@ test('persistent save requires the exact provider profile, browser, session and 
   const owned={...session,providerBrowserId:'aws.browser.v1'};
   const profile:CloudBrowserProfile={profileId:'coo-owned-profile',owner:'coo',persistent:true,providerProfileId:'cooIntercomAuth_owned-created123',allowedHosts:['app.intercom.com']};
   const valid={profileIdentifier:profile.providerProfileId,browserIdentifier:'aws.browser.v1',sessionId:owned.providerSessionId,lastUpdatedAt:'2026-10-14T00:00:00Z'};
-  for(const payload of [valid,{...valid,profileIdentifier:'other-profile'},{...valid,sessionId:'other-session'},{...valid,lastUpdatedAt:'invalid'},{}]) {
+  // @aws-sdk/client-bedrock-agentcore 3.1151.0 SaveBrowserSessionProfileResponse$ uses
+  // Smithy schema sentinel 5 (TIMESTAMP_DATE_TIME), overriding REST JSON's epoch default.
+  // Its model also explicitly documents ISO 8601. Numeric epoch seconds are not this API's wire format.
+  const cases = [
+    { payload: valid, accepted: true },
+    { payload: { ...valid, lastUpdatedAt: '2026-10-14T00:00:00.123Z' }, accepted: true },
+    { payload: { ...valid, lastUpdatedAt: '2026-10-14T07:00:00+07:00' }, accepted: true },
+    ...[
+      { ...valid, profileIdentifier: 'other-profile' }, { ...valid, browserIdentifier: 'other-browser' },
+      { ...valid, sessionId: 'other-session' }, { ...valid, lastUpdatedAt: 'invalid' },
+      { ...valid, lastUpdatedAt: 1_791_936_000 }, { ...valid, lastUpdatedAt: null },
+      { ...valid, lastUpdatedAt: {} }, {},
+    ].map(payload => ({ payload, accepted: false })),
+  ];
+  for(const {payload, accepted} of cases) {
     let calls=0;
-    const transport=new AgentCoreCloudBrowserTransport('us-east-1',async()=>{calls++;return new Response(JSON.stringify(payload),{status:200});});
-    if(payload===valid) await transport.saveProfile(owned,profile);
+    const transport=new AgentCoreCloudBrowserTransport('us-east-1',async(url,init)=>{
+      calls++;
+      assert.equal(String(url), `https://bedrock-agentcore.us-east-1.amazonaws.com/browser-profiles/${profile.providerProfileId}/save`);
+      assert.equal(init?.method, 'PUT');
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.browserIdentifier, owned.providerBrowserId);
+      assert.equal(body.sessionId, owned.providerSessionId);
+      assert.match(body.clientToken, /^[a-f0-9-]{36}$/);
+      return new Response(JSON.stringify(payload),{status:200});
+    });
+    if(accepted) await transport.saveProfile(owned,profile);
     else await assert.rejects(transport.saveProfile(owned,profile),/exact owned profile/);
     assert.equal(calls,1,'save is never retried');
   }
+});
+
+test('fixed website handoff navigates while suppressed and verifies only expected owned page without password', async (t) => {
+  const prior = { ...process.env }; t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'synthetic-login-access'; process.env.AWS_SECRET_ACCESS_KEY = 'synthetic-login-secret';
+  const commands: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let currentUrl = 'https://wefunder.com/otchealth/editor'; let passwordNode = 0; let targetId = 'owned-target';
+  class Socket extends EventTarget {
+    send(raw: string) {
+      const command = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown> };
+      commands.push(command);
+      const result = command.method === 'Target.getTargets' ? { targetInfos: [{ type: 'page', targetId, url: currentUrl }] } :
+        command.method === 'Target.attachToTarget' ? { sessionId: 'owned-page' } :
+        command.method === 'DOM.getDocument' ? { root: { nodeId: 1 } } :
+        command.method === 'DOM.querySelector' ? { nodeId: passwordNode } : {};
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ id: command.id, result }) })));
+    }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  const factory = () => { const socket = new Socket(); queueMicrotask(() => socket.dispatchEvent(new Event('open'))); return socket as unknown as WebSocket; };
+  const transport = new AgentCoreCloudBrowserTransport('us-east-1', fetch, factory);
+  const owned = { ...session, owner: 'cto', ownerSubjectHash: 'a'.repeat(64), providerBrowserId: 'aws.browser.v1', allowedHosts: ['wefunder.com'], sensitiveOutputSuppressed: true } as CloudBrowserSession;
+  await transport.prepareWebsiteLogin(owned, 'wefunder');
+  assert.deepEqual(owned.ownedTargetIds, ['owned-target']); assert.equal(owned.selectedTargetId, 'owned-target');
+  assert.equal(commands.find(command => command.method === 'Page.navigate')?.params.url, currentUrl);
+  await transport.verifyWebsiteLogin(owned, 'wefunder');
+  assert.equal(commands.some(command => command.method.startsWith('Accessibility.') || command.method === 'Runtime.evaluate' || command.method === 'Network.getCookies'), false);
+  for (const invalidUrl of ['https://wefunder.com/login', 'https://evil.example/otchealth/editor', 'https://wefunder.com/otchealth/editorial', 'http://wefunder.com/otchealth/editor', 'https://user:pass@wefunder.com/otchealth/editor']) {
+    currentUrl = invalidUrl;
+    await assert.rejects(transport.verifyWebsiteLogin(owned, 'wefunder'), (error: unknown) => (error as { code?: string }).code === 'company_sign_in_required');
+  }
+  currentUrl = 'https://wefunder.com/otchealth/editor'; passwordNode = 9;
+  await assert.rejects(transport.verifyWebsiteLogin(owned, 'wefunder'), /Complete the company sign-in/);
+  passwordNode = 0; targetId = 'foreign-target';
+  await assert.rejects(transport.verifyWebsiteLogin(owned, 'wefunder'), /unavailable/);
+  const before = commands.length;
+  await assert.rejects(transport.prepareWebsiteLogin({ ...owned, sensitiveOutputSuppressed: false }, 'wefunder'), /invalid/);
+  await assert.rejects(transport.prepareWebsiteLogin({ ...owned, owner: 'clo-personal' }, 'wefunder'), /invalid/);
+  assert.equal(commands.length, before);
+  targetId = 'owned-target'; currentUrl = 'https://www.linkedin.com/feed/';
+  const linkedin = { ...owned, allowedHosts: ['www.linkedin.com'] };
+  await transport.prepareWebsiteLogin(linkedin, 'linkedin');
+  await transport.verifyWebsiteLogin(linkedin, 'linkedin');
+  currentUrl = 'https://www.linkedin.com/in/company-owner/'; await transport.verifyWebsiteLogin(linkedin, 'linkedin');
+  currentUrl = 'https://www.linkedin.com/checkpoint/challenge/'; await assert.rejects(transport.verifyWebsiteLogin(linkedin, 'linkedin'), /requested company website/);
+  const target = await resolveWebsiteLoginTarget({ url: 'https://example.com/dashboard/', allowed_hosts: ['accounts.google.com'] }, { lookup: async () => [{ address: '8.8.8.8', family: 4 }] });
+  currentUrl = 'https://example.com/dashboard/?account=hidden#state';
+  const generic = { ...owned, allowedHosts: [...target.allowedHosts] };
+  await transport.prepareWebsiteLogin(generic, 'custom', target);
+  assert.equal(commands.filter(command => command.method === 'Page.navigate').at(-1)?.params.url, 'https://example.com/dashboard/');
+  await transport.verifyWebsiteLogin(generic, 'custom', target);
+  currentUrl = 'https://example.com/dashboard/other'; await assert.rejects(transport.verifyWebsiteLogin(generic, 'custom', target), /requested company website/);
+  await assert.rejects(transport.prepareWebsiteLogin(generic, 'custom', { ...target, origin: 'https://other.example.com' }), /public HTTPS website/);
 });

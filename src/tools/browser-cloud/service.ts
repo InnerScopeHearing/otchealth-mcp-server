@@ -52,6 +52,8 @@ function assertProfile(profile: CloudBrowserProfile, publicWebPolicy?: TrustedPu
   if (!/^[a-z0-9][a-z0-9_-]{2,63}$/i.test(profile.profileId) || !/^[a-z0-9][a-z0-9_-]{1,63}$/i.test(profile.owner)) throw new CloudBrowserError("invalid_profile", "Profile identity is invalid.");
   if (profile.ownerSubjectHash !== undefined && !SUBJECT_HASH.test(profile.ownerSubjectHash)) throw new CloudBrowserError('invalid_profile', 'Profile identity is invalid.');
   if (profile.maxSessionSeconds !== undefined && (!Number.isSafeInteger(profile.maxSessionSeconds) || profile.maxSessionSeconds < 1 || profile.maxSessionSeconds > CLOUD_BROWSER_MAX_SESSION_SECONDS)) throw new CloudBrowserError('invalid_profile', 'Profile session duration is invalid.');
+  if (profile.actionBudget !== undefined && (!Number.isSafeInteger(profile.actionBudget) || profile.actionBudget < 1 || profile.actionBudget > 1_000_000)) throw new CloudBrowserError('invalid_profile', 'Profile action budget is invalid.');
+  if (profile.maxActionSeconds !== undefined && (!Number.isSafeInteger(profile.maxActionSeconds) || profile.maxActionSeconds < 1 || profile.maxActionSeconds > 120)) throw new CloudBrowserError('invalid_profile', 'Profile action duration is invalid.');
   if (profile.mode === "public_web") {
     assertTrustedPublicWebProfile(profile, publicWebPolicy);
     if (!profile.customBrowserIdentifier || !/^[A-Za-z0-9._-]{1,128}$/.test(profile.customBrowserIdentifier) || !Number.isSafeInteger(profile.actionBudget) || profile.actionBudget! < 1 || !Number.isSafeInteger(profile.maxSessionSeconds) || profile.maxSessionSeconds! < 1 || profile.maxSessionSeconds! > CLOUD_BROWSER_MAX_SESSION_SECONDS || !Number.isSafeInteger(profile.maxActionSeconds) || profile.maxActionSeconds! < 1) throw new CloudBrowserError("invalid_profile", "Public browser profile budgets are invalid.");
@@ -187,7 +189,7 @@ export class CloudBrowserService {
     };
   }
 
-  async start(caller: string, profileId: string, maxSeconds: number, actionBudget?: number, principalHash?: string): Promise<{ sessionId: string; expiresAt: number }> {
+  async start(caller: string, profileId: string, maxSeconds: number, actionBudget?: number, principalHash?: string, loginLeaseOwner?: string): Promise<{ sessionId: string; expiresAt: number }> {
     const normalizedPrincipalHash = validatePrincipalHash(principalHash);
     let resolvedProfileId = profileId;
     const publicWebProfileId = `${caller}-public-web`;
@@ -196,6 +198,7 @@ export class CloudBrowserService {
       if (publicWebProfile) resolvedProfileId = publicWebProfile.profileId;
     }
     const profile = await this.loadProfile(caller, resolvedProfileId, normalizedPrincipalHash);
+    if (this.store.verifyLoginLease && !await this.store.verifyLoginLease(profile.profileId, loginLeaseOwner)) throw new CloudBrowserError('profile_login_in_progress', 'Complete the active human sign-in before reopening this profile.');
     // A public-web profile ID is never allowed to fall through to an
     // enrolled-host profile if its server enrollment changes or is malformed.
     if (resolvedProfileId === publicWebProfileId && profile.mode !== "public_web") {
@@ -204,15 +207,16 @@ export class CloudBrowserService {
     if (profile.mode === "public_web") assertProfile(profile, this.publicWebPolicy);
     const maxDuration = profile.mode === "public_web" ? profile.maxSessionSeconds! : profile.persistent && profile.maxSessionSeconds ? profile.maxSessionSeconds : CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS;
     if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > maxDuration) throw new CloudBrowserError("invalid_duration", "Session duration exceeds the configured profile bound.");
-    const selectedActionBudget = profile.mode === 'public_web' ? (actionBudget ?? profile.actionBudget) : CLOUD_BROWSER_MAX_ACTIONS;
-    if (profile.mode === "public_web" && (!Number.isSafeInteger(selectedActionBudget) || selectedActionBudget! < 1 || selectedActionBudget! > profile.actionBudget!)) throw new CloudBrowserError("invalid_action_budget", "Public session action budget must be within the server configured mission budget.");
+    const configuredBudget = profile.mode === 'public_web' || (profile.persistent && profile.providerProfileId && profile.actionBudget) ? profile.actionBudget! : CLOUD_BROWSER_MAX_ACTIONS;
+    const selectedActionBudget = actionBudget ?? configuredBudget;
+    if (!Number.isSafeInteger(selectedActionBudget) || selectedActionBudget < 1 || selectedActionBudget > configuredBudget) throw new CloudBrowserError("invalid_action_budget", "Session action budget must be within the configured profile budget.");
     const startedAt = this.now();
     const lockOwner = `${caller}:${randomUUID()}`;
     // A lost start acknowledgement must not permit another start. The durable
     // fence outlives the longest possible remote session plus request latency.
     const startFenceUntil = startedAt + maxSeconds * 1_000 + 30_000;
     if (!(await this.store.acquireProfileLock(resolvedProfileId, lockOwner, startFenceUntil))) throw new CloudBrowserError("profile_busy", "A browser start is in progress or requires reconciliation for this profile.");
-    if (profile.mode !== "public_web" && !(await this.store.reserveDailySession(caller, new Date(this.now()).toISOString().slice(0, 10), CLOUD_BROWSER_DAILY_SESSION_LIMIT))) {
+    if (profile.mode !== "public_web" && !profile.persistent && !(await this.store.reserveDailySession(caller, new Date(this.now()).toISOString().slice(0, 10), CLOUD_BROWSER_DAILY_SESSION_LIMIT))) {
       await this.store.releaseProfileLock(resolvedProfileId, lockOwner);
       throw new CloudBrowserError("daily_session_limit", "The daily cloud-browser session limit has been reached.");
     }
@@ -256,7 +260,7 @@ export class CloudBrowserService {
     assertBindingPair(profile, session);
     if ((profile.mode ?? "enrolled_hosts") !== (session.mode ?? "enrolled_hosts")) throw new CloudBrowserError("invalid_profile", "Browser session mode no longer matches its owner profile.");
     if (profile.mode === "public_web") assertProfile(profile, this.publicWebPolicy);
-    const maxActionSeconds = session.mode === "public_web" ? profile.maxActionSeconds! : CLOUD_BROWSER_MAX_ACTION_SECONDS;
+    const maxActionSeconds = session.mode === "public_web" || (profile.persistent && profile.providerProfileId && profile.maxActionSeconds) ? profile.maxActionSeconds! : CLOUD_BROWSER_MAX_ACTION_SECONDS;
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > maxActionSeconds) throw new CloudBrowserError("invalid_duration", "Action duration exceeds the configured profile bound.");
     if (session.actionsUsed >= (session.actionBudget ?? CLOUD_BROWSER_MAX_ACTIONS)) throw new CloudBrowserError("action_limit", "Session action budget reached.");
     assertAction(action, session.allowedHosts, session.mode);
@@ -267,9 +271,6 @@ export class CloudBrowserService {
       assertBindingPair(profile, current);
       if (current.effectUnknown) throw new CloudBrowserError("effect_unknown", "A previous browser tab operation has an unknown result; reconcile the session before continuing.");
       if (current.sensitiveOutputSuppressed) throw new CloudBrowserError('sensitive_output_denied', 'Ordinary browser output and actions are unavailable during sensitive authentication.');
-      if (action.type === 'capture' && (profile.persistent || Boolean(profile.providerProfileId) || current.sensitiveOutputSuppressed)) {
-        throw new CloudBrowserError('sensitive_output_denied', 'Browser capture is unavailable for persistent or output-suppressed sessions.');
-      }
       if (current.actionsUsed >= (current.actionBudget ?? CLOUD_BROWSER_MAX_ACTIONS)) throw new CloudBrowserError("action_limit", "Session action budget reached.");
       const deadline = this.now() + Math.min(timeoutSeconds, Math.max(1, Math.ceil((current.expiresAt - this.now()) / 1_000))) * 1_000;
       const remainingSeconds = (): number => Math.max(0, Math.ceil((deadline - this.now()) / 1_000));
@@ -386,11 +387,12 @@ export class CloudBrowserService {
     }
   }
 
-  async savePersistentProfile(caller: string, sessionId: string, principalHash?: string): Promise<void> {
+  async savePersistentProfile(caller: string, sessionId: string, principalHash?: string, loginLeaseOwner?: string): Promise<void> {
     const normalizedPrincipalHash = validatePrincipalHash(principalHash);
     const session = await this.sessionFor(caller, sessionId, false, normalizedPrincipalHash);
     const profile = await this.loadProfile(caller, session.profileId, normalizedPrincipalHash);
     assertBindingPair(profile, session);
+    if (this.store.verifyLoginLease && !await this.store.verifyLoginLease(profile.profileId, loginLeaseOwner)) throw new CloudBrowserError('profile_login_in_progress', 'Complete the active human sign-in before saving this profile.');
     if (!profile.persistent || !profile.providerProfileId || !this.transport.saveProfile) throw new CloudBrowserError("profile_not_persistent", "This session has no provider-backed persistent profile.");
     const lockOwner = `${caller}:${randomUUID()}`;
     if (!(await this.store.acquireProfileLock(profile.profileId, lockOwner, this.now() + 30_000))) throw new CloudBrowserError("profile_busy", "Another browser session operation is in progress for this profile.");

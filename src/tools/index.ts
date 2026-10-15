@@ -152,7 +152,8 @@ import { registerBrowserAgentcoreTools } from './browser-agentcore/tools.js';
 import { registerAgentCoreBrowserBrokerTools } from './browser-broker/tools.js';
 import { registerCloudBrowserTools } from './browser-cloud-gateway/index.js';
 import { registerIntercomBrowserLoginTool } from './browser-cloud/intercom-login-tools.js';
-import { intercomLoginRuntime } from '../server/cloud-browser-runtime.js';
+import { registerWebsiteBrowserLoginTools } from './browser-cloud/website-login-tools.js';
+import { intercomLoginRuntime, websiteLoginRuntime } from '../server/cloud-browser-runtime.js';
 import { cloudBrowserRuntime } from '../server/cloud-browser-runtime.js';
 import { registerFramerProjectInspect } from './framer/tool.js';
 
@@ -1972,6 +1973,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerAgentCoreBrowserBrokerTools(server, callerHash);
   registerCloudBrowserTools(server, callerHash, cloudBrowserRuntime);
   registerIntercomBrowserLoginTool(server, callerHash, intercomLoginRuntime);
+  registerWebsiteBrowserLoginTools(server, callerHash, websiteLoginRuntime);
   registerFramerProjectInspect(server, callerHash);
   // Mail archive (TEMPORARY EWS bridge, executive-ring gated — see tools/mail/client.ts header
   // for the retirement timeline this must be replaced before).
