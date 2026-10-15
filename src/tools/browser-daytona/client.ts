@@ -35,10 +35,10 @@ export interface DaytonaApiBrowserProviderOptions {
 type Context = { signal: AbortSignal; remaining: () => number; token?: string };
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const ORDINARY_JSON_BYTES = 131072, ORDINARY_RESULT_CHARS = 100000;
-// PNG bytes stay capped at 4MiB by the artifact decoder. Only that fixed typed
-// command receives the base64 allowance; all other provider reads remain small.
-const PNG_RESULT_CHARS = Math.ceil(4 * 1024 * 1024 / 3) * 4 + 16384;
-const PNG_JSON_BYTES = PNG_RESULT_CHARS + 16384;
+// PNG/PDF bytes stay capped at 4MiB by the artifact decoder. Only fixed typed
+// capture commands receive this allowance; all other provider reads stay small.
+const CAPTURE_RESULT_CHARS = Math.ceil(4 * 1024 * 1024 / 3) * 4 + 16384;
+const CAPTURE_JSON_BYTES = CAPTURE_RESULT_CHARS + 16384;
 const fail = (code: string): never => { throw new DaytonaBrowserError(code); };
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : fail('daytona_provider_invalid');
 function httpsUrl(raw: string): URL {
@@ -63,7 +63,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     this.fetchImpl = options.fetchImpl ?? fetch; this.deadlineMs = options.deadlineMs ?? 20000;
     if (!Number.isSafeInteger(this.deadlineMs) || this.deadlineMs < 1 || this.deadlineMs > 20000 || typeof options.resolveApiToken !== 'function') fail('daytona_provider_invalid');
     if (options.files !== undefined && typeof options.files?.forUpload !== 'function' || options.captures !== undefined && typeof options.captures?.createCapture !== 'function' || options.validator !== undefined && typeof options.validator?.validate !== 'function') fail('daytona_provider_invalid');
-    this.capabilities = Object.freeze({ typedBrowser: true, upload: options.files !== undefined, capture: options.captures !== undefined, checkpoint: false, publicWebNetworkIsolation: false,
+    this.capabilities = Object.freeze({ typedBrowser: true, upload: options.files !== undefined, capture: options.captures !== undefined, captureFormats: Object.freeze(options.captures ? ['png', 'pdf'] : []), checkpoint: false, publicWebNetworkIsolation: false,
       actions: Object.freeze(['navigate', 'snapshot', 'click', 'type', 'focus', 'select', 'wait_for', 'press_key', 'scroll', 'mouse_move', 'drag', 'tab_create', 'tab_select', 'tab_close', 'navigate_back', 'navigate_forward', 'reload', 'dialog', ...(options.files ? ['upload'] : []), ...(options.captures ? ['capture'] : [])]), maxActionSeconds: 14 });
   }
   private async bounded<T>(run: (context: Context) => Promise<T>): Promise<T> {
@@ -109,10 +109,10 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     if (!this.origins.has(base.origin)) return fail('daytona_toolbox_origin_forbidden');
     return base;
   }
-  private async processWith(context: Context, base: URL, binding: DaytonaBinding, command: string, timeoutMs: number, png = false): Promise<Record<string, unknown>> {
+  private async processWith(context: Context, base: URL, binding: DaytonaBinding, command: string, timeoutMs: number, binaryCapture = false): Promise<Record<string, unknown>> {
     context.remaining();
-    const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command, timeout: Math.ceil(timeoutMs / 1000) }) }, png ? PNG_JSON_BYTES : ORDINARY_JSON_BYTES);
-    if ((response.exitCode ?? response.code) !== 0 || typeof response.result !== 'string' || response.result.length > (png ? PNG_RESULT_CHARS : ORDINARY_RESULT_CHARS)) return fail('daytona_runtime_unavailable');
+    const response = await this.json(context, `${base.href.replace(/\/+$/, '')}/${encodeURIComponent(binding.sandboxId)}/process/execute`, { method: 'POST', body: JSON.stringify({ command, timeout: Math.ceil(timeoutMs / 1000) }) }, binaryCapture ? CAPTURE_JSON_BYTES : ORDINARY_JSON_BYTES);
+    if ((response.exitCode ?? response.code) !== 0 || typeof response.result !== 'string' || response.result.length > (binaryCapture ? CAPTURE_RESULT_CHARS : ORDINARY_RESULT_CHARS)) return fail('daytona_runtime_unavailable');
     let parsed: unknown; try { parsed = JSON.parse(response.result); } catch { return fail('daytona_runtime_invalid'); }
     return record(parsed);
   }
@@ -126,11 +126,11 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
     if (encoded.length > 32768) return fail('daytona_runtime_invalid');
     const command = `sudo -n runuser -u otcbrowser -- python3 -I /opt/otchealth-browser/browser-dispatcher.py --payload ${encoded}`;
-    const png = op === 'execute' && action?.type === 'capture' && action.request.type === 'screenshot' && (!action.request.format || action.request.format === 'png');
-    const receipt = await this.processWith(context, base, binding, command, timeoutMs, png);
+    const binaryCapture = op === 'execute' && action?.type === 'capture' && (action.request.type === 'pdf' || action.request.type === 'screenshot' && (!action.request.format || action.request.format === 'png'));
+    const receipt = await this.processWith(context, base, binding, command, timeoutMs, binaryCapture);
     // Only the V2 dispatcher promises these exact negative ACKs were emitted
     // before any effect. Nonzero exits and all other receipts stay unknown.
-    if (runtimeProtocol === 2 && receipt.version === 1 && receipt.ok === false && receipt.beforeEffect === true && typeof receipt.code === 'string'
+    if (runtimeProtocol === 2 && upload?.phase !== 'attach' && receipt.version === 1 && receipt.ok === false && receipt.beforeEffect === true && typeof receipt.code === 'string'
       && ['mission_busy', 'human_active', 'other_missions_active'].includes(receipt.code)
       && Object.keys(receipt).length === 4 && Object.keys(receipt).every(key => ['version', 'ok', 'code', 'beforeEffect'].includes(key))) return fail('daytona_operation_busy');
     if (receipt.version !== 1 || receipt.ok !== true || receipt.profileKey !== physicalKey || receipt.profilePath !== binding.profilePath || (sessionId !== undefined && receipt.sessionId !== sessionId)) return fail('daytona_runtime_invalid');
@@ -144,7 +144,7 @@ export class DaytonaApiBrowserProvider implements DaytonaProvider {
     return this.bounded(context => this.runtimeWith(context, binding, op, sessionId, action, principalHash, timeoutSeconds, undefined, runtimeProtocol));
   }
   private async transfer(binding: DaytonaBinding, session: DaytonaMission, action: Extract<CloudBrowserAction, { type: 'upload' | 'capture' }>, seconds: number, principal: string): Promise<BrowserCaptureMetadata | BrowserFileTransferReceipt> {
-    if (action.type === 'upload' && !this.options.files || action.type === 'capture' && (!this.options.captures || action.request.type !== 'screenshot' || action.request.format && action.request.format !== 'png')) return fail('daytona_action_unsupported');
+    if (action.type === 'upload' && !this.options.files || action.type === 'capture' && (!this.options.captures || action.request.type !== 'pdf' && (action.request.type !== 'screenshot' || action.request.format && action.request.format !== 'png'))) return fail('daytona_action_unsupported');
     return this.bounded(async outer => {
       const guarded = (remaining: () => number): Context => ({ signal: outer.signal, get token() { return outer.token; }, set token(value) { outer.token = value; }, remaining: () => { this.assertMission(binding, session, principal); return Math.min(outer.remaining(), remaining()); } });
       const current = () => { outer.remaining(); this.assertMission(binding, session, principal); };

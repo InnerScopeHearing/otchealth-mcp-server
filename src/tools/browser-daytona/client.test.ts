@@ -190,6 +190,24 @@ test('only exact V2 known-before-effect ACKs classify busy; all other runtime ou
     assert.equal(sends, 1);
   }
 });
+test('V2 upload attach busy is not a whole-action no-effect proof after staging writes', async () => {
+  for (const phase of ['prepare', 'attach']) {
+    const n = network(sharedRuntime), f = stagedFile(); let denied = 0;
+    const c = await client({ files: f.files, fetchImpl: async (input: any, init: any) => {
+      if (String(input).endsWith('/process/execute')) {
+        const body = JSON.parse(String(init.body));
+        if (body.command.includes('browser-dispatcher.py')) {
+          const payload = JSON.parse(Buffer.from(body.command.split(' ').at(-1), 'base64url').toString());
+          if (payload.upload?.phase === phase) { denied++; return Response.json({ exitCode: 0, result: JSON.stringify({ version: 1, ok: false, code: 'mission_busy', beforeEffect: true }) }); }
+        }
+      }
+      return n.fetchImpl(input, init);
+    } });
+    await assert.rejects(c.execute(sharedBinding, { ...sharedMission, runtimeProtocol: 2 }, { type: 'upload', fileId: f.id, selector: '#file' }, 20, sharedBinding.ownerSubjectHash), (error: any) => phase === 'prepare' ? error.code === 'daytona_operation_busy' : error.code !== 'daytona_operation_busy');
+    assert.equal(denied, 1);
+    assert.equal(n.requests.some(r => r.url.includes('/files/')), phase === 'attach');
+  }
+});
 test('foreign and missing organizations cannot reach any toolbox command', async () => {
   for (const org of ['22222222-2222-2222-2222-222222222222', undefined]) {
     const n = network(); n.state.sandbox.organizationId = org as any; const c = await client({ fetchImpl: n.fetchImpl });
@@ -209,6 +227,13 @@ test('open and typed execution use fixed toolbox recipes and validate exact runt
   await c.releaseMission(binding, mission);
   assert.equal(n.state.payloads.at(-1).principalHash, binding.ownerSubjectHash);
   n.state.foreignReceipt = true; await assert.rejects(c.openMission(binding, mission.sessionId));
+});
+test('one shared mission can navigate distinct public domains without a fixture-only allowlist', async () => {
+  const n = network(sharedRuntime), c = await client({ fetchImpl: n.fetchImpl });
+  const urls = ['https://www.linkedin.com/', 'https://wefunder.com/', 'https://www.wikipedia.org/'];
+  for (const url of urls) await c.execute(sharedBinding, sharedMission, { type: 'navigate', url }, 10, sharedBinding.ownerSubjectHash);
+  assert.deepEqual(n.state.payloads.map(payload => payload.action.url), urls);
+  assert.ok(n.state.payloads.every(payload => payload.profileKey === 'company-browser' && payload.sessionId === sharedMission.sessionId));
 });
 test('tab receipts preserve exact trusted target identifiers for the existing gateway shape', async () => {
   const n = network(); n.state.pageReceipt = { selectedTargetId: 'owned-selected', createdTargetId: 'owned-new', completed: true };
@@ -255,6 +280,8 @@ test('transfer capabilities require concrete corresponding server-only ports', a
   assert.equal((await client({ files: f.files })).capabilities.capture, false);
   const captures = { createCapture: async () => { throw new Error('unused'); } };
   assert.equal((await client({ captures })).capabilities.capture, true);
+  assert.deepEqual((await client({ captures })).capabilities.captureFormats, ['png', 'pdf']);
+  assert.deepEqual((await client()).capabilities.captureFormats, []);
   assert.equal((await client({ captures })).capabilities.upload, false);
   await assert.rejects(client({ files: {} })); await assert.rejects(client({ captures: {} }));
 });
@@ -318,7 +345,7 @@ test('one absolute provider deadline covers broker loading and prevents late tra
   await assert.rejects(c.execute(binding, mission, { type: 'upload', fileId: f.id, selector: '#file' }, 20, binding.ownerSubjectHash), (error: any) => error.code === 'daytona_provider_timeout');
   release(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(n.requests.length, 0);
 });
-test('only typed PNG capture admits a 4MiB frame and returns principal-bound metadata, not encoded bytes', async () => {
+test('typed PNG capture admits a 4MiB frame and returns principal-bound metadata, not encoded bytes', async () => {
   const n = network(), stores: any[] = [];
   // A synthetic structurally-approved frame tests transport boundaries only;
   // the bridge's production default performs actual binary validation.
@@ -332,7 +359,7 @@ test('only typed PNG capture admits a 4MiB frame and returns principal-bound met
   assert.equal((metadata as any).sha256, sha256); assert.equal((metadata as any).byteLength, png.length);
   assert.equal(JSON.stringify(metadata).includes('PRIVATE_STORAGE_KEY'), false); assert.equal('capture' in metadata, false);
   const before = n.requests.length;
-  for (const request of [{ type: 'pdf' }, { type: 'screenshot', format: 'jpeg' }]) await assert.rejects(c.execute(binding, mission, { type: 'capture', request } as any, 20, binding.ownerSubjectHash));
+  for (const request of [{ type: 'pdf', landscape: 'invalid' }, { type: 'screenshot', format: 'jpeg' }]) await assert.rejects(c.execute(binding, mission, { type: 'capture', request } as any, 20, binding.ownerSubjectHash));
   assert.equal(n.requests.length, before);
   n.state.result = { url: 'https://example.com/', title: 'Example', visibleText: 'x'.repeat(140000) };
   await assert.rejects(c.execute(binding, mission, { type: 'snapshot' }, 20, binding.ownerSubjectHash));
@@ -357,6 +384,22 @@ test('shared capture returns only the actual virtual member\'s principal-bound a
   assert.equal(calls.length, 1); assert.equal(calls[0][0], sharedBinding.owner); assert.equal(calls[0][1], sharedMission.sessionId); assert.equal(calls[0][4], sharedBinding.ownerSubjectHash);
   assert.equal(n.state.payloads.at(-1).profileKey, 'company-browser');
   assert.equal('capture' in receipt, false); assert.equal('data' in receipt, false);
+});
+test('typed shared PDF capture gets the bounded binary allowance and preserves verified page count and virtual ownership', async () => {
+  const n = network(sharedRuntime), calls: any[] = [];
+  const pdf = Buffer.alloc(4 * 1024 * 1024, 32); pdf.set(Buffer.from('%PDF-1.7\n')); pdf.set(Buffer.from('\n%%EOF'), pdf.length - 6);
+  n.state.result = { capture: { contentType: 'application/pdf', data: pdf.toString('base64') } };
+  const c = await client({ fetchImpl: n.fetchImpl, captures: { createCapture: async (...args: any[]) => { calls.push(args); return { id: 'bca_' + randomUUID(), owner: args[0], sessionId: args[1], ownerSubjectHash: args[4], contentType: args[2].contentType, byteLength: args[2].body.length, sha256: args[2].sha256, pageCount: args[2].pageCount, createdAt: args[3] }; } }, validator: { validate: async ({ contentType }: any) => ({ complete: contentType === 'application/pdf', pageCount: 2 }) } });
+  const receipt = await c.execute(sharedBinding, sharedMission, { type: 'capture', request: { type: 'pdf', landscape: true, printBackground: false } }, 20, sharedBinding.ownerSubjectHash);
+  assert.equal(calls.length, 1); assert.equal(calls[0][0], sharedBinding.owner); assert.equal(calls[0][1], sharedMission.sessionId); assert.equal(calls[0][4], sharedBinding.ownerSubjectHash);
+  assert.deepEqual(Buffer.from(calls[0][2].body), pdf);
+  assert.equal((receipt as any).contentType, 'application/pdf'); assert.equal((receipt as any).pageCount, 2); assert.equal((receipt as any).byteLength, pdf.length);
+  assert.deepEqual(n.state.payloads.at(-1).action, { type: 'capture', request: { type: 'pdf', landscape: true, printBackground: false } });
+  assert.equal(n.state.payloads.at(-1).profileKey, 'company-browser');
+  assert.equal('capture' in receipt, false); assert.equal('data' in receipt, false);
+  const before = n.requests.length;
+  for (const request of [{ type: 'screenshot', format: 'jpeg' }, { type: 'pdf', landscape: 'true' }, { type: 'pdf', filePath: '/tmp/forbidden.pdf' }]) await assert.rejects(c.execute(sharedBinding, sharedMission, { type: 'capture', request } as any, 20, sharedBinding.ownerSubjectHash));
+  assert.equal(n.requests.length, before);
 });
 test('viewer operations require a trusted port and exact original grant identity', async () => {
   const missing = await client(); await assert.rejects(missing.viewerGrant(binding, 60));
