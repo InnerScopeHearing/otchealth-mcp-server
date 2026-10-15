@@ -92,4 +92,52 @@ print(json.dumps(module.promote(values['payload'],profiles=values['profiles'],st
         self.assertTrue(json.loads(result.stdout)['staged']); self.assertFalse(self.source.exists())
         self.assertEqual((self.upload/self.transfer/'notes.txt').read_bytes(),self.body)
 
+    def registry(self):
+        return dict(version=2,uncertain=None,human=None,missions=[dict(self.mission),dict(sessionId='44444444-4444-4444-8444-444444444444',principalHash='b'*64,selected='B'*32,owned=['B'*32],uncertain=False)])
+    def write_registry(self,value):
+        path=self.base/'missions-v2.json';path.write_text(json.dumps(value));path.chmod(0o600)
+        return path
+    def test_v2_matches_only_exact_member_under_global_automation_gate_and_keeps_other_members_untouched(self):
+        self.receipt.unlink();registry=self.registry();path=self.write_registry(registry)
+        try:result=self.promote(dict(self.payload,runtimeProtocol=2))
+        except stage.StageError:self.fail('Trusted V2 promotion is not implemented')
+        self.assertEqual(result['runtimeProtocol'],2);self.assertTrue(result['staged'])
+        self.assertEqual(json.loads(path.read_text()),registry);self.assertEqual((self.upload/self.transfer/'notes.txt').read_bytes(),self.body)
+    def test_v2_missing_foreign_human_unknown_and_mixed_protocol_states_have_zero_target_effects(self):
+        self.receipt.unlink()
+        for mode in ('missing','foreign','human','unknown','own-unknown','legacy','symlink','mode'):
+            with self.subTest(mode=mode):
+                registry=self.registry();path=self.base/'missions-v2.json'
+                if path.exists() or path.is_symlink():path.unlink()
+                if self.receipt.exists():self.receipt.unlink()
+                if mode=='foreign':registry['missions'][0]['principalHash']='c'*64
+                if mode=='human':registry['human']={key:registry['missions'][1][key] for key in ('sessionId','principalHash')}
+                if mode in ('unknown','own-unknown'):
+                    entry=registry['missions'][0 if mode=='own-unknown' else 1];entry['uncertain']=True
+                    registry['uncertain']=dict(sessionId=entry['sessionId'],principalHash=entry['principalHash'],operation='action')
+                if mode!='missing':self.write_registry(registry)
+                if mode=='legacy':self.receipt.write_text(json.dumps(self.mission));self.receipt.chmod(0o600)
+                if mode=='symlink':path.unlink();path.symlink_to(self.receipt)
+                if mode=='mode':path.chmod(0o644)
+                with self.assertRaises(stage.StageError):self.promote(dict(self.payload,runtimeProtocol=2))
+                self.assertFalse((self.upload/self.transfer/'notes.txt').exists());self.assertTrue(self.source.exists())
+    def test_legacy_payload_cannot_ignore_existing_v2_global_fences_or_accept_invalid_protocol(self):
+        self.write_registry(self.registry())
+        with self.assertRaises(stage.StageError):self.promote()
+        for value in (None,True,1,3,'2'):
+            with self.subTest(value=value),self.assertRaises(stage.StageError):stage.validate(dict(self.payload,runtimeProtocol=value))
+        self.assertFalse((self.upload/self.transfer/'notes.txt').exists())
+    def test_v2_real_isolated_root_helper_ignores_ambient_registry_modules(self):
+        self.receipt.unlink();self.write_registry(self.registry())
+        code='''import importlib.util,json,os,sys,types
+sys.modules['mission_registry']=types.ModuleType('mission_registry')
+sys.modules['browser_transfers']=types.ModuleType('browser_transfers')
+spec=importlib.util.spec_from_file_location('owned_stage',sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+values=json.load(sys.stdin)
+print(json.dumps(module.promote(values['payload'],profiles=values['profiles'],staging=values['staging'],browser_uid=os.getuid(),browser_gid=os.getgid(),source_uids={os.getuid()})))
+'''
+        result=subprocess.run([sys.executable,'-I','-c',code,str(PATH)],input=json.dumps(dict(payload=dict(self.payload,runtimeProtocol=2),profiles=str(self.profiles),staging=str(self.staging))),text=True,capture_output=True,cwd=self.root,env={**os.environ,'PYTHONPATH':str(self.root)},timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout)['runtimeProtocol'],2)
+        self.assertEqual((self.upload/self.transfer/'notes.txt').read_bytes(),self.body)
+
 if __name__ == '__main__': unittest.main()

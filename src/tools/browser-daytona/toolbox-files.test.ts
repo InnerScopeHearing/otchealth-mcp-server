@@ -25,3 +25,14 @@ test('foreign paths/origins and ambiguous transfer are never forwarded or retrie
   for (const changes of [{ path: '/etc/passwd' }, { path: path.replace('profile-one/uploads', 'other/uploads') }, { toolboxBaseUrl: 'https://attacker.example/toolbox' }]) await assert.rejects(api.uploadDaytonaControlledFile({ ...base, ...changes }));
   assert.equal(calls, 0); await assert.rejects(api.uploadDaytonaControlledFile(base)); assert.equal(calls, 1);
 });
+test('promotion protocol comes only from the trusted mission; legacy absence is byte-compatible and invalid markers have zero effects',async()=>{
+  for(const marker of [undefined,2]){
+    const seen:any[]=[];
+    await api.uploadDaytonaControlledFile({binding,session:{...session,...(marker===2?{runtimeProtocol:2}:{})},path,body:Buffer.from('public'),toolboxBaseUrl:'https://proxy.app.daytona.io/toolbox',allowedOrigins:['https://proxy.app.daytona.io'],token:'synthetic-key',remaining:()=>1000,runtimeProtocol:marker===undefined?2:undefined,
+      fetchImpl:async()=>Response.json({errors:null}),promote:async(payload:any)=>{seen.push(payload);return {staged:true,sha256:payload.sha256,byteLength:payload.byteLength};}});
+    assert.equal(seen[0].runtimeProtocol,marker);assert.equal('runtimeProtocol' in seen[0],marker===2);
+  }
+  let calls=0;
+  for(const marker of [null,true,1,3,'2']) await assert.rejects(api.uploadDaytonaControlledFile({binding,session:{...session,runtimeProtocol:marker},path,body:Buffer.from('public'),toolboxBaseUrl:'https://proxy.app.daytona.io/toolbox',allowedOrigins:['https://proxy.app.daytona.io'],token:'synthetic-key',remaining:()=>1000,fetchImpl:async()=>{calls++;return Response.json({});},promote:async()=>{throw new Error('must not promote');}}));
+  assert.equal(calls,0);
+});

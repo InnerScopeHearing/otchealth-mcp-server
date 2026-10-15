@@ -7,6 +7,8 @@ import { BROWSER_FILE_MAX_BYTES } from '../browser-cloud/file-broker.js';
 export interface DaytonaStagePayload {
   version: 1; profileKey: string; sessionId: string; principalHash: string;
   transferId: string; relativePath: string; stagingId: string; byteLength: number; sha256: string;
+  /** Trusted mission protocol marker only; absent retains isolated V1 behavior. */
+  runtimeProtocol?: 2;
 }
 export interface ControlledDaytonaFileUpload {
   binding: DaytonaBinding; session: DaytonaMission; path: string; body: Uint8Array;
@@ -59,7 +61,7 @@ export async function uploadDaytonaControlledFile(input: ControlledDaytonaFileUp
   const permissions = await request(`${root}/files/permissions?${query}`, { method: 'POST' });
   await permissions.body?.cancel().catch(() => {}); input.remaining();
   const sha256 = createHash('sha256').update(body).digest('hex');
-  const receipt = await input.promote({ version: 1, profileKey: input.binding.profileKey, sessionId: input.session.sessionId, principalHash: input.binding.ownerSubjectHash, transferId: parts[0]!, relativePath: parts.slice(1).join('/'), stagingId, byteLength: body.length, sha256 }, input.remaining);
+  const receipt = await input.promote({ version: 1, profileKey: input.binding.profileKey, sessionId: input.session.sessionId, principalHash: input.binding.ownerSubjectHash, transferId: parts[0]!, relativePath: parts.slice(1).join('/'), stagingId, byteLength: body.length, sha256, ...(input.session.runtimeProtocol === 2 ? { runtimeProtocol: 2 } : {}) }, input.remaining);
   input.remaining();
   if (!receipt || receipt.staged !== true || receipt.sha256 !== sha256 || receipt.byteLength !== body.length) return fail('daytona_upload_unconfirmed');
 }

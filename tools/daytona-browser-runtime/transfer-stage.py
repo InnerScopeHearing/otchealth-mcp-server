@@ -29,8 +29,23 @@ def trusted_transfers():
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 
+def trusted_registry():
+    # V2 membership/global guards come from the same fixed reviewed registry
+    # asset as the dispatcher, including under isolated Python execution.
+    path=Path(__file__).resolve(strict=True).with_name('mission-registry.py')
+    if path.is_symlink(): raise ImportError('registry_module_unavailable')
+    spec=importlib.util.spec_from_file_location('_otc_owned_mission_registry',path)
+    if not spec or not spec.loader: raise ImportError('registry_module_unavailable')
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+def present(directory,name):
+    try:os.stat(name,dir_fd=directory,follow_symlinks=False);return True
+    except FileNotFoundError:return False
+
 def validate(value):
-    if not isinstance(value,dict) or set(value)!=FIELDS or type(value['version']) is not int or value['version']!=1: fail()
+    if not isinstance(value,dict) or not FIELDS<=value.keys() or not value.keys()<=FIELDS|{'runtimeProtocol'} or type(value['version']) is not int or value['version']!=1: fail()
+    if 'runtimeProtocol' in value and (type(value['runtimeProtocol']) is not int or value['runtimeProtocol']!=2): fail()
     if not isinstance(value['profileKey'],str) or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,95}',value['profileKey']): fail()
     if any(not isinstance(value[key],str) or not UUID.fullmatch(value[key]) for key in ('sessionId','transferId','stagingId')): fail()
     if any(not isinstance(value[key],str) or not re.fullmatch('[a-f0-9]{64}',value[key]) for key in ('principalHash','sha256')): fail()
@@ -86,7 +101,16 @@ def promote(value,*,profiles,staging,browser_uid,browser_gid,source_uids):
         lock=os.open('mission.lock',os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=base); opened.append(lock); private(lock,{browser_uid})
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: fail()
-        receipt=json.loads(read_file(base,'mission.json',{browser_uid},65536),object_pairs_hook=unique_object)
+        if value.get('runtimeProtocol')==2:
+            if present(base,'mission.json'):fail()
+            registry=trusted_registry()
+            try:receipt=registry.require_automation(registry.read_registry_at(base,browser_uid),value['sessionId'],value['principalHash'])
+            except registry.RegistryError:fail()
+        else:
+            # A legacy marker must not borrow a stale singleton to ignore a
+            # newer global human/unknown fence, even if its registry is empty.
+            if present(base,'missions-v2.json'):fail()
+            receipt=json.loads(read_file(base,'mission.json',{browser_uid},65536),object_pairs_hook=unique_object)
         if not isinstance(receipt,dict) or receipt.get('sessionId')!=value['sessionId'] or receipt.get('principalHash')!=value['principalHash'] or receipt.get('uncertain') is not False: fail()
         parent=os.open('uploads',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=base); opened.append(parent); private(parent,{browser_uid},True)
         trusted_transfers().check_upload_capacity(parent,value['byteLength'],browser_uid)
@@ -106,7 +130,7 @@ def promote(value,*,profiles,staging,browser_uid,browser_gid,source_uids):
         if (current.st_dev,current.st_ino)!=(source_info.st_dev,source_info.st_ino): fail()
         os.unlink('payload.bin',dir_fd=source); os.fsync(source)
         os.rmdir('otc-browser-upload-'+value['stagingId'],dir_fd=staging_root); os.fsync(staging_root)
-        return dict(version=1,ok=True,staged=True,sha256=value['sha256'],byteLength=len(body),profileKey=value['profileKey'],sessionId=value['sessionId'])
+        return dict(version=1,ok=True,staged=True,sha256=value['sha256'],byteLength=len(body),profileKey=value['profileKey'],sessionId=value['sessionId'],**({'runtimeProtocol':2} if value.get('runtimeProtocol')==2 else {}))
     except (OSError,ValueError,TypeError,KeyError): fail()
     finally:
         for fd in reversed(opened): os.close(fd)
