@@ -12,7 +12,7 @@ import type { BrowserFileBroker } from '../browser-cloud/file-broker.js';
 import type { BrowserFileTransferReceipt } from '../browser-cloud/provider-files.js';
 
 import { currentIntercomPrincipalKey } from '../browser-cloud/intercom-login-service.js';
-import { websitePrincipalHash } from '../browser-cloud/website-login-service.js';
+import { websitePrincipalHash, type WebsiteLoginService } from '../browser-cloud/website-login-service.js';
 function principalHash(caller: string): string | undefined {
   const subject = currentIntercomPrincipalKey();
   return (CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(caller) && subject ? websitePrincipalHash(caller, subject) : undefined;
@@ -121,8 +121,27 @@ export interface CloudBrowserGatewayRuntime {
   files?: Pick<BrowserFileBroker, 'stage' | 'get'>;
 }
 /** Register narrow MCP tools. Owner identity always comes from ToolContext.callerAgent. */
-export function registerCloudBrowserTools(server: McpServer, callerHash: CallerHashProvider, runtime: CloudBrowserGatewayRuntime): void {
+export function registerCloudBrowserTools(server: McpServer, callerHash: CallerHashProvider, runtime: CloudBrowserGatewayRuntime,
+  websiteLoginRuntime?: () => Pick<WebsiteLoginService, 'start' | 'discover'>): void {
   const live = () => cloudBrowserRuntimeStatus().enabled;
+  const websiteProfiles = async (caller: string) => {
+    const key = currentIntercomPrincipalKey();
+    if (!websiteLoginRuntime || !key || !(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(caller)) return undefined;
+    return Promise.all((['linkedin', 'wefunder'] as const).map(async site => {
+      const base = { site, login_profile_id: `website-login:${site}` };
+      try {
+        const saved = await websiteLoginRuntime().discover(caller, key, site);
+        return { ...base, saved_profile_id: saved.profile_id, status: 'saved_profile_available' };
+      } catch (e) {
+        const missing = e && typeof e === 'object' && 'code' in e && e.code === 'profile_not_enrolled';
+        return { ...base, status: missing ? 'login_required' : 'unavailable' };
+      }
+    }));
+  };
+  const websiteProfilesSchema = z.array(z.object({
+    site: z.enum(['linkedin', 'wefunder']), login_profile_id: z.string(),
+    saved_profile_id: z.string().optional(), status: z.enum(['saved_profile_available', 'login_required', 'unavailable']),
+  })).optional();
   registerTool(server, {
     name: 'browser_cloud_file_stage', category: 'write_simple',
     annotations: { title: 'Cloud browser: stage an owned upload file', description: 'Stages bounded file bytes privately for this caller. Validated UTF-8 text can be attached to a file input; binary files remain quarantined without a configured scanner. Staging is not a completed website upload.', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -147,16 +166,18 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
     {
       name: "browser_cloud_profile_discover",
       category: "read",
-      annotations: { title: "Cloud browser: discover my browser profile", description: "Returns only the authenticated caller's profile using the existing response shape. When that caller has a valid root-enrolled public-web profile, its ID and an empty host list are returned for cached clients; otherwise the legacy host-enrolled trial is returned. This does not enroll or convert profiles.", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { title: "Cloud browser: discover my browser profile", description: "Returns the authenticated caller's public profile and own saved website profile IDs. Named website-login:linkedin and website-login:wefunder profiles can start human sign-in through the existing session-start tool. Discovery creates no browser or login session.", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputShape: {},
-      outputShape: { profile_id: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), error: z.string().optional() },
+      outputShape: { profile_id: z.string().optional(), allowed_hosts: z.array(z.string()).optional(), persistent: z.boolean().optional(), website_profiles: websiteProfilesSchema, error: z.string().optional() },
       handler: async (_input, ctx) => {
         if (!live()) return unavailable();
+        const websites = await websiteProfiles(ctx.callerAgent);
         try {
           const profile = await runtime.browser.publicTrialProfile(ctx.callerAgent, principalHash(ctx.callerAgent));
-          return { data: { profile_id: profile.profileId, allowed_hosts: profile.allowedHosts, persistent: profile.persistent }, summary: "Returned this caller's legacy enrolled-host profile." };
+          return { data: { profile_id: profile.profileId, allowed_hosts: profile.allowedHosts, persistent: profile.persistent, ...(websites ? { website_profiles: websites } : {}) }, summary: "Returned this caller's public profile and available owned website profiles; no login or session was started." };
         } catch (e) {
-          return error(e);
+          const failure = error(e);
+          return { ...failure, data: { ...failure.data as Record<string, unknown>, ...(websites ? { website_profiles: websites } : {}) } };
         }
       },
     },
@@ -205,10 +226,12 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
         action_budget_limit: z.number().optional(),
         max_session_seconds: z.number().optional(),
         max_action_seconds: z.number().optional(),
+        website_profiles: websiteProfilesSchema,
         error: z.string().optional(),
       },
       handler: async (_input, ctx) => {
         if (!live()) return unavailable();
+        const websites = await websiteProfiles(ctx.callerAgent);
         try {
           const profile = await runtime.browser.publicWebProfile(ctx.callerAgent, principalHash(ctx.callerAgent));
           return {
@@ -220,11 +243,13 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
               action_budget_limit: profile.actionBudget,
               max_session_seconds: profile.maxSessionSeconds,
               max_action_seconds: profile.maxActionSeconds,
+              ...(websites ? { website_profiles: websites } : {}),
             },
             summary: "Returned this caller's server-enrolled public-web profile.",
           };
         } catch (e) {
-          return error(e);
+          const failure = error(e);
+          return { ...failure, data: { ...failure.data as Record<string, unknown>, ...(websites ? { website_profiles: websites } : {}) } };
         }
       },
     },
@@ -472,7 +497,7 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       category: "write_simple",
       annotations: {
         title: "Cloud browser: start session",
-        description: "Starts an authenticated caller’s session within server-configured budgets. A caller’s legacy public-trial ID resolves to their verified root-enrolled public-web profile when present; otherwise the legacy profile is used.",
+        description: "Starts an authenticated caller's browser within requested budgets. The named profiles website-login:linkedin and website-login:wefunder open the same connection-bound human sign-in flow without requiring a newer client tool name. Open the returned login_url, complete sign-in and Done, then reopen the returned real profile_id and verify authentication. Other profile IDs retain normal session behavior.",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -486,8 +511,16 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
       outputShape: {
         sessionId: z.string().optional(),
         expiresAt: z.number().optional(),
+        profile_id: z.string().optional(),
+        login_url: z.string().optional(),
+        login_expires_at: z.number().optional(),
+        status: z.literal('human_login_required').optional(),
         error: z.string().optional(),
       },
+      ephemeralOutput: true,
+      redactInputForLog: redactCloudBrowserInputForLog,
+      shieldInputForScan: shieldCloudBrowserInput,
+      redactResultForLog: () => ({ operation: 'browser_cloud_session_start', result: '[redacted browser session]' }),
       handler: async (input, ctx) => {
         if (!live()) return unavailable();
         if (ctx.dryRun)
@@ -496,6 +529,21 @@ export function registerCloudBrowserTools(server: McpServer, callerHash: CallerH
             summary: "Session start was not executed.",
           };
         try {
+          if (input.profile_id.startsWith('website-login:')) {
+            const site = input.profile_id === 'website-login:linkedin' ? 'linkedin'
+              : input.profile_id === 'website-login:wefunder' ? 'wefunder' : undefined;
+            if (!site) return { data: { error: 'website_login_profile_invalid' }, summary: 'Choose the named LinkedIn or WeFunder login profile.' };
+            if (!(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(ctx.callerAgent)) return { data: { error: 'company_connection_required' }, summary: 'Use an eligible authenticated company connection.' };
+            const key = currentIntercomPrincipalKey();
+            if (!key) return { data: { error: 'oauth_connection_required' }, summary: 'Website sign-in requires this company connection\'s OAuth binding.' };
+            if (!websiteLoginRuntime) return { data: { error: 'website_login_unavailable' }, summary: 'Website sign-in is not configured.' };
+            const login = await websiteLoginRuntime().start(ctx.callerAgent, key, site, undefined, { maxSeconds: input.max_seconds, actionBudget: input.action_budget });
+            return {
+              data: { sessionId: login.session_id, expiresAt: login.session_expires_at, profile_id: login.profile_id,
+                login_url: login.login_url, login_expires_at: login.expires_at, status: login.status },
+              summary: 'Open the sign-in link, complete login in its browser window, then click Done. Reopen the returned real profile_id in a new session and verify the intended signed-in account.',
+            };
+          }
           return {
             data: await runtime.browser.start(ctx.callerAgent, input.profile_id, input.max_seconds, input.action_budget, principalHash(ctx.callerAgent)),
             summary: "Cloud browser session started.",

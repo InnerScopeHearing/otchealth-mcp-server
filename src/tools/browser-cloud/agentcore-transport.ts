@@ -142,39 +142,14 @@ class Cdp {
 export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
   async prepareWebsiteLogin(session: CloudBrowserSession, site: WebsiteLoginSite, target?: WebsiteLoginTarget): Promise<void> {
     await this.websiteLoginPage(session, site, true, target);
-    // AgentCore keeps live-view input read-only while automation owns the stream.
-    // Navigate and close CDP before handing the suppressed session to its human owner.
-    await this.websiteAutomationStream(session, site, 'DISABLED', target);
   }
   async verifyWebsiteLogin(session: CloudBrowserSession, site: WebsiteLoginSite, target?: WebsiteLoginTarget): Promise<void> {
-    // Only the trusted Done path calls this method. Output remains suppressed.
-    await this.websiteAutomationStream(session, site, 'ENABLED', target);
     await this.websiteLoginPage(session, site, false, target);
   }
   private checkedWebsiteLoginPolicy(session: CloudBrowserSession, site: WebsiteLoginSite, target?: WebsiteLoginTarget): ReturnType<typeof websiteLoginPolicy> {
     const policy = websiteLoginPolicy(site, target);
     if (!(CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS as readonly string[]).includes(session.owner) || !/^[a-f0-9]{64}$/.test(session.ownerSubjectHash ?? '') || !session.sensitiveOutputSuppressed || session.providerBrowserId !== BROWSER_ID || session.mode === 'public_web' || session.allowedHosts.length !== policy.allowedHosts.length || session.allowedHosts.some((host, index) => host !== policy.allowedHosts[index])) throw new CloudBrowserError('login_invalid', 'The owned sign-in session is invalid.');
     return policy;
-  }
-  private async websiteAutomationStream(session: CloudBrowserSession, site: WebsiteLoginSite, streamStatus: 'DISABLED' | 'ENABLED', target?: WebsiteLoginTarget): Promise<void> {
-    this.checkedWebsiteLoginPolicy(session, site, target);
-    if (!/^[0-9a-zA-Z]{1,40}$/.test(session.providerSessionId)) throw new CloudBrowserError('login_invalid', 'The owned sign-in session is invalid.');
-    const credentials = await resolveAwsCredentials();
-    if (!credentials) throw new CloudBrowserError('aws_credentials_unavailable', 'Browser runtime credentials are unavailable.');
-    const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
-    const path = `/browsers/${encodeURIComponent(BROWSER_ID)}/sessions/streams/update`;
-    const query = { sessionId: session.providerSessionId };
-    const body = JSON.stringify({ clientToken: randomUUID(), streamUpdate: { automationStreamUpdate: { streamStatus } } });
-    const signed = signRequest({ method: 'PUT', host, path, query, body, region: this.region, service: 'bedrock-agentcore', credentials, extraHeaders: { 'content-type': 'application/json' } });
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`https://${host}${path}?sessionId=${encodeURIComponent(session.providerSessionId)}`, { method: 'PUT', headers: signed.headers, body, signal: AbortSignal.timeout(15_000) });
-    } catch {
-      throw new CloudBrowserError('provider_stream_update_failed', 'The browser control handoff could not be confirmed.');
-    }
-    if (!response.ok) throw new CloudBrowserError(`provider_stream_update_${response.status}`, `AgentCore request failed with HTTP ${response.status}.`);
-    const receipt = await response.json().catch(() => null) as { browserIdentifier?: unknown; sessionId?: unknown; streams?: { automationStream?: { streamStatus?: unknown } } } | null;
-    if (receipt?.browserIdentifier !== BROWSER_ID || receipt.sessionId !== session.providerSessionId || receipt.streams?.automationStream?.streamStatus !== streamStatus) throw new CloudBrowserError('provider_stream_receipt_invalid', 'The provider did not confirm the exact owned browser control handoff.');
   }
   /** Fixed trusted login path. No DOM text, credentials or form values leave this method. */
   private async websiteLoginPage(session: CloudBrowserSession, site: WebsiteLoginSite, navigate: boolean, target?: WebsiteLoginTarget): Promise<void> {
@@ -478,7 +453,7 @@ export class AgentCoreCloudBrowserTransport implements CloudBrowserTransport {
     const host = `bedrock-agentcore.${this.region}.amazonaws.com`;
     const path = `/browsers/${encodeURIComponent(browserId)}/sessions/stop`;
     const query = { sessionId: session.providerSessionId };
-    const body = JSON.stringify({ clientToken: randomUUID() });
+    const body = JSON.stringify({ clientToken: session.providerStopToken ?? randomUUID() });
     const signed = signRequest({
       method: "PUT",
       host,

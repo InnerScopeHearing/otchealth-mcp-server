@@ -7,6 +7,7 @@ const CREDS: AwsCredentials = { accessKeyId: 'ASIATEST', secretAccessKey: 'not-a
 const PROFILE_ID = 'cooIntercom-abc1234567';
 const OWNER_HASH = 'a'.repeat(64);
 const CLIENT_TOKEN = 'idempotency-token-0123456789';
+const AUTOMATION_ENDPOINT = 'wss://bedrock-agentcore.us-east-1.amazonaws.com/browser-streams/aws.browser.v1/sessions/session-abc/automation';
 
 function identityXml(account = '900915535335', arn = 'arn:aws:sts::900915535335:assumed-role/otchealth-gateway/task-123'): Response {
   return new Response(`<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>${arn}</Arn><Account>${account}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`, { status: 200 });
@@ -15,9 +16,10 @@ function identityXml(account = '900915535335', arn = 'arn:aws:sts::900915535335:
 function provider(overrides: {
   sts?: (url: string, init?: RequestInit) => Promise<Response>;
   controlSend?: (command: unknown, options?: { abortSignal?: AbortSignal }) => Promise<unknown>;
+  dataSend?: (command: unknown, options?: { abortSignal?: AbortSignal }) => Promise<unknown>;
   createBrowser?: (input: { region: string; identifier: string; credentials: AwsCredentials }) => { attachSession(sessionId: string): void; generateLiveViewUrl(expiresIn?: number): Promise<string> };
 } = {}) {
-  const state = { commandInput: undefined as unknown, sendCount: 0, attached: '', liveExpiry: 0, controlRegion: '', browserConfig: undefined as unknown };
+  const state = { commandInput: undefined as unknown, sendCount: 0, dataSendCount: 0, dataCommand: undefined as unknown, dataConfig: undefined as unknown, attached: '', liveExpiry: 0, controlRegion: '', browserConfig: undefined as unknown };
   const instance = new IntercomProfileProvider({ region: 'us-east-1', browserIdentifier: 'aws.browser.v1' }, {
     resolveCredentials: async () => CREDS,
     fetch: overrides.sts ?? (async () => identityXml()),
@@ -28,6 +30,18 @@ function provider(overrides: {
       return overrides.controlSend ? overrides.controlSend(command, options) : { profileId: PROFILE_ID };
     } }),
     createProfileCommand: (input) => { state.commandInput = input; return { operation: 'CreateBrowserProfile', input }; },
+    createDataClient: (config) => {
+      state.dataConfig = config;
+      return { send: async (command, options) => {
+        state.dataSendCount += 1;
+        state.dataCommand = command;
+        assert.ok(options?.abortSignal);
+        return overrides.dataSend ? overrides.dataSend(command, options) : {
+          browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc',
+          streams: { automationStream: { streamStatus: 'DISABLED' } },
+        };
+      } };
+    },
     createBrowser: (config) => {
       state.browserConfig = config;
       if (overrides.createBrowser) return overrides.createBrowser(config);
@@ -100,4 +114,60 @@ test('fails closed when provider credentials are unavailable', async () => {
   const instance = new IntercomProfileProvider({ region: 'us-east-1', browserIdentifier: 'aws.browser.v1' }, { resolveCredentials: async () => null });
   await assert.rejects(instance.createProfile({ name: 'coo-intercom', clientToken: CLIENT_TOKEN, ownerSubjectHash: OWNER_HASH }), (error: unknown) => error instanceof IntercomProfileProviderError && error.code === 'credentials_unavailable');
   await assert.rejects(instance.generateLiveViewUrl({ browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc' }), (error: unknown) => error instanceof IntercomProfileProviderError && error.code === 'credentials_unavailable');
+  await assert.rejects(instance.setAutomationStreamStatus({ browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streamStatus: 'DISABLED' }), (error: unknown) => error instanceof IntercomProfileProviderError && error.code === 'credentials_unavailable');
+});
+
+test('automation handoff sends the official SDK command once with explicit credentials, bounded timeout and exact owned IDs', async () => {
+  const { instance, state } = provider();
+  const result = await instance.setAutomationStreamStatus({ browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streamStatus: 'DISABLED' });
+  assert.deepEqual(result, { browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streamStatus: 'DISABLED' });
+  assert.equal(state.dataSendCount, 1);
+  const config = state.dataConfig as { region: string; maxAttempts: number; credentials: () => Promise<AwsCredentials> };
+  assert.equal(config.region, 'us-east-1');
+  assert.equal(config.maxAttempts, 1);
+  assert.deepEqual(await config.credentials(), CREDS);
+  assert.equal((state.dataCommand as { constructor: { name: string } }).constructor.name, 'UpdateBrowserStreamCommand');
+  const input = (state.dataCommand as { input: Record<string, unknown> }).input;
+  assert.equal(input.browserIdentifier, 'aws.browser.v1');
+  assert.equal(input.sessionId, 'session-abc');
+  assert.deepEqual(input.streamUpdate, { automationStreamUpdate: { streamStatus: 'DISABLED' } });
+  assert.match(String(input.clientToken), /^[a-f0-9-]{36}$/);
+});
+
+test('automation re-enable returns only the validated current session endpoint', async () => {
+  const { instance } = provider({ dataSend: async () => ({
+    browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc',
+    streams: { automationStream: { streamStatus: 'ENABLED', streamEndpoint: AUTOMATION_ENDPOINT } },
+  }) });
+  assert.deepEqual(await instance.setAutomationStreamStatus({ browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streamStatus: 'ENABLED' }), {
+    browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streamStatus: 'ENABLED', automationEndpoint: AUTOMATION_ENDPOINT,
+  });
+});
+
+test('automation handoff fails closed on substituted IDs, status mismatch and unsafe re-enabled endpoints', async () => {
+  const valid = { browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streams: { automationStream: { streamStatus: 'ENABLED', streamEndpoint: AUTOMATION_ENDPOINT } } };
+  const responses = [
+    { ...valid, browserIdentifier: 'other-browser' },
+    { ...valid, sessionId: 'other-session' },
+    { ...valid, browserIdentifier: undefined },
+    { ...valid, sessionId: undefined },
+    { ...valid, streams: { automationStream: { streamStatus: 'DISABLED', streamEndpoint: AUTOMATION_ENDPOINT } } },
+    { ...valid, streams: { automationStream: { streamStatus: 'ENABLED' } } },
+    { ...valid, streams: { automationStream: { streamStatus: 'ENABLED', streamEndpoint: AUTOMATION_ENDPOINT.replace('session-abc', 'session-other') } } },
+    { ...valid, streams: { automationStream: { streamStatus: 'ENABLED', streamEndpoint: 'wss://attacker.invalid/automation' } } },
+  ];
+  for (const response of responses) {
+    const { instance, state } = provider({ dataSend: async () => response });
+    await assert.rejects(instance.setAutomationStreamStatus({ browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streamStatus: 'ENABLED' }), (error: unknown) => error instanceof IntercomProfileProviderError && error.code === 'automation_stream_receipt_invalid');
+    assert.equal(state.dataSendCount, 1);
+  }
+});
+
+test('automation handoff rejects invalid input before AWS and sanitizes a single failed attempt', async () => {
+  const { instance, state } = provider({ dataSend: async () => { throw new Error(`AWS private ${CREDS.secretAccessKey} ${CREDS.sessionToken}`); } });
+  await assert.rejects(instance.setAutomationStreamStatus({ browserIdentifier: 'other-browser', sessionId: 'session-abc', streamStatus: 'DISABLED' }), (error: unknown) => error instanceof IntercomProfileProviderError && error.code === 'browser_identifier_forbidden');
+  await assert.rejects(instance.setAutomationStreamStatus({ browserIdentifier: 'aws.browser.v1', sessionId: '../other', streamStatus: 'DISABLED' }), (error: unknown) => error instanceof IntercomProfileProviderError && error.code === 'session_id_invalid');
+  assert.equal(state.dataSendCount, 0);
+  await assert.rejects(instance.setAutomationStreamStatus({ browserIdentifier: 'aws.browser.v1', sessionId: 'session-abc', streamStatus: 'DISABLED' }), (error: unknown) => error instanceof IntercomProfileProviderError && error.code === 'automation_stream_update_failed' && !error.message.includes(CREDS.secretAccessKey) && !error.message.includes(CREDS.sessionToken!));
+  assert.equal(state.dataSendCount, 1);
 });

@@ -1971,7 +1971,7 @@ export function registerAllTools(server: McpServer, callerHash: CallerHashProvid
   registerBrowserAgentcoreTools(server, callerHash);
   // General Browser broker: per-agent capability enrollments, beginning with Wefunder Campaign Director.
   registerAgentCoreBrowserBrokerTools(server, callerHash);
-  registerCloudBrowserTools(server, callerHash, cloudBrowserRuntime);
+  registerCloudBrowserTools(server, callerHash, cloudBrowserRuntime, websiteLoginRuntime);
   registerIntercomBrowserLoginTool(server, callerHash, intercomLoginRuntime);
   registerWebsiteBrowserLoginTools(server, callerHash, websiteLoginRuntime);
   registerFramerProjectInspect(server, callerHash);

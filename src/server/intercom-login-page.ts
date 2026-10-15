@@ -20,6 +20,9 @@ function securityHeaders(reply: FastifyReply, nonce?: string): void {
     .header('referrer-policy', 'no-referrer')
     .header('x-content-type-options', 'nosniff')
     .header('cross-origin-resource-policy', 'same-origin')
+    // DCV independently attempts async clipboard sync on focus even when its
+    // clipboardAutoSync option is false. Permit only explicit native gestures.
+    .header('permissions-policy', 'clipboard-read=(), clipboard-write=()')
     .header('content-security-policy', [
       "default-src 'none'",
       `script-src ${scriptSource}`,
@@ -85,10 +88,13 @@ function renderLoginPage(nonce: string, website = false): string {
       <h1 id="title">${heading}</h1>
       <p class="note">${instructions}</p>
       <p id="status" role="status" aria-live="polite">Preparing your secure sign-in window…</p>
-      <div id="stage" aria-label="${windowLabel}"><div id="dcv-display"></div></div>
+      <div id="stage" aria-label="${windowLabel}"><div id="dcv-display" tabindex="0"></div></div>
       <div class="actions">
+        <button id="clipboard-paste" type="button" disabled>Paste text into browser</button>
+        <button id="clipboard-copy" type="button" disabled>Copy browser text</button>
         <button id="done" class="primary" type="button" disabled>${doneLabel}</button>
       </div>
+      <p id="clipboard-status" class="note" role="status" aria-live="polite">Clipboard sharing is manual. To copy, select text in the secure window and press Ctrl+C or Command+C, then choose Copy browser text.</p>
       <p class="legal">The secure connection uses Amazon DCV. <a href="${ASSET_PREFIX}dcvjs-umd/EULA.txt" target="_blank" rel="noopener">License</a> · <a href="${ASSET_PREFIX}dcvjs-umd/third-party-licenses.txt" target="_blank" rel="noopener">Third-party notices</a></p>
     </section>
   </main>
@@ -98,8 +104,13 @@ function renderLoginPage(nonce: string, website = false): string {
     const statusNode = document.getElementById('status');
     const stage = document.getElementById('stage');
     const done = document.getElementById('done');
+    const paste = document.getElementById('clipboard-paste');
+    const copy = document.getElementById('clipboard-copy');
+    const clipboardStatus = document.getElementById('clipboard-status');
     let connection = null;
     let busy = false;
+    let clipboardClosed = false;
+    let clipboardArmed = false;
     ${website ? 'let terminal = false;' : ''}
     ${website ? 'let handoffId = null;' : ''}
 
@@ -107,6 +118,72 @@ function renderLoginPage(nonce: string, website = false): string {
       statusNode.textContent = message;
       statusNode.dataset.error = String(isError);
     }
+
+    function clipboardAvailable() {
+      return connection && !busy && !clipboardClosed
+        && typeof connection.captureClipboardEvents === 'function'
+        && typeof connection.syncClipboards === 'function';
+    }
+
+    function showClipboard(message, isError = false) {
+      clipboardStatus.textContent = message;
+      clipboardStatus.dataset.error = String(isError);
+    }
+
+    function disarmClipboard() {
+      if (!clipboardArmed) return;
+      clipboardArmed = false;
+      try { connection?.captureClipboardEvents(false, window); } catch { /* Already disconnected. */ }
+    }
+
+    function closeClipboard() {
+      disarmClipboard();
+      clipboardClosed = true;
+      paste.disabled = true;
+      copy.disabled = true;
+    }
+
+    function clipboardEvent(event) {
+      if (!clipboardAvailable()) return;
+      // Inspect only the event name, never clipboardData or provider error text.
+      if (event?.name === 'paste') {
+        disarmClipboard();
+        showClipboard('Paste captured for this browser. Verify the text in the secure window.');
+      } else if (event?.name === 'remoteError' || event?.name === 'dataSizeAlert') {
+        disarmClipboard();
+        showClipboard('Clipboard text could not be transferred. Try selecting and copying plain text again.', true);
+      }
+    }
+
+    paste.addEventListener('click', () => {
+      if (!clipboardAvailable()) return;
+      try {
+        connection.captureClipboardEvents(true, window);
+        clipboardArmed = true;
+        document.getElementById('dcv-display').focus();
+        showClipboard('Click the destination in the secure window, then press Ctrl+V (Windows) or Command+V (Mac).');
+      } catch {
+        disarmClipboard();
+        showClipboard('Clipboard paste is unavailable in this browser. Type directly in the secure window.', true);
+      }
+    });
+
+    copy.addEventListener('click', () => {
+      if (!clipboardAvailable()) return;
+      const activeConnection = connection;
+      const keepArmed = clipboardArmed;
+      try {
+        activeConnection.captureClipboardEvents(true, window);
+        if (!activeConnection.syncClipboards()) throw new Error('copy_unavailable');
+        showClipboard('Browser text copied to this device clipboard.');
+      } catch {
+        showClipboard('Copy is unavailable. Select text in the secure window and press Ctrl+C or Command+C, then try again.', true);
+      } finally {
+        if (!keepArmed) {
+          try { activeConnection.captureClipboardEvents(false, window); } catch { /* Already disconnected. */ }
+        }
+      }
+    });
 
     async function postJson(path, body) {
       const headers = { accept: 'application/json' };
@@ -160,10 +237,25 @@ function renderLoginPage(nonce: string, website = false): string {
               authToken: auth.authToken,
               baseUrl: '${ASSET_PREFIX}dcvjs-umd',
               divId: 'dcv-display',
-              observers: { httpExtraSearchParams: extraParams },
+              clipboardAutoSync: false,
+              observers: {
+                httpExtraSearchParams: extraParams,
+                clipboardEvent,
+                disconnect: () => {
+                  const wasOpen = !clipboardClosed;
+                  closeClipboard();
+                  connection = null;
+                  done.disabled = true;
+                  if (wasOpen) show('The secure sign-in window disconnected. Request a fresh link to continue.', true);
+                },
+              },
             }).then((activeConnection) => {
+              if (clipboardClosed) { activeConnection.disconnect(); return; }
               connection = activeConnection;
+              if (typeof connection.captureClipboardEvents === 'function') connection.captureClipboardEvents(false, window);
               done.disabled = false;
+              paste.disabled = !clipboardAvailable();
+              copy.disabled = !clipboardAvailable();
               show('${connectedMessage}');
             }).catch(() => show('The secure sign-in window could not connect. Request a new link or try again later.', true));
           },
@@ -176,6 +268,7 @@ function renderLoginPage(nonce: string, website = false): string {
     done.addEventListener('click', async () => {
       if (busy || done.disabled${website ? ' || terminal' : ''}) return;
       busy = true;
+      closeClipboard();
       ${website ? 'terminal = true;' : ''}
       done.disabled = true;
       show('Saving your secure sign-in…');
@@ -194,7 +287,7 @@ function renderLoginPage(nonce: string, website = false): string {
       }
     });
 
-    window.addEventListener('pagehide', () => connection?.disconnect(), { once: true });
+    window.addEventListener('pagehide', () => { closeClipboard(); connection?.disconnect(); }, { once: true });
     start();
   })();
   </script>

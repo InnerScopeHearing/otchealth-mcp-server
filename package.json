@@ -19,6 +19,7 @@
     "backfill:memory-exec": "tsx scripts/opensearch-backfill.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "3.1151.0",
     "@aws-sdk/client-bedrock-agentcore-control": "3.1151.0",
     "@descope/node-sdk": "^2.14.0",
     "@fastify/rate-limit": "10.3.0",

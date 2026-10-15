@@ -26,6 +26,25 @@ function validTargets(value: unknown): value is string[] {
   return Array.isArray(value) && value.length <= 21 && new Set(value).size === value.length && value.every((id) => typeof id === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(id));
 }
 
+function lifecycleStateItem(session: CloudBrowserSession): DynamoItem {
+  const leaseOwner = session.loginLeaseOwner;
+  if (leaseOwner !== undefined && (typeof leaseOwner !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(leaseOwner) || !/^[a-f0-9]{64}$/i.test(session.ownerSubjectHash ?? ''))) throw new CloudBrowserError('session_state_invalid', 'Browser session lifecycle state is invalid.');
+  if (session.providerStopToken !== undefined && (!leaseOwner || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(session.providerStopToken))) throw new CloudBrowserError('session_state_invalid', 'Browser session lifecycle state is invalid.');
+  if (session.providerStopped !== undefined && (typeof session.providerStopped !== 'boolean' || !leaseOwner || !session.providerStopToken)) throw new CloudBrowserError('session_state_invalid', 'Browser session lifecycle state is invalid.');
+  return {
+    ...(leaseOwner === undefined ? {} : { loginLeaseOwner: { S: leaseOwner } }),
+    ...(session.providerStopToken === undefined ? {} : { providerStopToken: { S: session.providerStopToken } }),
+    ...(session.providerStopped === undefined ? {} : { providerStopped: { BOOL: session.providerStopped } }),
+  };
+}
+
+function sessionTtl(session: CloudBrowserSession): string {
+  // Recovery metadata must outlast the login lease's grace; this does not extend browser access.
+  const cleanupUntil = session.expiresAt + (session.loginLeaseOwner === undefined ? 0 : 30_000);
+  if (!Number.isSafeInteger(cleanupUntil)) throw new CloudBrowserError('session_state_invalid', 'Browser session expiry is invalid.');
+  return String(Math.ceil(cleanupUntil / 1_000));
+}
+
 function pageStateItem(session: CloudBrowserSession): DynamoItem {
   if (session.ownedTargetIds === undefined) {
     if (session.selectedTargetId !== undefined) throw new CloudBrowserError("session_state_invalid", "Browser tab state is invalid.");
@@ -96,13 +115,14 @@ function sessionItem(session: CloudBrowserSession): DynamoItem {
     profileId: { S: session.profileId },
     hosts: { L: session.allowedHosts.map((host) => ({ S: host })) },
     expiresAt: { N: String(session.expiresAt) },
-    expiresAtEpoch: { N: String(Math.ceil(session.expiresAt / 1_000)) },
+    expiresAtEpoch: { N: sessionTtl(session) },
     actionsUsed: { N: String(session.actionsUsed) },
     providerSessionId: { S: session.providerSessionId },
     automationEndpoint: { S: session.automationEndpoint },
     ...(session.providerBrowserId ? { providerBrowserId: { S: session.providerBrowserId } } : {}),
     ...(session.mode ? { mode: { S: session.mode } } : {}),
     ...(session.actionBudget ? { actionBudget: { N: String(session.actionBudget) } } : {}),
+    ...lifecycleStateItem(session),
     ...pageStateItem(session),
   };
 }
@@ -130,7 +150,10 @@ function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
     if (typeof item.sensitiveOutputSuppressed.BOOL !== 'boolean') return null;
     pageState.sensitiveOutputSuppressed = item.sensitiveOutputSuppressed.BOOL;
   }
-  return {
+  if (item.loginLeaseOwner !== undefined && typeof item.loginLeaseOwner.S !== 'string') return null;
+  if (item.providerStopToken !== undefined && typeof item.providerStopToken.S !== 'string') return null;
+  if (item.providerStopped !== undefined && typeof item.providerStopped.BOOL !== 'boolean') return null;
+  const session: CloudBrowserSession = {
     sessionId: item.pk.S.slice(8),
     owner: item.owner.S,
     ...(item.ownerSubjectHash?.S ? { ownerSubjectHash: item.ownerSubjectHash.S.toLowerCase() } : {}),
@@ -143,8 +166,13 @@ function readSession(item: DynamoItem | undefined): CloudBrowserSession | null {
     ...(item.providerBrowserId?.S ? { providerBrowserId: item.providerBrowserId.S } : {}),
     ...(item.mode?.S === "public_web" || item.mode?.S === "enrolled_hosts" ? { mode: item.mode.S } : {}),
     ...(item.actionBudget?.N ? { actionBudget: Number(item.actionBudget.N) } : {}),
+    ...(item.loginLeaseOwner?.S === undefined ? {} : { loginLeaseOwner: item.loginLeaseOwner.S }),
+    ...(item.providerStopToken?.S === undefined ? {} : { providerStopToken: item.providerStopToken.S }),
+    ...(item.providerStopped?.BOOL === undefined ? {} : { providerStopped: item.providerStopped.BOOL }),
     ...pageState,
   };
+  try { lifecycleStateItem(session); } catch { return null; }
+  return session;
 }
 
 /**
@@ -249,11 +277,11 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
     });
   }
   async saveSessionUnderLock(session: CloudBrowserSession, lockOwner: string): Promise<void> {
-    const state = pageStateItem(session);
+    const state = { ...pageStateItem(session), ...lifecycleStateItem(session) };
     const values: Record<string, DynamoAttribute> = {
       ":actions": { N: String(session.actionsUsed) },
       ":expires": { N: String(session.expiresAt) },
-      ":ttl": { N: String(Math.ceil(session.expiresAt / 1_000)) },
+      ":ttl": { N: sessionTtl(session) },
       ":owner": { S: lockOwner },
     };
     const assignments = ["actionsUsed = :actions", "expiresAt = :expires", "expiresAtEpoch = :ttl"];
@@ -262,6 +290,9 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
       ["selectedTargetId", ":selected"],
       ["effectUnknown", ":uncertain"],
       ["sensitiveOutputSuppressed", ":sensitive"],
+      ["loginLeaseOwner", ":loginLeaseOwner"],
+      ["providerStopToken", ":providerStopToken"],
+      ["providerStopped", ":providerStopped"],
     ] as const) {
       if (state[attribute] !== undefined) {
         assignments.push(`${attribute} = ${variable}`);
@@ -281,6 +312,30 @@ export class DynamoCloudBrowserSessionStore implements CloudBrowserStore {
       TableName: this.tableName,
       Key: { pk: { S: `SESSION#${sessionId}` } },
     });
+  }
+  /** Only a confirmed-stopped, exact locked SESSION can authorize release of its opaque login lease. */
+  async releaseStoppedLoginLease(session: CloudBrowserSession, lockOwner: string): Promise<void> {
+    lifecycleStateItem(session);
+    if (!session.loginLeaseOwner || !session.providerStopped || !session.providerStopToken || !session.ownerSubjectHash) throw new CloudBrowserError('login_lease_cleanup_invalid', 'The stopped login session could not be confirmed.');
+    const response = await this.call('GetItem', {
+      TableName: this.tableName, Key: { pk: { S: `SESSION#${session.sessionId}` } }, ConsistentRead: true,
+    }) as { Item?: DynamoItem };
+    const current = readSession(response.Item);
+    if (!current || response.Item?.lockOwner?.S !== lockOwner || current.sessionId !== session.sessionId || current.owner !== session.owner
+      || current.ownerSubjectHash !== session.ownerSubjectHash.toLowerCase() || current.profileId !== session.profileId
+      || current.providerSessionId !== session.providerSessionId || current.providerBrowserId !== session.providerBrowserId
+      || current.loginLeaseOwner !== session.loginLeaseOwner || current.providerStopToken !== session.providerStopToken || !current.providerStopped) {
+      throw new CloudBrowserError('login_lease_cleanup_invalid', 'The stopped login session could not be confirmed.');
+    }
+    try {
+      await this.call('DeleteItem', {
+        TableName: this.tableName, Key: { pk: { S: `WEBSITE_LOGIN_LEASE#${session.profileId}` } },
+        ConditionExpression: 'lockOwner = :leaseOwner', ExpressionAttributeValues: { ':leaseOwner': { S: session.loginLeaseOwner } },
+      });
+    } catch (error) {
+      // An absent or replaced lease no longer belongs to this session; never delete a newer owner.
+      if (!(error instanceof CloudBrowserError && error.code === 'session_store_conflict')) throw error;
+    }
   }
   /** Atomically claim a known expired session only while its owner and expiry still match. */
   async claimExpiredSessionCleanup(sessionId: string, owner: string, now: number, lockOwner: string, until: number): Promise<boolean> {

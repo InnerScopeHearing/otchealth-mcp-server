@@ -3,6 +3,7 @@ import { validateCloudBrowserAction } from "./actions.js";
 import { CLOUD_BROWSER_DAILY_SESSION_LIMIT, CLOUD_BROWSER_MAX_ACTIONS, CLOUD_BROWSER_MAX_ACTION_SECONDS, CLOUD_BROWSER_MAX_SESSION_SECONDS, CLOUD_BROWSER_LEGACY_MAX_SESSION_SECONDS, type BrowserCaptureMetadata, type CloudBrowserAction, type CloudBrowserObservation, type CloudBrowserProfile, type CloudBrowserSession, type CloudBrowserStore, type CloudBrowserTransport, CloudBrowserError } from "./contract.js";
 import { assertTrustedPublicWebProfile, type TrustedPublicWebPolicy } from './public-web-policy.js';
 import { cleanupExpiredBrowserSession } from './session-recovery.js';
+import { stopOwnedSession } from './session-stop.js';
 
 function validHost(host: string): boolean {
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host);
@@ -198,6 +199,7 @@ export class CloudBrowserService {
       if (publicWebProfile) resolvedProfileId = publicWebProfile.profileId;
     }
     const profile = await this.loadProfile(caller, resolvedProfileId, normalizedPrincipalHash);
+    if (loginLeaseOwner !== undefined && (!/^[A-Za-z0-9._:-]{1,256}$/.test(loginLeaseOwner) || !normalizedPrincipalHash || !profile.persistent || !profile.providerProfileId || !this.store.verifyLoginLease || !this.store.releaseStoppedLoginLease)) throw new CloudBrowserError('login_lease_invalid', 'The trusted login lease binding is invalid.');
     if (this.store.verifyLoginLease && !await this.store.verifyLoginLease(profile.profileId, loginLeaseOwner)) throw new CloudBrowserError('profile_login_in_progress', 'Complete the active human sign-in before reopening this profile.');
     // A public-web profile ID is never allowed to fall through to an
     // enrolled-host profile if its server enrollment changes or is malformed.
@@ -238,6 +240,7 @@ export class CloudBrowserService {
       expiresAt: startedAt + maxSeconds * 1_000,
       actionsUsed: 0,
       ...remote,
+      ...(loginLeaseOwner === undefined ? {} : { loginLeaseOwner }),
       };
       try {
         await this.store.saveSession(session);
@@ -376,11 +379,16 @@ export class CloudBrowserService {
 
   async stop(caller: string, sessionId: string, principalHash?: string): Promise<void> {
     const normalizedPrincipalHash = validatePrincipalHash(principalHash);
-    const session = await this.sessionFor(caller, sessionId, true, normalizedPrincipalHash);
+    await this.sessionFor(caller, sessionId, true, normalizedPrincipalHash);
     const lockOwner = `${caller}:${randomUUID()}`;
-    if (!(await this.store.acquireSessionLock(sessionId, lockOwner, this.now() + 25_000))) throw new CloudBrowserError("session_busy", "Another bounded browser action is in progress for this session.");
+    if (!(await this.store.acquireSessionLock(sessionId, lockOwner, this.now() + 60_000))) throw new CloudBrowserError("session_busy", "Another bounded browser action is in progress for this session.");
     try {
-      await this.transport.stop(session);
+      const session = await this.sessionFor(caller, sessionId, true, normalizedPrincipalHash);
+      if (session.loginLeaseOwner !== undefined) {
+        const profile = await this.loadProfile(caller, session.profileId, normalizedPrincipalHash);
+        assertBindingPair(profile, session);
+      }
+      await stopOwnedSession({ store: this.store, transport: this.transport, session, lockOwner });
       await this.store.deleteSession(sessionId);
     } finally {
       await this.store.releaseSessionLock(sessionId, lockOwner);
@@ -433,7 +441,7 @@ export class CloudBrowserService {
 
   private async sessionFor(caller: string, sessionId: string, allowExpired = false, principalHash?: string): Promise<CloudBrowserSession> {
     const session = await this.store.loadSession(sessionId);
-    if (!session || session.owner !== caller) throw new CloudBrowserError("owner_forbidden", "Session is unavailable to this caller.");
+    if (!session || session.sessionId !== sessionId || session.owner !== caller) throw new CloudBrowserError("owner_forbidden", "Session is unavailable to this caller.");
     assertSubjectBinding(session.ownerSubjectHash, principalHash);
     if (!allowExpired && session.expiresAt <= this.now()) {
       const store = this.store as Parameters<typeof cleanupExpiredBrowserSession>[0]['store'];
@@ -442,6 +450,7 @@ export class CloudBrowserService {
       }
       throw new CloudBrowserError("session_expired", "Session expired; owned cleanup was attempted when supported. Start a new session.");
     }
+    if (!allowExpired && session.providerStopped) throw new CloudBrowserError('session_stopped', 'This browser session has stopped and awaits owned cleanup.');
     return session;
   }
 

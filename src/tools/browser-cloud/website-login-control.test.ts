@@ -22,7 +22,6 @@ const BROWSER_ID = 'aws.browser.v1';
 const TARGET_ID = 'owned-login-tab';
 
 type Event = { kind: 'cdp'; method: string; params?: Record<string, unknown> } | { kind: 'cdp-close' } | { kind: 'http'; url: string; init: RequestInit };
-type Receipt = { browserIdentifier: string; sessionId: string; streams: { automationStream: { streamEndpoint: string; streamStatus: string } }; updatedAt: string };
 
 class FakeSocket {
   private readonly listeners = new Map<string, Array<(event: any) => void>>();
@@ -75,7 +74,7 @@ function makeSession(overrides: Partial<CloudBrowserSession> = {}): CloudBrowser
   } as CloudBrowserSession;
 }
 
-function createHarness(options: { httpStatus?: number; receipt?: Partial<Receipt> } = {}) {
+function createHarness() {
   const events: Event[] = [];
   const socket = new FakeSocket(events);
   const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -83,26 +82,7 @@ function createHarness(options: { httpStatus?: number; receipt?: Partial<Receipt
     const url = String(input);
     calls.push({ url, init });
     events.push({ kind: 'http', url, init });
-    const status = options.httpStatus ?? 200;
-    const responseReceipt: Receipt = {
-      browserIdentifier: BROWSER_ID,
-      sessionId: SESSION_ID,
-      updatedAt: '2026-10-15T00:00:00Z',
-      ...options.receipt,
-      streams: {
-        automationStream: {
-          streamEndpoint: 'wss://browser.example.invalid/automation',
-          streamStatus: 'DISABLED',
-          ...options.receipt?.streams?.automationStream,
-        },
-      },
-    };
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      json: async () => responseReceipt,
-      text: async () => 'provider failure',
-    } as Response;
+    throw new Error('Transport must not duplicate the service-owned automation transfer');
   };
   const transport = new AgentCoreCloudBrowserTransport(
     'us-east-1',
@@ -110,16 +90,6 @@ function createHarness(options: { httpStatus?: number; receipt?: Partial<Receipt
     (() => socket as unknown as WebSocket) as (url: string, options: { headers: Record<string, string> }) => WebSocket,
   );
   return { transport, events, socket, calls };
-}
-
-function streamUpdate(calls: Array<{ url: string; init: RequestInit }>, status: 'DISABLED' | 'ENABLED') {
-  const call = calls.find(({ url }) => url.includes('/streams/update'));
-  assert.ok(call, `expected an AgentCore stream update to ${status}`);
-  assert.equal(new URL(call.url).searchParams.get('sessionId'), SESSION_ID);
-  assert.equal(call.init.method, 'PUT');
-  const body = JSON.parse(String(call.init.body));
-  assert.equal(body.streamUpdate?.automationStreamUpdate?.streamStatus, status);
-  return { call, body };
 }
 
 function assertNoSensitiveInspection(socket: FakeSocket): void {
@@ -131,25 +101,20 @@ function assertNoSensitiveInspection(socket: FakeSocket): void {
   }
 }
 
-test('prepare navigates and closes its bounded CDP channel before disabling automation for human control', async () => {
+test('prepare navigates and closes bounded CDP without duplicating service-owned control transfer', async () => {
   const h = createHarness();
   await h.transport.prepareWebsiteLogin(makeSession(), SITE);
-  const { call, body } = streamUpdate(h.calls, 'DISABLED');
-  assert.equal(body.clientToken && typeof body.clientToken, 'string');
-  assert.ok(body.clientToken.length > 0);
-  const streamEvent = h.events.findIndex(e => e.kind === 'http' && e.url === call.url);
-  assert.ok(h.events.findIndex(e => e.kind === 'cdp' && e.method === 'Page.navigate') < streamEvent);
-  assert.ok(h.events.findIndex(e => e.kind === 'cdp-close') < streamEvent);
+  assert.equal(h.calls.length, 0, 'the service/provider is the single stream controller');
+  const navigation = h.events.findIndex(e => e.kind === 'cdp' && e.method === 'Page.navigate');
+  assert.ok(navigation >= 0);
+  assert.ok(h.events.findIndex(e => e.kind === 'cdp-close') > navigation);
   assertNoSensitiveInspection(h.socket);
 });
 
-test('verify re-enables automation before opening CDP for trusted post-login verification', async () => {
-  const h = createHarness({ receipt: { streams: { automationStream: { streamEndpoint: 'wss://browser.example.invalid/automation', streamStatus: 'ENABLED' } } } });
+test('verify uses the service-confirmed endpoint without a second automation transfer', async () => {
+  const h = createHarness();
   await h.transport.verifyWebsiteLogin(makeSession(), SITE);
-  const { call } = streamUpdate(h.calls, 'ENABLED');
-  const streamEvent = h.events.findIndex(e => e.kind === 'http' && e.url === call.url);
-  const firstCdp = h.events.findIndex(e => e.kind === 'cdp');
-  assert.ok(streamEvent < firstCdp);
+  assert.equal(h.calls.length, 0, 'a second transfer must not invalidate the persisted endpoint');
   assert.ok(h.socket.sent.some(({ method }) => method === 'DOM.querySelector'));
   assertNoSensitiveInspection(h.socket);
 });
@@ -169,25 +134,5 @@ for (const [label, overrides] of [
     await assert.rejects(h.transport.verifyWebsiteLogin(makeSession(overrides), SITE));
     assert.equal(h.calls.length, 0);
     assert.equal(h.socket.sent.length, 0);
-  });
-}
-
-test('prepare fails closed when AgentCore rejects the stream handoff', async () => {
-  const h = createHarness({ httpStatus: 403 });
-  await assert.rejects(h.transport.prepareWebsiteLogin(makeSession(), SITE), /AgentCore request failed with HTTP 403/);
-  assert.equal(h.calls.length, 1);
-  assertNoSensitiveInspection(h.socket);
-});
-
-for (const [label, receipt] of [
-  ['browser identifier', { browserIdentifier: 'some-other-browser' }],
-  ['session identifier', { sessionId: 'some-other-session' }],
-  ['automation status', { streams: { automationStream: { streamEndpoint: 'wss://browser.example.invalid/automation', streamStatus: 'ENABLED' } } }],
-] as const) {
-  test(`prepare fails closed on mismatched ${label} in the AgentCore receipt`, async () => {
-    const h = createHarness({ receipt });
-    await assert.rejects(h.transport.prepareWebsiteLogin(makeSession(), SITE));
-    assert.equal(h.calls.length, 1);
-    assertNoSensitiveInspection(h.socket);
   });
 }

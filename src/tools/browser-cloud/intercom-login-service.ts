@@ -55,6 +55,7 @@ export class IntercomLoginService {
       await this.browser.beginSensitiveOutputSuppression('coo', started.sessionId, hash);
       const session = await this.ownedSession(started.sessionId, hash);
       await this.transport.prepareIntercomLogin(session, workspace, host);
+      await this.transferControl(session, 'DISABLED');
       await this.store.saveSession(session);
       const token = randomBytes(32).toString('base64url');
       const expiresAt = this.now() + 10 * 60_000;
@@ -69,6 +70,7 @@ export class IntercomLoginService {
     if (!binding) throw new CloudBrowserError('login_expired', 'This login link is invalid, consumed or expired.');
     const session = await this.ownedSession(binding.sessionId, binding.ownerSubjectHash);
     if (session.profileId !== binding.profileId || !session.sensitiveOutputSuppressed) throw new CloudBrowserError('login_invalid', 'The login session is unavailable.');
+    await this.transferControl(session, 'DISABLED');
     const signed = await this.provider.generateLiveViewUrl({ browserIdentifier: session.providerBrowserId!, sessionId: session.providerSessionId, expiresIn: 300 });
     return { signed_url: signed.url, expires_at: this.now() + 300_000, workspace_id: binding.expectedWorkspaceId, status: 'login_required' };
   }
@@ -81,11 +83,12 @@ export class IntercomLoginService {
     try {
       const session = await this.ownedSession(ticket.sessionId, ticket.ownerSubjectHash);
       if (session.profileId !== ticket.profileId || !session.sensitiveOutputSuppressed) throw new CloudBrowserError('login_invalid', 'The login session is unavailable.');
+      await this.transferControl(session, 'ENABLED');
       // The explicit human Done action confirms the account; the server independently checks
       // the exact requested company workspace/settings URL and excludes sign-in/password pages.
       await this.transport.verifyIntercomLogin(session, ticket.expectedWorkspaceId, ticket.expectedWorkspaceHost);
       await this.browser.savePersistentProfile('coo', ticket.sessionId, ticket.ownerSubjectHash);
-      await this.browser.endSensitiveOutputSuppression('coo', ticket.sessionId, ticket.ownerSubjectHash);
+      // Retain suppression until confirmed stop; an ambiguous stop must not expose human input.
       await this.browser.stop('coo', ticket.sessionId, ticket.ownerSubjectHash);
       if (!await this.tickets.complete(key, 'SAVED')) throw new CloudBrowserError('login_save_unknown', 'The saved sign-in receipt could not be confirmed.');
       return { status: 'saved', workspace_id: ticket.expectedWorkspaceId, verification: 'owner_confirmation_and_exact_settings_url' };
@@ -93,6 +96,16 @@ export class IntercomLoginService {
       await this.tickets.complete(key, 'FAILED').catch(() => undefined);
       await this.browser.stop('coo', ticket.sessionId, ticket.ownerSubjectHash).catch(() => undefined);
       throw error;
+    }
+  }
+
+  private async transferControl(session: CloudBrowserSession, streamStatus: 'DISABLED' | 'ENABLED'): Promise<void> {
+    if (!session.sensitiveOutputSuppressed || !session.providerBrowserId || !session.providerSessionId) throw new CloudBrowserError('login_invalid', 'The login session is unavailable.');
+    const receipt = await this.provider.setAutomationStreamStatus({ browserIdentifier: session.providerBrowserId, sessionId: session.providerSessionId, streamStatus });
+    if (receipt.browserIdentifier !== session.providerBrowserId || receipt.sessionId !== session.providerSessionId || receipt.streamStatus !== streamStatus) throw new CloudBrowserError('login_control_not_confirmed', 'The browser control transfer could not be confirmed.');
+    if (streamStatus === 'ENABLED' && receipt.automationEndpoint && receipt.automationEndpoint !== session.automationEndpoint) {
+      session.automationEndpoint = receipt.automationEndpoint;
+      await this.store.saveSession(session);
     }
   }
 

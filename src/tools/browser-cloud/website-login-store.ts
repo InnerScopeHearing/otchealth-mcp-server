@@ -146,6 +146,18 @@ export class WebsiteLoginTicketStore {
     const row = response?.Item; const until = Number(row?.lockUntil?.N);
     return row?.pk?.S === `WEBSITE_LOGIN_LEASE#${profileId}` && row.lockOwner?.S === owner && Number.isSafeInteger(until) && until > this.now();
   }
+  /** Owner-fenced renewal never deletes the row or revives an expired lease. */
+  async renewProfileLease(profileId: string, owner: string, until: number): Promise<boolean> {
+    if (!ID.test(profileId) || !ID.test(owner) || !Number.isSafeInteger(until) || until <= this.now() || until > this.now() + 3_660_000) throw new WebsiteLoginStoreError('website_login_lease_invalid');
+    try {
+      await this.call('UpdateItem', {
+        TableName: this.table, Key: { pk: { S: `WEBSITE_LOGIN_LEASE#${profileId}` } },
+        UpdateExpression: 'SET lockUntil = :until, expiresAtEpoch = :ttl',
+        ConditionExpression: 'lockOwner = :owner AND lockUntil > :now',
+        ExpressionAttributeValues: { ':owner': { S: owner }, ':until': { N: String(until) }, ':now': { N: String(this.now()) }, ':ttl': { N: String(Math.ceil(until / 1000)) } },
+      }); return true;
+    } catch (error) { if (error instanceof ConditionalCheckFailed) return false; throw error; }
+  }
   async releaseProfileLease(profileId: string, owner: string): Promise<void> {
     if (!ID.test(profileId) || !ID.test(owner)) throw new WebsiteLoginStoreError('website_login_lease_invalid');
     try {

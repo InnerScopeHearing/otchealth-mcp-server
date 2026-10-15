@@ -4,6 +4,26 @@ The cloud browser runs in the existing AWS AgentCore service. Each of the seven 
 
 ## Sign in and resume
 
+### Existing clients with a saved tool list
+
+If a company chat can call `browser_cloud_session_start` but has not loaded the newer login tool names, use the existing input schema:
+
+```json
+{"profile_id":"website-login:linkedin","max_seconds":600,"dry_run":false}
+```
+
+Use `website-login:wefunder` for the campaign portal. These are two explicit named profiles, not an arbitrary command or URL dispatcher. They invoke the same OAuth-bound human-login service and retain the existing tool confirmation and company-owner checks. They are not a fallback around an explicit workspace action denial or approval requirement.
+
+The result includes the real `sessionId`, provider session `expiresAt`, actual saved `profile_id`, short-lived `login_url`, separate `login_expires_at`, and `status: "human_login_required"`. Display the link immediately and keep it out of shared memory. Requested login duration must be 1–3,600 seconds; optional `action_budget` must be 1–10,000. After Done, start an ordinary new session with the returned real profile ID and verify authentication.
+
+Both existing profile-discovery tools return non-secret `website_profiles` entries: the named `login_profile_id`, owned `saved_profile_id` if present, and `saved_profile_available`, `login_required`, or `unavailable`. Discovery creates no provider profile or session. A saved profile is not proof the website is currently authenticated. Ordinary public-profile fields and normal session starts are unchanged.
+
+Custom sites continue to use the newer explicit login tool below. Updating the server cannot itself republish a workspace app's saved action list: use the owning app's supported action review/Refresh/publication controls for new tool names. Do not reset existing chats or sign-ins.
+
+### Current explicit login tools
+
+The viewer requires an explicit AgentCore control transfer, not merely a successful video connection. Setup prepares and suppresses the owned session, confirms `UpdateBrowserStream` with automation `DISABLED`, and only then grants human access. Exchange repeats that check for an unconsumed ticket. Done confirms automation `ENABLED` on the same session, persists its validated automation endpoint, then verifies and saves while output remains suppressed. A failed or mismatched transfer cannot report a usable handoff or a saved login. The gateway task role needs `bedrock-agentcore:UpdateBrowserStream` on the exact built-in browser ARN; this does not grant another connection's session.
+
 1. Call `browser_cloud_login_start` with `site: "wefunder"` or `site: "linkedin"`. For another public HTTPS website, use `site: "custom"`, the expected signed-in page `url`, and optional additional exact `allowed_hosts` needed for that site. Use a normal page address without a signed query, OAuth callback, token, or fragment.
 2. Show the returned short-lived `login_url` to the owner immediately. Do not save that link in shared memory. The owner signs in inside the embedded browser, confirms the intended account, opens the requested page, and selects Done. Passwords and verification codes stay inside that browser.
 3. After the page reports a successful save, call `browser_cloud_session_start` with the returned `profile_id`. Read the requested website and verify the intended signed-in account. A saved profile alone does not prove authentication.

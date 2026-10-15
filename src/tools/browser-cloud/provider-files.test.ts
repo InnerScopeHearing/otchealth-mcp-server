@@ -44,6 +44,76 @@ class Protocol implements BrowserFileCdp {
   }
 }
 
+class DirectoryProtocol extends Protocol {
+  constructedFiles = 0;
+  dispatchedEvents = 0;
+  constructor(private readonly directoryAt: 'description' | 'typecheck' | 'assignment', private readonly attributeValue = '') { super(); }
+  override async command(method: string, params: Record<string, unknown>, timeoutMs: number, sessionId: string): Promise<Record<string, unknown>> {
+    const result = await super.command(method, params, timeoutMs, sessionId);
+    if (method === 'DOM.describeNode' && this.directoryAt === 'description') {
+      return { node: { nodeName: 'INPUT', attributes: ['type', 'file', 'webkitdirectory', this.attributeValue] } };
+    }
+    const declaration = String(params.functionDeclaration ?? '');
+    if (method !== 'Runtime.callFunctionOn' || !declaration.includes('this instanceof HTMLInputElement')) return result;
+    const assignment = declaration.includes('this.files = transfer.files');
+    const directory = this.directoryAt === 'typecheck' || (this.directoryAt === 'assignment' && assignment);
+    class Input {
+      type = 'file';
+      isConnected = true;
+      disabled = false;
+      webkitdirectory = directory;
+      hasAttribute(name: string) { return name === 'webkitdirectory' && directory; }
+      dispatchEvent = () => { thisProtocol.dispatchedEvents += 1; };
+    }
+    const thisProtocol = this;
+    class File { constructor() { thisProtocol.constructedFiles += 1; } }
+    class DataTransfer { files: unknown[] = []; items = { add: (value: unknown) => this.files.push(value) }; }
+    // Execute the adapter's fixed guard in a minimal page realm, rather than mocking its boolean result.
+    const operation = new Function('HTMLInputElement', 'File', 'DataTransfer', `return (${declaration});`)(Input, File, DataTransfer);
+    return { result: { value: operation.call(new Input(), [], file.filename, file.contentType) } };
+  }
+}
+
+const upload = (cdp: BrowserFileCdp) => attachStagedFileToOwnedInput({
+  caller: 'cfo', session, targetId: 'owned-target', pageSessionId: 'page-session', selector: 'input[type=file]',
+  file: { record: file, body }, cdp, timeoutMs: 1_000, now: () => 1_000,
+});
+
+test('rejects directory inputs before resolving the input or transferring file bytes, including boolean attributes spelled false', async () => {
+  for (const attributeValue of ['', 'false']) {
+    const cdp = new DirectoryProtocol('description', attributeValue);
+    await assert.rejects(upload(cdp), (error: unknown) => error instanceof CloudBrowserError && error.code === 'directory_input_unsupported');
+    assert.equal(cdp.calls.some(call => call.method === 'DOM.resolveNode' || call.method === 'Runtime.callFunctionOn'), false);
+    assert.equal(cdp.constructedFiles, 0);
+    assert.equal(cdp.dispatchedEvents, 0);
+  }
+});
+
+test('rechecks directory state before allocating or transferring file bytes', async () => {
+  const cdp = new DirectoryProtocol('typecheck');
+  await assert.rejects(upload(cdp), (error: unknown) => error instanceof CloudBrowserError && error.code === 'file_input_invalid');
+  assert.equal(cdp.calls.some(call => String(call.params.functionDeclaration).includes('return []')), false);
+  assert.equal(cdp.constructedFiles, 0);
+  assert.equal(cdp.dispatchedEvents, 0);
+});
+
+test('does not assign or claim attachment when an input becomes a directory input during transfer', async () => {
+  const cdp = new DirectoryProtocol('assignment');
+  await assert.rejects(upload(cdp), (error: unknown) => error instanceof CloudBrowserError && error.code === 'file_transfer_uncertain');
+  assert.equal(cdp.constructedFiles, 0);
+  assert.equal(cdp.dispatchedEvents, 0);
+});
+
+test('continues allowing a single staged file on an ordinary multiple-file input', async () => {
+  class MultipleProtocol extends Protocol {
+    override async command(method: string, params: Record<string, unknown>, timeoutMs: number, sessionId: string): Promise<Record<string, unknown>> {
+      const result = await super.command(method, params, timeoutMs, sessionId);
+      return method === 'DOM.describeNode' ? { node: { nodeName: 'INPUT', attributes: ['type', 'file', 'multiple', ''] } } : result;
+    }
+  }
+  assert.equal((await upload(new MultipleProtocol())).status, 'attached');
+});
+
 test('streams broker bytes to one owned file input with fixed CDP code and verifies DOM readback', async () => {
   const cdp = new Protocol();
   const result = await attachStagedFileToOwnedInput({

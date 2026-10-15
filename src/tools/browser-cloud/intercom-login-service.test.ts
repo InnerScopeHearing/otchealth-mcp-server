@@ -10,6 +10,7 @@ const subject = 'coo-oauth-subject';
 const workspace = 'abc123';
 const now = 1_700_000_000_000;
 const loginToken = 'A'.repeat(43);
+const UPDATED_ENDPOINT = 'wss://bedrock-agentcore.us-east-1.amazonaws.com/browser-streams/aws.browser.v1/sessions/remote-session-1/automation';
 
 function fixture(overrides: {
   existingProfile?: CloudBrowserProfile;
@@ -18,9 +19,13 @@ function fixture(overrides: {
   prepareError?: Error;
   exchangeBinding?: { ownerSubjectHash: string; profileId: string; sessionId: string; expectedWorkspaceId: string; expiresAt: number } | null;
   sessionOwnerSubjectHash?: string;
+  streamError?: 'DISABLED' | 'ENABLED';
+  streamReceiptMismatch?: boolean;
+  stopError?: Error;
 } = {}) {
   const profiles = new Map<string, CloudBrowserProfile>();
   const sessions = new Map<string, CloudBrowserSession>();
+  const exchanged = new Map<string, Record<string, unknown>>();
   if (overrides.existingProfile) profiles.set(overrides.existingProfile.profileId, overrides.existingProfile);
 
   const state = {
@@ -32,6 +37,12 @@ function fixture(overrides: {
     prepareCalls: 0,
     ticketCreates: [] as Array<Record<string, unknown>>,
     liveViewCalls: 0,
+    verifyCalls: 0,
+    persistentSaveCalls: 0,
+    endSuppressionCalls: 0,
+    events: [] as string[],
+    streamCalls: [] as Array<{ browserIdentifier: string; sessionId: string; streamStatus: 'DISABLED' | 'ENABLED' }>,
+    savedSessions: [] as CloudBrowserSession[],
   };
 
   const store = {
@@ -45,7 +56,11 @@ function fixture(overrides: {
     },
     acquireProfileLock: async () => { state.profileLockCalls += 1; return true; },
     loadSession: async (id: string) => sessions.get(id) ?? null,
-    saveSession: async (session: CloudBrowserSession) => { sessions.set(session.sessionId, { ...session }); },
+    saveSession: async (session: CloudBrowserSession) => {
+      state.events.push('store-session');
+      state.savedSessions.push({ ...session });
+      sessions.set(session.sessionId, { ...session });
+    },
   } as unknown as CloudBrowserStore;
 
   const browser = {
@@ -66,9 +81,13 @@ function fixture(overrides: {
       const session = sessions.get(id)!;
       session.sensitiveOutputSuppressed = true;
     },
-    savePersistentProfile: async () => undefined,
-    endSensitiveOutputSuppression: async () => undefined,
-    stop: async (_owner: string, id: string) => { state.stopCalls += 1; sessions.delete(id); },
+    savePersistentProfile: async () => { state.events.push('save-profile'); state.persistentSaveCalls += 1; },
+    endSensitiveOutputSuppression: async () => { state.endSuppressionCalls += 1; },
+    stop: async (_owner: string, id: string) => {
+      state.events.push('stop'); state.stopCalls += 1;
+      if (overrides.stopError) throw overrides.stopError;
+      sessions.delete(id);
+    },
   };
 
   const provider = {
@@ -78,31 +97,49 @@ function fixture(overrides: {
       return { providerProfileId: `${input.name}-created123` };
     },
     generateLiveViewUrl: async () => {
+      state.events.push('sign-live-view');
       state.liveViewCalls += 1;
       return { url: 'https://browser.example/live-view?signature=opaque', expiresIn: 300 };
+    },
+    setAutomationStreamStatus: async (input: { browserIdentifier: string; sessionId: string; streamStatus: 'DISABLED' | 'ENABLED' }) => {
+      state.events.push(input.streamStatus);
+      state.streamCalls.push(input);
+      assert.equal([...sessions.values()][0]?.sensitiveOutputSuppressed, true);
+      if (overrides.streamError === input.streamStatus) throw new Error('control transfer failed');
+      return { ...input, ...(overrides.streamReceiptMismatch ? { sessionId: 'foreign-session' } : {}), ...(input.streamStatus === 'ENABLED' ? { automationEndpoint: UPDATED_ENDPOINT } : {}) };
     },
   };
 
   const transport = {
     prepareIntercomLogin: async () => {
+      state.events.push('prepare');
       state.prepareCalls += 1;
       if (overrides.prepareError) throw overrides.prepareError;
     },
-    verifyIntercomLogin: async () => undefined,
+    verifyIntercomLogin: async (session: CloudBrowserSession) => {
+      state.events.push('verify'); state.verifyCalls += 1;
+      assert.equal(session.sensitiveOutputSuppressed, true);
+      assert.equal(session.automationEndpoint, UPDATED_ENDPOINT);
+      assert.equal(sessions.get(session.sessionId)?.automationEndpoint, UPDATED_ENDPOINT);
+    },
   };
 
   const tickets = {
-    create: async (input: Record<string, unknown>) => { state.ticketCreates.push(input); },
+    create: async (input: Record<string, unknown>) => { state.events.push('ticket'); state.ticketCreates.push(input); },
     exchange: async (tokenHash: string) => {
-      if (overrides.exchangeBinding !== undefined) return overrides.exchangeBinding;
+      if (overrides.exchangeBinding !== undefined) {
+        if (overrides.exchangeBinding) exchanged.set(tokenHash, { ...overrides.exchangeBinding, phase: 'EXCHANGED' });
+        return overrides.exchangeBinding;
+      }
       const index = state.ticketCreates.findIndex(v => v.tokenHash === tokenHash);
       if (index < 0) return null;
       const {tokenHash: _hash, ...binding} = state.ticketCreates.splice(index, 1)[0]!;
+      exchanged.set(tokenHash, { ...binding, phase: 'EXCHANGED' });
       return binding;
     },
-    load: async () => null,
+    load: async (tokenHash: string) => exchanged.get(tokenHash) ?? null,
     finish: async () => true,
-    complete: async () => true,
+    complete: async (_tokenHash: string, phase: string) => { state.events.push(phase); return true; },
   };
 
   const service = new IntercomLoginService(
@@ -220,5 +257,66 @@ test('exchange refuses a ticket whose owner hash does not match its browser sess
     automationEndpoint: 'wss://browser.example/endpoint', sensitiveOutputSuppressed: true,
   });
   await assert.rejects(service.exchange(loginToken), (error: unknown) => error instanceof CloudBrowserError && error.code === 'owner_forbidden');
+  assert.equal(state.liveViewCalls, 0);
+});
+
+test('Intercom human login disables the exact owned automation stream after navigation and before creating its link', async () => {
+  const { service, state } = fixture();
+  await service.start(subject, workspace);
+  assert.deepEqual(state.streamCalls, [{ browserIdentifier: 'aws.browser.v1', sessionId: 'remote-session-1', streamStatus: 'DISABLED' }]);
+  assert.ok(state.events.indexOf('prepare') < state.events.indexOf('DISABLED'));
+  assert.ok(state.events.indexOf('DISABLED') < state.events.indexOf('ticket'));
+});
+
+test('Intercom exchange reasserts manual control for an existing unconsumed ticket before signing live view', async () => {
+  const { service, state } = fixture();
+  const started = await service.start(subject, workspace);
+  state.events.length = 0;
+  state.streamCalls.length = 0;
+  await service.exchange(started.login_url.split('#token=')[1]!);
+  assert.deepEqual(state.streamCalls, [{ browserIdentifier: 'aws.browser.v1', sessionId: 'remote-session-1', streamStatus: 'DISABLED' }]);
+  assert.deepEqual(state.events, ['DISABLED', 'sign-live-view']);
+});
+
+test('Intercom never creates a human login link when disabling automation fails', async () => {
+  const { service, state, sessions } = fixture({ streamError: 'DISABLED' });
+  await assert.rejects(service.start(subject, workspace), /control transfer failed/);
+  assert.equal(state.ticketCreates.length, 0);
+  assert.equal(state.stopCalls, 1);
+  assert.equal(sessions.size, 0);
+});
+
+test('Intercom completion re-enables the owned stream and persists its current endpoint before verification without unmasking the session', async () => {
+  const { service, state } = fixture();
+  const started = await service.start(subject, workspace);
+  const token = started.login_url.split('#token=')[1]!;
+  await service.exchange(token);
+  state.events.length = 0;
+  state.streamCalls.length = 0;
+  const result = await service.complete(token);
+  assert.equal(result.status, 'saved');
+  assert.deepEqual(state.streamCalls, [{ browserIdentifier: 'aws.browser.v1', sessionId: 'remote-session-1', streamStatus: 'ENABLED' }]);
+  assert.deepEqual(state.events, ['ENABLED', 'store-session', 'verify', 'save-profile', 'stop', 'SAVED']);
+  assert.equal(state.endSuppressionCalls, 0);
+  assert.equal(state.savedSessions.at(-1)?.sensitiveOutputSuppressed, true);
+});
+
+test('Intercom failed re-enable stops before CDP verification and retains suppression if stopping is unconfirmed', async () => {
+  const { service, state, sessions } = fixture({ streamError: 'ENABLED', stopError: new Error('stop unknown') });
+  const started = await service.start(subject, workspace);
+  const token = started.login_url.split('#token=')[1]!;
+  await service.exchange(token);
+  await assert.rejects(service.complete(token), /control transfer failed/);
+  assert.equal(state.verifyCalls, 0);
+  assert.equal(state.persistentSaveCalls, 0);
+  assert.equal(state.endSuppressionCalls, 0);
+  assert.equal(state.stopCalls, 1);
+  assert.equal(sessions.get(started.session_id)?.sensitiveOutputSuppressed, true);
+});
+
+test('Intercom rejects a mismatched stream receipt before exposing a link or signing live view', async () => {
+  const { service, state } = fixture({ streamReceiptMismatch: true });
+  await assert.rejects(service.start(subject, workspace), (error: unknown) => error instanceof CloudBrowserError && error.code === 'login_control_not_confirmed');
+  assert.equal(state.ticketCreates.length, 0);
   assert.equal(state.liveViewCalls, 0);
 });
