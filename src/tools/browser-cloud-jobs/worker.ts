@@ -24,13 +24,13 @@ export class CloudBrowserJobWorker {
         await this.jobs.complete(claimed.id, claimed.agent, claimed.leaseToken); await this.queue.delete(message.receipt); completed++;
       } catch (error) {
         if (error instanceof BrowserJobError && error.code === 'lease_expired') {
-          try { const current = await this.jobs.get(message.jobId, message.agent); const hasEffect = current.externalEffect === 'unknown' || Object.values(current.actionEffects).some(state => state === 'unknown' || state === 'succeeded'); if (hasEffect && run) { await this.jobs.markNeedsReconciliation(run.id, run.agent, run.leaseToken, 'lease_expired_after_browser_action'); await this.queue.delete(message.receipt); reconciliations++; } else { heldForRetry++; } } catch { heldForRetry++; }
+          try { const current = await this.jobs.getForWorker(message.jobId, message.agent); const hasEffect = current.externalEffect === 'unknown' || Object.values(current.actionEffects).some(state => state === 'unknown' || state === 'succeeded'); if (hasEffect && run) { await this.jobs.markNeedsReconciliation(run.id, run.agent, run.leaseToken, 'lease_expired_after_browser_action'); await this.queue.delete(message.receipt); reconciliations++; } else { heldForRetry++; } } catch { heldForRetry++; }
           continue;
         }
         if (error instanceof BrowserJobError && (error.code === 'effect_reconciliation_required' || error.code === 'session_resume_reconciliation_required' || error.code === 'job_terminal')) {
           try {
             if (run) await this.jobs.markNeedsReconciliation(run.id, run.agent, run.leaseToken, error.code);
-            const current = await this.jobs.get(message.jobId, message.agent);
+            const current = await this.jobs.getForWorker(message.jobId, message.agent);
             if (!['succeeded', 'failed', 'cancelled', 'needs_reconciliation'].includes(current.status)) { heldForRetry++; continue; }
             await this.queue.delete(message.receipt); reconciliations++;
           } catch { heldForRetry++; }
@@ -39,7 +39,7 @@ export class CloudBrowserJobWorker {
         // An action that had been marked unknown is intentionally left durable for reconciliation.
         // Delete its delivery to avoid a blind provider repeat. Safe pre-effect failures remain retryable.
         if (error instanceof BrowserJobError && error.code === 'concurrent_update') { heldForRetry++; continue; }
-        try { const job = await this.jobs.get(message.jobId, message.agent); if (job.externalEffect === 'unknown' && run) { await this.jobs.markNeedsReconciliation(run.id, run.agent, run.leaseToken, 'browser_action_outcome_unknown'); await this.queue.delete(message.receipt); reconciliations++; } else { heldForRetry++; } } catch { heldForRetry++; }
+        try { const job = await this.jobs.getForWorker(message.jobId, message.agent); if (job.externalEffect === 'unknown' && run) { await this.jobs.markNeedsReconciliation(run.id, run.agent, run.leaseToken, 'browser_action_outcome_unknown'); await this.queue.delete(message.receipt); reconciliations++; } else { heldForRetry++; } } catch { heldForRetry++; }
       }
     }
     return { received: messages.length, completed, heldForRetry, reconciliations };

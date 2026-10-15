@@ -14,8 +14,77 @@ function harness() {
     async replace(job, expected) { const prior = jobs.get(job.id); if (!prior || prior.version !== expected) return 'conflict'; jobs.set(job.id, { job: structuredClone(job), version: String(Number(expected) + 1) }); return 'replaced'; },
   };
   const api = new CloudBrowserJobs(store, { enqueue: async id => { queued.push(id); } }, { putImmutable: async () => ({ version: 'v1' }), getVersion: async () => ({ body: Buffer.alloc(0), contentType: 'application/json' }) }, () => now, () => String(++counter));
-  return { api, queued, tick: (ms: number) => { now += ms; } };
+  return { api, store, queued, tick: (ms: number) => { now += ms; } };
 }
+
+const OWNER_SUBJECT = 'a'.repeat(64);
+const OTHER_SUBJECT = 'b'.repeat(64);
+
+test('durable jobs preserve the server owner principal through worker execution and artifacts', async () => {
+  const h = harness();
+  const { job } = await h.api.submit({ agent: 'cto', ownerSubjectHash: OWNER_SUBJECT, idempotencyKey: 'principal:worker', request: {} });
+  assert.equal((await h.api.get(job.id, 'cto', OWNER_SUBJECT)).ownerSubjectHash, OWNER_SUBJECT);
+  let observedSubject: string | undefined;
+  const queue = { enqueue: async () => undefined, receive: async () => [{ id: 'm', receipt: 'r', jobId: job.id, agent: 'cto', ownerSubjectHash: OTHER_SUBJECT }], changeVisibility: async () => undefined, delete: async () => undefined };
+  const worker = new CloudBrowserJobWorker(h.api, queue, { execute: async (run) => {
+    observedSubject = run.ownerSubjectHash;
+    const body = Buffer.from('owned receipt');
+    await h.api.attachArtifact(run.id, run.agent, run.leaseToken, body, 'text/plain', sha(body));
+  } }, 1_000);
+  assert.equal((await worker.pollOnce()).completed, 1);
+  assert.equal(observedSubject, OWNER_SUBJECT);
+  assert.equal((await h.api.get(job.id, 'cto', OWNER_SUBJECT)).artifacts.length, 1);
+  await assert.rejects(h.api.get(job.id, 'cto'), /job_principal_mismatch/);
+  await assert.rejects(h.api.get(job.id, 'cto', OTHER_SUBJECT), /job_principal_mismatch/);
+  await assert.rejects(h.api.requestCancellation(job.id, 'cto'), /job_principal_mismatch/);
+  await assert.rejects(h.api.requestCancellation(job.id, 'cto', OTHER_SUBJECT), /job_principal_mismatch/);
+});
+
+test('principal-bound job replay cannot substitute or omit its original owner', async () => {
+  const h = harness();
+  const input = { agent: 'cto', ownerSubjectHash: OWNER_SUBJECT, idempotencyKey: 'principal:replay', request: {} };
+  const first = await h.api.submit(input);
+  assert.equal((await h.api.submit(input)).job.id, first.job.id);
+  for (const ownerSubjectHash of [OTHER_SUBJECT, undefined]) {
+    await assert.rejects(h.api.submit({ ...input, ownerSubjectHash }), /job_principal_mismatch/);
+  }
+  assert.equal((await h.api.get(first.job.id, 'cto', OWNER_SUBJECT)).ownerSubjectHash, OWNER_SUBJECT);
+  assert.equal(h.queued.length, 1);
+});
+
+test('a racing idempotency winner cannot replace the submitted principal', async () => {
+  const h = harness();
+  const input = { agent: 'cto', ownerSubjectHash: OWNER_SUBJECT, idempotencyKey: 'principal:raced', request: {} };
+  const first = await h.api.submit(input);
+  const read = h.store.readByIdempotency;
+  let reads = 0;
+  h.store.readByIdempotency = async (agent, key) => reads++ === 0 ? null : read(agent, key);
+  await assert.rejects(h.api.submit({ ...input, ownerSubjectHash: OTHER_SUBJECT }), /job_principal_mismatch/);
+  assert.equal((await h.api.get(first.job.id, 'cto', OWNER_SUBJECT)).ownerSubjectHash, OWNER_SUBJECT);
+  assert.equal(h.queued.length, 1);
+});
+
+test('job plans cannot carry caller-selected ownership metadata', async () => {
+  const h = harness();
+  for (const field of ['ownerSubjectHash', 'owner_subject_hash']) {
+    await assert.rejects(h.api.submit({ agent: 'cto', ownerSubjectHash: OWNER_SUBJECT, idempotencyKey: 'principal:forged', request: { [field]: OTHER_SUBJECT } }), /invalid_job_auth_metadata/);
+  }
+  await assert.rejects(h.api.submit({ agent: 'cto', ownerSubjectHash: 'malformed', idempotencyKey: 'principal:invalid', request: {} }), /invalid_owner_subject_hash/);
+  assert.equal(h.queued.length, 0);
+});
+
+test('bound terminal jobs are acknowledged by the worker without dropping principal enforcement', async () => {
+  const h = harness();
+  const { job } = await h.api.submit({ agent: 'cto', ownerSubjectHash: OWNER_SUBJECT, idempotencyKey: 'principal:terminal', request: {} });
+  const run = await h.api.claim(job.id, 'cto', 1_000);
+  await h.api.complete(job.id, 'cto', run.leaseToken);
+  let deletions = 0;
+  const queue = { enqueue: async () => undefined, receive: async () => [{ id: 'm', receipt: 'r', jobId: job.id, agent: 'cto' }], changeVisibility: async () => undefined, delete: async () => { deletions++; } };
+  const worker = new CloudBrowserJobWorker(h.api, queue, { execute: async () => { assert.fail('terminal job must not execute'); } }, 1_000);
+  assert.equal((await worker.pollOnce()).reconciliations, 1);
+  assert.equal(deletions, 1);
+  await assert.rejects(h.api.get(job.id, 'cto'), /job_principal_mismatch/);
+});
 
 test('safe pre-effect failures cannot consume browser attempts indefinitely', async () => {
   const h = harness();

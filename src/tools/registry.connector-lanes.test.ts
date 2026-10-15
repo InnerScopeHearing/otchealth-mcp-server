@@ -47,7 +47,8 @@ before(() => {
 
 const CLOUD_BROWSER_TOOLS = ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action',
   'browser_cloud_session_snapshot', 'browser_cloud_profile_save', 'browser_cloud_session_stop',
-  'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get'];
+  'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get',
+  'browser_cloud_login_start', 'browser_cloud_login_profile_discover', 'browser_cloud_file_stage'];
 test('public-web discovery is in curated seeds for only the existing eligible internal browser lanes', () => {
   const eligible = ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer'];
   for (const lane of eligible) {
@@ -471,7 +472,7 @@ test('isShipLane: exact predicate matches the routing above', () => {
 test('CONNECTOR_TOOLSET override preserves mandatory scoped operator front doors', () => {
   const env = { ...testEnv(), CONNECTOR_TOOLSET: 'brain_search,web_search' } as Env;
   const set = connectorToolset(env, 'cto');
-  assert.deepEqual([...set].sort(), ['brain_search', 'web_search', 'framer_project_inspect', ...GITHUB_OPERATOR_TOOLSET, ...AWS_MCP_TOOLS, ...INTERCOM_OPERATIONS_TOOLSET].sort());
+  assert.deepEqual([...set].sort(), ['brain_search', 'web_search', 'framer_project_inspect', ...GITHUB_OPERATOR_TOOLSET, ...AWS_MCP_TOOLS, ...INTERCOM_OPERATIONS_TOOLSET, ...CLOUD_BROWSER_TOOLS].sort());
 });
 
 test('Intercom/Fin operations stay on the CTO and COO identities even under injected overrides', () => {
@@ -602,6 +603,19 @@ test('Intercom login authorization is advertised only on the COO connector', () 
   assert.equal(connectorToolset(testEnv(), 'coo').has('browser_cloud_intercom_login_start'), true);
   for (const lane of ['cto', 'cfo', 'clo', 'clo-personal', 'cro', 'developer', 'exec', 'external-read', 'totally-unknown-lane']) {
     assert.equal(connectorToolset(testEnv(), lane).has('browser_cloud_intercom_login_start'), false, `${lane} must not advertise Intercom login`);
+  }
+});
+
+test('website login is exposed only to the seven eligible company browser lanes', () => {
+  for (const lane of ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director']) {
+    for (const tool of ['browser_cloud_login_start', 'browser_cloud_login_profile_discover']) {
+      assert.equal(connectorToolset(testEnv(), lane).has(tool), true, `${lane}: ${tool}`);
+    }
+  }
+  for (const lane of ['clo-personal', 'external-read', 'exec', 'cpo', 'cco', 'unknown']) {
+    for (const tool of ['browser_cloud_login_start', 'browser_cloud_login_profile_discover']) {
+      assert.equal(connectorToolset({ ...testEnv(), CONNECTOR_TOOLSET: tool }, lane).has(tool), false, `${lane}: ${tool}`);
+    }
   }
 });
 

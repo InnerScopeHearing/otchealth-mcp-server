@@ -567,9 +567,13 @@ export function connectorToolset(env: Env, lane: string): Set<string> {
   else for (const name of INTERCOM_OPERATIONS_TOOLSET) tools.delete(name);
   if (lane === 'coo') tools.add('browser_cloud_intercom_login_start');
   else tools.delete('browser_cloud_intercom_login_start');
-  if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane) && !(isShipLane(lane) && env.CONNECTOR_TOOLSET)) {
+  for (const name of ['browser_cloud_login_start', 'browser_cloud_login_profile_discover']) {
+    if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane)) tools.add(name);
+    else tools.delete(name);
+  }
+  if (['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director'].includes(lane)) {
     for (const name of ['browser_cloud_profile_discover', 'browser_cloud_public_web_profile_discover', 'browser_cloud_session_start', 'browser_cloud_session_action', 'browser_cloud_session_snapshot',
-      'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get']) tools.add(name);
+      'browser_cloud_profile_save', 'browser_cloud_session_stop', 'browser_cloud_job_submit', 'browser_cloud_job_get', 'browser_cloud_job_cancel', 'browser_cloud_artifact_get', 'browser_cloud_file_stage']) tools.add(name);
   }
   // CONNECTOR_TOOLSET may curate the surrounding ship catalog, but it cannot remove the bounded
   // company GitHub operator surface. Ordinary company seats are exact at this boundary: discard

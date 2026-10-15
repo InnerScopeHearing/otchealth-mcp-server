@@ -9,9 +9,12 @@ import { createTrustedBrowserBinaryValidator } from '../tools/browser-cloud/bina
 import { IntercomLoginService } from '../tools/browser-cloud/intercom-login-service.js';
 import { IntercomProfileProvider } from '../tools/browser-cloud/intercom-profile-provider.js';
 import { IntercomLoginTicketStore } from '../tools/browser-cloud/intercom-login-store.js';
+import { WebsiteLoginService } from '../tools/browser-cloud/website-login-service.js';
+import { WebsiteLoginTicketStore } from '../tools/browser-cloud/website-login-store.js';
 
 let instance: CloudBrowserGatewayRuntime | undefined;
 let intercomLogin: IntercomLoginService | undefined;
+let websiteLogin: WebsiteLoginService | undefined;
 function configured(): CloudBrowserGatewayRuntime {
   if (!cloudBrowserRuntimeStatus().enabled) throw new Error('cloud_browser_not_configured');
   if (!instance) {
@@ -27,12 +30,14 @@ function configured(): CloudBrowserGatewayRuntime {
     const transport = new AgentCoreCloudBrowserTransport(config.region, fetch, undefined, undefined, publicWebPolicy, (owner, fileId) => files.forUpload(owner, fileId));
     const browser = new CloudBrowserService(store, transport, Date.now, publicWebPolicy);
     intercomLogin = new IntercomLoginService(store, browser, transport, new IntercomProfileProvider({ region:config.region, browserIdentifier:'aws.browser.v1' }), new IntercomLoginTicketStore({ tableName:config.table, region:config.region }));
+    websiteLogin = new WebsiteLoginService(store, browser, transport, new IntercomProfileProvider({ region:config.region, browserIdentifier:'aws.browser.v1' }), new WebsiteLoginTicketStore({ tableName:config.table, region:config.region }));
     instance = { browser,
       jobs: new CloudBrowserJobs(createDynamoBrowserJobStore(config), queue, artifacts), queue, artifacts, files };
   }
   return instance!;
 }
 export function intercomLoginRuntime(): IntercomLoginService { configured(); return intercomLogin!; }
+export function websiteLoginRuntime(): WebsiteLoginService { configured(); return websiteLogin!; }
 
 // Lazy properties let disabled tools explain configuration gaps without making AWS calls at registration.
 export const cloudBrowserRuntime: CloudBrowserGatewayRuntime = {

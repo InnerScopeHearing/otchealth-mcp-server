@@ -88,6 +88,8 @@ test("session action returns opaque target receipts to the authenticated caller"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { requestContext } from "../../server/request-context.js";
 import { redactCloudBrowserInputForLog, registerCloudBrowserTools, shieldCloudBrowserInput, type CloudBrowserGatewayRuntime } from "./index.js";
+import { websitePrincipalHash } from '../browser-cloud/website-login-service.js';
+import { intercomPrincipalHash } from '../browser-cloud/intercom-login-service.js';
 
 for (const [key, value] of Object.entries({
   CIO_SITE_ID: "test",
@@ -114,6 +116,62 @@ function fakeServer(): {
     handlers,
   };
 }
+
+test('normal browser lifecycle carries the website connection hash for every eligible lane', async () => {
+  const keys = ['CLOUD_BROWSER_ENABLED', 'CLOUD_BROWSER_DDB_TABLE', 'CLOUD_BROWSER_QUEUE_URL', 'CLOUD_BROWSER_ARTIFACT_BUCKET', 'READ_ONLY_MODE', 'ENABLE_WRITE_TOOLS'];
+  const previous = keys.map(key => process.env[key]);
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 't', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'b', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
+  const calls: unknown[][] = [];
+  const runtime = { browser: { start: async (...args: unknown[]) => { calls.push(args); return { sessionId: 'owned-session', expiresAt: 1900000000000 }; } } as never, jobs: {} as never, queue: {} as never, artifacts: {} as never } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer();
+  registerCloudBrowserTools(server, () => 'a'.repeat(64), runtime);
+  try {
+    for (const lane of ['cto', 'cfo', 'clo', 'coo', 'cro', 'developer', 'wefunder-campaign-director']) {
+      const result = await requestContext.run({ callerHash: 'a'.repeat(64), correlationId: 'test', callerAgent: lane, authKind: 'oauth', authSubject: 'client', authConnectionId: 'authorization-1' }, () => handlers.get('browser_cloud_session_start')!({ profile_id: 'owned-profile', max_seconds: 60, dry_run: false }));
+      assert.equal(result.structuredContent?.result && (result.structuredContent.result as Record<string, unknown>).sessionId, 'owned-session');
+      assert.equal(calls.at(-1)?.[0], lane);
+      assert.equal(calls.at(-1)?.[4], websitePrincipalHash(lane, 'connection:authorization-1'));
+    }
+    assert.equal(websitePrincipalHash('coo', 'connection:authorization-1'), intercomPrincipalHash('connection:authorization-1'), 'existing COO profiles remain usable');
+  } finally {
+    for (const [index, key] of keys.entries()) {
+      if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index];
+    }
+  }
+});
+
+test('durable browser job endpoints bind the authenticated connection and redact the binding from readback', async () => {
+  const keys = ['CLOUD_BROWSER_ENABLED', 'CLOUD_BROWSER_DDB_TABLE', 'CLOUD_BROWSER_QUEUE_URL', 'CLOUD_BROWSER_ARTIFACT_BUCKET', 'READ_ONLY_MODE', 'ENABLE_WRITE_TOOLS'];
+  const previous = keys.map(key => process.env[key]);
+  Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 't', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'b', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });
+  const ownerHash = websitePrincipalHash('wefunder-campaign-director', 'connection:authorization-1');
+  const calls: unknown[][] = [];
+  const job = { id: 'job-1', agent: 'wefunder-campaign-director', ownerSubjectHash: ownerHash, request: { privatePlan: true }, status: 'queued', artifacts: [] };
+  const runtime = { browser: {} as never, jobs: {
+    submit: async (input: unknown) => { calls.push(['submit', input]); return { job, replayed: false }; },
+    get: async (...args: unknown[]) => { calls.push(['get', ...args]); return job; },
+    requestCancellation: async (...args: unknown[]) => { calls.push(['cancel', ...args]); return { ...job, status: 'cancelling' }; },
+  } as never, queue: {} as never, artifacts: {} as never } satisfies CloudBrowserGatewayRuntime;
+  const { server, handlers } = fakeServer();
+  registerCloudBrowserTools(server, () => 'a'.repeat(64), runtime);
+  const call = (tool: string, input: unknown) => requestContext.run({ callerHash: 'a'.repeat(64), correlationId: 'test', callerAgent: 'wefunder-campaign-director', authKind: 'oauth', authSubject: 'client', authConnectionId: 'authorization-1' }, () => handlers.get(tool)!(input));
+  try {
+    await call('browser_cloud_job_submit', { idempotency_key: 'owned-job-1', plan: { profile_id: 'saved-profile', max_seconds: 60, actions: [{ type: 'navigate', url: 'https://example.com/' }] }, dry_run: false });
+    assert.equal((calls[0]![1] as { ownerSubjectHash: string }).ownerSubjectHash, ownerHash);
+    const found = await call('browser_cloud_job_get', { job_id: 'job-1' });
+    assert.deepEqual(calls.at(-1), ['get', 'job-1', 'wefunder-campaign-director', ownerHash]);
+    assert.equal(JSON.stringify(found).includes(ownerHash), false);
+    assert.equal(JSON.stringify(found).includes('privatePlan'), false);
+    await call('browser_cloud_artifact_get', { job_id: 'job-1', artifact_id: 'not-found' });
+    assert.deepEqual(calls.at(-1), ['get', 'job-1', 'wefunder-campaign-director', ownerHash]);
+    await call('browser_cloud_job_cancel', { job_id: 'job-1', dry_run: false });
+    assert.deepEqual(calls.at(-1), ['cancel', 'job-1', 'wefunder-campaign-director', ownerHash]);
+  } finally {
+    for (const [index, key] of keys.entries()) {
+      if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index];
+    }
+  }
+});
 test('gateway capture action returns only metadata and an opaque ID, not capture bytes', async () => {
   const old = [process.env.CLOUD_BROWSER_ENABLED, process.env.CLOUD_BROWSER_DDB_TABLE, process.env.CLOUD_BROWSER_QUEUE_URL, process.env.CLOUD_BROWSER_ARTIFACT_BUCKET, process.env.READ_ONLY_MODE, process.env.ENABLE_WRITE_TOOLS];
   Object.assign(process.env, { CLOUD_BROWSER_ENABLED: 'true', CLOUD_BROWSER_DDB_TABLE: 'synthetic-table', CLOUD_BROWSER_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/1/q', CLOUD_BROWSER_ARTIFACT_BUCKET: 'synthetic-bucket', READ_ONLY_MODE: 'false', ENABLE_WRITE_TOOLS: 'true' });

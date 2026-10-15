@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DynamoCloudBrowserSessionStore } from "./dynamo-store.js";
 import type { CloudBrowserProfile, CloudBrowserSession } from "./contract.js";
+import { CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS } from "./service.js";
 
 const ownedSession: CloudBrowserSession = {
   sessionId: "session-1",
@@ -16,6 +17,128 @@ const ownedSession: CloudBrowserSession = {
   selectedTargetId: "target-2",
   effectUnknown: true,
 };
+
+test('persistent profile intents support every eligible company lane and remain create-only', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const requests: Record<string, any>[] = [];
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return new Response('{}');
+  });
+  for (const owner of CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS) {
+    const profile: CloudBrowserProfile = {
+      profileId: `web-${owner}-linkedin-test`, owner, ownerSubjectHash: 'a'.repeat(64),
+      allowedHosts: ['www.linkedin.com'], persistent: true, maxSessionSeconds: 3600,
+    };
+    assert.equal(await store.createProfileIntent(profile), true);
+    const request = requests.at(-1)!;
+    assert.equal(request.ConditionExpression, 'attribute_not_exists(pk)');
+    assert.deepEqual(request.Item.pk, { S: `PROFILE#${profile.profileId}` });
+    assert.deepEqual(request.Item.owner, { S: owner });
+    assert.deepEqual(request.Item.ownerSubjectHash, { S: profile.ownerSubjectHash });
+    assert.equal(request.Item.providerProfileId, undefined);
+  }
+  assert.equal(requests.length, CLOUD_BROWSER_PUBLIC_TRIAL_OWNERS.length);
+});
+
+test('persistent profile intents reject foreign lanes, absent principals and provider-backed profiles before AWS', async () => {
+  let requests = 0;
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async () => {
+    requests += 1;
+    return new Response('{}');
+  });
+  const profile: CloudBrowserProfile = {
+    profileId: 'web-cto-linkedin-test', owner: 'cto', ownerSubjectHash: 'a'.repeat(64),
+    allowedHosts: ['www.linkedin.com'], persistent: true,
+  };
+  for (const invalid of [
+    { ...profile, owner: 'clo-personal' },
+    { ...profile, owner: 'external' },
+    { ...profile, ownerSubjectHash: undefined },
+    { ...profile, ownerSubjectHash: 'not-a-hash' },
+    { ...profile, providerProfileId: 'existing-provider-profile' },
+  ]) await assert.rejects(store.createProfileIntent(invalid), { code: 'profile_intent_invalid' });
+  assert.equal(requests, 0);
+});
+
+test('duplicate profile intent returns a conflict without overwriting the enrolled profile', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    assert.equal(request.ConditionExpression, 'attribute_not_exists(pk)');
+    return new Response(JSON.stringify({ __type: 'com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException' }), { status: 400 });
+  });
+  assert.equal(await store.createProfileIntent({
+    profileId: 'web-wefunder-campaign-director-linkedin-test', owner: 'wefunder-campaign-director',
+    ownerSubjectHash: 'a'.repeat(64), allowedHosts: ['www.linkedin.com'], persistent: true,
+  }), false);
+});
+
+test('login lease verification permits an unleased profile or matching owner and denies active ordinary/foreign starts', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const profileId = 'web-cto-linkedin-test';
+  const pk = `WEBSITE_LOGIN_LEASE#${profileId}`;
+  const leaseOwner = 'a73bb282-61d0-4a0f-8b22-1d2332efb778';
+  let item: Record<string, any> | undefined;
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    assert.equal(request.ConsistentRead, true);
+    assert.deepEqual(request.Key, { pk: { S: pk } });
+    return new Response(JSON.stringify(item ? { Item: item } : {}));
+  }, () => 100_000);
+  assert.equal(await store.verifyLoginLease(profileId), true);
+  item = { pk: { S: pk }, lockOwner: { S: leaseOwner }, lockUntil: { N: '100001' } };
+  assert.equal(await store.verifyLoginLease(profileId), false);
+  assert.equal(await store.verifyLoginLease(profileId, 'foreign-owner'), false);
+  assert.equal(await store.verifyLoginLease(profileId, leaseOwner), true);
+  item.lockUntil = { N: '100000' };
+  assert.equal(await store.verifyLoginLease(profileId), false, 'equal-time lock remains active');
+  item.lockUntil = { N: '99999' };
+  assert.equal(await store.verifyLoginLease(profileId), true);
+  assert.equal(await store.verifyLoginLease(profileId, 'foreign-owner'), true);
+  item = undefined;
+  assert.equal(await store.verifyLoginLease(profileId), true, 'conditional lease deletion permits profile reopening before table TTL');
+});
+
+test('malformed login lease records and invalid lookup identifiers fail closed', async (t) => {
+  const prior = { ...process.env };
+  t.after(() => { process.env = prior; });
+  process.env.AWS_ACCESS_KEY_ID = 'test-access';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  const profileId = 'web-cto-linkedin-test';
+  const pk = `WEBSITE_LOGIN_LEASE#${profileId}`;
+  const lease = { pk: { S: pk }, lockOwner: { S: 'trusted-owner' }, lockUntil: { N: '100001' } };
+  let item: unknown = lease;
+  let requests = 0;
+  const store = new DynamoCloudBrowserSessionStore('synthetic-browser-state', 'us-east-1', async () => {
+    requests += 1;
+    return new Response(JSON.stringify({ Item: item }));
+  }, () => 100_000);
+  for (const invalid of [
+    null, [], {}, { pk: { S: pk } }, { pk: { S: pk }, expiresAtEpoch: { N: 'invalid' } },
+    { ...lease, pk: { S: 'WEBSITE_LOGIN_LEASE#foreign' } },
+    { ...lease, lockOwner: undefined }, { ...lease, lockOwner: { S: '' } },
+    { ...lease, lockUntil: undefined }, { ...lease, lockUntil: { N: 'not-a-time' } },
+    { ...lease, lockUntil: { N: '-1' } }, { ...lease, lockUntil: { N: '100001.5' } },
+    { ...lease, lockUntil: { N: '9007199254740992' } },
+  ]) {
+    item = invalid;
+    assert.equal(await store.verifyLoginLease(profileId, 'trusted-owner'), false);
+  }
+  const completedRequests = requests;
+  assert.equal(await store.verifyLoginLease('foreign/profile'), false);
+  assert.equal(await store.verifyLoginLease(profileId, ''), false);
+  assert.equal(requests, completedRequests);
+});
 
 test("tab ownership, selection and uncertain effects survive durable round-trip and fenced updates", async (t) => {
   const prior = { ...process.env };

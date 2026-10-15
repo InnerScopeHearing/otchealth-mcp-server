@@ -129,6 +129,8 @@ export interface BrowserCaptureRecord extends BrowserCaptureMetadata {
 export interface CloudBrowserStore {
   /** Atomic create-only provider preparation intent; unsupported stores cannot provision. */
   createProfileIntent?(profile: CloudBrowserProfile): Promise<boolean>;
+  /** Trusted human-login lease: ordinary starts/saves cannot reuse a profile until its login stops. */
+  verifyLoginLease?(profileId: string, leaseOwner?: string): Promise<boolean>;
   loadProfile(profileId: string): Promise<CloudBrowserProfile | null>;
   saveProfile(profile: CloudBrowserProfile): Promise<void>;
   loadSession(sessionId: string): Promise<CloudBrowserSession | null>;

@@ -36,14 +36,26 @@ function securityHeaders(reply: FastifyReply, nonce?: string): void {
     ].join('; '));
 }
 
-function renderLoginPage(nonce: string): string {
+function renderLoginPage(nonce: string, website = false): string {
+  const routePrefix = website ? '/browser/connect' : '/browser/login';
+  const title = website ? 'Connect your browser' : 'Connect to Intercom';
+  const heading = website ? 'Connect your browser' : 'Connect to your Intercom workspace';
+  const instructions = website
+    ? 'Sign in to the requested website in the secure window below, then open its signed-in workspace, feed, or editor. Confirm that the account is correct before clicking Done. Enter your password or verification code only in that window. Never paste credentials into chat or this page.'
+    : 'Sign in to the company workspace in the secure window below, then open its Settings page. Confirm that the signed-in company and account are correct before clicking Done. Enter your password or verification code only in that window. Never paste credentials into chat or this page.';
+  const windowLabel = website ? 'Website sign-in window' : 'Company sign-in window';
+  const doneLabel = website ? 'Done, I confirm the account' : 'Done, I confirm the company account';
+  const signInMessage = website ? 'Sign in to the requested website in the window below.' : 'Sign in to your company workspace in the window below.';
+  const connectedMessage = website ? 'Open the signed-in workspace, feed, or editor, confirm the correct account, then select Done.' : 'Sign in to your company workspace, then select Done.';
+  const savedMessage = website ? 'Your browser profile is saved. Your agent will reopen it to verify access. You may close this page.' : 'Your owned browser profile is saved. Your COO can now verify Settings access. You may close this page.';
+  const saveError = website ? 'Your sign-in could not be saved. Request a fresh sign-in link from your agent.' : 'Your sign-in could not be saved. Request a fresh sign-in link from your COO agent.';
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Connect to Intercom</title>
+  <title>${title}</title>
   <style nonce="${nonce}">
     :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17212b; background: #f4f6f8; }
     * { box-sizing: border-box; }
@@ -70,12 +82,12 @@ function renderLoginPage(nonce: string): string {
 <body>
   <main>
     <section class="card" aria-labelledby="title">
-      <h1 id="title">Connect to your Intercom workspace</h1>
-      <p class="note">Sign in to the company workspace in the secure window below, then open its Settings page. Confirm that the signed-in company and account are correct before clicking Done. Enter your password or verification code only in that window. Never paste credentials into chat or this page.</p>
+      <h1 id="title">${heading}</h1>
+      <p class="note">${instructions}</p>
       <p id="status" role="status" aria-live="polite">Preparing your secure sign-in window…</p>
-      <div id="stage" aria-label="Company sign-in window"><div id="dcv-display"></div></div>
+      <div id="stage" aria-label="${windowLabel}"><div id="dcv-display"></div></div>
       <div class="actions">
-        <button id="done" class="primary" type="button" disabled>Done, I confirm the company account</button>
+        <button id="done" class="primary" type="button" disabled>${doneLabel}</button>
       </div>
       <p class="legal">The secure connection uses Amazon DCV. <a href="${ASSET_PREFIX}dcvjs-umd/EULA.txt" target="_blank" rel="noopener">License</a> · <a href="${ASSET_PREFIX}dcvjs-umd/third-party-licenses.txt" target="_blank" rel="noopener">Third-party notices</a></p>
     </section>
@@ -88,6 +100,8 @@ function renderLoginPage(nonce: string): string {
     const done = document.getElementById('done');
     let connection = null;
     let busy = false;
+    ${website ? 'let terminal = false;' : ''}
+    ${website ? 'let handoffId = null;' : ''}
 
     function show(message, isError = false) {
       statusNode.textContent = message;
@@ -120,14 +134,16 @@ function renderLoginPage(nonce: string): string {
       }
       show('Preparing your secure sign-in window…');
       try {
-        const result = await postJson('/browser/login/exchange', { token });
+        const result = await postJson('${routePrefix}/exchange', { token });
         if (result.status !== 'login_required' || typeof result.signed_url !== 'string' || !Number.isSafeInteger(result.expires_at) || typeof result.workspace_id !== 'string') throw new Error('invalid_response');
+        ${website ? "if (typeof result.handoff_id !== 'string' || !/^[a-f0-9]{32}$/.test(result.handoff_id)) throw new Error('invalid_response');\n        handoffId = result.handoff_id;" : ''}
+        ${website ? "if (typeof result.site_label === 'string' && result.site_label) document.getElementById('title').textContent = 'Connect your browser: ' + result.site_label;" : ''}
         const signedUrl = result.signed_url;
         if (!signedUrl.startsWith('https://')) throw new Error('invalid_response');
         const extraParams = () => new URL(signedUrl).searchParams;
         window.dcv.setLogLevel(window.dcv.LogLevel.SILENT);
         stage.style.display = 'block';
-        show('Sign in to your company workspace in the window below.');
+        show('${signInMessage}');
         window.dcv.authenticate(signedUrl, {
           promptCredentials: () => {},
           httpExtraSearchParams: extraParams,
@@ -148,7 +164,7 @@ function renderLoginPage(nonce: string): string {
             }).then((activeConnection) => {
               connection = activeConnection;
               done.disabled = false;
-              show('Sign in to your company workspace, then select Done.');
+              show('${connectedMessage}');
             }).catch(() => show('The secure sign-in window could not connect. Request a new link or try again later.', true));
           },
         });
@@ -158,20 +174,21 @@ function renderLoginPage(nonce: string): string {
     }
 
     done.addEventListener('click', async () => {
-      if (busy || done.disabled) return;
+      if (busy || done.disabled${website ? ' || terminal' : ''}) return;
       busy = true;
+      ${website ? 'terminal = true;' : ''}
       done.disabled = true;
       show('Saving your secure sign-in…');
       try {
-        const result = await postJson('/browser/login/complete');
+        const result = await postJson('${routePrefix}/complete'${website ? ', { handoff_id: handoffId }' : ''});
         if (result.status !== 'saved' || typeof result.workspace_id !== 'string') throw new Error('save_failed');
         connection?.disconnect();
         connection = null;
         stage.style.display = 'none';
-        show('Your owned browser profile is saved. Your COO can now verify Settings access. You may close this page.');
+        show('${savedMessage}');
       } catch {
-        show('Your sign-in could not be saved. Request a fresh sign-in link from your COO agent.', true);
-        done.disabled = false;
+        show('${saveError}', true);
+        done.disabled = ${website};
       } finally {
         busy = false;
       }
@@ -239,4 +256,13 @@ export function registerIntercomLoginPage(app: FastifyInstance): void {
   });
 
   app.get('/browser/login/assets/*', (request, reply) => sendAsset(request, reply, assetRoot));
+}
+
+/** Reuse the Intercom viewer's vendored SDK without registering a second asset route. */
+export function registerWebsiteLoginPage(app: FastifyInstance): void {
+  app.get('/browser/connect', async (_request, reply) => {
+    const nonce = randomBytes(18).toString('base64');
+    securityHeaders(reply, nonce);
+    return reply.type('text/html; charset=utf-8').send(renderLoginPage(nonce, true));
+  });
 }
